@@ -905,40 +905,53 @@ impl ListenerApp {
         self.online || self.offline_snap.is_done(&track.id)
     }
 
+    /// In the full window: shows the sidebar on `tab`, or back to Up Next when
+    /// it's already showing that tab.
+    fn toggle_side_tab(&mut self, tab: QueueTab) {
+        if self.queue_ui.tab == tab && (self.show_queue || self.queue_sheet) {
+            self.queue_ui.tab = QueueTab::UpNext;
+            return;
+        }
+        self.queue_ui.tab = tab;
+        if self.queue_narrow {
+            self.queue_sheet = true;
+        } else if !self.show_queue {
+            self.actions.push(Action::ToggleQueue);
+        }
+    }
+
     fn keep_offline(&mut self, what: Keep, on: bool) {
-        match what {
+        // An album or playlist is pinned whole, once its track list is known.
+        let (key, pin, refs) = match what {
             Keep::Album(id) => {
-                let pin = Pin::Album(id.clone());
-                if !on {
-                    return self.offline.unpin(&pin);
-                }
-                match self.data.tracks.album(&id).cloned() {
-                    Some(tracks) => self.offline.pin(pin.clone(), self.pin_label(&pin), tracks.iter().map(track_ref).collect()),
-                    None => {
-                        self.wait_to_pin(ListKey::Album(id.clone()), pin);
-                        self.bridge.open_album(self.client.clone(), id);
-                    }
-                }
+                let refs = self.data.tracks.album(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
+                (ListKey::Album(id.clone()), Pin::Album(id), refs)
             }
             Keep::Playlist(id) => {
-                let pin = Pin::Playlist(id.clone());
-                if !on {
-                    return self.offline.unpin(&pin);
-                }
-                match self.data.playlist_tracks.get(&id).cloned() {
-                    Some(tracks) => self.offline.pin(pin.clone(), self.pin_label(&pin), tracks.iter().map(track_ref).collect()),
-                    None => {
-                        self.wait_to_pin(ListKey::Playlist(id.clone()), pin);
-                        self.bridge.open_playlist(self.client.clone(), id);
-                    }
-                }
+                let refs = self.data.playlist_tracks.get(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
+                (ListKey::Playlist(id.clone()), Pin::Playlist(id), refs)
             }
             // One pin per song, saved together: a big selection doesn't stall.
-            Keep::Tracks(tracks) if on => {
-                self.offline.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
-            }
             Keep::Tracks(tracks) => {
-                self.offline.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
+                if on {
+                    self.offline.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
+                } else {
+                    self.offline.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
+                }
+                self.offline_snap = self.offline.snapshot();
+                return;
+            }
+        };
+        match refs {
+            _ if !on => self.offline.unpin(&pin),
+            Some(refs) => self.offline.pin(pin.clone(), self.pin_label(&pin), refs),
+            None => {
+                self.wait_to_pin(key.clone(), pin);
+                match key {
+                    ListKey::Album(id) => self.bridge.open_album(self.client.clone(), id),
+                    ListKey::Playlist(id) => self.bridge.open_playlist(self.client.clone(), id),
+                    ListKey::Artist(_) => {}
+                }
             }
         }
         self.offline_snap = self.offline.snapshot();
@@ -1359,18 +1372,7 @@ impl ListenerApp {
                 self.follow_plan(plan);
             }
             Action::Lyrics => match self.windows.mode {
-                WindowMode::Full => {
-                    if self.queue_ui.tab == QueueTab::Lyrics && (self.show_queue || self.queue_sheet) {
-                        self.queue_ui.tab = QueueTab::UpNext;
-                    } else {
-                        self.queue_ui.tab = QueueTab::Lyrics;
-                        if self.queue_narrow {
-                            self.queue_sheet = true;
-                        } else if !self.show_queue {
-                            self.actions.push(Action::ToggleQueue);
-                        }
-                    }
-                }
+                WindowMode::Full => self.toggle_side_tab(QueueTab::Lyrics),
                 WindowMode::Player => self.actions.push(Action::SetLyricsDrawer(!self.windows.lyrics_open)),
                 WindowMode::Mini => {
                     self.windows.lyrics_open = true;
@@ -1378,18 +1380,7 @@ impl ListenerApp {
                 }
             },
             Action::Info => match self.windows.mode {
-                WindowMode::Full => {
-                    if self.queue_ui.tab == QueueTab::Info && (self.show_queue || self.queue_sheet) {
-                        self.queue_ui.tab = QueueTab::UpNext;
-                    } else {
-                        self.queue_ui.tab = QueueTab::Info;
-                        if self.queue_narrow {
-                            self.queue_sheet = true;
-                        } else if !self.show_queue {
-                            self.actions.push(Action::ToggleQueue);
-                        }
-                    }
-                }
+                WindowMode::Full => self.toggle_side_tab(QueueTab::Info),
                 WindowMode::Player => {
                     self.queue_ui.tab = if self.queue_ui.tab == QueueTab::Info { QueueTab::UpNext } else { QueueTab::Info };
                 }

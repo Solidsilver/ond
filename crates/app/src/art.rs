@@ -260,17 +260,22 @@ async fn load(client: Option<&Client>, dir: &Path, key: &Key) -> Option<ColorIma
                 .await;
             b
         }
-        Err(_) => {
-            let bytes = client?.cover_art(&key.cover, Some(key.size)).await.ok()?;
-            let tmp = path.with_extension("part");
-            if tokio::fs::create_dir_all(dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &path).await;
-            }
-            bytes
-        }
+        Err(_) => fetch_cached(client?, dir, &key.cover, key.size).await?,
     };
     let size = key.size;
     tokio::task::spawn_blocking(move || decode(&bytes, size)).await.ok().flatten()
+}
+
+/// Downloads `cover` at `size` px into the cache (written whole, then renamed
+/// into place) and returns its bytes.
+pub async fn fetch_cached(client: &Client, dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
+    let bytes = client.cover_art(cover, Some(size)).await.ok()?;
+    let path = cover_file(dir, cover, size);
+    let tmp = path.with_extension("part");
+    if tokio::fs::create_dir_all(dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
+        let _ = tokio::fs::rename(&tmp, &path).await;
+    }
+    Some(bytes)
 }
 
 fn decode(bytes: &[u8], size: u32) -> Option<ColorImage> {
