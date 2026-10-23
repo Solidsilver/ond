@@ -427,7 +427,9 @@ impl ListenerApp {
     }
 
     fn build(ctx: &egui::Context, paths: Paths, backend: Box<dyn audio::OutputBackend>) -> anyhow::Result<Self> {
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        // Four workers: downloads, sync and the server calls share them, so one
+        // busy task can't hold up the stream that feeds playback.
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?;
         let paths = Arc::new(paths);
         // The db is only a mirror of the server, so an unreadable one is set aside
         // and rebuilt by the sync that runs on connect.
@@ -469,7 +471,7 @@ impl ListenerApp {
             let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.handle().clone(), Arc::new(move || repaint.request_repaint()))?;
             // A track that finished streaming is linked in rather than downloaded again.
             let cached = cache.clone();
-            store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&audio::CacheKey::new(r.id.clone(), r.suffix.clone()))));
+            store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&audio::CacheKey::original(r.id.clone(), r.suffix.clone()))));
             store
         };
         let playback_cache = cache.clone();
@@ -879,15 +881,12 @@ impl ListenerApp {
                     }
                 }
             }
+            // One pin per song, saved together: a big selection doesn't stall.
+            Keep::Tracks(tracks) if on => {
+                self.offline.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
+            }
             Keep::Tracks(tracks) => {
-                for t in tracks {
-                    let pin = Pin::Track(t.id.clone());
-                    if on {
-                        self.offline.pin(pin, t.title.clone(), vec![track_ref(&t)]);
-                    } else {
-                        self.offline.unpin(&pin);
-                    }
-                }
+                self.offline.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
             }
         }
         self.offline_snap = self.offline.snapshot();

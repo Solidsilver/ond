@@ -16,9 +16,14 @@ struct Opts {
     ranges: bool,
     cut: Option<usize>,
     delay: Duration,
+    /// Answer with a Subsonic XML error envelope (labelled as audio, so only
+    /// sniffing the body catches it).
+    xml_error: bool,
+    /// Answer a ranged request with a 206 from byte 0 regardless (a broken proxy).
+    wrong_start: bool,
 }
 
-const OPTS: Opts = Opts { ranges: true, cut: None, delay: Duration::ZERO };
+const OPTS: Opts = Opts { ranges: true, cut: None, delay: Duration::ZERO, xml_error: false, wrong_start: false };
 
 impl Server {
     fn start(data: Vec<u8>, opts: Opts) -> Self {
@@ -63,6 +68,16 @@ fn serve(conn: TcpStream, data: &[u8], opts: Opts, first: bool, log: &Mutex<Vec<
     log.lock().unwrap().push(range);
     let mut out = conn;
     let len = data.len() as u64;
+    if opts.xml_error {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><subsonic-response status="failed"><error code="40" message="Wrong username or password"/></subsonic-response>"#;
+        let _ = write!(out, "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        return;
+    }
+    if opts.wrong_start && range.is_some() {
+        let _ = write!(out, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{len}\r\nContent-Type: audio/flac\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n", len - 1);
+        let _ = out.write_all(data);
+        return;
+    }
     let (status, start) = match range {
         Some(s) if opts.ranges && s >= len => {
             let _ = write!(out, "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{len}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -316,4 +331,60 @@ fn sizes_read_well() {
     assert_eq!(human_bytes(512), "512 bytes");
     assert_eq!(human_bytes(1_234_000), "1.2 MB");
     assert_eq!(human_bytes(42_000_000_000), "42 GB");
+}
+
+#[test]
+fn pinning_many_tracks_at_once_returns_at_once_and_is_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let s = store(dir.path(), &rt);
+    let pins: Vec<(Pin, String, Vec<TrackRef>)> =
+        (0..500).map(|i| (Pin::Track(format!("t{i}")), format!("Song {i}"), vec![track(&format!("t{i}"), 10)])).collect();
+    let t = Instant::now();
+    // No source: nothing downloads, so this measures pinning alone.
+    s.pin_many(pins);
+    assert!(t.elapsed() < Duration::from_millis(50), "pin_many took {:?}", t.elapsed());
+    assert!(s.is_pinned(&Pin::Track("t499".into())));
+    drop(s);
+    // Saved in the background, and complete once the store is gone.
+    let s = store(dir.path(), &rt);
+    assert_eq!(s.snapshot().pins.len(), 500);
+    assert_eq!(s.pin_tracks(&Pin::Track("t250".into())).unwrap(), ("Song 250".to_owned(), vec!["t250".to_owned()]));
+    s.unpin_many(&(0..500).map(|i| Pin::Track(format!("t{i}"))).collect::<Vec<_>>());
+    drop(s);
+    assert!(store(dir.path(), &rt).snapshot().pins.is_empty());
+}
+
+#[test]
+fn an_xml_error_reply_is_never_kept_as_a_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let server = Server::start(data(10_000), Opts { xml_error: true, ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", 10_000)]);
+    wait_for("a failed attempt", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
+    assert!(s.local_path("t").is_none());
+    assert!(!dir.path().join("t.flac").exists());
+    assert!(!dir.path().join("t.flac.part").exists(), "nothing of the error page is written");
+}
+
+#[test]
+fn a_resume_answered_from_the_wrong_offset_starts_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(40_000);
+    let server = Server::start(body.clone(), Opts { wrong_start: true, ..OPTS });
+    let s = store(dir.path(), &rt);
+    // Pinned with no source yet, then a partial file from before appears: the
+    // resume asks for byte 1000 and gets byte 0.
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    std::fs::write(dir.path().join("t.flac.part"), vec![7u8; 1000]).unwrap();
+    s.set_source(Some(server.url()));
+    wait_for("the refused resume", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
+    assert!(!dir.path().join("t.flac.part").exists(), "the partial file is dropped, not appended to");
+    s.retry_failed();
+    wait_for("the download", || s.snapshot().is_done("t"));
+    assert_eq!(server.requests(), [Some(1000), None]);
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }

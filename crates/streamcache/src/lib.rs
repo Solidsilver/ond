@@ -13,13 +13,16 @@
 //! on startup. Resuming would mean persisting the range map and trusting the
 //! server file hasn't changed underneath, which isn't worth it for a cache.
 //!
-//! This is not the offline store. Offline downloads will live in their own
-//! directory that is never evicted, and the engine will check it first (as a
-//! `file://` source) before falling back to this cache. Pinning a track that's
-//! already complete here can be a rename or hard link into that directory.
+//! This is not the offline store: that keeps its own never-evicted directory,
+//! and the app plays from it first (as a `file://` source). Both name files
+//! with [`file_name`], so pinning a track that's complete here can hard-link
+//! it instead of downloading it again.
 
 mod download;
+pub mod fetch;
 mod ranges;
+
+pub use fetch::{CONNECT_TIMEOUT, READ_TIMEOUT};
 
 use download::Download;
 use std::collections::HashMap;
@@ -31,18 +34,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
-/// Give up connecting after this long.
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// A response that sends nothing for this long counts as broken: the download
-/// retries and, where the server supports Range, resumes where it stopped.
-pub const READ_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// An HTTP client for downloads, with a connect timeout and a read timeout
-/// (time allowed between received bytes, not for the whole body).
-pub fn http_client(read_timeout: Duration) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).read_timeout(read_timeout).build()
-}
 
 /// How often a blocked reader re-checks its abort flag.
 const POLL: Duration = Duration::from_millis(50);
@@ -75,26 +66,50 @@ impl CacheKey {
         Self { id: id.into(), suffix }
     }
 
-    /// A filesystem-safe name. Ids are opaque server strings, so anything outside
-    /// `[A-Za-z0-9_-]` is percent-escaped.
-    fn file_name(&self) -> String {
-        let mut name = String::with_capacity(self.id.len() + 6);
-        for b in self.id.bytes() {
-            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
-                name.push(b as char);
-            } else {
-                name.push_str(&format!("%{b:02X}"));
-            }
-        }
-        if let Some(s) = &self.suffix {
-            let s: String = s.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
-            if !s.is_empty() {
-                name.push('.');
-                name.push_str(&s.to_ascii_lowercase());
-            }
-        }
-        name
+    /// The original file of track `id`.
+    pub fn original(id: impl Into<String>, suffix: Option<String>) -> Self {
+        Self::new(id, suffix)
     }
+
+    /// Track `id` converted by the server to `format` at `kbps`: cached apart
+    /// from the original and from other bitrates.
+    pub fn transcode(id: &str, format: &str, kbps: u32) -> Self {
+        Self::new(format!("{id}~{format}{kbps}"), Some(format.to_owned()))
+    }
+
+    /// The file's name in the cache directory; see [`file_name`].
+    pub fn file_name(&self) -> String {
+        file_name(&self.id, self.suffix.as_deref())
+    }
+}
+
+/// `<escaped id>.<suffix>`: how the stream cache and the offline store name a
+/// track's file. Both use this, so a finished cache file can be hard-linked
+/// into the offline store under the name it expects.
+pub fn file_name(id: &str, suffix: Option<&str>) -> String {
+    let mut name = escape_id(id);
+    if let Some(s) = suffix {
+        let s: String = s.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+        if !s.is_empty() {
+            name.push('.');
+            name.push_str(&s.to_ascii_lowercase());
+        }
+    }
+    name
+}
+
+/// An id made filesystem-safe: ids are opaque server strings, so anything
+/// outside `[A-Za-z0-9_-]` is percent-escaped. The result never contains `.`.
+pub fn escape_id(id: &str) -> String {
+    let mut name = String::with_capacity(id.len() + 6);
+    for b in id.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+            name.push(b as char);
+        } else {
+            name.push_str(&format!("%{b:02X}"));
+        }
+    }
+    name
 }
 
 /// How much of a file is on disk.
@@ -172,16 +187,15 @@ impl StreamCache {
             );
         }
         let inner = Inner {
-            client: http_client(cfg.read_timeout).map_err(io::Error::other)?,
+            client: fetch::client(cfg.read_timeout).map_err(io::Error::other)?,
             cfg,
             rt,
             index: Mutex::new(index),
             prefetch: Mutex::new(None),
             seq: AtomicU64::new(0),
         };
-        let mut idx = inner.lock_index();
-        inner.evict(&mut idx, None);
-        drop(idx);
+        let victims = inner.evict(&mut inner.lock_index(), None);
+        inner.remove(victims);
         Ok(Self { inner: Arc::new(inner) })
     }
 
@@ -320,7 +334,8 @@ impl Inner {
         let (inner, task_dl, url) = (self.clone(), dl.clone(), url.to_owned());
         self.rt.spawn(async move {
             let result = download::run(&task_dl, &inner.client, &url).await;
-            inner.finish(&task_dl, result);
+            // Renaming and evicting touch the disk: keep them off the async workers.
+            let _ = tokio::task::spawn_blocking(move || inner.finish(&task_dl, result)).await;
         });
         dl
     }
@@ -349,9 +364,10 @@ impl Inner {
             Ok(len) => {
                 let old = idx.complete.insert(dl.name.clone(), Entry { size: len, last_used: SystemTime::now() });
                 idx.total = idx.total - old.map_or(0, |e| e.size) + len;
-                self.evict(&mut idx, Some(&dl.name));
+                let victims = self.evict(&mut idx, Some(&dl.name));
                 drop(idx);
                 dl.finish(Ok(()));
+                self.remove(victims);
             }
             Err(e) => {
                 drop(idx);
@@ -364,10 +380,11 @@ impl Inner {
         }
     }
 
-    /// Deletes least recently used files until under the cap, never `keep`.
-    /// Open handles keep working: unlinking an open file is fine on every platform
-    /// we target (std opens with FILE_SHARE_DELETE on Windows).
-    fn evict(&self, idx: &mut Index, keep: Option<&str>) {
+    /// Drops least recently used files from the index until under the cap,
+    /// never `keep`, and returns them for [`remove`](Self::remove), which
+    /// deletes them once the index lock is released.
+    fn evict(&self, idx: &mut Index, keep: Option<&str>) -> Vec<String> {
+        let mut victims = Vec::new();
         while idx.total > self.cfg.max_bytes {
             let Some(victim) = idx
                 .complete
@@ -380,6 +397,16 @@ impl Inner {
             };
             let size = idx.complete.remove(&victim).map_or(0, |e| e.size);
             idx.total -= size;
+            victims.push(victim);
+        }
+        victims
+    }
+
+    /// Deletes evicted files. Open handles keep working: unlinking an open file
+    /// is fine on every platform we target (std opens with FILE_SHARE_DELETE on
+    /// Windows).
+    fn remove(&self, victims: Vec<String>) {
+        for victim in victims {
             if let Err(e) = std::fs::remove_file(self.cfg.dir.join(&victim))
                 && e.kind() != io::ErrorKind::NotFound
             {
@@ -501,10 +528,7 @@ impl Seek for StreamReader {
 
 /// A Subsonic error reply (JSON or XML) rather than audio.
 fn is_error_reply(path: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(path) else { return false };
-    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
-    let text = text.trim_start();
-    (text.starts_with('{') && text.contains("subsonic-response")) || text.starts_with("<?xml") || text.starts_with("<subsonic-response")
+    std::fs::read(path).is_ok_and(|bytes| subsonic::is_error_reply(None, &bytes))
 }
 
 #[cfg(test)]

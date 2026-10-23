@@ -1,8 +1,7 @@
 //! One file being fetched: shared state plus the async task that fills it.
 
+use crate::fetch::{self, FetchError, redact};
 use crate::ranges::RangeSet;
-use reqwest::StatusCode;
-use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -110,65 +109,47 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
             return Ok(len);
         }
 
-        let mut req = client.get(url);
-        if ranged != Some(false) {
-            req = req.header(RANGE, format!("bytes={start}-"));
-        }
         let sent = tokio::select! {
-            r = req.send() => r,
+            r = fetch::get_from(client, url, (ranged != Some(false)).then_some(start)) => r,
             _ = cancelled(dl) => return Err("cancelled".into()),
         };
-        let mut resp = match sent.and_then(|r| r.error_for_status()) {
-            Ok(r) => r,
-            Err(e) if e.status() == Some(StatusCode::RANGE_NOT_SATISFIABLE) => {
+        let mut body = match sent {
+            Ok(b) => b,
+            Err(FetchError::RangeNotSatisfiable) => {
                 // Asked past the end; whatever is missing must be before `start`.
                 failures += 1;
                 if failures > MAX_FAILURES {
-                    return Err(format!("fetch: {}", e.without_url()));
+                    return Err(FetchError::RangeNotSatisfiable.to_string());
                 }
                 start = 0;
                 continue;
             }
+            // Subsonic reports errors (bad auth, failed transcode) as a JSON or
+            // XML body with status 200. That's not audio and must never be cached.
             Err(e) => {
                 failures += 1;
-                if failures > MAX_FAILURES || e.status().is_some_and(|s| s.is_client_error()) {
-                    return Err(format!("fetch: {}", e.without_url()));
+                if failures > MAX_FAILURES || !e.retryable() {
+                    return Err(e.to_string());
                 }
                 backoff(dl, failures).await;
                 continue;
             }
         };
 
-        // Subsonic reports errors (bad auth, failed transcode) as a JSON or XML
-        // body with status 200. That's not audio and must never be cached as such.
-        let kind = resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default();
-        if kind.contains("json") || kind.contains("xml") {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("server error: {}", body.chars().take(200).collect::<String>()));
-        }
-
-        let mut pos = if resp.status() == StatusCode::PARTIAL_CONTENT {
+        let mut pos = body.start;
+        if body.ranged {
             ranged = Some(true);
-            let (first, total) = resp
-                .headers()
-                .get(CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_content_range)
-                .ok_or_else(|| "206 without a usable Content-Range".to_owned())?;
-            let mut st = dl.lock();
-            st.len = st.len.or(total);
-            first
         } else {
             // 200: the whole body from byte 0. Range isn't supported; read it straight through.
             if ranged.is_none() {
                 tracing::debug!("{}: server ignored Range, falling back to a sequential download", redact(url));
             }
             ranged = Some(false);
-            let len = resp.content_length();
+        }
+        {
             let mut st = dl.lock();
-            st.len = st.len.or(len);
-            0
-        };
+            st.len = st.len.or(body.total);
+        }
         let len = {
             let mut st = dl.lock();
             st.headers = true;
@@ -197,7 +178,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                         None => continue,
                     }
                 }
-                c = resp.chunk() => c,
+                c = body.chunk() => c,
             };
             match chunk {
                 Ok(Some(bytes)) => {
@@ -224,9 +205,9 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                 Err(e) => {
                     failures += 1;
                     if failures > MAX_FAILURES {
-                        return Err(format!("fetch: {}", e.without_url()));
+                        return Err(e.to_string());
                     }
-                    tracing::debug!("{}: {}; retrying", redact(url), e.without_url());
+                    tracing::debug!("{}: {e}; retrying", redact(url));
                     backoff(dl, failures).await;
                     // Ranged: resume where it broke. Sequential: start over (bytes already written stay valid).
                     break Some(if ranged == Some(true) { pos } else { 0 });
@@ -251,11 +232,6 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
             }
         };
     }
-}
-
-/// A URL fit for logs: the path only. The query holds the auth token.
-pub(crate) fn redact(url: &str) -> &str {
-    url.split_once('?').map_or(url, |(path, _)| path)
 }
 
 fn done_len(st: &DlState) -> Option<u64> {
@@ -284,33 +260,12 @@ async fn cancelled(dl: &Download) {
 
 async fn backoff(dl: &Download, failures: u32) {
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(250 * u64::from(failures))) => {}
+        _ = tokio::time::sleep(fetch::backoff(failures, Duration::from_millis(250), Duration::from_secs(2))) => {}
         _ = cancelled(dl) => {}
     }
-}
-
-/// `bytes 100-199/1000` → (100, Some(1000)); `bytes 100-199/*` → (100, None).
-fn parse_content_range(v: &str) -> Option<(u64, Option<u64>)> {
-    let rest = v.trim().strip_prefix("bytes ")?;
-    let (span, total) = rest.split_once('/')?;
-    let (first, _) = span.split_once('-')?;
-    let total = if total == "*" { None } else { Some(total.parse().ok()?) };
-    Some((first.parse().ok()?, total))
 }
 
 /// Opens a read handle on a download that may be renamed to its final path at any moment.
 pub(crate) fn open_read(dl: &Download) -> std::io::Result<File> {
     File::open(&dl.part_path).or_else(|_| File::open(&dl.final_path))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_content_range;
-
-    #[test]
-    fn content_range() {
-        assert_eq!(parse_content_range("bytes 0-99/1000"), Some((0, Some(1000))));
-        assert_eq!(parse_content_range("bytes 500-999/*"), Some((500, None)));
-        assert_eq!(parse_content_range("items 0-1/2"), None);
-    }
 }

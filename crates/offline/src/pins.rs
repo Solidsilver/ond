@@ -62,6 +62,32 @@ impl Pins {
     /// Adds `pin`, or replaces its track list (a playlist that changed on the
     /// server). Returns the track ids no pin needs any more.
     pub fn set(&mut self, pin: Pin, label: String, tracks: Vec<TrackRef>) -> Vec<String> {
+        self.set_many(std::iter::once((pin, label, tracks)))
+    }
+
+    /// [`set`](Self::set) for many pins, with one pass to find what's no
+    /// longer needed instead of one per pin.
+    pub fn set_many(&mut self, pins: impl IntoIterator<Item = (Pin, String, Vec<TrackRef>)>) -> Vec<String> {
+        let mut at: std::collections::HashMap<Pin, usize> = self.pins.iter().enumerate().map(|(i, p)| (p.pin.clone(), i)).collect();
+        for (pin, label, tracks) in pins {
+            let ids = self.store(tracks);
+            match at.get(&pin) {
+                Some(&i) => {
+                    self.pins[i].label = label;
+                    self.pins[i].tracks = ids;
+                }
+                None => {
+                    at.insert(pin.clone(), self.pins.len());
+                    self.pins.push(PinRecord { pin, label, tracks: ids });
+                }
+            }
+        }
+        self.gc()
+    }
+
+    /// Records `tracks` (keeping finished files' names) and returns their ids,
+    /// duplicates dropped, in order.
+    fn store(&mut self, tracks: Vec<TrackRef>) -> Vec<String> {
         let mut ids = Vec::with_capacity(tracks.len());
         let mut seen = HashSet::new();
         for t in tracks {
@@ -78,19 +104,18 @@ impl Pins {
                 }
             }
         }
-        match self.pins.iter_mut().find(|p| p.pin == pin) {
-            Some(p) => {
-                p.label = label;
-                p.tracks = ids;
-            }
-            None => self.pins.push(PinRecord { pin, label, tracks: ids }),
-        }
-        self.gc()
+        ids
     }
 
     /// Removes `pin`; returns the track ids nothing else keeps.
     pub fn remove(&mut self, pin: &Pin) -> Vec<String> {
-        self.pins.retain(|p| &p.pin != pin);
+        self.remove_many(std::slice::from_ref(pin))
+    }
+
+    /// [`remove`](Self::remove) for many pins, with one cleanup pass.
+    pub fn remove_many(&mut self, pins: &[Pin]) -> Vec<String> {
+        let drop: HashSet<&Pin> = pins.iter().collect();
+        self.pins.retain(|p| !drop.contains(&p.pin));
         self.gc()
     }
 

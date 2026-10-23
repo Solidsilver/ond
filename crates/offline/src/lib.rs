@@ -8,8 +8,8 @@
 //! already complete in the stream cache is hard-linked (or copied) instead of
 //! downloaded again.
 //!
-//! Files are `<id>.<suffix>` (the id percent-escaped, as in the stream cache),
-//! with `.part` appended while downloading. The engine plays a finished one as a
+//! Files are named by [`streamcache::file_name`], exactly as in the stream
+//! cache, with `.part` appended while downloading. The engine plays a finished one as a
 //! `file://` source; see [`OfflineStore::local_path`].
 
 pub mod pins;
@@ -19,10 +19,11 @@ pub use pins::{Pin, PinRecord, Pins, TrackRef};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
+use streamcache::fetch::{self, FetchError};
 use tokio::sync::Notify;
 
 const STATE_FILE: &str = "offline.json";
@@ -33,7 +34,8 @@ const MAX_ATTEMPTS: u32 = 6;
 /// Progress repaints at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
 
-/// Makes the stream URL for a track id; `None` while the server is unreachable.
+/// Makes the stream URL for a track id. The store has none while the server
+/// is unreachable (see [`OfflineStore::set_source`]).
 pub type UrlFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// Finds a complete copy of a track in the stream cache.
 pub type CacheLookup = Arc<dyn Fn(&TrackRef) -> Option<PathBuf> + Send + Sync>;
@@ -136,10 +138,10 @@ pub struct OfflineStore {
 }
 
 impl Drop for OfflineStore {
-    /// Lets a save that's being written finish, so reopening (or moving) the
-    /// store right after sees it.
+    /// Waits for queued saves to reach the disk, so reopening (or moving) the
+    /// store right after sees them.
     fn drop(&mut self) {
-        drop(self.inner.written.lock());
+        self.inner.flush.wait_for(self.inner.flush.requested.load(Ordering::Acquire), Duration::from_secs(5));
     }
 }
 
@@ -158,14 +160,38 @@ struct Inner {
     /// Track ids whose files should go, deleted on a thread of their own so an
     /// unpin never waits on the disk (or holds the state lock while it does).
     doomed: Mutex<Sender<Vec<String>>>,
-    /// The newest pins revision written to disk; older writes are skipped.
-    written: Mutex<u64>,
+    /// Pins to write, saved on a thread of their own for the same reason.
+    saves: Mutex<Sender<Save>>,
+    flush: Arc<Flush>,
 }
 
 /// A copy of the pins to write, taken under the state lock and written after it.
 struct Save {
     revision: u64,
     bytes: Vec<u8>,
+}
+
+/// How far the saver thread got, for waiting on it.
+#[derive(Default)]
+struct Flush {
+    /// The newest revision handed to the saver.
+    requested: AtomicU64,
+    /// The newest revision written (or given up on).
+    done: Mutex<u64>,
+    cond: Condvar,
+}
+
+impl Flush {
+    fn wait_for(&self, revision: u64, timeout: Duration) {
+        let done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.cond.wait_timeout_while(done, timeout, |d| *d < revision);
+    }
+
+    fn mark(&self, revision: u64) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        *done = (*done).max(revision);
+        self.cond.notify_all();
+    }
 }
 
 struct State {
@@ -236,14 +262,14 @@ impl OfflineStore {
         }
         remove_strays(&cfg.dir, &pins);
         let (doomed, doomed_rx) = std::sync::mpsc::channel();
+        let (saves, saves_rx) = std::sync::mpsc::channel();
+        let flush = Arc::new(Flush::default());
         let inner = Arc::new(Inner {
             doomed: Mutex::new(doomed),
-            written: Mutex::new(0),
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .read_timeout(Duration::from_secs(60))
-                .build()
-                .map_err(io::Error::other)?,
+            saves: Mutex::new(saves),
+            flush: flush.clone(),
+            // Offline downloads aren't waited on by playback: a slow server gets longer.
+            http: fetch::client(Duration::from_secs(60)).map_err(io::Error::other)?,
             dir: cfg.dir,
             wake: Notify::new(),
             on_change,
@@ -275,6 +301,11 @@ impl OfflineStore {
             .name("offline-delete".into())
             .spawn(move || deleter(weak, dir, doomed_rx))
             .map_err(io::Error::other)?;
+        let dir = inner.dir.clone();
+        std::thread::Builder::new()
+            .name("offline-save".into())
+            .spawn(move || saver(dir, saves_rx, flush))
+            .map_err(io::Error::other)?;
         Ok(Self { inner })
     }
 
@@ -302,8 +333,17 @@ impl OfflineStore {
 
     /// Pins (or re-pins with a new track list) and queues what's missing.
     pub fn pin(&self, pin: Pin, label: impl Into<String>, tracks: Vec<TrackRef>) {
+        self.pin_many(vec![(pin, label.into(), tracks)]);
+    }
+
+    /// [`pin`](Self::pin) for many at once (say, every song in a selection),
+    /// with one save instead of one per pin.
+    pub fn pin_many(&self, pins: Vec<(Pin, String, Vec<TrackRef>)>) {
+        if pins.is_empty() {
+            return;
+        }
         let mut st = self.inner.lock();
-        let gone = st.pins.set(pin, label.into(), tracks);
+        let gone = st.pins.set_many(pins);
         self.inner.commit(st, gone);
     }
 
@@ -342,8 +382,16 @@ impl OfflineStore {
 
     /// Unpins; files no other pin needs are deleted (in the background).
     pub fn unpin(&self, pin: &Pin) {
+        self.unpin_many(std::slice::from_ref(pin));
+    }
+
+    /// [`unpin`](Self::unpin) for many at once, with one save.
+    pub fn unpin_many(&self, pins: &[Pin]) {
+        if pins.is_empty() {
+            return;
+        }
         let mut st = self.inner.lock();
-        let gone = st.pins.remove(pin);
+        let gone = st.pins.remove_many(pins);
         self.inner.commit(st, gone);
     }
 
@@ -417,15 +465,23 @@ impl Inner {
     }
 
     /// After a change to the pins: forgets `gone` tracks, then (with the state
-    /// lock released) saves the pins and hands the files to the deleter.
+    /// lock released) hands the pins to the saver and the files to the deleter.
+    /// Neither touches the disk on the calling thread.
     fn commit(&self, mut st: MutexGuard<'_, State>, gone: Vec<String>) {
         let doomed = self.forget(&mut st, gone);
         let save = self.save(&mut st);
-        // Taken before the change is visible, so whoever sees it and then waits
-        // on the file (dropping the store, see `Drop`) finds it written.
-        let written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(save) = &save {
+            // Recorded before the change is visible, so whoever sees it and then
+            // waits on the file (dropping the store, see `Drop`) waits for this.
+            self.flush.requested.fetch_max(save.revision, Ordering::AcqRel);
+        }
         self.changed(st);
-        Self::write(&self.dir, written, save);
+        if let Some(save) = save {
+            let revision = save.revision;
+            if self.saves.lock().unwrap_or_else(|e| e.into_inner()).send(save).is_err() {
+                self.flush.mark(revision);
+            }
+        }
         self.delete(doomed);
     }
 
@@ -459,26 +515,6 @@ impl Inner {
                 tracing::warn!("saving offline state: {e}");
                 None
             }
-        }
-    }
-
-    /// Writes a [`Save`] unless a newer one already reached the disk. Runs with
-    /// the state lock released; `written` serializes the writers.
-    fn write(dir: &Path, mut written: MutexGuard<'_, u64>, save: Option<Save>) {
-        let Some(save) = save else { return };
-        if *written >= save.revision {
-            return;
-        }
-        let write = || -> io::Result<()> {
-            let tmp = dir.join(format!("{STATE_FILE}.tmp"));
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&save.bytes)?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, dir.join(STATE_FILE))
-        };
-        match write() {
-            Ok(()) => *written = save.revision,
-            Err(e) => tracing::warn!("saving offline state: {e}"),
         }
     }
 
@@ -676,7 +712,9 @@ async fn worker(inner: Arc<Inner>) {
 
 async fn run(inner: &Inner, job: &Job) -> Result<u64, JobError> {
     if let Some(src) = &job.from_cache {
-        match promote(src, job) {
+        // A copy across volumes can take a while: not on the async workers.
+        let (src, size, part, dest) = (src.clone(), job.r.size, job.part.clone(), job.dest.clone());
+        match blocking(move || promote(&src, size, &part, &dest)).await {
             Ok(size) => return Ok(size),
             Err(e) => tracing::debug!("promote {} from cache: {e}", job.r.id),
         }
@@ -685,62 +723,51 @@ async fn run(inner: &Inner, job: &Job) -> Result<u64, JobError> {
     download(inner, job, url).await
 }
 
+/// Runs disk work that may block (copies, fsync, renames) on tokio's blocking pool.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
+    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| Err(io::Error::other(e)))
+}
+
 /// Takes a complete stream-cache file: a hard link where possible (same
 /// volume; eviction there only unlinks its own name), else a copy.
-fn promote(src: &Path, job: &Job) -> io::Result<u64> {
+fn promote(src: &Path, size: Option<u64>, part: &Path, dest: &Path) -> io::Result<u64> {
     let len = std::fs::metadata(src)?.len();
-    if job.r.size.is_some_and(|s| s != len) {
+    if size.is_some_and(|s| s != len) {
         return Err(io::Error::other("cached file has the wrong size"));
     }
-    let _ = std::fs::remove_file(&job.dest);
-    if std::fs::hard_link(src, &job.dest).is_err() {
-        std::fs::copy(src, &job.part)?;
-        std::fs::rename(&job.part, &job.dest)?;
+    let _ = std::fs::remove_file(dest);
+    if std::fs::hard_link(src, dest).is_err() {
+        std::fs::copy(src, part)?;
+        std::fs::rename(part, dest)?;
     }
     Ok(len)
 }
 
 async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> {
-    use reqwest::StatusCode;
-    use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE};
-
     let mut have = std::fs::metadata(&job.part).map_or(0, |m| m.len());
     if job.r.size.is_some_and(|s| have > s) {
         have = 0;
     }
-    let mut req = inner.http.get(url);
-    if have > 0 {
-        req = req.header(RANGE, format!("bytes={have}-"));
-    }
-    // Errors drop the URL: it carries the auth token.
-    let mut resp = req.send().await.map_err(|e| JobError::Failed(e.without_url().to_string()))?;
-    let status = resp.status();
-    let total = match status {
-        StatusCode::PARTIAL_CONTENT => resp
-            .headers()
-            .get(CONTENT_RANGE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.rsplit('/').next())
-            .and_then(|t| t.parse::<u64>().ok()),
-        StatusCode::OK => {
-            // The server ignored the range (or there was none): start over.
-            have = 0;
-            resp.content_length()
-        }
-        StatusCode::RANGE_NOT_SATISFIABLE if have > 0 && job.r.size == Some(have) => {
-            return finish(job, have);
-        }
-        StatusCode::RANGE_NOT_SATISFIABLE => {
+    let mut body = match fetch::get_from(&inner.http, url, (have > 0).then_some(have)).await {
+        Ok(b) => b,
+        Err(FetchError::RangeNotSatisfiable) if have > 0 && job.r.size == Some(have) => return finish(job, have).await,
+        Err(FetchError::RangeNotSatisfiable) => {
             let _ = std::fs::remove_file(&job.part);
             return Err(JobError::Failed("server rejected the resume; starting over".into()));
         }
-        s => return Err(JobError::Failed(format!("http {s}"))),
+        Err(FetchError::BadRange(e)) => {
+            // The server answered the resume from somewhere else: the partial
+            // file can't be trusted to line up. Start over.
+            let _ = std::fs::remove_file(&job.part);
+            return Err(JobError::Failed(e));
+        }
+        Err(e) => return Err(JobError::Failed(e.to_string())),
     };
-    // Subsonic reports errors as a JSON body with 200.
-    if resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|ct| ct.contains("json")) {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(JobError::Failed(format!("server error: {}", body.chars().take(200).collect::<String>())));
+    if !body.ranged {
+        // The server ignored the range (or there was none): start over.
+        have = 0;
     }
+    let total = body.total;
     let mut file = std::fs::OpenOptions::new().create(true).write(true).append(have > 0).truncate(have == 0).open(&job.part)?;
     let mut last_note = Instant::now();
     inner.progress(&job.r.id, have, total, true);
@@ -748,12 +775,12 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
         if job.cancel.load(Ordering::Relaxed) {
             return Err(JobError::Cancelled);
         }
-        let chunk = match resp.chunk().await {
+        let chunk = match body.chunk().await {
             Ok(Some(c)) => c,
             Ok(None) => break,
             Err(e) => {
                 let _ = file.flush();
-                return Err(JobError::Failed(e.without_url().to_string()));
+                return Err(JobError::Failed(e.to_string()));
             }
         };
         file.write_all(&chunk)?;
@@ -764,55 +791,54 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
         }
         inner.progress(&job.r.id, have, total, note);
     }
-    file.sync_all()?;
-    drop(file);
+    blocking(move || file.sync_all()).await?;
     if let Some(t) = total
         && have != t
     {
         return Err(JobError::Failed(format!("incomplete: {have} of {t} bytes")));
     }
-    finish(job, have)
+    finish(job, have).await
 }
 
 /// Checks the size and moves the finished `.part` into place.
-fn finish(job: &Job, have: u64) -> Result<u64, JobError> {
+async fn finish(job: &Job, have: u64) -> Result<u64, JobError> {
     if let Some(expected) = job.r.size
         && have != expected
     {
         let _ = std::fs::remove_file(&job.part);
         return Err(JobError::Failed(format!("size mismatch: got {have} bytes, server said {expected}")));
     }
-    std::fs::rename(&job.part, &job.dest)?;
+    let (part, dest) = (job.part.clone(), job.dest.clone());
+    blocking(move || std::fs::rename(part, dest)).await?;
     Ok(have)
 }
 
 fn backoff(attempts: u32) -> Duration {
-    Duration::from_secs((2u64 << attempts.min(8)).min(300))
+    fetch::backoff(attempts, Duration::from_secs(4), Duration::from_secs(300))
 }
 
-/// Filesystem-safe `<id>.<suffix>`, the same scheme as the stream cache.
+/// The track's file name, the same as in the stream cache.
 pub fn file_name(r: &TrackRef) -> String {
-    let mut name = escape(&r.id);
-    if let Some(s) = &r.suffix {
-        let s: String = s.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
-        if !s.is_empty() {
-            name.push('.');
-            name.push_str(&s.to_ascii_lowercase());
-        }
-    }
-    name
+    streamcache::file_name(&r.id, r.suffix.as_deref())
 }
 
-fn escape(id: &str) -> String {
-    let mut name = String::with_capacity(id.len() + 6);
-    for b in id.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
-            name.push(b as char);
-        } else {
-            name.push_str(&format!("%{b:02X}"));
+/// The saver thread: writes the newest pins handed to it, skipping any that a
+/// newer one superseded while it was busy, until the store goes away.
+fn saver(dir: PathBuf, saves: Receiver<Save>, flush: Arc<Flush>) {
+    while let Ok(first) = saves.recv() {
+        let save = saves.try_iter().fold(first, |a, b| if b.revision > a.revision { b } else { a });
+        let write = || -> io::Result<()> {
+            let tmp = dir.join(format!("{STATE_FILE}.tmp"));
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&save.bytes)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, dir.join(STATE_FILE))
+        };
+        if let Err(e) = write() {
+            tracing::warn!("saving offline state: {e}");
         }
+        flush.mark(save.revision);
     }
-    name
 }
 
 /// The deleter thread: removes the files of tracks no pin needs any more, one
@@ -838,7 +864,7 @@ fn remove_files(dir: &Path, ids: &[String]) {
     if ids.is_empty() {
         return;
     }
-    let stems: HashSet<String> = ids.iter().map(|id| escape(id)).collect();
+    let stems: HashSet<String> = ids.iter().map(|id| streamcache::escape_id(id)).collect();
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let name = e.file_name();
