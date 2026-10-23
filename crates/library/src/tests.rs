@@ -551,16 +551,43 @@ fn v2_rows_migrate_to_v3_with_credits_index() {
 #[test]
 fn analysis_records_persist_and_replace() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lib.redb");
+    let path = dir.path().join("analysis.redb");
     {
-        let lib = Library::open(&path).unwrap();
-        lib.put_analysis("s-1", b"one").unwrap();
-        lib.put_analysis("s-2", b"two").unwrap();
-        lib.put_analysis("s-1", b"uno").unwrap();
+        let store = AnalysisStore::open(&path).unwrap();
+        store.put("s-1", b"one").unwrap();
+        store.put("s-2", b"two").unwrap();
+        store.put("s-1", b"uno").unwrap();
     }
-    let lib = Library::open(&path).unwrap();
-    let mut rows = lib.analysis_records().unwrap();
+    let store = AnalysisStore::open(&path).unwrap();
+    let mut rows = store.records().unwrap();
     rows.sort();
     assert_eq!(rows, [("s-1".to_owned(), b"uno".to_vec()), ("s-2".to_owned(), b"two".to_vec())]);
-    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION, "a new table, not a schema bump");
+}
+
+#[test]
+fn analysis_survives_a_library_rebuild_and_old_records_move_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_path = dir.path().join("library.redb");
+    let store = AnalysisStore::open(dir.path().join("analysis.redb")).unwrap();
+    store.put("new", b"kept").unwrap();
+    {
+        // An older build kept analysis in the library database.
+        let lib = Library::open(&lib_path).unwrap();
+        let wt = lib.db.begin_write().unwrap();
+        {
+            let mut t = wt.open_table(ANALYSIS).unwrap();
+            t.insert("old", b"moved".as_slice()).unwrap();
+            t.insert("new", b"stale".as_slice()).unwrap();
+        }
+        wt.commit().unwrap();
+        assert_eq!(store.adopt(&lib).unwrap(), 2);
+        assert!(lib.legacy_analysis_records().unwrap().is_empty(), "taken over once");
+        assert_eq!(store.adopt(&lib).unwrap(), 0);
+    }
+    // The library is thrown away and rebuilt (e.g. a newer-schema db deleted).
+    std::fs::remove_file(&lib_path).unwrap();
+    let _fresh = Library::open(&lib_path).unwrap();
+    let mut rows = store.records().unwrap();
+    rows.sort();
+    assert_eq!(rows, [("new".to_owned(), b"kept".to_vec()), ("old".to_owned(), b"moved".to_vec())]);
 }

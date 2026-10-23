@@ -283,8 +283,8 @@ pub struct ListenerApp {
     art: Art,
 
     queue: Queue,
-    /// The track id last sent as `SetNext`, so the engine isn't told twice.
-    sent_next: Option<String>,
+    /// The queue item last sent as `SetNext`, so the engine isn't told twice.
+    sent_next: Option<u64>,
     show_queue: bool,
     /// Narrow windows: the queue opens as a sheet over the content instead.
     queue_sheet: bool,
@@ -394,6 +394,13 @@ impl ListenerApp {
             tracing::warn!("library database was unreadable; moved to {} and starting fresh", aside.display());
             format!("Library database was unreadable and is being rebuilt (old copy: {})", aside.display())
         });
+        // Analysis results live apart from the (disposable) library mirror.
+        let analyses = Arc::new(library::AnalysisStore::open(paths.library_db.with_file_name("analysis.redb"))?);
+        match analyses.adopt(&library) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("moved {n} analysis results out of the library database"),
+            Err(e) => tracing::warn!("moving analysis results: {e}"),
+        }
         let library = Arc::new(library);
         let (tx, inbox) = channel();
         let bridge = Bridge::new(rt.handle().clone(), tx, ctx.clone(), library.clone());
@@ -444,11 +451,11 @@ impl ListenerApp {
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
         bridge.load_cached_albums();
-        bridge.load_analyses();
+        bridge.load_analyses(analyses.clone());
         let analyzer = {
             let (results, ticks) = (bridge.clone(), bridge.ctx().clone());
             analyze::Runner::start(analyze::Config {
-                library,
+                store: analyses,
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
@@ -597,11 +604,13 @@ impl ListenerApp {
             Msg::AllTracks(t) => {
                 self.data.set_all_tracks(t);
                 self.search_stale = true;
-                // A sync may have changed pinned albums' track lists.
+                // A sync may have added tracks to pinned albums. The library can be
+                // partial (a sync stopped or failed, a rebuilt database), so this may
+                // only add: removals wait for the server's own listing of the album.
                 let albums: Vec<String> = self.offline_snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
                 for id in albums {
                     if let Some(tracks) = self.data.tracks.get(&id).cloned() {
-                        self.refresh_pin(Pin::Album(id), &tracks);
+                        self.refresh_pin(Pin::Album(id), &tracks, false);
                     }
                 }
                 self.resume_library_analysis();
@@ -640,8 +649,8 @@ impl ListenerApp {
                 self.sync_label = format!("{n} albums");
                 self.track_syncing = true;
             }
-            Msg::Tracks { album_id, tracks } => {
-                self.refresh_pin(Pin::Album(album_id.clone()), &tracks);
+            Msg::Tracks { album_id, tracks, fresh } => {
+                self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.insert(album_id.clone(), tracks);
                 self.run_pending(&format!("album:{album_id}"));
             }
@@ -651,7 +660,8 @@ impl ListenerApp {
             }
             Msg::Playlists(p) => self.data.playlists = p,
             Msg::PlaylistTracks { id, tracks } => {
-                self.refresh_pin(Pin::Playlist(id.clone()), &tracks);
+                // Always the server's complete listing.
+                self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
                 self.data.playlist_tracks.insert(id.clone(), tracks);
                 self.run_pending(&format!("playlist:{id}"));
             }
@@ -671,8 +681,8 @@ impl ListenerApp {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
             }
             Msg::UserMeta { meta, tracks } => self.favorites.note(meta, &tracks),
-            Msg::StarDone { kind, id, on, error } => self.star_done(kind, id, on, error),
-            Msg::RatingDone { id, previous, error } => self.rating_done(id, previous, error),
+            Msg::StarDone { kind, id, on, seq, error } => self.star_done(kind, id, on, seq, error),
+            Msg::RatingDone { id, previous, seq, error } => self.rating_done(id, previous, seq, error),
             Msg::PlaylistCreated { id, name } => {
                 self.recent_playlists.insert(0, id.clone());
                 self.recent_playlists.truncate(3);
@@ -707,15 +717,22 @@ impl ListenerApp {
     }
 
     /// Pins `pin` if it was waiting for these tracks, or refreshes its track
-    /// list if it's already pinned.
-    fn refresh_pin(&mut self, pin: Pin, tracks: &[Track]) {
+    /// list if it's already pinned. Only `complete` lists (the server's own
+    /// answer for that album or playlist) may drop tracks and delete their
+    /// downloads; anything else (the local library, which may be mid-sync or
+    /// rebuilt) can only add.
+    fn refresh_pin(&mut self, pin: Pin, tracks: &[Track], complete: bool) {
         let label = self.pin_label(&pin);
         let refs = || tracks.iter().map(track_ref).collect::<Vec<_>>();
         if let Some(at) = self.pending_pins.iter().position(|(_, p)| p == &pin) {
             self.pending_pins.remove(at);
             self.offline.pin(pin, label, refs());
-        } else if self.offline_snap.pin(&pin).is_some() {
-            self.offline.update(&pin, label, refs());
+        } else if self.offline.is_pinned(&pin) {
+            if complete {
+                self.offline.update(&pin, label, refs());
+            } else {
+                self.offline.extend(&pin, refs());
+            }
         }
     }
 
@@ -820,15 +837,20 @@ impl ListenerApp {
             self.bit_perfect = mode == PlaybackMode::BitPerfect;
         }
         match ev {
-            audio::Event::TrackStarted { track_id, .. } => {
+            audio::Event::TrackStarted { track_id, token, gapless, restart, .. } => {
                 if self.analyze_playing
+                    && !restart
                     && let Some(t) = self.playing_track(&track_id)
                 {
                     self.enqueue_analysis(std::slice::from_ref(&t));
                 }
-                let is_current = self.queue.current.as_ref().is_some_and(|c| c.track.id == track_id);
-                let is_next = self.queue.peek_next().is_some_and(|n| n.track.id == track_id);
-                if !is_current && is_next {
+                // Matched by queue item (the token), so the same song twice in a row
+                // still moves the queue along. With "repeat queue" over a single
+                // item, the next item *is* the current one: a gapless start of it
+                // is the next pass.
+                let is_next = self.queue.peek_next().is_some_and(|n| n.uid == token);
+                let is_current = self.queue.current.as_ref().is_some_and(|c| c.uid == token);
+                if is_next && (gapless || !is_current) {
                     // The engine moved on gaplessly; line up the track after this one.
                     self.queue.advance();
                     self.pending_seek = None;
@@ -862,8 +884,9 @@ impl ListenerApp {
     /// What the engine needs to play `track`: the downloaded file first
     /// (instant, no network), else the server while it's reachable (original or
     /// transcoded), with its ReplayGain and whether it plays as part of its album
-    /// (from its queue neighbours `prev` and `next`).
-    fn source(&self, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
+    /// (from its queue neighbours `prev` and `next`). `token` is the queue item's
+    /// id, echoed back by the engine so two plays of one track stay apart.
+    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
         let replay_gain = playback::replay_gain(track);
         let album_context = playback::in_album(prev, track, next);
         if let Some(path) = self.offline.local_path(&track.id) {
@@ -874,6 +897,7 @@ impl ListenerApp {
                 replay_gain,
                 album_context,
                 transcode: None,
+                token,
             });
         }
         let client = self.client.as_ref().filter(|_| self.online)?;
@@ -882,7 +906,7 @@ impl ListenerApp {
             None => (client.stream_url(&track.id), track.suffix.clone()),
             Some(t) => (client.transcoded_stream_url(&track.id, &t.format, t.kbps), Some(t.format.clone())),
         };
-        Some(TrackSource { id: track.id.clone(), url: url.to_string(), suffix, replay_gain, album_context, transcode })
+        Some(TrackSource { id: track.id.clone(), url: url.to_string(), suffix, replay_gain, album_context, transcode, token })
     }
 
     /// Starts the queue's current item from the top (or stops when there is
@@ -891,14 +915,22 @@ impl ListenerApp {
         self.pending_seek = None;
         self.sent_next = None;
         let mut skipped = 0;
+        // With "repeat queue" the queue never runs out, so give up after one
+        // full pass in which nothing could play.
+        let limit = self.queue.pass_len().max(1);
         loop {
             let Some(item) = &self.queue.current else {
                 self.engine.send(Command::Stop);
                 break;
             };
+            if skipped >= limit {
+                self.engine.send(Command::Stop);
+                self.notice = Some("Nothing in the queue is downloaded".to_owned());
+                return;
+            }
             let prev = self.queue.history.last().map(|i| &i.track);
             let next = self.queue.peek_next().map(|i| &i.track);
-            if let Some(src) = self.source(prev, &item.track, next) {
+            if let Some(src) = self.source(item.uid, prev, &item.track, next) {
                 self.announce(&item.track);
                 self.engine.send(Command::Play(src));
                 self.sync_next();
@@ -922,17 +954,18 @@ impl ListenerApp {
         if self.queue.current.is_none() {
             return;
         }
-        let next = self.queue.peek_next().map(|i| i.track.clone());
+        let next = self.queue.peek_next().map(|i| (i.uid, i.track.clone()));
         let current = self.queue.current.as_ref().map(|i| &i.track);
         let after = self.queue.upcoming.get(1).map(|i| &i.track);
-        let source = next.as_ref().and_then(|t| self.source(current, t, after));
-        let id = source.as_ref().map(|s| s.id.clone());
-        if id != self.sent_next {
-            if let Some(t) = next.as_ref().filter(|_| source.is_some()) {
+        let source = next.as_ref().and_then(|(uid, t)| self.source(*uid, current, t, after));
+        // By queue item, not track: the same song queued twice is two items.
+        let sent = source.as_ref().map(|s| s.token);
+        if sent != self.sent_next {
+            if let Some((_, t)) = next.as_ref().filter(|_| source.is_some()) {
                 self.announce(t);
             }
             self.engine.send(Command::SetNext(source));
-            self.sent_next = id;
+            self.sent_next = sent;
         }
     }
 
@@ -1829,6 +1862,19 @@ mod tests {
     }
 
     #[test]
+    fn repeat_queue_with_nothing_playable_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        app.online = false;
+        app.queue.end = crate::queue::EndAction::RepeatQueue;
+        let pass = app.queue.pass_len();
+        app.start_current();
+        assert!(app.queue.history.len() <= 2 * pass, "history grew to {}", app.queue.history.len());
+        assert_eq!(app.notice.as_deref(), Some("Nothing in the queue is downloaded"));
+    }
+
+    #[test]
     fn every_view_draws() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
@@ -1887,7 +1933,7 @@ mod tests {
         assert_eq!(app.pending.len(), 1);
         // ...and runs when they arrive.
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
-        app.handle(Msg::Tracks { album_id: "al-12".into(), tracks });
+        app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
         assert_eq!(app.queue.upcoming.len(), before + 3);
         assert!(app.pending.is_empty());
         // Played next: right after what the user already chose to play next.
@@ -1949,8 +1995,8 @@ mod tests {
         download(&mut app, dir.path(), "t-2");
         assert!(!app.online);
         let tracks: Vec<Track> = app.data.tracks["al-0"][..4].to_vec();
-        assert!(app.source(None, &tracks[0], None).is_none(), "offline and not downloaded: nothing to play");
-        let local = app.source(None, &tracks[1], None).unwrap();
+        assert!(app.source(0, None, &tracks[0], None).is_none(), "offline and not downloaded: nothing to play");
+        let local = app.source(0, None, &tracks[1], None).unwrap();
         assert!(local.url.starts_with("file://") && local.url.ends_with("t-2.flac"), "{}", local.url);
 
         // Playing from the top skips to the downloaded song and says so.
@@ -1961,15 +2007,15 @@ mod tests {
         // Nothing after it can play, so the engine isn't told about a next track.
         assert_eq!(app.sent_next, None);
         // When it ends, the rest is skipped and playback stops cleanly.
-        app.handle_engine(audio::Event::Ended { track_id: "t-2".into() });
+        app.handle_engine(audio::Event::Ended { track_id: "t-2".into(), token: 0 });
         assert!(app.queue.current.is_none());
 
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
         app.handle(Msg::Connected { client, settings: Box::default(), server: "test".into() });
         assert!(app.online);
-        assert!(app.source(None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
-        assert!(app.source(None, &tracks[1], None).unwrap().url.starts_with("file://"));
+        assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
+        assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
     }
 
     #[test]
@@ -1981,12 +2027,18 @@ mod tests {
         app.apply(Action::KeepOffline(Keep::Album("al-5".into()), true));
         assert!(!app.offline.is_pinned(&Pin::Album("al-5".into())));
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
-        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone() });
+        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
         assert!(app.offline.is_pinned(&Pin::Album("al-5".into())));
         assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
-        // The album changed on the server: the pin follows.
+        // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
         app.offline_snap = app.offline.snapshot();
-        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec() });
+        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
+        // (The stored album now lists only y-1; a library-wide refresh sees that.)
+        let all = app.data.all_tracks.to_vec();
+        app.handle(Msg::AllTracks(all));
+        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+        // The album changed on the server: the pin follows.
+        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
         assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
         download(&mut app, dir.path(), "t-3");
 
@@ -2009,13 +2061,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        let next = app.queue.peek_next().unwrap().track.id.clone();
+        let next = app.queue.peek_next().unwrap().clone();
         let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
-        app.handle_engine(audio::Event::TrackStarted { track_id: next.clone(), format, gapless: true });
-        assert_eq!(app.queue.current.as_ref().unwrap().track.id, next);
+        let started = |i: &crate::queue::Item| audio::Event::TrackStarted {
+            track_id: i.track.id.clone(),
+            token: i.uid,
+            format,
+            gapless: true,
+            restart: false,
+        };
+        app.handle_engine(started(&next));
+        assert_eq!(app.queue.current.as_ref().unwrap().uid, next.uid);
         // A repeat of the same event (or the current track) changes nothing.
         let upcoming = app.queue.upcoming.len();
-        app.handle_engine(audio::Event::TrackStarted { track_id: next, format, gapless: true });
+        app.handle_engine(started(&next));
         assert_eq!(app.queue.upcoming.len(), upcoming);
+    }
+
+    #[test]
+    fn the_playing_song_queued_next_still_advances_gaplessly() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+        let started = |i: &crate::queue::Item| audio::Event::TrackStarted {
+            track_id: i.track.id.clone(),
+            token: i.uid,
+            format,
+            gapless: true,
+            restart: false,
+        };
+        // "Play next" on the song that's playing: the same track, a new queue item.
+        let playing = app.queue.current.clone().unwrap();
+        app.queue.clear();
+        app.queue.play_next(vec![playing.track.clone()]);
+        let copy = app.queue.peek_next().unwrap().clone();
+        assert_eq!(copy.track.id, playing.track.id);
+        assert_ne!(copy.uid, playing.uid);
+        app.handle_engine(started(&copy));
+        assert_eq!(app.queue.current.as_ref().unwrap().uid, copy.uid, "the queue moved to the copy");
+
+        // Repeat queue over a single item: each gapless start is the next pass.
+        app.queue = Queue::default();
+        app.queue.end = crate::queue::EndAction::RepeatQueue;
+        app.queue.play_now(vec![playing.track.clone()], 0, Source::Added);
+        let first = app.queue.current.clone().unwrap();
+        app.handle_engine(started(&first));
+        let second = app.queue.current.clone().unwrap();
+        assert_ne!(second.uid, first.uid, "a new pass began");
+        assert_eq!(app.queue.history.len(), 1);
     }
 }
