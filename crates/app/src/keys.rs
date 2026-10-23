@@ -27,10 +27,12 @@ pub enum Cmd {
     /// A sidebar place, by position (0 = Recently Added).
     Place(u8),
     ToggleQueue,
-    /// Open (or close) the Now Playing view.
-    NowPlaying,
+    /// Lyrics: the sidebar's Lyrics tab in the full window, the drawer in the Player.
+    Lyrics,
+    /// The full window ↔ the Player.
+    TogglePlayer,
     Full,
-    Compact,
+    Player,
     Mini,
     ToggleMini,
     Settings,
@@ -100,10 +102,11 @@ pub static BINDINGS: &[Binding] = &[
     view("Lists & queue", "Move in queue or playlist", "⌥↑ ⌥↓"),
     view("Lists & queue", "Remove from queue or playlist", "⌫"),
     b("Lists & queue", "New playlist", "⌘N", CMD, Key::N, false, Cmd::NewPlaylist),
-    b("Window", "Now Playing", "⇧⌘N", CMD_SHIFT, Key::N, false, Cmd::NowPlaying),
+    b("Window", "Player on / off", "⇧⌘N", CMD_SHIFT, Key::N, false, Cmd::TogglePlayer),
+    b("Window", "Lyrics", "⌥⌘L", CMD_ALT, Key::L, false, Cmd::Lyrics),
     b("Window", "Show / hide queue", "⌥⌘U", CMD_ALT, Key::U, false, Cmd::ToggleQueue),
     b("Window", "Full window", "⌥⌘1", CMD_ALT, Key::Num1, false, Cmd::Full),
-    b("Window", "Compact", "⌥⌘2", CMD_ALT, Key::Num2, false, Cmd::Compact),
+    b("Window", "Player", "⌥⌘2", CMD_ALT, Key::Num2, false, Cmd::Player),
     b("Window", "Mini player", "⌥⌘3", CMD_ALT, Key::Num3, false, Cmd::Mini),
     b("Window", "Mini player on / off", "⇧⌘M", CMD_SHIFT, Key::M, false, Cmd::ToggleMini),
     b("Window", "Settings", "⌘,", CMD, Key::Comma, false, Cmd::Settings),
@@ -174,7 +177,8 @@ mod tests {
         assert_eq!(press(Key::L, CMD, false), [Cmd::Reveal]);
         assert_eq!(press(Key::L, CMD_SHIFT, false), [Cmd::Love]);
         assert_eq!(press(Key::N, CMD, false), [Cmd::NewPlaylist]);
-        assert_eq!(press(Key::N, CMD_SHIFT, false), [Cmd::NowPlaying]);
+        assert_eq!(press(Key::N, CMD_SHIFT, false), [Cmd::TogglePlayer]);
+        assert_eq!(press(Key::L, CMD_ALT, false), [Cmd::Lyrics]);
         assert_eq!(press(Key::Questionmark, SHIFT, false), [Cmd::Shortcuts]);
         // Space and ⌘-arrows belong to a focused text field.
         assert!(press(Key::Space, NONE, true).is_empty());

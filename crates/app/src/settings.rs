@@ -27,7 +27,7 @@ pub struct Settings {
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
-    /// Full / Compact / Mini, and where each was.
+    /// Full / Player / Mini, and where each was.
     #[serde(default)]
     pub window: crate::window::Windows,
     /// Report plays to the server (which passes them on to Last.fm / ListenBrainz).

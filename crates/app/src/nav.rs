@@ -17,8 +17,6 @@ pub enum Route {
     /// Loved songs, albums and artists.
     Favorites,
     Offline,
-    /// The playing track, large, with its lyrics.
-    NowPlaying,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

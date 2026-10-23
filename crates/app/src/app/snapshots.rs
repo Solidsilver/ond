@@ -429,6 +429,7 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     egui::Popup::close_all(&h.ctx);
     let app = app_mut(h);
     app.windows.mode = WindowMode::Full;
+    app.windows.lyrics_open = false;
     app.palette = None;
     app.overlay = None;
     app.fav_tab = favorites_page::FavTab::default();
@@ -527,35 +528,61 @@ fn fixture_lyrics(app: &mut ListenerApp, synced: bool) {
 }
 
 fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
-    reset(h, FULL, Route::NowPlaying);
+    // The Player: artwork, transport and the queue; lyrics in a drawer that
+    // widens the window.
+    let player = vec2(380.0, 880.0);
+    reset(h, player, Route::Recent);
+    app_mut(h).windows.mode = WindowMode::Player;
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(4);
+    s.shoot(h, "player");
+
+    reset(h, vec2(player.x + crate::window::DRAWER_W, player.y), Route::Recent);
+    app_mut(h).windows.mode = WindowMode::Player;
+    app_mut(h).windows.lyrics_open = true;
     fixture_lyrics(app_mut(h), true);
     h.run_steps(20);
-    s.shoot(h, "now-playing");
+    s.shoot(h, "player-lyrics");
 
-    reset(h, FULL, Route::NowPlaying);
-    fixture_lyrics(app_mut(h), true);
-    h.run_steps(20);
-    let lyrics_col = egui::Rect::from_min_max(pos2(700.0, 120.0), pos2(1120.0, 800.0));
-    if !hover_label(h, "Every clock is running slow", lyrics_col) {
-        h.hover_at(pos2(860.0, 600.0));
-    }
-    s.shoot(h, "now-playing-line-hover");
-
-    reset(h, FULL, Route::NowPlaying);
+    reset(h, vec2(player.x + crate::window::DRAWER_W, player.y), Route::Recent);
+    app_mut(h).windows.mode = WindowMode::Player;
+    app_mut(h).windows.lyrics_open = true;
     fixture_lyrics(app_mut(h), false);
-    s.shoot(h, "now-playing-plain");
+    h.run_steps(4);
+    s.shoot(h, "player-lyrics-plain");
 
-    reset(h, FULL, Route::NowPlaying);
+    reset(h, player, Route::Recent);
+    app_mut(h).windows.mode = WindowMode::Player;
+    app_mut(h).np_details = true;
+    h.hover_at(pos2(190.0, 150.0));
+    h.run_steps(4);
+    s.shoot(h, "player-details-art-hover");
+
+    // The full window's sidebar on its Lyrics tab.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(20);
+    s.shoot(h, "sidebar-lyrics");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    fixture_lyrics(app_mut(h), false);
+    s.shoot(h, "sidebar-lyrics-plain");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
     if let Some(id) = app_mut(h).queue.current.as_ref().map(|c| c.track.id.clone()) {
         app_mut(h).lyrics.insert(id, crate::lyrics::Fetch::Done(None));
     }
-    app_mut(h).np_details = true;
-    s.shoot(h, "now-playing-no-lyrics");
+    s.shoot(h, "sidebar-lyrics-none");
 
-    reset(h, vec2(900.0, 700.0), Route::NowPlaying);
+    reset(h, vec2(900.0, 700.0), Route::Recent);
+    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    app_mut(h).queue_sheet = true;
     fixture_lyrics(app_mut(h), true);
     h.run_steps(20);
-    s.shoot(h, "narrow-now-playing");
+    s.shoot(h, "narrow-lyrics-sheet");
 
     reset(h, FULL, Route::Recent);
     // The LCD's artwork (left end of the centered display).
@@ -760,9 +787,6 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, vec2(900.0, 700.0), Route::Album(album_id(7)));
     s.shoot(h, "narrow-long-album");
 
-    reset(h, vec2(340.0, 660.0), Route::Recent);
-    app_mut(h).windows.mode = WindowMode::Compact;
-    s.shoot(h, "compact");
 
     reset(h, vec2(280.0, 280.0), Route::Recent);
     app_mut(h).windows.mode = WindowMode::Mini;
@@ -838,13 +862,13 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     app_mut(h).notice = Some("Added 6 songs to Late night, low volume".into());
     s.shoot(h, "toasts");
 
-    reset(h, vec2(340.0, 660.0), Route::Recent);
+    reset(h, vec2(380.0, 880.0), Route::Recent);
     {
         let app = app_mut(h);
-        app.windows.mode = WindowMode::Compact;
+        app.windows.mode = WindowMode::Player;
         app.output.handle(&signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Verified, None));
     }
-    s.shoot(h, "compact-verified");
+    s.shoot(h, "player-verified");
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
