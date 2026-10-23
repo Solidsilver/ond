@@ -285,3 +285,42 @@ fn key_file_names_are_safe() {
     assert_eq!(CacheKey::new("ab/../c d", Some("FLAC".into())).file_name(), "ab%2F%2E%2E%2Fc%20d.flac");
     assert_eq!(CacheKey::new("x", Some("".into())).file_name(), "x");
 }
+
+#[test]
+fn a_subsonic_error_reply_is_not_cached_as_audio() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    // A stale error reply from an older version is purged at startup.
+    std::fs::write(dir.path().join("old.flac"), br#"{"subsonic-response":{"status":"failed","error":{"code":70}}}"#).unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    assert!(!dir.path().join("old.flac").exists());
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/rest/stream?id=x", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { break };
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let body: &[u8] = br#"{"subsonic-response":{"status":"failed","error":{"code":40}}}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = conn.write_all(head.as_bytes());
+            let _ = conn.write_all(body);
+        }
+    });
+    let key = CacheKey::new("bad", Some("flac".into()));
+    // Either the open or the first read reports the failure; neither yields audio.
+    if let Ok(mut src) = cache.open(&key, &url, never()) {
+        let mut out = Vec::new();
+        assert!(src.read_to_end(&mut out).is_err(), "read {} bytes of an error reply as audio", out.len());
+    }
+    thread::sleep(Duration::from_millis(100));
+    assert!(!dir.path().join("bad.flac").exists());
+    assert!(!cache.progress(&key).is_some_and(|p| p.complete));
+}

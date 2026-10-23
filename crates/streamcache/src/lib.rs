@@ -145,6 +145,11 @@ impl StreamCache {
                 continue;
             }
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            // An error reply cached as audio by an earlier version: it would fail every play.
+            if meta.len() < 64 * 1024 && is_error_reply(&path) {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
             index.total += meta.len();
             index.complete.insert(
                 name.to_owned(),
@@ -480,6 +485,14 @@ impl Seek for StreamReader {
         self.pos = target.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek before start"))?;
         Ok(self.pos)
     }
+}
+
+/// A Subsonic error reply (JSON or XML) rather than audio.
+fn is_error_reply(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else { return false };
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
+    let text = text.trim_start();
+    (text.starts_with('{') && text.contains("subsonic-response")) || text.starts_with("<?xml") || text.starts_with("<subsonic-response")
 }
 
 #[cfg(test)]
