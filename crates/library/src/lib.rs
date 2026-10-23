@@ -120,19 +120,10 @@ impl AnalysisStore {
     /// aside (`<name>.bad-<unix secs>`) and a fresh store started.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let open = |p: &Path| -> Result<Self> {
-            let db = Database::create(p)?;
-            let wt = db.begin_write()?;
-            wt.open_table(ANALYSIS)?;
-            wt.commit()?;
-            Ok(Self { db })
-        };
+        let open = |p: &Path| Self::init(Database::create(p)?);
         match open(path) {
             Err(e) if e.is_damage() => {
-                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                let mut aside = path.as_os_str().to_owned();
-                aside.push(format!(".bad-{stamp}"));
-                std::fs::rename(path, PathBuf::from(aside)).map_err(|io| Error::Db(Box::new(redb::StorageError::Io(io).into())))?;
+                set_aside(path)?;
                 open(path)
             }
             other => other,
@@ -140,7 +131,10 @@ impl AnalysisStore {
     }
 
     pub fn in_memory() -> Result<Self> {
-        let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
+        Self::init(Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?)
+    }
+
+    fn init(db: Database) -> Result<Self> {
         let wt = db.begin_write()?;
         wt.open_table(ANALYSIS)?;
         wt.commit()?;
@@ -171,13 +165,7 @@ impl AnalysisStore {
 
     /// Every stored record, by track id.
     pub fn records(&self) -> Result<Vec<(String, Vec<u8>)>> {
-        let rt = self.db.begin_read()?;
-        let mut out = Vec::new();
-        for entry in rt.open_table(ANALYSIS)?.iter()? {
-            let (id, bytes) = entry?;
-            out.push((id.value().to_owned(), bytes.value().to_vec()));
-        }
-        Ok(out)
+        analysis_rows(&self.db)
     }
 
     pub fn put(&self, track_id: &str, record: &[u8]) -> Result<()> {
@@ -204,11 +192,7 @@ impl Library {
         match Self::open(path) {
             Ok(lib) => Ok((lib, None)),
             Err(e) if e.is_damage() => {
-                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                let mut aside = path.as_os_str().to_owned();
-                aside.push(format!(".bad-{stamp}"));
-                let aside = PathBuf::from(aside);
-                std::fs::rename(path, &aside).map_err(|io| Error::Db(Box::new(redb::StorageError::Io(io).into())))?;
+                let aside = set_aside(path)?;
                 Ok((Self::open(path)?, Some(aside)))
             }
             Err(e) => Err(e),
@@ -397,13 +381,7 @@ impl Library {
     /// Analysis records stored here by older builds; they now live in an
     /// [`AnalysisStore`], which takes them over with [`AnalysisStore::adopt`].
     fn legacy_analysis_records(&self) -> Result<Vec<(String, Vec<u8>)>> {
-        let rt = self.db.begin_read()?;
-        let mut out = Vec::new();
-        for entry in rt.open_table(ANALYSIS)?.iter()? {
-            let (id, bytes) = entry?;
-            out.push((id.value().to_owned(), bytes.value().to_vec()));
-        }
-        Ok(out)
+        analysis_rows(&self.db)
     }
 
     fn clear_legacy_analysis(&self) -> Result<()> {
@@ -627,6 +605,27 @@ impl Library {
 
 /// Schema upgrades, run inside the opening write transaction. Each step takes
 /// the db from `from` to `from + 1`.
+/// Moves an unreadable database file out of the way as `<name>.bad-<unix secs>`.
+fn set_aside(path: &Path) -> Result<PathBuf> {
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".bad-{stamp}"));
+    let aside = PathBuf::from(aside);
+    std::fs::rename(path, &aside).map_err(|io| Error::Db(Box::new(redb::StorageError::Io(io).into())))?;
+    Ok(aside)
+}
+
+/// Every row of the analysis table in `db` (either database keeps one).
+fn analysis_rows(db: &Database) -> Result<Vec<(String, Vec<u8>)>> {
+    let rt = db.begin_read()?;
+    let mut out = Vec::new();
+    for entry in rt.open_table(ANALYSIS)?.iter()? {
+        let (id, bytes) = entry?;
+        out.push((id.value().to_owned(), bytes.value().to_vec()));
+    }
+    Ok(out)
+}
+
 /// Removes an album, its tracks and their index entries within `wt`.
 fn remove_album_in(wt: &WriteTransaction, id: &str) -> Result<bool> {
     TrackTables::open(wt)?.remove_album(id)?;
