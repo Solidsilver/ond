@@ -201,12 +201,18 @@ impl ListenerApp {
         let host = self.settings.as_ref().map(|s| super::diagnostics::server_host(&s.server)).unwrap_or_default();
         if let Some(p) = self.sync_progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
-            let (done, total) = (thousands(p.done), thousands(p.total));
-            let label = match p.unit {
-                crate::sync::Unit::Tracks => format!("Syncing {done} of {total}"),
-                crate::sync::Unit::Albums => format!("Syncing album {done} of {total}"),
+            // Short enough for the footer; the counts are in the tooltip and popover.
+            let label = match fraction {
+                Some(f) => format!("Syncing · {:.0}%", 100.0 * f),
+                None => "Syncing…".to_owned(),
             };
-            return ServerState::Syncing { host, label, detail: p.label(), fraction };
+            let (done, total) = (thousands(p.done), thousands(p.total));
+            let what = match p.unit {
+                crate::sync::Unit::Tracks => "tracks",
+                crate::sync::Unit::Albums => "albums",
+            };
+            let detail = format!("{}\n{done} of {total} {what}", p.label());
+            return ServerState::Syncing { host, label, detail, fraction };
         }
         if self.online && (self.album_syncing || self.track_syncing) {
             return ServerState::Syncing { host, label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None };
@@ -266,7 +272,7 @@ impl ListenerApp {
                 info_row(ui, "Server", &self.server_info, t.text);
             }
             let synced = match state {
-                ServerState::Syncing { label, .. } => label.clone(),
+                ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
                 _ => match self.last_synced {
                     Some(at) => at.format("%-I:%M %p").to_string(),
                     None if self.client.is_some() => "At launch".to_owned(),
@@ -274,18 +280,27 @@ impl ListenerApp {
                 },
             };
             info_row(ui, "Last sync", &synced, t.text);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            let action = if self.track_syncing {
+                Some("Stop sync")
+            } else if self.client.is_some() && self.online {
+                Some("Sync now")
+            } else {
+                None
+            };
+            if let Some(label) = action {
                 ui.add_space(8.0);
-                if self.track_syncing {
-                    if super::widgets::link(ui, "Stop sync", FontId::proportional(12.0), t.accent).clicked() {
-                        self.bridge.cancel_sync();
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    if super::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
+                        if self.track_syncing {
+                            self.bridge.cancel_sync();
+                        } else {
+                            self.actions.push(Action::SyncNow);
+                            ui.close();
+                        }
                     }
-                } else if self.client.is_some() && self.online && super::widgets::link(ui, "Sync now", FontId::proportional(12.0), t.accent).clicked() {
-                    self.actions.push(Action::SyncNow);
-                    ui.close();
-                }
-            });
+                });
+            }
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);

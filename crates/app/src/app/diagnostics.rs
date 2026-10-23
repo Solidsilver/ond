@@ -214,16 +214,19 @@ impl ListenerApp {
         let rect = ui.available_rect_before_wrap();
         ui.painter().hline(rect.x_range(), rect.top() - 0.5, egui::Stroke::new(1.0, t.hairline));
         let font = FontId::monospace(10.0);
+        // Text stays muted; a segment worth a glance gets a small coloured dot.
+        const DOT: f32 = 10.0;
         let mut x = rect.left();
         for (i, s) in segs.iter().enumerate() {
-            let color = match s.tone {
-                Tone::Normal => t.muted,
-                Tone::Good => t.ok,
-                Tone::Warn => t.warn,
+            let dot = match s.tone {
+                Tone::Normal => None,
+                Tone::Good => Some(t.ok),
+                Tone::Warn => Some(t.warn),
             };
-            let g = ui.painter().layout_no_wrap(s.text.clone(), font.clone(), color);
+            let g = ui.painter().layout_no_wrap(s.text.clone(), font.clone(), t.muted);
             let gap = if i == 0 { 0.0 } else { 17.0 };
-            if x + gap + g.size().x > rect.right() {
+            let lead = if dot.is_some() { DOT } else { 0.0 };
+            if x + gap + lead + g.size().x > rect.right() {
                 break;
             }
             if i > 0 {
@@ -231,8 +234,12 @@ impl ListenerApp {
                 ui.painter().vline(mid, rect.center().y - 5.0..=rect.center().y + 5.0, egui::Stroke::new(1.0, t.hairline));
             }
             x += gap;
+            if let Some(c) = dot {
+                ui.painter().circle_filled(pos2(x + 3.0, rect.center().y), 3.0, c);
+                x += lead;
+            }
             let r = Rect::from_min_size(pos2(x, rect.center().y - g.size().y / 2.0), g.size());
-            ui.painter().galley(r.min, g, color);
+            ui.painter().galley(r.min, g, t.muted);
             let resp = ui.interact(r.expand2(vec2(4.0, 4.0)), ui.scope_id().with(("diag", i)), Sense::hover());
             let detail = s.detail.clone();
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &detail));

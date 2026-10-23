@@ -446,6 +446,9 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.track_syncing = false;
     app.sync_progress = None;
     app.toasts = super::toasts::Toasts::default();
+    app.unreachable = false;
+    app.diagnostics = super::diagnostics::Diagnostics::new(false);
+    app.diagnostics.set_latency(Some(Duration::from_millis(14)));
     app.output.handle(&signal());
     app.nav = Nav::default();
     app.nav.go(route);
@@ -558,9 +561,18 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "narrow-now-playing");
 
     reset(h, FULL, Route::Recent);
-    // The LCD's artwork (left end of the centered display).
-    h.hover_at(pos2(354.0, 26.0));
+    // The LCD's artwork (left end of the display, centred on the window).
+    h.hover_at(pos2(472.0, 26.0));
     s.shoot(h, "lcd-art-hover");
+
+    // The LCD at a mid width (the right controls start to crowd the centre)
+    // and with the pointer on its seek line.
+    reset(h, vec2(1100.0, 760.0), Route::Recent);
+    s.shoot(h, "lcd-1100");
+    reset(h, FULL, Route::Recent);
+    h.hover_at(pos2(720.0, 41.0));
+    h.run_steps(2);
+    s.shoot(h, "lcd-seek-hover");
 
     reset(h, FULL, Route::Recent);
     s.shoot(h, "recent");
@@ -689,12 +701,52 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     app_mut(h).overlay = Some(Overlay::Delete { id: "pl-0".into(), name: "Late night, low volume".into() });
     s.shoot(h, "delete-playlist");
 
+    // The sidebar footer: server status (click for details), shortcuts, settings.
     reset(h, FULL, Route::Recent);
-    let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 876.0));
-    if !click_label(h, "Settings", sidebar) {
-        eprintln!("  (settings button not found by label)");
+    let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 900.0));
+    if !click_label(h, "Connected to", sidebar) {
+        eprintln!("  (server status not found by label)");
     }
-    s.shoot(h, "gear-menu");
+    h.run_steps(3);
+    s.shoot(h, "server-popover");
+
+    reset(h, FULL, Route::Recent);
+    if !hover_label(h, "Keyboard shortcuts", sidebar) {
+        eprintln!("  (help button not found by label)");
+    }
+    h.run_steps(30);
+    s.shoot(h, "footer-help-hover");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).online = false;
+    s.shoot(h, "footer-connecting");
+
+    // The diagnostics bar, on, while playing and syncing; and at a narrow width.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        app.diagnostics.shown = true;
+        app.track_syncing = true;
+        app.sync_progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.diagnostics.note_frame(Duration::from_micros(1800));
+    }
+    h.run_steps(2);
+    s.shoot(h, "diagnostics-bar");
+    let bar = egui::Rect::from_min_max(pos2(0.0, 870.0), pos2(1440.0, 900.0));
+    if !hover_label(h, "Engine:", bar) {
+        eprintln!("  (diagnostics segment not found by label)");
+    }
+    h.run_steps(30);
+    s.shoot(h, "diagnostics-bar-hover");
+
+    reset(h, vec2(900.0, 700.0), Route::Recent);
+    app_mut(h).diagnostics.shown = true;
+    h.run_steps(2);
+    s.shoot(h, "narrow-diagnostics-bar");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
+    s.shoot(h, "settings-general-diagnostics");
 
     for section in settings_page::Section::ALL {
         reset(h, FULL, Route::Recent);
@@ -820,6 +872,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Recent);
     app_mut(h).online = false;
+    app_mut(h).unreachable = true;
     s.shoot(h, "offline-pill");
 
     reset(h, vec2(760.0, 640.0), Route::Albums);
