@@ -7,6 +7,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
+use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnalyzeError {
@@ -84,4 +85,42 @@ pub fn analyze(source: Box<dyn MediaSource>, suffix: Option<&str>, cancel: &dyn 
         a.push(&scratch);
     }
     analyzer.map(Analyzer::finish).ok_or_else(|| AnalyzeError::Failed("no audio decoded".into()))
+}
+
+/// [`analyze`] for any seekable reader (a file, a stream cache's reader);
+/// `len` helps symphonia seek within formats that need the file size.
+pub fn analyze_reader<R: Read + Seek + Send + Sync + 'static>(
+    reader: R,
+    len: Option<u64>,
+    suffix: Option<&str>,
+    cancel: &dyn Fn() -> bool,
+) -> Result<TrackAnalysis, AnalyzeError> {
+    analyze(Box::new(Source { reader, len }), suffix, cancel)
+}
+
+struct Source<R> {
+    reader: R,
+    len: Option<u64>,
+}
+
+impl<R: Read> Read for Source<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+impl<R: Seek> Seek for Source<R> {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.reader.seek(to)
+    }
+}
+
+impl<R: Read + Seek + Send + Sync> MediaSource for Source<R> {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.len
+    }
 }

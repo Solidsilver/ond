@@ -3,6 +3,7 @@
 //! Login → sync into the local db → browse → play through the audio engine,
 //! with the UI thread never blocking.
 
+mod analyze;
 mod app;
 mod art;
 mod bridge;

@@ -544,3 +544,20 @@ fn v2_rows_migrate_to_v3_with_credits_index() {
     assert!(lib.album_stamps().unwrap().is_empty(), "migrated tracks get fetched again by the next sync");
     assert_consistent(&lib);
 }
+
+#[test]
+fn analysis_records_persist_and_replace() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.redb");
+    {
+        let lib = Library::open(&path).unwrap();
+        lib.put_analysis("s-1", b"one").unwrap();
+        lib.put_analysis("s-2", b"two").unwrap();
+        lib.put_analysis("s-1", b"uno").unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    let mut rows = lib.analysis_records().unwrap();
+    rows.sort();
+    assert_eq!(rows, [("s-1".to_owned(), b"uno".to_vec()), ("s-2".to_owned(), b"two".to_vec())]);
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION, "a new table, not a schema bump");
+}

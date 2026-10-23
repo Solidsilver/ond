@@ -2290,6 +2290,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "listener"
 version = "0.1.0"
 dependencies = [
+ "analysis",
  "anyhow",
  "audio",
  "block2 0.6.2",
@@ -2301,6 +2302,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "keyring",
+ "libc",
  "library",
  "nucleo-matcher",
  "objc2 0.6.5",
@@ -2310,6 +2312,7 @@ dependencies = [
  "objc2-media-player",
  "serde",
  "serde_json",
+ "streamcache",
  "subsonic",
  "tempfile",
  "tokio",

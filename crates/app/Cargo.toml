@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+analysis = { version = "0.1.0", path = "../analysis" }
 anyhow = "1.0.104"
 audio = { version = "0.1.0", path = "../audio" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
@@ -17,6 +18,7 @@ library = { version = "0.1.0", path = "../library" }
 nucleo-matcher = "0.3.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+streamcache = { version = "0.1.0", path = "../streamcache" }
 subsonic = { version = "0.1.0", path = "../subsonic" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "fs"] }
 tracing = "0.1.44"
@@ -34,6 +36,7 @@ tempfile = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
+libc = "0.2"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSImage"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }

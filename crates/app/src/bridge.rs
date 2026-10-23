@@ -34,6 +34,10 @@ pub enum Msg {
     AllTracks(Vec<Track>),
     TrackSync(sync::Progress),
     TrackSyncDone(sync::Outcome),
+    /// A track's analysis just finished.
+    Analyzed { track_id: String, record: analysis::Record },
+    /// Every stored analysis, read at startup.
+    AnalysesLoaded(Vec<(String, analysis::Record)>),
     Engine(audio::Event),
     /// Media keys, Control Center, headphone buttons.
     Remote(crate::now_playing::Remote),
@@ -96,6 +100,18 @@ impl Bridge {
                 this.send(Msg::Artists(a));
             }
             this.load_all_tracks();
+        });
+    }
+
+    /// Reads the stored analysis results.
+    pub fn load_analyses(&self) {
+        let this = self.clone();
+        self.rt.spawn_blocking(move || match this.library.analysis_records() {
+            Ok(rows) => {
+                let records = rows.into_iter().filter_map(|(id, b)| analysis::Record::decode(&b).map(|r| (id, r))).collect();
+                this.send(Msg::AnalysesLoaded(records));
+            }
+            Err(e) => tracing::warn!("reading analyses: {e}"),
         });
     }
 
