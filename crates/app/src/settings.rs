@@ -24,6 +24,9 @@ pub struct Settings {
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
+    /// Report plays to the server (which passes them on to Last.fm / ListenBrainz).
+    #[serde(default = "yes")]
+    pub scrobble: bool,
 }
 
 fn yes() -> bool {
@@ -40,6 +43,7 @@ impl Default for Settings {
             device_modes: Default::default(),
             theme: Default::default(),
             show_queue: true,
+            scrobble: true,
         }
     }
 }

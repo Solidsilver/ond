@@ -215,8 +215,13 @@ impl Art {
 }
 
 fn file_for(dir: &Path, key: &Key) -> PathBuf {
-    let safe: String = key.cover.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-    dir.join(format!("{safe}-{}", key.size))
+    cover_file(dir, &key.cover, key.size)
+}
+
+/// Where the cache keeps `cover` at `size` px.
+pub fn cover_file(dir: &Path, cover: &str, size: u32) -> PathBuf {
+    let safe: String = cover.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    dir.join(format!("{safe}-{size}"))
 }
 
 async fn load(client: &Client, dir: &Path, key: &Key) -> Option<ColorImage> {

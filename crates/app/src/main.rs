@@ -8,6 +8,7 @@ mod art;
 mod bridge;
 mod icons;
 mod nav;
+mod now_playing;
 mod output;
 mod queue;
 mod search;

@@ -73,6 +73,11 @@ impl ListenerApp {
                         self.actions.push(Action::SetTheme(pref));
                     }
                 }
+                ui.separator();
+                let mut scrobble = self.scrobble;
+                if ui.checkbox(&mut scrobble, "Scrobble plays").on_hover_text("Report plays to the server, which passes them on to Last.fm / ListenBrainz").changed() {
+                    self.actions.push(Action::SetScrobble(scrobble));
+                }
             });
         });
     }
