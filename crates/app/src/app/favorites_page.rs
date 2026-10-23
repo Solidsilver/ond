@@ -2,8 +2,8 @@
 
 use super::album_page::ListOpts;
 use super::browse::grid_metrics;
-use super::widgets::{choice, elide, primary, secondary};
-use super::{Action, ListenerApp, QueueAction};
+use super::widgets::{choice, elide};
+use super::{Action, ListenerApp};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::queue::Source;
@@ -52,12 +52,8 @@ impl ListenerApp {
                     return empty(ui, "Songs you love show up here. Click the heart on a track, or press ⇧⌘L while one plays.");
                 }
                 ui.horizontal(|ui| {
-                    if primary(ui, Some(Icon::Play), "Play").clicked() {
-                        self.actions.push(Action::Tracks { tracks: v.songs.clone(), source: favorites_source(), action: QueueAction::Play { start: 0 } });
-                    }
-                    ui.add_space(4.0);
-                    if secondary(ui, "Shuffle").clicked() {
-                        self.actions.push(Action::Tracks { tracks: v.songs.clone(), source: favorites_source(), action: QueueAction::Shuffle });
+                    if let Some(action) = super::browse::play_shuffle(ui) {
+                        self.actions.push(Action::Tracks { tracks: v.songs.clone(), source: favorites_source(), action });
                     }
                 });
                 ui.add_space(14.0);

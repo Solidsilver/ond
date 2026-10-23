@@ -94,7 +94,8 @@ impl ListenerApp {
                     self.actions.push(Action::Go(route));
                 }
                 resp.context_menu(|ui| {
-                    self.playlist_menu(ui, &p.id);
+                    let kept = self.offline_snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
+                    super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, &mut self.actions);
                     if mine {
                         ui.separator();
                         self.playlist_edit_items(ui, &p.id, &p.name);
@@ -308,21 +309,6 @@ impl ListenerApp {
             }
             ui.add_space(2.0);
         });
-    }
-
-    fn playlist_menu(&mut self, ui: &mut Ui, id: &str) {
-        if ui.button("Play").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::Play { start: 0 }));
-        }
-        if ui.button("Shuffle").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::Shuffle));
-        }
-        if ui.button("Play next").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::PlayNext));
-        }
-        if ui.button("Add to queue").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::Add));
-        }
     }
 
     /// The gear: opens Settings.

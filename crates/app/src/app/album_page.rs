@@ -4,7 +4,7 @@
 //! per-track measurements, folded away until asked for. Playlists reuse the
 //! track list.
 
-use super::widgets::{Mark, chip, elide, heart_button, link, primary, secondary};
+use super::widgets::{Mark, chip, elide, heart_button, link};
 use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -216,12 +216,8 @@ impl ListenerApp {
                     });
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        if primary(ui, Some(Icon::Play), "Play").clicked() {
-                            self.actions.push(Action::Album(album.id.clone(), QueueAction::Play { start: 0 }));
-                        }
-                        ui.add_space(4.0);
-                        if secondary(ui, "Shuffle").clicked() {
-                            self.actions.push(Action::Album(album.id.clone(), QueueAction::Shuffle));
+                        if let Some(a) = super::browse::play_shuffle(ui) {
+                            self.actions.push(Action::Album(album.id.clone(), a));
                         }
                         let loved = self.favorites.is_on(StarKind::Album, &album.id);
                         if heart_button(ui, loved, 30.0, 14.0).clicked() {
@@ -231,14 +227,8 @@ impl ListenerApp {
                         let pin = offline::Pin::Album(album.id.clone());
                         let kept = self.offline_snap.pin(&pin).is_some();
                         egui::Popup::menu(&more).show(|ui| {
-                            if ui.button("Play next").clicked() {
-                                self.actions.push(Action::Album(album.id.clone(), QueueAction::PlayNext));
-                            }
-                            if ui.button("Add to queue").clicked() {
-                                self.actions.push(Action::Album(album.id.clone(), QueueAction::Add));
-                            }
-                            ui.separator();
-                            super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Album(album.id.clone()), &mut self.actions);
+                            let c = super::browse::Collection::Album(album.id.clone());
+                            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), &mut self.actions);
                             if !summary.complete() && analysing == 0 && !tracks.is_empty() {
                                 ui.separator();
                                 if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
@@ -375,24 +365,14 @@ impl ListenerApp {
                 ui.horizontal(|ui| {
                     let has_tracks = tracks.as_ref().is_some_and(|t| !t.is_empty());
                     ui.add_enabled_ui(has_tracks, |ui| {
-                        if primary(ui, Some(Icon::Play), "Play").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Play { start: 0 }));
-                        }
-                        ui.add_space(4.0);
-                        if secondary(ui, "Shuffle").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Shuffle));
+                        if let Some(a) = super::browse::play_shuffle(ui) {
+                            self.actions.push(Action::Playlist(id.to_owned(), a));
                         }
                     });
                     let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
                     egui::Popup::menu(&more).show(|ui| {
-                        if ui.button("Play next").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::PlayNext));
-                        }
-                        if ui.button("Add to queue").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Add));
-                        }
-                        ui.separator();
-                        super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Playlist(id.to_owned()), &mut self.actions);
+                        let c = super::browse::Collection::Playlist(id.to_owned());
+                        super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), &mut self.actions);
                         if mine {
                             ui.separator();
                             self.playlist_edit_items(ui, id, name);
