@@ -14,6 +14,8 @@ pub enum Route {
     Playlist { id: String, name: String },
     /// Albums sharing a genre, year or label.
     Filter { kind: FilterKind, value: String },
+    /// Loved songs, albums and artists.
+    Favorites,
     Offline,
 }
 
@@ -27,7 +29,7 @@ pub enum FilterKind {
 impl Route {
     /// Top-level places the sidebar links to; going to one starts a fresh trail.
     pub fn is_root(&self) -> bool {
-        matches!(self, Route::Recent | Route::Albums | Route::Artists | Route::Songs | Route::Offline | Route::Playlist { .. })
+        matches!(self, Route::Recent | Route::Albums | Route::Artists | Route::Songs | Route::Favorites | Route::Offline | Route::Playlist { .. })
     }
 }
 
@@ -99,6 +101,17 @@ impl Nav {
         }
         out.reverse();
         if out.len() == 1 { Vec::new() } else { out }
+    }
+
+    /// A playlist was renamed: show the new name wherever it's been visited.
+    pub fn rename_playlist(&mut self, id: &str, name: &str) {
+        for r in self.back.iter_mut().chain(self.forward.iter_mut()).chain(std::iter::once(&mut self.current)) {
+            if let Route::Playlist { id: pid, name: n } = r
+                && pid == id
+            {
+                *n = name.to_owned();
+            }
+        }
     }
 
     /// Steps back `steps` times (clicking an earlier breadcrumb).

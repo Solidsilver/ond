@@ -21,6 +21,7 @@ pub fn route_label(route: &Route, data: &Data) -> String {
         Route::Albums => "Albums".into(),
         Route::Artists => "Artists".into(),
         Route::Songs => "Songs".into(),
+        Route::Favorites => "Favorites".into(),
         Route::Offline => "Offline".into(),
         Route::Artist { name, .. } => name.clone(),
         Route::Album(id) => data.album(id).map_or_else(|| "Album".into(), |a| a.name.clone()),
@@ -102,6 +103,7 @@ impl ListenerApp {
             Route::Artist { name, .. } => self.artist_page(ui, &route, name),
             Route::Album(id) => self.album_page(ui, id),
             Route::Playlist { id, name } => self.playlist_page(ui, id, name),
+            Route::Favorites => self.favorites_page(ui),
             Route::Filter { kind, value } => {
                 let what = match kind {
                     FilterKind::Genre => "Genre",
@@ -312,6 +314,13 @@ impl ListenerApp {
                 ui.add_space(4.0);
                 if super::widgets::secondary(ui, "Play next").clicked() {
                     self.actions.push(Action::Artist(name.to_owned(), QueueAction::PlayNext));
+                }
+                // Only artists the server knows by id can be loved.
+                if let Route::Artist { id: Some(id), .. } = route {
+                    let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
+                    if super::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
+                        self.actions.push(Action::ToggleStar { kind: crate::favorites::StarKind::Artist, id: id.clone(), track: None, name: Some(name.to_owned()) });
+                    }
                 }
             });
             ui.add_space(14.0);

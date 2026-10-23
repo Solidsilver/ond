@@ -208,13 +208,15 @@ impl Art {
 
     /// Paints `cover` into `rect` (or the placeholder tile). A rect that isn't
     /// square is filled edge to edge, cropping the art's middle.
-    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: f32) {
+    /// `radius` may round only some corners (a mosaic's outer ones).
+    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>) {
+        let radius = radius.into();
         let painter = ui.painter();
         let tex = cover.and_then(|c| self.texture(c, rect.width().max(rect.height())));
         match tex {
             Some(t) => {
                 let uv = crop_uv(rect.width() / rect.height().max(1.0));
-                painter.add(egui::epaint::RectShape::filled(rect, CornerRadius::same(radius as u8), Color32::WHITE).with_texture(t.id(), uv));
+                painter.add(egui::epaint::RectShape::filled(rect, radius, Color32::WHITE).with_texture(t.id(), uv));
             }
             None => {
                 let t = crate::theme::Tokens::of(ui);

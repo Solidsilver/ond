@@ -14,6 +14,7 @@ fn album(id: &str, name: &str, artist: &str, year: i32) -> subsonic::Album {
         created: None,
         starred: None,
         play_count: None,
+        user_rating: None,
         sort_name: None,
         record_labels: Vec::new(),
         genres: Vec::new(),
@@ -46,6 +47,8 @@ fn song(id: &str, album_id: &str, disc: u32, track: u32) -> subsonic::Song {
         display_composer: None,
         contributors: Vec::new(),
         artists: Vec::new(),
+        starred: None,
+        user_rating: None,
     }
 }
 

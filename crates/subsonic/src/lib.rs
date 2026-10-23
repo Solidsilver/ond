@@ -181,6 +181,60 @@ impl Client {
         Ok(p.search_result3.song)
     }
 
+    /// Everything the user starred.
+    pub async fn starred(&self) -> Result<Starred2> {
+        let (_, p): (_, Starred2Payload) = self.call("getStarred2", &[]).await?;
+        Ok(p.starred2)
+    }
+
+    /// Stars (`on`) or unstars a song, album or artist.
+    pub async fn set_starred(&self, kind: StarKind, id: &str, on: bool) -> Result<()> {
+        let (_, _): (_, serde_json::Value) = self.call(if on { "star" } else { "unstar" }, &[(kind.param(), id)]).await?;
+        Ok(())
+    }
+
+    /// Sets the user's rating of a song: 1–5, or 0 to clear it.
+    pub async fn set_rating(&self, id: &str, rating: u8) -> Result<()> {
+        let (_, _): (_, serde_json::Value) = self.call("setRating", &[("id", id), ("rating", &rating.min(5).to_string())]).await?;
+        Ok(())
+    }
+
+    /// Creates a playlist holding `song_ids`, in order.
+    pub async fn create_playlist(&self, name: &str, song_ids: &[String]) -> Result<PlaylistWithSongs> {
+        let mut params = vec![("name", name)];
+        params.extend(song_ids.iter().map(|id| ("songId", id.as_str())));
+        let (_, p): (_, PlaylistPayload) = self.call("createPlaylist", &params).await?;
+        Ok(p.playlist)
+    }
+
+    /// Replaces a playlist's songs with `song_ids`, in order. This is how a
+    /// reorder is saved: `updatePlaylist` can only append and remove.
+    pub async fn replace_playlist(&self, id: &str, song_ids: &[String]) -> Result<()> {
+        let mut params = vec![("playlistId", id)];
+        params.extend(song_ids.iter().map(|id| ("songId", id.as_str())));
+        let (_, _): (_, serde_json::Value) = self.call("createPlaylist", &params).await?;
+        Ok(())
+    }
+
+    /// Renames a playlist and/or appends songs and/or removes the songs at
+    /// `remove_at` (indices into the playlist as it was before the call).
+    pub async fn update_playlist(&self, id: &str, name: Option<&str>, add: &[String], remove_at: &[usize]) -> Result<()> {
+        let remove: Vec<String> = remove_at.iter().map(usize::to_string).collect();
+        let mut params = vec![("playlistId", id)];
+        if let Some(n) = name {
+            params.push(("name", n));
+        }
+        params.extend(add.iter().map(|s| ("songIdToAdd", s.as_str())));
+        params.extend(remove.iter().map(|s| ("songIndexToRemove", s.as_str())));
+        let (_, _): (_, serde_json::Value) = self.call("updatePlaylist", &params).await?;
+        Ok(())
+    }
+
+    pub async fn delete_playlist(&self, id: &str) -> Result<()> {
+        let (_, _): (_, serde_json::Value) = self.call("deletePlaylist", &[("id", id)]).await?;
+        Ok(())
+    }
+
     pub async fn artists(&self) -> Result<Vec<Artist>> {
         let (_, p): (_, ArtistsPayload) = self.call("getArtists", &[]).await?;
         Ok(p.artists.index.into_iter().flat_map(|i| i.artist).collect())

@@ -302,6 +302,20 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
         .enumerate()
         .map(|(i, n)| subsonic::Playlist { id: format!("pl-{i}"), name: (*n).into(), song_count: 12, duration: 3000, cover_art: None, owner: None })
         .collect();
+    // A playlist mixing albums, for its page and mosaic.
+    let mut mix = filler(20, 3);
+    mix.extend(kind_of_blue().into_iter().take(2));
+    mix.extend(vanguard().into_iter().skip(2).take(3));
+    mix.extend(filler(23, 2));
+    app.data.playlist_tracks.insert("pl-0".into(), mix);
+    // Loved: the playing track and another, an album, an artist; a rating.
+    let vg = vanguard();
+    let mut loved_songs = vec![vg[1].clone(), vg[4].clone()];
+    loved_songs.extend(kind_of_blue().into_iter().take(3));
+    app.favorites.load(
+        crate::favorites::Starred { songs: loved_songs, albums: vec![album_id(0), album_id(1), album_id(5)], artists: vec![("ar-be".into(), "Bill Evans".into()), ("ar-md".into(), "Miles Davis".into())] },
+        vec![(vg[1].id.clone(), 5), (vg[4].id.clone(), 4)],
+    );
     app.data.credited.insert("Scott LaFaro".into(), vec![album_id(0), album_id(21), album_id(22)]);
     app.data.credited.insert("Bill Evans".into(), vec![album_id(0), album_id(1), album_id(21), album_id(22), album_id(23)]);
 
@@ -393,6 +407,8 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     let app = app_mut(h);
     app.windows.mode = WindowMode::Full;
     app.palette = None;
+    app.overlay = None;
+    app.fav_tab = favorites_page::FavTab::default();
     app.show_queue = true;
     app.queue_sheet = false;
     app.credits_open = false;
@@ -509,6 +525,60 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     app_mut(h).engine.status.preview(PlayState::Buffering, 141.0, 383.0, 0.38);
     s.shoot(h, "buffering");
 
+    // Library actions: playlists, favorites, menus, sheets.
+    reset(h, FULL, Route::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() });
+    s.shoot(h, "playlist");
+
+    reset(h, FULL, Route::Album(album_id(0)));
+    // Right-click a track, then open "Add to Playlist".
+    if let Some(row) = h.query_all_by_label_contains("Solar").find(|n| main.contains(n.rect().center())) {
+        row.click_secondary();
+    }
+    h.run_steps(3);
+    let sub: Option<Pos2> = h.query_all_by_label_contains("Add to Playlist").map(|n| n.rect().center()).next();
+    match sub {
+        Some(p) => {
+            h.hover_at(p);
+            h.run_steps(6);
+        }
+        None => eprintln!("  (track menu didn't open; add-to-playlist shows the page)"),
+    }
+    s.shoot(h, "add-to-playlist");
+
+    reset(h, FULL, Route::Favorites);
+    s.shoot(h, "favorites");
+
+    reset(h, FULL, Route::Favorites);
+    app_mut(h).fav_tab = favorites_page::FavTab::Albums;
+    s.shoot(h, "favorites-albums");
+
+    reset(h, FULL, Route::Favorites);
+    let loved = {
+        let app = app_mut(h);
+        app.fav_tab = favorites_page::FavTab::Artists;
+        let loved = std::mem::take(&mut app.favorites);
+        app.favorites.load(crate::favorites::Starred::default(), Vec::new());
+        loved
+    };
+    s.shoot(h, "favorites-empty");
+    app_mut(h).favorites = loved;
+
+    reset(h, FULL, Route::Album(album_id(0)));
+    app_mut(h).overlay = Some(Overlay::Shortcuts);
+    s.shoot(h, "shortcuts");
+
+    reset(h, vec2(900.0, 640.0), Route::Album(album_id(0)));
+    app_mut(h).overlay = Some(Overlay::Shortcuts);
+    s.shoot(h, "narrow-shortcuts");
+
+    reset(h, FULL, Route::Album(album_id(0)));
+    app_mut(h).overlay = Some(Overlay::new_playlist(vec![vanguard().remove(2)]));
+    s.shoot(h, "new-playlist");
+
+    reset(h, FULL, Route::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() });
+    app_mut(h).overlay = Some(Overlay::Delete { id: "pl-0".into(), name: "Late night, low volume".into() });
+    s.shoot(h, "delete-playlist");
+
     reset(h, FULL, Route::Recent);
     let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 876.0));
     if !click_label(h, "Settings", sidebar) {
@@ -568,7 +638,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     app_mut(h).login = Some(LoginForm {
         server: "https://music.example.com".into(),
         username: "solidsilver".into(),
-        error: Some("Wrong username or password (server said: Wrong username or password)".into()),
+        error: Some(crate::bridge::connect_error(&subsonic::Error::Api { code: 40, message: "Wrong username or password".into() })),
         ..Default::default()
     });
     s.shoot(h, "login-error");

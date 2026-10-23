@@ -2,8 +2,9 @@
 //! list (composer and actions appear on hover), and credits gathered from the
 //! tracks' OpenSubsonic contributors. Playlists reuse the track list.
 
-use super::widgets::{Mark, chip, elide, link, primary, secondary};
-use super::{Action, Focus, Keep, ListenerApp, QueueAction, mmss};
+use super::widgets::{Mark, chip, elide, heart_button, link, primary, secondary};
+use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction, mmss};
+use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::queue::Source;
@@ -81,10 +82,13 @@ fn shared_format(tracks: &[Track]) -> Option<String> {
     tracks.iter().all(|t| t.quality_label() == first).then_some(first)
 }
 
-#[derive(Clone, Copy)]
-struct ListOpts {
-    numbers: bool,
-    artist: bool,
+#[derive(Clone)]
+pub(super) struct ListOpts {
+    pub numbers: bool,
+    pub artist: bool,
+    /// The user's own playlist being shown: rows can be removed and dragged
+    /// to reorder.
+    pub playlist: Option<String>,
 }
 
 impl ListenerApp {
@@ -189,6 +193,10 @@ impl ListenerApp {
                         if secondary(ui, "Shuffle").clicked() {
                             self.actions.push(Action::Album(album.id.clone(), QueueAction::Shuffle));
                         }
+                        let loved = self.favorites.is_on(StarKind::Album, &album.id);
+                        if heart_button(ui, loved, 30.0, 14.0).clicked() {
+                            self.actions.push(Action::ToggleStar { kind: StarKind::Album, id: album.id.clone(), track: None, name: None });
+                        }
                         let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
                         let pin = offline::Pin::Album(album.id.clone());
                         let kept = self.offline_snap.pin(&pin).is_some();
@@ -206,6 +214,10 @@ impl ListenerApp {
                                 if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
                                     self.actions.push(Action::Analyze(tracks.clone()));
                                 }
+                            }
+                            if !tracks.is_empty() {
+                                ui.separator();
+                                self.add_to_playlist_menu(ui, &tracks);
                             }
                         });
                         ui.add_space(6.0);
@@ -232,7 +244,7 @@ impl ListenerApp {
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width(list_w);
-                    self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false });
+                    self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false, playlist: None });
                     ui.add_space(14.0);
                     let mins = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>().div_ceil(60);
                     let n = tracks.len();
@@ -342,73 +354,219 @@ impl ListenerApp {
         }
     }
 
+    /// A playlist: a mosaic of its first albums' covers, name, length, Play /
+    /// Shuffle / ⋯, then its tracks. The user's own playlists can be renamed,
+    /// deleted, reordered by dragging (or ⌥↑/↓) and trimmed (⌫).
     pub(super) fn playlist_page(&mut self, ui: &mut Ui, id: &str, name: &str) {
         let t = Tokens::of(ui);
         let info = self.data.playlists.iter().find(|p| p.id == id).cloned();
-        let tracks = self.data.playlist_tracks.get(id).cloned().unwrap_or_default();
-        let sub = info.as_ref().map(|p| format!("{} songs · {}", p.song_count, mmss(f64::from(p.duration))));
-        self.heading(ui, name, sub);
+        let tracks = self.data.playlist_tracks.get(id).cloned();
+        let mine = info.as_ref().is_some_and(|p| self.owns(p));
+        let source = Source::Playlist { id: id.to_owned(), name: name.to_owned() };
         let pin = offline::Pin::Playlist(id.to_owned());
         let kept = self.offline_snap.pin(&pin).is_some();
         if self.download_key(ui) {
             self.actions.push(Action::KeepOffline(Keep::Playlist(id.to_owned()), !kept));
         }
+
+        let art_side = (ui.available_width() * 0.3).clamp(120.0, 180.0);
         ui.horizontal(|ui| {
-            if primary(ui, Some(Icon::Play), "Play").clicked() {
-                self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Play { start: 0 }));
-            }
-            ui.add_space(4.0);
-            if secondary(ui, "Shuffle").clicked() {
-                self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Shuffle));
-            }
-            let t = Tokens::of(ui);
-            let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
-            egui::Popup::menu(&more).show(|ui| {
-                if ui.button("Play next").clicked() {
-                    self.actions.push(Action::Playlist(id.to_owned(), QueueAction::PlayNext));
-                }
-                if ui.button("Add to queue").clicked() {
-                    self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Add));
-                }
-                ui.separator();
-                super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Playlist(id.to_owned()), &mut self.actions);
+            let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
+            self.mosaic(ui, art, tracks.as_deref().unwrap_or_default());
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.add_space((art_side - 118.0).max(0.0));
+                ui.label(egui::RichText::new("Playlist").font(FontId::new(11.0, semibold())).color(t.muted));
+                ui.add(egui::Label::new(egui::RichText::new(name).font(FontId::new(26.0, semibold())).color(t.text)).truncate());
+                let sub = match &info {
+                    Some(p) if p.song_count > 0 => format!("{} song{} · {}", p.song_count, if p.song_count == 1 { "" } else { "s" }, length(p.duration)),
+                    Some(_) => "Empty".to_owned(),
+                    None => String::new(),
+                };
+                ui.label(egui::RichText::new(sub).size(12.0).color(t.muted));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let has_tracks = tracks.as_ref().is_some_and(|t| !t.is_empty());
+                    ui.add_enabled_ui(has_tracks, |ui| {
+                        if primary(ui, Some(Icon::Play), "Play").clicked() {
+                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Play { start: 0 }));
+                        }
+                        ui.add_space(4.0);
+                        if secondary(ui, "Shuffle").clicked() {
+                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Shuffle));
+                        }
+                    });
+                    let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
+                    egui::Popup::menu(&more).show(|ui| {
+                        if ui.button("Play next").clicked() {
+                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::PlayNext));
+                        }
+                        if ui.button("Add to queue").clicked() {
+                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Add));
+                        }
+                        ui.separator();
+                        super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Playlist(id.to_owned()), &mut self.actions);
+                        if mine {
+                            ui.separator();
+                            self.playlist_edit_items(ui, id, name);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    self.pin_status(ui, &pin);
+                });
             });
-            ui.add_space(6.0);
-            self.pin_status(ui, &pin);
         });
-        ui.add_space(16.0);
-        if tracks.is_empty() {
+        ui.add_space(20.0);
+        let Some(tracks) = tracks else {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
+        };
+        if tracks.is_empty() {
+            let hint = if mine { "Nothing here yet. Drag songs onto this playlist in the sidebar, or use “Add to Playlist” on any song." } else { "This playlist is empty." };
+            ui.label(egui::RichText::new(hint).color(t.muted));
+            return;
         }
-        let source = Source::Playlist { id: id.to_owned(), name: name.to_owned() };
         egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).show(ui, |ui| {
-            self.track_list(ui, &tracks, &source, ListOpts { numbers: false, artist: true });
+            self.track_list(ui, &tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) });
+        });
+    }
+
+    /// Rename… and Delete… for one of the user's playlists.
+    pub(super) fn playlist_edit_items(&mut self, ui: &mut Ui, id: &str, name: &str) {
+        if ui.button("Rename…").clicked() {
+            self.actions.push(Action::Overlay(Overlay::Rename { id: id.to_owned(), name: name.to_owned() }));
+        }
+        if ui.button("Delete…").clicked() {
+            self.actions.push(Action::Overlay(Overlay::Delete { id: id.to_owned(), name: name.to_owned() }));
+        }
+    }
+
+    /// Playlists the user can change (others' public ones are read-only).
+    pub(super) fn owns(&self, p: &subsonic::Playlist) -> bool {
+        match (&p.owner, &self.client) {
+            (Some(owner), Some(c)) => owner == c.username(),
+            _ => true,
+        }
+    }
+
+    /// Up to four album covers in a 2×2 square (one fills it; none: a note glyph).
+    fn mosaic(&mut self, ui: &mut Ui, rect: Rect, tracks: &[Track]) {
+        let t = Tokens::of(ui);
+        let mut covers: Vec<String> = Vec::new();
+        for tr in tracks {
+            let cover = tr.cover_art.clone().or_else(|| self.data.album(&tr.album_id).and_then(|a| a.cover_art.clone()));
+            if let Some(c) = cover
+                && !covers.contains(&c)
+            {
+                covers.push(c);
+                if covers.len() == 4 {
+                    break;
+                }
+            }
+        }
+        match covers.len() {
+            0 => {
+                ui.painter().rect_filled(rect, 6.0, t.field);
+                icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(rect.width() * 0.28, rect.width() * 0.28)), Icon::Note, t.muted);
+            }
+            1..=3 => self.art.paint(ui, rect, Some(&covers[0]), 6.0),
+            _ => {
+                let half = rect.width() / 2.0;
+                for (i, c) in covers.iter().enumerate() {
+                    let at = pos2(rect.left() + half * (i % 2) as f32, rect.top() + half * (i / 2) as f32);
+                    // Only the mosaic's outer corners are rounded.
+                    let r = 6;
+                    let corners = match i {
+                        0 => egui::CornerRadius { nw: r, ..Default::default() },
+                        1 => egui::CornerRadius { ne: r, ..Default::default() },
+                        2 => egui::CornerRadius { sw: r, ..Default::default() },
+                        _ => egui::CornerRadius { se: r, ..Default::default() },
+                    };
+                    self.art.paint(ui, Rect::from_min_size(at, vec2(half, half)), Some(c), corners);
+                }
+            }
+        }
+    }
+
+    /// The Add to Playlist submenu: New Playlist…, then recently used, then the rest.
+    pub(super) fn add_to_playlist_menu(&mut self, ui: &mut Ui, tracks: &[Track]) {
+        ui.menu_button("Add to Playlist", |ui| {
+            if ui.button("New Playlist…").clicked() {
+                self.actions.push(Action::Overlay(Overlay::new_playlist(tracks.to_vec())));
+            }
+            let mine: Vec<subsonic::Playlist> = self.data.playlists.iter().filter(|p| self.owns(p)).cloned().collect();
+            let recent: Vec<&subsonic::Playlist> = self.recent_playlists.iter().filter_map(|id| mine.iter().find(|p| &p.id == id)).collect();
+            let mut rest: Vec<&subsonic::Playlist> = mine.iter().filter(|p| !self.recent_playlists.contains(&p.id)).collect();
+            rest.sort_by_cached_key(|p| p.name.to_lowercase());
+            for group in [recent, rest] {
+                if group.is_empty() {
+                    continue;
+                }
+                ui.separator();
+                for p in group {
+                    if ui.button(&p.name).clicked() {
+                        self.actions.push(Action::PlaylistEdit(PlaylistAction::Add { id: p.id.clone(), tracks: tracks.to_vec() }));
+                    }
+                }
+            }
         });
     }
 
     /// Rows of tracks. Click selects, double-click (or ⏎) plays from there;
     /// ⌥⏎ plays next, ⇧⏎ adds to the queue. Hovering a row shows its composer
-    /// and the queue actions.
-    fn track_list(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
+    /// and the queue actions; a loved track keeps its heart. Rows drag onto
+    /// a sidebar playlist, and within the user's own playlist, to reorder.
+    pub(super) fn track_list(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
         let t = Tokens::of(ui);
-        self.track_list_keys(ui, tracks, source);
+        self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
         let current = self.queue.current.as_ref().map(|c| c.track.id.clone());
         let discs = tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1);
         let mut last_disc = None;
+        // Where a reorder drag would land: (index to insert at, y of the line).
+        let mut drop_at: Option<(usize, f32)> = None;
         ui.spacing_mut().item_spacing.y = 0.0;
         for (i, tr) in tracks.iter().enumerate() {
-            if discs > 1 && tr.disc != last_disc {
+            if discs > 1 && opts.playlist.is_none() && tr.disc != last_disc {
                 last_disc = tr.disc;
                 ui.add_space(if i == 0 { 0.0 } else { 12.0 });
                 ui.label(egui::RichText::new(format!("Disc {}", tr.disc.unwrap_or(1))).font(FontId::new(12.0, semibold())).color(t.muted));
                 ui.add_space(4.0);
             }
             let h = if opts.artist { 44.0 } else { 38.0 };
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
             let playing = current.as_deref() == Some(tr.id.as_str());
+            if self.reveal.as_deref() == Some(tr.id.as_str()) {
+                self.reveal = None;
+                self.track_sel = Some(i);
+                self.focus = Focus::Main;
+                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+            }
             let selected = self.focus == Focus::Main && self.track_sel == Some(i);
             let hovered = resp.hovered() || resp.contains_pointer();
+            let loved = self.favorites.is_on(StarKind::Song, &tr.id);
+            // Drag: the selection's track (or this one) to a playlist; within
+            // one's own playlist, also to a new place in it.
+            resp.dnd_set_drag_payload(DragTracks { tracks: vec![tr.clone()], from: opts.playlist.clone().map(|p| (p, i)) });
+            if let Some(pid) = &opts.playlist {
+                if let Some(drag) = resp.dnd_hover_payload::<DragTracks>()
+                    && drag.from.as_ref().is_some_and(|(p, _)| p == pid)
+                    && let Some(p) = ui.ctx().pointer_hover_pos()
+                {
+                    let below = p.y > rect.center().y;
+                    drop_at = Some((if below { i + 1 } else { i }, if below { rect.bottom() } else { rect.top() }));
+                }
+                if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
+                    && let Some((p, from)) = &drag.from
+                    && p == pid
+                    && let Some(pos) = ui.ctx().pointer_interact_pos()
+                {
+                    let mut to = if pos.y > rect.center().y { i + 1 } else { i };
+                    if to > *from {
+                        to -= 1;
+                    }
+                    self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.clone(), from: *from, to }));
+                }
+            }
             if ui.is_rect_visible(rect) {
                 let fill = if selected {
                     t.selected
@@ -446,8 +604,21 @@ impl ListenerApp {
                 }
                 let dur = tr.duration_secs.map(|d| mmss(f64::from(d))).unwrap_or_default();
                 ui.painter().text(pos2(rect.right() - 10.0, cy), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
+                // The heart sits just left of the duration: always when loved,
+                // on hover otherwise.
+                let heart = Rect::from_center_size(pos2(rect.right() - 70.0, cy), vec2(24.0, 24.0));
+                if loved || hovered {
+                    let hr = ui.interact(heart, ui.scope_id().with(("heart", &tr.id, i)), Sense::click());
+                    let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if hr.hovered() { t.text } else { t.muted }) };
+                    icons::paint(ui.painter(), Rect::from_center_size(heart.center(), vec2(12.0, 12.0)), icon, color);
+                    let label = if loved { "Unlove" } else { "Love" };
+                    hr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+                    if hr.on_hover_text(label).clicked() {
+                        self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
+                    }
+                }
                 let actions_w = if hovered { 150.0 } else { 0.0 };
-                let text_w = rect.right() - 60.0 - actions_w - x;
+                let text_w = rect.right() - 86.0 - actions_w - x;
                 let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
                 if opts.artist {
                     let title = elide(ui, &tr.title, title_font, color, text_w);
@@ -479,17 +650,17 @@ impl ListenerApp {
                     }
                 }
                 if hovered {
-                    let r = Rect::from_min_max(pos2(rect.right() - 60.0 - actions_w, rect.top()), pos2(rect.right() - 56.0, rect.bottom()));
+                    let r = Rect::from_min_max(pos2(rect.right() - 86.0 - actions_w, rect.top()), pos2(rect.right() - 84.0, rect.bottom()));
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)));
                     child.spacing_mut().item_spacing.x = 4.0;
                     let more = icons::sized_button(&mut child, Icon::More, "More", vec2(24.0, 22.0), 11.0, Some(t.muted));
-                    egui::Popup::menu(&more).show(|ui| self.track_menu(ui, tr, source));
+                    egui::Popup::menu(&more).show(|ui| self.track_row_menu(ui, tr, i, source, opts.playlist.as_deref()));
                     if child.add(egui::Button::new(egui::RichText::new("Play next").size(11.0)).corner_radius(11.0).stroke(egui::Stroke::new(1.0, t.hairline))).clicked() {
                         self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: source.clone(), action: QueueAction::PlayNext });
                     }
                 }
             }
-            let label = format!("{}{}", tr.title, if playing { ", playing" } else { "" });
+            let label = format!("{}{}{}", tr.title, if loved { ", loved" } else { "" }, if playing { ", playing" } else { "" });
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
             if resp.double_clicked() {
                 self.actions.push(Action::Tracks { tracks: tracks.to_vec(), source: source.clone(), action: QueueAction::Play { start: i } });
@@ -497,7 +668,22 @@ impl ListenerApp {
                 self.track_sel = Some(i);
                 self.focus = Focus::Main;
             }
-            resp.context_menu(|ui| self.track_menu(ui, tr, source));
+            resp.context_menu(|ui| self.track_row_menu(ui, tr, i, source, opts.playlist.as_deref()));
+        }
+        if let Some((_, y)) = drop_at {
+            let r = ui.min_rect();
+            ui.painter().line_segment([pos2(r.left() + 4.0, y), pos2(r.right() - 4.0, y)], egui::Stroke::new(2.0, t.accent));
+        }
+    }
+
+    /// [`track_menu`](Self::track_menu), plus Remove from Playlist in the user's own.
+    fn track_row_menu(&mut self, ui: &mut Ui, tr: &Track, index: usize, source: &Source, playlist: Option<&str>) {
+        self.track_menu(ui, tr, source);
+        if let Some(pid) = playlist {
+            ui.separator();
+            if ui.button("Remove from Playlist").clicked() {
+                self.actions.push(Action::PlaylistEdit(PlaylistAction::Remove { id: pid.to_owned(), index }));
+            }
         }
     }
 
@@ -508,6 +694,25 @@ impl ListenerApp {
         if ui.button("Add to queue").clicked() {
             self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: source.clone(), action: QueueAction::Add });
         }
+        ui.separator();
+        let loved = self.favorites.is_on(StarKind::Song, &tr.id);
+        if ui.button(if loved { "Unlove" } else { "Love" }).clicked() {
+            self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
+        }
+        ui.menu_button("Rating", |ui| {
+            let current = self.favorites.rating(&tr.id);
+            for r in 1..=5u8 {
+                let stars = format!("{}{}", "★".repeat(r.into()), "☆".repeat((5 - r).into()));
+                if ui.add(egui::Button::selectable(current == r, stars)).clicked() {
+                    self.actions.push(Action::Rate(tr.id.clone(), r));
+                }
+            }
+            ui.separator();
+            if ui.add_enabled(current > 0, egui::Button::new("Clear Rating")).clicked() {
+                self.actions.push(Action::Rate(tr.id.clone(), 0));
+            }
+        });
+        self.add_to_playlist_menu(ui, std::slice::from_ref(tr));
         if let Some(artist) = &tr.artist {
             ui.separator();
             if ui.button(format!("Go to {artist}")).clicked() {
@@ -534,12 +739,24 @@ impl ListenerApp {
         ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::D)))
     }
 
-    /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add.
-    fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source) {
-        if self.focus != Focus::Main || self.palette.is_some() || ui.ctx().memory(|m| m.focused().is_some()) || tracks.is_empty() {
+    /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add. In the
+    /// user's own playlist, ⌥↑/⌥↓ move the selected song and ⌫ removes it.
+    fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) {
+        if self.focus != Focus::Main || self.palette.is_some() || self.overlay.is_some() || ui.ctx().memory(|m| m.focused().is_some()) || tracks.is_empty() {
             return;
         }
         use egui::{Key, Modifiers};
+        let (move_up, move_down, remove) = if playlist.is_some() {
+            ui.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::ALT, Key::ArrowUp),
+                    i.consume_key(Modifiers::ALT, Key::ArrowDown),
+                    i.consume_key(Modifiers::NONE, Key::Backspace) | i.consume_key(Modifiers::NONE, Key::Delete),
+                )
+            })
+        } else {
+            (false, false, false)
+        };
         let (up, down, enter, next, add) = ui.input_mut(|i| {
             (
                 i.consume_key(Modifiers::NONE, Key::ArrowUp),
@@ -557,6 +774,17 @@ impl ListenerApp {
             self.track_sel = Some(self.track_sel.map_or(0, |s| s.saturating_sub(1)));
         }
         let Some(sel) = self.track_sel.filter(|s| *s <= last) else { return };
+        if let Some(pid) = playlist {
+            if move_up && sel > 0 {
+                self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel - 1 }));
+            }
+            if move_down && sel < last {
+                self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel + 1 }));
+            }
+            if remove {
+                self.actions.push(Action::PlaylistEdit(PlaylistAction::Remove { id: pid.to_owned(), index: sel }));
+            }
+        }
         if enter {
             self.actions.push(Action::Tracks { tracks: tracks.to_vec(), source: source.clone(), action: QueueAction::Play { start: sel } });
         }
@@ -567,6 +795,12 @@ impl ListenerApp {
             self.actions.push(Action::Tracks { tracks: vec![tracks[sel].clone()], source: source.clone(), action: QueueAction::Add });
         }
     }
+}
+
+/// "41 min", "1 hr 12 min".
+fn length(secs: u32) -> String {
+    let mins = secs.div_ceil(60);
+    if mins >= 60 { format!("{} hr {} min", mins / 60, mins % 60) } else { format!("{mins} min") }
 }
 
 fn composer_of(t: &Track) -> Option<String> {

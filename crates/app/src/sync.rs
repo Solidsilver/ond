@@ -286,6 +286,7 @@ mod tests {
             created: None,
             starred: None,
             play_count: None,
+            user_rating: None,
             sort_name: None,
             record_labels: Vec::new(),
             genres: Vec::new(),
@@ -318,6 +319,8 @@ mod tests {
             display_composer: None,
             contributors: Vec::new(),
             artists: Vec::new(),
+            starred: None,
+            user_rating: None,
         }
     }
 

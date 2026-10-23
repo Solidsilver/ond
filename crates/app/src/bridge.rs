@@ -1,6 +1,7 @@
 //! Background work for the UI. Every function here returns immediately; results
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
+use crate::favorites::{StarKind, Starred, UserMeta};
 use crate::settings::{Paths, Settings};
 use crate::sync;
 use library::{Album, Library, Track};
@@ -44,7 +45,52 @@ pub enum Msg {
     Engine(audio::Event),
     /// Media keys, Control Center, headphone buttons.
     Remote(crate::now_playing::Remote),
+    /// `getStarred2`: everything loved, and the ratings seen with it.
+    Starred { starred: Starred, ratings: Vec<(String, u8)> },
+    /// Hearts and ratings seen while loading an album or playlist.
+    UserMeta { meta: UserMeta, tracks: Vec<Track> },
+    /// A heart change reached the server (`error` is `None`) or didn't.
+    StarDone { kind: StarKind, id: String, on: bool, error: Option<String> },
+    RatingDone { id: String, previous: u8, error: Option<String> },
+    /// A playlist was made; the app opens it.
+    PlaylistCreated { id: String, name: String },
+    /// Selected from the native menu bar.
+    Menu(crate::keys::Cmd),
     Error(String),
+}
+
+/// A change to a playlist, sent to the server.
+#[derive(Debug, Clone)]
+pub enum PlaylistEdit {
+    Rename(String),
+    Add(Vec<String>),
+    /// Indices into the playlist as the server has it.
+    Remove(Vec<usize>),
+    /// The whole song list, in its new order.
+    Replace(Vec<String>),
+    Delete,
+}
+
+/// What the user sees when connecting fails: the gist, without the plumbing.
+pub fn connect_error(e: &subsonic::Error) -> String {
+    match e {
+        // 40: wrong credentials; 41: token auth not allowed for LDAP users.
+        subsonic::Error::Api { code: 40 | 41, .. } => "Wrong username or password.".into(),
+        subsonic::Error::Api { message, .. } if !message.is_empty() => format!("The server said: {message}"),
+        subsonic::Error::Url(_) => "That doesn't look like a server address (e.g. https://music.example.com).".into(),
+        subsonic::Error::Http(h) if h.is_connect() || h.is_timeout() => "Couldn't reach the server. Check the address and that it's running.".into(),
+        subsonic::Error::Http(h) if h.status().is_some() => format!("The server answered with an error ({}).", h.status().map(|s| s.to_string()).unwrap_or_default()),
+        subsonic::Error::Decode(_) => "That address answered, but not like a Navidrome server.".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Hearts and ratings carried by a list of songs.
+fn song_meta(songs: &[subsonic::Song]) -> UserMeta {
+    UserMeta {
+        starred: songs.iter().map(|s| (StarKind::Song, s.id.clone(), s.starred.is_some())).collect(),
+        ratings: songs.iter().map(|s| (s.id.clone(), s.user_rating.unwrap_or(0))).collect(),
+    }
 }
 
 #[derive(Clone)]
@@ -148,7 +194,7 @@ impl Bridge {
             };
             let client = match Client::new(&settings.server, Credentials::new(&settings.username, &password)) {
                 Ok(c) => c,
-                Err(e) => return this.send(Msg::ConnectFailed(e.to_string())),
+                Err(e) => return this.send(Msg::ConnectFailed(connect_error(&e))),
             };
             match ping(&client).await {
                 Ok(server) => {
@@ -334,6 +380,8 @@ impl Bridge {
                 Ok(a) => a,
                 Err(e) => return this.send(Msg::Error(format!("load album: {e}"))),
             };
+            let mut meta = song_meta(&album.song);
+            meta.starred.push((StarKind::Album, album_id.clone(), album.album.starred.is_some()));
             let lib = this.library.clone();
             let id = album_id.clone();
             let stored = tokio::task::spawn_blocking(move || {
@@ -346,6 +394,7 @@ impl Bridge {
                     if let Some(row) = row {
                         this.send(Msg::AlbumUpdated(row));
                     }
+                    this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(Msg::Tracks { album_id, tracks });
                 }
                 Ok(Err(e)) => this.send(Msg::Error(format!("store album: {e}"))),
@@ -381,19 +430,102 @@ impl Bridge {
         self.rt.spawn(async move {
             match client.playlist(&id).await {
                 Ok(p) => {
-                    let tracks = p
-                        .entry
-                        .into_iter()
-                        .map(|s| {
-                            let album = s.album_id.clone().unwrap_or_default();
-                            Track::from_song(s, &album)
-                        })
-                        .collect();
+                    let meta = song_meta(&p.entry);
+                    let tracks: Vec<Track> = p.entry.into_iter().map(song_track).collect();
+                    this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(Msg::PlaylistTracks { id, tracks });
                 }
                 Err(e) => this.send(Msg::Error(format!("load playlist: {e}"))),
             }
         });
+    }
+
+    /// Everything the user starred, and the ratings that come with it.
+    pub fn fetch_starred(&self, client: Option<Client>) {
+        let Some(client) = client else { return };
+        let this = self.clone();
+        self.rt.spawn(async move {
+            match client.starred().await {
+                Ok(s) => {
+                    let mut ratings: Vec<(String, u8)> = s.song.iter().filter_map(|t| t.user_rating.filter(|r| *r > 0).map(|r| (t.id.clone(), r))).collect();
+                    ratings.extend(s.album.iter().filter_map(|a| a.user_rating.filter(|r| *r > 0).map(|r| (a.id.clone(), r))));
+                    let starred = Starred {
+                        songs: s.song.into_iter().map(song_track).collect(),
+                        albums: s.album.into_iter().map(|a| a.id).collect(),
+                        artists: s.artist.into_iter().map(|a| (a.id, a.name)).collect(),
+                    };
+                    this.send(Msg::Starred { starred, ratings });
+                }
+                Err(e) => this.send(Msg::Error(format!("favorites: {e}"))),
+            }
+        });
+    }
+
+    pub fn set_starred(&self, client: Option<Client>, kind: StarKind, id: String, on: bool) {
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let error = match &client {
+                Some(c) => c.set_starred(kind, &id, on).await.err().map(|e| e.to_string()),
+                None => Some("not connected".into()),
+            };
+            this.send(Msg::StarDone { kind, id, on, error });
+        });
+    }
+
+    pub fn set_rating(&self, client: Option<Client>, id: String, rating: u8, previous: u8) {
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let error = match &client {
+                Some(c) => c.set_rating(&id, rating).await.err().map(|e| e.to_string()),
+                None => Some("not connected".into()),
+            };
+            this.send(Msg::RatingDone { id, previous, error });
+        });
+    }
+
+    /// Makes a playlist of `song_ids`; the app opens it when it's there.
+    pub fn create_playlist(&self, client: Option<Client>, name: String, song_ids: Vec<String>) {
+        let Some(client) = client else { return self.send(Msg::Error("not connected".into())) };
+        let this = self.clone();
+        self.rt.spawn(async move {
+            match client.create_playlist(&name, &song_ids).await {
+                Ok(p) => {
+                    this.refresh_playlists(&client).await;
+                    this.send(Msg::PlaylistCreated { id: p.playlist.id, name: p.playlist.name });
+                }
+                Err(e) => this.send(Msg::Error(format!("new playlist: {e}"))),
+            }
+        });
+    }
+
+    /// Sends one edit, then reloads the playlist list and the playlist (which
+    /// also undoes the app's optimistic copy if the edit failed).
+    pub fn edit_playlist(&self, client: Option<Client>, id: String, edit: PlaylistEdit) {
+        let Some(client) = client else { return self.send(Msg::Error("not connected".into())) };
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let result = match &edit {
+                PlaylistEdit::Rename(name) => client.update_playlist(&id, Some(name), &[], &[]).await,
+                PlaylistEdit::Add(songs) => client.update_playlist(&id, None, songs, &[]).await,
+                PlaylistEdit::Remove(at) => client.update_playlist(&id, None, &[], at).await,
+                PlaylistEdit::Replace(songs) => client.replace_playlist(&id, songs).await,
+                PlaylistEdit::Delete => client.delete_playlist(&id).await,
+            };
+            if let Err(e) = result {
+                this.send(Msg::Error(format!("playlist: {e}")));
+            }
+            this.refresh_playlists(&client).await;
+            if !matches!(edit, PlaylistEdit::Delete) {
+                this.open_playlist(Some(client), id);
+            }
+        });
+    }
+
+    async fn refresh_playlists(&self, client: &Client) {
+        match client.playlists().await {
+            Ok(p) => self.send(Msg::Playlists(p)),
+            Err(e) => self.send(Msg::Error(format!("playlists: {e}"))),
+        }
     }
 
     /// Looks up which stored albums credit `name` (composer, performer, ...).
@@ -444,7 +576,27 @@ async fn ping(client: &Client) -> Result<String, PingError> {
     match tokio::time::timeout(Duration::from_secs(10), client.ping()).await {
         Err(_) => Err(PingError::Unreachable("no answer from the server".into())),
         Ok(Err(e @ subsonic::Error::Http(_))) => Err(PingError::Unreachable(e.to_string())),
-        Ok(Err(e)) => Err(PingError::Refused(e.to_string())),
+        Ok(Err(e)) => Err(PingError::Refused(connect_error(&e))),
         Ok(Ok(info)) => Ok(format!("{} {}", info.server_type.as_deref().unwrap_or("subsonic"), info.server_version.as_deref().unwrap_or(&info.version))),
+    }
+}
+
+fn song_track(s: subsonic::Song) -> Track {
+    let album = s.album_id.clone().unwrap_or_default();
+    Track::from_song(s, &album)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_errors_read_plainly() {
+        let wrong = subsonic::Error::Api { code: 40, message: "Wrong username or password".into() };
+        assert_eq!(connect_error(&wrong), "Wrong username or password.");
+        let other = subsonic::Error::Api { code: 50, message: "Not allowed".into() };
+        assert_eq!(connect_error(&other), "The server said: Not allowed");
+        let url = subsonic::Client::new("not a url", subsonic::Credentials::new("a", "b")).err().unwrap();
+        assert!(connect_error(&url).contains("server address"));
     }
 }

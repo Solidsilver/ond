@@ -3,6 +3,7 @@
 
 use super::widgets::elide;
 use super::{Action, ListenerApp, mmss};
+use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
@@ -124,30 +125,48 @@ impl ListenerApp {
             painter.rect_filled(Rect::from_min_max(pos2(x, bar.top()), pos2((x + 40.0).min(bar.right()), bar.bottom())), 0.0, t.accent.gamma_multiply(alpha));
         }
         let hovering = body.hovered() || strip_resp.hovered() || self.seek_preview.is_some();
+        // Love: the heart at the right end, shown when loved or on hover.
+        let loved = self.favorites.is_on(StarKind::Song, &item.track.id);
+        let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y - 1.0), vec2(22.0, 22.0));
+        let heart_resp = ui.interact(heart, ui.scope_id().with("lcd-heart"), if loved || hovering { Sense::click() } else { Sense::hover() });
+        if loved || hovering || heart_resp.hovered() {
+            let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if heart_resp.hovered() { t.text } else { t.muted }) };
+            icons::paint(&painter, Rect::from_center_size(heart.center(), vec2(11.0, 11.0)), icon, color);
+        }
+        let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
+        heart_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, love_label));
+        if heart_resp.clicked() {
+            self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
+        }
         if hovering {
             let small = FontId::proportional(10.5);
             let y = rect.top() + 5.0;
             painter.text(pos2(text_rect.left(), y), egui::Align2::LEFT_TOP, mmss(shown), small.clone(), t.muted);
             let right = dur.map(|d| format!("−{}", mmss(d - shown))).unwrap_or_default();
-            painter.text(pos2(text_rect.right(), y), egui::Align2::RIGHT_TOP, right, small, t.muted);
+            painter.text(pos2(heart.left() - 2.0, y), egui::Align2::RIGHT_TOP, right, small, t.muted);
             if strip_resp.hovered() || self.seek_preview.is_some() {
                 painter.circle_filled(pos2(x, bar.center().y), 4.0, t.text);
             }
         }
         let label = format!("Now playing: {} — {sub_text}", item.track.title);
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        if body.clicked() && !strip_resp.hovered() {
+        if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() {
             self.actions.push(Action::Go(Route::Album(item.track.album_id.clone())));
         }
-        body.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if !heart_resp.hovered() {
+            body.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+        heart_resp.on_hover_text(love_label);
     }
 
     /// Queue toggle · volume · output chip (laid out right to left).
     fn toolbar_right(&mut self, ui: &mut Ui, narrow: bool) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = 10.0;
-        let queue_icon = icons::sized_button(ui, Icon::Queue, if self.show_queue { "Hide queue (⌥⌘U)" } else { "Show queue (⌥⌘U)" }, vec2(28.0, 28.0), 14.0, Some(if self.show_queue { t.accent } else { t.muted }));
-        if self.show_queue {
+        // In narrow windows the queue is a sheet: the button shows whether it's open.
+        let shown = if self.queue_narrow { self.queue_sheet } else { self.show_queue };
+        let queue_icon = icons::sized_button(ui, Icon::Queue, if shown { "Hide queue (⌥⌘U)" } else { "Show queue (⌥⌘U)" }, vec2(28.0, 28.0), 14.0, Some(if shown { t.accent } else { t.muted }));
+        if shown {
             ui.painter().rect_filled(queue_icon.rect, 6.0, t.accent.gamma_multiply(0.12));
         }
         if queue_icon.clicked() {
