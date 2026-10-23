@@ -94,6 +94,9 @@ pub struct TrackSource {
     pub album_context: bool,
     /// The server converts the file on the fly; `None` streams the original.
     pub transcode: Option<Transcode>,
+    /// Opaque to the engine and echoed in [`Event::TrackStarted`] / [`Event::Ended`]:
+    /// tells two plays of the same track apart (e.g. a queue item id). 0: none.
+    pub token: u64,
 }
 
 /// A server-side conversion, e.g. AAC at 256 kbps.
@@ -156,8 +159,10 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub enum Event {
     /// The output reached a track. `gapless` is true when it followed the previous
-    /// track on the next sample without reopening the device.
-    TrackStarted { track_id: String, format: StreamFormat, gapless: bool },
+    /// track on the next sample without reopening the device. `restart` is true
+    /// when the engine started the same track over by itself (device switch, a
+    /// seek it couldn't serve in place, the queue changing under it): not a new play.
+    TrackStarted { track_id: String, token: u64, format: StreamFormat, gapless: bool, restart: bool },
     /// The device stream changed, or the mode did; describes what reaches the device.
     SignalPath(SignalPath),
     /// The output devices, and which one playback uses.
@@ -169,7 +174,7 @@ pub enum Event {
     /// A device that went away is back; the UI may offer to switch to it.
     DeviceReturned { uid: String, name: String },
     /// Playback reached the end of the last queued track.
-    Ended { track_id: String },
+    Ended { track_id: String, token: u64 },
     /// A seek landed; playback continues from `position_secs` once buffered.
     Seeked { track_id: String, position_secs: f64 },
     Error { track_id: Option<String>, message: String },
@@ -330,6 +335,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 current_device: None,
                 known: Vec::new(),
                 lost: None,
+                restarting: false,
             }
             .run(cmd_rx)
         })
@@ -388,6 +394,9 @@ struct Engine {
     known: Vec<DeviceInfo>,
     /// A device that disappeared while in use: (uid, name).
     lost: Option<(String, String)>,
+    /// The session being started picks up a track that was already playing, so
+    /// its start is announced as a restart rather than a new play.
+    restarting: bool,
 }
 
 impl Engine {
@@ -468,6 +477,7 @@ impl Engine {
     /// Starts a new session at `src`, optionally from `start_at`.
     fn start(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.stop();
+        self.restarting = false;
         self.status.set_state(PlayState::Loading);
         self.status.paused.store(false, Ordering::Relaxed);
         let caps = self.backend.device_caps();
@@ -544,7 +554,7 @@ impl Engine {
             // The decoder is still on the output's track: tell it what follows.
             None => session.set_next(self.out_seq, next),
             // It already moved on to the right track.
-            Some(t) if next.as_ref().is_some_and(|n| n.id == t.src.id) => {}
+            Some(t) if next.as_ref().is_some_and(|n| n.id == t.src.id && n.token == t.src.token) => {}
             // It moved on to a track that's no longer next (the queue changed in the
             // last few seconds of the track). Restart the current track where it is.
             Some(_) => {
@@ -577,6 +587,7 @@ impl Engine {
     /// Restarts at a position from [`take_position`](Self::take_position), keeping pause.
     fn resume(&mut self, (src, at, paused): (TrackSource, Duration, bool)) {
         self.start(src, Some(at));
+        self.restarting = true;
         if paused {
             self.status.paused.store(true, Ordering::Relaxed);
             self.status.set_state(PlayState::Paused);
@@ -766,10 +777,10 @@ impl Engine {
         }
 
         if self.session.is_some() && finished && (self.ring.is_none() || self.backend.drained()) {
-            let track_id = self.current().map(|t| t.src.id.clone());
+            let ended = self.current().map(|t| (t.src.id.clone(), t.src.token));
             self.stop();
-            if let Some(track_id) = track_id {
-                let _ = self.events.send(Event::Ended { track_id });
+            if let Some((track_id, token)) = ended {
+                let _ = self.events.send(Event::Ended { track_id, token });
             }
         }
     }
@@ -808,10 +819,13 @@ impl Engine {
     /// Publishes the output's current track.
     fn announce(&mut self, gapless: bool) {
         let Some(t) = self.current() else { return };
-        let (track_id, format, total, rate) = (t.src.id.clone(), t.format, t.total_frames, t.output.sample_rate);
+        let (track_id, token, format, total, rate) =
+            (t.src.id.clone(), t.src.token, t.format, t.total_frames, t.output.sample_rate);
         self.status.total_frames.store(total.unwrap_or(0), Ordering::Relaxed);
         self.status.sample_rate.store(rate, Ordering::Relaxed);
-        let _ = self.events.send(Event::TrackStarted { track_id, format, gapless });
+        // Only the first announcement of a restarted session is a restart.
+        let restart = !gapless && std::mem::take(&mut self.restarting);
+        let _ = self.events.send(Event::TrackStarted { track_id, token, format, gapless, restart });
     }
 }
 

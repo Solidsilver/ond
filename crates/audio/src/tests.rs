@@ -143,7 +143,7 @@ fn gapless_queue_reports_each_track_as_it_plays() {
         })
         .collect();
     assert_eq!(started, [("a", false), ("b", true)]);
-    assert!(matches!(seen.last(), Some(Event::Ended { track_id }) if track_id == "b"));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "b"));
     assert_eq!(opens.load(Ordering::Relaxed), 1, "the device stayed open across the boundary");
 
     let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
@@ -361,5 +361,34 @@ fn a_seek_after_the_decoder_moved_on_keeps_pause() {
     events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
     thread::sleep(Duration::from_millis(50));
     assert_eq!(engine.status.state(), PlayState::Paused);
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn the_same_track_twice_is_told_apart_and_restarts_are_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 4, 6);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
+    let engine = spawn(config, Box::new(backend), None);
+    let first = TrackSource { token: 1, ..file_source(&dir, "a", &a) };
+    let again = TrackSource { token: 2, ..first.clone() };
+    engine.send(Command::Play(first));
+    engine.send(Command::SetNext(Some(again)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // The decoder is on the second copy by now: this seek restarts the first.
+    thread::sleep(Duration::from_millis(200));
+    engine.send(Command::Seek(Duration::from_secs(1)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let started: Vec<(u64, bool, bool)> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::TrackStarted { token, gapless, restart, .. } => Some((*token, *gapless, *restart)),
+            _ => None,
+        })
+        .collect();
+    // The restart is flagged; the second copy still follows gaplessly, as itself.
+    assert_eq!(started, [(1, false, true), (2, true, false)]);
+    assert!(matches!(seen.last(), Some(Event::Ended { token: 2, .. })), "{seen:?}");
     engine.send(Command::Shutdown);
 }
