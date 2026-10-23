@@ -379,6 +379,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 ring: None,
                 next: None,
                 prefetched: None,
+                held_seek: None,
                 device_modes: HashMap::new(),
                 current_device: None,
                 known: Vec::new(),
@@ -435,6 +436,8 @@ struct Engine {
     next: Option<TrackSource>,
     /// Id of the track already handed to the cache's prefetch slot.
     prefetched: Option<String>,
+    /// A seek the output is holding for, until the decoder reports it done.
+    held_seek: Option<Duration>,
     device_modes: HashMap<String, PlaybackMode>,
     /// UID of the device in use, when the backend can tell.
     current_device: Option<String>,
@@ -487,7 +490,14 @@ impl Engine {
                 }
             }
             Command::Stop => self.stop(),
-            Command::SetVolume(v) => self.status.set_volume(v),
+            Command::SetVolume(v) => {
+                let was_full = self.status.volume() >= 1.0;
+                self.status.set_volume(v);
+                // Leaving or reaching full volume changes whether samples are requantized.
+                if was_full != (self.status.volume() >= 1.0) {
+                    self.report_signal_path();
+                }
+            }
             Command::SetGain(cfg) => {
                 *self.gain.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
                 for seq in self.out_seq..self.tracks.len() as u64 {
@@ -549,6 +559,7 @@ impl Engine {
     }
 
     fn stop(&mut self) {
+        self.held_seek = None;
         if let Some(s) = self.session.take() {
             s.cancel();
         }
@@ -595,6 +606,7 @@ impl Engine {
         let hold = self.ring.as_ref().map_or(0, |r| r.ctl.hold());
         if hold > 0 {
             self.status.buffering.store(true, Ordering::Relaxed);
+            self.held_seek = Some(to);
         }
         session.seek(self.out_seq, to, hold);
     }
@@ -732,8 +744,11 @@ impl Engine {
         // The integer format actually in use: what the callback dithers to.
         let device_bits = caps.as_ref().and_then(|c| c.active_bits);
         let resampled = device_rate != source.sample_rate;
+        // Software volume changes samples too, outside bit-perfect mode.
+        let volume = self.config.mode == PlaybackMode::Normal && self.status.volume() < 1.0;
         let recomputed = matches!(channels, ChannelChange::Downmix { .. })
-            || matches!(gain, GainState::Applied(g) if g.linear != 1.0);
+            || matches!(gain, GainState::Applied(g) if g.linear != 1.0)
+            || volume;
         let dithered = device_bits
             .is_some_and(|b| b < 32 && (resampled || recomputed || source.bits_per_sample.is_none_or(|s| s > b)));
         let path = SignalPath {
@@ -804,6 +819,7 @@ impl Engine {
                     }
                 }
                 DecoderMsg::Seeked { seq, position_secs } => {
+                    self.held_seek = None;
                     if let Some(t) = self.tracks.get(seq as usize) {
                         let track_id = t.src.id.clone();
                         let _ = self.events.send(Event::Seeked { track_id, position_secs });
@@ -826,6 +842,17 @@ impl Engine {
                     }
                 }
             }
+        }
+
+        // The decoder exited just as a seek went in (it had finished the last
+        // track), so nothing will release the output: start over at the target.
+        if finished
+            && let Some(to) = self.held_seek.take()
+        {
+            if let Some(src) = self.current().map(|t| t.src.clone()) {
+                self.restart_at(src, to);
+            }
+            return;
         }
 
         // Track boundaries the callback has played past.

@@ -386,6 +386,11 @@ impl Ctx {
         let mut skip_until: Option<Timestamp> = None;
         let mut started = false;
         let mut map = ChannelMap::Identity;
+        // The track's format as its first packet had it. A stream that changes
+        // rate or channels midway (chained Ogg, some MP3s) has those packets
+        // skipped: they'd be pushed into a ring set up for the first format.
+        let mut first_spec: Option<(u32, usize)> = None;
+        let mut skipped_spec = false;
 
         loop {
             if self.cancel.load(Ordering::Relaxed) {
@@ -401,6 +406,8 @@ impl Ctx {
             }
             let packet = match t.reader.next_packet() {
                 Ok(Some(p)) => p,
+                // A seek that came in as the track ran out is still applied.
+                Ok(None) if self.seek_pending.load(Ordering::Acquire) => continue,
                 Ok(None) => break,
                 // The read was interrupted for a seek or cancel; the loop head handles both.
                 Err(_) if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) => continue,
@@ -427,6 +434,17 @@ impl Ctx {
                 _ => None,
             };
             let rate = spec.rate();
+            match first_spec {
+                None => first_spec = Some((rate, channels)),
+                Some(first) if first != (rate, channels) => {
+                    if !skipped_spec {
+                        skipped_spec = true;
+                        tracing::warn!("format changed mid-stream ({}/{} → {rate}/{channels}); skipping those packets", first.0, first.1);
+                    }
+                    continue;
+                }
+                Some(_) => {}
+            }
             scratch.resize(buf.samples_interleaved(), 0.0);
             buf.copy_to_slice_interleaved(&mut scratch);
             if t.clock.rate == 0 {
@@ -609,13 +627,18 @@ impl Ctx {
         // Whatever happened, the output must stop holding: flush, then let it buffer.
         if let Some(o) = out {
             let generation = o.ctl.request_flush(req.hold);
-            let deadline = Instant::now() + Duration::from_millis(500);
+            // The callback empties the ring. It runs whenever the device is open
+            // (paused too), and the engine opens the device as soon as it hears
+            // of the ring, so this normally takes a callback period. Pushing new
+            // audio before the flush lands would have it thrown away with the
+            // stale audio, so wait for it; a device that never opens ends in a
+            // cancel, and the deadline is only a guard against a stuck callback.
+            let deadline = Instant::now() + Duration::from_secs(5);
             while !o.ctl.flushed(generation) {
                 if self.cancel.load(Ordering::Relaxed) {
                     return Seeked::Nothing;
                 }
                 if Instant::now() > deadline {
-                    // No callback is running (device not open yet?). Carry on; a little stale audio may play.
                     tracing::warn!("ring flush not acknowledged");
                     break;
                 }

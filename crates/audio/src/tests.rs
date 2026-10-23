@@ -443,3 +443,27 @@ fn an_idle_engine_backs_off_and_a_busy_one_does_not() {
         assert_eq!(next_wait(IDLE_TICK, state), TICK, "{state:?}: back to the fast tick");
     }
 }
+
+
+#[test]
+fn turning_the_volume_down_is_reported_as_dithered() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cd.wav");
+    std::fs::write(&path, crate::decode::tests::wav(48_000, 2, &pcm(2 * 48_000 * 2, 0))).unwrap();
+    let src = TrackSource { id: "cd".into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() };
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    let device = DeviceCaps { active_bits: Some(16), ..caps(Some(16), 48_000) };
+    let engine = spawn(config, Box::new(FakeBackend::new(device)), None);
+    engine.send(Command::Play(src));
+    let dithered = |engine: &EngineHandle| {
+        let seen = events_until(engine, |e| matches!(e, Event::SignalPath(_)));
+        let Some(Event::SignalPath(p)) = seen.last() else { unreachable!() };
+        p.dithered
+    };
+    assert!(!dithered(&engine), "16/48 at full volume reaches the 16-bit device untouched");
+    engine.send(Command::SetVolume(0.5));
+    assert!(dithered(&engine), "software volume requantizes");
+    engine.send(Command::SetVolume(1.0));
+    assert!(!dithered(&engine));
+    engine.send(Command::Shutdown);
+}
