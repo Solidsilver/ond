@@ -12,6 +12,7 @@ mod diagnostics;
 mod offline_page;
 mod dialogs;
 mod favorites_page;
+mod info_panel;
 mod now_playing_view;
 mod palette;
 mod settings_page;
@@ -168,6 +169,9 @@ pub enum Action {
     /// Show the lyrics: the sidebar's Lyrics tab in the full window; in the
     /// Player, open or close its drawer; from Mini, the Player with it open.
     Lyrics,
+    /// Show (or hide again) the playing song's details: the Info tab of the
+    /// sidebar, or of the Player's queue; from Mini, the Player on it.
+    Info,
     /// Open or close the Player's lyrics drawer.
     SetLyricsDrawer(bool),
     SetScrobble(bool),
@@ -236,6 +240,16 @@ pub enum QueueTab {
     History,
     /// The playing track's lyrics (the full window's sidebar only).
     Lyrics,
+    /// The playing track's credits, album, file and analysis details.
+    Info,
+}
+
+/// A song's plays as the server counts them, for the Info tab.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SongStats {
+    pub plays: Option<u64>,
+    /// RFC 3339, as the server sends it.
+    pub last_played: Option<String>,
 }
 
 /// Which side keyboard navigation applies to.
@@ -307,7 +321,6 @@ pub struct ListenerApp {
     focus: Focus,
     /// Keyboard selection in the album/playlist track list.
     track_sel: Option<usize>,
-    credits_open: bool,
 
     /// Output devices and what reaches the one in use.
     output: Outputs,
@@ -373,8 +386,6 @@ pub struct ListenerApp {
     analysis_library: bool,
     /// Analyse each track as it plays (it's in the playback cache by then).
     analyze_playing: bool,
-    /// The album page's analysis table is open.
-    analysis_open: bool,
     /// Hearts and ratings, mirrored from the server.
     favorites: Favorites,
     /// A sheet over the window, if one is open.
@@ -394,6 +405,9 @@ pub struct ListenerApp {
     server_info: String,
     /// Lyrics by track id, fetched when a lyrics view first needs them.
     lyrics: HashMap<String, crate::lyrics::Fetch>,
+    /// Play counts by track id for the Info tab: absent until asked for,
+    /// `None` while loading or when the server couldn't say.
+    song_stats: HashMap<String, Option<SongStats>>,
     /// Whether the lyrics column follows the sung line.
     lyrics_follow: crate::lyrics::Follow,
     /// The Player's details strip is open.
@@ -531,7 +545,6 @@ impl ListenerApp {
             queue_narrow: false,
             focus: Focus::default(),
             track_sel: None,
-            credits_open: false,
             output,
             bit_perfect: false,
             volume: 1.0,
@@ -567,7 +580,6 @@ impl ListenerApp {
             analyses: HashMap::new(),
             analyses_loaded: false,
             analyzer,
-            analysis_open: false,
             favorites: Favorites::default(),
             overlay: None,
             menu: None,
@@ -578,6 +590,7 @@ impl ListenerApp {
             last_synced: None,
             server_info: String::new(),
             lyrics: HashMap::new(),
+            song_stats: HashMap::new(),
             lyrics_follow: crate::lyrics::Follow::default(),
             np_details: false,
             unreachable: false,
@@ -730,6 +743,9 @@ impl ListenerApp {
             Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
             Msg::Lyrics { track_id, lyrics } => {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
+            }
+            Msg::SongStats { track_id, stats } => {
+                self.song_stats.insert(track_id, stats);
             }
             Msg::UserMeta { meta, tracks } => self.favorites.note(meta, &tracks),
             Msg::StarDone { kind, id, on, seq, error } => self.star_done(kind, id, on, seq, error),
@@ -1248,6 +1264,27 @@ impl ListenerApp {
                     self.set_mode(Some(WindowMode::Player));
                 }
             },
+            Action::Info => match self.windows.mode {
+                WindowMode::Full => {
+                    if self.queue_ui.tab == QueueTab::Info && (self.show_queue || self.queue_sheet) {
+                        self.queue_ui.tab = QueueTab::UpNext;
+                    } else {
+                        self.queue_ui.tab = QueueTab::Info;
+                        if self.queue_narrow {
+                            self.queue_sheet = true;
+                        } else if !self.show_queue {
+                            self.actions.push(Action::ToggleQueue);
+                        }
+                    }
+                }
+                WindowMode::Player => {
+                    self.queue_ui.tab = if self.queue_ui.tab == QueueTab::Info { QueueTab::UpNext } else { QueueTab::Info };
+                }
+                WindowMode::Mini => {
+                    self.queue_ui.tab = QueueTab::Info;
+                    self.set_mode(Some(WindowMode::Player));
+                }
+            },
             Action::SetLyricsDrawer(open) => {
                 let plan = self.windows.set_lyrics(open, self.seen);
                 self.follow_plan(plan);
@@ -1435,10 +1472,7 @@ impl ListenerApp {
         self.track_sel = None;
         self.focus = Focus::Main;
         match self.nav.current().clone() {
-            Route::Album(id) => {
-                self.credits_open = false;
-                self.bridge.open_album(self.client.clone(), id);
-            }
+            Route::Album(id) => self.bridge.open_album(self.client.clone(), id),
             Route::Artist { name, .. } => self.bridge.find_credited(name),
             Route::Playlist { id, .. } => {
                 // Offline, a kept playlist is rebuilt from its pin and the stored tracks.

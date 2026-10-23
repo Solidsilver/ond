@@ -49,6 +49,8 @@ fn song(id: &str, album_id: &str, disc: u32, track: u32) -> subsonic::Song {
         artists: Vec::new(),
         starred: None,
         user_rating: None,
+        play_count: None,
+        played: None,
     }
 }
 

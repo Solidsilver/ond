@@ -124,6 +124,13 @@ impl Client {
         Ok(p.album)
     }
 
+    /// One song as the server has it now, with the user's play count and
+    /// last-played time.
+    pub async fn song(&self, id: &str) -> Result<Song> {
+        let (_, p): (_, SongPayload) = self.call("getSong", &[("id", id)]).await?;
+        Ok(p.song)
+    }
+
     /// Cover art bytes as the server sends them (usually JPEG), scaled server-side to `size` px.
     pub async fn cover_art(&self, cover_id: &str, size: Option<u32>) -> Result<Vec<u8>> {
         let resp = self.http.get(self.cover_art_url(cover_id, size)).send().await?.error_for_status()?;

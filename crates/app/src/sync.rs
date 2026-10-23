@@ -321,6 +321,8 @@ mod tests {
             artists: Vec::new(),
             starred: None,
             user_rating: None,
+            play_count: None,
+            played: None,
         }
     }
 

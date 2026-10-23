@@ -29,6 +29,8 @@ pub enum Cmd {
     ToggleQueue,
     /// Lyrics: the sidebar's Lyrics tab in the full window, the drawer in the Player.
     Lyrics,
+    /// The playing song's details: the sidebar's (or the Player queue's) Info tab.
+    Info,
     /// The full window ↔ the Player.
     TogglePlayer,
     Full,
@@ -106,6 +108,7 @@ pub static BINDINGS: &[Binding] = &[
     b("Lists & queue", "New playlist", "⌘N", CMD, Key::N, false, Cmd::NewPlaylist),
     b("Window", "Player on / off", "⇧⌘N", CMD_SHIFT, Key::N, false, Cmd::TogglePlayer),
     b("Window", "Lyrics", "⌥⌘L", CMD_ALT, Key::L, false, Cmd::Lyrics),
+    b("Window", "Song info", "⌘I", CMD, Key::I, false, Cmd::Info),
     b("Window", "Show / hide queue", "⌥⌘U", CMD_ALT, Key::U, false, Cmd::ToggleQueue),
     b("Window", "Full window", "⌥⌘1", CMD_ALT, Key::Num1, false, Cmd::Full),
     b("Window", "Player", "⌥⌘2", CMD_ALT, Key::Num2, false, Cmd::Player),
@@ -184,6 +187,7 @@ mod tests {
         assert_eq!(press(Key::L, CMD_ALT, false), [Cmd::Lyrics]);
         assert_eq!(press(Key::Questionmark, SHIFT, false), [Cmd::Shortcuts]);
         assert_eq!(press(Key::I, CMD_ALT, false), [Cmd::ToggleDiagnostics]);
+        assert_eq!(press(Key::I, CMD, false), [Cmd::Info]);
         // Space and ⌘-arrows belong to a focused text field.
         assert!(press(Key::Space, NONE, true).is_empty());
         assert!(press(Key::ArrowRight, CMD, true).is_empty());

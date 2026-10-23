@@ -435,8 +435,6 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.fav_tab = favorites_page::FavTab::default();
     app.show_queue = true;
     app.queue_sheet = false;
-    app.credits_open = false;
-    app.analysis_open = false;
     app.analyzer.clear();
     app.queue_ui = QueueUi::default();
     app.np_details = false;
@@ -540,6 +538,44 @@ fn fixture_lyrics(app: &mut ListenerApp, synced: bool) {
     app.lyrics.insert(id, crate::lyrics::Fetch::Done(Some(lyrics)));
 }
 
+/// Lyrics as a scraper hands them over: a counter-and-title header glued to
+/// the first marker, markers glued to lines, an ad, a trailing "Embed". The
+/// words are the fixture's own.
+const SCRAPED: &str = "3 ContributorsMy Man's Gone Now Lyrics[Verse 1]\n\
+Lamps come on along the water\n\
+Somebody's radio two floors down\n\
+I kept the window open for the rain[Chorus]\n\
+Hold the note a little longer\n\
+Let the room decide when it is done\n\
+The bass walks home without us\n\
+\n\
+\n\
+[Verse 2]\n\
+Every chair is facing somewhere else\n\
+Every clock is running slow tonightYou might also like[Bridge]\n\
+See Bill Evans Trio LiveGet tickets as low as $45\n\
+Turn it down, the neighbours listen too\n\
+They'd never say they like it\n\
+\n\
+(Instrumental)\n\
+\n\
+[Outro]\n\
+Lamps go out along the water\n\
+In case the rain remembers12Embed";
+
+/// The playing song's lyrics as they arrive from a scraper, cleaned the way
+/// the app cleans them.
+fn scraped_lyrics(app: &mut ListenerApp) {
+    let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
+    app.lyrics.insert(id, crate::lyrics::Fetch::Done(crate::lyrics::from_text(SCRAPED)));
+}
+
+/// Play stats for the playing song, as the server would report them.
+fn info_fixture(app: &mut ListenerApp) {
+    let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
+    app.song_stats.insert(id, Some(SongStats { plays: Some(14), last_played: Some("2026-10-21T21:40:00Z".into()) }));
+}
+
 fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     // The Player: artwork, transport and the queue; lyrics in a drawer that
     // widens the window.
@@ -590,6 +626,21 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     }
     s.shoot(h, "sidebar-lyrics-none");
 
+    // Unsynced lyrics straight from a scraper, after cleaning: stanzas under
+    // section labels, no debris.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    scraped_lyrics(app_mut(h));
+    h.run_steps(2);
+    s.shoot(h, "sidebar-lyrics-scraped");
+
+    reset(h, vec2(player.x + crate::window::DRAWER_W, player.y), Route::Recent);
+    app_mut(h).windows.mode = WindowMode::Player;
+    app_mut(h).windows.lyrics_open = true;
+    scraped_lyrics(app_mut(h));
+    h.run_steps(4);
+    s.shoot(h, "player-lyrics-scraped");
+
     reset(h, vec2(900.0, 700.0), Route::Recent);
     app_mut(h).queue_ui.tab = QueueTab::Lyrics;
     app_mut(h).queue_sheet = true;
@@ -631,16 +682,53 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     }
     s.shoot(h, "album-track-hover");
 
-    reset(h, FULL, Route::Album(album_id(0)));
-    app_mut(h).credits_open = true;
-    s.shoot(h, "album-credits");
-
     reset(h, FULL, Route::Album(album_id(1)));
     s.shoot(h, "album-two-discs");
 
+    // The Info tab: the playing song's credits, album, file, analysis, plays.
     reset(h, FULL, Route::Album(album_id(0)));
-    app_mut(h).analysis_open = true;
-    s.shoot(h, "album-analysis");
+    info_fixture(app_mut(h));
+    app_mut(h).queue_ui.tab = QueueTab::Info;
+    h.run_steps(2);
+    s.shoot(h, "info");
+
+    // Narrow: the Info tab in the queue sheet.
+    reset(h, vec2(900.0, 700.0), Route::Recent);
+    info_fixture(app_mut(h));
+    app_mut(h).queue_ui.tab = QueueTab::Info;
+    app_mut(h).queue_sheet = true;
+    h.run_steps(2);
+    s.shoot(h, "narrow-info-sheet");
+
+    // A song with little known about it, and nothing playing at all.
+    reset(h, FULL, Route::Recent);
+    let saved = app_mut(h).queue.current.clone();
+    if let Some(cur) = app_mut(h).queue.current.as_mut() {
+        let t = &mut cur.track;
+        t.id = "sparse".into();
+        t.contributors.clear();
+        t.composer = None;
+        t.bit_depth = None;
+        t.track_gain = None;
+        t.album_gain = None;
+        t.track_peak = None;
+        t.size = None;
+    }
+    app_mut(h).queue_ui.tab = QueueTab::Info;
+    h.run_steps(2);
+    s.shoot(h, "info-sparse");
+    app_mut(h).queue.current = None;
+    h.run_steps(2);
+    s.shoot(h, "info-nothing");
+    app_mut(h).queue.current = saved;
+
+    // The Player's queue area has the same Info tab.
+    reset(h, vec2(380.0, 880.0), Route::Recent);
+    info_fixture(app_mut(h));
+    app_mut(h).windows.mode = WindowMode::Player;
+    app_mut(h).queue_ui.tab = QueueTab::Info;
+    h.run_steps(4);
+    s.shoot(h, "player-info");
 
     reset(h, FULL, Route::Album(album_id(0)));
     let header = egui::Rect::from_min_max(pos2(216.0, 52.0), pos2(1120.0, 300.0));
@@ -650,9 +738,6 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     h.run_steps(30);
     s.shoot(h, "album-verdict-hover");
 
-    reset(h, FULL, Route::Album(album_id(1)));
-    app_mut(h).analysis_open = true;
-    s.shoot(h, "album-analysis-clean");
 
     reset(h, FULL, Route::Recent);
     let queue = egui::Rect::from_min_max(pos2(1120.0, 52.0), pos2(1440.0, 876.0));
