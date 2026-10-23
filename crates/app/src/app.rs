@@ -314,6 +314,8 @@ pub struct QueueUi {
 pub struct ListenerApp {
     // Kept alive for the app's lifetime; the bridge holds a handle to it.
     _rt: tokio::runtime::Runtime,
+    /// The window's egui context (for theme changes and window commands).
+    ctx: egui::Context,
     bridge: Bridge,
     inbox: Receiver<Msg>,
     engine: EngineHandle,
@@ -474,7 +476,8 @@ impl ListenerApp {
         }
         let library = Arc::new(library);
         let (tx, inbox) = channel();
-        let bridge = Bridge::new(rt.handle().clone(), tx, ctx.clone(), library.clone());
+        let repaint = ctx.clone();
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), library.clone());
 
         let (prefs, loaded) = Prefs::open(&paths.config_file);
         let notice = match loaded {
@@ -529,14 +532,14 @@ impl ListenerApp {
         bridge.load_cached_albums();
         bridge.load_analyses(analyses.clone());
         let analyzer = {
-            let (results, ticks) = (bridge.clone(), bridge.ctx().clone());
+            let (results, ticks) = (bridge.clone(), bridge.notifier());
             analyze::Runner::start(analyze::Config {
                 store: analyses,
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
                 on_result: Arc::new(move |track_id, record| results.post(Msg::Analyzed { track_id, record })),
-                on_progress: Arc::new(move || ticks.request_repaint()),
+                on_progress: ticks,
             })
         };
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
@@ -552,6 +555,7 @@ impl ListenerApp {
 
         Ok(Self {
             _rt: rt,
+            ctx: ctx.clone(),
             album_details_open: false,
             columns: layout::Columns::restore(saved.sidebar_width, saved.queue_width),
             bridge,
@@ -1182,7 +1186,7 @@ impl ListenerApp {
                 }
             }
             Action::SetTheme(pref) => {
-                theme::set_pref(self.bridge.ctx(), pref);
+                theme::set_pref(&self.ctx, pref);
                 self.prefs.edit(|s| s.theme = pref);
             }
             Action::ToggleQueue if self.queue_narrow => self.queue_sheet = !self.queue_sheet,
@@ -1412,7 +1416,7 @@ impl ListenerApp {
 
     /// Resizes the window to `plan` (if any) and saves the window state.
     fn follow_plan(&mut self, plan: Option<crate::window::Plan>) {
-        let ctx = self.bridge.ctx().clone();
+        let ctx = self.ctx.clone();
         if let Some(plan) = plan {
             plan.apply(&ctx);
             // Until the window reports its new size, don't mistake the old one for it.

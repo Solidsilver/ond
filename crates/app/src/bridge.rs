@@ -121,11 +121,14 @@ fn song_meta(songs: &[subsonic::Song]) -> UserMeta {
     }
 }
 
+/// Wakes the UI so it reads what was sent (a repaint, in the app).
+pub type Notify = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Bridge {
     rt: tokio::runtime::Handle,
     tx: Sender<Msg>,
-    ctx: egui::Context,
+    notify: Notify,
     library: Arc<Library>,
     /// Stops the running track sync, if any.
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
@@ -140,11 +143,11 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, ctx: egui::Context, library: Arc<Library>) -> Self {
+    pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, library: Arc<Library>) -> Self {
         Self {
             rt,
             tx,
-            ctx,
+            notify,
             library,
             sync_cancel: Arc::default(),
             reconnecting: Arc::default(),
@@ -186,13 +189,14 @@ impl Bridge {
         self.session() == session
     }
 
-    pub fn ctx(&self) -> &egui::Context {
-        &self.ctx
+    /// The UI's wake-up, for other background work to share.
+    pub fn notifier(&self) -> Notify {
+        self.notify.clone()
     }
 
     fn send(&self, msg: Msg) {
         let _ = self.tx.send(msg);
-        self.ctx.request_repaint();
+        (self.notify)();
     }
 
     /// Runs `f` on the library off the async workers (redb blocks).
