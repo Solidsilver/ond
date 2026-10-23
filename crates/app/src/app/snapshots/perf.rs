@@ -2,7 +2,7 @@
 //! 500-item queue. Headless (no GPU): it times egui's layout and
 //! tessellation of the real views, which is the CPU cost per frame.
 //!
-//! `cargo test -p listener --release perf -- --ignored --nocapture`
+//! `cargo test -p ond-player --release perf -- --ignored --nocapture`
 
 use super::*;
 use std::time::{Duration, Instant};
@@ -12,7 +12,7 @@ const TRACKS_N: usize = 25_000;
 const QUEUE_N: usize = 500;
 const PINS_N: usize = 2_000;
 
-fn big_library(app: &mut ListenerApp) {
+fn big_library(app: &mut OndApp) {
     let albums: Vec<Album> = (0..ALBUMS_N)
         .map(|i| {
             let mut a = album(i % ALBUMS.len());
@@ -41,7 +41,7 @@ fn big_library(app: &mut ListenerApp) {
     app.rebuild_search();
 }
 
-fn big_queue(app: &mut ListenerApp) {
+fn big_queue(app: &mut OndApp) {
     let tracks: Vec<Track> = app.data.tracks.all.iter().take(QUEUE_N).cloned().collect();
     app.player.queue = crate::queue::Queue::default();
     app.player.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
@@ -54,7 +54,7 @@ struct Timing {
 }
 
 /// Times `n` frames after a short warm-up.
-fn time_frames(h: &mut Harness<'_, Option<ListenerApp>>, n: usize) -> Timing {
+fn time_frames(h: &mut Harness<'_, Option<OndApp>>, n: usize) -> Timing {
     for _ in 0..5 {
         h.step();
     }
@@ -72,7 +72,7 @@ fn time_frames(h: &mut Harness<'_, Option<ListenerApp>>, n: usize) -> Timing {
     Timing { mean, p95: runs[n * 95 / 100], max: runs[n - 1] }
 }
 
-fn scene(h: &mut Harness<'_, Option<ListenerApp>>, route: Route) {
+fn scene(h: &mut Harness<'_, Option<OndApp>>, route: Route) {
     reset(h, FULL, route);
     big_queue(app_mut(h));
 }
@@ -88,7 +88,7 @@ fn perf() {
         .allow_missing_glyphs()
         .with_os(egui::os::OperatingSystem::Mac)
         .build_ui_state(
-            |ui, app: &mut Option<ListenerApp>| {
+            |ui, app: &mut Option<OndApp>| {
                 if let Some(app) = app {
                     app.main_ui(ui);
                 }

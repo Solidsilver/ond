@@ -3,7 +3,7 @@
 
 use super::widgets::elide;
 use super::seek::SeekStyle;
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -48,7 +48,7 @@ pub(super) fn lcd_rect(full: Rect, left_end: f32, right_start: f32) -> Rect {
     Rect::from_center_size(pos2(room.center().x, y), vec2(room.width().clamp(140.0, LCD_MAX_W), LCD_H))
 }
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         let full = ui.available_rect_before_wrap();
         // The bar is the window's title bar too: its empty parts move the

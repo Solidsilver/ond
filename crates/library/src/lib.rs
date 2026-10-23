@@ -56,7 +56,7 @@ pub enum Error {
     Db(Box<redb::Error>),
     #[error("corrupt row: {0}")]
     Codec(#[from] postcard::Error),
-    #[error("library database was written by a newer version of Listener (schema v{found}, this build reads v{SCHEMA_VERSION}); update Listener, or delete the file to resync")]
+    #[error("library database was written by a newer version of Ond (schema v{found}, this build reads v{SCHEMA_VERSION}); update Ond, or delete the file to resync")]
     NewerSchema { found: u32 },
 }
 

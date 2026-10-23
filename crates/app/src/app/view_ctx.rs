@@ -4,7 +4,7 @@
 //! request or touch the engine behind the app's back; the app applies the
 //! actions after the frame.
 
-use super::{Action, Analysis, Data, Downloads, ListenerApp, SearchState, Session, SongStats, SyncState, UiState, diagnostics};
+use super::{Action, Analysis, Data, Downloads, OndApp, SearchState, Session, SongStats, SyncState, UiState, diagnostics};
 use crate::art::Art;
 use crate::favorites::Favorites;
 use crate::output::Outputs;
@@ -62,7 +62,7 @@ impl ViewCtx<'_> {
     }
 }
 
-impl ListenerApp {
+impl OndApp {
     /// Lends the parts a view works with.
     pub(super) fn view(&mut self) -> ViewCtx<'_> {
         ViewCtx {

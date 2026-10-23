@@ -234,7 +234,7 @@ mod tests {
   "scrobble": false,
   "signed_out": true,
   "playback": { "replay_gain": "album", "preamp_db": 2.0, "untagged_db": -6.0, "quality": "auto", "format": "mp3", "kbps": 192 },
-  "offline_dir": "/Volumes/Music/Listener Offline",
+  "offline_dir": "/Volumes/Music/Ond Offline",
   "offline_limit_gb": 50,
   "offline_move_from": "/old/place",
   "analyze_playing": true,

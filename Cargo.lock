@@ -2297,43 +2297,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "listener"
-version = "0.1.0"
-dependencies = [
- "analysis",
- "anyhow",
- "audio",
- "block2 0.6.2",
- "chrono",
- "directories",
- "dispatch2",
- "eframe",
- "egui",
- "egui_kittest",
- "image",
- "keyring",
- "libc",
- "library",
- "muda",
- "nucleo-matcher",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-foundation 0.3.2",
- "objc2-media-player",
- "offline",
- "serde",
- "serde_json",
- "streamcache",
- "subsonic",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3067,6 +3030,43 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "ond-player"
+version = "0.1.0"
+dependencies = [
+ "analysis",
+ "anyhow",
+ "audio",
+ "block2 0.6.2",
+ "chrono",
+ "directories",
+ "dispatch2",
+ "eframe",
+ "egui",
+ "egui_kittest",
+ "image",
+ "keyring",
+ "libc",
+ "library",
+ "muda",
+ "nucleo-matcher",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-media-player",
+ "offline",
+ "serde",
+ "serde_json",
+ "streamcache",
+ "subsonic",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
 
 [[package]]
 name = "openssl-probe"

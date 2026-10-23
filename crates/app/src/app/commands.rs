@@ -1,7 +1,7 @@
 //! What keys, the menu bar, hearts, ratings and playlist edits do. Views push
 //! [`Action`]s; these apply them.
 
-use super::{Action, ListenerApp, sidebar};
+use super::{Action, OndApp, sidebar};
 use std::sync::Arc;
 use crate::bridge::PlaylistEdit;
 use crate::favorites::StarKind;
@@ -39,7 +39,7 @@ const VOLUME_STEP: f32 = 0.1;
 /// How far ⌥⌘→ / ⌥⌘← skip.
 const SKIP_SECS: f64 = 10.0;
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::PlayPause => self.actions.push(Action::PlayPause),

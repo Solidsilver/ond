@@ -130,16 +130,16 @@ mod imp {
         pub fn install(post: impl Fn(Cmd) + Send + Sync + 'static) -> Option<Self> {
             let sep = PredefinedMenuItem::separator;
             let about = AboutMetadata {
-                name: Some("Listener".into()),
+                name: Some("Ond".into()),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
                 comments: Some("A native player for Navidrome.".into()),
                 ..Default::default()
             };
             let app = Submenu::with_items(
-                "Listener",
+                "Ond",
                 true,
                 &[
-                    &PredefinedMenuItem::about(Some("About Listener"), Some(about)),
+                    &PredefinedMenuItem::about(Some("About Ond"), Some(about)),
                     &sep(),
                     &item("Settings…", Cmd::Settings),
                     &sep(),
@@ -149,7 +149,7 @@ mod imp {
                     &PredefinedMenuItem::hide_others(None),
                     &PredefinedMenuItem::show_all(None),
                     &sep(),
-                    &PredefinedMenuItem::quit(Some("Quit Listener")),
+                    &PredefinedMenuItem::quit(Some("Quit Ond")),
                 ],
             )
             .ok()?;

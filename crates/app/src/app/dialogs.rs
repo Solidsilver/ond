@@ -4,7 +4,7 @@
 
 use super::commands::PlaylistAction;
 use super::widgets::{danger, primary, secondary};
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::keys::{BINDINGS, GROUPS};
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Key, Modifiers, vec2};
@@ -27,7 +27,7 @@ impl Overlay {
 
 const DIALOG_W: f32 = 340.0;
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn overlay_ui(&mut self, ctx: &egui::Context) {
         if matches!(self.ui.overlay, Some(Overlay::Settings)) {
             self.settings_window(ctx);

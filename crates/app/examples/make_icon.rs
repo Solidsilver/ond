@@ -1,8 +1,8 @@
-//! Renders the app icon: `cargo run -p listener --example make_icon`.
+//! Renders the app icon: `cargo run -p ond-player --example make_icon`.
 //!
 //! Writes `packaging/macos/icon-1024.png`, `icon-256.png` (the window icon)
-//! and a `Listener.iconset` that `iconutil -c icns` turns into
-//! `Listener.icns`. The outputs are committed; rerun only to change the icon.
+//! and a `Ond.iconset` that `iconutil -c icns` turns into
+//! `Ond.icns`. The outputs are committed; rerun only to change the icon.
 //!
 //! The shape follows the macOS icon grid: an 824 pt rounded square centred on
 //! a 1024 canvas with a soft shadow, a deep blue gradient, and a short
@@ -22,7 +22,7 @@ fn main() {
     icon.save(out.join("icon-1024.png")).expect("write icon-1024.png");
     imageops::resize(&icon, 256, 256, imageops::FilterType::Lanczos3).save(out.join("icon-256.png")).expect("write icon-256.png");
 
-    let set = out.join("Listener.iconset");
+    let set = out.join("Ond.iconset");
     std::fs::create_dir_all(&set).expect("create iconset");
     for base in [16u32, 32, 128, 256, 512] {
         for scale in [1u32, 2] {

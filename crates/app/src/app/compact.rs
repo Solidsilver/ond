@@ -5,7 +5,7 @@
 
 use super::widgets::elide;
 use super::seek::SeekStyle;
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::window::WindowMode;
@@ -28,7 +28,7 @@ pub(super) fn on_art(ui: &mut Ui) {
     w.inactive.weak_bg_fill = Color32::TRANSPARENT;
 }
 
-impl ListenerApp {
+impl OndApp {
     fn cover_of(&self, track: &Track) -> Option<String> {
         self.data.cover_for(track).map(str::to_owned)
     }

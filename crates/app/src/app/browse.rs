@@ -3,7 +3,7 @@
 
 use super::view_ctx::ViewCtx;
 use super::widgets::{Mark, choice, elide};
-use super::{Action, AlbumSort, Data, Keep, ListenerApp, QueueAction};
+use super::{Action, AlbumSort, Data, Keep, OndApp, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
@@ -76,7 +76,7 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, data: &Data) -> Vec<usize> {
     ids
 }
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn main_view(&mut self, ui: &mut Ui) {
         self.trail_bar(ui);
         let route = self.ui.nav.current().clone();

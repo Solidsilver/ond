@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Listener.app and packages it as a .zip and a .dmg in target/bundle.
+# Builds Ond.app and packages it as a .zip and a .dmg in target/bundle.
 #
 #   scripts/bundle-macos.sh              # host architecture
 #   scripts/bundle-macos.sh --universal  # arm64 + x86_64 in one binary
@@ -21,11 +21,11 @@ for arg in "$@"; do
   esac
 done
 
-# "path+file:///…/crates/app#listener@0.1.0" → "0.1.0"
-version="$(cargo pkgid -p listener)"
+# "path+file:///…/crates/app#ond-player@0.1.0" → "0.1.0"
+version="$(cargo pkgid -p ond-player)"
 version="${version##*@}"
 if [[ -z "$version" || "$version" == *"#"* ]]; then
-  echo "could not read the listener package version from cargo pkgid" >&2
+  echo "could not read the ond-player package version from cargo pkgid" >&2
   exit 1
 fi
 build="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
@@ -45,35 +45,35 @@ if $universal; then
     fi
   done
   for t in "${targets[@]}"; do
-    cargo build --release -p listener --target "$t"
+    cargo build --release -p ond-player --target "$t"
   done
-  binary="$out/listener-universal"
+  binary="$out/ond-universal"
   lipo -create -output "$binary" \
-    target/aarch64-apple-darwin/release/listener \
-    target/x86_64-apple-darwin/release/listener
+    target/aarch64-apple-darwin/release/ond \
+    target/x86_64-apple-darwin/release/ond
   arch="universal"
 else
-  cargo build --release -p listener
-  binary="target/release/listener"
+  cargo build --release -p ond-player
+  binary="target/release/ond"
   arch="$(uname -m)"
 fi
 
-app="$out/Listener.app"
+app="$out/Ond.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$binary" "$app/Contents/MacOS/Listener"
-cp packaging/macos/Listener.icns "$app/Contents/Resources/Listener.icns"
+cp "$binary" "$app/Contents/MacOS/Ond"
+cp packaging/macos/Ond.icns "$app/Contents/Resources/Ond.icns"
 sed -e "s/@VERSION@/$version/" \
     -e "s/@BUILD@/$build/" \
     -e "s/@MIN_MACOS@/$MIN_MACOS/" \
-    -e "s/@COPYRIGHT@/© $year Listener contributors/" \
+    -e "s/@COPYRIGHT@/© $year Ond contributors/" \
     packaging/macos/Info.plist.in > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 # An ad-hoc signature keeps Apple Silicon happy and lets macOS track the app
 # consistently; it is not a Developer ID signature.
 codesign --force --deep --sign - "$app" >/dev/null 2>&1 || echo "note: ad-hoc codesign failed; continuing unsigned" >&2
 
-name="Listener-$version-macos-$arch"
+name="Ond-$version-macos-$arch"
 rm -f "$out/$name.zip" "$out/$name.dmg"
 ditto -c -k --keepParent "$app" "$out/$name.zip"
 
@@ -81,7 +81,7 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cp -R "$app" "$stage/"
 ln -s /Applications "$stage/Applications"
-hdiutil create -quiet -volname "Listener $version" -srcfolder "$stage" -ov -format UDZO "$out/$name.dmg"
+hdiutil create -quiet -volname "Ond $version" -srcfolder "$stage" -ov -format UDZO "$out/$name.dmg"
 
 echo "built:"
 du -sh "$app" "$out/$name.zip" "$out/$name.dmg"

@@ -324,7 +324,7 @@ pub struct QueueUi {
     pub selected: Option<u64>,
 }
 
-pub struct ListenerApp {
+pub struct OndApp {
     // Kept alive for the app's lifetime; the bridge holds a handle to it.
     _rt: tokio::runtime::Runtime,
     /// The window's egui context (for theme changes and window commands).
@@ -603,13 +603,13 @@ impl Downloads {
                 if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
                     // Always a folder of our own inside the chosen one: the store
                     // tidies files it doesn't know, which must never be the user's.
-                    let dir = if chosen.file_name().is_some_and(|n| n == "Listener Offline") { chosen } else { chosen.join("Listener Offline") };
+                    let dir = if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") };
                     if dir != current {
                         prefs.edit(|s| {
                             s.offline_dir = Some(dir.clone());
                             s.offline_move_from = Some(current.clone());
                         });
-                        return Ok(Some(format!("Downloads will move to {} when Listener restarts", dir.display())));
+                        return Ok(Some(format!("Downloads move to {} the next time Ond starts", dir.display())));
                     }
                 }
             }
@@ -654,7 +654,7 @@ impl Analysis {
     }
 }
 
-impl ListenerApp {
+impl OndApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
         // The app is running by now, so NSApp takes the menu bar.
@@ -1594,7 +1594,7 @@ impl ListenerApp {
             self.ui.seen = None;
             self.ui.settling = Some((plan.size, 30));
             self.ui.switch_started = Some(std::time::Instant::now());
-            tracing::debug!(target: "listener::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
+            tracing::debug!(target: "ond::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
         }
     }
 
@@ -1668,7 +1668,7 @@ impl ListenerApp {
             const FORM_H: f32 = 330.0;
             ui.add_space(((ui.available_height() - FORM_H) * 0.42).max(24.0));
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Listener").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
+                ui.label(egui::RichText::new("Ond").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Connect to your Navidrome server").size(13.0).color(t.muted));
                 ui.add_space(24.0);
@@ -1946,7 +1946,7 @@ impl ListenerApp {
     }
 }
 
-impl eframe::App for ListenerApp {
+impl eframe::App for OndApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg);
@@ -2009,7 +2009,7 @@ impl eframe::App for ListenerApp {
                         // (see `chrome::end_programmatic_resize`).
                         crate::chrome::end_programmatic_resize();
                         if let Some(t) = self.ui.switch_started.take() {
-                            tracing::debug!(target: "listener::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
+                            tracing::debug!(target: "ond::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
                         }
                     }
                     // Mini is square; where the platform doesn't hold it so, snap back.
@@ -2045,7 +2045,7 @@ impl eframe::App for ListenerApp {
     }
 }
 
-impl Drop for ListenerApp {
+impl Drop for OndApp {
     fn drop(&mut self) {
         self.bridge.cancel_sync();
         self.engine.send(Command::Shutdown);
@@ -2166,7 +2166,7 @@ mod tests {
         }
     }
 
-    fn app(ctx: &egui::Context, dir: &std::path::Path) -> ListenerApp {
+    fn app(ctx: &egui::Context, dir: &std::path::Path) -> OndApp {
         let paths = Paths {
             config_file: dir.join("settings.json"),
             library_db: dir.join("library.redb"),
@@ -2174,7 +2174,7 @@ mod tests {
             art_cache: dir.join("art"),
             offline: dir.join("offline"),
         };
-        let mut app = ListenerApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
+        let mut app = OndApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
         app.login = None;
         let albums: Vec<Album> = (0..60)
             .map(|i| Album {
@@ -2207,7 +2207,7 @@ mod tests {
         app
     }
 
-    fn frame(ctx: &egui::Context, app: &mut ListenerApp, events: Vec<egui::Event>) {
+    fn frame(ctx: &egui::Context, app: &mut OndApp, events: Vec<egui::Event>) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))),
             events,
@@ -2298,7 +2298,7 @@ mod tests {
     }
 
     /// Handles what the bridge sends until `done` says so (or 3 s pass).
-    fn until(app: &mut ListenerApp, mut done: impl FnMut(&ListenerApp) -> bool) {
+    fn until(app: &mut OndApp, mut done: impl FnMut(&OndApp) -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !done(app) {
             assert!(std::time::Instant::now() < deadline, "timed out waiting on the bridge");
@@ -2450,7 +2450,7 @@ mod tests {
 
     /// Makes track `id` downloaded, the way a finished stream would: via a file
     /// the stream cache "has", which the store links in.
-    fn download(app: &mut ListenerApp, dir: &std::path::Path, id: &str) {
+    fn download(app: &mut OndApp, dir: &std::path::Path, id: &str) {
         let file = dir.join(format!("cached-{id}.flac"));
         std::fs::write(&file, b"fLaC").unwrap();
         let want = id.to_owned();
@@ -2484,7 +2484,7 @@ mod tests {
         let mut app = app(&ctx, dir.path());
         let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
         let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
-        let connect = |app: &mut ListenerApp, user: &str, new_account: bool| {
+        let connect = |app: &mut OndApp, user: &str, new_account: bool| {
             let session = app.bridge.session();
             app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account });
         };

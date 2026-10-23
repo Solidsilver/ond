@@ -1,7 +1,7 @@
 //! Left column: search (opens the palette), library places, playlists, and
 //! settings. In narrow windows it collapses to a rail of icons.
 
-use super::{Action, DragTracks, ListenerApp, PlaylistAction};
+use super::{Action, DragTracks, OndApp, PlaylistAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
@@ -22,7 +22,7 @@ pub(super) const PLACES: [(&str, Route, Icon); 6] = [
     ("Offline", Route::Offline, Icon::Download),
 ];
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn sidebar(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.y = 1.0;

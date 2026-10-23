@@ -1,14 +1,14 @@
-# Listener
+# Ond
 
-A native macOS music player for [Navidrome](https://www.navidrome.org) and other OpenSubsonic servers, written in Rust with [egui](https://www.egui.rs).
+Ond is a native macOS music player for [Navidrome](https://www.navidrome.org) and other OpenSubsonic servers, written in Rust with [egui](https://www.egui.rs).
 
-I wanted a client that treats playback quality as the main feature and stays out of the way otherwise. Listener plays your original files, tells you exactly what happens to the signal on its way to the speakers, and keeps the interface quiet unless you ask for more.
+I wanted a client that treats playback quality as the main feature and stays out of the way otherwise. Ond plays your original files, tells you exactly what happens to the signal on its way to the speakers, and keeps the interface quiet unless you ask for more.
 
 ## What it does
 
 ### Playback
 
-- Bit-perfect output through CoreAudio. Listener takes exclusive access to the device and switches its sample rate to match each file. It shows a green dot only when every condition holds, and it says why when it can't.
+- Bit-perfect output through CoreAudio. Ond takes exclusive access to the device and switches its sample rate to match each file. It shows a green dot only when every condition holds, and it says why when it can't.
 - Normal mode for everyday listening, with ReplayGain (track, album, or automatic), a sinc resampler and TPDF dither when a file needs converting for your device.
 - Gapless playback, and seeking into parts of a track that haven't downloaded yet.
 - Every output device remembers its own mode. A USB DAC can stay bit-perfect while the laptop speakers stay in Normal mode.
@@ -30,27 +30,27 @@ I wanted a client that treats playback quality as the main feature and stays out
 
 ## Install
 
-Download the `.dmg` from [Releases](../../releases) and drag Listener to Applications.
+Download the `.dmg` from [Releases](../../releases) and drag Ond to Applications.
 
-The app isn't signed with an Apple Developer ID yet, so macOS blocks the first launch. Right-click Listener in Applications and choose Open, or run:
+The app isn't signed with an Apple Developer ID yet, so macOS blocks the first launch. Right-click Ond in Applications and choose Open, or run:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Listener.app
+xattr -dr com.apple.quarantine /Applications/Ond.app
 ```
 
-Listener needs macOS 11 (Big Sur) or later and a Navidrome server. Credits need Navidrome 0.55 or newer; everything else works with any OpenSubsonic server.
+Ond needs macOS 11 (Big Sur) or later and a Navidrome server. Credits need Navidrome 0.55 or newer; everything else works with any OpenSubsonic server.
 
 ## Build from source
 
 You need a recent stable Rust toolchain (`rustup`) and the Xcode command line tools.
 
 ```sh
-cargo run -p listener --release
+cargo run -p ond-player --release
 ```
 
-Use `--release` for listening. Debug builds are slow enough to cause dropouts.
+Use `--release` for listening. Debug builds are slow enough to cause dropouts. The package is called `ond-player`; the binary it builds is `ond`. To see the window-mode timings in the log, run with `RUST_LOG=ond::window=debug`.
 
-To build `Listener.app`, a `.zip` and a `.dmg` in `target/bundle/`:
+To build `Ond.app`, a `.zip` and a `.dmg` in `target/bundle/`:
 
 ```sh
 scripts/bundle-macos.sh              # this Mac's architecture
@@ -61,14 +61,14 @@ scripts/bundle-macos.sh --universal  # Apple silicon and Intel
 
 | What | Where |
 |---|---|
-| Password | macOS Keychain |
-| Settings | `~/Library/Application Support/dev.listener.Listener/settings.json` |
-| Library and analysis databases | `~/Library/Application Support/dev.listener.Listener/` |
-| Offline downloads | `~/Library/Application Support/dev.listener.Listener/Offline` (you can move it in Settings) |
-| Stream and artwork caches | `~/Library/Caches/dev.listener.Listener/` |
-| Logs | `~/Library/Logs/Listener/` |
+| Password | macOS Keychain, under `dev.solidsilver.ond` |
+| Settings | `~/Library/Application Support/dev.solidsilver.ond/settings.json` |
+| Library and analysis databases | `~/Library/Application Support/dev.solidsilver.ond/` |
+| Offline downloads | `~/Library/Application Support/dev.solidsilver.ond/Offline` (you can move it in Settings) |
+| Stream and artwork caches | `~/Library/Caches/dev.solidsilver.ond/` |
+| Logs | `~/Library/Logs/Ond/` |
 
-The library database is a copy of what's on your server. If it ever breaks, Listener moves it aside and syncs again.
+The library database is a copy of what's on your server. If it ever breaks, Ond moves it aside and syncs again.
 
 ## Development
 
@@ -76,13 +76,15 @@ The workspace has seven crates:
 
 | Crate | Job |
 |---|---|
-| `app` | The `listener` binary: UI, queue, sync, settings, macOS integration |
+| `app` | The `ond-player` package, which builds the `ond` binary: UI, queue, sync, settings, macOS integration |
 | `subsonic` | OpenSubsonic API client |
 | `library` | Local library mirror in redb, with hand-written indexes and migrations |
 | `streamcache` | Download cache that playback can read and seek while it fills |
 | `offline` | Pinned downloads |
 | `audio` | Decoding, the playback engine, resampling, dither, CoreAudio and cpal output |
 | `analysis` | Loudness, dynamic range and fake hi-res detection |
+
+None of the crates are published to crates.io.
 
 Before sending changes:
 
@@ -94,7 +96,7 @@ cargo test --workspace
 The UI tests can render every screen to PNG without a server, which is how most of the visual work gets checked:
 
 ```sh
-cargo test -p listener --release snapshots -- --ignored --nocapture
+cargo test -p ond-player --release snapshots -- --ignored --nocapture
 # images land in target/snapshots/
 ```
 
@@ -104,7 +106,7 @@ Some things need real hardware or a real server. [TESTING.md](TESTING.md) lists 
 
 ## How this was made
 
-I built Listener with Claude Opus 5.5. I set the direction, made the design and product calls, and tested on my own library and hardware. Claude wrote most of the code. I'd rather say that plainly than leave you to guess.
+I built Ond with Claude Opus 5.5. I set the direction, made the design and product calls, and tested on my own library and hardware. Claude wrote most of the code. I'd rather say that plainly than leave you to guess.
 
 ## License
 

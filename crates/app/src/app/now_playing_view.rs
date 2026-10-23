@@ -8,7 +8,7 @@
 use super::view_ctx::ViewCtx;
 use super::widgets::{elide, heart_button, link};
 use super::seek::SeekStyle;
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::lyrics::{self, Fetch, Lyrics};
@@ -480,7 +480,7 @@ fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysi
     rows
 }
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         egui::Panel::top("player-bar")

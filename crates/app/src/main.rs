@@ -1,4 +1,4 @@
-//! Listener: a native Navidrome client.
+//! Ond: a native Navidrome client.
 //!
 //! Login → sync into the local db → browse → play through the audio engine,
 //! with the UI thread never blocking.
@@ -40,11 +40,11 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    eframe::run_native("Listener", options, Box::new(|cc| Ok(Box::new(app::ListenerApp::new(cc)?))))
+    eframe::run_native("Ond", options, Box::new(|cc| Ok(Box::new(app::OndApp::new(cc)?))))
 }
 
 /// Logs to stderr from a terminal; launched as an app (Finder, Dock) there is
-/// no terminal, so logs go to `~/Library/Logs/Listener/listener.log`, rotated
+/// no terminal, so logs go to `~/Library/Logs/Ond/ond.log`, rotated
 /// once it passes 5 MB.
 fn init_logging() {
     use std::io::IsTerminal;
@@ -60,11 +60,11 @@ fn init_logging() {
 
 fn log_file() -> Option<std::fs::File> {
     const MAX: u64 = 5 * 1024 * 1024;
-    let dir = directories::BaseDirs::new()?.home_dir().join("Library/Logs/Listener");
+    let dir = directories::BaseDirs::new()?.home_dir().join("Library/Logs/Ond");
     std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("listener.log");
+    let path = dir.join("ond.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX) {
-        let _ = std::fs::rename(&path, dir.join("listener.log.1"));
+        let _ = std::fs::rename(&path, dir.join("ond.log.1"));
     }
     std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
 }

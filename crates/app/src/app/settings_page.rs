@@ -4,7 +4,7 @@
 //! account) lives here; the popovers keep only what's needed in the moment.
 
 use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, section, thin_slider, toggle};
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{ThemePref, Tokens, semibold};
 use audio::PlaybackMode;
@@ -41,7 +41,7 @@ const NAV_W: f32 = 176.0;
 /// The right pane's content width (it scrolls when taller than the window).
 const PANE_PAD: f32 = 28.0;
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         let w = (screen.width() - 64.0).clamp(480.0, 760.0);
@@ -247,7 +247,7 @@ impl ListenerApp {
                 }
             });
             ui.add_space(6.0);
-            hint(ui, "Downloads move to a new location the next time Listener starts.");
+            hint(ui, "Downloads move to a new location the next time Ond starts.");
         });
     }
 
