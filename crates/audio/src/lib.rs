@@ -41,7 +41,7 @@ pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
 pub use dither::Tpdf;
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
 pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, adjust, assess, choose_rate, describe, khz};
-pub use streamcache::{CacheConfig, CacheKey, StreamCache};
+use streamcache::{CacheKey, StreamCache};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use decode::{DecoderMsg, Session};
@@ -195,22 +195,22 @@ pub enum PlayState {
 pub struct Status {
     state: AtomicU8,
     /// Frames the device has actually consumed for the current track.
-    pub frames_played: AtomicU64,
+    pub(crate) frames_played: AtomicU64,
     /// 0 when unknown (e.g. unseekable stream without a duration header).
-    pub total_frames: AtomicU64,
-    pub sample_rate: AtomicU32,
-    pub underruns: AtomicU64,
+    pub(crate) total_frames: AtomicU64,
+    pub(crate) sample_rate: AtomicU32,
+    pub(crate) underruns: AtomicU64,
     /// Decoded frames queued ahead of the output (the ring's fill), as of the
     /// last callback.
-    pub buffered_frames: AtomicU64,
+    pub(crate) buffered_frames: AtomicU64,
     /// Bytes of the current track on disk, and its size (0 when unknown or local).
-    pub fetched_bytes: AtomicU64,
-    pub total_bytes: AtomicU64,
+    pub(crate) fetched_bytes: AtomicU64,
+    pub(crate) total_bytes: AtomicU64,
     /// Playback is downloading: the current track (whatever its size, known or
     /// not, as with a transcode) or the next one's prefetch isn't complete.
     pub(crate) downloading: AtomicBool,
     /// Track boundaries the output has crossed in this session (bumped by the callback).
-    pub track_seq: AtomicU64,
+    pub(crate) track_seq: AtomicU64,
     volume_bits: AtomicU32,
     pub(crate) paused: AtomicBool,
     /// The callback is holding or prebuffering.
@@ -273,6 +273,16 @@ impl Status {
     /// The current track or the next one's prefetch is still downloading.
     pub fn downloading(&self) -> bool {
         self.downloading.load(Ordering::Relaxed)
+    }
+
+    /// Times the output ran dry since the engine started.
+    pub fn underruns(&self) -> u64 {
+        self.underruns.load(Ordering::Relaxed)
+    }
+
+    /// Bytes of the current file on disk and its size (0 when unknown or local).
+    pub fn fetched_bytes(&self) -> (u64, u64) {
+        (self.fetched_bytes.load(Ordering::Relaxed), self.total_bytes.load(Ordering::Relaxed))
     }
 
     pub fn duration_secs(&self) -> Option<f64> {

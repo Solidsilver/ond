@@ -553,11 +553,11 @@ impl ListenerApp {
         };
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
-        let mut cache_cfg = audio::CacheConfig::new(&paths.stream_cache);
+        let mut cache_cfg = streamcache::CacheConfig::new(&paths.stream_cache);
         if let Some(mb) = saved.stream_cache_mb {
             cache_cfg.max_bytes = mb * 1024 * 1024;
         }
-        let cache = audio::StreamCache::new(cache_cfg, rt.handle().clone())?;
+        let cache = streamcache::StreamCache::new(cache_cfg, rt.handle().clone())?;
         let offline = {
             let dir = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
             // A new location chosen last time: bring the downloads along first.
@@ -572,15 +572,15 @@ impl ListenerApp {
             let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.handle().clone(), Arc::new(move || repaint.request_repaint()))?;
             // A track that finished streaming is linked in rather than downloaded again.
             let cached = cache.clone();
-            store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&audio::CacheKey::original(r.id.clone(), r.suffix.clone()))));
+            store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&streamcache::CacheKey::original(r.id.clone(), r.suffix.clone()))));
             store
         };
         let playback_cache = cache.clone();
         // Analysis fetches uncached files here, so a library-wide run doesn't
         // evict what was just played.
-        let mut scratch_cfg = audio::CacheConfig::new(paths.stream_cache.with_file_name("analysis"));
+        let mut scratch_cfg = streamcache::CacheConfig::new(paths.stream_cache.with_file_name("analysis"));
         scratch_cfg.max_bytes = 64 * 1024 * 1024;
-        let scratch_cache = audio::StreamCache::new(scratch_cfg, rt.handle().clone())?;
+        let scratch_cache = streamcache::StreamCache::new(scratch_cfg, rt.handle().clone())?;
         let engine = audio::spawn(audio::EngineConfig::default(), backend, Some(cache));
         let output = Outputs::restore(&engine, prefs.clone());
         engine.send(Command::SetVolume(saved.volume));

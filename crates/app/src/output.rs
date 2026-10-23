@@ -315,7 +315,7 @@ impl Outputs {
             return None;
         }
         let mut detail = format!("{}\n{}", p.summary(), hover_text(p));
-        let underruns = status.underruns.load(std::sync::atomic::Ordering::Relaxed);
+        let underruns = status.underruns();
         if underruns > 0 {
             detail.push_str(&format!("\n{underruns} underruns"));
         }
