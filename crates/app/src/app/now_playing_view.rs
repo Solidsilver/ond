@@ -5,7 +5,6 @@
 //! lyrics view, smaller, is the full window's sidebar "Lyrics" tab. A quiet
 //! details strip folds out under the transport.
 
-use super::compact::{on_art, scrim};
 use super::widgets::{elide, heart_button, link};
 use super::{Action, ListenerApp, mmss};
 use crate::favorites::StarKind;
@@ -27,10 +26,18 @@ const QUEUE_MIN_H: f32 = 250.0;
 /// Lyric text size in the Player's drawer and the full window's sidebar.
 const DRAWER_LYRIC: f32 = 18.0;
 const SIDEBAR_LYRIC: f32 = 15.0;
+/// The Player's top bar (its title bar): the traffic lights centre in it.
+pub const PLAYER_BAR_H: f32 = 40.0;
 
 impl ListenerApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
+        egui::Panel::top("player-bar")
+            .exact_size(PLAYER_BAR_H)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(t.bg))
+            .show(ui, |ui| self.player_bar(ui));
         self.player_status_bar(ui);
         if self.windows.lyrics_open {
             egui::Panel::right("lyrics-drawer")
@@ -51,7 +58,7 @@ impl ListenerApp {
                 });
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 4 }))
+            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
             .show(ui, |ui| {
                 let full = ui.available_rect_before_wrap();
                 let below = BELOW_ART_H + if self.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
@@ -65,7 +72,6 @@ impl ListenerApp {
                         ui.vertical_centered(|ui| {
                             let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
                             self.art.paint(ui, art, None, 8.0);
-                            self.art_corner_buttons(ui, art);
                             ui.add_space(16.0);
                             ui.label(egui::RichText::new("Not playing").size(14.0).color(t.muted));
                         });
@@ -79,22 +85,28 @@ impl ListenerApp {
             });
     }
 
-    /// Full window and Mini, over the Player's artwork while it's hovered.
-    fn art_corner_buttons(&mut self, ui: &mut Ui, art: Rect) {
-        if !ui.rect_contains_pointer(art) {
-            return;
+    /// The Player's top bar, which is also its title bar: the traffic lights
+    /// on the left (macOS), Mini and Full window on the right. Its empty part
+    /// moves the window; a double-click zooms it.
+    fn player_bar(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let rect = ui.max_rect();
+        let bg = ui.interact(rect, ui.scope_id().with("player-titlebar"), Sense::click_and_drag());
+        if bg.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
-        let mut corner = ui.new_child(UiBuilder::new().max_rect(art.shrink(8.0)).layout(Layout::right_to_left(Align::Min)));
-        on_art(&mut corner);
-        corner.spacing_mut().item_spacing.x = 4.0;
-        for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⌥⌘3)", WindowMode::Mini)] {
-            let (r, _) = corner.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
-            corner.painter().circle_filled(r.center(), 13.0, scrim());
-            let mut b = corner.new_child(UiBuilder::new().max_rect(r));
-            if icons::sized_button(&mut b, icon, label, r.size(), 10.0, Some(Color32::from_rgb(0xE8, 0xE9, 0xEC))).clicked() {
-                self.actions.push(Action::SetMode(mode));
+        if bg.double_clicked() {
+            crate::chrome::title_double_click(ui.ctx());
+        }
+        let right = rect.shrink2(vec2(10.0, 0.0));
+        ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⇧⌘M)", WindowMode::Mini)] {
+                if icons::sized_button(ui, icon, label, vec2(28.0, 28.0), 12.0, Some(t.muted)).clicked() {
+                    self.actions.push(Action::SetMode(mode));
+                }
             }
-        }
+        });
     }
 
     /// Asks the server for `track`'s lyrics the first time something shows them.
@@ -149,9 +161,6 @@ impl ListenerApp {
             let shadow = egui::Shadow { offset: [0, (side / 40.0) as i8], blur: (side / 14.0).min(28.0) as u8, spread: 0, color: Color32::from_black_alpha(if dark { 110 } else { 46 }) };
             ui.painter().add(shadow.as_shape(art, 8));
             this.art.paint(ui, art, cover.as_deref(), if side < 120.0 { 6.0 } else { 8.0 });
-            if window && side >= 120.0 {
-                this.art_corner_buttons(ui, art);
-            }
         };
 
         let compact = side.is_none();

@@ -70,7 +70,9 @@ pub struct Plan {
     pub size: [f32; 2],
     pub min_size: [f32; 2],
     pub pos: Option<[f32; 2]>,
-    /// Mini has no title bar; it's dragged by its artwork.
+    /// Mini has no title bar; it's dragged by its artwork. (On macOS the
+    /// window keeps its frame and Mini just hides the traffic lights; see
+    /// `chrome`.)
     pub decorations: bool,
     pub on_top: bool,
     /// Keep the window square while resizing (Mini).
@@ -80,7 +82,13 @@ pub struct Plan {
 impl Plan {
     /// The window this plan describes, for startup.
     pub fn builder(&self, b: egui::ViewportBuilder) -> egui::ViewportBuilder {
-        let b = b.with_inner_size(self.size).with_min_inner_size(self.min_size).with_decorations(self.decorations).with_window_level(self.level());
+        let b = b.with_inner_size(self.size).with_min_inner_size(self.min_size).with_window_level(self.level());
+        // macOS: the title bar folds into our toolbar (see `chrome`).
+        let b = if cfg!(target_os = "macos") {
+            b.with_decorations(true).with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false)
+        } else {
+            b.with_decorations(self.decorations)
+        };
         match self.pos {
             Some(p) => b.with_position(p),
             None => b,
@@ -89,10 +97,15 @@ impl Plan {
 
     /// Turns the running window into this one.
     pub fn apply(&self, ctx: &Context) {
-        // Lower the minimum first, or shrinking below the old one is refused.
-        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(self.min_size.into()));
-        ctx.send_viewport_cmd(ViewportCommand::Decorations(self.decorations));
+        // Drop the minimum out of the way, resize, then set the new one: a
+        // larger minimum set first would resize the window once on its own,
+        // and a smaller one set after would refuse the shrink.
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(egui::vec2(1.0, 1.0)));
+        if !cfg!(target_os = "macos") {
+            ctx.send_viewport_cmd(ViewportCommand::Decorations(self.decorations));
+        }
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size.into()));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(self.min_size.into()));
         if let Some(p) = self.pos {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p.into()));
         }

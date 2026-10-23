@@ -10,8 +10,12 @@ use crate::theme::{Tokens, semibold};
 use audio::{Command, PlayState};
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
-const LEFT_W: f32 = 120.0;
-/// The transport's inset from the window edge, so prev/play/next don't hug it.
+/// The toolbar's height; on macOS the traffic lights sit centred in it.
+pub const TOOLBAR_H: f32 = 52.0;
+/// Width of prev · play/pause · next.
+const TRANSPORT_W: f32 = 108.0;
+/// Without the traffic lights (full screen, other platforms), the transport's
+/// smallest inset from the window edge.
 const TRANSPORT_INSET: f32 = 14.0;
 const RIGHT_W: f32 = 370.0;
 const LCD_MAX_W: f32 = 540.0;
@@ -19,6 +23,14 @@ const LCD_MIN_W: f32 = 200.0;
 const LCD_H: f32 = 44.0;
 /// Below this window width the toolbar tightens up.
 const NARROW_W: f32 = 900.0;
+
+/// Where prev/play/next go: centred in the free space between `free_left`
+/// (past the traffic lights) and the now-playing display, never left of
+/// `free_left`.
+pub(super) fn transport_x(free_left: f32, lcd_left: f32) -> f32 {
+    let centred = (free_left + lcd_left) / 2.0 - TRANSPORT_W / 2.0;
+    centred.max(free_left)
+}
 
 /// Where the now-playing display goes: centred on the window (`full`'s
 /// centre), as wide as the room on its tighter side allows; when even that is
@@ -38,26 +50,35 @@ pub(super) fn lcd_rect(full: Rect, left_end: f32, right_start: f32) -> Rect {
 impl ListenerApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         let full = ui.available_rect_before_wrap();
-        let left = Rect::from_min_max(pos2(full.left() + TRANSPORT_INSET, full.top()), pos2(full.left() + TRANSPORT_INSET + LEFT_W, full.bottom()));
+        // The bar is the window's title bar too: its empty parts move the
+        // window, and a double-click zooms it. Widgets drawn after this take
+        // the pointer where they are.
+        let whole = full.expand2(vec2(12.0, 0.0));
+        let bg = ui.interact(whole, ui.scope_id().with("titlebar"), Sense::click_and_drag());
+        if bg.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if bg.double_clicked() {
+            crate::chrome::title_double_click(ui.ctx());
+        }
+        // On macOS the traffic lights sit at the left of the bar.
+        let free_left = if crate::chrome::folded(ui.ctx()) { whole.left() + crate::chrome::LIGHTS_W } else { full.left() + TRANSPORT_INSET };
         // Narrow windows fold the volume slider behind its icon so the
         // now-playing display keeps room for the title.
         let narrow = full.width() < NARROW_W;
         let right_w = if narrow { RIGHT_W - 90.0 } else { RIGHT_W };
         let right = Rect::from_min_max(pos2(full.right() - right_w, full.top()), full.max);
-
-        let left_end = ui
-            .scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
-                self.transport(ui, None);
-                ui.min_rect().right()
-            })
-            .inner;
         let right_start = ui
             .scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
                 self.toolbar_right(ui, narrow);
                 ui.min_rect().left()
             })
             .inner;
-        self.lcd(ui, lcd_rect(full, left_end, right_start));
+        let lcd = lcd_rect(full, free_left + TRANSPORT_W, right_start);
+        let x = transport_x(free_left, lcd.left());
+        let left = Rect::from_min_max(pos2(x, full.top()), pos2(x + TRANSPORT_W, full.bottom()));
+        ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, None));
+        self.lcd(ui, lcd);
     }
 
     /// Previous · play/pause (a spinner while buffering) · next. `color`
@@ -287,6 +308,14 @@ mod tests {
         assert!((r.center().x - 500.0).abs() < 0.5);
         assert!(r.right() <= right_start - 11.9, "{r:?} overlaps the right controls");
         assert!(r.width() < LCD_MAX_W);
+    }
+
+    #[test]
+    fn the_transport_sits_midway_between_the_lights_and_the_display() {
+        let x = transport_x(84.0, 450.0);
+        assert!(((x + TRANSPORT_W / 2.0) - 267.0).abs() < 0.5);
+        // No room to centre: it stays clear of the lights.
+        assert_eq!(transport_x(84.0, 150.0), 84.0);
     }
 
     #[test]

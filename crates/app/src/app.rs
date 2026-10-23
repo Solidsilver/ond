@@ -345,6 +345,8 @@ pub struct ListenerApp {
     /// After a mode switch: the size asked for, and frames left to wait for it.
     /// The window reports its old size for a frame or two meanwhile.
     settling: Option<([f32; 2], u32)>,
+    /// When the current mode switch was asked for (for the debug log).
+    switch_started: Option<std::time::Instant>,
     /// When the last scroll happened (frame clock), for showing scroll bars.
     last_scroll: f64,
     bars_shown: bool,
@@ -547,6 +549,7 @@ impl ListenerApp {
             windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
             seen: None,
             settling: None,
+            switch_started: None,
             square_wanted: None,
             square_native: false,
             last_scroll: f64::NEG_INFINITY,
@@ -1415,6 +1418,8 @@ impl ListenerApp {
             // Until the window reports its new size, don't mistake the old one for it.
             self.seen = None;
             self.settling = Some((plan.size, 30));
+            self.switch_started = Some(std::time::Instant::now());
+            tracing::debug!(target: "listener::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
             let w = self.windows.clone();
             Settings::update(&self.paths, |s| s.window = w);
         }
@@ -1481,6 +1486,15 @@ impl ListenerApp {
         let mut submit = false;
         let t = Tokens::of(ui);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
+            // The top strip is the title bar here too.
+            let strip = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), toolbar::TOOLBAR_H));
+            let bar = ui.interact(strip, ui.scope_id().with("login-titlebar"), egui::Sense::click_and_drag());
+            if bar.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if bar.double_clicked() {
+                crate::chrome::title_double_click(ui.ctx());
+            }
             const W: f32 = 320.0;
             const FORM_H: f32 = 330.0;
             ui.add_space(((ui.available_height() - FORM_H) * 0.42).max(24.0));
@@ -1574,6 +1588,15 @@ impl ListenerApp {
         }
     }
 
+    /// The height our bar gives the traffic lights to centre in; `None` hides them.
+    fn title_bar_h(&self) -> Option<f32> {
+        match self.windows.mode {
+            WindowMode::Full => Some(toolbar::TOOLBAR_H),
+            WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
+            WindowMode::Mini => None,
+        }
+    }
+
     fn main_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.art.poll();
@@ -1657,7 +1680,7 @@ impl ListenerApp {
         let rail = width < SIDEBAR_FULL_MIN_W;
 
         egui::Panel::top("toolbar")
-            .exact_size(52.0)
+            .exact_size(toolbar::TOOLBAR_H)
             .resizable(false)
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.toolbar(ui));
@@ -1771,6 +1794,7 @@ impl eframe::App for ListenerApp {
             _ if self.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
             _ => {}
         }
+        crate::chrome::sync(ctx, crate::chrome::Bar { height: self.title_bar_h() });
         let square = self.windows.mode == WindowMode::Mini;
         // Until the window exists the platform can't lock it; keep asking.
         if self.square_wanted != Some(square) || (square && !self.square_native) {
@@ -1784,7 +1808,14 @@ impl eframe::App for ListenerApp {
                     ctx.request_repaint();
                 }
                 _ => {
-                    self.settling = None;
+                    if self.settling.take().is_some() {
+                        // Our own resize has landed: put presentation back to normal
+                        // (see `chrome::end_programmatic_resize`).
+                        crate::chrome::end_programmatic_resize();
+                        if let Some(t) = self.switch_started.take() {
+                            tracing::debug!(target: "listener::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
+                        }
+                    }
                     // Mini is square; where the platform doesn't hold it so, snap back.
                     if square
                         && !self.square_native

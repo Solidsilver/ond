@@ -516,6 +516,16 @@ const VERSES: [&str; 26] = [
     "When it is done",
 ];
 
+/// Stand-ins for macOS's traffic lights, which the offscreen renderer can't
+/// draw: three circles where `chrome` puts the real ones, to judge spacing.
+fn traffic_lights(ctx: &egui::Context, bar_h: Option<f32>) {
+    let Some(h) = bar_h else { return };
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("snapshot-traffic-lights")));
+    for (i, c) in [egui::Color32::from_rgb(0xFF, 0x5F, 0x57), egui::Color32::from_rgb(0xFE, 0xBC, 0x2E), egui::Color32::from_rgb(0x28, 0xC8, 0x40)].into_iter().enumerate() {
+        painter.circle_filled(pos2(18.0 + 7.0 + 20.0 * i as f32, h / 2.0), 6.0, c);
+    }
+}
+
 /// The current track's lyrics, as the server would give them: one line every
 /// eight seconds from 0:20, so 2:21 into the fixture lands mid-song.
 fn fixture_lyrics(app: &mut ListenerApp, synced: bool) {
@@ -965,6 +975,7 @@ fn snapshots() {
                         } else {
                             app.main_ui(ui);
                         }
+                        traffic_lights(ui.ctx(), app.title_bar_h());
                     }
                 },
                 None,
