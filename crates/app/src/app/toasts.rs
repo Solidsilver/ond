@@ -36,6 +36,7 @@ impl Toasts {
     }
 
     /// The messages showing, oldest first.
+    #[cfg(test)]
     pub fn texts(&self) -> Vec<&str> {
         self.items.iter().map(|t| t.text.as_str()).collect()
     }
