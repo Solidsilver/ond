@@ -49,12 +49,12 @@ if $universal; then
   done
   binary="$out/ond-universal"
   lipo -create -output "$binary" \
-    target/aarch64-apple-darwin/release/ond \
-    target/x86_64-apple-darwin/release/ond
+    target/aarch64-apple-darwin/release/Ond \
+    target/x86_64-apple-darwin/release/Ond
   arch="universal"
 else
   cargo build --release -p ond-player
-  binary="target/release/ond"
+  binary="target/release/Ond"
   arch="$(uname -m)"
 fi
 

@@ -7,7 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [[bin]]
-name = "ond"
+name = "Ond"
 path = "src/main.rs"
 
 [dependencies]

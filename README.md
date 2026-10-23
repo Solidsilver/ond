@@ -48,7 +48,7 @@ You need a recent stable Rust toolchain (`rustup`) and the Xcode command line to
 cargo run -p ond-player --release
 ```
 
-Use `--release` for listening. Debug builds are slow enough to cause dropouts. The package is called `ond-player`; the binary it builds is `ond`. To see the window-mode timings in the log, run with `RUST_LOG=ond::window=debug`.
+Use `--release` for listening. Debug builds are slow enough to cause dropouts. The package is called `ond-player`; the binary it builds is `Ond`, so the app shows as Ond in the menu bar and Dock even when you run it with cargo. To see the window-mode timings in the log, run with `RUST_LOG=ond::window=debug`.
 
 To build `Ond.app`, a `.zip` and a `.dmg` in `target/bundle/`:
 
