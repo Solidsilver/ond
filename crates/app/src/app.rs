@@ -14,6 +14,9 @@ mod songs;
 mod toolbar;
 mod widgets;
 
+#[cfg(test)]
+mod snapshots;
+
 use crate::art::Art;
 use crate::bridge::{Bridge, Msg};
 use crate::nav::{Nav, Route};

@@ -197,6 +197,15 @@ impl Art {
         });
     }
 
+    /// Makes `image` the art for `cover` at every size, without a server.
+    #[cfg(test)]
+    pub fn preload(&mut self, cover: &str, image: ColorImage) {
+        let tex = self.ctx.load_texture(format!("art:{cover}"), image, TextureOptions::LINEAR);
+        for size in SIZES {
+            self.textures.insert(Key { cover: cover.to_owned(), size }, tex.clone());
+        }
+    }
+
     /// Paints `cover` into `rect` (or the placeholder tile). A rect that isn't
     /// square is filled edge to edge, cropping the art's middle.
     pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: f32) {
