@@ -16,6 +16,7 @@ mod widgets;
 use crate::art::Art;
 use crate::bridge::{Bridge, Msg};
 use crate::nav::{Nav, Route};
+use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::queue::{EndAction, Queue, Source};
 use crate::search::SearchIndex;
@@ -119,6 +120,7 @@ pub enum Action {
     SetMode(WindowMode),
     /// Into Mini, or back to where Mini was entered from.
     ToggleMini,
+    SetScrobble(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -219,6 +221,9 @@ pub struct ListenerApp {
     /// When the last scroll happened (frame clock), for showing scroll bars.
     last_scroll: f64,
     bars_shown: bool,
+    /// OS Now Playing and server scrobbles.
+    now_playing: now_playing::Session,
+    scrobble: bool,
 }
 
 impl ListenerApp {
@@ -250,7 +255,18 @@ impl ListenerApp {
         let cache = audio::StreamCache::new(cache_cfg, rt.handle().clone())?;
         let engine = audio::spawn(audio::EngineConfig::default(), backend, Some(cache));
         let output = Outputs::restore(&engine, saved.as_ref());
-        bridge.forward_engine_events(engine.events.clone());
+        let scrobble = saved.as_ref().is_none_or(|s| s.scrobble);
+        let remote_bridge = bridge.clone();
+        let now_playing = now_playing::Session::start(now_playing::Config {
+            status: engine.status.clone(),
+            rt: rt.handle().clone(),
+            art_dir: paths.art_cache.clone(),
+            retry_file: paths.library_db.with_file_name("scrobbles.json"),
+            scrobble,
+            remote: Arc::new(move |r| remote_bridge.post(Msg::Remote(r))),
+        });
+        let tap = now_playing.clone();
+        bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
         bridge.load_cached_albums();
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
 
@@ -301,6 +317,8 @@ impl ListenerApp {
             settling: None,
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
+            now_playing,
+            scrobble,
         })
     }
 
@@ -313,6 +331,7 @@ impl ListenerApp {
                 self.bridge.sync_albums(client.clone());
                 self.bridge.fetch_home(client.clone());
                 self.art.set_client(client.clone());
+                self.now_playing.set_client(client.clone());
                 self.client = Some(client);
             }
             Msg::ConnectFailed(e) => {
@@ -356,8 +375,41 @@ impl ListenerApp {
                 }
             }
             Msg::Engine(ev) => self.handle_engine(ev),
+            Msg::Remote(r) => self.remote(r),
             Msg::Error(e) => self.error = Some(e),
         }
+    }
+
+    /// A media key, Control Center or headphone command.
+    fn remote(&mut self, r: Remote) {
+        let state = self.engine.status.state();
+        match r {
+            Remote::Play if state == PlayState::Paused => self.engine.send(Command::Resume),
+            Remote::Play if state == PlayState::Stopped => self.play_pause(),
+            Remote::Pause if !matches!(state, PlayState::Paused | PlayState::Stopped) => self.engine.send(Command::Pause),
+            Remote::Play | Remote::Pause => {}
+            Remote::Toggle => self.play_pause(),
+            Remote::Next => self.next(),
+            Remote::Previous => self.previous(),
+            Remote::Seek(to) => self.seek(to.max(0.0)),
+            Remote::SkipBy(by) => {
+                let end = self.duration_secs().unwrap_or(f64::MAX);
+                self.seek((self.position_secs() + by).clamp(0.0, end));
+            }
+        }
+    }
+
+    /// Describes `track` for Now Playing before the engine reaches it.
+    fn announce(&self, track: &Track) {
+        let album = self.data.album(&track.album_id);
+        self.now_playing.known(now_playing::Info {
+            track_id: track.id.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: album.map(|a| a.name.clone()),
+            duration_secs: track.duration_secs.map(f64::from),
+            cover: track.cover_art.clone().or_else(|| album.and_then(|a| a.cover_art.clone())),
+        });
     }
 
     fn handle_engine(&mut self, ev: audio::Event) {
@@ -409,6 +461,7 @@ impl ListenerApp {
         self.sent_next = None;
         match (&self.client, &self.queue.current) {
             (Some(client), Some(item)) => {
+                self.announce(&item.track);
                 self.engine.send(Command::Play(Self::source(client, &item.track)));
                 self.sync_next();
             }
@@ -427,6 +480,9 @@ impl ListenerApp {
         let next = self.queue.peek_next().map(|i| i.track.clone());
         let id = next.as_ref().map(|t| t.id.clone());
         if id != self.sent_next {
+            if let Some(t) = &next {
+                self.announce(t);
+            }
             self.engine.send(Command::SetNext(next.map(|t| Self::source(client, &t))));
             self.sent_next = id;
         }
@@ -633,6 +689,11 @@ impl ListenerApp {
             }
             Action::SetMode(mode) => self.set_mode(Some(mode)),
             Action::ToggleMini => self.set_mode(None),
+            Action::SetScrobble(on) => {
+                self.scrobble = on;
+                self.now_playing.set_scrobbling(on);
+                Settings::update(&self.paths, |s| s.scrobble = on);
+            }
         }
     }
 

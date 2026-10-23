@@ -27,6 +27,9 @@ pub struct Settings {
     /// Full / Compact / Mini, and where each was.
     #[serde(default)]
     pub window: crate::window::Windows,
+    /// Report plays to the server (which passes them on to Last.fm / ListenBrainz).
+    #[serde(default = "yes")]
+    pub scrobble: bool,
 }
 
 fn yes() -> bool {
@@ -44,6 +47,7 @@ impl Default for Settings {
             theme: Default::default(),
             show_queue: true,
             window: Default::default(),
+            scrobble: true,
         }
     }
 }

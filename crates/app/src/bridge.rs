@@ -25,6 +25,8 @@ pub enum Msg {
     /// Tracks of several albums, gathered for one queue action (`key` says which).
     TrackBatch { key: String, tracks: Vec<Track> },
     Engine(audio::Event),
+    /// Media keys, Control Center, headphone buttons.
+    Remote(crate::now_playing::Remote),
     Error(String),
 }
 
@@ -50,13 +52,20 @@ impl Bridge {
         self.ctx.request_repaint();
     }
 
-    /// Forwards engine events into the UI channel so `Ended` is seen even when idle.
-    pub fn forward_engine_events(&self, events: audio::EventReceiver<audio::Event>) {
+    /// Delivers `msg` to the UI from any thread.
+    pub fn post(&self, msg: Msg) {
+        self.send(msg);
+    }
+
+    /// Forwards engine events into the UI channel so `Ended` is seen even when
+    /// idle; `tap` sees each one first.
+    pub fn forward_engine_events(&self, events: audio::EventReceiver<audio::Event>, tap: impl Fn(&audio::Event) + Send + 'static) {
         let this = self.clone();
         std::thread::Builder::new()
             .name("engine-events".into())
             .spawn(move || {
                 while let Ok(ev) = events.recv() {
+                    tap(&ev);
                     this.send(Msg::Engine(ev));
                 }
             })

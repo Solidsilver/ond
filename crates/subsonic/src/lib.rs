@@ -144,6 +144,19 @@ impl Client {
         Ok(p.playlist)
     }
 
+    /// Reports a play to the server. `submission = false` marks it as "now playing";
+    /// `true` records the play (Navidrome forwards both to Last.fm / ListenBrainz).
+    /// `time_ms` is when playback started, in milliseconds since the Unix epoch.
+    pub async fn scrobble(&self, id: &str, time_ms: u64, submission: bool) -> Result<()> {
+        let (_, _): (_, serde_json::Value) = self
+            .call(
+                "scrobble",
+                &[("id", id), ("time", &time_ms.to_string()), ("submission", if submission { "true" } else { "false" })],
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn artists(&self) -> Result<Vec<Artist>> {
         let (_, p): (_, ArtistsPayload) = self.call("getArtists", &[]).await?;
         Ok(p.artists.index.into_iter().flat_map(|i| i.artist).collect())
