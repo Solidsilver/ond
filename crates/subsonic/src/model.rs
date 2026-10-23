@@ -80,8 +80,11 @@ pub struct Album {
     pub year: Option<i32>,
     pub genre: Option<String>,
     pub created: Option<String>,
+    /// When the user starred it (absent when not starred).
     pub starred: Option<String>,
     pub play_count: Option<u64>,
+    /// The user's 1–5 rating; absent or 0 when unrated.
+    pub user_rating: Option<u8>,
     /// OpenSubsonic: sort-friendly name without leading articles.
     pub sort_name: Option<String>,
     /// OpenSubsonic.
@@ -151,6 +154,10 @@ pub struct Song {
     /// OpenSubsonic: the track artists as separate entities.
     #[serde(default)]
     pub artists: Vec<ArtistRef>,
+    /// When the user starred it (absent when not starred).
+    pub starred: Option<String>,
+    /// The user's 1–5 rating; absent or 0 when unrated.
+    pub user_rating: Option<u8>,
 }
 
 /// `{ "name": ... }` objects: record labels, genres.
@@ -206,6 +213,42 @@ pub struct Artist {
     pub album_count: u32,
     pub cover_art: Option<String>,
     pub sort_name: Option<String>,
+}
+
+/// `getStarred2`: what the user starred, of each kind.
+#[derive(Debug, Default, Deserialize)]
+pub struct Starred2 {
+    #[serde(default)]
+    pub artist: Vec<Artist>,
+    #[serde(default)]
+    pub album: Vec<Album>,
+    #[serde(default)]
+    pub song: Vec<Song>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Starred2Payload {
+    #[serde(default)]
+    pub starred2: Starred2,
+}
+
+/// What a star applies to; the API takes a different parameter for each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StarKind {
+    Song,
+    Album,
+    Artist,
+}
+
+impl StarKind {
+    pub(crate) fn param(self) -> &'static str {
+        match self {
+            StarKind::Song => "id",
+            StarKind::Album => "albumId",
+            StarKind::Artist => "artistId",
+        }
+    }
 }
 
 #[derive(Deserialize)]

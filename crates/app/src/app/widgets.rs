@@ -53,6 +53,28 @@ pub fn primary(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str) -> Res
     resp
 }
 
+/// A filled button for a destructive choice (Delete in a confirmation).
+pub fn danger(ui: &mut Ui, text: &str) -> Response {
+    let t = Tokens::of(ui);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), Color32::WHITE);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, 30.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if resp.hovered() { t.danger.gamma_multiply(0.88) } else { t.danger };
+        ui.painter().rect_filled(rect, 6.0, fill);
+        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    }
+    let label = text.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    resp
+}
+
+/// A heart that loves / unloves: filled accent when on, a quiet outline when off.
+pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
+    let t = Tokens::of(ui);
+    let (icon, color, label) = if on { (crate::icons::Icon::HeartFilled, t.accent, "Unlove") } else { (crate::icons::Icon::Heart, t.muted, "Love") };
+    crate::icons::sized_button(ui, icon, label, vec2(size, size), glyph, Some(color))
+}
+
 /// A quiet button with a tinted fill (Shuffle next to Play).
 pub fn secondary(ui: &mut Ui, text: &str) -> Response {
     let t = Tokens::of(ui);

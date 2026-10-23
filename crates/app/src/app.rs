@@ -6,7 +6,10 @@
 
 mod album_page;
 mod browse;
+mod commands;
 mod compact;
+mod dialogs;
+mod favorites_page;
 mod palette;
 mod queue_panel;
 mod sidebar;
@@ -19,6 +22,8 @@ mod snapshots;
 
 use crate::art::Art;
 use crate::bridge::{Bridge, Msg};
+use crate::favorites::{Favorites, StarKind};
+use crate::keys::Cmd;
 use crate::nav::{Nav, Route};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
@@ -35,6 +40,8 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 use subsonic::Client;
 
+pub use commands::PlaylistAction;
+pub use dialogs::Overlay;
 pub use palette::Palette;
 pub(crate) use widgets::{elide as elide_text, segmented_wide};
 
@@ -151,6 +158,24 @@ pub enum Action {
     SetScrobble(bool),
     /// Back to the login screen; the saved password is forgotten.
     SignOut,
+    /// Love or unlove a song, album or artist. `track` / `name` keep the
+    /// Favorites view current.
+    ToggleStar { kind: StarKind, id: String, track: Option<Box<Track>>, name: Option<String> },
+    /// Rate a song 1–5; 0 clears it.
+    Rate(String, u8),
+    /// A key or menu-bar command.
+    Command(Cmd),
+    /// Open a sheet (new playlist, rename, delete, shortcuts).
+    Overlay(Overlay),
+    PlaylistEdit(PlaylistAction),
+}
+
+/// Tracks being dragged (onto a sidebar playlist, or within a playlist to
+/// reorder: then `from` says where they were).
+#[derive(Debug, Clone)]
+pub struct DragTracks {
+    pub tracks: Vec<Track>,
+    pub from: Option<(String, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -263,11 +288,26 @@ pub struct ListenerApp {
     /// OS Now Playing and server scrobbles.
     now_playing: now_playing::Session,
     scrobble: bool,
+    /// Hearts and ratings, mirrored from the server.
+    favorites: Favorites,
+    /// A sheet over the window, if one is open.
+    overlay: Option<Overlay>,
+    /// The native menu bar (macOS); kept alive here.
+    menu: Option<crate::menu::MenuBar>,
+    /// ⌘L: select (and scroll to) this track once its album is shown.
+    reveal: Option<String>,
+    /// Playlists added to lately, first in "Add to Playlist".
+    recent_playlists: Vec<String>,
+    fav_tab: favorites_page::FavTab,
 }
 
 impl ListenerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())
+        let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
+        // The app is running by now, so NSApp takes the menu bar.
+        let bridge = app.bridge.clone();
+        app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
+        Ok(app)
     }
 
     fn build(ctx: &egui::Context, paths: Paths, backend: Box<dyn audio::OutputBackend>) -> anyhow::Result<Self> {
@@ -364,6 +404,12 @@ impl ListenerApp {
             bars_shown: false,
             now_playing,
             scrobble,
+            favorites: Favorites::default(),
+            overlay: None,
+            menu: None,
+            reveal: None,
+            recent_playlists: Vec::new(),
+            fav_tab: favorites_page::FavTab::default(),
         })
     }
 
@@ -377,6 +423,7 @@ impl ListenerApp {
                 self.bridge.fetch_home(client.clone());
                 self.art.set_client(client.clone());
                 self.now_playing.set_client(client.clone());
+                self.bridge.fetch_starred(Some(client.clone()));
                 self.client = Some(client);
             }
             Msg::ConnectFailed(e) => {
@@ -444,6 +491,16 @@ impl ListenerApp {
             }
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
+            Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
+            Msg::UserMeta { meta, tracks } => self.favorites.note(meta, &tracks),
+            Msg::StarDone { kind, id, on, error } => self.star_done(kind, id, on, error),
+            Msg::RatingDone { id, previous, error } => self.rating_done(id, previous, error),
+            Msg::PlaylistCreated { id, name } => {
+                self.recent_playlists.insert(0, id.clone());
+                self.recent_playlists.truncate(3);
+                self.go(Route::Playlist { id, name });
+            }
+            Msg::Menu(cmd) => self.command(cmd),
             Msg::Error(e) => self.error = Some(e),
         }
     }
@@ -772,6 +829,11 @@ impl ListenerApp {
                 self.now_playing.set_scrobbling(on);
                 Settings::update(&self.paths, |s| s.scrobble = on);
             }
+            Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
+            Action::Rate(id, rating) => self.rate(id, rating),
+            Action::Command(cmd) => self.command(cmd),
+            Action::Overlay(o) => self.overlay = Some(o),
+            Action::PlaylistEdit(edit) => self.playlist_action(edit),
         }
     }
 
@@ -808,6 +870,7 @@ impl ListenerApp {
             }
             Route::Artist { name, .. } => self.bridge.find_credited(name),
             Route::Playlist { id, .. } => self.bridge.open_playlist(self.client.clone(), id),
+            Route::Favorites => self.bridge.fetch_starred(self.client.clone()),
             _ => {}
         }
     }
@@ -820,6 +883,8 @@ impl ListenerApp {
         self.queue.current = None;
         self.sent_next = None;
         self.palette = None;
+        self.overlay = None;
+        self.favorites = Favorites::default();
         self.bridge.cancel_sync();
         self.client = None;
         self.server_label.clear();
@@ -907,52 +972,29 @@ impl ListenerApp {
         }
     }
 
-    /// App-wide keys. Views handle their own (track list, queue, palette).
+    /// App-wide keys, from the key map in [`crate::keys`]. Views handle their
+    /// own (track list, queue, palette); a sheet takes the keyboard while open
+    /// except to close the shortcut list with ⌘/.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.palette.is_some() {
             return;
         }
-        use egui::{Key, KeyboardShortcut, Modifiers};
+        use egui::{Key, Modifiers};
         let typing = ctx.memory(|m| m.focused().is_some());
-        let mut out = Vec::new();
-        ctx.input_mut(|i| {
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::K)) {
-                out.push(Action::OpenPalette);
-            }
+        let cmds = ctx.input_mut(|i| {
+            let mut cmds = crate::keys::take(i, typing);
             if !typing && i.consume_key(Modifiers::NONE, Key::Slash) {
                 // Keep the `/` itself out of the search field.
                 i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == "/"));
-                out.push(Action::OpenPalette);
+                cmds.push(Cmd::Search);
             }
-            if !typing && i.consume_key(Modifiers::NONE, Key::Space) {
-                out.push(Action::PlayPause);
-            }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::OpenBracket)) {
-                out.push(Action::Back);
-            }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::CloseBracket)) {
-                out.push(Action::Forward);
-            }
-            if !typing && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowRight)) {
-                out.push(Action::Next);
-            }
-            if !typing && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowLeft)) {
-                out.push(Action::Previous);
-            }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, Key::U)) {
-                out.push(Action::ToggleQueue);
-            }
-            // Window modes. ⇧⌘3 would be nicer but it's the system screenshot key.
-            for (key, mode) in [(Key::Num1, WindowMode::Full), (Key::Num2, WindowMode::Compact), (Key::Num3, WindowMode::Mini)] {
-                if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, key)) {
-                    out.push(Action::SetMode(mode));
-                }
-            }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::M)) {
-                out.push(Action::ToggleMini);
-            }
+            cmds
         });
-        self.actions.extend(out);
+        for cmd in cmds {
+            if self.overlay.is_none() || cmd == Cmd::Shortcuts {
+                self.actions.push(Action::Command(cmd));
+            }
+        }
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui) {
@@ -964,13 +1006,39 @@ impl ListenerApp {
             WindowMode::Full => {
                 self.full_ui(ui);
                 self.palette_ui(&ctx);
+                self.overlay_ui(&ctx);
+                self.drag_ghost(&ctx);
             }
             WindowMode::Compact => self.compact_ui(ui),
             WindowMode::Mini => self.mini_ui(ui),
         }
-        for a in std::mem::take(&mut self.actions) {
-            self.apply(a);
+        // Commands become actions; apply those in the same frame too (bounded,
+        // in case something keeps asking).
+        for _ in 0..4 {
+            if self.actions.is_empty() {
+                break;
+            }
+            for a in std::mem::take(&mut self.actions) {
+                self.apply(a);
+            }
         }
+    }
+
+    /// What's being dragged, following the pointer.
+    fn drag_ghost(&self, ctx: &egui::Context) {
+        let Some(drag) = egui::DragAndDrop::payload::<DragTracks>(ctx) else { return };
+        let Some(at) = ctx.pointer_interact_pos() else { return };
+        let t = Tokens::of_ctx(ctx);
+        let text = match drag.tracks.len() {
+            1 => drag.tracks[0].title.clone(),
+            n => format!("{n} songs"),
+        };
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("drag-ghost")));
+        let font = egui::FontId::proportional(12.0);
+        let galley = painter.layout_no_wrap(text, font, t.text);
+        let rect = egui::Rect::from_min_size(at + egui::vec2(14.0, 10.0), galley.size() + egui::vec2(20.0, 10.0));
+        painter.rect(rect, 6.0, t.panel, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+        painter.galley(rect.min + egui::vec2(10.0, 5.0), galley, t.text);
     }
 
     /// Scroll bars show while scrolling and fade a second after.
@@ -1102,6 +1170,15 @@ impl eframe::App for ListenerApp {
         // back to back, and each rebuild is ~30 ms on a 20k-track library.
         if std::mem::take(&mut self.search_stale) {
             self.rebuild_search();
+        }
+        if let Some(menu) = self.menu.as_mut() {
+            let queue = if self.queue_narrow { self.queue_sheet } else { self.show_queue };
+            let theme = match self.theme {
+                ThemePref::System => 0,
+                ThemePref::Light => 1,
+                ThemePref::Dark => 2,
+            };
+            menu.sync(queue, self.bit_perfect, theme);
         }
         // Only the progress readout needs a clock; idle costs nothing. Buffering
         // animates the seek bar and spinner, so it ticks faster.

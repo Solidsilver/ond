@@ -42,6 +42,24 @@ pub enum Icon {
     Note,
     /// Offline.
     Download,
+    /// Love, not yet given.
+    Heart,
+    /// Loved.
+    HeartFilled,
+    /// New playlist.
+    Plus,
+}
+
+/// The heart's outline, top notch first, clockwise, in icon units (−1..1).
+fn heart_points(n: usize) -> Vec<(f32, f32)> {
+    (0..=n)
+        .map(|k| {
+            let t = std::f32::consts::TAU * k as f32 / n as f32;
+            let x = 16.0 * t.sin().powi(3);
+            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
+            (x / 17.0, -(y + 2.5) / 15.5)
+        })
+        .collect()
 }
 
 /// Paints `icon` centred in `rect`.
@@ -173,6 +191,23 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.0, -0.8), p(0.0, 0.3)], line);
             painter.add(Shape::line(vec![p(-0.45, -0.1), p(0.0, 0.35), p(0.45, -0.1)], line));
             painter.line_segment([p(-0.75, 0.8), p(0.75, 0.8)], line);
+        }
+        Icon::Heart => {
+            let pts = heart_points(48).into_iter().map(|(x, y)| p(x * 0.92, y * 0.92)).collect();
+            painter.add(Shape::closed_line(pts, Stroke::new((r * 0.17).max(1.1), color)));
+        }
+        Icon::HeartFilled => {
+            // Each half is convex (the notch is on the split), which egui fills cleanly.
+            let pts = heart_points(48);
+            let half = |right: bool| -> Vec<Pos2> {
+                pts.iter().filter(|(x, _)| if right { *x >= -1e-4 } else { *x <= 1e-4 }).map(|(x, y)| p(x * 0.92, y * 0.92)).collect()
+            };
+            painter.add(Shape::convex_polygon(half(true), color, Stroke::NONE));
+            painter.add(Shape::convex_polygon(half(false), color, Stroke::NONE));
+        }
+        Icon::Plus => {
+            painter.line_segment([p(0.0, -0.75), p(0.0, 0.75)], line);
+            painter.line_segment([p(-0.75, 0.0), p(0.75, 0.0)], line);
         }
         Icon::Spinner => {
             let t = painter.ctx().input(|i| i.time) as f32;

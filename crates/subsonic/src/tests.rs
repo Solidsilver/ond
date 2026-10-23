@@ -175,3 +175,32 @@ fn parses_album_artist_entities() {
     assert_eq!(p.album_list2.album[0].artists.len(), 2);
     assert_eq!(p.album_list2.album[0].artists[1].id.as_deref(), Some("ar-b"));
 }
+
+#[test]
+fn parses_starred2_with_ratings() {
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","starred2":{
+        "artist":[{"id":"ar1","name":"Bill Evans","albumCount":14,"starred":"2026-01-02T03:04:05Z"}],
+        "album":[{"id":"al1","name":"Portrait in Jazz","songCount":12,"duration":2700,"starred":"2026-01-02T03:04:05Z","userRating":4}],
+        "song":[{"id":"s1","title":"Peace Piece","albumId":"al2","starred":"2026-01-02T03:04:05Z","userRating":5},
+                {"id":"s2","title":"Autumn Leaves","albumId":"al1"}]}}}"#;
+    let (_, p): (ServerInfo, Starred2Payload) = parse_response(json).unwrap();
+    let s = p.starred2;
+    assert_eq!(s.artist[0].name, "Bill Evans");
+    assert_eq!(s.album[0].user_rating, Some(4));
+    assert_eq!(s.song[0].user_rating, Some(5));
+    assert!(s.song[0].starred.is_some());
+    assert_eq!(s.song[1].user_rating, None);
+    // An empty result omits the lists entirely.
+    let empty = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","starred2":{}}}"#;
+    let (_, p): (ServerInfo, Starred2Payload) = parse_response(empty).unwrap();
+    assert!(p.starred2.song.is_empty());
+}
+
+#[test]
+fn playlist_edits_repeat_their_params() {
+    let c = Client::new("https://music.example.com", Credentials::new("joe", "pw")).unwrap();
+    let url = c.endpoint("updatePlaylist", &[("playlistId", "p1"), ("songIdToAdd", "a"), ("songIdToAdd", "b"), ("songIndexToRemove", "3")]);
+    let adds: Vec<String> = url.query_pairs().filter(|(k, _)| k == "songIdToAdd").map(|(_, v)| v.into_owned()).collect();
+    assert_eq!(adds, ["a", "b"]);
+    assert_eq!(StarKind::Album.param(), "albumId");
+}

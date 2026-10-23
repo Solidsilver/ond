@@ -6,7 +6,10 @@
 mod app;
 mod art;
 mod bridge;
+mod favorites;
 mod icons;
+mod keys;
+mod menu;
 mod nav;
 mod now_playing;
 mod output;

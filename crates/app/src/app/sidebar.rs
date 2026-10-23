@@ -2,7 +2,7 @@
 //! settings. In narrow windows it collapses to a rail of icons.
 
 use super::widgets::toggle;
-use super::{Action, ListenerApp};
+use super::{Action, DragTracks, ListenerApp, PlaylistAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{ThemePref, Tokens, semibold};
@@ -12,11 +12,13 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 pub const SIDEBAR_W: f32 = 216.0;
 pub const RAIL_W: f32 = 52.0;
 
-const PLACES: [(&str, Route, Icon); 5] = [
+/// In ⌘1…⌘6 order.
+pub(super) const PLACES: [(&str, Route, Icon); 6] = [
     ("Recently Added", Route::Recent, Icon::Clock),
     ("Artists", Route::Artists, Icon::Person),
     ("Albums", Route::Albums, Icon::Grid),
     ("Songs", Route::Songs, Icon::Note),
+    ("Favorites", Route::Favorites, Icon::Heart),
     ("Offline", Route::Offline, Icon::Download),
 ];
 
@@ -46,8 +48,21 @@ impl ListenerApp {
             }
         }
         ui.add_space(18.0);
-        self.section(ui, "Playlists");
+        // "Playlists" with a + for a new one, in line with the section label.
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.set_height(18.0);
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Playlists").font(FontId::new(11.0, semibold())).color(t.muted));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::sized_button(ui, Icon::Plus, "New Playlist (⌘N)", vec2(20.0, 18.0), 9.0, Some(t.muted)).clicked() {
+                    self.actions.push(Action::Command(crate::keys::Cmd::NewPlaylist));
+                }
+            });
+        });
+        ui.add_space(4.0);
         let bottom_h = 34.0;
+        let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
         egui::ScrollArea::vertical().id_salt("playlists").max_height((ui.available_height() - bottom_h).max(40.0)).show(ui, |ui| {
             if self.data.playlists.is_empty() {
                 ui.label(egui::RichText::new("  None yet").small().color(t.muted));
@@ -55,11 +70,30 @@ impl ListenerApp {
             for p in self.data.playlists.clone() {
                 let route = Route::Playlist { id: p.id.clone(), name: p.name.clone() };
                 let on = active.as_ref() == Some(&route);
+                let mine = self.owns(&p);
                 let resp = self.place(ui, &p.name, on);
+                // A drop target for songs dragged from any list.
+                if mine && dragging {
+                    let over = resp.dnd_hover_payload::<DragTracks>().is_some_and(|d| d.from.as_ref().is_none_or(|(from, _)| *from != p.id));
+                    if over {
+                        ui.painter().rect_stroke(resp.rect, 6.0, egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
+                    }
+                    if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
+                        && drag.from.as_ref().is_none_or(|(from, _)| *from != p.id)
+                    {
+                        self.actions.push(Action::PlaylistEdit(PlaylistAction::Add { id: p.id.clone(), tracks: drag.tracks.clone() }));
+                    }
+                }
                 if resp.clicked() {
                     self.actions.push(Action::Go(route));
                 }
-                resp.context_menu(|ui| self.playlist_menu(ui, &p.id));
+                resp.context_menu(|ui| {
+                    self.playlist_menu(ui, &p.id);
+                    if mine {
+                        ui.separator();
+                        self.playlist_edit_items(ui, &p.id, &p.name);
+                    }
+                });
             }
         });
 
