@@ -64,15 +64,15 @@ impl Verdict {
     pub fn evidence(&self) -> String {
         match &self.kind {
             VerdictKind::PaddedBits { bits, effective } => {
-                format!("The low {} bits of every sample are zero: {bits}-bit in name, {effective}-bit in content.", bits - effective)
+                format!("The low {} bits of every sample are zero. The file is {bits}-bit in name and {effective}-bit in content.", bits - effective)
             }
             VerdictKind::Upsampled { from_hz, cutoff_hz } => format!(
-                "No content above {} kHz; a native high-rate recording would have some. Likely upsampled from {} kHz.",
+                "No content above {} kHz, where a native high-rate recording would have some. Likely upsampled from {} kHz.",
                 khz(*cutoff_hz),
                 khz(*from_hz)
             ),
             VerdictKind::LossySource { cutoff_hz } => format!(
-                "Sharp cutoff at {} kHz, the lowpass MP3 and AAC encoders apply. The file may have been made from a lossy copy.",
+                "Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy.",
                 khz(*cutoff_hz)
             ),
         }

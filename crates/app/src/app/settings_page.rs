@@ -4,7 +4,7 @@
 //! account) lives here; the popovers keep only what's needed in the moment.
 
 use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, section, thin_slider, toggle};
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{ThemePref, Tokens, semibold};
 use audio::PlaybackMode;
@@ -41,7 +41,7 @@ const NAV_W: f32 = 176.0;
 /// The right pane's content width (it scrolls when taller than the window).
 const PANE_PAD: f32 = 28.0;
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         let w = (screen.width() - 64.0).clamp(480.0, 760.0);
@@ -111,7 +111,7 @@ impl ListenerApp {
             if narrow_toggle(ui, &mut scrobble, "Scrobble plays").changed() {
                 self.actions.push(Action::SetScrobble(scrobble));
             }
-            hint(ui, "Plays are reported to your server, which passes them on to Last.fm or ListenBrainz if set up.");
+            hint(ui, "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.");
             ui.add_space(10.0);
             let mut playing = self.analyze_playing();
             if narrow_toggle(ui, &mut playing, "Analyze tracks as they play").changed() {
@@ -124,7 +124,7 @@ impl ListenerApp {
             if narrow_toggle(ui, &mut shown, "Show diagnostics bar").changed() {
                 self.actions.push(Action::SetDiagnostics(shown));
             }
-            hint(ui, "Signal path, buffer, downloads, sync and server timing in one thin strip along the bottom (⌥⌘I). Nothing moves out of its usual place.");
+            hint(ui, "Shows the signal path, buffer, downloads, sync and server timing in a thin bar along the bottom (⌥⌘I).");
         });
     }
 
@@ -138,7 +138,7 @@ impl ListenerApp {
                 ui.add_space(12.0);
                 db_row(ui, "Pre-amp", &mut p.preamp_db, -12.0..=12.0, width);
                 db_row(ui, "Untagged tracks", &mut p.untagged_db, -12.0..=0.0, width);
-                hint(ui, "Gain for tracks without ReplayGain tags. Peaks are always kept below −1 dBFS.");
+                hint(ui, "Gain for tracks without ReplayGain tags. Ond keeps peaks below −1 dBFS.");
             }
             if self.bit_perfect {
                 ui.add_space(6.0);
@@ -208,7 +208,7 @@ impl ListenerApp {
                 });
             }
             ui.add_space(10.0);
-            hint(ui, "New devices start in Normal for speakers, Bluetooth and AirPlay, and in Bit-perfect for DACs and headphones. Bit-perfect sends samples untouched: use the device's own volume.");
+            hint(ui, "New devices start in Normal for speakers, Bluetooth and AirPlay, and in Bit-perfect for DACs and headphones. Bit-perfect sends samples untouched, so use the device's own volume.");
         });
     }
 
@@ -247,7 +247,7 @@ impl ListenerApp {
                 }
             });
             ui.add_space(6.0);
-            hint(ui, "Downloads move to a new location the next time Listener starts.");
+            hint(ui, "Downloads move to a new location the next time Ond starts.");
         });
     }
 
@@ -294,7 +294,7 @@ impl ListenerApp {
             } else if p.waiting {
                 format!("{} of {} · waiting for playback", p.done.min(p.total), p.total)
             } else {
-                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::fmt::about(p.eta_secs))
+                format!("Analyzing {} of {} · {} left", p.done.min(p.total), p.total, crate::fmt::about(p.eta_secs))
             };
             ui.label(egui::RichText::new(status).size(13.0).color(t.text));
             ui.add_space(6.0);
@@ -316,9 +316,9 @@ impl ListenerApp {
         } else if self.session.client.is_some() && !self.data.tracks.all.is_empty() {
             let (n, secs) = self.unanalysed();
             if n == 0 {
-                ui.label(egui::RichText::new("Every track is analysed.").size(13.0).color(t.text));
+                ui.label(egui::RichText::new("Every track is analyzed.").size(13.0).color(t.text));
             } else {
-                let text = format!("{} not analysed yet · {}", crate::fmt::plural(n, "track"), crate::fmt::about(crate::analyze::assumed_eta(secs)));
+                let text = format!("{} not analyzed yet · {}", crate::fmt::plural(n, "track"), crate::fmt::about(crate::analyze::assumed_eta(secs)));
                 ui.label(egui::RichText::new(text).size(13.0).color(t.text));
                 ui.add_space(10.0);
                 if secondary(ui, "Analyze library").clicked() {
@@ -333,7 +333,7 @@ impl ListenerApp {
             hint(ui, &format!("{} couldn't be read", p.failed));
         }
         ui.add_space(8.0);
-        hint(ui, "Loudness, dynamic range, and a check for upsampled or lossy-sourced files. Runs in the background and waits while playback needs the network.");
+        hint(ui, "Measures loudness and dynamic range, and checks for upsampled or lossy-sourced files. Runs in the background and pauses while playback needs the network.");
     }
 
     fn account_settings(&mut self, ui: &mut Ui) {

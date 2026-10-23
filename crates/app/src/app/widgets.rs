@@ -109,6 +109,31 @@ pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: b
     resp
 }
 
+/// One choice in a rating menu: `rating` stars drawn as icons, filled up to
+/// it, with a check when it's the current rating.
+pub fn rating_choice(ui: &mut Ui, rating: u8, current: bool) -> Response {
+    let t = Tokens::of(ui);
+    let star = 12.0;
+    // A fixed width: a menu sizes itself to its widest row, so taking the room
+    // offered would stretch the menu across the window.
+    let width = 26.0 + 5.0 * (star + 3.0) + 8.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, t.selected);
+    }
+    if current {
+        crate::icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(rect.left() + 10.0, rect.center().y), vec2(10.0, 10.0)), crate::icons::Icon::Check, t.text);
+    }
+    for k in 0..5u8 {
+        let c = egui::pos2(rect.left() + 26.0 + f32::from(k) * (star + 3.0), rect.center().y);
+        let (icon, color) = if k < rating { (crate::icons::Icon::StarFilled, t.text) } else { (crate::icons::Icon::Star, t.muted) };
+        crate::icons::paint(ui.painter(), Rect::from_center_size(c, vec2(star, star)), icon, color);
+    }
+    let label = crate::fmt::stars(rating);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, true, current, &label));
+    resp
+}
+
 /// A quiet button with a tinted fill (Shuffle next to Play).
 pub fn secondary(ui: &mut Ui, text: &str) -> Response {
     let t = Tokens::of(ui);

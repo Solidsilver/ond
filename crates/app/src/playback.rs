@@ -35,7 +35,7 @@ impl RgMode {
         match self {
             RgMode::Off => "Tracks play at their mastered level",
             RgMode::Track => "Every track evened out to the same loudness",
-            RgMode::Album => "Albums evened out; quiet and loud songs within one keep their contrast",
+            RgMode::Album => "Albums evened out, so quiet and loud songs on one album keep their contrast",
             RgMode::Auto => "Album gain while an album plays in order, track gain otherwise",
         }
     }
@@ -170,9 +170,9 @@ pub enum Network {
 impl Network {
     pub fn label(self) -> &'static str {
         match self {
-            Network::Unknown => "checking network…",
-            Network::Home => "server is on this network",
-            Network::Away => "server is remote",
+            Network::Unknown => "Checking the network…",
+            Network::Home => "Server is on this network",
+            Network::Away => "Server is remote",
         }
     }
 }

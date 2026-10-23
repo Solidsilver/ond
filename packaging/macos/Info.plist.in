@@ -5,17 +5,17 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>Listener</string>
+	<string>Ond</string>
 	<key>CFBundleIconFile</key>
-	<string>Listener</string>
+	<string>Ond</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.listener.Listener</string>
+	<string>dev.solidsilver.ond</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Listener</string>
+	<string>Ond</string>
 	<key>CFBundleDisplayName</key>
-	<string>Listener</string>
+	<string>Ond</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -33,6 +33,6 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>@COPYRIGHT@</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Listener connects to your Navidrome server, which may be on your local network.</string>
+	<string>Ond connects to your Navidrome server, which may be on your local network.</string>
 </dict>
 </plist>

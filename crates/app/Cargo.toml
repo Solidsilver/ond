@@ -1,9 +1,14 @@
 [package]
-name = "listener"
+name = "ond-player"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ond"
+path = "src/main.rs"
 
 [dependencies]
 analysis = { version = "0.1.0", path = "../analysis" }

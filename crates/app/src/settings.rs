@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const KEYRING_SERVICE: &str = "dev.listener.navidrome";
+/// The Keychain service, the same as the bundle id.
+const KEYRING_SERVICE: &str = "dev.solidsilver.ond";
 
 /// How a device plays, as remembered per device. Saved as "normal" /
 /// "bit-perfect", as earlier builds wrote it.
@@ -141,8 +142,8 @@ pub struct Paths {
 
 impl Paths {
     pub fn resolve() -> anyhow::Result<Self> {
-        let dirs = directories::ProjectDirs::from("dev", "listener", "Listener")
-            .ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+        // On macOS the folders are named `dev.solidsilver.ond`, the bundle id.
+        let dirs = directories::ProjectDirs::from("dev", "solidsilver", "ond").ok_or_else(|| anyhow::anyhow!("no home directory"))?;
         std::fs::create_dir_all(dirs.config_dir())?;
         std::fs::create_dir_all(dirs.data_dir())?;
         Ok(Self {
@@ -216,5 +217,13 @@ mod tests {
         assert_eq!(login("", "luke").account_id(), None);
         // Fixed across builds: downloads live in a folder named after it.
         assert_eq!(login("http://localhost:4533", "admin").account_id(), Some(0x5cd1_2c42));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn folders_are_named_after_the_bundle_id() {
+        let dirs = directories::ProjectDirs::from("dev", "solidsilver", "ond").unwrap();
+        assert!(dirs.data_dir().ends_with("dev.solidsilver.ond"), "{}", dirs.data_dir().display());
+        assert!(dirs.cache_dir().ends_with("dev.solidsilver.ond"), "{}", dirs.cache_dir().display());
     }
 }

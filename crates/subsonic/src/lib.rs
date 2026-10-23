@@ -15,7 +15,7 @@ use url::Url;
 
 /// Protocol version we advertise. Navidrome speaks 1.16.1 plus OpenSubsonic extensions.
 pub const API_VERSION: &str = "1.16.1";
-pub const CLIENT_NAME: &str = "listener";
+pub const CLIENT_NAME: &str = "ond";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -61,7 +61,7 @@ impl Client {
             base.set_path(&format!("{}/", base.path()));
         }
         let http = reqwest::Client::builder()
-            .user_agent(concat!("listener/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("ond/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .build()?;

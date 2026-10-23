@@ -8,7 +8,7 @@
 use super::view_ctx::ViewCtx;
 use super::widgets::{elide, heart_button, link};
 use super::seek::SeekStyle;
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::lyrics::{self, Fetch, Lyrics};
@@ -85,7 +85,7 @@ impl ViewCtx<'_> {
                 self.lyrics_block(ui, &track, &l, size, bg);
             }
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
-            _ if self.session.client.is_none() => note(ui, "Lyrics come from your server when it's connected."),
+            _ if self.session.client.is_none() => note(ui, "Lyrics load when the server is connected."),
             _ => note(ui, "No lyrics for this song."),
         }
     }
@@ -160,7 +160,7 @@ impl ViewCtx<'_> {
             }
             if let Some(al) = album {
                 if track.artist.is_some() {
-                    ui.label(egui::RichText::new("  —  ").font(font.clone()).color(t.muted));
+                    ui.label(egui::RichText::new("  ·  ").font(font.clone()).color(t.muted));
                 }
                 if link(ui, &al.name, font, t.muted).clicked() {
                     self.ui.reveal = Some(track.id.clone());
@@ -313,7 +313,7 @@ impl ViewCtx<'_> {
                             lyrics::Row::Text { text, line: Some(i) } => {
                                 let i = *i;
                                 let sung = Some(i) == cur;
-                                // A pause is a gap, or a quiet "• • •" while it's the sung line.
+                                // A pause is a gap, or a quiet "· · ·" while it's the sung line.
                                 if text.is_empty() && !sung {
                                     continue;
                                 }
@@ -325,14 +325,14 @@ impl ViewCtx<'_> {
                                 } else {
                                     (size, t.muted)
                                 };
-                                let shown = if text.is_empty() { "•  •  •" } else { text.as_str() };
+                                let shown = if text.is_empty() { "·  ·  ·" } else { text.as_str() };
                                 let galley = lyric_galley(ui, shown, FontId::new(px, semibold()), color, width);
                                 let (r, resp) = ui.allocate_exact_size(vec2(width, galley.size().y + 6.0), Sense::click());
                                 if resp.hovered() && !sung {
                                     ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
                                 }
                                 ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
-                                let label = format!("{} — {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0), text);
+                                let label = format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0));
                                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     seek_to = Some(lines[i].start_ms as f64 / 1000.0);
@@ -381,7 +381,7 @@ impl ViewCtx<'_> {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new("Not synced").size(11.0).color(t.muted.gamma_multiply(0.8)))
-                        .on_hover_text("These lyrics have no timing, so they don't follow the music");
+                        .on_hover_text("These lyrics have no timing, so they can't follow the music");
                     ui.add_space((size * 1.0).round());
                     let mut first = true;
                     for row in &rows {
@@ -480,7 +480,7 @@ fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysi
     rows
 }
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         egui::Panel::top("player-bar")

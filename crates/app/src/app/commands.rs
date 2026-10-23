@@ -1,7 +1,7 @@
 //! What keys, the menu bar, hearts, ratings and playlist edits do. Views push
 //! [`Action`]s; these apply them.
 
-use super::{Action, ListenerApp, sidebar};
+use super::{Action, OndApp, sidebar};
 use std::sync::Arc;
 use crate::bridge::PlaylistEdit;
 use crate::favorites::StarKind;
@@ -39,7 +39,7 @@ const VOLUME_STEP: f32 = 0.1;
 /// How far ⌥⌘→ / ⌥⌘← skip.
 const SKIP_SECS: f64 = 10.0;
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::PlayPause => self.actions.push(Action::PlayPause),
@@ -125,7 +125,7 @@ impl ListenerApp {
             Some(e) => {
                 let track = self.favorites.view.songs.iter().find(|t| t.id == id).cloned().or_else(|| self.find_track(&id));
                 self.favorites.failed(kind, &id, on, seq, track.as_ref(), None);
-                self.show_error(format!("Couldn't {} that: {e}", if on { "love" } else { "unlove" }));
+                self.show_error(format!("Couldn't save the heart: {e}"));
             }
         }
     }
@@ -151,7 +151,7 @@ impl ListenerApp {
         let client = self.session.client.clone();
         match a {
             PlaylistAction::Create { name, tracks } => {
-                let name = if name.trim().is_empty() { "Untitled Playlist".to_owned() } else { name.trim().to_owned() };
+                let name = if name.trim().is_empty() { "Untitled playlist".to_owned() } else { name.trim().to_owned() };
                 let ids = tracks.iter().map(|t| t.id.clone()).collect();
                 self.bridge.create_playlist(client, name, ids);
             }

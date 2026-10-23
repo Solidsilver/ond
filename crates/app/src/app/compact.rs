@@ -5,7 +5,7 @@
 
 use super::widgets::elide;
 use super::seek::SeekStyle;
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::window::WindowMode;
@@ -28,7 +28,7 @@ pub(super) fn on_art(ui: &mut Ui) {
     w.inactive.weak_bg_fill = Color32::TRANSPARENT;
 }
 
-impl ListenerApp {
+impl OndApp {
     fn cover_of(&self, track: &Track) -> Option<String> {
         self.data.cover_for(track).map(str::to_owned)
     }
@@ -109,7 +109,7 @@ impl ListenerApp {
         ui.scope_builder(UiBuilder::new().max_rect(row).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, Some(ON_ART)));
         let corner = |at: egui::Pos2| Rect::from_center_size(at, vec2(26.0, 26.0));
         for (r, icon, label, mode) in [
-            (corner(rect.left_top() + vec2(19.0, 19.0)), Icon::Player, "Player, with the queue (⌥⌘2)", WindowMode::Player),
+            (corner(rect.left_top() + vec2(19.0, 19.0)), Icon::Player, "Player (⌥⌘2)", WindowMode::Player),
             (corner(rect.right_top() + vec2(-19.0, 19.0)), Icon::Expand, "Full window (⌥⌘1)", WindowMode::Full),
         ] {
             ui.painter().circle_filled(r.center(), 13.0, scrim());

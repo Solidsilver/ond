@@ -90,10 +90,9 @@ pub fn capitalize(s: &str) -> String {
     }
 }
 
-/// A 0–5 rating as stars: "★★★☆☆".
+/// A 1–5 rating in words: "3 stars". The UI draws stars as icons, never text.
 pub fn stars(rating: u8) -> String {
-    let r = usize::from(rating.min(5));
-    format!("{}{}", "★".repeat(r), "☆".repeat(5 - r))
+    plural(usize::from(rating.min(5)), "star")
 }
 
 /// 44100 → "44.1", 48000 → "48" (the engine's rule, so the status line agrees).
@@ -226,7 +225,8 @@ mod tests {
         assert_eq!(plural(3, "song"), "3 songs");
         assert_eq!(thousands(1866), "1,866");
         assert_eq!(thousands(25_000), "25,000");
-        assert_eq!(stars(3), "★★★☆☆");
+        assert_eq!(stars(3), "3 stars");
+        assert_eq!(stars(1), "1 star");
         assert_eq!(capitalize("double bass"), "Double bass");
     }
 

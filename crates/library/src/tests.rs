@@ -268,7 +268,7 @@ fn newer_schema_is_refused_not_destroyed() {
 
     let err = Library::open_or_recover(&path).err().expect("newer schema must not open");
     assert!(matches!(err, Error::NewerSchema { .. }));
-    assert!(err.to_string().contains("newer version of Listener"), "{err}");
+    assert!(err.to_string().contains("newer version of Ond"), "{err}");
     assert_eq!(files_in(dir.path()), ["library.redb"], "nothing moved or deleted");
 }
 

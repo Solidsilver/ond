@@ -1,8 +1,8 @@
 # Manual test checklist
 
 What automated tests can't cover: real hardware, the real server, and macOS integration.
-Run with `cargo run -p listener --release`. Visual review without a server:
-`cargo test -p listener --release snapshots -- --ignored --nocapture` → `target/snapshots/*.png`.
+Run with `cargo run -p ond-player --release`. Visual review without a server:
+`cargo test -p ond-player --release snapshots -- --ignored --nocapture` → `target/snapshots/*.png`.
 
 ## Audio output
 - [ ] UMC22, 16/44.1 file, bit-perfect: green dot; Audio MIDI Setup shows 44.1 kHz; other apps are silent on the UMC22 (hog mode).

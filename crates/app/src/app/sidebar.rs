@@ -1,7 +1,7 @@
 //! Left column: search (opens the palette), library places, playlists, and
 //! settings. In narrow windows it collapses to a rail of icons.
 
-use super::{Action, DragTracks, ListenerApp, PlaylistAction};
+use super::{Action, DragTracks, OndApp, PlaylistAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
@@ -14,7 +14,7 @@ const FOOTER_BUTTON: f32 = 28.0;
 
 /// In ⌘1…⌘6 order.
 pub(super) const PLACES: [(&str, Route, Icon); 6] = [
-    ("Recently Added", Route::Recent, Icon::Clock),
+    ("Recently added", Route::Recent, Icon::Clock),
     ("Artists", Route::Artists, Icon::Person),
     ("Albums", Route::Albums, Icon::Grid),
     ("Songs", Route::Songs, Icon::Note),
@@ -22,7 +22,7 @@ pub(super) const PLACES: [(&str, Route, Icon); 6] = [
     ("Offline", Route::Offline, Icon::Download),
 ];
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn sidebar(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.y = 1.0;
@@ -304,7 +304,7 @@ impl ListenerApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            if menu_item(ui, "Sign Out", "") {
+            if menu_item(ui, "Sign out", "") {
                 self.actions.push(Action::SignOut);
             }
             ui.add_space(2.0);
@@ -444,8 +444,8 @@ impl ServerState {
     fn tooltip(&self) -> String {
         match self {
             ServerState::Connected { host } => format!("Connected to {host}. Click for details."),
-            ServerState::Syncing { detail, .. } => format!("{detail}\nBrowsing works meanwhile; new albums and tracks appear as they arrive."),
-            ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays; reconnecting in the background.".into(),
+            ServerState::Syncing { detail, .. } => format!("{detail}\nYou can browse while it runs. New albums and tracks appear as they arrive."),
+            ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
         }
     }

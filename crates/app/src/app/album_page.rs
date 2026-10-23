@@ -102,7 +102,7 @@ fn analysis_table(ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>]
                     }
                 }
                 None => {
-                    ui.label(small("not analysed".into(), t.muted));
+                    ui.label(small("not analyzed".into(), t.muted));
                     for _ in 0..3 {
                         ui.label("");
                     }
@@ -201,17 +201,17 @@ impl ViewCtx<'_> {
                         if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
                             sep(ui);
                             ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
-                                .on_hover_text("Dynamic range (DR meter): the album's average");
+                                .on_hover_text("Dynamic range (DR meter), averaged across the album");
                             sep(ui);
                             ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
                                 .on_hover_text("Integrated loudness (EBU R128), across the album");
                         } else if analysing > 0 {
                             sep(ui);
-                            ui.label(egui::RichText::new(format!("analysing {}/{}", summary.analyzed, tracks.len())).size(12.0).color(t.muted));
+                            ui.label(egui::RichText::new(format!("analyzing {}/{}", summary.analyzed, tracks.len())).size(12.0).color(t.muted));
                         }
                         if let Some((v, n)) = &summary.verdict {
                             ui.add_space(10.0);
-                            let tracks_note = if *n == summary.analyzed { "every analysed track".to_owned() } else { format!("{n} of {} analysed tracks", summary.analyzed) };
+                            let tracks_note = if *n == summary.analyzed { "every analyzed track".to_owned() } else { format!("{n} of {} analyzed tracks", summary.analyzed) };
                             chip(ui, &v.label(), t.warn).on_hover_text(format!("{}\n\nSeen in {tracks_note}.", v.evidence()));
                         }
                     });
@@ -232,7 +232,7 @@ impl ViewCtx<'_> {
                             super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
                             if !summary.complete() && analysing == 0 && !tracks.is_empty() {
                                 ui.separator();
-                                if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
+                                if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {
                                     self.actions.push(Action::Analyze(tracks.to_vec()));
                                 }
                             }
@@ -310,9 +310,9 @@ impl ViewCtx<'_> {
             if found.iter().all(Option::is_none) {
                 super::widgets::kv_row(ui, "Loudness", |ui| {
                     if analysing {
-                        ui.label(egui::RichText::new("Analysing…").size(12.5).color(t.muted));
+                        ui.label(egui::RichText::new("Analyzing…").size(12.5).color(t.muted));
                     } else if link(ui, "Analyze album", FontId::proportional(12.5), t.accent)
-                        .on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files")
+                        .on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files")
                         .clicked()
                     {
                         self.actions.push(Action::Analyze(tracks.to_vec()));
@@ -390,7 +390,7 @@ impl ViewCtx<'_> {
             return;
         };
         if tracks.is_empty() {
-            let hint = if mine { "Drag songs onto this playlist in the sidebar, or use “Add to Playlist” on any song." } else { "Its owner hasn’t added any songs." };
+            let hint = if mine { "Drag songs onto this playlist in the sidebar, or use “Add to playlist” on any song." } else { "Its owner hasn’t added any songs." };
             super::widgets::empty_state(ui, Icon::Note, "This playlist is empty", hint);
             return;
         }
@@ -458,8 +458,8 @@ impl ViewCtx<'_> {
 
     /// The Add to Playlist submenu: New Playlist…, then recently used, then the rest.
     pub(super) fn add_to_playlist_menu(&mut self, ui: &mut Ui, tracks: &[Track]) {
-        ui.menu_button("Add to Playlist", |ui| {
-            if ui.button("New Playlist…").clicked() {
+        ui.menu_button("Add to playlist", |ui| {
+            if ui.button("New playlist…").clicked() {
                 self.actions.push(Action::Overlay(Overlay::new_playlist(tracks.to_vec())));
             }
             let mine: Vec<subsonic::Playlist> = self.data.playlists.iter().filter(|p| self.owns(p)).cloned().collect();
@@ -641,7 +641,7 @@ impl ViewCtx<'_> {
         self.track_menu(ui, tr, source);
         if let Some(pid) = playlist {
             ui.separator();
-            if ui.button("Remove from Playlist").clicked() {
+            if ui.button("Remove from playlist").clicked() {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Remove { id: pid.to_owned(), index }));
             }
         }
@@ -662,13 +662,13 @@ impl ViewCtx<'_> {
         ui.menu_button("Rating", |ui| {
             let current = self.favorites.rating(&tr.id);
             for r in 1..=5u8 {
-                let stars = format!("{}{}", "★".repeat(r.into()), "☆".repeat((5 - r).into()));
-                if ui.add(egui::Button::selectable(current == r, stars)).clicked() {
+                if super::widgets::rating_choice(ui, r, current == r).clicked() {
                     self.actions.push(Action::Rate(tr.id.clone(), r));
+                    ui.close();
                 }
             }
             ui.separator();
-            if ui.add_enabled(current > 0, egui::Button::new("Clear Rating")).clicked() {
+            if ui.add_enabled(current > 0, egui::Button::new("Clear rating")).clicked() {
                 self.actions.push(Action::Rate(tr.id.clone(), 0));
             }
         });

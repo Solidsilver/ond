@@ -3,7 +3,7 @@
 //! compared); it's for looking at the UI without running the app:
 //!
 //! ```sh
-//! cargo test -p listener --release snapshots -- --ignored --nocapture
+//! cargo test -p ond-player --release snapshots -- --ignored --nocapture
 //! ```
 //!
 //! The data is a fixed, realistic library with generated cover art, a queue
@@ -281,7 +281,7 @@ fn signal_with(source: (u32, u32), device: (u32, u32), verdict: audio::BitPerfec
 }
 
 /// The app with the fixture library, queue and devices.
-fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
+fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     let paths = Paths {
         config_file: dir.join("settings.json"),
         library_db: dir.join("library.redb"),
@@ -289,7 +289,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
         art_cache: dir.join("art"),
         offline: dir.join("offline"),
     };
-    let mut app = ListenerApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
+    let mut app = OndApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
     // Let start-up messages (cached albums from the empty db, device list from
     // the null output) land first, so they don't overwrite the fixture.
     std::thread::sleep(Duration::from_millis(300));
@@ -359,7 +359,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
 }
 
 /// Stored results for every track of `album`, with plausible spread.
-fn analysed(app: &mut ListenerApp, album: usize, verdict: Option<analysis::Verdict>) {
+fn analysed(app: &mut OndApp, album: usize, verdict: Option<analysis::Verdict>) {
     let tracks = app.data.tracks.album(&album_id(album)).cloned().unwrap_or_default();
     for (i, t) in tracks.iter().enumerate() {
         let k = (i % 4) as f64;
@@ -383,7 +383,7 @@ fn analysed(app: &mut ListenerApp, album: usize, verdict: Option<analysis::Verdi
     }
 }
 
-fn fill_queue(app: &mut ListenerApp) {
+fn fill_queue(app: &mut OndApp) {
     let q = &mut app.player.queue;
     *q = crate::queue::Queue::default();
     let history = filler(2, 3);
@@ -405,7 +405,7 @@ struct Shooter {
 }
 
 impl Shooter {
-    fn shoot(&self, h: &mut Harness<'_, Option<ListenerApp>>, scene: &str) {
+    fn shoot(&self, h: &mut Harness<'_, Option<OndApp>>, scene: &str) {
         h.run_steps(4);
         match h.render() {
             Ok(img) => {
@@ -418,11 +418,11 @@ impl Shooter {
     }
 }
 
-fn app_mut<'h>(h: &'h mut Harness<'_, Option<ListenerApp>>) -> &'h mut ListenerApp {
+fn app_mut<'h>(h: &'h mut Harness<'_, Option<OndApp>>) -> &'h mut OndApp {
     h.state_mut().as_mut().expect("app is built")
 }
 
-fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
+fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     h.remove_cursor();
     h.set_size(size);
     // Popups (the output picker, menus) live in egui memory: close them so
@@ -462,7 +462,7 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
 }
 
 /// Hovers the first widget labelled `label` inside `area`, if any.
-fn hover_label(h: &mut Harness<'_, Option<ListenerApp>>, label: &str, area: egui::Rect) -> bool {
+fn hover_label(h: &mut Harness<'_, Option<OndApp>>, label: &str, area: egui::Rect) -> bool {
     let at: Option<Pos2> = h.query_all_by_label_contains(label).map(|n| n.rect()).find(|r| area.contains(r.center())).map(|r| r.center());
     match at {
         Some(p) => {
@@ -473,7 +473,7 @@ fn hover_label(h: &mut Harness<'_, Option<ListenerApp>>, label: &str, area: egui
     }
 }
 
-fn click_label(h: &mut Harness<'_, Option<ListenerApp>>, label: &str, area: egui::Rect) -> bool {
+fn click_label(h: &mut Harness<'_, Option<OndApp>>, label: &str, area: egui::Rect) -> bool {
     let at: Option<Pos2> = h.query_all_by_label_contains(label).map(|n| n.rect()).find(|r| area.contains(r.center())).map(|r| r.center());
     match at {
         Some(p) => {
@@ -530,7 +530,7 @@ fn traffic_lights(ctx: &egui::Context, bar_h: Option<f32>) {
 
 /// The current track's lyrics, as the server would give them: one line every
 /// eight seconds from 0:20, so 2:21 into the fixture lands mid-song.
-fn fixture_lyrics(app: &mut ListenerApp, synced: bool) {
+fn fixture_lyrics(app: &mut OndApp, synced: bool) {
     let Some(id) = app.player.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
     let lyrics = if synced {
         crate::lyrics::Lyrics::Synced(
@@ -569,7 +569,7 @@ In case the rain remembers12Embed";
 
 /// The playing song's lyrics as they arrive from a scraper, cleaned the way
 /// the app cleans them.
-fn scraped_lyrics(app: &mut ListenerApp) {
+fn scraped_lyrics(app: &mut OndApp) {
     let Some(id) = app.player.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
     app.lyrics.insert(id, crate::lyrics::Fetch::Done(crate::lyrics::from_text(SCRAPED)));
 }
@@ -577,7 +577,7 @@ fn scraped_lyrics(app: &mut ListenerApp) {
 /// The playing song made as long-winded as the one in the user's screenshot:
 /// a composer credit with a comma in it, and every ReplayGain value. Returns
 /// the song as it was, to put back.
-fn long_info(app: &mut ListenerApp) -> Option<Item> {
+fn long_info(app: &mut OndApp) -> Option<Item> {
     let saved = app.player.queue.current.clone();
     if let Some(cur) = app.player.queue.current.as_mut() {
         let t = &mut cur.track;
@@ -598,12 +598,12 @@ fn long_info(app: &mut ListenerApp) -> Option<Item> {
 }
 
 /// Play stats for the playing song, as the server would report them.
-fn info_fixture(app: &mut ListenerApp) {
+fn info_fixture(app: &mut OndApp) {
     let Some(id) = app.player.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
     app.song_stats.insert(id, Some(SongStats { plays: Some(14), last_played: Some("2026-10-21T21:40:00Z".into()) }));
 }
 
-fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
+fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The Player: artwork, transport and the queue; lyrics in a drawer that
     // widens the window.
     let player = vec2(380.0, 880.0);
@@ -847,12 +847,12 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "playlist");
 
     reset(h, FULL, Route::Album(album_id(0)));
-    // Right-click a track, then open "Add to Playlist".
+    // Right-click a track, then open "Add to playlist".
     if let Some(row) = h.query_all_by_label_contains("Solar").find(|n| main.contains(n.rect().center())) {
         row.click_secondary();
     }
     h.run_steps(3);
-    let sub: Option<Pos2> = h.query_all_by_label_contains("Add to Playlist").map(|n| n.rect().center()).next();
+    let sub: Option<Pos2> = h.query_all_by_label_contains("Add to playlist").map(|n| n.rect().center()).next();
     match sub {
         Some(p) => {
             h.hover_at(p);
@@ -861,6 +861,22 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
         None => eprintln!("  (track menu didn't open; add-to-playlist shows the page)"),
     }
     s.shoot(h, "add-to-playlist");
+
+    // The same menu's Rating submenu: stars drawn as icons.
+    reset(h, FULL, Route::Album(album_id(0)));
+    if let Some(row) = h.query_all_by_label_contains("Solar").find(|n| main.contains(n.rect().center())) {
+        row.click_secondary();
+    }
+    h.run_steps(3);
+    let rating: Option<Pos2> = h.query_all_by_label("Rating").map(|n| n.rect().center()).next();
+    match rating {
+        Some(p) => {
+            h.hover_at(p);
+            h.run_steps(6);
+        }
+        None => eprintln!("  (track menu didn't open; rating-menu shows the page)"),
+    }
+    s.shoot(h, "rating-menu");
 
     reset(h, FULL, Route::Favorites);
     s.shoot(h, "favorites");
@@ -1126,7 +1142,7 @@ fn snapshots() {
             .with_os(egui::os::OperatingSystem::Mac)
             .wgpu()
             .build_ui_state(
-                |ui, app: &mut Option<ListenerApp>| {
+                |ui, app: &mut Option<OndApp>| {
                     if let Some(app) = app {
                         if app.login.is_some() {
                             app.login_ui(ui);
@@ -1161,7 +1177,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
         .with_accessibility_check(false)
         .allow_missing_glyphs()
         .build_ui_state(
-            |ui, app: &mut Option<ListenerApp>| {
+            |ui, app: &mut Option<OndApp>| {
                 if let Some(app) = app {
                     app.main_ui(ui);
                 }
@@ -1170,10 +1186,10 @@ fn info_stays_inside_its_column_after_a_long_song() {
         );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
-    let check = |h: &mut Harness<'_, Option<ListenerApp>>, what: &str| {
+    let check = |h: &mut Harness<'_, Option<OndApp>>, what: &str| {
         let right = app_mut(h).columns().right;
         let column = egui::Rect::from_x_y_ranges(FULL.x - right..=FULL.x, 0.0..=FULL.y);
-        for label in ["Up Next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
+        for label in ["Up next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
             for n in h.query_all_by_label_contains(label) {
                 let r = n.rect();
                 if r.center().x < FULL.x - right - 40.0 {
@@ -1207,7 +1223,7 @@ fn column_edges_drag_and_persist() {
         .with_accessibility_check(false)
         .allow_missing_glyphs()
         .build_ui_state(
-            |ui, app: &mut Option<ListenerApp>| {
+            |ui, app: &mut Option<OndApp>| {
                 if let Some(app) = app {
                     app.main_ui(ui);
                 }
@@ -1258,7 +1274,7 @@ fn the_now_playing_heart_toggles_both_ways() {
         .with_accessibility_check(false)
         .allow_missing_glyphs()
         .build_ui_state(
-            |ui, app: &mut Option<ListenerApp>| {
+            |ui, app: &mut Option<OndApp>| {
                 if let Some(app) = app {
                     app.main_ui(ui);
                 }
@@ -1269,7 +1285,7 @@ fn the_now_playing_heart_toggles_both_ways() {
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
     let id = app_mut(&mut h).player.queue.current.as_ref().unwrap().track.id.clone();
-    let loved = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).favorites.is_on(StarKind::Song, &id);
+    let loved = |h: &mut Harness<'_, Option<OndApp>>| app_mut(h).favorites.is_on(StarKind::Song, &id);
     assert!(loved(&mut h), "the fixture's playing song starts loved");
     h.get_by_label("Unlove (⇧⌘L)").click();
     h.run_steps(2);
@@ -1290,7 +1306,7 @@ fn list_keys_stay_with_an_open_sheet() {
         .with_accessibility_check(false)
         .allow_missing_glyphs()
         .build_ui_state(
-            |ui, app: &mut Option<ListenerApp>| {
+            |ui, app: &mut Option<OndApp>| {
                 if let Some(app) = app {
                     app.main_ui(ui);
                 }
@@ -1302,7 +1318,7 @@ fn list_keys_stay_with_an_open_sheet() {
 
     // Songs with a selection, Settings open on top.
     reset(&mut h, FULL, Route::Songs);
-    let playing = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).player.queue.current.as_ref().map(|c| c.track.id.clone());
+    let playing = |h: &mut Harness<'_, Option<OndApp>>| app_mut(h).player.queue.current.as_ref().map(|c| c.track.id.clone());
     let before = playing(&mut h);
     app_mut(&mut h).ui.songs.selected = Some(0);
     app_mut(&mut h).ui.overlay = Some(Overlay::Settings);

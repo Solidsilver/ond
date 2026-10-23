@@ -3,7 +3,7 @@
 
 use super::widgets::elide;
 use super::seek::SeekStyle;
-use super::{Action, ListenerApp};
+use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -48,7 +48,7 @@ pub(super) fn lcd_rect(full: Rect, left_end: f32, right_start: f32) -> Rect {
     Rect::from_center_size(pos2(room.center().x, y), vec2(room.width().clamp(140.0, LCD_MAX_W), LCD_H))
 }
 
-impl ListenerApp {
+impl OndApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         let full = ui.available_rect_before_wrap();
         // The bar is the window's title bar too: its empty parts move the
@@ -138,7 +138,7 @@ impl ListenerApp {
         let (center_x, text_w) = if symmetric >= 140.0 { (rect.center().x, symmetric) } else { ((col_left + col_right) / 2.0, (col_right - col_left).max(40.0)) };
         let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_w);
         let sub_text = match (&item.track.artist, &album) {
-            (Some(a), Some(al)) => format!("{a} — {}", al.name),
+            (Some(a), Some(al)) => format!("{a} · {}", al.name),
             (Some(a), None) => a.clone(),
             (None, Some(al)) => al.name.clone(),
             _ => String::new(),
@@ -198,7 +198,7 @@ impl ListenerApp {
         if heart_resp.clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }
-        let label = format!("Now playing: {} — {sub_text}", item.track.title);
+        let label = format!("Now playing: {}, {sub_text}", item.track.title);
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         // The artwork switches to the player last used (Player or Mini); the
         // rest of the display opens the album.
@@ -239,7 +239,7 @@ impl ListenerApp {
             let resp = ui
                 .add_enabled_ui(!self.bit_perfect, |ui| super::widgets::thin_slider(ui, &mut level, width, "Volume"))
                 .inner
-                .on_disabled_hover_text("Bit-perfect: volume is controlled by your DAC or the system");
+                .on_disabled_hover_text("In bit-perfect mode, use your DAC's or the system's volume");
             if resp.changed() {
                 self.set_volume(level);
             }
