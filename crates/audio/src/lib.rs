@@ -516,6 +516,16 @@ impl Engine {
 
     fn seek(&mut self, to: Duration) {
         let Some(session) = &self.session else { return };
+        // The decoder can only reposition the track it's on. Once it has exited
+        // (the queue's last track is fully decoded, or the next one failed) or
+        // moved on to opening the next track, nothing would release a hold:
+        // start the output's track over at the target instead.
+        if session.finished() || session.decoding() != self.out_seq {
+            if let Some(src) = self.current().map(|t| t.src.clone()) {
+                self.restart_at(src, to);
+            }
+            return;
+        }
         // Silence the output now; the decoder releases it once it has repositioned.
         let hold = self.ring.as_ref().map_or(0, |r| r.ctl.hold());
         if hold > 0 {
@@ -553,6 +563,15 @@ impl Engine {
         }
         let src = self.current().map(|t| t.src.clone())?;
         Some((src, Duration::from_secs_f64(self.status.position_secs()), state == PlayState::Paused))
+    }
+
+    /// Starts `src` over at `to`, staying paused if playback was paused.
+    fn restart_at(&mut self, src: TrackSource, to: Duration) {
+        let paused = self.status.state() == PlayState::Paused;
+        let track_id = src.id.clone();
+        self.resume((src, to, paused));
+        // The new session's own report would arrive before it knows its track.
+        let _ = self.events.send(Event::Seeked { track_id, position_secs: to.as_secs_f64() });
     }
 
     /// Restarts at a position from [`take_position`](Self::take_position), keeping pause.
@@ -715,7 +734,7 @@ impl Engine {
                 }
                 DecoderMsg::SeekMiss { seq, to } => {
                     if let Some(src) = self.tracks.get(seq as usize).map(|t| t.src.clone()) {
-                        self.start(src, Some(to));
+                        self.restart_at(src, to);
                     }
                     return;
                 }

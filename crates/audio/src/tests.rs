@@ -322,3 +322,44 @@ fn remembered_modes_win_over_device_defaults() {
     assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::Normal, .. })));
     engine.send(Command::Shutdown);
 }
+
+#[test]
+fn a_seek_after_the_decoder_has_finished_still_lands_and_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    // 16 s, all of it fits the buffer: the decoder is done long before the output.
+    let a = pcm(2 * 44_100 * 16, 3);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
+    let engine = spawn(config, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while engine.status.state() == PlayState::Loading && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    thread::sleep(Duration::from_millis(150));
+    engine.send(Command::Seek(Duration::from_secs(12)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::Seeked { .. })), "the seek landed: {seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_after_the_decoder_moved_on_keeps_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 8, 4), pcm(2 * 44_100 * 8, 5));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
+    let engine = spawn(config, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    engine.send(Command::Pause);
+    // Give the decoder time to finish "a" and move on to "b".
+    thread::sleep(Duration::from_millis(200));
+    engine.send(Command::Seek(Duration::from_secs(2)));
+    events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    engine.send(Command::Shutdown);
+}

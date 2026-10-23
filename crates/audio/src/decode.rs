@@ -20,7 +20,7 @@ use symphonia::core::meta::{StandardTag, Tag};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rtrb::{Producer, RingBuffer};
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -70,6 +70,8 @@ pub(crate) struct Session {
     /// Set by [`Session::seek`] so a decode thread blocked on the network or a full ring lets go.
     seek_pending: Arc<AtomicBool>,
     next: NextSlot,
+    /// The track the decode thread is opening or decoding.
+    at_seq: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -96,7 +98,16 @@ impl Session {
         let next: NextSlot = Arc::default();
         let (msg_tx, msgs) = unbounded();
         let (seeks, seek_rx) = unbounded();
-        let session = Self { cancel: cancel.clone(), done: done.clone(), msgs, seeks, seek_pending: seek_pending.clone(), next: next.clone() };
+        let at_seq = Arc::new(AtomicU64::new(0));
+        let session = Self {
+            cancel: cancel.clone(),
+            done: done.clone(),
+            msgs,
+            seeks,
+            seek_pending: seek_pending.clone(),
+            next: next.clone(),
+            at_seq: at_seq.clone(),
+        };
         if let Some(to) = start_at {
             // Applied right after probing, before any audio is queued.
             session.seek(0, to, 0);
@@ -109,6 +120,7 @@ impl Session {
             msgs: msg_tx,
             cancel,
             seek_pending,
+            at_seq,
             seek_rx,
             next,
             caps,
@@ -139,6 +151,12 @@ impl Session {
         self.done.load(Ordering::Acquire)
     }
 
+    /// The track the decode thread is on (opening or decoding). Only that one can
+    /// be repositioned in place.
+    pub fn decoding(&self) -> u64 {
+        self.at_seq.load(Ordering::Acquire)
+    }
+
     /// Asks the decode thread to jump to `to` within track `seq`. Only the latest
     /// pending request is honoured.
     pub fn seek(&self, seq: u64, to: Duration, hold: u64) {
@@ -165,6 +183,7 @@ struct Ctx {
     msgs: Sender<DecoderMsg>,
     cancel: Arc<AtomicBool>,
     seek_pending: Arc<AtomicBool>,
+    at_seq: Arc<AtomicU64>,
     seek_rx: Receiver<SeekReq>,
     next: NextSlot,
     /// The output device, as it was when the session started (picks the ring's rate).
@@ -270,6 +289,7 @@ impl Ctx {
         let mut src = first;
         let mut out: Option<Out> = None;
         let result = loop {
+            self.at_seq.store(seq, Ordering::Release);
             let mut track = match self.open(&src) {
                 Ok(t) => t,
                 Err(_) if self.cancel.load(Ordering::Relaxed) => return Ok(()),
