@@ -31,6 +31,13 @@ const MAX_FAILURES: usize = 8;
 /// Tries per bulk page before giving up; the saved offset resumes it next time.
 const BULK_RETRIES: usize = 3;
 
+/// Wait before retry number `failures` of a bulk page: 1 s, then 2 s (kept
+/// short in tests).
+fn retry_delay(failures: usize) -> std::time::Duration {
+    let unit = if cfg!(test) { std::time::Duration::from_millis(2) } else { std::time::Duration::from_secs(1) };
+    unit * (1u32 << failures.saturating_sub(1).min(4))
+}
+
 const BULK_DONE: &str = "tracks_bulk_done";
 const BULK_OFFSET: &str = "tracks_bulk_offset";
 
@@ -194,6 +201,9 @@ async fn bulk_pass<F: Fetch>(
                 if failures >= BULK_RETRIES {
                     return Err(format!("track sync: {e}"));
                 }
+                // A hiccup gets a moment to clear instead of three retries in
+                // the same millisecond.
+                tokio::time::sleep(retry_delay(failures)).await;
                 continue;
             }
         };
@@ -271,6 +281,13 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn bulk_retries_wait_and_back_off() {
+        assert!(retry_delay(1) > std::time::Duration::ZERO, "retries wait");
+        assert_eq!(retry_delay(2), retry_delay(1) * 2);
+        assert_eq!(retry_delay(50), retry_delay(5), "capped");
+    }
 
     fn album(id: &str, songs: u32) -> subsonic::Album {
         subsonic::Album {
