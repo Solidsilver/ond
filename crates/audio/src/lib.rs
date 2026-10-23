@@ -219,6 +219,22 @@ impl Status {
         let total = self.total_frames.load(Ordering::Relaxed);
         (total > 0).then(|| secs(total, self.sample_rate.load(Ordering::Relaxed)))
     }
+
+    /// Shows a track at `position` of `duration` seconds in `state`, with
+    /// `fetched` of the file downloaded, without an engine stream behind it.
+    /// For UI previews only; a running engine overwrites it.
+    #[cfg(feature = "preview")]
+    pub fn preview(&self, state: PlayState, position: f64, duration: f64, fetched: f32) {
+        const RATE: u32 = 44_100;
+        let buffering = state == PlayState::Buffering;
+        self.set_state(if buffering { PlayState::Playing } else { state });
+        self.buffering.store(buffering, Ordering::Relaxed);
+        self.sample_rate.store(RATE, Ordering::Relaxed);
+        self.frames_played.store((position * RATE as f64) as u64, Ordering::Relaxed);
+        self.total_frames.store((duration * RATE as f64) as u64, Ordering::Relaxed);
+        self.total_bytes.store(1_000_000, Ordering::Relaxed);
+        self.fetched_bytes.store((fetched.clamp(0.0, 1.0) * 1_000_000.0) as u64, Ordering::Relaxed);
+    }
 }
 
 fn secs(frames: u64, rate: u32) -> f64 {
