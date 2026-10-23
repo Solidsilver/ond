@@ -111,31 +111,31 @@ impl ListenerApp {
 
     /// Flips a heart now and tells the server; a refusal puts it back.
     pub(super) fn toggle_star(&mut self, kind: StarKind, id: String, track: Option<Track>, name: Option<String>) {
-        let on = self.favorites.toggle(kind, &id, track.as_ref(), name.as_deref());
-        self.bridge.set_starred(self.client.clone(), kind, id, on);
+        let (on, seq) = self.favorites.toggle(kind, &id, track.as_ref(), name.as_deref());
+        self.bridge.set_starred(self.client.clone(), kind, id, on, seq);
     }
 
     pub(super) fn rate(&mut self, id: String, rating: u8) {
-        let previous = self.favorites.rate(&id, rating);
-        self.bridge.set_rating(self.client.clone(), id, rating, previous);
+        let (previous, seq) = self.favorites.rate(&id, rating);
+        self.bridge.set_rating(self.client.clone(), id, rating, previous, seq);
     }
 
-    pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, error: Option<String>) {
+    pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, seq: u64, error: Option<String>) {
         match error {
-            None => self.favorites.settled(kind, &id),
+            None => self.favorites.settled(kind, &id, seq),
             Some(e) => {
                 let track = self.favorites.view.songs.iter().find(|t| t.id == id).cloned().or_else(|| self.find_track(&id));
-                self.favorites.failed(kind, &id, on, track.as_ref(), None);
+                self.favorites.failed(kind, &id, on, seq, track.as_ref(), None);
                 self.error = Some(format!("Couldn't {} that: {e}", if on { "love" } else { "unlove" }));
             }
         }
     }
 
-    pub(super) fn rating_done(&mut self, id: String, previous: u8, error: Option<String>) {
+    pub(super) fn rating_done(&mut self, id: String, previous: u8, seq: u64, error: Option<String>) {
         match error {
-            None => self.favorites.rating_settled(&id),
+            None => self.favorites.rating_settled(&id, seq),
             Some(e) => {
-                self.favorites.rating_failed(&id, previous);
+                self.favorites.rating_failed(&id, previous, seq);
                 self.error = Some(format!("Couldn't save the rating: {e}"));
             }
         }

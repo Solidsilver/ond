@@ -164,24 +164,16 @@ impl Outputs {
         let Some(uid) = self.current.clone() else { return };
         self.saved_modes.insert(uid.clone(), mode_name(mode).into());
         engine.send(Command::DeviceModes(modes(&self.saved_modes)));
-        if let Some(mut s) = Settings::load(paths) {
+        Settings::update(paths, |s| {
             s.device_modes.insert(uid, mode_name(mode).into());
-            if let Err(e) = s.save(paths) {
-                tracing::warn!("saving device mode: {e}");
-            }
-        }
+        });
     }
 
     fn choose(&mut self, uid: Option<String>, engine: &EngineHandle, paths: &Paths) {
         self.returned = None;
         self.lost = None;
         engine.send(Command::SelectDevice(uid.clone()));
-        if let Some(mut s) = Settings::load(paths) {
-            s.output_device = uid;
-            if let Err(e) = s.save(paths) {
-                tracing::warn!("saving output device: {e}");
-            }
-        }
+        Settings::update(paths, |s| s.output_device = uid);
     }
 
     /// The output chip: device name with a status dot. Its popup lists devices

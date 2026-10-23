@@ -212,12 +212,37 @@ fn unpinning_deletes_only_unshared_files() {
     s.pin(Pin::Playlist("p".into()), "P", vec![track("2", body.len())]);
     wait_for("downloads", || s.snapshot().is_done("1") && s.snapshot().is_done("2"));
     s.unpin(&Pin::Album("a".into()));
-    assert!(!dir.path().join("1.flac").exists());
+    wait_for("1.flac to go", || !dir.path().join("1.flac").exists());
     assert!(dir.path().join("2.flac").exists());
     assert!(s.local_path("1").is_none());
     s.unpin(&Pin::Playlist("p".into()));
-    assert!(!dir.path().join("2.flac").exists());
+    wait_for("2.flac to go", || !dir.path().join("2.flac").exists());
     assert_eq!(s.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn unpinning_a_big_playlist_returns_at_once_and_cleans_up_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let s = store(dir.path(), &rt);
+    let n = 3_000;
+    let tracks: Vec<TrackRef> = (0..n).map(|i| track(&format!("t{i}"), 10)).collect();
+    // No source: nothing downloads; the files stand in for finished ones.
+    s.pin(Pin::Playlist("big".into()), "Big", tracks);
+    for i in 0..n {
+        std::fs::write(dir.path().join(format!("t{i}.flac")), b"x").unwrap();
+    }
+    let t = Instant::now();
+    s.unpin(&Pin::Playlist("big".into()));
+    assert!(t.elapsed() < Duration::from_millis(200), "unpin took {:?}", t.elapsed());
+    wait_for("the files to go", || std::fs::read_dir(dir.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".flac")));
+    // Re-pinning before the deleter gets to a track keeps its file.
+    s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
+    std::fs::write(dir.path().join("keep.flac"), b"x").unwrap();
+    s.unpin(&Pin::Track("keep".into()));
+    s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
+    thread::sleep(Duration::from_millis(100));
+    assert!(dir.path().join("keep.flac").exists());
 }
 
 #[test]

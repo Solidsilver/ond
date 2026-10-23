@@ -250,7 +250,13 @@ impl Worker {
     fn engine(&mut self, ev: audio::Event) {
         let now = self.now();
         match ev {
-            audio::Event::TrackStarted { track_id, .. } => {
+            audio::Event::TrackStarted { track_id, restart, .. } => {
+                // The engine started the same track over (device switch, a seek
+                // it couldn't serve in place): the same listen carries on.
+                if restart && self.listen.as_ref().is_some_and(|l| l.track_id == track_id) {
+                    self.publisher.reset();
+                    return;
+                }
                 let info = self.known.get(&track_id).cloned();
                 let started_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
                 self.listen = Some(Listen::new(track_id.clone(), started_ms, info.as_ref().and_then(|i| i.duration_secs)));
@@ -442,5 +448,30 @@ mod tests {
         assert!(p.should("b", State::Playing, 0.0, 33.0), "a new track");
         p.reset();
         assert!(p.should("b", State::Playing, 1.0, 34.0));
+    }
+
+    #[test]
+    fn an_engine_restart_keeps_the_listen() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            status: Arc::default(),
+            rt: rt.handle().clone(),
+            art_dir: dir.path().join("art"),
+            retry_file: dir.path().join("scrobbles.json"),
+            scrobble: false,
+            remote: Arc::new(|_| {}),
+        };
+        let (tx, _rx) = channel();
+        let mut w = Worker::new(cfg, tx);
+        let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+        let started = |restart| audio::Event::TrackStarted { track_id: "a".into(), token: 1, format, gapless: false, restart };
+        w.engine(started(false));
+        let first = w.listen.as_ref().unwrap().started_ms;
+        std::thread::sleep(Duration::from_millis(5));
+        w.engine(started(true));
+        assert_eq!(w.listen.as_ref().unwrap().started_ms, first, "same listen after a restart");
+        w.engine(started(false));
+        assert_ne!(w.listen.as_ref().unwrap().started_ms, first, "a real new start is a new listen");
     }
 }

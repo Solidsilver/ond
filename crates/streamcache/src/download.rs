@@ -2,7 +2,7 @@
 
 use crate::ranges::RangeSet;
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_RANGE, RANGE};
+use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -138,6 +138,14 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                 continue;
             }
         };
+
+        // Subsonic reports errors (bad auth, failed transcode) as a JSON or XML
+        // body with status 200. That's not audio and must never be cached as such.
+        let kind = resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default();
+        if kind.contains("json") || kind.contains("xml") {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("server error: {}", body.chars().take(200).collect::<String>()));
+        }
 
         let mut pos = if resp.status() == StatusCode::PARTIAL_CONTENT {
             ranged = Some(true);
