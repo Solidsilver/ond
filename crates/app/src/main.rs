@@ -20,6 +20,7 @@ mod nav;
 mod now_playing;
 mod output;
 mod playback;
+mod player;
 mod prefs;
 mod queue;
 mod search;

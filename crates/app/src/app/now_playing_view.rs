@@ -64,7 +64,7 @@ impl ListenerApp {
                 let full = ui.available_rect_before_wrap();
                 let below = BELOW_ART_H + if self.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
                 let side = full.width().min(full.height() - below).max(120.0).floor();
-                match self.queue.current.as_ref().map(|c| c.track.clone()) {
+                match self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     Some(track) => {
                         self.ensure_lyrics(&track);
                         self.player_block(ui, &track, Some(side), true);
@@ -126,7 +126,7 @@ impl ListenerApp {
             ui.add_space(8.0);
             ui.label(egui::RichText::new(text).size(12.5).color(t.muted));
         };
-        let Some(track) = self.queue.current.as_ref().map(|c| c.track.clone()) else {
+        let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
             note(ui, "Nothing playing.");
             return;
         };
@@ -257,7 +257,7 @@ impl ListenerApp {
     fn big_transport(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let state = self.engine.status.state();
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.pending_seek.is_some();
+        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some();
         let (icon, label) = match state {
             _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
             PlayState::Playing => (Icon::Pause, "Pause"),

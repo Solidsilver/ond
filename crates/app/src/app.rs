@@ -37,8 +37,9 @@ use crate::nav::{Nav, Route};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
+use crate::player::{self, Note, Player};
 use crate::prefs::{Loaded, Prefs};
-use crate::queue::{EndAction, Queue, Source};
+use crate::queue::{EndAction, Source};
 use crate::search::SearchIndex;
 use crate::settings::{Paths, Settings};
 use crate::theme::{self, ThemePref, Tokens};
@@ -136,15 +137,7 @@ impl Data {
     }
 }
 
-/// What a queue action does with a set of tracks.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum QueueAction {
-    /// Play now, starting at this track.
-    Play { start: usize },
-    Shuffle,
-    PlayNext,
-    Add,
-}
+pub use crate::player::QueueAction;
 
 /// A state change requested by a view; applied after the frame is drawn.
 pub enum Action {
@@ -339,9 +332,8 @@ pub struct ListenerApp {
     pending: Vec<Pending>,
     art: Art,
 
-    queue: Queue,
-    /// The queue item last sent as `SetNext`, so the engine isn't told twice.
-    sent_next: Option<u64>,
+    /// The queue and what the engine is told about it.
+    player: Player,
     /// Sidebar and queue column widths (dragged by their inner edges).
     columns: layout::Columns,
     /// The album page's "Album details" is unfolded (for this session).
@@ -360,8 +352,6 @@ pub struct ListenerApp {
     bit_perfect: bool,
     /// Where the seek bar is being dragged to, in seconds.
     seek_preview: Option<f64>,
-    /// A seek that's been sent but not confirmed yet; shown instead of the engine position.
-    pending_seek: Option<f64>,
 
     /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
     /// the old one serves until the new one lands.
@@ -578,8 +568,7 @@ impl ListenerApp {
             actions: Vec::new(),
             pending: Vec::new(),
             art,
-            queue: Queue::default(),
-            sent_next: None,
+            player: Player::default(),
             queue_ui: QueueUi::default(),
             queue_sheet: false,
             queue_narrow: false,
@@ -588,7 +577,6 @@ impl ListenerApp {
             output,
             bit_perfect: false,
             seek_preview: None,
-            pending_seek: None,
             search: None,
             search_stale: false,
             search_generation: 0,
@@ -670,7 +658,7 @@ impl ListenerApp {
                 if !self.online {
                     self.online = true;
                     // Lined up while offline; the server can supply the rest again.
-                    self.sent_next = None;
+                    self.player.forget_next();
                     self.sync_next();
                 }
                 self.resume_library_analysis();
@@ -954,34 +942,7 @@ impl ListenerApp {
 
     /// A media key, Control Center or headphone command.
     fn remote(&mut self, r: Remote) {
-        let state = self.engine.status.state();
-        match r {
-            Remote::Play if state == PlayState::Paused => self.engine.send(Command::Resume),
-            Remote::Play if state == PlayState::Stopped => self.play_pause(),
-            Remote::Pause if !matches!(state, PlayState::Paused | PlayState::Stopped) => self.engine.send(Command::Pause),
-            Remote::Play | Remote::Pause => {}
-            Remote::Toggle => self.play_pause(),
-            Remote::Next => self.next(),
-            Remote::Previous => self.previous(),
-            Remote::Seek(to) => self.seek(to.max(0.0)),
-            Remote::SkipBy(by) => {
-                let end = self.duration_secs().unwrap_or(f64::MAX);
-                self.seek((self.position_secs() + by).clamp(0.0, end));
-            }
-        }
-    }
-
-    /// Describes `track` for Now Playing before the engine reaches it.
-    fn announce(&self, track: &Track) {
-        let album = self.data.album(&track.album_id);
-        self.now_playing.known(now_playing::Info {
-            track_id: track.id.clone(),
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: album.map(|a| a.name.clone()),
-            duration_secs: track.duration_secs.map(f64::from),
-            cover: self.data.cover_for(track).map(str::to_owned),
-        });
+        self.with_player(|p, cx| p.remote(r, cx));
     }
 
     /// Work owed once per batch of messages: a sync delivers albums, artists
@@ -1012,213 +973,85 @@ impl ListenerApp {
             // The engine picked the mode for a new device (remembered, or its default).
             self.bit_perfect = mode == PlaybackMode::BitPerfect;
         }
-        match ev {
-            audio::Event::TrackStarted { track_id, token, gapless, restart, .. } => {
-                if self.analyze_playing()
-                    && !restart
-                    && let Some(t) = self.playing_track(&track_id)
-                {
-                    self.enqueue_analysis(std::slice::from_ref(&t));
-                }
-                // Matched by queue item (the token), so the same song twice in a row
-                // still moves the queue along. With "repeat queue" over a single
-                // item, the next item *is* the current one: a gapless start of it
-                // is the next pass.
-                let is_next = self.queue.peek_next().is_some_and(|n| n.uid == token);
-                let is_current = self.queue.current.as_ref().is_some_and(|c| c.uid == token);
-                if is_next && (gapless || !is_current) {
-                    // The engine moved on gaplessly; line up the track after this one.
-                    self.queue.advance();
-                    self.pending_seek = None;
-                    self.sent_next = None;
-                    self.sync_next();
-                }
-            }
-            audio::Event::Seeked { .. } => self.pending_seek = None,
-            // The engine ran out of queued tracks. If the queue has more (the next one
-            // was named too late to play gaplessly), carry on from there.
-            audio::Event::Ended { .. } => {
-                if self.queue.advance().is_some() {
-                    self.start_current();
-                } else {
-                    self.sent_next = None;
-                }
-            }
-            audio::Event::Error { message, .. } => {
-                self.pending_seek = None;
-                self.show_error(message);
-                self.probe();
-            }
-            audio::Event::SignalPath(_)
-            | audio::Event::Devices { .. }
-            | audio::Event::ModeChanged { .. }
-            | audio::Event::DeviceLost { .. }
-            | audio::Event::DeviceReturned { .. } => {}
-        }
+        self.with_player(|p, cx| p.handle_engine(&ev, cx));
     }
 
-    /// What the engine needs to play `track`: the downloaded file first
-    /// (instant, no network), else the server while it's reachable (original or
-    /// transcoded), with its ReplayGain and whether it plays as part of its album
-    /// (from its queue neighbours `prev` and `next`). `token` is the queue item's
-    /// id, echoed back by the engine so two plays of one track stay apart.
-    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
-        let replay_gain = playback::replay_gain(track);
-        let album_context = playback::in_album(prev, track, next);
-        if let Some(path) = self.offline.local_path(&track.id) {
-            return Some(TrackSource {
-                id: track.id.clone(),
-                url: format!("file://{}", path.display()),
-                suffix: track.suffix.clone(),
-                replay_gain,
-                album_context,
-                transcode: None,
-                token,
-            });
-        }
-        let client = self.client.as_ref().filter(|_| self.online)?;
-        let transcode = self.output.transcode();
-        let (url, suffix) = match &transcode {
-            None => (client.stream_url(&track.id), track.suffix.clone()),
-            Some(t) => (client.transcoded_stream_url(&track.id, &t.format, t.kbps), Some(t.format.clone())),
+    /// Runs `f` on the player with the engine and the app's sources, then acts
+    /// on what it reports.
+    fn with_player<R>(&mut self, f: impl FnOnce(&mut Player, &mut player::Ctx<'_>) -> R) -> R {
+        let mut notes = Vec::new();
+        let sources = AppSources {
+            offline: &self.offline,
+            client: self.client.as_ref().filter(|_| self.online),
+            output: &self.output,
+            data: &self.data,
+            now_playing: &self.now_playing,
         };
-        Some(TrackSource { id: track.id.clone(), url: url.to_string(), suffix, replay_gain, album_context, transcode, token })
+        let result = f(&mut self.player, &mut player::Ctx { engine: &self.engine, sources: &sources, notes: &mut notes });
+        for note in notes {
+            match note {
+                Note::Notice(text) => self.show_notice(text),
+                Note::Error(text) => self.show_error(text),
+                Note::Probe => self.probe(),
+                Note::Started { track, restart } => {
+                    if self.analyze_playing() && !restart {
+                        self.enqueue_analysis(std::slice::from_ref(&*track));
+                    }
+                }
+            }
+        }
+        result
     }
 
-    /// Starts the queue's current item from the top (or stops when there is
-    /// none). Tracks that can't play (offline, not downloaded) are skipped.
     fn start_current(&mut self) {
-        self.pending_seek = None;
-        self.sent_next = None;
-        let mut skipped = 0;
-        // With "repeat queue" the queue never runs out, so give up after one
-        // full pass in which nothing could play.
-        let limit = self.queue.pass_len().max(1);
-        loop {
-            let Some(item) = &self.queue.current else {
-                self.engine.send(Command::Stop);
-                break;
-            };
-            if skipped >= limit {
-                self.engine.send(Command::Stop);
-                self.show_notice("Nothing in the queue is downloaded".to_owned());
-                return;
-            }
-            let prev = self.queue.history.last().map(|i| &i.track);
-            let next = self.queue.peek_next().map(|i| &i.track);
-            if let Some(src) = self.source(item.uid, prev, &item.track, next) {
-                self.announce(&item.track);
-                self.engine.send(Command::Play(src));
-                self.sync_next();
-                break;
-            }
-            skipped += 1;
-            if self.queue.advance().is_none() {
-                self.engine.send(Command::Stop);
-                break;
-            }
-        }
-        if skipped > 0 {
-            self.show_notice(if skipped == 1 { "Skipped 1 song that isn't downloaded".to_owned() } else { format!("Skipped {skipped} songs that aren't downloaded") });
-        }
+        self.with_player(|p, cx| p.start_current(cx));
     }
 
-    /// Tells the engine what follows the current track (prefetch + gapless), if
-    /// that changed. A next track that can't play isn't named; when the current
-    /// one ends, `start_current` skips past it.
+    /// Where `track` would play from now (tests).
+    #[cfg(test)]
+    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
+        use player::Sources;
+        let sources = AppSources {
+            offline: &self.offline,
+            client: self.client.as_ref().filter(|_| self.online),
+            output: &self.output,
+            data: &self.data,
+            now_playing: &self.now_playing,
+        };
+        sources.source(token, prev, track, next)
+    }
+
     fn sync_next(&mut self) {
-        if self.queue.current.is_none() {
-            return;
-        }
-        let next = self.queue.peek_next().map(|i| (i.uid, i.track.clone()));
-        let current = self.queue.current.as_ref().map(|i| &i.track);
-        let after = self.queue.upcoming.get(1).map(|i| &i.track);
-        let source = next.as_ref().and_then(|(uid, t)| self.source(*uid, current, t, after));
-        // By queue item, not track: the same song queued twice is two items.
-        let sent = source.as_ref().map(|s| s.token);
-        if sent != self.sent_next {
-            if let Some((_, t)) = next.as_ref().filter(|_| source.is_some()) {
-                self.announce(t);
-            }
-            self.engine.send(Command::SetNext(source));
-            self.sent_next = sent;
-        }
+        self.with_player(|p, cx| p.sync_next(cx));
     }
 
     fn position_secs(&self) -> f64 {
-        self.pending_seek.unwrap_or_else(|| self.engine.status.position_secs())
+        self.player.position_secs(&self.engine)
     }
 
     fn duration_secs(&self) -> Option<f64> {
-        self.engine
-            .status
-            .duration_secs()
-            .or_else(|| self.queue.current.as_ref().and_then(|c| c.track.duration_secs).map(f64::from))
+        self.player.duration_secs(&self.engine)
     }
 
     fn play_pause(&mut self) {
-        match self.engine.status.state() {
-            PlayState::Playing | PlayState::Buffering | PlayState::Loading => self.engine.send(Command::Pause),
-            PlayState::Paused => self.engine.send(Command::Resume),
-            PlayState::Stopped => {
-                if self.queue.current.is_some() || self.queue.advance().is_some() {
-                    self.start_current();
-                }
-            }
-        }
+        self.with_player(|p, cx| p.play_pause(cx));
     }
 
     fn next(&mut self) {
-        if self.queue.advance().is_some() {
-            self.start_current();
-        } else {
-            self.engine.send(Command::Stop);
-            self.sent_next = None;
-        }
+        self.with_player(|p, cx| p.next(cx));
     }
 
-    /// Restarts the track when it's past the first few seconds, else goes back one.
     fn previous(&mut self) {
-        if self.position_secs() > 3.0 || self.queue.history.is_empty() {
-            self.seek(0.0);
-        } else if self.queue.back().is_some() {
-            self.start_current();
-        }
+        self.with_player(|p, cx| p.previous(cx));
     }
 
     fn seek(&mut self, to: f64) {
-        if self.queue.current.is_none() {
-            return;
-        }
-        self.pending_seek = Some(to);
-        self.engine.send(Command::Seek(Duration::from_secs_f64(to)));
+        self.with_player(|p, cx| p.seek(to, cx));
     }
 
     /// Applies a queue action once the tracks are known.
     fn queue_tracks(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction) {
-        if tracks.is_empty() {
-            return;
-        }
-        match action {
-            QueueAction::Play { start } => {
-                self.queue.play_now(tracks, start, source);
-                self.start_current();
-            }
-            QueueAction::Shuffle => {
-                let mut tracks = tracks;
-                shuffle(&mut tracks);
-                self.queue.play_now(tracks, 0, source);
-                self.start_current();
-            }
-            QueueAction::PlayNext => {
-                self.queue.play_next(tracks);
-                self.sync_next();
-            }
-            QueueAction::Add => {
-                self.queue.add(tracks);
-                self.sync_next();
-            }
-        }
+        self.with_player(|p, cx| p.queue_tracks(tracks, source, action, cx));
     }
 
     /// Holds `p` until its tracks load. A newer action for the same list
@@ -1303,40 +1136,40 @@ impl ListenerApp {
             }
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
             Action::JumpTo(uid) => {
-                if self.queue.jump_to(uid) {
+                if self.player.queue.jump_to(uid) {
                     self.start_current();
                 }
             }
             Action::Replay(uid) => {
-                if self.queue.replay(uid) {
+                if self.player.queue.replay(uid) {
                     self.start_current();
                 }
             }
             Action::Remove(uid) => {
                 if self.queue_ui.selected == Some(uid) {
                     // Keep a selection for repeated ⌫.
-                    let at = self.queue.position(uid).unwrap_or(0);
-                    self.queue.remove(uid);
-                    self.queue_ui.selected = self.queue.upcoming.get(at).or(self.queue.upcoming.last()).map(|i| i.uid);
+                    let at = self.player.queue.position(uid).unwrap_or(0);
+                    self.player.queue.remove(uid);
+                    self.queue_ui.selected = self.player.queue.upcoming.get(at).or(self.player.queue.upcoming.last()).map(|i| i.uid);
                 } else {
-                    self.queue.remove(uid);
+                    self.player.queue.remove(uid);
                 }
                 self.sync_next();
             }
             Action::Move(uid, to) => {
-                self.queue.move_to(uid, to);
+                self.player.queue.move_to(uid, to);
                 self.sync_next();
             }
             Action::MoveBy(uid, delta) => {
-                self.queue.move_by(uid, delta);
+                self.player.queue.move_by(uid, delta);
                 self.sync_next();
             }
             Action::ClearQueue => {
-                self.queue.clear();
+                self.player.queue.clear();
                 self.sync_next();
             }
             Action::SetEnd(end) => {
-                self.queue.end = end;
+                self.player.queue.end = end;
                 self.sync_next();
             }
             Action::PlayPause => self.play_pause(),
@@ -1466,11 +1299,6 @@ impl ListenerApp {
             Action::Overlay(o) => self.overlay = Some(o),
             Action::PlaylistEdit(edit) => self.playlist_action(edit),
         }
-    }
-
-    /// The queue entry the engine just started: the current one, or the next (gapless).
-    fn playing_track(&self, id: &str) -> Option<Track> {
-        [self.queue.current.as_ref(), self.queue.peek_next()].into_iter().flatten().find(|i| i.track.id == id).map(|i| i.track.clone())
     }
 
     /// A track's analysis, if there is one for the file as it is now.
@@ -1628,10 +1456,7 @@ impl ListenerApp {
     /// Stops playback, forgets the saved password and shows the login screen
     /// with the server and username filled in.
     fn sign_out(&mut self) {
-        self.engine.send(Command::Stop);
-        self.queue.clear();
-        self.queue.current = None;
-        self.sent_next = None;
+        self.with_player(|p, cx| p.reset(cx));
         self.palette = None;
         self.overlay = None;
         self.favorites = Favorites::default();
@@ -1994,7 +1819,7 @@ impl eframe::App for ListenerApp {
         match self.engine.status.state() {
             PlayState::Playing => ctx.request_repaint_after(Duration::from_millis(250)),
             PlayState::Buffering | PlayState::Loading => ctx.request_repaint_after(Duration::from_millis(33)),
-            _ if self.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
+            _ if self.player.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
             _ => {}
         }
         crate::chrome::sync(ctx, crate::chrome::Bar { height: self.title_bar_h() });
@@ -2061,13 +1886,54 @@ impl Drop for ListenerApp {
 }
 
 /// Fisher–Yates with a small xorshift; good enough for a play order.
-fn shuffle<T>(v: &mut [T]) {
-    let mut s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.as_nanos() as u64) | 1;
-    for i in (1..v.len()).rev() {
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        v.swap(i, (s % (i as u64 + 1)) as usize);
+/// Where queue items play from: a downloaded file first (instant, no
+/// network), else the server while it's reachable (original or transcoded).
+struct AppSources<'a> {
+    offline: &'a OfflineStore,
+    /// Only while the server answers.
+    client: Option<&'a Client>,
+    output: &'a Outputs,
+    data: &'a Data,
+    now_playing: &'a now_playing::Session,
+}
+
+impl player::Sources for AppSources<'_> {
+    /// With its ReplayGain, and whether it plays as part of its album (from
+    /// its queue neighbours `prev` and `next`).
+    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
+        let replay_gain = playback::replay_gain(track);
+        let album_context = playback::in_album(prev, track, next);
+        if let Some(path) = self.offline.local_path(&track.id) {
+            return Some(TrackSource {
+                id: track.id.clone(),
+                url: format!("file://{}", path.display()),
+                suffix: track.suffix.clone(),
+                replay_gain,
+                album_context,
+                transcode: None,
+                token,
+            });
+        }
+        let client = self.client?;
+        let transcode = self.output.transcode();
+        let (url, suffix) = match &transcode {
+            None => (client.stream_url(&track.id), track.suffix.clone()),
+            Some(t) => (client.transcoded_stream_url(&track.id, &t.format, t.kbps), Some(t.format.clone())),
+        };
+        Some(TrackSource { id: track.id.clone(), url: url.to_string(), suffix, replay_gain, album_context, transcode, token })
+    }
+
+    /// Describes `track` for Now Playing before the engine reaches it.
+    fn announce(&self, track: &Track) {
+        let album = self.data.album(&track.album_id);
+        self.now_playing.known(now_playing::Info {
+            track_id: track.id.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: album.map(|a| a.name.clone()),
+            duration_secs: track.duration_secs.map(f64::from),
+            cover: self.data.cover_for(track).map(str::to_owned),
+        });
     }
 }
 
@@ -2168,9 +2034,9 @@ mod tests {
         app.data.playlists = vec![subsonic::Playlist { id: "pl-1".into(), name: "Late night".into(), song_count: 3, duration: 900, cover_art: None, owner: None }];
         app.data.playlist_tracks.insert("pl-1".into(), Arc::new(tracks[..3].to_vec()));
         app.data.credited.insert("Scott LaFaro".into(), vec!["al-1".into(), "al-0".into()]);
-        app.queue.play_now(tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
-        app.queue.play_next(tracks[..2].to_vec());
-        app.queue.add(tracks[5..15].to_vec());
+        app.player.queue.play_now(tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
+        app.player.queue.play_next(tracks[..2].to_vec());
+        app.player.queue.add(tracks[5..15].to_vec());
         app
     }
 
@@ -2191,10 +2057,10 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
         app.online = false;
-        app.queue.end = crate::queue::EndAction::RepeatQueue;
-        let pass = app.queue.pass_len();
+        app.player.queue.end = crate::queue::EndAction::RepeatQueue;
+        let pass = app.player.queue.pass_len();
         app.start_current();
-        assert!(app.queue.history.len() <= 2 * pass, "history grew to {}", app.queue.history.len());
+        assert!(app.player.queue.history.len() <= 2 * pass, "history grew to {}", app.player.queue.history.len());
         assert_eq!(app.toasts.texts().last().copied(), Some("Nothing in the queue is downloaded"));
     }
 
@@ -2226,7 +2092,7 @@ mod tests {
             }
         }
         app.queue_ui.tab = QueueTab::History;
-        app.queue.advance();
+        app.player.queue.advance();
         frame(&ctx, &mut app, Vec::new());
         app.prefs.edit(|s| s.show_queue = false);
         frame(&ctx, &mut app, Vec::new());
@@ -2248,20 +2114,20 @@ mod tests {
         frame(&ctx, &mut app, vec![egui::Event::Text("album 12".into())]);
         frame(&ctx, &mut app, Vec::new());
         assert_eq!(app.palette.as_ref().map(|p| p.query.as_str()), Some("album 12"));
-        let before = app.queue.upcoming.len();
+        let before = app.player.queue.upcoming.len();
         let alt_enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
         frame(&ctx, &mut app, vec![alt_enter]);
         assert!(app.palette.is_none());
         // Album 12's tracks aren't loaded, so the action waits for them...
-        assert_eq!(app.queue.upcoming.len(), before);
+        assert_eq!(app.player.queue.upcoming.len(), before);
         assert_eq!(app.pending.len(), 1);
         // ...and runs when they arrive.
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
-        assert_eq!(app.queue.upcoming.len(), before + 3);
+        assert_eq!(app.player.queue.upcoming.len(), before + 3);
         assert!(app.pending.is_empty());
         // Played next: right after what the user already chose to play next.
-        assert_eq!(app.queue.upcoming[2].track.id, "x-1");
+        assert_eq!(app.player.queue.upcoming[2].track.id, "x-1");
     }
 
     /// Handles what the bridge sends until `done` says so (or 3 s pass).
@@ -2318,7 +2184,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
         assert!(app.client.is_none(), "offline: nothing can be fetched");
-        let before = app.queue.upcoming.len();
+        let before = app.player.queue.upcoming.len();
         // Album 12 isn't stored either: the play and the pin both wait, once each.
         app.apply(Action::Album("al-12".into(), QueueAction::Add));
         app.apply(Action::Album("al-12".into(), QueueAction::PlayNext));
@@ -2331,7 +2197,7 @@ mod tests {
         // The tracks turn up later anyway (browsing, a sync): nothing plays or pins.
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
-        assert_eq!(app.queue.upcoming.len(), before, "a stale action played");
+        assert_eq!(app.player.queue.upcoming.len(), before, "a stale action played");
         assert!(!app.offline.is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
     }
 
@@ -2445,15 +2311,15 @@ mod tests {
         assert!(local.url.starts_with("file://") && local.url.ends_with("t-2.flac"), "{}", local.url);
 
         // Playing from the top skips to the downloaded song and says so.
-        app.queue = Queue::default();
+        app.player.queue = crate::queue::Queue::default();
         app.queue_tracks(tracks.clone(), Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
-        assert_eq!(app.queue.current.as_ref().unwrap().track.id, "t-2");
+        assert_eq!(app.player.queue.current.as_ref().unwrap().track.id, "t-2");
         assert_eq!(app.toasts.texts().last().copied(), Some("Skipped 1 song that isn't downloaded"));
         // Nothing after it can play, so the engine isn't told about a next track.
-        assert_eq!(app.sent_next, None);
+        assert_eq!(app.player.sent_next(), None);
         // When it ends, the rest is skipped and playback stops cleanly.
         app.handle_engine(audio::Event::Ended { track_id: "t-2".into(), token: 0 });
-        assert!(app.queue.current.is_none());
+        assert!(app.player.queue.current.is_none());
 
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
@@ -2548,7 +2414,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        let next = app.queue.peek_next().unwrap().clone();
+        let next = app.player.queue.peek_next().unwrap().clone();
         let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
         let started = |i: &crate::queue::Item| audio::Event::TrackStarted {
             track_id: i.track.id.clone(),
@@ -2558,11 +2424,11 @@ mod tests {
             restart: false,
         };
         app.handle_engine(started(&next));
-        assert_eq!(app.queue.current.as_ref().unwrap().uid, next.uid);
+        assert_eq!(app.player.queue.current.as_ref().unwrap().uid, next.uid);
         // A repeat of the same event (or the current track) changes nothing.
-        let upcoming = app.queue.upcoming.len();
+        let upcoming = app.player.queue.upcoming.len();
         app.handle_engine(started(&next));
-        assert_eq!(app.queue.upcoming.len(), upcoming);
+        assert_eq!(app.player.queue.upcoming.len(), upcoming);
     }
 
     #[test]
@@ -2579,23 +2445,23 @@ mod tests {
             restart: false,
         };
         // "Play next" on the song that's playing: the same track, a new queue item.
-        let playing = app.queue.current.clone().unwrap();
-        app.queue.clear();
-        app.queue.play_next(vec![playing.track.clone()]);
-        let copy = app.queue.peek_next().unwrap().clone();
+        let playing = app.player.queue.current.clone().unwrap();
+        app.player.queue.clear();
+        app.player.queue.play_next(vec![playing.track.clone()]);
+        let copy = app.player.queue.peek_next().unwrap().clone();
         assert_eq!(copy.track.id, playing.track.id);
         assert_ne!(copy.uid, playing.uid);
         app.handle_engine(started(&copy));
-        assert_eq!(app.queue.current.as_ref().unwrap().uid, copy.uid, "the queue moved to the copy");
+        assert_eq!(app.player.queue.current.as_ref().unwrap().uid, copy.uid, "the queue moved to the copy");
 
         // Repeat queue over a single item: each gapless start is the next pass.
-        app.queue = Queue::default();
-        app.queue.end = crate::queue::EndAction::RepeatQueue;
-        app.queue.play_now(vec![playing.track.clone()], 0, Source::Added);
-        let first = app.queue.current.clone().unwrap();
+        app.player.queue = crate::queue::Queue::default();
+        app.player.queue.end = crate::queue::EndAction::RepeatQueue;
+        app.player.queue.play_now(vec![playing.track.clone()], 0, Source::Added);
+        let first = app.player.queue.current.clone().unwrap();
         app.handle_engine(started(&first));
-        let second = app.queue.current.clone().unwrap();
+        let second = app.player.queue.current.clone().unwrap();
         assert_ne!(second.uid, first.uid, "a new pass began");
-        assert_eq!(app.queue.history.len(), 1);
+        assert_eq!(app.player.queue.history.len(), 1);
     }
 }

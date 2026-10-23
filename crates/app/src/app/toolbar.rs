@@ -91,7 +91,7 @@ impl ListenerApp {
         if icons::sized_button(ui, Icon::Previous, "Previous", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Previous);
         }
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.pending_seek.is_some();
+        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some();
         let (icon, label) = match state {
             _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
             PlayState::Playing => (Icon::Pause, "Pause"),
@@ -113,7 +113,7 @@ impl ListenerApp {
         let painter = ui.painter().clone();
         painter.rect(rect, 7.0, t.sidebar, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
         let body = ui.interact(rect, ui.scope_id().with("lcd"), Sense::click());
-        let Some(item) = self.queue.current.clone() else {
+        let Some(item) = self.player.queue.current.clone() else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), t.muted);
             return;
         };

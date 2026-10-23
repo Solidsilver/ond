@@ -384,8 +384,8 @@ fn analysed(app: &mut ListenerApp, album: usize, verdict: Option<analysis::Verdi
 }
 
 fn fill_queue(app: &mut ListenerApp) {
-    let q = &mut app.queue;
-    *q = Queue::default();
+    let q = &mut app.player.queue;
+    *q = crate::queue::Queue::default();
     let history = filler(2, 3);
     q.play_now(history, 0, Source::Album { id: album_id(2), name: ALBUMS[2].0.into() });
     q.advance();
@@ -531,7 +531,7 @@ fn traffic_lights(ctx: &egui::Context, bar_h: Option<f32>) {
 /// The current track's lyrics, as the server would give them: one line every
 /// eight seconds from 0:20, so 2:21 into the fixture lands mid-song.
 fn fixture_lyrics(app: &mut ListenerApp, synced: bool) {
-    let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
+    let Some(id) = app.player.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
     let lyrics = if synced {
         crate::lyrics::Lyrics::Synced(
             VERSES.iter().enumerate().map(|(i, v)| crate::lyrics::Line { start_ms: 20_000 + 8_000 * i as i64, text: (*v).into() }).collect(),
@@ -570,7 +570,7 @@ In case the rain remembers12Embed";
 /// The playing song's lyrics as they arrive from a scraper, cleaned the way
 /// the app cleans them.
 fn scraped_lyrics(app: &mut ListenerApp) {
-    let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
+    let Some(id) = app.player.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
     app.lyrics.insert(id, crate::lyrics::Fetch::Done(crate::lyrics::from_text(SCRAPED)));
 }
 
@@ -578,8 +578,8 @@ fn scraped_lyrics(app: &mut ListenerApp) {
 /// a composer credit with a comma in it, and every ReplayGain value. Returns
 /// the song as it was, to put back.
 fn long_info(app: &mut ListenerApp) -> Option<Item> {
-    let saved = app.queue.current.clone();
-    if let Some(cur) = app.queue.current.as_mut() {
+    let saved = app.player.queue.current.clone();
+    if let Some(cur) = app.player.queue.current.as_mut() {
         let t = &mut cur.track;
         t.id = "long-credits".into();
         t.title = "Leaning on the Everlasting Arms (Live at the Old Dominican Chapel)".into();
@@ -599,7 +599,7 @@ fn long_info(app: &mut ListenerApp) -> Option<Item> {
 
 /// Play stats for the playing song, as the server would report them.
 fn info_fixture(app: &mut ListenerApp) {
-    let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
+    let Some(id) = app.player.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
     app.song_stats.insert(id, Some(SongStats { plays: Some(14), last_played: Some("2026-10-21T21:40:00Z".into()) }));
 }
 
@@ -648,7 +648,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Recent);
     app_mut(h).queue_ui.tab = QueueTab::Lyrics;
-    if let Some(id) = app_mut(h).queue.current.as_ref().map(|c| c.track.id.clone()) {
+    if let Some(id) = app_mut(h).player.queue.current.as_ref().map(|c| c.track.id.clone()) {
         app_mut(h).lyrics.insert(id, crate::lyrics::Fetch::Done(None));
     }
     s.shoot(h, "sidebar-lyrics-none");
@@ -729,8 +729,8 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
 
     // A song with little known about it, and nothing playing at all.
     reset(h, FULL, Route::Recent);
-    let saved = app_mut(h).queue.current.clone();
-    if let Some(cur) = app_mut(h).queue.current.as_mut() {
+    let saved = app_mut(h).player.queue.current.clone();
+    if let Some(cur) = app_mut(h).player.queue.current.as_mut() {
         let t = &mut cur.track;
         t.id = "sparse".into();
         t.contributors.clear();
@@ -744,10 +744,10 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     app_mut(h).queue_ui.tab = QueueTab::Info;
     h.run_steps(2);
     s.shoot(h, "info-sparse");
-    app_mut(h).queue.current = None;
+    app_mut(h).player.queue.current = None;
     h.run_steps(2);
     s.shoot(h, "info-nothing");
-    app_mut(h).queue.current = saved;
+    app_mut(h).player.queue.current = saved;
 
     // Long credits and a long ReplayGain line wrap inside the column, at the
     // default width and at the narrowest; then a short song in the same app
@@ -762,7 +762,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     h.run_steps(3);
     s.shoot(h, "info-long-min");
     app_mut(h).columns.right = super::layout::RIGHT_DEFAULT;
-    app_mut(h).queue.current = saved;
+    app_mut(h).player.queue.current = saved;
     info_fixture(app_mut(h));
     h.run_steps(3);
     s.shoot(h, "info-after-long");
@@ -1018,7 +1018,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        app.queue = Queue::default();
+        app.player.queue = crate::queue::Queue::default();
         app.engine.status.preview(PlayState::Stopped, 0.0, 0.0, 0.0);
     }
     s.shoot(h, "empty-queue");
@@ -1190,7 +1190,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
         app_mut(&mut h).queue_ui.tab = QueueTab::Info;
         h.run_steps(4);
         check(&mut h, "long song");
-        app_mut(&mut h).queue.current = saved;
+        app_mut(&mut h).player.queue.current = saved;
         h.run_steps(4);
         check(&mut h, "short song after the long one");
     }
@@ -1268,7 +1268,7 @@ fn the_now_playing_heart_toggles_both_ways() {
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
-    let id = app_mut(&mut h).queue.current.as_ref().unwrap().track.id.clone();
+    let id = app_mut(&mut h).player.queue.current.as_ref().unwrap().track.id.clone();
     let loved = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).favorites.is_on(StarKind::Song, &id);
     assert!(loved(&mut h), "the fixture's playing song starts loved");
     h.get_by_label("Unlove (⇧⌘L)").click();
@@ -1302,7 +1302,7 @@ fn list_keys_stay_with_an_open_sheet() {
 
     // Songs with a selection, Settings open on top.
     reset(&mut h, FULL, Route::Songs);
-    let playing = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).queue.current.as_ref().map(|c| c.track.id.clone());
+    let playing = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).player.queue.current.as_ref().map(|c| c.track.id.clone());
     let before = playing(&mut h);
     app_mut(&mut h).songs.selected = Some(0);
     app_mut(&mut h).overlay = Some(Overlay::Settings);
@@ -1315,21 +1315,21 @@ fn list_keys_stay_with_an_open_sheet() {
 
     // The queue with a selected item: ⌫ must not remove it.
     let app = app_mut(&mut h);
-    let uid = app.queue.upcoming[0].uid;
-    let len = app.queue.upcoming.len();
+    let uid = app.player.queue.upcoming[0].uid;
+    let len = app.player.queue.upcoming.len();
     app.focus = Focus::Queue;
     app.queue_ui.selected = Some(uid);
     h.run_steps(1);
     h.key_press(egui::Key::Backspace);
     h.key_press(egui::Key::Delete);
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).queue.upcoming.len(), len, "⌫ edited the queue under the sheet");
+    assert_eq!(app_mut(&mut h).player.queue.upcoming.len(), len, "⌫ edited the queue under the sheet");
 
     // Closed again: the same keys reach the queue.
     app_mut(&mut h).overlay = None;
     h.run_steps(1);
     h.key_press(egui::Key::Backspace);
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).queue.upcoming.len(), len - 1, "⌫ works once the sheet is closed");
+    assert_eq!(app_mut(&mut h).player.queue.upcoming.len(), len - 1, "⌫ works once the sheet is closed");
     *h.state_mut() = None;
 }

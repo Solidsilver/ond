@@ -43,8 +43,8 @@ fn big_library(app: &mut ListenerApp) {
 
 fn big_queue(app: &mut ListenerApp) {
     let tracks: Vec<Track> = app.data.tracks.all.iter().take(QUEUE_N).cloned().collect();
-    app.queue = Queue::default();
-    app.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
+    app.player.queue = crate::queue::Queue::default();
+    app.player.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
 }
 
 struct Timing {

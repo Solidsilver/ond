@@ -486,7 +486,7 @@ impl ListenerApp {
     pub(super) fn track_list(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
         let t = Tokens::of(ui);
         self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
-        let current = self.queue.current.as_ref().map(|c| c.track.id.clone());
+        let current = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
         let discs = tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1);
         let mut last_disc = None;
         // Where a reorder drag would land: (index to insert at, y of the line).

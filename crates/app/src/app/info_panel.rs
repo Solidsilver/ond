@@ -17,7 +17,7 @@ impl ListenerApp {
     /// `header`: lead with the song's artwork and title (not in the Player,
     /// where they're right above).
     pub(super) fn sidebar_info(&mut self, ui: &mut Ui, header: bool) {
-        let Some(track) = self.queue.current.as_ref().map(|c| c.track.clone()) else {
+        let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
             // Wrapped to the column: a long line must not widen the sidebar.
             let t = Tokens::of(ui);
             let width = ui.available_width();

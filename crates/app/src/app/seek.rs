@@ -57,7 +57,7 @@ impl ListenerApp {
         let shown = self.seek_preview.unwrap_or_else(|| self.position_secs());
         let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
         painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), s.radius, s.fill);
-        if state == PlayState::Buffering || self.pending_seek.is_some() {
+        if state == PlayState::Buffering || self.player.pending_seek.is_some() {
             let tm = ui.input(|i| i.time) as f32;
             let alpha = 0.35 + 0.35 * (tm * std::f32::consts::TAU / 1.2).sin();
             painter.rect_filled(Rect::from_min_max(pos2(x, line.top()), pos2((x + s.pulse_len).min(line.right()), line.bottom())), s.radius, s.pulse.gamma_multiply(alpha));

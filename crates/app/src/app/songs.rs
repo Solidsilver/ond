@@ -156,7 +156,7 @@ impl ListenerApp {
         ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, t.hairline));
 
         let tracks = self.data.tracks.all.clone();
-        let current = self.queue.current.as_ref().map(|c| c.track.id.clone());
+        let current = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
         egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false).show_rows(ui, ROW_H, order.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for row in range {

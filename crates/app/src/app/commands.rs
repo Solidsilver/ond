@@ -53,19 +53,19 @@ impl ListenerApp {
                 }
             }
             Cmd::SeekForward | Cmd::SeekBack => {
-                if self.queue.current.is_some() {
+                if self.player.queue.current.is_some() {
                     let by = if cmd == Cmd::SeekForward { SKIP_SECS } else { -SKIP_SECS };
                     let end = self.duration_secs().unwrap_or(f64::MAX);
                     self.actions.push(Action::Seek((self.position_secs() + by).clamp(0.0, end)));
                 }
             }
             Cmd::Love => {
-                if let Some(t) = self.queue.current.as_ref().map(|c| c.track.clone()) {
+                if let Some(t) = self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: t.id.clone(), track: Some(Box::new(t)), name: None });
                 }
             }
             Cmd::Reveal => {
-                if let Some(t) = self.queue.current.as_ref().map(|c| c.track.clone()) {
+                if let Some(t) = self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     self.reveal = Some(t.id.clone());
                     self.actions.push(Action::Go(Route::Album(t.album_id)));
                 }

@@ -35,7 +35,7 @@ impl ListenerApp {
             self.queue_ui.tab = QueueTab::UpNext;
         }
         let now = chrono::Local::now().time();
-        let remaining = match (self.queue.current.as_ref(), self.duration_secs()) {
+        let remaining = match (self.player.queue.current.as_ref(), self.duration_secs()) {
             (Some(_), Some(d)) => d - self.position_secs(),
             _ => 0.0,
         };
@@ -46,8 +46,8 @@ impl ListenerApp {
             tabs.push(QueueTab::Lyrics);
         }
         tabs.push(QueueTab::Info);
-        let until = (self.queue.current.is_some() && !self.queue.upcoming.is_empty() && self.queue_ui.tab == QueueTab::UpNext)
-            .then(|| format!("until {}", clock_label(now, end_offset(remaining, &self.queue.upcoming))));
+        let until = (self.player.queue.current.is_some() && !self.player.queue.upcoming.is_empty() && self.queue_ui.tab == QueueTab::UpNext)
+            .then(|| format!("until {}", clock_label(now, end_offset(remaining, &self.player.queue.upcoming))));
         let mut until_below = false;
         ui.horizontal(|ui| {
             choice(ui, &tabs, &mut self.queue_ui.tab, None, |t| t.label().into());
@@ -98,7 +98,7 @@ impl ListenerApp {
                     EndAction::RepeatQueue => "Repeat queue",
                     EndAction::Similar => "Continue with similar",
                 };
-                let mut end = self.queue.end;
+                let mut end = self.player.queue.end;
                 let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text)
                     .on_hover_text("What happens when the queue runs out");
                 egui::Popup::menu(&button).show(|ui| {
@@ -108,10 +108,10 @@ impl ListenerApp {
                         .response
                         .on_disabled_hover_text("Not available yet");
                 });
-                if end != self.queue.end {
+                if end != self.player.queue.end {
                     self.actions.push(Action::SetEnd(end));
                 }
-                if !self.queue.upcoming.is_empty() {
+                if !self.player.queue.upcoming.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
                         if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text("Remove everything up next").clicked() {
@@ -127,7 +127,7 @@ impl ListenerApp {
 
     fn up_next(&mut self, ui: &mut Ui, now: chrono::NaiveTime, remaining: f64) {
         let t = Tokens::of(ui);
-        if self.queue.upcoming.is_empty() {
+        if self.player.queue.upcoming.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("Nothing up next").color(t.muted));
@@ -135,8 +135,8 @@ impl ListenerApp {
             });
             return;
         }
-        let starts = start_offsets(remaining, &self.queue.upcoming);
-        let groups = self.queue.groups();
+        let starts = start_offsets(remaining, &self.player.queue.upcoming);
+        let groups = self.player.queue.groups();
         let mut drawn = 0;
         for (gi, g) in groups.iter().enumerate() {
             let key = g.source.key();
@@ -165,11 +165,11 @@ impl ListenerApp {
             }
             for (i, start) in starts.iter().enumerate().skip(g.start).take(g.len) {
                 if drawn == MAX_ROWS {
-                    let more = self.queue.upcoming.len() - i;
+                    let more = self.player.queue.upcoming.len() - i;
                     ui.label(egui::RichText::new(format!("and {more} more")).size(11.0).color(t.muted));
                     return;
                 }
-                let item = self.queue.upcoming[i].clone();
+                let item = self.player.queue.upcoming[i].clone();
                 self.queue_row(ui, &item, Some(i), Some(clock_label(now, *start)));
                 drawn += 1;
             }
@@ -179,12 +179,12 @@ impl ListenerApp {
 
     fn history(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        if self.queue.history.is_empty() {
+        if self.player.queue.history.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| ui.label(egui::RichText::new("Nothing played yet").color(t.muted)));
             return;
         }
-        let items: Vec<Item> = self.queue.history.iter().rev().take(MAX_ROWS).cloned().collect();
+        let items: Vec<Item> = self.player.queue.history.iter().rev().take(MAX_ROWS).cloned().collect();
         for item in &items {
             self.queue_row(ui, item, None, None);
         }
@@ -236,7 +236,7 @@ impl ListenerApp {
             }
             if let (Some(uid), Some(p)) = (resp.dnd_release_payload::<u64>(), ui.ctx().pointer_interact_pos()) {
                 let below = p.y > rect.center().y;
-                let from = self.queue.position(*uid).unwrap_or(usize::MAX);
+                let from = self.player.queue.position(*uid).unwrap_or(usize::MAX);
                 let mut to = index + usize::from(below);
                 if from < to {
                     to -= 1;
@@ -275,10 +275,10 @@ impl ListenerApp {
     /// With a queue item selected: ↑/↓ select, ⌥↑/⌥↓ move it, ⌫ remove, ⏎ play.
     fn queue_keys(&mut self, ui: &Ui) {
         let Some(uid) = self.queue_ui.selected else { return };
-        let Some(at) = self.queue.position(uid) else { return };
+        let Some(at) = self.player.queue.position(uid) else { return };
         let Some(k) = self.list_keys(ui, Focus::Queue, true, true) else { return };
-        if let Some(to) = k.step(Some(at), self.queue.upcoming.len()) {
-            self.queue_ui.selected = Some(self.queue.upcoming[to].uid);
+        if let Some(to) = k.step(Some(at), self.player.queue.upcoming.len()) {
+            self.queue_ui.selected = Some(self.player.queue.upcoming[to].uid);
         }
         if k.move_up {
             self.actions.push(Action::MoveBy(uid, -1));
