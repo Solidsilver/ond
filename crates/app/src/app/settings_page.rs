@@ -120,6 +120,13 @@ impl ListenerApp {
             }
             hint(ui, "Measures loudness and dynamic range once a track has downloaded for playback.");
         });
+        group(ui, "Advanced", |ui| {
+            let mut shown = self.diagnostics.shown;
+            if narrow_toggle(ui, &mut shown, "Show diagnostics bar").changed() {
+                self.actions.push(Action::SetDiagnostics(shown));
+            }
+            hint(ui, "Signal path, buffer, downloads, sync and server timing in one thin strip along the bottom (⌥⌘I). Nothing moves out of its usual place.");
+        });
     }
 
     fn playback_settings(&mut self, ui: &mut Ui, width: f32) {

@@ -229,6 +229,7 @@ impl RingInput {
         }
 
         let done = self.input_done.load(Ordering::Acquire);
+        status.buffered_frames.store((self.samples.slots() / channels.max(1)) as u64, Ordering::Relaxed);
         if self.buffering {
             let channels_u = channels.max(1);
             let target = ((PREBUFFER_SECS * rate as f32) as usize * channels_u).min(self.samples.buffer().capacity() / 2);

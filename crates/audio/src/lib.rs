@@ -202,6 +202,9 @@ pub struct Status {
     pub total_frames: AtomicU64,
     pub sample_rate: AtomicU32,
     pub underruns: AtomicU64,
+    /// Decoded frames queued ahead of the output (the ring's fill), as of the
+    /// last callback.
+    pub buffered_frames: AtomicU64,
     /// Bytes of the current track on disk, and its size (0 when unknown or local).
     pub fetched_bytes: AtomicU64,
     pub total_bytes: AtomicU64,
@@ -264,6 +267,16 @@ impl Status {
         (total > 0).then(|| self.fetched_bytes.load(Ordering::Relaxed) as f32 / total as f32)
     }
 
+    /// Seconds of decoded audio queued ahead of the output.
+    pub fn buffered_secs(&self) -> f64 {
+        secs(self.buffered_frames.load(Ordering::Relaxed), self.sample_rate.load(Ordering::Relaxed))
+    }
+
+    /// The current track or the next one's prefetch is still downloading.
+    pub fn downloading(&self) -> bool {
+        self.downloading.load(Ordering::Relaxed)
+    }
+
     pub fn duration_secs(&self) -> Option<f64> {
         let total = self.total_frames.load(Ordering::Relaxed);
         (total > 0).then(|| secs(total, self.sample_rate.load(Ordering::Relaxed)))
@@ -283,6 +296,8 @@ impl Status {
         self.total_frames.store((duration * RATE as f64) as u64, Ordering::Relaxed);
         self.total_bytes.store(1_000_000, Ordering::Relaxed);
         self.fetched_bytes.store((fetched.clamp(0.0, 1.0) * 1_000_000.0) as u64, Ordering::Relaxed);
+        self.buffered_frames.store((1.6 * RATE as f64) as u64, Ordering::Relaxed);
+        self.downloading.store(fetched < 1.0, Ordering::Relaxed);
     }
 }
 

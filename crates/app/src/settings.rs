@@ -54,6 +54,9 @@ pub struct Settings {
     /// A library-wide analysis was started and hasn't finished: carry on next launch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub analysis_resume: bool,
+    /// The diagnostics bar along the bottom (for the technically curious).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics_bar: bool,
 }
 
 fn yes() -> bool {
@@ -79,6 +82,7 @@ impl Default for Settings {
             offline_move_from: None,
             analyze_playing: false,
             analysis_resume: false,
+            diagnostics_bar: false,
         }
     }
 }

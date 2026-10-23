@@ -341,10 +341,12 @@ fn readout_of(p: &SignalPath, detail: String) -> Readout {
     Readout { from, to, verdict, detail }
 }
 
-/// Paints `r` right-aligned to `right` (vertically centred on it) in muted
-/// text of `size` pt, or only measures it when `paint` is false. Returns the
-/// rect it covers.
+/// The readout in a small pill: the format(s) and, after them, the verdict dot.
+/// Right-aligned at `right` (vertically centred on it). Returns the pill's
+/// rect; with `paint` false it only measures.
 pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, paint: bool) -> egui::Rect {
+    const PAD_X: f32 = 6.0;
+    const PAD_Y: f32 = 2.5;
     let t = Tokens::of(ui);
     let painter = ui.painter();
     let font = egui::FontId::proportional(size);
@@ -352,25 +354,30 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
     let to = r.to.as_ref().map(|s| painter.layout_no_wrap(s.clone(), font.clone(), t.muted));
     let arrow_w = size * 0.85;
     let gap = 3.0;
-    let dot_w = if r.verdict == Verdict::None { 0.0 } else { 5.0 + 5.0 };
+    let dot_w = if r.verdict == Verdict::None { 0.0 } else { 4.0 + 5.0 };
     let text_w = from.size().x + to.as_ref().map_or(0.0, |g| gap + arrow_w + gap + g.size().x);
     let h = from.size().y;
-    let rect = egui::Rect::from_min_max(egui::pos2(right.x - text_w - dot_w, right.y - h / 2.0), egui::pos2(right.x, right.y + h / 2.0));
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(right.x - text_w - dot_w - 2.0 * PAD_X, right.y - h / 2.0 - PAD_Y),
+        egui::pos2(right.x, right.y + h / 2.0 + PAD_Y),
+    );
     if !paint {
         return rect;
     }
-    let mut x = rect.left();
-    painter.galley(egui::pos2(x, rect.top()), from.clone(), t.muted);
+    painter.rect(rect, rect.height() / 2.0, t.field, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+    let mut x = rect.left() + PAD_X;
+    let top = right.y - h / 2.0;
+    painter.galley(egui::pos2(x, top), from.clone(), t.muted);
     x += from.size().x;
     if let Some(to) = to {
         x += gap;
         let a = egui::Rect::from_center_size(egui::pos2(x + arrow_w / 2.0, right.y), egui::vec2(arrow_w, size * 0.7));
         icons::paint(painter, a, Icon::ArrowRight, t.muted);
         x += arrow_w + gap;
-        painter.galley(egui::pos2(x, rect.top()), to.clone(), t.muted);
+        painter.galley(egui::pos2(x, top), to.clone(), t.muted);
         x += to.size().x;
     }
-    let c = egui::pos2(x + 5.0 + 2.5, right.y);
+    let c = egui::pos2(x + 4.0 + 2.5, right.y);
     match r.verdict {
         Verdict::None => {}
         Verdict::Verified => {

@@ -22,6 +22,7 @@ impl MenuBar {
         None
     }
     pub fn sync(&mut self, _queue: bool, _bit_perfect: bool, _theme: u8) {}
+    pub fn set_diagnostics(&mut self, _on: bool) {}
 }
 
 /// Menu item id ↔ command.
@@ -53,6 +54,7 @@ fn cmd_of(id: &str) -> Option<Cmd> {
         Cmd::Shortcuts,
         Cmd::NewPlaylist,
         Cmd::ToggleBitPerfect,
+        Cmd::ToggleDiagnostics,
         Cmd::Place(0),
         Cmd::Place(1),
         Cmd::Place(2),
@@ -78,7 +80,9 @@ mod imp {
         queue: CheckMenuItem,
         bit_perfect: CheckMenuItem,
         themes: [CheckMenuItem; 3],
+        diagnostics: CheckMenuItem,
         shown: Option<(bool, bool, u8)>,
+        diagnostics_shown: Option<bool>,
     }
 
     /// The accelerator for `cmd`, from the key map ("⇧⌘L" → "Shift+Cmd+L").
@@ -185,6 +189,7 @@ mod imp {
             )
             .ok()?;
             let queue = check("Show Queue", Cmd::ToggleQueue);
+            let diagnostics = check("Diagnostics Bar", Cmd::ToggleDiagnostics);
             let themes = [check("System", Cmd::Appearance(0)), check("Light", Cmd::Appearance(1)), check("Dark", Cmd::Appearance(2))];
             let appearance = Submenu::with_items("Appearance", true, &[&themes[0], &themes[1], &themes[2]]).ok()?;
             let go = Submenu::with_items(
@@ -209,6 +214,7 @@ mod imp {
                 &[
                     &item("Now Playing", Cmd::NowPlaying),
                     &queue,
+                    &diagnostics,
                     &sep(),
                     &item("Full Window", Cmd::Full),
                     &item("Compact", Cmd::Compact),
@@ -236,7 +242,15 @@ mod imp {
                     post(cmd);
                 }
             }));
-            Some(Self { _menu: menu, queue, bit_perfect, themes, shown: None })
+            Some(Self { _menu: menu, queue, bit_perfect, themes, diagnostics, shown: None, diagnostics_shown: None })
+        }
+
+        /// The Diagnostics Bar check mark.
+        pub fn set_diagnostics(&mut self, on: bool) {
+            if self.diagnostics_shown != Some(on) {
+                self.diagnostics_shown = Some(on);
+                self.diagnostics.set_checked(on);
+            }
         }
 
         /// Keeps the check marks in step with the app (cheap when nothing changed).

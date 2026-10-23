@@ -8,6 +8,7 @@ mod album_page;
 mod browse;
 mod commands;
 mod compact;
+mod diagnostics;
 mod offline_page;
 mod dialogs;
 mod favorites_page;
@@ -163,6 +164,8 @@ pub enum Action {
     /// Into Mini, or back to where Mini was entered from.
     ToggleMini,
     SetScrobble(bool),
+    /// Show or hide the diagnostics bar.
+    SetDiagnostics(bool),
     /// Open the Settings window at a section.
     OpenSettings(settings_page::Section),
     /// Re-read the library from the server (albums, then tracks).
@@ -380,6 +383,11 @@ pub struct ListenerApp {
     lyrics_follow: crate::lyrics::Follow,
     /// The Now Playing details strip is open.
     np_details: bool,
+    /// The diagnostics bar: whether it's on, and what it measures.
+    diagnostics: diagnostics::Diagnostics,
+    /// The server stopped answering and reconnecting runs in the background
+    /// (as opposed to the first connect still under way).
+    unreachable: bool,
 }
 
 impl ListenerApp {
@@ -536,6 +544,7 @@ impl ListenerApp {
             online: false,
             analysis_library: saved.as_ref().is_some_and(|s| s.analysis_resume),
             analyze_playing: saved.as_ref().is_some_and(|s| s.analyze_playing),
+            diagnostics: diagnostics::Diagnostics::new(saved.as_ref().is_some_and(|s| s.diagnostics_bar)),
             settings: saved,
             analyses: HashMap::new(),
             analyses_loaded: false,
@@ -553,6 +562,7 @@ impl ListenerApp {
             lyrics: HashMap::new(),
             lyrics_follow: crate::lyrics::Follow::default(),
             np_details: false,
+            unreachable: false,
         })
     }
 
@@ -578,6 +588,9 @@ impl ListenerApp {
                     }
                 }
                 self.bridge.fetch_starred(Some(client.clone()));
+                self.diagnostics.latency_asked();
+                self.bridge.measure_latency(client.clone());
+                self.unreachable = false;
                 self.client = Some(client);
                 self.settings = Some(*settings);
                 if !self.online {
@@ -601,9 +614,12 @@ impl ListenerApp {
                 tracing::info!("server unreachable: {error}");
                 self.login = None;
                 self.set_offline();
+                self.unreachable = true;
+                self.diagnostics.set_latency(None);
                 self.server_label = format!("{username} · offline");
                 self.sync_label = "reconnecting…".into();
             }
+            Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
             Msg::Albums(a) => {
                 self.data.set_albums(a);
                 self.search_stale = true;
@@ -1217,6 +1233,10 @@ impl ListenerApp {
                 self.now_playing.set_scrobbling(on);
                 Settings::update(&self.paths, |s| s.scrobble = on);
             }
+            Action::SetDiagnostics(on) => {
+                self.diagnostics.shown = on;
+                Settings::update(&self.paths, |s| s.diagnostics_bar = on);
+            }
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
             Action::Unpin(pin) => {
                 self.offline.unpin(&pin);
@@ -1592,6 +1612,13 @@ impl ListenerApp {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.toolbar(ui));
+        if self.diagnostics.shown {
+            egui::Panel::bottom("diagnostics")
+                .exact_size(diagnostics::BAR_H)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin::symmetric(12, 0)))
+                .show(ui, |ui| self.diagnostics_bar(ui));
+        }
         if rail {
             egui::Panel::left("sidebar-rail")
                 .exact_size(sidebar::RAIL_W)
@@ -1674,6 +1701,18 @@ impl eframe::App for ListenerApp {
                 ThemePref::Dark => 2,
             };
             menu.sync(queue, self.bit_perfect, theme);
+            menu.set_diagnostics(self.diagnostics.shown);
+        }
+        // The diagnostics bar keeps the server round trip fresh, but only while
+        // something plays (idle stays idle).
+        if self.diagnostics.shown
+            && self.online
+            && self.engine.status.state() == PlayState::Playing
+            && self.diagnostics.latency_stale()
+            && let Some(client) = self.client.clone()
+        {
+            self.diagnostics.latency_asked();
+            self.bridge.measure_latency(client);
         }
         // Only the progress readout needs a clock; idle costs nothing. Buffering
         // animates the seek bar and spinner, so it ticks faster.
@@ -1698,6 +1737,7 @@ impl eframe::App for ListenerApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let started = std::time::Instant::now();
         if self.login.is_some() {
             // Logging in needs the full window.
             self.set_mode(Some(WindowMode::Full));
@@ -1705,6 +1745,7 @@ impl eframe::App for ListenerApp {
         } else {
             self.main_ui(ui);
         }
+        self.diagnostics.note_frame(started.elapsed());
     }
 
     fn on_exit(&mut self) {
