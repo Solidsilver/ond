@@ -1,5 +1,5 @@
 //! Small shared pieces: elided text, quiet links, the accent button, a
-//! segmented control.
+//! segmented control, a thin slider, a switch and a menu label.
 
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
@@ -70,9 +70,21 @@ pub fn secondary(ui: &mut Ui, text: &str) -> Response {
 /// Mutually exclusive choices in a pill (Up Next / History, sort order).
 /// Returns the index clicked, if any.
 pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize> {
+    let font = FontId::proportional(12.0);
+    let widths: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), font.clone(), Color32::WHITE).size().x + 22.0).collect();
+    segments(ui, options, &widths, selected)
+}
+
+/// [`segmented`] with equal segments filling `width`.
+pub fn segmented_wide(ui: &mut Ui, options: &[&str], selected: usize, width: f32) -> Option<usize> {
+    let each = (width - 4.0) / options.len().max(1) as f32;
+    segments(ui, options, &vec![each; options.len()], selected)
+}
+
+fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> Option<usize> {
     let t = Tokens::of(ui);
     let font = FontId::proportional(12.0);
-    let widths: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), font.clone(), t.text).size().x + 22.0).collect();
+    let widths = widths.to_vec();
     let size = vec2(widths.iter().sum::<f32>() + 4.0, 26.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().rect_filled(rect, 7.0, t.field);
@@ -102,4 +114,105 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize
 pub fn section(ui: &mut Ui, text: &str) {
     let t = Tokens::of(ui);
     ui.label(egui::RichText::new(text).font(FontId::new(11.0, semibold())).color(t.muted));
+}
+
+/// A thin horizontal slider for `value` in 0..=1 (volume): a 3 px track, the
+/// filled part in the accent, a small round knob that grows on hover.
+/// Dragging, clicking, the scroll wheel and ←/→ (when focused) all adjust it.
+pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Response {
+    let t = Tokens::of(ui);
+    let enabled = ui.is_enabled();
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
+    let knob_r = 6.0;
+    let track = Rect::from_min_max(egui::pos2(rect.left() + knob_r, rect.center().y - 1.5), egui::pos2(rect.right() - knob_r, rect.center().y + 1.5));
+    let before = *value;
+    if enabled {
+        if let Some(p) = resp.interact_pointer_pos()
+            && (resp.dragged() || resp.clicked() || resp.drag_started())
+        {
+            *value = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta);
+            let d = if scroll.x.abs() > scroll.y.abs() { scroll.x } else { scroll.y };
+            if d != 0.0 {
+                *value = (*value + d / 400.0).clamp(0.0, 1.0);
+            }
+        }
+        if resp.has_focus() {
+            let step = ui.input(|i| {
+                let mut s = 0.0;
+                if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowUp) {
+                    s += 0.05;
+                }
+                if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowDown) {
+                    s -= 0.05;
+                }
+                s
+            });
+            *value = (*value + step).clamp(0.0, 1.0);
+        }
+    }
+    if *value != before {
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let fill = if enabled { t.accent } else { t.muted.gamma_multiply(0.5) };
+        ui.painter().rect_filled(track, 1.5, t.hairline);
+        let x = track.left() + track.width() * value.clamp(0.0, 1.0);
+        ui.painter().rect_filled(Rect::from_min_max(track.min, egui::pos2(x, track.bottom())), 1.5, fill);
+        if enabled {
+            let hot = resp.hovered() || resp.dragged() || resp.has_focus();
+            let r = if hot { knob_r + 1.0 } else { knob_r };
+            let c = egui::pos2(x, track.center().y);
+            let knob = if ui.visuals().dark_mode { t.text } else { Color32::WHITE };
+            ui.painter().circle_filled(c + vec2(0.0, 0.5), r + 0.5, Color32::from_black_alpha(40));
+            ui.painter().circle(c, r, knob, egui::Stroke::new(1.0, t.hairline));
+        }
+    }
+    let v = f64::from(*value);
+    let label = label.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::slider(enabled, v, &label));
+    resp
+}
+
+/// An on/off switch with its label on the left, the row filling the width.
+pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let t = Tokens::of(ui);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        ui.painter().text(egui::pos2(rect.left(), rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
+        let sw = Rect::from_min_size(egui::pos2(rect.right() - 30.0, rect.center().y - 9.0), vec2(30.0, 18.0));
+        let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
+        let track = if *on { t.accent } else { t.selected };
+        ui.painter().rect_filled(sw, 9.0, track);
+        let x = egui::lerp(sw.left() + 9.0..=sw.right() - 9.0, how_on);
+        ui.painter().circle_filled(egui::pos2(x, sw.center().y), 7.0, Color32::WHITE);
+    }
+    let (on, label) = (*on, label.to_owned());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, true, on, &label));
+    resp
+}
+
+/// A quiet button that opens a menu: its text and a small chevron, hugging
+/// its content.
+pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    let t = Tokens::of(ui);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(12.0), color);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 6.0, t.hover);
+        }
+        ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, color);
+        let chev = Rect::from_center_size(egui::pos2(rect.right() - 10.0, rect.center().y + 1.0), vec2(8.0, 8.0));
+        crate::icons::paint(ui.painter(), chev, crate::icons::Icon::ChevronDown, t.muted);
+    }
+    let label = text.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    resp
 }

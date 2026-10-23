@@ -61,15 +61,16 @@ impl ListenerApp {
         // Footer: what happens when the queue runs out.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Then").size(12.0).color(t.muted));
+                ui.add_space(2.0);
                 let label = |e: EndAction| match e {
                     EndAction::Stop => "Stop",
                     EndAction::RepeatQueue => "Repeat queue",
                     EndAction::Similar => "Continue with similar",
                 };
                 let mut end = self.queue.end;
-                egui::ComboBox::from_id_salt("queue-end").selected_text(label(end)).width(150.0).show_ui(ui, |ui| {
+                let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text)
+                    .on_hover_text("What happens when the queue runs out");
+                egui::Popup::menu(&button).show(|ui| {
                     ui.selectable_value(&mut end, EndAction::Stop, label(EndAction::Stop));
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
                     ui.add_enabled_ui(false, |ui| ui.selectable_value(&mut end, EndAction::Similar, label(EndAction::Similar)))
@@ -81,7 +82,8 @@ impl ListenerApp {
                 }
                 if !self.queue.upcoming.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).clicked() {
+                        ui.add_space(8.0);
+                        if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text("Remove everything up next").clicked() {
                             self.actions.push(Action::ClearQueue);
                         }
                     });

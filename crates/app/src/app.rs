@@ -36,6 +36,12 @@ use std::time::Duration;
 use subsonic::Client;
 
 pub use palette::Palette;
+pub(crate) use widgets::{elide as elide_text, segmented_wide};
+
+/// Narrower windows show the queue as a sheet instead of a column.
+const QUEUE_DOCK_MIN_W: f32 = 1100.0;
+/// Narrower windows show the sidebar as a rail of icons.
+const SIDEBAR_FULL_MIN_W: f32 = 820.0;
 
 #[derive(Default)]
 struct LoginForm {
@@ -143,6 +149,8 @@ pub enum Action {
     /// Into Mini, or back to where Mini was entered from.
     ToggleMini,
     SetScrobble(bool),
+    /// Back to the login screen; the saved password is forgotten.
+    SignOut,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -213,6 +221,10 @@ pub struct ListenerApp {
     /// The track id last sent as `SetNext`, so the engine isn't told twice.
     sent_next: Option<String>,
     show_queue: bool,
+    /// Narrow windows: the queue opens as a sheet over the content instead.
+    queue_sheet: bool,
+    /// The window is too narrow to dock the queue column (set each frame).
+    queue_narrow: bool,
     queue_ui: QueueUi,
     focus: Focus,
     /// Keyboard selection in the album/playlist track list.
@@ -298,6 +310,7 @@ impl ListenerApp {
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
 
         let login = match &saved {
+            Some(s) if s.signed_out => LoginForm { server: s.server.clone(), username: s.username.clone(), ..Default::default() },
             Some(s) => {
                 bridge.connect(s.clone(), None, paths.clone());
                 LoginForm { server: s.server.clone(), username: s.username.clone(), busy: true, ..Default::default() }
@@ -328,6 +341,8 @@ impl ListenerApp {
             queue: Queue::default(),
             sent_next: None,
             queue_ui: QueueUi::default(),
+            queue_sheet: false,
+            queue_narrow: false,
             focus: Focus::default(),
             track_sel: None,
             credits_open: false,
@@ -743,11 +758,13 @@ impl ListenerApp {
                 theme::set_pref(self.bridge.ctx(), pref);
                 Settings::update(&self.paths, |s| s.theme = pref);
             }
+            Action::ToggleQueue if self.queue_narrow => self.queue_sheet = !self.queue_sheet,
             Action::ToggleQueue => {
                 self.show_queue = !self.show_queue;
                 let show = self.show_queue;
                 Settings::update(&self.paths, |s| s.show_queue = show);
             }
+            Action::SignOut => self.sign_out(),
             Action::SetMode(mode) => self.set_mode(Some(mode)),
             Action::ToggleMini => self.set_mode(None),
             Action::SetScrobble(on) => {
@@ -795,27 +812,86 @@ impl ListenerApp {
         }
     }
 
+    /// Stops playback, forgets the saved password and shows the login screen
+    /// with the server and username filled in.
+    fn sign_out(&mut self) {
+        self.engine.send(Command::Stop);
+        self.queue.clear();
+        self.queue.current = None;
+        self.sent_next = None;
+        self.palette = None;
+        self.bridge.cancel_sync();
+        self.client = None;
+        self.server_label.clear();
+        let saved = Settings::load(&self.paths);
+        if let Some(s) = saved.clone() {
+            std::thread::spawn(move || s.forget_password());
+        }
+        Settings::update(&self.paths, |s| s.signed_out = true);
+        self.login = Some(match saved {
+            Some(s) => LoginForm { server: s.server, username: s.username, ..Default::default() },
+            None => LoginForm::default(),
+        });
+    }
+
     fn login_ui(&mut self, ui: &mut egui::Ui) {
         let Some(form) = self.login.as_mut() else { return };
         let mut submit = false;
-        egui::CentralPanel::default_margins().show(ui, |ui| {
+        let t = Tokens::of(ui);
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
+            const W: f32 = 320.0;
+            const FORM_H: f32 = 330.0;
+            ui.add_space(((ui.available_height() - FORM_H) * 0.42).max(24.0));
             ui.vertical_centered(|ui| {
-                ui.add_space(120.0);
-                ui.heading("Connect to Navidrome");
-                ui.add_space(16.0);
-                ui.add_enabled_ui(!form.busy, |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut form.server).hint_text("https://music.example.com").desired_width(320.0));
-                    ui.add(egui::TextEdit::singleline(&mut form.username).hint_text("username").desired_width(320.0));
-                    let pw = ui.add(egui::TextEdit::singleline(&mut form.password).password(true).hint_text("password").desired_width(320.0));
-                    let enter = pw.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    submit = ui.button("Connect").clicked() || enter;
+                ui.label(egui::RichText::new("Listener").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Connect to your Navidrome server").size(13.0).color(t.muted));
+                ui.add_space(24.0);
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - W) / 2.0).max(0.0));
+                ui.vertical(|ui| {
+                    ui.set_width(W);
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let mut enter = false;
+                    ui.add_enabled_ui(!form.busy, |ui| {
+                        let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool| {
+                            ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
+                            let r = ui.add(
+                                egui::TextEdit::singleline(text)
+                                    .hint_text(hint)
+                                    .password(password)
+                                    .desired_width(W)
+                                    .margin(egui::vec2(10.0, 7.0))
+                                    .background_color(t.field),
+                            );
+                            r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        };
+                        enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false);
+                        ui.label(egui::RichText::new("Your Navidrome URL, e.g. https://music.example.com").size(11.0).color(t.muted));
+                        ui.add_space(10.0);
+                        enter |= field(ui, "Username", &mut form.username, "", false);
+                        ui.add_space(10.0);
+                        enter |= field(ui, "Password", &mut form.password, "", true);
+                    });
+                    ui.add_space(18.0);
+                    let label = if form.busy { "Connecting…" } else { "Connect" };
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, 34.0), if form.busy { egui::Sense::hover() } else { egui::Sense::click() });
+                    let fill = if form.busy { t.accent.gamma_multiply(0.6) } else if resp.hovered() { t.accent.gamma_multiply(0.88) } else { t.accent };
+                    ui.painter().rect_filled(rect, 7.0, fill);
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::new(13.0, theme::semibold()), t.on_accent);
+                    if form.busy {
+                        let r = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(14.0, 14.0));
+                        crate::icons::paint(ui.painter(), r, crate::icons::Icon::Spinner, t.on_accent);
+                        ui.ctx().request_repaint_after(Duration::from_millis(33));
+                    }
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+                    submit = resp.clicked() || enter;
+                    if let Some(e) = &form.error {
+                        ui.add_space(12.0);
+                        ui.add(egui::Label::new(egui::RichText::new(e).size(12.0).color(ui.visuals().error_fg_color)).wrap());
+                    }
                 });
-                if form.busy {
-                    ui.spinner();
-                }
-                if let Some(e) = &form.error {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
-                }
             });
         });
         if submit && !form.busy {
@@ -824,6 +900,7 @@ impl ListenerApp {
             let settings = Settings {
                 server: form.server.trim().to_owned(),
                 username: form.username.trim().to_owned(),
+                signed_out: false,
                 ..Settings::load(&self.paths).unwrap_or_default()
             };
             self.bridge.connect(settings, Some(std::mem::take(&mut form.password)), self.paths.clone());
@@ -915,6 +992,14 @@ impl ListenerApp {
 
     fn full_ui(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::of(ui);
+        let width = ui.available_width();
+        // Narrow windows give the content the room: the queue becomes a sheet
+        // over it, and below that the sidebar becomes a rail of icons.
+        self.queue_narrow = width < QUEUE_DOCK_MIN_W;
+        if !self.queue_narrow {
+            self.queue_sheet = false;
+        }
+        let rail = width < SIDEBAR_FULL_MIN_W;
 
         egui::Panel::top("toolbar")
             .exact_size(52.0)
@@ -926,21 +1011,54 @@ impl ListenerApp {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.status_bar(ui));
-        egui::Panel::left("sidebar")
-            .exact_size(216.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 10, right: 10, top: 14, bottom: 10 }))
-            .show(ui, |ui| self.sidebar(ui));
-        if self.show_queue {
+        if rail {
+            egui::Panel::left("sidebar-rail")
+                .exact_size(sidebar::RAIL_W)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 4, right: 4, top: 14, bottom: 10 }))
+                .show(ui, |ui| self.sidebar_rail(ui));
+        } else {
+            egui::Panel::left("sidebar")
+                .exact_size(sidebar::SIDEBAR_W)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 10, right: 10, top: 14, bottom: 10 }))
+                .show(ui, |ui| self.sidebar(ui));
+        }
+        if self.show_queue && !self.queue_narrow {
             egui::Panel::right("queue")
                 .exact_size(320.0)
                 .resizable(false)
                 .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 8, right: 8, top: 12, bottom: 8 }))
                 .show(ui, |ui| self.queue_panel(ui));
         }
-        egui::CentralPanel::default()
+        let content = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
             .show(ui, |ui| self.main_view(ui));
+        if self.queue_sheet {
+            self.queue_sheet_ui(ui.ctx(), content.response.rect);
+        }
+    }
+
+    /// The queue as a sheet sliding over the right of the content (narrow
+    /// windows). Esc or a click outside closes it.
+    fn queue_sheet_ui(&mut self, ctx: &egui::Context, content: egui::Rect) {
+        let t = Tokens::of_ctx(ctx);
+        let w = 320.0_f32.min(content.width() - 24.0);
+        let id = egui::Id::unique("queue-sheet");
+        let area = egui::Modal::default_area(id).anchor(egui::Align2::RIGHT_TOP, egui::vec2(0.0, content.top()));
+        let shadow = egui::Shadow { offset: [-6, 0], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 120 } else { 40 }) };
+        let modal = egui::Modal::new(id)
+            .area(area)
+            .backdrop_color(egui::Color32::from_black_alpha(18))
+            .frame(egui::Frame::new().fill(t.panel).shadow(shadow).stroke(egui::Stroke::new(1.0, t.hairline)).inner_margin(egui::Margin { left: 8, right: 8, top: 12, bottom: 8 }))
+            .show(ctx, |ui| {
+                ui.set_width(w - 16.0);
+                ui.set_height(content.height() - 20.0);
+                self.queue_panel(ui);
+            });
+        if modal.should_close() {
+            self.queue_sheet = false;
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {

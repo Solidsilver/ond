@@ -28,11 +28,20 @@ pub enum Icon {
     Disc,
     List,
     More,
-    Sliders,
     /// A window with a small player in its corner: switch to the mini player.
     MiniPlayer,
     /// Arrows pointing out to the corners: back to the full window.
     Expand,
+    /// Settings.
+    Gear,
+    /// Recently added.
+    Clock,
+    /// Albums.
+    Grid,
+    /// Songs.
+    Note,
+    /// Offline.
+    Download,
 }
 
 /// Paints `icon` centred in `rect`.
@@ -128,12 +137,6 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 painter.circle_filled(p(x, 0.0), r * 0.13, color);
             }
         }
-        Icon::Sliders => {
-            for (y, knob) in [(-0.5, 0.35), (0.0, -0.35), (0.5, 0.15)] {
-                painter.line_segment([p(-0.8, y), p(0.8, y)], line);
-                painter.circle_filled(p(knob, y), r * 0.16, color);
-            }
-        }
         Icon::MiniPlayer => {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
             painter.rect_filled(Rect::from_min_max(p(0.05, 0.05), p(0.6, 0.45)), r * 0.08, color);
@@ -143,6 +146,33 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.8, -0.8), p(0.2, -0.2)], line);
             painter.add(Shape::line(vec![p(-0.15, 0.8), p(-0.8, 0.8), p(-0.8, 0.15)], line));
             painter.line_segment([p(-0.8, 0.8), p(-0.2, 0.2)], line);
+        }
+        Icon::Gear => {
+            for k in 0..8 {
+                let a = std::f32::consts::TAU * k as f32 / 8.0;
+                painter.line_segment([p(0.5 * a.cos(), 0.5 * a.sin()), p(0.85 * a.cos(), 0.85 * a.sin())], Stroke::new(line.width * 1.5, color));
+            }
+            painter.circle_stroke(c, r * 0.55, line);
+            painter.circle_stroke(c, r * 0.2, line);
+        }
+        Icon::Clock => {
+            painter.circle_stroke(c, r * 0.8, line);
+            painter.add(Shape::line(vec![p(0.0, -0.45), p(0.0, 0.0), p(0.35, 0.2)], line));
+        }
+        Icon::Grid => {
+            for (x, y) in [(-0.8, -0.8), (0.1, -0.8), (-0.8, 0.1), (0.1, 0.1)] {
+                painter.rect_stroke(Rect::from_min_max(p(x, y), p(x + 0.7, y + 0.7)), r * 0.1, line, egui::StrokeKind::Middle);
+            }
+        }
+        Icon::Note => {
+            painter.line_segment([p(0.25, 0.45), p(0.25, -0.8)], line);
+            painter.add(Shape::line(vec![p(0.25, -0.8), p(0.7, -0.6), p(0.7, -0.3), p(0.25, -0.45)], line));
+            painter.circle_filled(p(-0.1, 0.5), r * 0.33, color);
+        }
+        Icon::Download => {
+            painter.line_segment([p(0.0, -0.8), p(0.0, 0.3)], line);
+            painter.add(Shape::line(vec![p(-0.45, -0.1), p(0.0, 0.35), p(0.45, -0.1)], line));
+            painter.line_segment([p(-0.75, 0.8), p(0.75, 0.8)], line);
         }
         Icon::Spinner => {
             let t = painter.ctx().input(|i| i.time) as f32;
@@ -172,11 +202,4 @@ pub fn sized_button(ui: &mut Ui, icon: Icon, label: &str, size: Vec2, glyph: f32
     let enabled = ui.is_enabled();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, label));
     resp.on_hover_text(label)
-}
-
-/// An icon inline with text, at text height.
-pub fn inline(ui: &mut Ui, icon: Icon, color: Color32) {
-    let h = ui.text_style_height(&egui::TextStyle::Body) * 0.7;
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(h), Sense::hover());
-    paint(ui.painter(), rect, icon, color);
 }

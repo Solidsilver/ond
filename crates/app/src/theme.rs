@@ -33,6 +33,8 @@ pub struct Tokens {
     pub selected: Color32,
     pub placeholder: Color32,
     pub warn: Color32,
+    /// Errors (failed login): a softer red than egui's default.
+    pub danger: Color32,
     pub ok: Color32,
 }
 
@@ -56,6 +58,7 @@ impl Tokens {
         selected: hex(0xE2E2E6),
         placeholder: hex(0xE4E4E7),
         warn: hex(0xB25E09),
+        danger: hex(0xC0392B),
         ok: hex(0x2E7D5B),
     };
 
@@ -74,11 +77,17 @@ impl Tokens {
         selected: hex(0x36363B),
         placeholder: hex(0x2E2E32),
         warn: hex(0xE8A54B),
+        danger: hex(0xF0857A),
         ok: hex(0x6FCF97),
     };
 
     pub fn of(ui: &egui::Ui) -> Tokens {
         if ui.visuals().dark_mode { Self::DARK } else { Self::LIGHT }
+    }
+
+    /// For code that has a context but no `Ui` (overlays).
+    pub fn of_ctx(ctx: &Context) -> Tokens {
+        if ctx.global_style().visuals.dark_mode { Self::DARK } else { Self::LIGHT }
     }
 }
 
@@ -141,6 +150,7 @@ fn visuals(theme: Theme, t: &Tokens) -> egui::Visuals {
     v.faint_bg_color = t.panel;
     v.hyperlink_color = t.accent;
     v.warn_fg_color = t.warn;
+    v.error_fg_color = t.danger;
     v.selection.bg_fill = t.accent.gamma_multiply(if theme == Theme::Dark { 0.45 } else { 0.22 });
     v.selection.stroke = egui::Stroke::new(1.0, t.accent);
     v.window_stroke = egui::Stroke::new(1.0, t.hairline);
@@ -183,6 +193,24 @@ fn install_fonts(ctx: &Context) {
             p.insert(0, "sf".into());
         }
         semibold_family.insert(0, "sf-semibold".into());
+    }
+    // SF has no CJK. Hiragino Sans covers kanji, kana and most common hanzi in
+    // ~8 MB a weight; the Chinese and Korean system fonts are 20–55 MB each,
+    // too much to hold in memory for the odd title. Colour emoji is a bitmap
+    // font egui can't draw, so it's left out.
+    for (name, file, family) in [
+        ("cjk", "ヒラギノ角ゴシック W3.ttc", FontFamily::Proportional),
+        ("cjk-semibold", "ヒラギノ角ゴシック W6.ttc", semibold()),
+    ] {
+        if let Ok(bytes) = std::fs::read(format!("/System/Library/Fonts/{file}")) {
+            fonts.font_data.insert(name.into(), egui::FontData::from_owned(bytes).into());
+            let list = if family == FontFamily::Proportional { fonts.families.get_mut(&family) } else { Some(&mut semibold_family) };
+            if let Some(list) = list {
+                // After the UI font, before egui's bundled fallbacks.
+                let at = usize::from(list.first().is_some_and(|f| f.starts_with("sf")));
+                list.insert(at, name.into());
+            }
+        }
     }
     fonts.families.insert(semibold(), semibold_family);
     ctx.set_fonts(fonts);
