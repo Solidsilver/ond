@@ -117,8 +117,8 @@ impl TrackSource {
     /// Original and transcoded copies of a track are cached separately.
     fn cache_key(&self) -> CacheKey {
         match &self.transcode {
-            None => CacheKey::new(self.id.clone(), self.suffix.clone()),
-            Some(t) => CacheKey::new(format!("{}~{}{}", self.id, t.format, t.kbps), Some(t.format.clone())),
+            None => CacheKey::original(self.id.clone(), self.suffix.clone()),
+            Some(t) => CacheKey::transcode(&self.id, &t.format, t.kbps),
         }
     }
 

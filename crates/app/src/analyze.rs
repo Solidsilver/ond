@@ -330,7 +330,7 @@ fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Res
     if let Some(out) = analyze_local(job, stop) {
         return out;
     }
-    let key = CacheKey::new(job.track_id.clone(), job.suffix.clone());
+    let key = CacheKey::original(job.track_id.clone(), job.suffix.clone());
     let cached = cfg.playback.progress(&key).is_some_and(|p| p.complete);
     let cache = if cached { &cfg.playback } else { &cfg.scratch };
     // A download of our own gives way as soon as playback wants the network;
