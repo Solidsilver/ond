@@ -295,6 +295,8 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     for i in [2, 20, 23] {
         app.data.tracks.insert(album_id(i), filler(i, 9));
     }
+    // A connected session: nothing is dimmed as "not downloaded".
+    app.online = true;
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
         .enumerate()
