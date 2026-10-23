@@ -90,6 +90,10 @@ pub struct Album {
     /// OpenSubsonic: every genre, where `genre` is only the first.
     #[serde(default)]
     pub genres: Vec<Named>,
+    /// OpenSubsonic: the album artists as separate entities (the `artist`
+    /// string joins them for display).
+    #[serde(default)]
+    pub artists: Vec<ArtistRef>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -144,6 +148,9 @@ pub struct Song {
     /// OpenSubsonic: everyone credited besides the main artists, by role.
     #[serde(default)]
     pub contributors: Vec<Contributor>,
+    /// OpenSubsonic: the track artists as separate entities.
+    #[serde(default)]
+    pub artists: Vec<ArtistRef>,
 }
 
 /// `{ "name": ... }` objects: record labels, genres.
@@ -233,6 +240,25 @@ pub(crate) struct ArtistIndexes {
 pub(crate) struct ArtistIndex {
     #[serde(default)]
     pub artist: Vec<Artist>,
+}
+
+/// `search3` results. Navidrome returns everything for an empty query, which
+/// makes it a paged bulk export of the library.
+#[derive(Debug, Default, Deserialize)]
+pub struct SearchResult3 {
+    #[serde(default)]
+    pub artist: Vec<Artist>,
+    #[serde(default)]
+    pub album: Vec<Album>,
+    #[serde(default)]
+    pub song: Vec<Song>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchResult3Payload {
+    #[serde(default)]
+    pub search_result3: SearchResult3,
 }
 
 #[derive(Deserialize)]

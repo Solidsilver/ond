@@ -2,9 +2,13 @@
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
 use crate::settings::{Paths, Settings};
+use crate::sync;
 use library::{Album, Library, Track};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use subsonic::{AlbumListType, Client, Credentials};
 
 pub enum Msg {
@@ -24,6 +28,12 @@ pub enum Msg {
     Credited { name: String, album_ids: Vec<String> },
     /// Tracks of several albums, gathered for one queue action (`key` says which).
     TrackBatch { key: String, tracks: Vec<Track> },
+    /// The server's artists (split from joined credits), sorted.
+    Artists(Vec<library::Artist>),
+    /// Every stored track, grouped by album; sent after load and after a sync.
+    AllTracks(Vec<Track>),
+    TrackSync(sync::Progress),
+    TrackSyncDone(sync::Outcome),
     Engine(audio::Event),
     Error(String),
 }
@@ -34,11 +44,13 @@ pub struct Bridge {
     tx: Sender<Msg>,
     ctx: egui::Context,
     library: Arc<Library>,
+    /// Stops the running track sync, if any.
+    sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
 }
 
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, ctx: egui::Context, library: Arc<Library>) -> Self {
-        Self { rt, tx, ctx, library }
+        Self { rt, tx, ctx, library, sync_cancel: Arc::default() }
     }
 
     pub fn ctx(&self) -> &egui::Context {
@@ -63,13 +75,27 @@ impl Bridge {
             .expect("spawn event forwarder");
     }
 
-    /// Loads cached albums from disk without touching the network.
+    /// Loads the cached library from disk without touching the network.
     pub fn load_cached_albums(&self) {
         let this = self.clone();
-        self.rt.spawn_blocking(move || match this.library.albums() {
-            Ok(a) => this.send(Msg::Albums(a)),
-            Err(e) => this.send(Msg::Error(format!("read library: {e}"))),
+        self.rt.spawn_blocking(move || {
+            match this.library.albums() {
+                Ok(a) => this.send(Msg::Albums(a)),
+                Err(e) => return this.send(Msg::Error(format!("read library: {e}"))),
+            }
+            if let Ok(a) = this.library.artists() {
+                this.send(Msg::Artists(a));
+            }
+            this.load_all_tracks();
         });
+    }
+
+    /// Blocking: reads every stored track and sends them to the UI.
+    fn load_all_tracks(&self) {
+        match self.library.all_tracks() {
+            Ok(t) => self.send(Msg::AllTracks(t)),
+            Err(e) => self.send(Msg::Error(format!("read tracks: {e}"))),
+        }
     }
 
     /// Pings the server; on success persists settings (+ password when `remember`).
@@ -120,11 +146,13 @@ impl Bridge {
         self.rt.spawn(async move {
             const PAGE: u32 = 500;
             let mut offset = 0;
+            let mut seen = HashSet::new();
             loop {
                 let page = match client.album_list(AlbumListType::AlphabeticalByArtist, PAGE, offset).await {
                     Ok(p) => p,
                     Err(e) => return this.send(Msg::Error(format!("sync: {e}"))),
                 };
+                seen.extend(page.iter().map(|a| a.id.clone()));
                 let n = page.len() as u32;
                 let lib = this.library.clone();
                 let stored = tokio::task::spawn_blocking(move || lib.upsert_albums(page)).await;
@@ -137,12 +165,83 @@ impl Bridge {
                     break;
                 }
             }
+            // The full list arrived, so anything else stored is gone from the server.
             let lib = this.library.clone();
-            if let Ok(Ok(albums)) = tokio::task::spawn_blocking(move || lib.albums()).await {
+            let listed = tokio::task::spawn_blocking(move || {
+                let removed = lib.retain_albums(&seen)?;
+                if removed > 0 {
+                    tracing::info!("sync: removed {removed} albums no longer on the server");
+                }
+                lib.albums()
+            })
+            .await;
+            if let Ok(Ok(albums)) = listed {
                 this.send(Msg::Albums(albums));
             }
             this.send(Msg::SyncDone(offset as usize));
+            this.sync_artists(client.clone()).await;
+            this.sync_tracks(client);
         });
+    }
+
+    async fn sync_artists(&self, client: Client) {
+        let artists = match client.artists().await {
+            Ok(a) => a,
+            Err(e) => return self.send(Msg::Error(format!("artists: {e}"))),
+        };
+        let lib = self.library.clone();
+        if let Ok(Ok(stored)) = tokio::task::spawn_blocking(move || lib.replace_artists(artists).and_then(|_| lib.artists())).await {
+            self.send(Msg::Artists(stored));
+        }
+    }
+
+    /// Fetches the tracks of every album that changed since the last sync, in
+    /// the background. Replaces (cancels) a sync already running.
+    pub fn sync_tracks(&self, client: Client) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Some(old) = self.sync_cancel.lock().unwrap_or_else(|e| e.into_inner()).replace(cancel.clone()) {
+            old.store(true, Ordering::Relaxed);
+        }
+        let this = self.clone();
+        self.rt.spawn(async move {
+            // At most ~10 progress repaints a second, however fast albums arrive.
+            let last = Mutex::new(Instant::now() - Duration::from_secs(1));
+            let outcome = sync::run(this.library.clone(), client, cancel.clone(), |p| {
+                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                if p.done == p.total || last.elapsed() >= Duration::from_millis(100) {
+                    *last = Instant::now();
+                    this.send(Msg::TrackSync(p));
+                }
+            })
+            .await;
+            // Show what was stored, unless nothing changed. A cancelled sync
+            // still stored something worth showing.
+            if outcome != (sync::Outcome::Done { fetched: 0, bulk: false }) {
+                let me = this.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(albums) = me.library.albums() {
+                        me.send(Msg::Albums(albums));
+                    }
+                    me.load_all_tracks();
+                })
+                .await;
+            }
+            // A newer sync took over: it reports for itself.
+            if this.is_current(&cancel) {
+                this.send(Msg::TrackSyncDone(outcome));
+            }
+        });
+    }
+
+    fn is_current(&self, cancel: &Arc<AtomicBool>) -> bool {
+        self.sync_cancel.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|c| Arc::ptr_eq(c, cancel))
+    }
+
+    /// Stops the running track sync; what it fetched so far is kept.
+    pub fn cancel_sync(&self) {
+        if let Some(c) = self.sync_cancel.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            c.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Shows cached tracks immediately, then refreshes them from the server.

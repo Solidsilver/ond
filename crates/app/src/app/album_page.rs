@@ -350,7 +350,7 @@ impl ListenerApp {
         }
     }
 
-    fn track_menu(&mut self, ui: &mut Ui, tr: &Track, source: &Source) {
+    pub(super) fn track_menu(&mut self, ui: &mut Ui, tr: &Track, source: &Source) {
         if ui.button("Play next").clicked() {
             self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: source.clone(), action: QueueAction::PlayNext });
         }
@@ -439,6 +439,7 @@ mod tests {
                 .map(|(role, sub, name)| Contributor { role: (*role).into(), sub_role: sub.map(Into::into), name: (*name).into(), artist_id: None })
                 .collect(),
             cover_art: None,
+            artists: Vec::new(),
         }
     }
 

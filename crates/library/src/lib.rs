@@ -17,11 +17,12 @@ use redb::{
     WriteTransaction,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bump when a model or index layout changes, and handle the step in `migrate`.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
 const ARTISTS: TableDefinition<&str, &[u8]> = TableDefinition::new("artists");
@@ -34,6 +35,12 @@ const ALBUMS_BY_SORT: TableDefinition<(&str, i32, &str, &str), ()> = TableDefini
 /// (album id, disc, track, track id). Tuple keys compare field by field, so an
 /// album id that is a prefix of another can't interleave with it.
 const TRACKS_BY_ALBUM: TableDefinition<(&str, u32, u32, &str), ()> = TableDefinition::new("tracks_by_album");
+/// (folded person name, album id, track id): who a track credits, in any role.
+/// Keyed down to the track so removing one track leaves the album's other
+/// credits in place.
+const CREDITS: TableDefinition<(&str, &str, &str), ()> = TableDefinition::new("credits");
+/// album id → [`Album::sync_stamp`] of the album when its tracks were last stored.
+const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_stamps");
 
 const SCHEMA_KEY: &str = "schema_version";
 
@@ -147,6 +154,8 @@ impl Library {
             wt.open_table(ARTISTS_BY_NAME)?;
             wt.open_table(ALBUMS_BY_SORT)?;
             wt.open_table(TRACKS_BY_ALBUM)?;
+            wt.open_table(CREDITS)?;
+            wt.open_table(ALBUM_STAMPS)?;
         }
         wt.commit()?;
         Ok(Self { db })
@@ -155,6 +164,42 @@ impl Library {
     pub fn schema_version(&self) -> Result<u32> {
         let rt = self.db.begin_read()?;
         Ok(rt.open_table(META)?.get(SCHEMA_KEY)?.map_or(0, |v| v.value()))
+    }
+
+    /// A small counter or flag kept alongside the data (e.g. sync progress).
+    pub fn meta(&self, key: &str) -> Result<Option<u32>> {
+        let rt = self.db.begin_read()?;
+        Ok(rt.open_table(META)?.get(key)?.map(|v| v.value()))
+    }
+
+    pub fn set_meta(&self, key: &str, value: Option<u32>) -> Result<()> {
+        assert_ne!(key, SCHEMA_KEY, "the schema version is managed by `init`");
+        let wt = self.db.begin_write()?;
+        {
+            let mut meta = wt.open_table(META)?;
+            match value {
+                Some(v) => meta.insert(key, v)?,
+                None => meta.remove(key)?,
+            };
+        }
+        Ok(wt.commit()?)
+    }
+
+    /// Replaces the whole artist list with what the server returned.
+    pub fn replace_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        {
+            let mut rows = wt.open_table(ARTISTS)?;
+            let mut idx = wt.open_table(ARTISTS_BY_NAME)?;
+            rows.retain(|_, _| false)?;
+            idx.retain(|_, _| false)?;
+            for a in artists {
+                let a = Artist::from(a);
+                rows.insert(a.id.as_str(), encode(&a)?.as_slice())?;
+                idx.insert((a.sort_name().as_str(), a.id.as_str()), ())?;
+            }
+        }
+        Ok(wt.commit()?)
     }
 
     pub fn upsert_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
@@ -186,22 +231,118 @@ impl Library {
         Ok(wt.commit()?)
     }
 
-    /// Replaces an album's track list with what the server returned.
+    /// Replaces an album's track list with what the server returned, and
+    /// stamps it as current.
     pub fn upsert_album_tracks(&self, album: subsonic::AlbumWithSongs) -> Result<()> {
-        let album_id = album.album.id.clone();
+        self.upsert_albums_tracks(vec![album])
+    }
+
+    /// [`upsert_album_tracks`](Self::upsert_album_tracks) for several albums in
+    /// one transaction.
+    pub fn upsert_albums_tracks(&self, albums: Vec<subsonic::AlbumWithSongs>) -> Result<()> {
         let wt = self.db.begin_write()?;
         {
-            let mut tracks = wt.open_table(TRACKS)?;
-            let mut by_album = wt.open_table(TRACKS_BY_ALBUM)?;
-            remove_album_tracks(&mut tracks, &mut by_album, &album_id)?;
-            for s in album.song {
-                put_track(&mut tracks, &mut by_album, &Track::from_song(s, &album_id))?;
-            }
+            let mut tt = TrackTables::open(&wt)?;
             let mut rows = wt.open_table(ALBUMS)?;
             let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
-            put_album(&mut rows, &mut idx, &Album::from(album.album))?;
+            let mut stamps = wt.open_table(ALBUM_STAMPS)?;
+            for album in albums {
+                let album_id = album.album.id.clone();
+                tt.remove_album(&album_id)?;
+                for s in album.song {
+                    tt.put(&Track::from_song(s, &album_id))?;
+                }
+                let row = Album::from(album.album);
+                stamps.insert(album_id.as_str(), row.sync_stamp())?;
+                put_album(&mut rows, &mut idx, &row)?;
+            }
         }
         Ok(wt.commit()?)
+    }
+
+    /// Stores songs as they come, e.g. pages of a bulk `search3` export.
+    /// Unlike [`upsert_album_tracks`](Self::upsert_album_tracks) this never
+    /// removes anything, and stamps nothing: a page holds parts of albums.
+    pub fn store_songs(&self, songs: Vec<subsonic::Song>) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        {
+            let mut tt = TrackTables::open(&wt)?;
+            for s in songs {
+                let Some(album_id) = s.album_id.clone() else { continue };
+                tt.put(&Track::from_song(s, &album_id))?;
+            }
+        }
+        Ok(wt.commit()?)
+    }
+
+    /// Stamps of albums whose tracks are stored and current as of that stamp.
+    pub fn album_stamps(&self) -> Result<HashMap<String, u64>> {
+        let rt = self.db.begin_read()?;
+        let mut out = HashMap::new();
+        for entry in rt.open_table(ALBUM_STAMPS)?.iter()? {
+            let (id, stamp) = entry?;
+            out.insert(id.value().to_owned(), stamp.value());
+        }
+        Ok(out)
+    }
+
+    pub fn set_album_stamps(&self, stamps: impl IntoIterator<Item = (String, u64)>) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        {
+            let mut table = wt.open_table(ALBUM_STAMPS)?;
+            for (id, stamp) in stamps {
+                table.insert(id.as_str(), stamp)?;
+            }
+        }
+        Ok(wt.commit()?)
+    }
+
+    /// Stored tracks per album id.
+    pub fn track_counts(&self) -> Result<HashMap<String, u32>> {
+        let rt = self.db.begin_read()?;
+        let mut out = HashMap::new();
+        for entry in rt.open_table(TRACKS_BY_ALBUM)?.iter()? {
+            let (key, _) = entry?;
+            *out.entry(key.value().0.to_owned()).or_default() += 1;
+        }
+        Ok(out)
+    }
+
+    pub fn track_count(&self) -> Result<u64> {
+        Ok(self.db.begin_read()?.open_table(TRACKS)?.len()?)
+    }
+
+    /// Every stored track, grouped by album in disc/track order.
+    pub fn all_tracks(&self) -> Result<Vec<Track>> {
+        let rt = self.db.begin_read()?;
+        let rows = rt.open_table(TRACKS)?;
+        let idx = rt.open_table(TRACKS_BY_ALBUM)?;
+        let mut out = Vec::with_capacity(idx.len()? as usize);
+        for entry in idx.iter()? {
+            let (key, _) = entry?;
+            out.extend(get_row(&rows, key.value().3)?);
+        }
+        Ok(out)
+    }
+
+    /// Removes every album not in `keep` (gone from the server), with its
+    /// tracks. Returns how many were removed.
+    pub fn retain_albums(&self, keep: &HashSet<String>) -> Result<usize> {
+        let gone: Vec<String> = {
+            let rt = self.db.begin_read()?;
+            let mut ids = Vec::new();
+            for entry in rt.open_table(ALBUMS)?.iter()? {
+                let (id, _) = entry?;
+                if !keep.contains(id.value()) {
+                    ids.push(id.value().to_owned());
+                }
+            }
+            ids
+        };
+        for id in &gone {
+            self.remove_album(id)?;
+        }
+        Ok(gone.len())
     }
 
     /// Deletes an album, its tracks and all their index entries. Returns whether
@@ -209,9 +350,8 @@ impl Library {
     pub fn remove_album(&self, id: &str) -> Result<bool> {
         let wt = self.db.begin_write()?;
         let existed = {
-            let mut tracks = wt.open_table(TRACKS)?;
-            let mut by_album = wt.open_table(TRACKS_BY_ALBUM)?;
-            remove_album_tracks(&mut tracks, &mut by_album, id)?;
+            TrackTables::open(&wt)?.remove_album(id)?;
+            wt.open_table(ALBUM_STAMPS)?.remove(id)?;
             let mut rows = wt.open_table(ALBUMS)?;
             let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
             let old = rows.remove(id)?.map(|g| decode::<Album>(g.value())).transpose()?;
@@ -262,18 +402,20 @@ impl Library {
         Ok(out)
     }
 
-    /// Albums with a stored track crediting `name` (any role). Only covers albums
-    /// whose tracks have been synced, i.e. opened at least once.
+    /// Albums with a stored track crediting `name` in any role (artist,
+    /// composer, performer, ...), case- and accent-insensitively.
     pub fn albums_crediting(&self, name: &str) -> Result<Vec<String>> {
         let rt = self.db.begin_read()?;
-        let tracks = rt.open_table(TRACKS)?;
+        let credits = rt.open_table(CREDITS)?;
+        let who = fold(name);
         let mut ids = std::collections::BTreeSet::new();
-        for entry in tracks.iter()? {
-            let (_, bytes) = entry?;
-            let t: Track = decode(bytes.value())?;
-            if t.contributors.iter().any(|c| c.name == name) || t.composer.as_deref() == Some(name) {
-                ids.insert(t.album_id);
+        for entry in credits.range((who.as_str(), "", "")..)? {
+            let (key, _) = entry?;
+            let (person, album, _) = key.value();
+            if person != who {
+                break;
             }
+            ids.insert(album.to_owned());
         }
         Ok(ids.into_iter().collect())
     }
@@ -315,6 +457,22 @@ impl Library {
         if track_idx.len()? != tracks.len()? {
             problems.push(format!("track index has {} entries for {} rows", track_idx.len()?, tracks.len()?));
         }
+
+        let credits = rt.open_table(CREDITS)?;
+        let mut expected = 0u64;
+        for entry in tracks.iter()? {
+            let (id, bytes) = entry?;
+            let t: Track = decode(bytes.value())?;
+            for name in t.credited_names() {
+                expected += 1;
+                if credits.get((name.as_str(), t.album_id.as_str(), id.value()))?.is_none() {
+                    problems.push(format!("credit {name} on track {} missing", id.value()));
+                }
+            }
+        }
+        if credits.len()? != expected {
+            problems.push(format!("credit index has {} entries, expected {expected}", credits.len()?));
+        }
         Ok(problems)
     }
 }
@@ -332,6 +490,21 @@ fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
             1 => {
                 rewrite_rows::<AlbumV1, AlbumV2>(&mut wt.open_table(ALBUMS)?)?;
                 rewrite_rows::<TrackV1, TrackV2>(&mut wt.open_table(TRACKS)?)?;
+            }
+            // v3 adds artist entities to albums and tracks (filled in by the next
+            // sync) and the credits index, built here from the stored tracks.
+            2 => {
+                rewrite_rows::<AlbumV2, AlbumV3>(&mut wt.open_table(ALBUMS)?)?;
+                rewrite_rows::<TrackV2, TrackV3>(&mut wt.open_table(TRACKS)?)?;
+                let tracks = wt.open_table(TRACKS)?;
+                let mut credits = wt.open_table(CREDITS)?;
+                for entry in tracks.iter()? {
+                    let (id, bytes) = entry?;
+                    let t: Track = decode(bytes.value())?;
+                    for name in t.credited_names() {
+                        credits.insert((name.as_str(), t.album_id.as_str(), id.value()), ())?;
+                    }
+                }
             }
             _ => {}
         }
@@ -392,28 +565,51 @@ fn put_album(
     Ok(())
 }
 
-fn put_track(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut TrackIndex, t: &Track) -> Result<()> {
-    // A track the server moved to another album leaves its old index entry behind
-    // unless we drop it here.
-    if let Some(old) = rows.insert(t.id.as_str(), encode(t)?.as_slice())? {
-        let old: Track = decode(old.value())?;
-        let (disc, no) = old.order_parts();
-        idx.remove((old.album_id.as_str(), disc, no, old.id.as_str()))?;
-    }
-    let (disc, no) = t.order_parts();
-    idx.insert((t.album_id.as_str(), disc, no, t.id.as_str()), ())?;
-    Ok(())
+/// The tables a track write touches, opened once per transaction.
+struct TrackTables<'t> {
+    rows: Table<'t, &'static str, &'static [u8]>,
+    by_album: TrackIndex<'t>,
+    credits: Table<'t, (&'static str, &'static str, &'static str), ()>,
 }
 
-fn remove_album_tracks(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut TrackIndex, album_id: &str) -> Result<()> {
-    for id in collect_track_ids(idx, album_id)? {
-        if let Some(old) = rows.remove(id.as_str())? {
-            let old: Track = decode(old.value())?;
-            let (disc, no) = old.order_parts();
-            idx.remove((old.album_id.as_str(), disc, no, old.id.as_str()))?;
-        }
+impl<'t> TrackTables<'t> {
+    fn open(wt: &'t WriteTransaction) -> Result<Self> {
+        Ok(Self { rows: wt.open_table(TRACKS)?, by_album: wt.open_table(TRACKS_BY_ALBUM)?, credits: wt.open_table(CREDITS)? })
     }
-    Ok(())
+
+    fn put(&mut self, t: &Track) -> Result<()> {
+        // A track the server moved to another album leaves its old index entries
+        // behind unless we drop them here.
+        let old = self.rows.insert(t.id.as_str(), encode(t)?.as_slice())?.map(|g| decode::<Track>(g.value())).transpose()?;
+        if let Some(old) = old {
+            self.unindex(&old)?;
+        }
+        let (disc, no) = t.order_parts();
+        self.by_album.insert((t.album_id.as_str(), disc, no, t.id.as_str()), ())?;
+        for name in t.credited_names() {
+            self.credits.insert((name.as_str(), t.album_id.as_str(), t.id.as_str()), ())?;
+        }
+        Ok(())
+    }
+
+    fn unindex(&mut self, old: &Track) -> Result<()> {
+        let (disc, no) = old.order_parts();
+        self.by_album.remove((old.album_id.as_str(), disc, no, old.id.as_str()))?;
+        for name in old.credited_names() {
+            self.credits.remove((name.as_str(), old.album_id.as_str(), old.id.as_str()))?;
+        }
+        Ok(())
+    }
+
+    fn remove_album(&mut self, album_id: &str) -> Result<()> {
+        for id in collect_track_ids(&self.by_album, album_id)? {
+            let old = self.rows.remove(id.as_str())?.map(|g| decode::<Track>(g.value())).transpose()?;
+            if let Some(old) = old {
+                self.unindex(&old)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ fn album(id: &str, name: &str, artist: &str, year: i32) -> subsonic::Album {
         sort_name: None,
         record_labels: Vec::new(),
         genres: Vec::new(),
+        artists: Vec::new(),
     }
 }
 
@@ -44,6 +45,7 @@ fn song(id: &str, album_id: &str, disc: u32, track: u32) -> subsonic::Song {
         replay_gain: None,
         display_composer: None,
         contributors: Vec::new(),
+        artists: Vec::new(),
     }
 }
 
@@ -272,7 +274,7 @@ fn newer_schema_is_refused_not_destroyed() {
 }
 
 #[test]
-fn v1_rows_migrate_to_v2() {
+fn v1_rows_migrate_to_current() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lib.redb");
     // Hand-build a v1 database: v1 rows and index entries, schema 1.
@@ -322,7 +324,7 @@ fn v1_rows_migrate_to_v2() {
         wt.commit().unwrap();
     }
     let lib = Library::open(&path).unwrap();
-    assert_eq!(lib.schema_version().unwrap(), 2);
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
     let albums = lib.albums().unwrap();
     assert_eq!(albums[0].name, "Kind of Blue");
     assert_eq!(albums[0].all_genres(), ["Jazz"]);
@@ -352,5 +354,193 @@ fn credits_are_stored_and_findable() {
     assert_eq!(lib.album("al-1").unwrap().unwrap().labels, ["Riverside"]);
     assert_eq!(lib.albums_crediting("Bill Evans").unwrap(), ["al-1"]);
     assert_eq!(lib.albums_crediting("Scott LaFaro").unwrap(), ["al-1"]);
+    // Folded like sort keys.
+    assert_eq!(lib.albums_crediting("scott lafaro").unwrap(), ["al-1"]);
     assert!(lib.albums_crediting("Nobody").unwrap().is_empty());
+    assert_consistent(&lib);
+}
+
+fn artist_ref(id: &str, name: &str) -> subsonic::ArtistRef {
+    subsonic::ArtistRef { id: Some(id.into()), name: name.into() }
+}
+
+#[test]
+fn split_artists_are_kept_as_entities_and_credited() {
+    let lib = Library::in_memory().unwrap();
+    let mut a = album("al-1", "Ondes", "Johannes Motschmann, David Panzl, Boris Bolles", 2019);
+    a.artists = vec![artist_ref("ar-1", "Johannes Motschmann"), artist_ref("ar-2", "David Panzl"), artist_ref("ar-3", "Boris Bolles")];
+    let mut s = song("s-1", "al-1", 1, 1);
+    s.artist = a.artist.clone();
+    s.artists = a.artists.clone();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a, song: vec![s] }).unwrap();
+
+    let row = lib.album("al-1").unwrap().unwrap();
+    assert_eq!(row.artists.len(), 3);
+    assert!(row.has_artist(Some("ar-2"), "David Panzl"));
+    assert!(row.has_artist(None, "Boris Bolles"));
+    assert!(!row.has_artist(Some("ar-9"), "Someone Else"));
+    // Each split artist finds the album; the joined string is credited too.
+    assert_eq!(lib.albums_crediting("David Panzl").unwrap(), ["al-1"]);
+    assert_eq!(lib.albums_crediting("Johannes Motschmann, David Panzl, Boris Bolles").unwrap(), ["al-1"]);
+    assert_consistent(&lib);
+}
+
+#[test]
+fn credits_follow_track_updates_and_removal() {
+    let lib = Library::in_memory().unwrap();
+    let with = |id: &str, songs| subsonic::AlbumWithSongs { album: album(id, id, "X", 2000), song: songs };
+    let mut a = song("a", "one", 1, 1);
+    a.display_composer = Some("Cole Porter".into());
+    let mut b = song("b", "one", 1, 2);
+    b.display_composer = Some("Cole Porter".into());
+    lib.upsert_album_tracks(with("one", vec![a.clone(), b])).unwrap();
+    assert_eq!(lib.albums_crediting("Cole Porter").unwrap(), ["one"]);
+
+    // Re-credited on resync: the old name goes, the album stays for the new one.
+    a.display_composer = Some("Gershwin".into());
+    lib.upsert_album_tracks(with("one", vec![a])).unwrap();
+    assert!(lib.albums_crediting("Cole Porter").unwrap().is_empty());
+    assert_eq!(lib.albums_crediting("Gershwin").unwrap(), ["one"]);
+    assert_consistent(&lib);
+
+    lib.remove_album("one").unwrap();
+    assert!(lib.albums_crediting("Gershwin").unwrap().is_empty());
+    assert_consistent(&lib);
+}
+
+#[test]
+fn stamps_written_with_tracks_and_dropped_with_album() {
+    let lib = Library::in_memory().unwrap();
+    let mut a = album("al", "A", "X", 2000);
+    a.song_count = 1;
+    a.cover_art = Some("al-al_65a1b2c3".into());
+    let expected = Album::from(a.clone()).sync_stamp();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a.clone(), song: vec![song("s", "al", 1, 1)] }).unwrap();
+    assert_eq!(lib.album_stamps().unwrap().get("al"), Some(&expected));
+
+    // Any change the album list reports changes the stamp: Navidrome bumps the
+    // cover art id when an album is updated.
+    let mut edited = a.clone();
+    edited.cover_art = Some("al-al_65a1b2ff".into());
+    assert_ne!(Album::from(edited).sync_stamp(), expected);
+    let mut more = a;
+    more.song_count = 2;
+    assert_ne!(Album::from(more).sync_stamp(), expected);
+
+    lib.remove_album("al").unwrap();
+    assert!(lib.album_stamps().unwrap().is_empty());
+}
+
+#[test]
+fn bulk_songs_store_without_stamping_and_counts_add_up() {
+    let lib = Library::in_memory().unwrap();
+    lib.upsert_albums([album("one", "One", "X", 2000), album("two", "Two", "X", 2001)]).unwrap();
+    // A page boundary splits album "two" across two pages.
+    lib.store_songs(vec![song("a", "one", 1, 1), song("b", "one", 1, 2), song("c", "two", 1, 1)]).unwrap();
+    lib.store_songs(vec![song("d", "two", 1, 2), { let mut s = song("x", "", 1, 1); s.album_id = None; s }]).unwrap();
+    assert!(lib.album_stamps().unwrap().is_empty());
+    let counts = lib.track_counts().unwrap();
+    assert_eq!(counts.get("one"), Some(&2));
+    assert_eq!(counts.get("two"), Some(&2));
+    assert_eq!(lib.track_count().unwrap(), 4, "songs without an album are skipped");
+    let all: Vec<_> = lib.all_tracks().unwrap().into_iter().map(|t| t.id).collect();
+    assert_eq!(all, ["a", "b", "c", "d"]);
+    // Re-storing the same page is harmless.
+    lib.store_songs(vec![song("a", "one", 1, 1)]).unwrap();
+    assert_eq!(lib.track_count().unwrap(), 4);
+    assert_consistent(&lib);
+}
+
+#[test]
+fn retain_albums_drops_what_the_server_no_longer_has() {
+    let lib = Library::in_memory().unwrap();
+    for id in ["a", "b", "c"] {
+        lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album(id, id, "X", 2000), song: vec![song(&format!("{id}-1"), id, 1, 1)] })
+            .unwrap();
+    }
+    let keep = ["a".to_owned(), "c".to_owned()].into_iter().collect();
+    assert_eq!(lib.retain_albums(&keep).unwrap(), 1);
+    assert_eq!(lib.albums().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), ["a", "c"]);
+    assert_eq!(lib.track_count().unwrap(), 2);
+    assert!(!lib.album_stamps().unwrap().contains_key("b"));
+    assert_consistent(&lib);
+}
+
+#[test]
+fn replace_artists_drops_stale_ones() {
+    let lib = Library::in_memory().unwrap();
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    lib.replace_artists([artist("1", "Old Name"), artist("2", "Kept")]).unwrap();
+    lib.replace_artists([artist("2", "Kept"), artist("3", "New")]).unwrap();
+    let names: Vec<_> = lib.artists().unwrap().into_iter().map(|a| a.name).collect();
+    assert_eq!(names, ["Kept", "New"]);
+}
+
+#[test]
+fn meta_values_round_trip() {
+    let lib = Library::in_memory().unwrap();
+    assert_eq!(lib.meta("bulk_offset").unwrap(), None);
+    lib.set_meta("bulk_offset", Some(1500)).unwrap();
+    assert_eq!(lib.meta("bulk_offset").unwrap(), Some(1500));
+    lib.set_meta("bulk_offset", None).unwrap();
+    assert_eq!(lib.meta("bulk_offset").unwrap(), None);
+}
+
+#[test]
+fn v2_rows_migrate_to_v3_with_credits_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.redb");
+    {
+        let db = redb::Database::create(&path).unwrap();
+        let wt = db.begin_write().unwrap();
+        {
+            wt.open_table(META).unwrap().insert(SCHEMA_KEY, 2).unwrap();
+            let v2 = AlbumV2::from(AlbumV1 {
+                id: "al-1".into(),
+                name: "Sunday".into(),
+                sort: None,
+                artist: Some("Bill Evans Trio".into()),
+                artist_ref: None,
+                year: Some(1961),
+                genre: None,
+                song_count: 1,
+                duration_secs: 370,
+                cover_art: None,
+                created: None,
+            });
+            wt.open_table(ALBUMS).unwrap().insert("al-1", encode(&v2).unwrap().as_slice()).unwrap();
+            wt.open_table(ALBUMS_BY_SORT).unwrap().insert(("bill evans trio", 1961, "sunday", "al-1"), ()).unwrap();
+            let mut t2 = TrackV2::from(TrackV1 {
+                id: "s-1".into(),
+                album_id: "al-1".into(),
+                title: "Gloria's Step".into(),
+                artist: Some("Bill Evans Trio".into()),
+                track: Some(1),
+                disc: Some(1),
+                duration_secs: Some(370),
+                suffix: None,
+                content_type: None,
+                size: None,
+                bit_rate_kbps: None,
+                bit_depth: None,
+                sample_rate: None,
+                channels: None,
+                track_gain: None,
+                album_gain: None,
+                track_peak: None,
+                album_peak: None,
+            });
+            t2.composer = Some("Scott LaFaro".into());
+            wt.open_table(TRACKS).unwrap().insert("s-1", encode(&t2).unwrap().as_slice()).unwrap();
+            wt.open_table(TRACKS_BY_ALBUM).unwrap().insert(("al-1", 1, 1, "s-1"), ()).unwrap();
+        }
+        wt.commit().unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    assert_eq!(lib.schema_version().unwrap(), 3);
+    assert!(lib.albums().unwrap()[0].artists.is_empty());
+    assert_eq!(lib.album_tracks("al-1").unwrap()[0].composer.as_deref(), Some("Scott LaFaro"));
+    assert_eq!(lib.albums_crediting("Scott LaFaro").unwrap(), ["al-1"]);
+    assert!(lib.album_stamps().unwrap().is_empty(), "migrated tracks get fetched again by the next sync");
+    assert_consistent(&lib);
 }

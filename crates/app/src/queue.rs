@@ -289,6 +289,7 @@ mod tests {
             composer: None,
             contributors: Vec::new(),
             cover_art: None,
+            artists: Vec::new(),
         }
     }
 

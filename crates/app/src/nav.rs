@@ -6,6 +6,8 @@ pub enum Route {
     Recent,
     Albums,
     Artists,
+    /// Every track, as a sortable table.
+    Songs,
     /// An album artist's page; `id` when the server gave one.
     Artist { name: String, id: Option<String> },
     Album(String),
@@ -25,7 +27,7 @@ pub enum FilterKind {
 impl Route {
     /// Top-level places the sidebar links to; going to one starts a fresh trail.
     pub fn is_root(&self) -> bool {
-        matches!(self, Route::Recent | Route::Albums | Route::Artists | Route::Offline | Route::Playlist { .. })
+        matches!(self, Route::Recent | Route::Albums | Route::Artists | Route::Songs | Route::Offline | Route::Playlist { .. })
     }
 }
 

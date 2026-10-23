@@ -9,6 +9,7 @@ mod browse;
 mod palette;
 mod queue_panel;
 mod sidebar;
+mod songs;
 mod toolbar;
 mod widgets;
 
@@ -54,6 +55,12 @@ pub struct Data {
     pub playlist_tracks: HashMap<String, Vec<Track>>,
     /// Album ids crediting a person, from stored tracks.
     pub credited: HashMap<String, Vec<String>>,
+    /// The server's artists, as separate entities ("A, B & C" split).
+    pub artists: Vec<library::Artist>,
+    /// Every stored track, grouped by album; the Songs view sorts these.
+    pub all_tracks: Arc<Vec<Track>>,
+    /// Bumped whenever `all_tracks` changes.
+    pub tracks_version: u64,
 }
 
 impl Data {
@@ -65,6 +72,18 @@ impl Data {
         self.by_id = albums.iter().enumerate().map(|(i, a)| (a.id.clone(), i)).collect();
         self.albums = albums;
         self.version += 1;
+    }
+
+    fn set_all_tracks(&mut self, tracks: Vec<Track>) {
+        let mut by_album: HashMap<String, Vec<Track>> = HashMap::new();
+        for t in &tracks {
+            by_album.entry(t.album_id.clone()).or_default().push(t.clone());
+        }
+        // Stored tracks are the server's as of the last sync; anything fetched
+        // since (an album opened) is in the db too, so this replaces it all.
+        self.tracks = by_album;
+        self.all_tracks = Arc::new(tracks);
+        self.tracks_version += 1;
     }
 
     fn update_album(&mut self, album: Album) {
@@ -199,8 +218,13 @@ pub struct ListenerApp {
     /// A seek that's been sent but not confirmed yet; shown instead of the engine position.
     pending_seek: Option<f64>,
 
-    /// Rebuilt whenever the album list changes.
+    /// Rebuilt whenever albums, artists or tracks change.
     search: Option<SearchIndex>,
+    /// Albums, artists or tracks changed since the index was built.
+    search_stale: bool,
+    songs: songs::SongsView,
+    /// A track sync is running (shows a stop button in the status bar).
+    track_syncing: bool,
     palette: Option<Palette>,
     theme: ThemePref,
 }
@@ -278,6 +302,9 @@ impl ListenerApp {
             seek_preview: None,
             pending_seek: None,
             search: None,
+            search_stale: false,
+            songs: songs::SongsView::default(),
+            track_syncing: false,
             palette: None,
             theme: theme_pref,
         })
@@ -302,16 +329,39 @@ impl ListenerApp {
             }
             Msg::Albums(a) => {
                 self.data.set_albums(a);
-                self.search = Some(SearchIndex::new(&self.data.albums));
-                if let Some(p) = self.palette.as_mut()
-                    && let Some(idx) = self.search.as_mut()
-                {
-                    p.refresh(idx);
-                }
+                self.search_stale = true;
+            }
+            Msg::Artists(a) => {
+                self.data.artists = a;
+                self.search_stale = true;
+            }
+            Msg::AllTracks(t) => {
+                self.data.set_all_tracks(t);
+                self.search_stale = true;
+            }
+            Msg::TrackSync(p) => {
+                self.track_syncing = true;
+                self.sync_label = p.label();
+            }
+            Msg::TrackSyncDone(outcome) => {
+                self.track_syncing = false;
+                let albums = self.data.albums.len();
+                let tracks = self.data.all_tracks.len();
+                self.sync_label = match outcome {
+                    crate::sync::Outcome::Done { .. } => format!("{albums} albums · {tracks} tracks"),
+                    crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
+                    crate::sync::Outcome::Failed(e) => {
+                        self.error = Some(e);
+                        format!("{albums} albums · {tracks} tracks")
+                    }
+                };
             }
             Msg::AlbumUpdated(a) => self.data.update_album(a),
             Msg::SyncProgress(n) => self.sync_label = format!("syncing… {n}"),
-            Msg::SyncDone(n) => self.sync_label = format!("{n} albums"),
+            Msg::SyncDone(n) => {
+                self.sync_label = format!("{n} albums");
+                self.track_syncing = true;
+            }
             Msg::Tracks { album_id, tracks } => {
                 self.data.tracks.insert(album_id.clone(), tracks);
                 self.run_pending(&format!("album:{album_id}"));
@@ -337,6 +387,14 @@ impl ListenerApp {
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Error(e) => self.error = Some(e),
         }
+    }
+
+    fn rebuild_search(&mut self) {
+        let mut index = SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.all_tracks);
+        if let Some(p) = self.palette.as_mut() {
+            p.refresh(&mut index);
+        }
+        self.search = Some(index);
     }
 
     fn handle_engine(&mut self, ev: audio::Event) {
@@ -527,7 +585,7 @@ impl ListenerApp {
                 }
             }
             Action::Artist(name, action) => {
-                let ids: Vec<String> = self.data.albums.iter().filter(|a| a.artist.as_deref() == Some(name.as_str())).map(|a| a.id.clone()).collect();
+                let ids: Vec<String> = self.data.albums.iter().filter(|a| a.has_artist(None, &name)).map(|a| a.id.clone()).collect();
                 let key = format!("artist:{name}");
                 let source = match action {
                     QueueAction::PlayNext | QueueAction::Add => Source::Added,
@@ -758,6 +816,9 @@ impl ListenerApp {
                 }
             } else {
                 ui.label(egui::RichText::new(format!("{} · {}", self.server_label, self.sync_label)).small().color(t.muted));
+                if self.track_syncing && widgets::link(ui, "Stop", egui::FontId::proportional(11.0), t.muted).clicked() {
+                    self.bridge.cancel_sync();
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
@@ -774,6 +835,11 @@ impl eframe::App for ListenerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg);
+        }
+        // Once per batch of messages: a sync delivers albums, artists and tracks
+        // back to back, and each rebuild is ~30 ms on a 20k-track library.
+        if std::mem::take(&mut self.search_stale) {
+            self.rebuild_search();
         }
         // Only the progress readout needs a clock; idle costs nothing. Buffering
         // animates the seek bar and spinner, so it ticks faster.
@@ -796,6 +862,7 @@ impl eframe::App for ListenerApp {
 
 impl Drop for ListenerApp {
     fn drop(&mut self) {
+        self.bridge.cancel_sync();
         self.engine.send(Command::Shutdown);
     }
 }
@@ -868,6 +935,7 @@ mod tests {
                 library::Contributor { role: "composer".into(), sub_role: None, name: "Scott LaFaro".into(), artist_id: None },
             ],
             cover_art: None,
+            artists: Vec::new(),
         }
     }
 
@@ -895,12 +963,13 @@ mod tests {
                 created: Some(format!("2024-01-{:02}", 1 + i % 28)),
                 labels: vec!["Riverside".into()],
                 genres: vec!["Jazz".into(), "Cool Jazz".into()],
+                artists: Vec::new(),
             })
             .collect();
         app.data.set_albums(albums);
-        app.search = Some(SearchIndex::new(&app.data.albums));
         let tracks: Vec<Track> = (1..=20).map(|n| track(&format!("t-{n}"), "al-0", n)).collect();
-        app.data.tracks.insert("al-0".into(), tracks.clone());
+        app.data.set_all_tracks(tracks.clone());
+        app.rebuild_search();
         app.data.playlists = vec![subsonic::Playlist { id: "pl-1".into(), name: "Late night".into(), song_count: 3, duration: 900, cover_art: None, owner: None }];
         app.data.playlist_tracks.insert("pl-1".into(), tracks[..3].to_vec());
         app.data.credited.insert("Scott LaFaro".into(), vec!["al-1".into(), "al-0".into()]);
@@ -938,6 +1007,7 @@ mod tests {
             Route::Filter { kind: FilterKind::Genre, value: "Cool Jazz".into() },
             Route::Filter { kind: FilterKind::Label, value: "Nobody".into() },
             Route::Offline,
+            Route::Songs,
         ];
         for (k, r) in routes.into_iter().enumerate() {
             app.nav.go(r);
@@ -954,7 +1024,7 @@ mod tests {
         frame(&ctx, &mut app, Vec::new());
         app.nav.go(Route::Album("al-0".into()));
         frame(&ctx, &mut app, Vec::new());
-        assert_eq!(app.nav.trail(), [&Route::Offline, &Route::Album("al-0".into())]);
+        assert_eq!(app.nav.trail(), [&Route::Songs, &Route::Album("al-0".into())]);
     }
 
     #[test]

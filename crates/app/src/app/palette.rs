@@ -90,7 +90,7 @@ impl ListenerApp {
                 ui.add_space(4.0);
                 let edit = ui.add(
                     egui::TextEdit::singleline(&mut palette.query)
-                        .hint_text("Search artists and albums")
+                        .hint_text("Search artists, albums and songs")
                         .font(FontId::proportional(17.0))
                         .frame(egui::Frame::NONE)
                         .desired_width(WIDTH - 90.0),
@@ -119,8 +119,12 @@ impl ListenerApp {
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                     ui.add_space(6.0);
                     let mut row = 0;
-                    let groups: [(&str, Vec<Hit>); 2] =
-                        [("Artists", r.artists.iter().map(|&i| Hit::Artist(i)).collect()), ("Albums", r.albums.iter().map(|&i| Hit::Album(i)).collect())];
+                    let groups: [(&str, Vec<Hit>); 4] = [
+                        ("Top hit", r.top.into_iter().collect()),
+                        ("Artists", r.artists.iter().map(|&i| Hit::Artist(i)).collect()),
+                        ("Albums", r.albums.iter().map(|&i| Hit::Album(i)).collect()),
+                        ("Songs", r.tracks.iter().map(|&i| Hit::Track(i)).collect()),
+                    ];
                     for (title, hits) in groups {
                         if hits.is_empty() {
                             continue;
@@ -157,6 +161,12 @@ impl ListenerApp {
                                         None => a.artist.clone(),
                                     };
                                     (a.title.clone(), sub)
+                                }
+                                Hit::Track(i) => {
+                                    let tr = &index.tracks[i];
+                                    let cover = self.data.album(&tr.album_id).and_then(|al| al.cover_art.clone());
+                                    self.art.paint(ui, tile, cover.as_deref(), 4.0);
+                                    (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album))
                                 }
                             };
                             let x = tile.right() + 12.0;
@@ -225,9 +235,10 @@ impl ListenerApp {
         match hit {
             Hit::Artist(i) => {
                 let name = index.artists[i].name.clone();
+                let known = index.artists[i].id.clone();
                 let action = match verb {
                     Verb::Open => {
-                        let id = self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name.as_str())).and_then(|a| a.artist_ref.clone());
+                        let id = known.or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name.as_str())).and_then(|a| a.artist_ref.clone()));
                         self.actions.push(Action::Go(Route::Artist { name, id }));
                         return;
                     }
@@ -245,6 +256,17 @@ impl ListenerApp {
                     Verb::PlayNext => Action::Album(id, QueueAction::PlayNext),
                     Verb::Add => Action::Album(id, QueueAction::Add),
                 });
+            }
+            Hit::Track(i) => {
+                let (id, album_id) = (index.tracks[i].id.clone(), index.tracks[i].album_id.clone());
+                let Some(tr) = self.data.tracks.get(&album_id).and_then(|ts| ts.iter().find(|t| t.id == id)).cloned() else { return };
+                match verb {
+                    Verb::Open => self.actions.push(Action::Go(Route::Album(album_id))),
+                    // Plays the album from this track, as double-clicking it there would.
+                    Verb::Play => self.play_from_album(&tr, QueueAction::Play { start: 0 }),
+                    Verb::PlayNext => self.play_from_album(&tr, QueueAction::PlayNext),
+                    Verb::Add => self.play_from_album(&tr, QueueAction::Add),
+                }
             }
         }
     }
