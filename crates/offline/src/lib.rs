@@ -16,11 +16,12 @@ pub mod pins;
 
 pub use pins::{Pin, PinRecord, Pins, TrackRef};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
@@ -134,6 +135,14 @@ pub struct OfflineStore {
     inner: Arc<Inner>,
 }
 
+impl Drop for OfflineStore {
+    /// Lets a save that's being written finish, so reopening (or moving) the
+    /// store right after sees it.
+    fn drop(&mut self) {
+        drop(self.inner.written.lock());
+    }
+}
+
 impl std::fmt::Debug for OfflineStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OfflineStore").field("dir", &self.inner.dir).finish_non_exhaustive()
@@ -146,6 +155,17 @@ struct Inner {
     state: Mutex<State>,
     wake: Notify,
     on_change: OnChange,
+    /// Track ids whose files should go, deleted on a thread of their own so an
+    /// unpin never waits on the disk (or holds the state lock while it does).
+    doomed: Mutex<Sender<Vec<String>>>,
+    /// The newest pins revision written to disk; older writes are skipped.
+    written: Mutex<u64>,
+}
+
+/// A copy of the pins to write, taken under the state lock and written after it.
+struct Save {
+    revision: u64,
+    bytes: Vec<u8>,
 }
 
 struct State {
@@ -159,6 +179,8 @@ struct State {
     version: u64,
     snapshot: Arc<Snapshot>,
     free: Option<(Instant, Option<u64>)>,
+    /// Bumped by every change to `pins` that needs saving.
+    pins_revision: u64,
 }
 
 struct Active {
@@ -213,7 +235,10 @@ impl OfflineStore {
             }
         }
         remove_strays(&cfg.dir, &pins);
+        let (doomed, doomed_rx) = std::sync::mpsc::channel();
         let inner = Arc::new(Inner {
+            doomed: Mutex::new(doomed),
+            written: Mutex::new(0),
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .read_timeout(Duration::from_secs(60))
@@ -233,6 +258,7 @@ impl OfflineStore {
                 version: 1,
                 snapshot: Arc::new(Snapshot::default()),
                 free: None,
+                pins_revision: 0,
             }),
         });
         {
@@ -244,6 +270,11 @@ impl OfflineStore {
             let inner = inner.clone();
             rt.spawn(async move { worker(inner).await });
         }
+        let (weak, dir) = (Arc::downgrade(&inner), inner.dir.clone());
+        std::thread::Builder::new()
+            .name("offline-delete".into())
+            .spawn(move || deleter(weak, dir, doomed_rx))
+            .map_err(io::Error::other)?;
         Ok(Self { inner })
     }
 
@@ -273,9 +304,7 @@ impl OfflineStore {
     pub fn pin(&self, pin: Pin, label: impl Into<String>, tracks: Vec<TrackRef>) {
         let mut st = self.inner.lock();
         let gone = st.pins.set(pin, label.into(), tracks);
-        self.inner.forget(&mut st, gone);
-        self.inner.persist(&st);
-        self.inner.changed(st);
+        self.inner.commit(st, gone);
     }
 
     /// Refreshes a pin's track list (the album or playlist changed on the
@@ -289,9 +318,7 @@ impl OfflineStore {
             return;
         }
         let gone = st.pins.set(pin.clone(), label, tracks);
-        self.inner.forget(&mut st, gone);
-        self.inner.persist(&st);
-        self.inner.changed(st);
+        self.inner.commit(st, gone);
     }
 
     /// Adds tracks to a pin without dropping any: for track lists that may be
@@ -300,7 +327,7 @@ impl OfflineStore {
     pub fn extend(&self, pin: &Pin, tracks: Vec<TrackRef>) {
         let mut st = self.inner.lock();
         let Some(rec) = st.pins.record(pin) else { return };
-        let have: std::collections::HashSet<&String> = rec.tracks.iter().collect();
+        let have: HashSet<&String> = rec.tracks.iter().collect();
         let added: Vec<TrackRef> = tracks.into_iter().filter(|t| !have.contains(&t.id)).collect();
         if added.is_empty() {
             return;
@@ -310,17 +337,14 @@ impl OfflineStore {
         all.extend(added);
         let gone = st.pins.set(pin.clone(), label, all);
         debug_assert!(gone.is_empty());
-        self.inner.persist(&st);
-        self.inner.changed(st);
+        self.inner.commit(st, gone);
     }
 
-    /// Unpins; files no other pin needs are deleted.
+    /// Unpins; files no other pin needs are deleted (in the background).
     pub fn unpin(&self, pin: &Pin) {
         let mut st = self.inner.lock();
         let gone = st.pins.remove(pin);
-        self.inner.forget(&mut st, gone);
-        self.inner.persist(&st);
-        self.inner.changed(st);
+        self.inner.commit(st, gone);
     }
 
     pub fn is_pinned(&self, pin: &Pin) -> bool {
@@ -352,8 +376,7 @@ impl OfflineStore {
                 a.cancel.store(true, Ordering::Relaxed);
             }
         }
-        self.inner.persist(&st);
-        self.inner.changed(st);
+        self.inner.commit(st, Vec::new());
     }
 
     /// Tries failed downloads again now.
@@ -393,29 +416,69 @@ impl Inner {
         (self.on_change)();
     }
 
-    /// Deletes the files of tracks no pin needs; a running download of one is
-    /// cancelled and cleans up after itself.
-    fn forget(&self, st: &mut State, gone: Vec<String>) {
+    /// After a change to the pins: forgets `gone` tracks, then (with the state
+    /// lock released) saves the pins and hands the files to the deleter.
+    fn commit(&self, mut st: MutexGuard<'_, State>, gone: Vec<String>) {
+        let doomed = self.forget(&mut st, gone);
+        let save = self.save(&mut st);
+        // Taken before the change is visible, so whoever sees it and then waits
+        // on the file (dropping the store, see `Drop`) finds it written.
+        let written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+        self.changed(st);
+        Self::write(&self.dir, written, save);
+        self.delete(doomed);
+    }
+
+    /// Tracks no pin needs: returns the ids whose files should go. A running
+    /// download of one is cancelled instead and cleans up after itself.
+    fn forget(&self, st: &mut State, gone: Vec<String>) -> Vec<String> {
+        let mut doomed = Vec::new();
         for id in gone {
             st.failures.remove(&id);
             if let Some(a) = st.active.get(&id) {
                 a.cancel.store(true, Ordering::Relaxed);
                 continue;
             }
-            remove_files(&self.dir, &id);
+            doomed.push(id);
+        }
+        doomed
+    }
+
+    fn delete(&self, ids: Vec<String>) {
+        if !ids.is_empty() {
+            let _ = self.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(ids);
         }
     }
 
-    fn persist(&self, st: &State) {
+    /// The pins as they are now, to [`write`](Self::write) once the lock is released.
+    fn save(&self, st: &mut State) -> Option<Save> {
+        st.pins_revision += 1;
+        match serde_json::to_vec(&st.pins) {
+            Ok(bytes) => Some(Save { revision: st.pins_revision, bytes }),
+            Err(e) => {
+                tracing::warn!("saving offline state: {e}");
+                None
+            }
+        }
+    }
+
+    /// Writes a [`Save`] unless a newer one already reached the disk. Runs with
+    /// the state lock released; `written` serializes the writers.
+    fn write(dir: &Path, mut written: MutexGuard<'_, u64>, save: Option<Save>) {
+        let Some(save) = save else { return };
+        if *written >= save.revision {
+            return;
+        }
         let write = || -> io::Result<()> {
-            let tmp = self.dir.join(format!("{STATE_FILE}.tmp"));
+            let tmp = dir.join(format!("{STATE_FILE}.tmp"));
             let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&serde_json::to_vec(&st.pins).map_err(io::Error::other)?)?;
+            f.write_all(&save.bytes)?;
             f.sync_all()?;
-            std::fs::rename(&tmp, self.dir.join(STATE_FILE))
+            std::fs::rename(&tmp, dir.join(STATE_FILE))
         };
-        if let Err(e) = write() {
-            tracing::warn!("saving offline state: {e}");
+        match write() {
+            Ok(()) => *written = save.revision,
+            Err(e) => tracing::warn!("saving offline state: {e}"),
         }
     }
 
@@ -492,10 +555,8 @@ impl Inner {
         st.active.remove(&job.r.id);
         if !st.pins.tracks.contains_key(&job.r.id) {
             // Unpinned while downloading.
-            drop(st);
-            remove_files(&self.dir, &job.r.id);
-            let st = self.lock();
-            return self.changed(st);
+            self.changed(st);
+            return self.delete(vec![job.r.id]);
         }
         match result {
             Ok(size) => {
@@ -503,7 +564,7 @@ impl Inner {
                 if let Some(s) = st.pins.tracks.get_mut(&job.r.id) {
                     s.done = Some(size);
                 }
-                self.persist(&st);
+                return self.commit(st, Vec::new());
             }
             Err(JobError::Cancelled) => {}
             Err(JobError::Failed(error)) => {
@@ -753,14 +814,37 @@ fn escape(id: &str) -> String {
     name
 }
 
-/// Deletes the finished and partial files of track `id`, whatever their suffix.
-fn remove_files(dir: &Path, id: &str) {
-    let stem = escape(id);
+/// The deleter thread: removes the files of tracks no pin needs any more, one
+/// batch at a time, until the store goes away.
+fn deleter(store: Weak<Inner>, dir: PathBuf, batches: Receiver<Vec<String>>) {
+    while let Ok(mut ids) = batches.recv() {
+        // Anything else that piled up goes in the same directory scan.
+        ids.extend(batches.try_iter().flatten());
+        let Some(inner) = store.upgrade() else { return };
+        // Pinned again since (or downloading again): its files stay.
+        ids.retain(|id| {
+            let st = inner.lock();
+            !st.pins.tracks.contains_key(id) && !st.active.contains_key(id)
+        });
+        drop(inner);
+        remove_files(&dir, &ids);
+    }
+}
+
+/// Deletes the finished and partial files of tracks `ids`, whatever their
+/// suffix, in one pass over the directory.
+fn remove_files(dir: &Path, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let stems: HashSet<String> = ids.iter().map(|id| escape(id)).collect();
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name == stem || name.strip_prefix(&stem).is_some_and(|rest| rest.starts_with('.')) {
+        // `<stem>`, `<stem>.<suffix>` or `<stem>.<suffix>.part`: escaped ids never contain '.'.
+        let stem = name.split('.').next().unwrap_or(name);
+        if stems.contains(stem) {
             let _ = std::fs::remove_file(e.path());
         }
     }
