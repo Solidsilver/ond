@@ -247,3 +247,18 @@ async fn http_errors_never_carry_the_auth_token() {
         assert!(!shown.contains(leak), "{leak} leaked in {shown}");
     }
 }
+
+#[test]
+fn error_replies_are_recognised_as_json_or_xml() {
+    let json = br#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":70,"message":"Not found"}}}"#;
+    let xml = br#"<?xml version="1.0" encoding="UTF-8"?><subsonic-response status="failed"><error code="70" message="Not found"/></subsonic-response>"#;
+    assert!(crate::is_error_reply(Some("application/json"), b""));
+    assert!(crate::is_error_reply(Some("text/xml; charset=utf-8"), b""));
+    // No or a wrong content type: sniffed from the body.
+    assert!(crate::is_error_reply(None, json));
+    assert!(crate::is_error_reply(Some("audio/flac"), xml));
+    assert!(!crate::is_error_reply(Some("audio/flac"), b"fLaC\0\0\0\x22"));
+    assert!(!crate::is_error_reply(None, b"{ not subsonic }"));
+    assert_eq!(crate::error_text(json), "Not found");
+    assert_eq!(crate::error_text(xml), "Not found");
+}

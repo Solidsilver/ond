@@ -151,15 +151,14 @@ impl Client {
     /// Cover art bytes as the server sends them (usually JPEG), scaled server-side to `size` px.
     pub async fn cover_art(&self, cover_id: &str, size: Option<u32>) -> Result<Vec<u8>> {
         let resp = self.http.get(self.cover_art_url(cover_id, size)).send().await?.error_for_status()?;
-        // Errors come back as a JSON envelope rather than an image.
-        let is_json = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.contains("json"));
+        let kind = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = resp.bytes().await?;
-        if is_json {
-            parse_response::<serde_json::Value>(&bytes)?;
+        // Errors come back as an envelope rather than an image.
+        if is_error_reply(kind.as_deref(), &bytes) {
+            return Err(match parse_response::<serde_json::Value>(&bytes) {
+                Err(e @ Error::Api { .. }) => e,
+                _ => Error::Api { code: -1, message: error_text(&bytes) },
+            });
         }
         Ok(bytes.to_vec())
     }
@@ -275,6 +274,31 @@ impl Client {
     pub async fn artists(&self) -> Result<Vec<Artist>> {
         let (_, p): (_, ArtistsPayload) = self.call("getArtists", &[]).await?;
         Ok(p.artists.index.into_iter().flat_map(|i| i.artist).collect())
+    }
+}
+
+/// Whether a response is a Subsonic error envelope (JSON or XML) rather than
+/// the file asked for. Subsonic sends those with status 200, so a download
+/// must check before keeping the bytes. `head` is the start of the body.
+pub fn is_error_reply(content_type: Option<&str>, head: &[u8]) -> bool {
+    if content_type.is_some_and(|ct| ct.contains("json") || ct.contains("xml")) {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&head[..head.len().min(512)]);
+    let text = text.trim_start();
+    (text.starts_with('{') && text.contains("subsonic-response")) || text.starts_with("<?xml") || text.starts_with("<subsonic-response")
+}
+
+/// A short, readable form of an error envelope for messages: the server's
+/// `message` when there is one, else the start of the body.
+pub fn error_text(body: &[u8]) -> String {
+    if let Err(Error::Api { message, .. }) = parse_response::<serde_json::Value>(body) {
+        return message;
+    }
+    let text = String::from_utf8_lossy(&body[..body.len().min(200)]);
+    match text.split_once("message=\"").and_then(|(_, rest)| rest.split_once('"')) {
+        Some((message, _)) => message.to_owned(),
+        None => text.trim().to_owned(),
     }
 }
 
