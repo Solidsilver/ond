@@ -94,7 +94,8 @@ impl ListenerApp {
                     self.actions.push(Action::Go(route));
                 }
                 resp.context_menu(|ui| {
-                    self.playlist_menu(ui, &p.id);
+                    let kept = self.offline_snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
+                    super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, &mut self.actions);
                     if mine {
                         ui.separator();
                         self.playlist_edit_items(ui, &p.id, &p.name);
@@ -205,7 +206,7 @@ impl ListenerApp {
                 Some(f) => format!("Syncing · {:.0}%", 100.0 * f),
                 None => "Syncing…".to_owned(),
             };
-            let (done, total) = (thousands(p.done), thousands(p.total));
+            let (done, total) = (crate::fmt::thousands(p.done), crate::fmt::thousands(p.total));
             let what = match p.unit {
                 crate::sync::Unit::Tracks => "tracks",
                 crate::sync::Unit::Albums => "albums",
@@ -310,21 +311,6 @@ impl ListenerApp {
         });
     }
 
-    fn playlist_menu(&mut self, ui: &mut Ui, id: &str) {
-        if ui.button("Play").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::Play { start: 0 }));
-        }
-        if ui.button("Shuffle").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::Shuffle));
-        }
-        if ui.button("Play next").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::PlayNext));
-        }
-        if ui.button("Add to queue").clicked() {
-            self.actions.push(Action::Playlist(id.to_owned(), super::QueueAction::Add));
-        }
-    }
-
     /// The gear: opens Settings.
     fn settings_button(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
@@ -363,11 +349,10 @@ impl ListenerApp {
     }
 
     fn section(&self, ui: &mut Ui, text: &str) {
-        let t = Tokens::of(ui);
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(text).font(FontId::new(11.0, semibold())).color(t.muted));
+            super::widgets::section(ui, text);
         });
         ui.add_space(4.0);
     }
@@ -481,17 +466,4 @@ impl ServerState {
             ServerState::Offline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
         }
     }
-}
-
-/// 1866 → "1,866".
-fn thousands(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }

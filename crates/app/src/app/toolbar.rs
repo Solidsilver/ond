@@ -2,7 +2,8 @@
 //! window, output / volume / queue on the right.
 
 use super::widgets::elide;
-use super::{Action, ListenerApp, mmss};
+use super::seek::SeekStyle;
+use super::{Action, ListenerApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -149,9 +150,6 @@ impl ListenerApp {
         painter.galley(pos2(center_x - sub.size().x / 2.0, y0 + title_h), sub, t.muted);
 
         // The seek line along the bottom of the column, the times at its ends.
-        let state = self.engine.status.state();
-        let dur = self.duration_secs().filter(|d| *d > 0.0);
-        let shown = self.seek_preview.unwrap_or_else(|| self.position_secs());
         let time_font = FontId::proportional(9.5);
         // Sized for the widest time, so the line doesn't shift as digits change.
         let time_w = painter.layout_no_wrap("−88:88".into(), time_font.clone(), t.muted).size().x;
@@ -159,40 +157,20 @@ impl ListenerApp {
         let bar_left = col_left + time_w + 6.0;
         let bar = Rect::from_min_max(pos2(bar_left, line_y - 1.0), pos2((col_right - time_w - 6.0).max(bar_left + 20.0), line_y + 1.0));
         let strip = Rect::from_min_max(pos2(bar.left() - 4.0, line_y - 6.0), pos2(bar.right() + 4.0, rect.bottom()));
-        let seekable = dur.is_some() && matches!(state, PlayState::Playing | PlayState::Paused | PlayState::Buffering);
-        let strip_resp = ui.interact(strip, ui.scope_id().with("lcd-seek"), if seekable { Sense::click_and_drag() } else { Sense::hover() });
-        let frac_at = |x: f32| f64::from(((x - bar.left()) / bar.width()).clamp(0.0, 1.0));
-        if let Some(d) = dur {
-            if (strip_resp.dragged() || strip_resp.drag_started())
-                && let Some(p) = strip_resp.interact_pointer_pos()
-            {
-                self.seek_preview = Some(frac_at(p.x) * d);
-            }
-            if strip_resp.drag_stopped() || strip_resp.clicked() {
-                if let Some(to) = strip_resp.interact_pointer_pos().map(|p| frac_at(p.x) * d).or(self.seek_preview) {
-                    self.actions.push(Action::Seek(to));
-                }
-                self.seek_preview = None;
-            }
-        }
-        let seeking = strip_resp.hovered() || self.seek_preview.is_some();
-        let line = if seeking { bar.expand2(vec2(0.0, 0.5)) } else { bar };
-        painter.rect_filled(line, 1.0, t.hairline);
-        if let Some(f) = self.engine.status.fetched_fraction() {
-            painter.rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * f.clamp(0.0, 1.0), line.bottom())), 1.0, t.selected);
-        }
-        let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
-        painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), 1.0, t.muted);
-        if state == PlayState::Buffering || self.pending_seek.is_some() {
-            let tm = ui.input(|i| i.time) as f32;
-            let alpha = 0.35 + 0.35 * (tm * std::f32::consts::TAU / 1.2).sin();
-            painter.rect_filled(Rect::from_min_max(pos2(x, line.top()), pos2((x + 40.0).min(line.right()), line.bottom())), 1.0, t.accent.gamma_multiply(alpha));
-        }
-        if seeking {
-            painter.circle_filled(pos2(x, line.center().y), 3.5, t.text);
-        }
-        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, mmss(shown), time_font.clone(), t.muted);
-        let remaining = dur.map(|d| format!("−{}", mmss((d - shown).max(0.0)))).unwrap_or_default();
+        let style = SeekStyle {
+            track: t.hairline,
+            fetched: t.selected,
+            fill: t.muted,
+            pulse: t.accent,
+            pulse_len: 40.0,
+            radius: 1.0,
+            grow: 0.5,
+            knob: t.text,
+            knob_r: 3.5,
+        };
+        let (shown, strip_resp) = self.seek_line(ui, bar, strip, "lcd-seek", &style);
+        let (elapsed, remaining) = self.seek_times(shown);
+        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, elapsed, time_font.clone(), t.muted);
         painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
 
         let hovering = body.hovered() || strip_resp.hovered() || self.seek_preview.is_some();
@@ -214,13 +192,8 @@ impl ListenerApp {
         }
         // Always clickable: the heart sits over the display, so while the pointer
         // is on it the display itself doesn't count as hovered.
-        let heart_resp = ui.interact(heart, ui.scope_id().with("lcd-heart"), Sense::click());
-        if loved || hovering || heart_resp.hovered() {
-            let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if heart_resp.hovered() { t.text } else { t.muted }) };
-            icons::paint(&painter, Rect::from_center_size(heart.center(), vec2(11.0, 11.0)), icon, color);
-        }
         let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
-        heart_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, love_label));
+        let heart_resp = super::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
         if heart_resp.clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }

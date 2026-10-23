@@ -5,7 +5,7 @@
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
 use super::widgets::elide;
-use super::{Action, Focus, ListenerApp, QueueAction, mmss};
+use super::{Action, Focus, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
@@ -169,22 +169,9 @@ impl ListenerApp {
                 let hovered = resp.hovered() || resp.contains_pointer();
                 let playing = current.as_deref() == Some(tr.id.as_str());
                 if ui.is_rect_visible(rect) {
-                    let fill = if selected {
-                        t.selected
-                    } else if hovered {
-                        t.hover
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    };
-                    ui.painter().rect_filled(rect, 6.0, fill);
+                    ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
                     let c = columns(rect);
-                    let color = if playing {
-                        t.accent
-                    } else if self.playable(tr) {
-                        t.text
-                    } else {
-                        t.muted.gamma_multiply(0.75)
-                    };
+                    let color = super::widgets::track_color(&t, playing, self.playable(tr));
                     if let Some(m) = super::widgets::Mark::of_track(self.offline_snap.track(&tr.id)) {
                         super::widgets::mark(ui, pos2(c.time.left() + 10.0, rect.center().y), 10.0, m);
                     }
@@ -202,9 +189,9 @@ impl ListenerApp {
                     cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + 10.0, c.artist.width(), FontId::proportional(13.0), t.muted);
                     let album = self.data.album(&tr.album_id).map(|a| a.name.clone()).unwrap_or_default();
                     cell(ui, &album, c.album.left() + 10.0, c.album.width(), FontId::proportional(13.0), t.muted);
-                    let dur = tr.duration_secs.map(|d| mmss(f64::from(d))).unwrap_or_default();
+                    let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
                     ui.painter().text(pos2(c.time.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
-                    cell(ui, &tr.quality_label(), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
+                    cell(ui, &crate::fmt::quality(tr), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
                 }
                 let label = format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" });
                 resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
@@ -247,35 +234,20 @@ impl ListenerApp {
 
     /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
     fn songs_keys(&mut self, ui: &Ui, order: &[usize]) {
-        if self.focus != Focus::Main || !self.list_keys_free(ui) || order.is_empty() {
+        if order.is_empty() {
             return;
         }
-        use egui::{Key, Modifiers};
-        let (up, down, enter, next, add) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::ALT, Key::Enter),
-                i.consume_key(Modifiers::SHIFT, Key::Enter),
-            )
-        });
-        let last = order.len() - 1;
-        if down {
-            self.songs.selected = Some(self.songs.selected.map_or(0, |s| (s + 1).min(last)));
-        }
-        if up {
-            self.songs.selected = Some(self.songs.selected.map_or(0, |s| s.saturating_sub(1)));
-        }
-        let Some(sel) = self.songs.selected.filter(|s| *s <= last) else { return };
+        let Some(k) = self.list_keys(ui, Focus::Main, false, false) else { return };
+        self.songs.selected = k.step(self.songs.selected, order.len());
+        let Some(sel) = self.songs.selected.filter(|s| *s < order.len()) else { return };
         let tr = self.data.tracks.all[order[sel]].clone();
-        if enter {
+        if k.enter {
             self.play_from_album(&tr, QueueAction::Play { start: 0 });
         }
-        if next {
+        if k.play_next {
             self.play_from_album(&tr, QueueAction::PlayNext);
         }
-        if add {
+        if k.add {
             self.play_from_album(&tr, QueueAction::Add);
         }
     }

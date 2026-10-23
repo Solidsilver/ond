@@ -4,11 +4,11 @@
 //! bottom status line lives here too.
 
 use super::widgets::elide;
-use super::{Action, ListenerApp, mmss};
+use super::seek::SeekStyle;
+use super::{Action, ListenerApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::window::WindowMode;
-use audio::PlayState;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, ViewportCommand, pos2, vec2};
 use library::Track;
 
@@ -88,11 +88,21 @@ impl ListenerApp {
             let font = FontId::proportional(10.0);
             let time_w = ui.painter().layout_no_wrap("−88:88".into(), font.clone(), ON_ART_MUTED).size().x;
             let bar = Rect::from_min_max(pos2(inner.left() + time_w + 8.0, seek_y - 1.5), pos2(inner.right() - time_w - 8.0, seek_y + 1.5));
-            let shown = self.seek_bar(&mut ui, bar, Color32::from_white_alpha(56), ON_ART);
-            ui.painter().text(pos2(bar.left() - 8.0, seek_y), egui::Align2::RIGHT_CENTER, mmss(shown), font.clone(), ON_ART_MUTED);
-            if let Some(d) = self.duration_secs() {
-                ui.painter().text(pos2(bar.right() + 8.0, seek_y), egui::Align2::LEFT_CENTER, format!("−{}", mmss((d - shown).max(0.0))), font, ON_ART_MUTED);
-            }
+            let style = SeekStyle {
+                track: Color32::from_white_alpha(56),
+                fetched: ON_ART.gamma_multiply(0.3),
+                fill: ON_ART,
+                pulse: ON_ART,
+                pulse_len: 30.0,
+                radius: 2.0,
+                grow: 1.0,
+                knob: ON_ART,
+                knob_r: 5.0,
+            };
+            let (shown, _) = self.seek_line(&mut ui, bar, bar.expand2(vec2(4.0, 7.0)), "mini-seek", &style);
+            let (elapsed, remaining) = self.seek_times(shown);
+            ui.painter().text(pos2(bar.left() - 8.0, seek_y), egui::Align2::RIGHT_CENTER, elapsed, font.clone(), ON_ART_MUTED);
+            ui.painter().text(pos2(bar.right() + 8.0, seek_y), egui::Align2::LEFT_CENTER, remaining, font, ON_ART_MUTED);
         }
         let row = Rect::from_center_size(pos2(inner.center().x, inner.bottom() - 15.0), vec2(120.0, 32.0));
         ui.scope_builder(UiBuilder::new().max_rect(row).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, Some(ON_ART)));
@@ -141,49 +151,5 @@ impl ListenerApp {
                     });
                 });
             });
-    }
-
-    /// A seek bar you can click or drag, with a taller invisible strip around
-    /// it to grab and a pulse ahead of the position while buffering. Returns
-    /// the position it shows (the drag preview while dragging).
-    fn seek_bar(&mut self, ui: &mut Ui, bar: Rect, track: Color32, fill: Color32) -> f64 {
-        let state = self.engine.status.state();
-        let dur = self.duration_secs().filter(|d| *d > 0.0);
-        let seekable = dur.is_some() && matches!(state, PlayState::Playing | PlayState::Paused | PlayState::Buffering);
-        let strip = bar.expand2(vec2(4.0, 7.0));
-        let resp = ui.interact(strip, ui.scope_id().with("mini-seek"), if seekable { Sense::click_and_drag() } else { Sense::hover() });
-        let frac_at = |x: f32| f64::from(((x - bar.left()) / bar.width()).clamp(0.0, 1.0));
-        if let Some(d) = dur {
-            if (resp.dragged() || resp.drag_started())
-                && let Some(p) = resp.interact_pointer_pos()
-            {
-                self.seek_preview = Some(frac_at(p.x) * d);
-            }
-            if resp.drag_stopped() || resp.clicked() {
-                if let Some(to) = resp.interact_pointer_pos().map(|p| frac_at(p.x) * d).or(self.seek_preview) {
-                    self.actions.push(Action::Seek(to));
-                }
-                self.seek_preview = None;
-            }
-        }
-        let painter = ui.painter();
-        let grabbed = resp.hovered() || self.seek_preview.is_some();
-        let line = if grabbed { bar.expand2(vec2(0.0, 1.0)) } else { bar };
-        painter.rect_filled(line, 2.0, track);
-        if let Some(f) = self.engine.status.fetched_fraction() {
-            painter.rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * f.clamp(0.0, 1.0), line.bottom())), 2.0, fill.gamma_multiply(0.3));
-        }
-        let shown = self.seek_preview.unwrap_or_else(|| self.position_secs());
-        let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
-        painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), 2.0, fill);
-        if state == PlayState::Buffering || self.pending_seek.is_some() {
-            let tm = ui.input(|i| i.time) as f32;
-            let alpha = 0.35 + 0.35 * (tm * std::f32::consts::TAU / 1.2).sin();
-            painter.rect_filled(Rect::from_min_max(pos2(x, line.top()), pos2((x + 30.0).min(line.right()), line.bottom())), 2.0, fill.gamma_multiply(alpha));
-        }
-        if grabbed && seekable {
-            painter.circle_filled(pos2(x, line.center().y), 5.0, fill);
-        }
-        shown
     }
 }

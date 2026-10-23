@@ -4,7 +4,7 @@
 //! The same column can show the playing track's lyrics (in the full window)
 //! or its details instead (Up Next · History · Lyrics · Info).
 
-use super::widgets::{elide, segmented};
+use super::widgets::{choice, elide};
 use super::{Action, Focus, ListenerApp, QueueTab};
 use crate::icons::{self, Icon};
 use crate::queue::{EndAction, Item, Source, clock_label, end_offset, start_offsets};
@@ -41,20 +41,16 @@ impl ListenerApp {
         };
         // Up Next · History · Lyrics · Info; the Player has its lyrics drawer
         // instead of a Lyrics tab.
-        let mut tabs = vec![("Up Next", QueueTab::UpNext), ("History", QueueTab::History)];
+        let mut tabs = vec![QueueTab::UpNext, QueueTab::History];
         if lyrics_tab {
-            tabs.push(("Lyrics", QueueTab::Lyrics));
+            tabs.push(QueueTab::Lyrics);
         }
-        tabs.push(("Info", QueueTab::Info));
+        tabs.push(QueueTab::Info);
         let until = (self.queue.current.is_some() && !self.queue.upcoming.is_empty() && self.queue_ui.tab == QueueTab::UpNext)
             .then(|| format!("until {}", clock_label(now, end_offset(remaining, &self.queue.upcoming))));
         let mut until_below = false;
         ui.horizontal(|ui| {
-            let labels: Vec<&str> = tabs.iter().map(|(l, _)| *l).collect();
-            let at = tabs.iter().position(|(_, tab)| *tab == self.queue_ui.tab).unwrap_or(0);
-            if let Some(i) = segmented(ui, &labels, at) {
-                self.queue_ui.tab = tabs[i].1;
-            }
+            choice(ui, &tabs, &mut self.queue_ui.tab, None, |t| t.label().into());
             if let Some(until) = &until {
                 // Beside the switch when there's room, else on its own line.
                 let w = ui.painter().layout_no_wrap(until.clone(), FontId::proportional(11.0), t.muted).size().x;
@@ -202,14 +198,9 @@ impl ListenerApp {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
         let selected = self.queue_ui.selected == Some(item.uid);
         if ui.is_rect_visible(rect) {
-            let fill = if selected && self.focus == Focus::Queue {
-                t.selected
-            } else if resp.hovered() || selected {
-                t.hover
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            ui.painter().rect_filled(rect, 6.0, fill);
+            // A selection the keyboard isn't on reads as a hover.
+            let focused = selected && self.focus == Focus::Queue;
+            ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, focused, resp.hovered() || selected));
             let art = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 16.0), vec2(32.0, 32.0));
             let cover = self.data.cover_for(&item.track).map(str::to_owned);
             self.art.paint(ui, art, cover.as_deref(), 3.0);
@@ -218,13 +209,13 @@ impl ListenerApp {
             let right = match (&starts_at, resp.hovered()) {
                 (_, true) if !available => "not downloaded".to_owned(),
                 (Some(at), true) => format!("at {at}"),
-                _ => item.track.duration_secs.map(|d| super::mmss(f64::from(d))).unwrap_or_default(),
+                _ => item.track.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default(),
             };
             let right_g = ui.painter().layout_no_wrap(right, FontId::proportional(11.0), t.muted);
             let text_w = rect.right() - 10.0 - right_g.size().x - 8.0 - (art.right() + 10.0);
             ui.painter().galley(pos2(rect.right() - 10.0 - right_g.size().x, rect.center().y - right_g.size().y / 2.0), right_g, t.muted);
             let x = art.right() + 10.0;
-            let color = if available { t.text } else { t.muted.gamma_multiply(0.75) };
+            let color = super::widgets::track_color(&t, false, available);
             let title = elide(ui, &item.track.title, FontId::proportional(12.5), color, text_w);
             ui.painter().galley(pos2(x, rect.center().y - title.size().y), title, color);
             let sub = elide(ui, item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted, text_w);
@@ -283,43 +274,25 @@ impl ListenerApp {
 
     /// With a queue item selected: ↑/↓ select, ⌥↑/⌥↓ move it, ⌫ remove, ⏎ play.
     fn queue_keys(&mut self, ui: &Ui) {
-        if self.focus != Focus::Queue || !self.list_keys_free(ui) {
-            return;
-        }
         let Some(uid) = self.queue_ui.selected else { return };
         let Some(at) = self.queue.position(uid) else { return };
-        use egui::{Key, Modifiers};
-        let (up, down, move_up, move_down, remove, play, escape) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                i.consume_key(Modifiers::ALT, Key::ArrowUp),
-                i.consume_key(Modifiers::ALT, Key::ArrowDown),
-                i.consume_key(Modifiers::NONE, Key::Backspace) || i.consume_key(Modifiers::NONE, Key::Delete),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::NONE, Key::Escape),
-            )
-        });
-        let n = self.queue.upcoming.len();
-        if up && at > 0 {
-            self.queue_ui.selected = Some(self.queue.upcoming[at - 1].uid);
+        let Some(k) = self.list_keys(ui, Focus::Queue, true, true) else { return };
+        if let Some(to) = k.step(Some(at), self.queue.upcoming.len()) {
+            self.queue_ui.selected = Some(self.queue.upcoming[to].uid);
         }
-        if down && at + 1 < n {
-            self.queue_ui.selected = Some(self.queue.upcoming[at + 1].uid);
-        }
-        if move_up {
+        if k.move_up {
             self.actions.push(Action::MoveBy(uid, -1));
         }
-        if move_down {
+        if k.move_down {
             self.actions.push(Action::MoveBy(uid, 1));
         }
-        if remove {
+        if k.remove {
             self.actions.push(Action::Remove(uid));
         }
-        if play {
+        if k.enter {
             self.actions.push(Action::JumpTo(uid));
         }
-        if escape {
+        if k.escape {
             self.queue_ui.selected = None;
             self.focus = Focus::Main;
         }

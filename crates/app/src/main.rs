@@ -10,6 +10,7 @@ mod bridge;
 mod chrome;
 mod folder;
 mod favorites;
+mod fmt;
 mod icons;
 mod keys;
 mod lyrics;

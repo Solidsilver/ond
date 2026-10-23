@@ -6,7 +6,8 @@
 //! details strip folds out under the transport.
 
 use super::widgets::{elide, heart_button, link};
-use super::{Action, ListenerApp, mmss};
+use super::seek::SeekStyle;
+use super::{Action, ListenerApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::lyrics::{self, Fetch, Lyrics};
@@ -226,50 +227,28 @@ impl ListenerApp {
     /// elapsed and remaining underneath.
     fn big_seek(&mut self, ui: &mut Ui, width: f32) {
         let t = Tokens::of(ui);
-        let state = self.engine.status.state();
-        let dur = self.duration_secs().filter(|d| *d > 0.0);
-        let seekable = dur.is_some() && matches!(state, PlayState::Playing | PlayState::Paused | PlayState::Buffering);
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, 16.0), if seekable { Sense::click_and_drag() } else { Sense::hover() });
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 16.0), Sense::hover());
         let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
-        let frac_at = |x: f32| f64::from(((x - bar.left()) / bar.width()).clamp(0.0, 1.0));
-        if let Some(d) = dur {
-            if (resp.dragged() || resp.drag_started())
-                && let Some(p) = resp.interact_pointer_pos()
-            {
-                self.seek_preview = Some(frac_at(p.x) * d);
-            }
-            if resp.drag_stopped() || resp.clicked() {
-                if let Some(to) = resp.interact_pointer_pos().map(|p| frac_at(p.x) * d).or(self.seek_preview) {
-                    self.actions.push(Action::Seek(to));
-                }
-                self.seek_preview = None;
-            }
-        }
-        let painter = ui.painter();
-        painter.rect_filled(bar, 2.0, t.hairline);
-        if let Some(f) = self.engine.status.fetched_fraction() {
-            painter.rect_filled(Rect::from_min_max(bar.min, pos2(bar.left() + bar.width() * f.clamp(0.0, 1.0), bar.bottom())), 2.0, t.selected);
-        }
-        let shown = self.seek_preview.unwrap_or_else(|| self.position_secs());
-        let x = bar.left() + bar.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
-        painter.rect_filled(Rect::from_min_max(bar.min, pos2(x, bar.bottom())), 2.0, t.text);
-        if state == PlayState::Buffering || self.pending_seek.is_some() {
-            let tm = ui.input(|i| i.time) as f32;
-            let alpha = 0.35 + 0.35 * (tm * std::f32::consts::TAU / 1.2).sin();
-            painter.rect_filled(Rect::from_min_max(pos2(x, bar.top()), pos2((x + 48.0).min(bar.right()), bar.bottom())), 2.0, t.accent.gamma_multiply(alpha));
-        }
-        if resp.hovered() || self.seek_preview.is_some() {
-            painter.circle_filled(pos2(x, bar.center().y), 6.0, t.text);
-        }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, seekable, "Position"));
+        let style = SeekStyle {
+            track: t.hairline,
+            fetched: t.selected,
+            fill: t.text,
+            pulse: t.accent,
+            pulse_len: 48.0,
+            radius: 2.0,
+            grow: 0.0,
+            knob: t.text,
+            knob_r: 6.0,
+        };
+        let (shown, _) = self.seek_line(ui, bar, rect, "player-seek", &style);
+        let (elapsed, remaining) = self.seek_times(shown);
         let small = FontId::proportional(11.5);
         ui.horizontal(|ui| {
             // Line the times up with the bar's ends.
             ui.set_max_width(width);
-            ui.label(egui::RichText::new(mmss(shown)).font(small.clone()).color(t.muted));
+            ui.label(egui::RichText::new(elapsed).font(small.clone()).color(t.muted));
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                let left = dur.map(|d| format!("−{}", mmss((d - shown).max(0.0)))).unwrap_or_default();
-                ui.label(egui::RichText::new(left).font(small).color(t.muted));
+                ui.label(egui::RichText::new(remaining).font(small).color(t.muted));
             });
         });
     }
@@ -338,11 +317,10 @@ impl ListenerApp {
         }
         ui.add_space(8.0);
         let rows = details_rows(track, self.output.signal().map(|s| s.summary()), self.analysis_of(track));
-        egui::Grid::new("np-details").num_columns(2).spacing(vec2(16.0, 6.0)).show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for (k, v) in rows {
-                ui.label(egui::RichText::new(k).size(12.0).color(t.muted));
-                ui.add(egui::Label::new(egui::RichText::new(v).size(12.0).color(t.text)).wrap());
-                ui.end_row();
+                super::widgets::kv_text(ui, k, &v);
             }
         });
     }
@@ -407,7 +385,7 @@ impl ListenerApp {
                                     ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
                                 }
                                 ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
-                                let label = format!("{} — {}", mmss(lines[i].start_ms as f64 / 1000.0), text);
+                                let label = format!("{} — {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0), text);
                                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     seek_to = Some(lines[i].start_ms as f64 / 1000.0);
@@ -545,48 +523,12 @@ fn section_label(ui: &mut Ui, label: &str, size: f32, space_above: bool) {
 }
 
 /// The details strip's rows: only the ones there is something to say about.
+/// The Info tab's file facts minus what the Player already shows (length on
+/// the seek bar; channels), then the analysis in one line.
 fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysis::TrackAnalysis>) -> Vec<(&'static str, String)> {
-    let mut rows = Vec::new();
-    let mut source = Vec::new();
-    if let Some(s) = &track.suffix {
-        source.push(s.to_uppercase());
-    }
-    if let Some(rate) = track.sample_rate {
-        source.push(audio::describe(track.bit_depth, rate));
-    }
-    if let Some(k) = track.bit_rate_kbps {
-        source.push(format!("{k} kbps"));
-    }
-    if let Some(b) = track.size {
-        source.push(format!("{:.1} MB", b as f64 / 1_000_000.0));
-    }
-    if !source.is_empty() {
-        rows.push(("File", source.join(" · ")));
-    }
-    if let Some(s) = signal {
-        rows.push(("Playback", s));
-    }
-    let gain = |g: Option<f32>| g.map(|g| format!("{g:+.1} dB").replace('-', "−"));
-    match (gain(track.track_gain), gain(track.album_gain)) {
-        (Some(tg), Some(ag)) => rows.push(("ReplayGain", format!("track {tg} · album {ag}"))),
-        (Some(tg), None) => rows.push(("ReplayGain", format!("track {tg}"))),
-        (None, Some(ag)) => rows.push(("ReplayGain", format!("album {ag}"))),
-        (None, None) => {}
-    }
-    if let Some(a) = analysis {
-        let mut parts = Vec::new();
-        if let Some(dr) = a.dr {
-            parts.push(format!("DR{}", dr.round() as i64));
-        }
-        if let Some(l) = a.integrated_lufs {
-            parts.push(format!("{l:.1} LUFS").replace('-', "−"));
-        }
-        if let Some(p) = a.true_peak_dbtp {
-            parts.push(format!("peak {p:.1} dBTP").replace('-', "−"));
-        }
-        if !parts.is_empty() {
-            rows.push(("Loudness", parts.join(" · ")));
-        }
+    let mut rows: Vec<_> = crate::fmt::track_facts(track, signal).into_iter().filter(|(k, _)| !matches!(*k, "Length" | "Channels")).collect();
+    if let Some(line) = analysis.and_then(crate::fmt::loudness_line) {
+        rows.push(("Loudness", line));
     }
     rows
 }
@@ -628,8 +570,8 @@ mod tests {
         t.sample_rate = Some(96_000);
         t.track_gain = Some(-6.3);
         let rows = details_rows(&t, Some("24/96 · bit-perfect".into()), None);
-        assert_eq!(rows[0], ("File", "FLAC · 24/96".into()));
-        assert_eq!(rows[1], ("Playback", "24/96 · bit-perfect".into()));
-        assert_eq!(rows[2].1, "track −6.3 dB");
+        assert_eq!(rows[0], ("Format", "FLAC 24/96".into()));
+        assert_eq!(rows[1], ("ReplayGain", "track −6.3 dB".into()));
+        assert_eq!(rows[2], ("Playback", "24/96 · bit-perfect".into()));
     }
 }

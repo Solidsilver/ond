@@ -16,6 +16,18 @@ pub enum ThemePref {
     Dark,
 }
 
+impl ThemePref {
+    pub const ALL: [ThemePref; 3] = [ThemePref::System, ThemePref::Light, ThemePref::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePref::System => "System",
+            ThemePref::Light => "Light",
+            ThemePref::Dark => "Dark",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Tokens {
     pub bg: Color32,

@@ -399,13 +399,9 @@ impl Worker {
                 }
             }
             let Some(client) = client else { return };
-            let Ok(bytes) = client.cover_art(&cover, Some(512)).await else { return };
-            let path = crate::art::cover_file(&dir, &cover, 512);
-            let tmp = path.with_extension("part");
-            if tokio::fs::create_dir_all(&dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &path).await;
+            if let Some(bytes) = crate::art::fetch_cached(&client, &dir, &cover, 512).await {
+                set_artwork(track_id, bytes);
             }
-            set_artwork(track_id, bytes);
         });
     }
 }

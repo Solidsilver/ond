@@ -1,7 +1,7 @@
 //! The main view's router and the album-grid places: Recently Added, Albums,
 //! Artists, an artist's page, and albums by genre / year / label.
 
-use super::widgets::{Mark, elide, segmented};
+use super::widgets::{Mark, choice, elide};
 use super::{Action, AlbumSort, Data, Keep, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
@@ -89,12 +89,10 @@ impl ListenerApp {
                 ui.horizontal(|ui| {
                     self.heading(ui, "Albums", Some(format!("{n}")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let order = [AlbumSort::Artist, AlbumSort::Title, AlbumSort::Year, AlbumSort::Added];
-                        let at = order.iter().position(|s| *s == self.sort).unwrap_or(0);
                         // Right-to-left layout: the pill itself still reads left to right.
-                        if let Some(i) = ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| segmented(ui, &["Artist", "Title", "Year", "Recently added"], at)).inner {
-                            self.sort = order[i];
-                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            choice(ui, &AlbumSort::ALL, &mut self.sort, None, |s| s.label().into());
+                        });
                     });
                 });
                 self.grid_place(ui, &route);
@@ -245,7 +243,7 @@ impl ListenerApp {
         }
         let kept = self.offline_snap.pin(&offline::Pin::Album(id.clone())).is_some();
         resp.context_menu(|ui| {
-            album_menu(ui, &id, kept, &mut self.actions);
+            collection_menu(ui, &Collection::Album(id.clone()), true, kept, None, &mut self.actions);
             if let Some(name) = artist {
                 ui.separator();
                 if ui.button(format!("Go to {name}")).clicked() {
@@ -275,14 +273,14 @@ impl ListenerApp {
                 }
                 let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 100.0);
                 ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
-                let count = format!("{n} album{}", if *n == 1 { "" } else { "s" });
+                let count = crate::fmt::plural(*n, "album");
                 ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, count, FontId::proportional(12.0), t.muted);
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
                 if resp.clicked() {
                     let id = id.clone().or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name)).and_then(|a| a.artist_ref.clone()));
                     self.actions.push(Action::Go(Route::Artist { name: name.clone(), id }));
                 }
-                resp.context_menu(|ui| artist_menu(ui, name, &mut self.actions));
+                resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(name.clone()), true, false, None, &mut self.actions));
             }
         });
     }
@@ -352,19 +350,68 @@ pub fn grid_metrics(width: f32) -> (usize, f32) {
     (cols, tile)
 }
 
-pub fn album_menu(ui: &mut Ui, id: &str, kept: bool, actions: &mut Vec<Action>) {
-    for (label, action) in [
-        ("Play", QueueAction::Play { start: 0 }),
-        ("Shuffle", QueueAction::Shuffle),
-        ("Play next", QueueAction::PlayNext),
-        ("Add to queue", QueueAction::Add),
-    ] {
-        if ui.button(label).clicked() {
-            actions.push(Action::Album(id.to_owned(), action));
+/// Something that plays as a whole: an album, a playlist, or all of an artist.
+#[derive(Debug, Clone)]
+pub enum Collection {
+    Album(String),
+    Playlist(String),
+    Artist(String),
+}
+
+impl Collection {
+    fn action(&self, a: QueueAction) -> Action {
+        match self {
+            Collection::Album(id) => Action::Album(id.clone(), a),
+            Collection::Playlist(id) => Action::Playlist(id.clone(), a),
+            Collection::Artist(name) => Action::Artist(name.clone(), a),
         }
     }
-    ui.separator();
-    offline_item(ui, kept, None, || Keep::Album(id.to_owned()), actions);
+
+    /// What "Make available offline" keeps; an artist isn't downloaded whole.
+    fn keep(&self) -> Option<Keep> {
+        match self {
+            Collection::Album(id) => Some(Keep::Album(id.clone())),
+            Collection::Playlist(id) => Some(Keep::Playlist(id.clone())),
+            Collection::Artist(_) => None,
+        }
+    }
+}
+
+/// The same queue and download items wherever a collection has a menu. With
+/// `play` the menu leads with Play and Shuffle (context menus); header menus
+/// skip them, having those buttons beside. `shortcut` labels the download item.
+pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: bool, shortcut: Option<&str>, actions: &mut Vec<Action>) {
+    let mut items = Vec::new();
+    if play {
+        match c {
+            // Playing an artist shuffles across their albums.
+            Collection::Artist(_) => items.push(("Shuffle all", QueueAction::Play { start: 0 })),
+            _ => items.extend([("Play", QueueAction::Play { start: 0 }), ("Shuffle", QueueAction::Shuffle)]),
+        }
+    }
+    items.extend([("Play next", QueueAction::PlayNext), ("Add to queue", QueueAction::Add)]);
+    for (label, action) in items {
+        if ui.button(label).clicked() {
+            actions.push(c.action(action));
+        }
+    }
+    if let Some(keep) = c.keep() {
+        ui.separator();
+        offline_item(ui, kept, shortcut, || keep, actions);
+    }
+}
+
+/// The Play and Shuffle buttons at the head of a list; which was clicked.
+pub fn play_shuffle(ui: &mut Ui) -> Option<QueueAction> {
+    let mut picked = None;
+    if super::widgets::primary(ui, Some(Icon::Play), "Play").clicked() {
+        picked = Some(QueueAction::Play { start: 0 });
+    }
+    ui.add_space(4.0);
+    if super::widgets::secondary(ui, "Shuffle").clicked() {
+        picked = Some(QueueAction::Shuffle);
+    }
+    picked
 }
 
 /// "Make available offline" / "Remove download", with the key that does it
@@ -380,13 +427,6 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
     }
 }
 
-pub fn artist_menu(ui: &mut Ui, name: &str, actions: &mut Vec<Action>) {
-    for (label, action) in [("Shuffle all", QueueAction::Play { start: 0 }), ("Play next", QueueAction::PlayNext), ("Add to queue", QueueAction::Add)] {
-        if ui.button(label).clicked() {
-            actions.push(Action::Artist(name.to_owned(), action));
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -455,5 +495,13 @@ mod tests {
         let (cols, tile) = grid_metrics(900.0);
         assert_eq!(cols, 5);
         assert!((tile * cols as f32 + GAP_X * (cols - 1) as f32 - 900.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn albums_and_playlists_download_but_artists_do_not() {
+        assert!(matches!(Collection::Album("a".into()).keep(), Some(Keep::Album(id)) if id == "a"));
+        assert!(matches!(Collection::Playlist("p".into()).keep(), Some(Keep::Playlist(id)) if id == "p"));
+        assert!(Collection::Artist("Bill Evans".into()).keep().is_none());
+        assert!(matches!(Collection::Playlist("p".into()).action(QueueAction::Add), Action::Playlist(id, QueueAction::Add) if id == "p"));
     }
 }

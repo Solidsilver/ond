@@ -43,41 +43,44 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The filled accent button (Play).
-pub fn primary(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str) -> Response {
-    let t = Tokens::of(ui);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), t.on_accent);
+/// How a filled button looks: text colour, fill at rest and on hover, and the
+/// horizontal padding (both sides together).
+struct Fill {
+    text: Color32,
+    rest: Color32,
+    hover: Color32,
+    pad: f32,
+}
+
+/// The body every filled button shares: an optional icon, then the label.
+fn filled(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str, f: Fill) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), f.text);
     let icon_w = if icon.is_some() { 16.0 } else { 0.0 };
-    let size = vec2(galley.size().x + icon_w + 32.0, 30.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + icon_w + f.pad, 30.0), Sense::click());
     if ui.is_rect_visible(rect) {
-        let fill = if resp.hovered() { t.accent.gamma_multiply(0.88) } else { t.accent };
-        ui.painter().rect_filled(rect, 6.0, fill);
-        let mut x = rect.left() + 16.0;
+        ui.painter().rect_filled(rect, 6.0, if resp.hovered() { f.hover } else { f.rest });
+        let mut x = rect.left() + f.pad / 2.0;
         if let Some(icon) = icon {
-            crate::icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(x + 5.0, rect.center().y), vec2(10.0, 10.0)), icon, t.on_accent);
+            crate::icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(x + 5.0, rect.center().y), vec2(10.0, 10.0)), icon, f.text);
             x += icon_w;
         }
-        ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, t.on_accent);
+        ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, f.text);
     }
     let label = text.to_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
 }
 
+/// The filled accent button (Play).
+pub fn primary(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str) -> Response {
+    let t = Tokens::of(ui);
+    filled(ui, icon, text, Fill { text: t.on_accent, rest: t.accent, hover: t.accent.gamma_multiply(0.88), pad: 32.0 })
+}
+
 /// A filled button for a destructive choice (Delete in a confirmation).
 pub fn danger(ui: &mut Ui, text: &str) -> Response {
     let t = Tokens::of(ui);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), Color32::WHITE);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, 30.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let fill = if resp.hovered() { t.danger.gamma_multiply(0.88) } else { t.danger };
-        ui.painter().rect_filled(rect, 6.0, fill);
-        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
-    }
-    let label = text.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    resp
+    filled(ui, None, text, Fill { text: Color32::WHITE, rest: t.danger, hover: t.danger.gamma_multiply(0.88), pad: 32.0 })
 }
 
 /// A heart that loves / unloves: filled accent when on, a quiet outline when off.
@@ -87,18 +90,29 @@ pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
     crate::icons::sized_button(ui, icon, label, vec2(size, size), glyph, Some(color))
 }
 
+/// The heart over a row or display: drawn filled when loved, as an outline when
+/// `reveal` (its row is hovered) or when it's hovered itself, and always
+/// clickable. `label` names it for accessibility ("Love", "Unlove (⇧⌘L)").
+pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: bool, glyph: f32, label: &str) -> Response {
+    let t = Tokens::of(ui);
+    let resp = ui.interact(rect, id, Sense::click());
+    if loved || reveal || resp.hovered() {
+        let (icon, color) = if loved {
+            (crate::icons::Icon::HeartFilled, t.accent)
+        } else {
+            (crate::icons::Icon::Heart, if resp.hovered() { t.text } else { t.muted })
+        };
+        crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
+    }
+    let label = label.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    resp
+}
+
 /// A quiet button with a tinted fill (Shuffle next to Play).
 pub fn secondary(ui: &mut Ui, text: &str) -> Response {
     let t = Tokens::of(ui);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), t.accent);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 30.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(rect, 6.0, if resp.hovered() { t.selected } else { t.field });
-        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.accent);
-    }
-    let label = text.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    resp
+    filled(ui, None, text, Fill { text: t.accent, rest: t.field, hover: t.selected, pad: 28.0 })
 }
 
 /// Mutually exclusive choices in a pill (Up Next / History, sort order).
@@ -107,6 +121,36 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize
     let font = FontId::proportional(12.0);
     let natural: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), font.clone(), Color32::WHITE).size().x).collect();
     segments(ui, options, &fit_segments(&natural, ui.available_width()), selected)
+}
+
+/// The two playback modes, in the order the switches show them.
+pub const MODES: [audio::PlaybackMode; 2] = [audio::PlaybackMode::Normal, audio::PlaybackMode::BitPerfect];
+
+pub fn mode_label(m: audio::PlaybackMode) -> String {
+    match m {
+        audio::PlaybackMode::Normal => "Normal".into(),
+        audio::PlaybackMode::BitPerfect => "Bit-perfect".into(),
+    }
+}
+
+/// One of `all` in a segmented control, each labelled by `label`. With a
+/// `width`, equal segments fill it; otherwise each fits its label. Writes the
+/// pick into `current` and says whether it changed.
+pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, all: &[T], current: &mut T, width: Option<f32>, label: impl Fn(T) -> String) -> bool {
+    let labels: Vec<String> = all.iter().map(|v| label(*v)).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let at = all.iter().position(|v| v == current).unwrap_or(0);
+    let picked = match width {
+        Some(w) => segmented_wide(ui, &labels, at, w),
+        None => segmented(ui, &labels, at),
+    };
+    match picked.map(|i| all[i]) {
+        Some(v) if v != *current => {
+            *current = v;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Segment widths for labels of `natural` width: comfortable padding when it
@@ -228,6 +272,64 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
 pub fn section(ui: &mut Ui, text: &str) {
     let t = Tokens::of(ui);
     ui.label(egui::RichText::new(text).font(FontId::new(11.0, semibold())).color(t.muted));
+}
+
+/// A list row's background: the selection, else the hover tint, else none.
+pub fn row_fill(t: &Tokens, selected: bool, hovered: bool) -> Color32 {
+    if selected {
+        t.selected
+    } else if hovered {
+        t.hover
+    } else {
+        Color32::TRANSPARENT
+    }
+}
+
+/// A track title's colour in a list: the accent while it plays, dimmed when it
+/// can't play right now (offline and not downloaded).
+pub fn track_color(t: &Tokens, playing: bool, playable: bool) -> Color32 {
+    if playing {
+        t.accent
+    } else if playable {
+        t.text
+    } else {
+        t.muted.gamma_multiply(0.75)
+    }
+}
+
+/// The label column of [`kv_row`]s, so values line up down a section.
+const KV_LABEL_W: f32 = 96.0;
+/// Value text size in [`kv_row`]s.
+pub const KV_VALUE: f32 = 12.5;
+
+/// A [`section`] label with room above it, heading a run of [`kv_row`]s.
+pub fn kv_section(ui: &mut Ui, title: &str) {
+    ui.add_space(18.0);
+    section(ui, title);
+    ui.add_space(6.0);
+}
+
+/// A muted label in a fixed column, then the value laid out by `value`
+/// (Info tab, album details, the Player's details).
+pub fn kv_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
+    let t = Tokens::of(ui);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (r, _) = ui.allocate_exact_size(vec2(KV_LABEL_W, KV_VALUE + 4.0), Sense::hover());
+        let g = elide(ui, label, FontId::proportional(12.0), t.muted, KV_LABEL_W - 4.0);
+        ui.painter().galley(r.min + vec2(0.0, 1.0), g, t.muted);
+        let rest = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(rest, 0.0), egui::Layout::top_down(egui::Align::Min), value);
+    });
+    ui.add_space(6.0);
+}
+
+/// A [`kv_row`] whose value is plain, wrapping text.
+pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
+    let t = Tokens::of(ui);
+    kv_row(ui, label, |ui| {
+        ui.add(egui::Label::new(egui::RichText::new(value).size(KV_VALUE).color(t.text)).wrap());
+    });
 }
 
 /// A thin horizontal slider for `value` in 0..=1 (volume): a 3 px track, the

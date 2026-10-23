@@ -197,18 +197,6 @@ impl Runner {
     }
 }
 
-/// "about 3 h", "about 25 min".
-pub fn about(secs: f64) -> String {
-    let mins = (secs / 60.0).round();
-    if mins < 1.0 {
-        "under a minute".into()
-    } else if mins < 90.0 {
-        format!("about {mins} min")
-    } else {
-        format!("about {} h", (mins / 60.0).round())
-    }
-}
-
 /// Audio seconds analysed per second, before any have been measured.
 pub fn assumed_eta(audio_secs: f64) -> f64 {
     audio_secs / ASSUMED_SPEED

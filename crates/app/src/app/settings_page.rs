@@ -3,13 +3,13 @@
 //! ReplayGain, streaming, per-device modes, downloads, sync, analysis, the
 //! account) lives here; the popovers keep only what's needed in the moment.
 
-use super::widgets::{danger, menu_label, secondary, section, segmented, segmented_wide, thin_slider, toggle};
+use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, section, thin_slider, toggle};
 use super::{Action, ListenerApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{ThemePref, Tokens, semibold};
 use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use offline::human_bytes;
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Section {
@@ -101,10 +101,9 @@ impl ListenerApp {
 
     fn general_settings(&mut self, ui: &mut Ui) {
         group(ui, "Appearance", |ui| {
-            let prefs = [ThemePref::System, ThemePref::Light, ThemePref::Dark];
-            let at = prefs.iter().position(|p| *p == self.theme).unwrap_or(0);
-            if let Some(i) = segmented_wide(ui, &["System", "Light", "Dark"], at, 240.0) {
-                self.actions.push(Action::SetTheme(prefs[i]));
+            let mut theme = self.theme;
+            if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
+                self.actions.push(Action::SetTheme(theme));
             }
         });
         group(ui, "Listening", |ui| {
@@ -133,11 +132,7 @@ impl ListenerApp {
         let mut p: PlaybackPrefs = self.output.prefs().clone();
         let before = p.clone();
         group(ui, "ReplayGain", |ui| {
-            let at = RgMode::ALL.iter().position(|m| *m == p.replay_gain).unwrap_or(0);
-            let labels: Vec<&str> = RgMode::ALL.iter().map(|m| m.label()).collect();
-            if let Some(i) = segmented_wide(ui, &labels, at, width.min(360.0)) {
-                p.replay_gain = RgMode::ALL[i];
-            }
+            choice(ui, &RgMode::ALL, &mut p.replay_gain, Some(width.min(360.0)), |m| m.label().into());
             hint(ui, p.replay_gain.hint());
             if p.replay_gain != RgMode::Off {
                 ui.add_space(12.0);
@@ -151,28 +146,17 @@ impl ListenerApp {
             }
         });
         group(ui, "Streaming", |ui| {
-            let at = QualityMode::ALL.iter().position(|q| *q == p.quality).unwrap_or(0);
-            if let Some(i) = segmented_wide(ui, &["Original", "Auto", "Transcoded"], at, width.min(360.0)) {
-                p.quality = QualityMode::ALL[i];
-            }
-            hint(ui, p.quality.label());
+            choice(ui, &QualityMode::ALL, &mut p.quality, Some(width.min(360.0)), |q| q.label().into());
+            hint(ui, p.quality.hint());
             if p.quality != QualityMode::Original {
                 ui.add_space(12.0);
                 row(ui, "Format", |ui| {
-                    let at = TranscodeFormat::ALL.iter().position(|f| *f == p.format).unwrap_or(0);
-                    if let Some(i) = segmented(ui, &["AAC", "MP3"], at) {
-                        p.format = TranscodeFormat::ALL[i];
-                    }
+                    choice(ui, &TranscodeFormat::ALL, &mut p.format, None, |f| f.label().into());
                 });
                 row(ui, "Bitrate", |ui| {
-                    let at = BITRATES.iter().position(|k| *k == p.kbps).unwrap_or(2);
-                    let labels: Vec<String> = BITRATES.iter().map(|k| k.to_string()).collect();
-                    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-                    if let Some(i) = segmented(ui, &labels, at) {
-                        p.kbps = BITRATES[i];
-                    }
+                    choice(ui, &BITRATES, &mut p.kbps, None, |k| k.to_string());
                 });
-                let network = capitalize(self.output.network().label());
+                let network = crate::fmt::capitalize(self.output.network().label());
                 let now = match p.transcode(self.output.network()) {
                     Some(t) => format!("{network} · new tracks stream as {}", t.label()),
                     None => format!("{network} · new tracks stream as original files"),
@@ -216,11 +200,8 @@ impl ListenerApp {
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let at = usize::from(*mode == PlaybackMode::BitPerfect);
-                        if let Some(i) = segmented(ui, &["Normal", "Bit-perfect"], at)
-                            && i != at
-                        {
-                            let m = if i == 1 { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                        let mut m = *mode;
+                        if choice(ui, &MODES, &mut m, None, mode_label) {
                             self.actions.push(Action::SetDeviceMode(uid.clone(), m));
                         }
                     });
@@ -235,29 +216,15 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let snap = self.offline_snap.clone();
         group(ui, "Storage", |ui| {
-            let mut used = format!("{} on this computer", human_bytes(snap.used_bytes));
-            if let Some(free) = snap.free_bytes {
-                used.push_str(&format!(" · {} free", human_bytes(free)));
-            }
-            ui.label(egui::RichText::new(used).size(13.0).color(t.text));
+            ui.label(egui::RichText::new(super::offline_page::storage_used(&snap)).size(13.0).color(t.text));
             ui.add_space(10.0);
             row(ui, "Limit", |ui| {
                 let label = match snap.limit {
-                    Some(b) => human_bytes(b),
+                    Some(b) => crate::fmt::bytes(b),
                     None => "No limit".to_owned(),
                 };
                 let resp = menu_label(ui, &label, t.text);
-                egui::Popup::menu(&resp).show(|ui| {
-                    if ui.radio(snap.limit.is_none(), "No limit").clicked() {
-                        self.actions.push(Action::SetOfflineLimit(None));
-                    }
-                    for gb in super::offline_page::LIMITS {
-                        let bytes = gb * 1_000_000_000;
-                        if ui.radio(snap.limit == Some(bytes), format!("{gb} GB")).clicked() {
-                            self.actions.push(Action::SetOfflineLimit(Some(bytes)));
-                        }
-                    }
-                });
+                egui::Popup::menu(&resp).show(|ui| super::offline_page::limit_choices(ui, snap.limit, &mut self.actions));
             });
             let mut paused = snap.paused;
             if narrow_toggle(ui, &mut paused, "Pause downloads").changed() {
@@ -327,7 +294,7 @@ impl ListenerApp {
             } else if p.waiting {
                 format!("{} of {} · waiting for playback", p.done.min(p.total), p.total)
             } else {
-                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::analyze::about(p.eta_secs))
+                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::fmt::about(p.eta_secs))
             };
             ui.label(egui::RichText::new(status).size(13.0).color(t.text));
             ui.add_space(6.0);
@@ -351,8 +318,8 @@ impl ListenerApp {
             if n == 0 {
                 ui.label(egui::RichText::new("Every track is analysed.").size(13.0).color(t.text));
             } else {
-                let tracks = if n == 1 { "1 track".to_owned() } else { format!("{n} tracks") };
-                ui.label(egui::RichText::new(format!("{tracks} not analysed yet · about {}", crate::analyze::about(crate::analyze::assumed_eta(secs)))).size(13.0).color(t.text));
+                let text = format!("{} not analysed yet · {}", crate::fmt::plural(n, "track"), crate::fmt::about(crate::analyze::assumed_eta(secs)));
+                ui.label(egui::RichText::new(text).size(13.0).color(t.text));
                 ui.add_space(10.0);
                 if secondary(ui, "Analyze library").clicked() {
                     self.actions.push(Action::AnalyzeLibrary);
@@ -444,18 +411,10 @@ fn db_row(ui: &mut Ui, label: &str, db: &mut f32, range: std::ops::RangeInclusiv
         if thin_slider(ui, &mut v, (width - LABEL_W - 80.0).clamp(140.0, 240.0), label).changed() {
             *db = ((lo + v * (hi - lo)) * 2.0).round() / 2.0;
         }
-        let readout = if db.abs() < 0.05 { "0 dB".to_owned() } else { format!("{:+.1} dB", *db).replace('-', "−") };
+        let readout = crate::fmt::gain(*db);
         let (r, _) = ui.allocate_exact_size(vec2(56.0, 18.0), Sense::hover());
         ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, readout, FontId::proportional(12.0), t.muted);
     });
-}
-
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().chain(c).collect(),
-        None => String::new(),
-    }
 }
 
 /// A switch row kept to a readable width, so the switch sits near its label.

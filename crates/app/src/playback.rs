@@ -57,6 +57,14 @@ impl QualityMode {
 
     pub fn label(self) -> &'static str {
         match self {
+            QualityMode::Original => "Original",
+            QualityMode::Auto => "Auto",
+            QualityMode::Transcode => "Transcoded",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
             QualityMode::Original => "Original files",
             QualityMode::Auto => "Original at home, transcoded away",
             QualityMode::Transcode => "Always transcoded",
@@ -81,6 +89,13 @@ impl TranscodeFormat {
         match self {
             TranscodeFormat::Aac => "aac",
             TranscodeFormat::Mp3 => "mp3",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TranscodeFormat::Aac => "AAC",
+            TranscodeFormat::Mp3 => "MP3",
         }
     }
 }

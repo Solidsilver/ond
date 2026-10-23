@@ -140,7 +140,7 @@ impl ListenerApp {
             });
             let underruns = status.underruns.load(std::sync::atomic::Ordering::Relaxed);
             if underruns > 0 {
-                out.push(Segment { text: format!("{underruns} underrun{}", if underruns == 1 { "" } else { "s" }), detail: "Times the output ran out of audio this session".into(), tone: Tone::Warn });
+                out.push(Segment { text: crate::fmt::plural(underruns as usize, "underrun"), detail: "Times the output ran out of audio this session".into(), tone: Tone::Warn });
             }
         }
 
@@ -152,16 +152,16 @@ impl ListenerApp {
             let text = if total > 0 && fetched >= total {
                 if status.downloading() { "track cached · prefetching next".to_owned() } else { "track cached".to_owned() }
             } else {
-                let pct = if total > 0 { format!("{:.0}%", 100.0 * fetched as f64 / total as f64) } else { offline::human_bytes(fetched) };
+                let pct = if total > 0 { format!("{:.0}%", 100.0 * fetched as f64 / total as f64) } else { crate::fmt::bytes(fetched) };
                 match self.diagnostics.rate.filter(|r| *r > 0.0) {
-                    Some(r) => format!("dl {pct} · {}/s", offline::human_bytes(r as u64)),
+                    Some(r) => format!("dl {pct} · {}/s", crate::fmt::bytes(r as u64)),
                     None => format!("dl {pct}"),
                 }
             };
             let detail = format!(
                 "Current file: {} of {}{}",
-                offline::human_bytes(fetched),
-                if total > 0 { offline::human_bytes(total) } else { "unknown size".into() },
+                crate::fmt::bytes(fetched),
+                if total > 0 { crate::fmt::bytes(total) } else { "unknown size".into() },
                 if status.downloading() { "\nStill downloading (this track or the next one's prefetch)" } else { "" }
             );
             out.push(Segment { text, detail, tone: Tone::Normal });

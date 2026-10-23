@@ -260,14 +260,11 @@ impl Outputs {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            if let Some(i) = crate::app::segmented_wide(ui, &["Normal", "Bit-perfect"], usize::from(*bit_perfect), POPUP_W - 16.0) {
-                let want = i == 1;
-                if want != *bit_perfect {
-                    *bit_perfect = want;
-                    let mode = if want { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                    engine.send(Command::SetMode(mode));
-                    self.remember_mode(mode, engine, paths);
-                }
+            let mut mode = if *bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+            if crate::app::choice(ui, &crate::app::MODES, &mut mode, Some(POPUP_W - 16.0), crate::app::mode_label) {
+                *bit_perfect = mode == PlaybackMode::BitPerfect;
+                engine.send(Command::SetMode(mode));
+                self.remember_mode(mode, engine, paths);
             }
         });
         ui.add_space(6.0);

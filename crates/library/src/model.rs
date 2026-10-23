@@ -436,18 +436,4 @@ impl TrackV3 {
             artists: s.artists.into_iter().map(ArtistLink::from).collect(),
         }
     }
-
-    /// e.g. `FLAC 24/88.2`, or just the codec when the server omits depth/rate.
-    pub fn quality_label(&self) -> String {
-        let codec = self.suffix.as_deref().unwrap_or("?").to_uppercase();
-        match (self.bit_depth, self.sample_rate) {
-            (Some(d), Some(r)) if d > 0 => format!("{codec} {d}/{}", khz(r)),
-            (_, Some(r)) => format!("{codec} {}", khz(r)),
-            _ => codec,
-        }
-    }
-}
-
-fn khz(hz: u32) -> String {
-    if hz.is_multiple_of(1000) { (hz / 1000).to_string() } else { format!("{:.1}", hz as f32 / 1000.0) }
 }

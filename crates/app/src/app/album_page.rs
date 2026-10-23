@@ -4,8 +4,8 @@
 //! per-track measurements, folded away until asked for. Playlists reuse the
 //! track list.
 
-use super::widgets::{Mark, chip, elide, heart_button, link, primary, secondary};
-use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction, mmss};
+use super::widgets::{Mark, chip, elide, heart_button, link};
+use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
@@ -35,8 +35,8 @@ pub fn credits(tracks: &[Track]) -> Vec<Credit> {
                 continue;
             }
             let label = match (&role[..], c.sub_role.as_deref()) {
-                ("performer", Some(sub)) if !sub.is_empty() => capitalize(sub),
-                _ => capitalize(&role),
+                ("performer", Some(sub)) if !sub.is_empty() => crate::fmt::capitalize(sub),
+                _ => crate::fmt::capitalize(&role),
             };
             let entry = match out.iter_mut().position(|e| e.role == label) {
                 Some(i) => &mut out[i],
@@ -62,23 +62,11 @@ pub fn credits(tracks: &[Track]) -> Vec<Credit> {
     out
 }
 
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().chain(c).collect(),
-        None => String::new(),
-    }
-}
-
-/// "−11.2" with a real minus sign.
-fn signed(v: f64) -> String {
-    format!("{v:.1}").replace('-', "\u{2212}")
-}
 
 /// `FLAC 16/44.1` when every track shares it.
 fn shared_format(tracks: &[Track]) -> Option<String> {
-    let first = tracks.first()?.quality_label();
-    tracks.iter().all(|t| t.quality_label() == first).then_some(first)
+    let first = crate::fmt::quality(tracks.first()?);
+    tracks.iter().all(|t| crate::fmt::quality(t) == first).then_some(first)
 }
 
 /// Per-track loudness, peak and dynamic range, with any finding the album as a
@@ -100,8 +88,8 @@ fn analysis_table(ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>]
             match a {
                 Some(a) => {
                     let dash = || "–".to_owned();
-                    ui.label(small(a.integrated_lufs.map_or_else(dash, |l| format!("{} LUFS", signed(l))), t.text));
-                    ui.label(small(a.true_peak_dbtp.map_or_else(dash, |p| format!("{} dBTP", signed(p))), t.text));
+                    ui.label(small(a.integrated_lufs.map_or_else(dash, |l| crate::fmt::level(l, "LUFS")), t.text));
+                    ui.label(small(a.true_peak_dbtp.map_or_else(dash, |p| crate::fmt::level(p, "dBTP")), t.text));
                     ui.label(small(a.dr_rounded().map_or_else(dash, |d| format!("DR{d}")), t.text));
                     match a.verdicts.iter().find(|v| album_verdict.is_none_or(|av| !av.same_kind(v))) {
                         Some(v) => {
@@ -214,7 +202,7 @@ impl ListenerApp {
                             ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
                                 .on_hover_text("Dynamic range (DR meter): the album's average");
                             sep(ui);
-                            ui.label(egui::RichText::new(format!("{} LUFS", signed(lufs))).size(12.0).color(t.muted))
+                            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
                                 .on_hover_text("Integrated loudness (EBU R128), across the album");
                         } else if analysing > 0 {
                             sep(ui);
@@ -228,12 +216,8 @@ impl ListenerApp {
                     });
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        if primary(ui, Some(Icon::Play), "Play").clicked() {
-                            self.actions.push(Action::Album(album.id.clone(), QueueAction::Play { start: 0 }));
-                        }
-                        ui.add_space(4.0);
-                        if secondary(ui, "Shuffle").clicked() {
-                            self.actions.push(Action::Album(album.id.clone(), QueueAction::Shuffle));
+                        if let Some(a) = super::browse::play_shuffle(ui) {
+                            self.actions.push(Action::Album(album.id.clone(), a));
                         }
                         let loved = self.favorites.is_on(StarKind::Album, &album.id);
                         if heart_button(ui, loved, 30.0, 14.0).clicked() {
@@ -243,14 +227,8 @@ impl ListenerApp {
                         let pin = offline::Pin::Album(album.id.clone());
                         let kept = self.offline_snap.pin(&pin).is_some();
                         egui::Popup::menu(&more).show(|ui| {
-                            if ui.button("Play next").clicked() {
-                                self.actions.push(Action::Album(album.id.clone(), QueueAction::PlayNext));
-                            }
-                            if ui.button("Add to queue").clicked() {
-                                self.actions.push(Action::Album(album.id.clone(), QueueAction::Add));
-                            }
-                            ui.separator();
-                            super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Album(album.id.clone()), &mut self.actions);
+                            let c = super::browse::Collection::Album(album.id.clone());
+                            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), &mut self.actions);
                             if !summary.complete() && analysing == 0 && !tracks.is_empty() {
                                 ui.separator();
                                 if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
@@ -282,9 +260,8 @@ impl ListenerApp {
             let source = Source::Album { id: album.id.clone(), name: album.name.clone() };
             self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false, playlist: None });
             ui.add_space(14.0);
-            let mins = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>().div_ceil(60);
-            let n = tracks.len();
-            let mut footer = format!("{n} song{}, {mins} minutes", if n == 1 { "" } else { "s" });
+            let secs = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>();
+            let mut footer = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
             if let Some(y) = album.year {
                 footer.push_str(&format!(" · {y}"));
             }
@@ -322,15 +299,15 @@ impl ListenerApp {
             ui.spacing_mut().item_spacing.y = 0.0;
             let people = credits(tracks);
             if !people.is_empty() {
-                super::info_panel::info_section(ui, "Credits");
+                super::widgets::kv_section(ui, "Credits");
                 for c in &people {
                     let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
                     self.links_row(ui, &c.role, items);
                 }
             }
-            super::info_panel::info_section(ui, "Analysis");
+            super::widgets::kv_section(ui, "Analysis");
             if found.iter().all(Option::is_none) {
-                super::info_panel::row(ui, "Loudness", |ui| {
+                super::widgets::kv_row(ui, "Loudness", |ui| {
                     if analysing {
                         ui.label(egui::RichText::new("Analysing…").size(12.5).color(t.muted));
                     } else if link(ui, "Analyze album", FontId::proportional(12.5), t.accent)
@@ -379,7 +356,7 @@ impl ListenerApp {
                     (None, None) => None,
                 };
                 let sub = match counts {
-                    Some((n, secs)) if n > 0 => format!("{n} song{} · {}", if n == 1 { "" } else { "s" }, length(secs)),
+                    Some((n, secs)) if n > 0 => format!("{} · {}", crate::fmt::plural(n, "song"), crate::fmt::span(secs)),
                     Some(_) => "Empty".to_owned(),
                     None => String::new(),
                 };
@@ -388,24 +365,14 @@ impl ListenerApp {
                 ui.horizontal(|ui| {
                     let has_tracks = tracks.as_ref().is_some_and(|t| !t.is_empty());
                     ui.add_enabled_ui(has_tracks, |ui| {
-                        if primary(ui, Some(Icon::Play), "Play").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Play { start: 0 }));
-                        }
-                        ui.add_space(4.0);
-                        if secondary(ui, "Shuffle").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Shuffle));
+                        if let Some(a) = super::browse::play_shuffle(ui) {
+                            self.actions.push(Action::Playlist(id.to_owned(), a));
                         }
                     });
                     let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
                     egui::Popup::menu(&more).show(|ui| {
-                        if ui.button("Play next").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::PlayNext));
-                        }
-                        if ui.button("Add to queue").clicked() {
-                            self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Add));
-                        }
-                        ui.separator();
-                        super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Playlist(id.to_owned()), &mut self.actions);
+                        let c = super::browse::Collection::Playlist(id.to_owned());
+                        super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), &mut self.actions);
                         if mine {
                             ui.separator();
                             self.playlist_edit_items(ui, id, name);
@@ -576,25 +543,12 @@ impl ListenerApp {
                 }
             }
             if ui.is_rect_visible(rect) {
-                let fill = if selected {
-                    t.selected
-                } else if hovered {
-                    t.hover
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-                ui.painter().rect_filled(rect, 6.0, fill);
+                ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
                 let mut x = rect.left() + 10.0;
                 let cy = rect.center().y;
                 // Offline, what isn't downloaded is dimmed rather than hidden.
                 let available = self.playable(tr);
-                let color = if playing {
-                    t.accent
-                } else if available {
-                    t.text
-                } else {
-                    t.muted.gamma_multiply(0.75)
-                };
+                let color = super::widgets::track_color(&t, playing, available);
                 if let Some(m) = Mark::of_track(self.offline_snap.track(&tr.id)) {
                     super::widgets::mark(ui, pos2(rect.right() - 48.0, cy), 10.0, m);
                 }
@@ -610,17 +564,14 @@ impl ListenerApp {
                     icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 4.0, cy), vec2(8.0, 8.0)), Icon::Play, t.accent);
                     x += 16.0;
                 }
-                let dur = tr.duration_secs.map(|d| mmss(f64::from(d))).unwrap_or_default();
+                let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
                 ui.painter().text(pos2(rect.right() - 10.0, cy), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
                 // The heart sits just left of the duration: always when loved,
                 // on hover otherwise.
                 let heart = Rect::from_center_size(pos2(rect.right() - 70.0, cy), vec2(24.0, 24.0));
                 if loved || hovered {
-                    let hr = ui.interact(heart, ui.scope_id().with(("heart", &tr.id, i)), Sense::click());
-                    let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if hr.hovered() { t.text } else { t.muted }) };
-                    icons::paint(ui.painter(), Rect::from_center_size(heart.center(), vec2(12.0, 12.0)), icon, color);
                     let label = if loved { "Unlove" } else { "Love" };
-                    hr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+                    let hr = super::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
                     if hr.on_hover_text(label).clicked() {
                         self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
                     }
@@ -755,69 +706,99 @@ impl ListenerApp {
         ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::D)))
     }
 
+    /// The list keys pressed this frame, consumed, when the list on `focus`
+    /// may take them (see [`list_keys_free`](Self::list_keys_free)); `None`
+    /// otherwise. `edit` also takes ⌥↑/⌥↓ and ⌫ (lists the user can change);
+    /// `escape` takes Esc.
+    pub(super) fn list_keys(&self, ui: &Ui, focus: Focus, edit: bool, escape: bool) -> Option<ListKeys> {
+        if self.focus != focus || !self.list_keys_free(ui) {
+            return None;
+        }
+        use egui::{Key, Modifiers};
+        Some(ui.input_mut(|i| {
+            let mut k = ListKeys {
+                up: i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                down: i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                enter: i.consume_key(Modifiers::NONE, Key::Enter),
+                play_next: i.consume_key(Modifiers::ALT, Key::Enter),
+                add: i.consume_key(Modifiers::SHIFT, Key::Enter),
+                ..ListKeys::default()
+            };
+            if edit {
+                k.move_up = i.consume_key(Modifiers::ALT, Key::ArrowUp);
+                k.move_down = i.consume_key(Modifiers::ALT, Key::ArrowDown);
+                k.remove = i.consume_key(Modifiers::NONE, Key::Backspace) | i.consume_key(Modifiers::NONE, Key::Delete);
+            }
+            if escape {
+                k.escape = i.consume_key(Modifiers::NONE, Key::Escape);
+            }
+            k
+        }))
+    }
+
     /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add. In the
     /// user's own playlist, ⌥↑/⌥↓ move the selected song and ⌫ removes it.
     fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) {
-        if self.focus != Focus::Main || !self.list_keys_free(ui) || tracks.is_empty() {
+        if tracks.is_empty() {
             return;
         }
-        use egui::{Key, Modifiers};
-        let (move_up, move_down, remove) = if playlist.is_some() {
-            ui.input_mut(|i| {
-                (
-                    i.consume_key(Modifiers::ALT, Key::ArrowUp),
-                    i.consume_key(Modifiers::ALT, Key::ArrowDown),
-                    i.consume_key(Modifiers::NONE, Key::Backspace) | i.consume_key(Modifiers::NONE, Key::Delete),
-                )
-            })
-        } else {
-            (false, false, false)
-        };
-        let (up, down, enter, next, add) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::ALT, Key::Enter),
-                i.consume_key(Modifiers::SHIFT, Key::Enter),
-            )
-        });
+        let Some(k) = self.list_keys(ui, Focus::Main, playlist.is_some(), false) else { return };
         let last = tracks.len() - 1;
-        if down {
-            self.track_sel = Some(self.track_sel.map_or(0, |s| (s + 1).min(last)));
-        }
-        if up {
-            self.track_sel = Some(self.track_sel.map_or(0, |s| s.saturating_sub(1)));
-        }
+        self.track_sel = k.step(self.track_sel, tracks.len());
         let Some(sel) = self.track_sel.filter(|s| *s <= last) else { return };
         if let Some(pid) = playlist {
-            if move_up && sel > 0 {
+            if k.move_up && sel > 0 {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel - 1 }));
             }
-            if move_down && sel < last {
+            if k.move_down && sel < last {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel + 1 }));
             }
-            if remove {
+            if k.remove {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Remove { id: pid.to_owned(), index: sel }));
             }
         }
-        if enter {
+        if k.enter {
             self.actions.push(Action::Tracks { tracks: tracks.to_vec(), source: source.clone(), action: QueueAction::Play { start: sel } });
         }
-        if next {
+        if k.play_next {
             self.actions.push(Action::Tracks { tracks: vec![tracks[sel].clone()], source: source.clone(), action: QueueAction::PlayNext });
         }
-        if add {
+        if k.add {
             self.actions.push(Action::Tracks { tracks: vec![tracks[sel].clone()], source: source.clone(), action: QueueAction::Add });
         }
     }
 }
 
-/// "41 min", "1 hr 12 min".
-fn length(secs: u32) -> String {
-    let mins = secs.div_ceil(60);
-    if mins >= 60 { format!("{} hr {} min", mins / 60, mins % 60) } else { format!("{mins} min") }
+/// The keys a list reacts to, as read (and consumed) by `list_keys`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ListKeys {
+    pub up: bool,
+    pub down: bool,
+    pub enter: bool,
+    pub play_next: bool,
+    pub add: bool,
+    pub move_up: bool,
+    pub move_down: bool,
+    pub remove: bool,
+    pub escape: bool,
 }
+
+impl ListKeys {
+    /// The selection after ↑/↓ in a list of `len` rows: the first row when
+    /// nothing was selected, clamped at both ends.
+    pub fn step(&self, sel: Option<usize>, len: usize) -> Option<usize> {
+        let last = len.checked_sub(1)?;
+        let mut sel = sel;
+        if self.down {
+            sel = Some(sel.map_or(0, |s| (s + 1).min(last)));
+        }
+        if self.up {
+            sel = Some(sel.map_or(0, |s| s.saturating_sub(1)));
+        }
+        sel
+    }
+}
+
 
 fn composer_of(t: &Track) -> Option<String> {
     t.composer.clone().or_else(|| t.contributors.iter().find(|c| c.role.eq_ignore_ascii_case("composer")).map(|c| c.name.clone()))
@@ -882,5 +863,17 @@ mod tests {
         b.bit_depth = Some(24);
         assert_eq!(shared_format(&[a, b]), None);
         assert_eq!(shared_format(&[]), None);
+    }
+
+    #[test]
+    fn arrow_keys_step_and_clamp() {
+        let down = ListKeys { down: true, ..ListKeys::default() };
+        let up = ListKeys { up: true, ..ListKeys::default() };
+        assert_eq!(down.step(None, 3), Some(0), "the first press selects the first row");
+        assert_eq!(down.step(Some(2), 3), Some(2), "stops at the end");
+        assert_eq!(up.step(Some(0), 3), Some(0), "stops at the top");
+        assert_eq!(up.step(Some(2), 3), Some(1));
+        assert_eq!(ListKeys::default().step(Some(1), 3), Some(1));
+        assert_eq!(down.step(None, 0), None, "an empty list has nothing to select");
     }
 }
