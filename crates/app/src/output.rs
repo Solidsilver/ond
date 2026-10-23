@@ -46,6 +46,11 @@ impl Outputs {
         self.network = NetworkProbe::start(server);
     }
 
+    /// The signal path of what's playing, as the engine last reported it.
+    pub fn signal(&self) -> Option<&SignalPath> {
+        self.signal.as_ref()
+    }
+
     /// The transcode new tracks should be streamed with, if any.
     pub fn transcode(&self) -> Option<Transcode> {
         self.prefs.transcode(self.network.get())

@@ -11,6 +11,7 @@ mod folder;
 mod favorites;
 mod icons;
 mod keys;
+mod lyrics;
 mod menu;
 mod nav;
 mod now_playing;

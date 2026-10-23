@@ -150,8 +150,14 @@ impl ListenerApp {
         }
         let label = format!("Now playing: {} — {sub_text}", item.track.title);
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        // The artwork opens Now Playing; the rest of the display, the album.
+        let on_art = body.interact_pointer_pos().or(body.hover_pos()).is_some_and(|p| art.contains(p));
         if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() {
-            self.actions.push(Action::Go(Route::Album(item.track.album_id.clone())));
+            let to = if on_art { Route::NowPlaying } else { Route::Album(item.track.album_id.clone()) };
+            self.actions.push(Action::Go(to));
+        }
+        if on_art && body.hovered() {
+            painter.rect_stroke(art.shrink(1.0), 6.0, egui::Stroke::new(1.5, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
         }
         if !heart_resp.hovered() {
             body.on_hover_cursor(egui::CursorIcon::PointingHand);

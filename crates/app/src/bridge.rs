@@ -47,6 +47,8 @@ pub enum Msg {
     Remote(crate::now_playing::Remote),
     /// `getStarred2`: everything loved, and the ratings seen with it.
     Starred { starred: Starred, ratings: Vec<(String, u8)> },
+    /// A track's lyrics arrived (`None`: the server has none).
+    Lyrics { track_id: String, lyrics: Option<crate::lyrics::Lyrics> },
     /// Hearts and ratings seen while loading an album or playlist.
     UserMeta { meta: UserMeta, tracks: Vec<Track> },
     /// A heart change reached the server (`error` is `None`) or didn't.
@@ -458,6 +460,32 @@ impl Bridge {
                 }
                 Err(e) => this.send(Msg::Error(format!("favorites: {e}"))),
             }
+        });
+    }
+
+    /// Lyrics for one track: structured (synced where possible) first, then
+    /// plain `getLyrics` by artist and title. Failures read as "no lyrics":
+    /// they're a nicety, never worth an error banner.
+    pub fn fetch_lyrics(&self, client: Option<Client>, track_id: String, artist: Option<String>, title: String) {
+        let Some(client) = client else { return };
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let mut lyrics = match client.lyrics_by_song(&track_id).await {
+                Ok(versions) => crate::lyrics::pick(versions),
+                Err(e) => {
+                    tracing::debug!("getLyricsBySongId {track_id}: {e}");
+                    None
+                }
+            };
+            if lyrics.is_none()
+                && let Some(artist) = artist.as_deref()
+            {
+                match client.lyrics(artist, &title).await {
+                    Ok(text) => lyrics = text.as_deref().and_then(crate::lyrics::from_text),
+                    Err(e) => tracing::debug!("getLyrics {title}: {e}"),
+                }
+            }
+            this.send(Msg::Lyrics { track_id, lyrics });
         });
     }
 

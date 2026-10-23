@@ -11,6 +11,7 @@ mod compact;
 mod offline_page;
 mod dialogs;
 mod favorites_page;
+mod now_playing_view;
 mod palette;
 mod settings_page;
 mod queue_panel;
@@ -366,6 +367,12 @@ pub struct ListenerApp {
     last_synced: Option<chrono::DateTime<chrono::Local>>,
     /// "navidrome 0.64.2", as the server reported it.
     server_info: String,
+    /// Lyrics by track id, fetched when the Now Playing view first needs them.
+    lyrics: HashMap<String, crate::lyrics::Fetch>,
+    /// Whether the lyrics column follows the sung line.
+    lyrics_follow: crate::lyrics::Follow,
+    /// The Now Playing details strip is open.
+    np_details: bool,
 }
 
 impl ListenerApp {
@@ -526,6 +533,9 @@ impl ListenerApp {
             settings_section: settings_page::Section::default(),
             last_synced: None,
             server_info: String::new(),
+            lyrics: HashMap::new(),
+            lyrics_follow: crate::lyrics::Follow::default(),
+            np_details: false,
         })
     }
 
@@ -657,6 +667,9 @@ impl ListenerApp {
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
             Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
+            Msg::Lyrics { track_id, lyrics } => {
+                self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
+            }
             Msg::UserMeta { meta, tracks } => self.favorites.note(meta, &tracks),
             Msg::StarDone { kind, id, on, error } => self.star_done(kind, id, on, error),
             Msg::RatingDone { id, previous, error } => self.rating_done(id, previous, error),

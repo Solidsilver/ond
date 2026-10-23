@@ -319,3 +319,49 @@ pub(crate) struct PlaylistList {
 pub(crate) struct PlaylistPayload {
     pub playlist: PlaylistWithSongs,
 }
+
+/// OpenSubsonic structured lyrics: one language / version of a song's words.
+/// `start` and `offset` are milliseconds; unsynced lyrics have no `start`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuredLyrics {
+    pub lang: Option<String>,
+    #[serde(default)]
+    pub synced: bool,
+    /// Shift to apply to every line's start (positive: the words come later).
+    pub offset: Option<i64>,
+    #[serde(default)]
+    pub line: Vec<LyricLine>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LyricLine {
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub value: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LyricsListPayload {
+    #[serde(default)]
+    pub lyrics_list: LyricsList,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LyricsList {
+    #[serde(default)]
+    pub structured_lyrics: Vec<StructuredLyrics>,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct LyricsPayload {
+    #[serde(default)]
+    pub lyrics: Option<LyricsText>,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct LyricsText {
+    pub value: Option<String>,
+}

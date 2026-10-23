@@ -54,6 +54,30 @@ fn parses_ping() {
 }
 
 #[test]
+fn parses_structured_lyrics() {
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true,
+      "lyricsList":{"structuredLyrics":[
+        {"displayArtist":"Bill Evans Trio","displayTitle":"Solar","lang":"eng","offset":-100,"synced":true,
+         "line":[{"start":0,"value":"First"},{"start":2500,"value":"Second"}]},
+        {"lang":"xxx","synced":false,"line":[{"value":"Plain one"},{"value":"Plain two"}]}
+      ]}}}"#;
+    let (_, p): (_, LyricsListPayload) = parse_response(json).unwrap();
+    let l = &p.lyrics_list.structured_lyrics;
+    assert_eq!(l.len(), 2);
+    assert!(l[0].synced);
+    assert_eq!(l[0].offset, Some(-100));
+    assert_eq!(l[0].line[1].start, Some(2500));
+    assert_eq!(l[1].line[0].start, None);
+    // No lyrics at all: an empty list, not an error.
+    let empty = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","lyricsList":{}}}"#;
+    let (_, p): (_, LyricsListPayload) = parse_response(empty).unwrap();
+    assert!(p.lyrics_list.structured_lyrics.is_empty());
+    let plain = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","lyrics":{"artist":"A","title":"T","value":"la la"}}}"#;
+    let (_, p): (_, LyricsPayload) = parse_response(plain).unwrap();
+    assert_eq!(p.lyrics.and_then(|l| l.value).as_deref(), Some("la la"));
+}
+
+#[test]
 fn parses_api_error() {
     let json = br#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}"#;
     match parse_response::<serde_json::Value>(json) {

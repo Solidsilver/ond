@@ -421,6 +421,8 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.analysis_open = false;
     app.analyzer.clear();
     app.queue_ui = QueueUi::default();
+    app.np_details = false;
+    app.lyrics_follow = crate::lyrics::Follow::default();
     app.login = None;
     app.nav = Nav::default();
     app.nav.go(route);
@@ -457,7 +459,86 @@ fn click_label(h: &mut Harness<'_, Option<ListenerApp>>, label: &str, area: egui
     }
 }
 
+/// Made-up words for the lyrics scenes (no real song's).
+const VERSES: [&str; 26] = [
+    "Lamps come on along the water",
+    "Somebody's radio two floors down",
+    "",
+    "I kept the window open for the rain",
+    "It never came, the evening did",
+    "Coffee cold beside the record sleeve",
+    "Needle drifting in the run-out groove",
+    "",
+    "Hold the note a little longer",
+    "Let the room decide when it is done",
+    "The bass walks home without us",
+    "We follow at a quarter time",
+    "",
+    "Every chair is facing somewhere else",
+    "Every clock is running slow tonight",
+    "Turn it down, the neighbours listen too",
+    "They'd never say they like it",
+    "",
+    "Lamps go out along the water",
+    "Somebody's radio signs off",
+    "I leave the window open anyway",
+    "In case the rain remembers",
+    "",
+    "Hold the note",
+    "Let the room decide",
+    "When it is done",
+];
+
+/// The current track's lyrics, as the server would give them: one line every
+/// eight seconds from 0:20, so 2:21 into the fixture lands mid-song.
+fn fixture_lyrics(app: &mut ListenerApp, synced: bool) {
+    let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
+    let lyrics = if synced {
+        crate::lyrics::Lyrics::Synced(
+            VERSES.iter().enumerate().map(|(i, v)| crate::lyrics::Line { start_ms: 20_000 + 8_000 * i as i64, text: (*v).into() }).collect(),
+        )
+    } else {
+        crate::lyrics::Lyrics::Plain(VERSES.iter().map(|v| (*v).to_owned()).collect())
+    };
+    app.lyrics.insert(id, crate::lyrics::Fetch::Done(Some(lyrics)));
+}
+
 fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
+    reset(h, FULL, Route::NowPlaying);
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(20);
+    s.shoot(h, "now-playing");
+
+    reset(h, FULL, Route::NowPlaying);
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(20);
+    let lyrics_col = egui::Rect::from_min_max(pos2(700.0, 120.0), pos2(1120.0, 800.0));
+    if !hover_label(h, "Every clock is running slow", lyrics_col) {
+        h.hover_at(pos2(860.0, 600.0));
+    }
+    s.shoot(h, "now-playing-line-hover");
+
+    reset(h, FULL, Route::NowPlaying);
+    fixture_lyrics(app_mut(h), false);
+    s.shoot(h, "now-playing-plain");
+
+    reset(h, FULL, Route::NowPlaying);
+    if let Some(id) = app_mut(h).queue.current.as_ref().map(|c| c.track.id.clone()) {
+        app_mut(h).lyrics.insert(id, crate::lyrics::Fetch::Done(None));
+    }
+    app_mut(h).np_details = true;
+    s.shoot(h, "now-playing-no-lyrics");
+
+    reset(h, vec2(900.0, 700.0), Route::NowPlaying);
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(20);
+    s.shoot(h, "narrow-now-playing");
+
+    reset(h, FULL, Route::Recent);
+    // The LCD's artwork (left end of the centered display).
+    h.hover_at(pos2(354.0, 26.0));
+    s.shoot(h, "lcd-art-hover");
+
     reset(h, FULL, Route::Recent);
     s.shoot(h, "recent");
 
