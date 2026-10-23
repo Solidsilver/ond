@@ -10,6 +10,7 @@ mod icons;
 mod nav;
 mod now_playing;
 mod output;
+mod playback;
 mod queue;
 mod search;
 mod settings;

@@ -33,6 +33,9 @@ pub struct Settings {
     /// The user signed out: show the login screen instead of reconnecting.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub signed_out: bool,
+    /// ReplayGain and streaming quality.
+    #[serde(default)]
+    pub playback: crate::playback::PlaybackPrefs,
 }
 
 fn yes() -> bool {
@@ -52,6 +55,7 @@ impl Default for Settings {
             window: Default::default(),
             scrobble: true,
             signed_out: false,
+            playback: Default::default(),
         }
     }
 }

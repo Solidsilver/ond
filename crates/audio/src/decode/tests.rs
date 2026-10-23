@@ -38,7 +38,7 @@ pub(crate) fn pcm(n: usize, salt: i64) -> Vec<i16> {
 pub(crate) fn file_source(dir: &tempfile::TempDir, name: &str, samples: &[i16]) -> TrackSource {
     let path = dir.path().join(format!("{name}.wav"));
     std::fs::write(&path, wav(RATE, 2, samples)).unwrap();
-    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()) }
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
 }
 
 fn config(buffer_secs: f32) -> EngineConfig {
@@ -121,7 +121,7 @@ fn bit_perfect_decode_round_trips_pcm() {
     let a = pcm(20_000, 0);
     let dir = tempfile::tempdir().unwrap();
     let status = bit_perfect_status();
-    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None);
+    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None, Arc::default());
     let (input, seen) = wait_ring(&s);
     let Some(DecoderMsg::Track { format, total_frames, .. }) = seen.first() else { panic!("no Track message: {seen:?}") };
     assert_eq!(*format, StreamFormat { sample_rate: RATE, channels: 2, bits_per_sample: Some(16) });
@@ -139,7 +139,7 @@ fn gapless_two_tracks_share_one_ring_and_switch_on_the_exact_sample() {
     let (a, b) = (pcm(2 * 30_001, 1), pcm(2 * 17_003, 2));
     let dir = tempfile::tempdir().unwrap();
     let status = bit_perfect_status();
-    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None);
+    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None, Arc::default());
     s.set_next(0, Some(file_source(&dir, "b", &b)));
     let (input, _) = wait_ring(&s);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
@@ -180,9 +180,9 @@ fn format_change_starts_a_new_ring() {
     let dir = tempfile::tempdir().unwrap();
     let b_path = dir.path().join("b.wav");
     std::fs::write(&b_path, wav(48_000, 2, &pcm(2 * 4_000, 2))).unwrap();
-    let b = TrackSource { id: "b".into(), url: format!("file://{}", b_path.display()), suffix: Some("wav".into()) };
+    let b = TrackSource { id: "b".into(), url: format!("file://{}", b_path.display()), suffix: Some("wav".into()), ..Default::default() };
     let status = bit_perfect_status();
-    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None);
+    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None, Arc::default());
     s.set_next(0, Some(b));
     let (input, _) = wait_ring(&s);
     let mut dev = Device { input, status, played: Vec::new() };
@@ -205,7 +205,7 @@ fn seek_cuts_stale_audio_and_resumes_at_the_exact_frame() {
     let a = pcm(RATE as usize * 2 * 2, 0);
     let dir = tempfile::tempdir().unwrap();
     let status = bit_perfect_status();
-    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None);
+    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None, Arc::default());
     let (input, _) = wait_ring(&s);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     while dev.played.len() < 2_000 {
@@ -241,7 +241,7 @@ fn caps_48k() -> Option<DeviceCaps> {
 fn source_at(dir: &tempfile::TempDir, name: &str, rate: u32, samples: &[i16]) -> TrackSource {
     let path = dir.path().join(format!("{name}.wav"));
     std::fs::write(&path, wav(rate, 2, samples)).unwrap();
-    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()) }
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
 }
 
 /// Reference: what the resampler makes of `samples` in one go.
@@ -284,7 +284,7 @@ fn hi_res_tracks_are_resampled_for_the_device_and_stay_gapless() {
     let (a, b) = (pcm(2 * 48_001, 3), pcm(2 * 24_003, 4));
     let dir = tempfile::tempdir().unwrap();
     let status = bit_perfect_status();
-    let s = Session::start(source_at(&dir, "a", 96_000, &a), None, config(0.1), status.clone(), None, caps_48k());
+    let s = Session::start(source_at(&dir, "a", 96_000, &a), None, config(0.1), status.clone(), None, caps_48k(), Arc::default());
     s.set_next(0, Some(source_at(&dir, "b", 96_000, &b)));
     let (input, seen) = wait_ring(&s);
     let Some(DecoderMsg::Track { format, output, total_frames, .. }) = seen.first() else { panic!("no Track: {seen:?}") };
@@ -307,7 +307,7 @@ fn seek_with_resampling_restarts_cleanly_at_the_target() {
     let a = pcm(96_000 * 2 * 2, 5);
     let dir = tempfile::tempdir().unwrap();
     let status = bit_perfect_status();
-    let s = Session::start(source_at(&dir, "a", 96_000, &a), None, config(0.1), status.clone(), None, caps_48k());
+    let s = Session::start(source_at(&dir, "a", 96_000, &a), None, config(0.1), status.clone(), None, caps_48k(), Arc::default());
     let (mut input, _) = wait_ring(&s);
     let mut buf = vec![0.0f32; 2 * 256];
     for _ in 0..20 {
@@ -386,9 +386,9 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(streamcache::CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let status = bit_perfect_status();
-    let src = TrackSource { id: "net".into(), url, suffix: Some("wav".into()) };
+    let src = TrackSource { id: "net".into(), url, suffix: Some("wav".into()), ..Default::default() };
     // A 1 s ring so the 0.4 s prebuffer target isn't capped by its size.
-    let s = Session::start(src, None, config(1.0), status.clone(), Some(cache), None);
+    let s = Session::start(src, None, config(1.0), status.clone(), Some(cache), None, Arc::default());
     let (input, _) = wait_ring(&s);
     let capacity = input.samples.buffer().capacity();
     let target = ((crate::PREBUFFER_SECS * RATE as f32) as usize * 2).min(capacity / 2);
@@ -422,4 +422,106 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     assert!(queued >= target || done, "resumed with {queued} samples queued, target {target}");
     // Without a ranged jump this would wait for ~1 s of sequential download.
     assert!(dev.played[before..] == a[132_300 * 2..], "only audio from the seek target on");
+}
+
+fn wav_source(dir: &tempfile::TempDir, name: &str, channels: u16, samples: &[i16]) -> TrackSource {
+    let path = dir.path().join(format!("{name}.wav"));
+    std::fs::write(&path, wav(RATE, channels, samples)).unwrap();
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
+}
+
+#[test]
+fn mono_plays_on_both_channels_sample_exact() {
+    let a = pcm(6_000, 3);
+    let dir = tempfile::tempdir().unwrap();
+    let status = bit_perfect_status();
+    let s = Session::start(wav_source(&dir, "m", 1, &a), None, config(0.05), status.clone(), None, None, Arc::default());
+    let (input, seen) = wait_ring(&s);
+    let Some(DecoderMsg::Track { format, output, channels, .. }) = seen.first() else { panic!("no Track: {seen:?}") };
+    assert_eq!((format.channels, output.channels), (1, 2));
+    assert_eq!(*channels, ChannelChange::Upmix { from: 1, to: 2 });
+    let mut dev = Device { input, status, played: Vec::new() };
+    play_to_end(&s, &mut dev);
+    let doubled: Vec<i16> = a.iter().flat_map(|s| [*s, *s]).collect();
+    assert_eq!(dev.played, doubled);
+}
+
+#[test]
+fn surround_is_downmixed_to_stereo() {
+    // 5.1 frames with only the front left and the LFE carrying signal.
+    let frames = 4_000;
+    let samples: Vec<i16> = (0..frames).flat_map(|_| [16_000i16, 0, 0, 20_000, 0, 0]).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let status = bit_perfect_status();
+    let s = Session::start(wav_source(&dir, "s", 6, &samples), None, config(0.05), status.clone(), None, None, Arc::default());
+    let (mut input, seen) = wait_ring(&s);
+    let Some(DecoderMsg::Track { output, channels, .. }) = seen.first() else { panic!("no Track: {seen:?}") };
+    assert_eq!(output.channels, 2);
+    assert_eq!(*channels, ChannelChange::Downmix { from: 6, to: 2 });
+    let mut played = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while played.len() < frames * 2 {
+        assert!(Instant::now() < deadline, "playback stalled");
+        let mut buf = vec![0.0f32; 512];
+        input.fill(&mut buf, 2, RATE, &status);
+        played.extend(buf.as_chunks::<2>().0.iter().filter(|f| f[0] != 0.0).flatten().copied());
+        thread::sleep(Duration::from_micros(200));
+    }
+    let left = 16_000.0 / 32_768.0 / (1.0 + 2.0 * std::f32::consts::FRAC_1_SQRT_2);
+    for f in played.as_chunks::<2>().0 {
+        assert!((f[0] - left).abs() < 1e-6, "left {f:?}");
+        assert_eq!(f[1], 0.0, "the LFE is dropped and nothing else reaches the right: {f:?}");
+    }
+}
+
+#[test]
+fn each_track_gets_its_gain_before_its_first_sample() {
+    use crate::replaygain::{GainMode, db_to_linear};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = file_source(&dir, "a", &pcm(2 * 3_000, 1));
+    a.replay_gain = ReplayGain { track_gain: Some(-6.0), album_gain: Some(-9.0), ..Default::default() };
+    let mut b = file_source(&dir, "b", &pcm(2 * 3_000, 2));
+    b.replay_gain = ReplayGain { track_gain: Some(-12.0), album_gain: Some(-9.0), ..Default::default() };
+    b.album_context = true;
+    let status = bit_perfect_status();
+    let gain = Arc::new(Mutex::new(GainConfig { mode: GainMode::Auto, ..Default::default() }));
+    let s = Session::start(a, None, config(0.05), status.clone(), None, None, gain);
+    s.set_next(0, Some(b));
+    let (input, mut seen) = wait_ring(&s);
+    let mut dev = Device { input, status: status.clone(), played: Vec::new() };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "playback stalled");
+        seen.extend(std::iter::from_fn(|| s.try_msg()));
+        if dev.tick(512).0 && s.finished() {
+            break;
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    seen.extend(std::iter::from_fn(|| s.try_msg()));
+    // Auto: a plays alone (track gain), b as part of its album (album gain).
+    assert!((status.gains.get(0) - db_to_linear(-6.0)).abs() < 1e-6);
+    assert!((status.gains.get(1) - db_to_linear(-9.0)).abs() < 1e-6);
+    let gains: Vec<ReplayGain> = seen
+        .iter()
+        .filter_map(|m| if let DecoderMsg::Track { replay_gain, .. } = m { Some(*replay_gain) } else { None })
+        .collect();
+    assert_eq!(gains.len(), 2);
+    assert_eq!(gains[1].track_gain, Some(-12.0));
+}
+
+#[test]
+fn replay_gain_tags_are_read_by_standard_or_raw_key() {
+    use symphonia::core::meta::RawTag;
+    let tags = [
+        Tag {
+            raw: RawTag::new("REPLAYGAIN_TRACK_GAIN", "-7.50 dB"),
+            std: Some(StandardTag::ReplayGainTrackGain(Arc::new("-7.50 dB".into()))),
+        },
+        Tag { raw: RawTag::new("TXXX:replaygain_album_gain", "-8.25 dB"), std: None },
+        Tag { raw: RawTag::new("----:com.apple.iTunes:replaygain_track_peak", "0.988"), std: None },
+        Tag { raw: RawTag::new("ARTIST", "x"), std: None },
+    ];
+    let rg = replay_gain_from_tags(tags.iter());
+    assert_eq!(rg, ReplayGain { track_gain: Some(-7.5), album_gain: Some(-8.25), track_peak: Some(0.988), album_peak: None });
 }

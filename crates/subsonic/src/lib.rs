@@ -78,6 +78,12 @@ impl Client {
         self.endpoint("stream", &[("id", song_id), ("format", "raw")])
     }
 
+    /// URL for a server-side transcode to `format` (e.g. `aac`, `mp3`) at up to
+    /// `max_kbps`. The server needs a transcoding configured for that format.
+    pub fn transcoded_stream_url(&self, song_id: &str, format: &str, max_kbps: u32) -> Url {
+        self.endpoint("stream", &[("id", song_id), ("format", format), ("maxBitRate", &max_kbps.to_string())])
+    }
+
     pub fn cover_art_url(&self, cover_id: &str, size: Option<u32>) -> Url {
         match size {
             Some(px) => self.endpoint("getCoverArt", &[("id", cover_id), ("size", &px.to_string())]),

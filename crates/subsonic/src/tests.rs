@@ -39,6 +39,13 @@ fn endpoint_has_auth_params_and_raw_stream() {
 }
 
 #[test]
+fn transcoded_stream_asks_for_format_and_bitrate() {
+    let c = Client::new("https://music.example.com", Credentials::new("joe", "pw")).unwrap();
+    let q: std::collections::HashMap<_, _> = c.transcoded_stream_url("abc", "aac", 256).query_pairs().into_owned().collect();
+    assert_eq!((q["format"].as_str(), q["maxBitRate"].as_str(), q["id"].as_str()), ("aac", "256", "abc"));
+}
+
+#[test]
 fn parses_ping() {
     let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.58.0","openSubsonic":true}}"#;
     let (info, _): (ServerInfo, serde_json::Value) = parse_response(json).unwrap();

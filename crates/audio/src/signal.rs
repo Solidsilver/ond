@@ -1,7 +1,9 @@
 //! What the output path does to the signal, stated honestly.
 
 use crate::PlaybackMode;
+use crate::channels::ChannelChange;
 use crate::output::StreamFormat;
+use crate::replaygain::{AppliedGain, GainSource};
 
 /// Whether playback is bit-perfect, and why not when it isn't.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +146,7 @@ pub fn assess(mode: PlaybackMode, source: &StreamFormat, device_rate: u32, caps:
 }
 
 /// Everything the UI needs to describe the path from file to device.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SignalPath {
     /// Backend and device, e.g. "CoreAudio · UMC22".
     pub output: String,
@@ -156,6 +158,64 @@ pub struct SignalPath {
     /// The output is requantized with TPDF dither (narrower device or processed signal).
     pub dithered: bool,
     pub bit_perfect: BitPerfectStatus,
+    /// Mono duplicated, or surround mixed down.
+    pub channels: ChannelChange,
+    pub gain: GainState,
+    /// The server transcoded the stream, e.g. "AAC 256".
+    pub transcoded: Option<String>,
+}
+
+/// ReplayGain on the current track.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum GainState {
+    /// ReplayGain is off.
+    #[default]
+    Off,
+    Applied(AppliedGain),
+    /// On, but bit-perfect mode leaves the samples alone.
+    Bypassed,
+}
+
+impl GainState {
+    fn label(&self) -> Option<String> {
+        match self {
+            GainState::Off => None,
+            GainState::Bypassed => Some("ReplayGain bypassed".into()),
+            GainState::Applied(g) => {
+                let db = g.db();
+                let db = if db.abs() < 0.05 { "0 dB".to_owned() } else { format!("{db:+.1} dB").replace('-', "−") };
+                let what = match g.source {
+                    GainSource::Track => "track",
+                    GainSource::Album => "album",
+                    GainSource::Untagged => "untagged",
+                };
+                Some(format!("RG {db} {what}{}", if g.limited { ", peak-limited" } else { "" }))
+            }
+        }
+    }
+}
+
+/// Folds what happens outside the device check into the verdict: a server
+/// transcode or a downmix means the file's samples never reach the device;
+/// a mono file duplicated onto two channels is exact but not what was asked.
+pub fn adjust(status: BitPerfectStatus, channels: ChannelChange, transcoded: Option<&str>) -> BitPerfectStatus {
+    if status == BitPerfectStatus::Off {
+        return status;
+    }
+    if let Some(t) = transcoded {
+        return BitPerfectStatus::Unavailable { reason: format!("transcoded by the server ({t})") };
+    }
+    match channels {
+        ChannelChange::Downmix { from, to } => BitPerfectStatus::Unavailable {
+            reason: format!("{} downmixed to {}", crate::channels::layout(from), crate::channels::layout(to)),
+        },
+        ChannelChange::Upmix { from, to } if !matches!(status, BitPerfectStatus::Unavailable { .. }) => {
+            BitPerfectStatus::Requested {
+                reason: format!("{} upmixed to {}", crate::channels::layout(from), crate::channels::layout(to)),
+            }
+        }
+        _ => status,
+    }
 }
 
 impl SignalPath {
@@ -163,8 +223,14 @@ impl SignalPath {
     pub fn summary(&self) -> String {
         let src = describe(self.source.bits_per_sample, self.source.sample_rate);
         let changed = self.resampled || matches!((self.device_bits, self.source.bits_per_sample), (Some(d), Some(s)) if d < s);
-        let mut parts =
-            vec![if changed { format!("{src} → {}", describe(self.device_bits, self.device_rate)) } else { src }];
+        let mut parts = Vec::new();
+        if let Some(t) = &self.transcoded {
+            parts.push(format!("{t} · transcoded"));
+        }
+        parts.push(if changed { format!("{src} → {}", describe(self.device_bits, self.device_rate)) } else { src });
+        if let Some(c) = self.channels.label() {
+            parts.push(c);
+        }
         let mut processing = Vec::new();
         if self.resampled {
             processing.push("resampled");
@@ -174,6 +240,9 @@ impl SignalPath {
         }
         if !processing.is_empty() {
             parts.push(processing.join(", "));
+        }
+        if let Some(g) = self.gain.label() {
+            parts.push(g);
         }
         match &self.bit_perfect {
             BitPerfectStatus::Off => {}
@@ -315,6 +384,9 @@ mod tests {
             resampled: true,
             dithered: true,
             bit_perfect: BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into() },
+            channels: ChannelChange::None,
+            gain: GainState::Off,
+            transcoded: None,
         };
         assert_eq!(path.summary(), "24/96 → 16/48 · resampled, dithered · device limit");
         let verified = SignalPath {
@@ -326,7 +398,42 @@ mod tests {
             ..path.clone()
         };
         assert_eq!(verified.summary(), "16/44.1 · bit-perfect");
-        let normal = SignalPath { bit_perfect: BitPerfectStatus::Off, ..verified };
+        let normal = SignalPath { bit_perfect: BitPerfectStatus::Off, ..verified.clone() };
         assert_eq!(normal.summary(), "16/44.1");
+
+        let gained = SignalPath {
+            gain: GainState::Applied(AppliedGain { linear: 0.398_107_2, source: GainSource::Album, limited: false }),
+            ..normal.clone()
+        };
+        assert_eq!(gained.summary(), "16/44.1 · RG −8.0 dB album");
+        let bypassed = SignalPath { gain: GainState::Bypassed, ..verified.clone() };
+        assert_eq!(bypassed.summary(), "16/44.1 · ReplayGain bypassed · bit-perfect");
+        let mono = SignalPath { channels: ChannelChange::Upmix { from: 1, to: 2 }, ..normal.clone() };
+        assert_eq!(mono.summary(), "16/44.1 · mono → stereo");
+        let aac = SignalPath {
+            source: StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: None },
+            transcoded: Some("AAC 256".into()),
+            ..normal
+        };
+        assert_eq!(aac.summary(), "AAC 256 · transcoded · 44.1 kHz");
+    }
+
+    #[test]
+    fn transcodes_and_channel_changes_fold_into_the_verdict() {
+        let v = BitPerfectStatus::Verified;
+        let downmix = ChannelChange::Downmix { from: 6, to: 2 };
+        assert_eq!(adjust(BitPerfectStatus::Off, downmix, Some("AAC 256")), BitPerfectStatus::Off);
+        assert_eq!(
+            adjust(v.clone(), ChannelChange::None, Some("AAC 256")),
+            BitPerfectStatus::Unavailable { reason: "transcoded by the server (AAC 256)".into() }
+        );
+        assert_eq!(adjust(v.clone(), downmix, None), BitPerfectStatus::Unavailable { reason: "5.1 downmixed to stereo".into() });
+        assert_eq!(
+            adjust(v.clone(), ChannelChange::Upmix { from: 1, to: 2 }, None),
+            BitPerfectStatus::Requested { reason: "mono upmixed to stereo".into() }
+        );
+        let limit = BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into() };
+        assert_eq!(adjust(limit.clone(), ChannelChange::Upmix { from: 1, to: 2 }, None), limit);
+        assert_eq!(adjust(v.clone(), ChannelChange::None, None), v);
     }
 }

@@ -22,6 +22,7 @@ use crate::bridge::{Bridge, Msg};
 use crate::nav::{Nav, Route};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
+use crate::playback;
 use crate::queue::{EndAction, Queue, Source};
 use crate::search::SearchIndex;
 use crate::settings::{Paths, Settings};
@@ -377,6 +378,7 @@ impl ListenerApp {
                 self.bridge.fetch_home(client.clone());
                 self.art.set_client(client.clone());
                 self.now_playing.set_client(client.clone());
+                self.output.connected(&settings.server);
                 self.client = Some(client);
             }
             Msg::ConnectFailed(e) => {
@@ -527,8 +529,28 @@ impl ListenerApp {
         }
     }
 
-    fn source(client: &Client, track: &Track) -> TrackSource {
-        TrackSource { id: track.id.clone(), url: client.stream_url(&track.id).to_string(), suffix: track.suffix.clone() }
+    /// What the engine needs to play `track`: the stream (original or
+    /// transcoded), its ReplayGain, and whether it plays as part of its album
+    /// (from its queue neighbours `prev` and `next`).
+    fn source(
+        client: &Client,
+        transcode: Option<audio::Transcode>,
+        prev: Option<&Track>,
+        track: &Track,
+        next: Option<&Track>,
+    ) -> TrackSource {
+        let (url, suffix) = match &transcode {
+            None => (client.stream_url(&track.id), track.suffix.clone()),
+            Some(t) => (client.transcoded_stream_url(&track.id, &t.format, t.kbps), Some(t.format.clone())),
+        };
+        TrackSource {
+            id: track.id.clone(),
+            url: url.to_string(),
+            suffix,
+            replay_gain: playback::replay_gain(track),
+            album_context: playback::in_album(prev, track, next),
+            transcode,
+        }
     }
 
     /// Starts the queue's current item from the top (or stops when there is none).
@@ -538,7 +560,10 @@ impl ListenerApp {
         match (&self.client, &self.queue.current) {
             (Some(client), Some(item)) => {
                 self.announce(&item.track);
-                self.engine.send(Command::Play(Self::source(client, &item.track)));
+                let prev = self.queue.history.last().map(|i| &i.track);
+                let next = self.queue.peek_next().map(|i| &i.track);
+                let src = Self::source(client, self.output.transcode(), prev, &item.track, next);
+                self.engine.send(Command::Play(src));
                 self.sync_next();
             }
             (_, None) => self.engine.send(Command::Stop),
@@ -559,7 +584,11 @@ impl ListenerApp {
             if let Some(t) = &next {
                 self.announce(t);
             }
-            self.engine.send(Command::SetNext(next.map(|t| Self::source(client, &t))));
+            let current = self.queue.current.as_ref().map(|i| &i.track);
+            let after = self.queue.upcoming.get(1).map(|i| &i.track);
+            let transcode = self.output.transcode();
+            let src = next.map(|t| Self::source(client, transcode, current, &t, after));
+            self.engine.send(Command::SetNext(src));
             self.sent_next = id;
         }
     }

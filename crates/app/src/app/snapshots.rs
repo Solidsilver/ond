@@ -257,6 +257,9 @@ fn signal() -> audio::Event {
         resampled: true,
         dithered: true,
         bit_perfect: audio::BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into() },
+        channels: Default::default(),
+        gain: Default::default(),
+        transcoded: None,
     })
 }
 
