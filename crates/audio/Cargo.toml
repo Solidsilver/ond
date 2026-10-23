@@ -1,0 +1,29 @@
+[package]
+name = "audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cpal = "0.18.2"
+crossbeam-channel = "0.5.17"
+streamcache = { version = "0.1.0", path = "../streamcache" }
+rtrb = "0.4.0"
+symphonia = { version = "0.6.1", features = ["all"] }
+thiserror = "2.0.21"
+tracing = "0.1.44"
+rubato = "5.0.1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = "0.14.2"
+libc = "0.2"
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }

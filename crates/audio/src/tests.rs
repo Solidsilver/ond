@@ -1,0 +1,257 @@
+//! Engine-level tests with a fake device that runs the real callback on a thread.
+
+use super::*;
+use crate::decode::tests::{file_source, pcm};
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Plays rings at roughly 8× real time and records what it played.
+struct FakeBackend {
+    caps: DeviceCaps,
+    played: Arc<Mutex<Vec<f32>>>,
+    stop: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
+    drained: Arc<AtomicBool>,
+    opens: Arc<AtomicU64>,
+    /// Devices "plugged in"; the first is the system default.
+    devices: Arc<Mutex<Vec<DeviceInfo>>>,
+    device_events: Arc<Mutex<Vec<DeviceEvent>>>,
+    selected: Option<String>,
+}
+
+impl FakeBackend {
+    fn new(caps: DeviceCaps) -> Self {
+        Self {
+            caps,
+            played: Arc::default(),
+            stop: None,
+            drained: Arc::default(),
+            opens: Arc::default(),
+            devices: Arc::default(),
+            device_events: Arc::default(),
+            selected: None,
+        }
+    }
+}
+
+impl OutputBackend for FakeBackend {
+    fn name(&self) -> &str {
+        "fake"
+    }
+
+    fn device_caps(&mut self) -> Option<DeviceCaps> {
+        Some(self.caps.clone())
+    }
+
+    fn devices(&mut self) -> Vec<DeviceInfo> {
+        self.devices.lock().unwrap().clone()
+    }
+
+    fn current_device(&mut self) -> Option<DeviceInfo> {
+        let devices = self.devices.lock().unwrap();
+        let chosen = self.selected.as_ref().and_then(|uid| devices.iter().find(|d| &d.uid == uid));
+        chosen.or(devices.first()).cloned()
+    }
+
+    fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
+        self.selected = uid.map(str::to_owned);
+        Ok(())
+    }
+
+    fn poll_device_events(&mut self) -> Vec<DeviceEvent> {
+        std::mem::take(&mut *self.device_events.lock().unwrap())
+    }
+
+    fn open(&mut self, format: StreamFormat, mut input: RingInput, status: Arc<Status>) -> Result<(), OutputError> {
+        self.close();
+        if !self.caps.supports(format.sample_rate, format.channels) {
+            return Err(OutputError::Unsupported { rate: format.sample_rate, channels: format.channels });
+        }
+        self.opens.fetch_add(1, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let drained = Arc::new(AtomicBool::new(false));
+        self.drained = drained.clone();
+        let (played, stop2) = (self.played.clone(), stop.clone());
+        let channels = format.channels as usize;
+        let handle = thread::spawn(move || {
+            let mut buf = vec![0.0f32; 512 * channels];
+            while !stop2.load(Ordering::Relaxed) {
+                if input.fill(&mut buf, channels, format.sample_rate, &status) {
+                    drained.store(true, Ordering::Release);
+                }
+                played.lock().unwrap().extend(buf.iter().filter(|s| **s != 0.0));
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        self.stop = Some((stop, handle));
+        Ok(())
+    }
+
+    fn drained(&self) -> bool {
+        self.drained.load(Ordering::Acquire)
+    }
+
+    fn close(&mut self) {
+        if let Some((stop, handle)) = self.stop.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+}
+
+fn caps(max_bits: Option<u32>, max_rate: u32) -> DeviceCaps {
+    DeviceCaps {
+        name: "fake".into(),
+        configs: vec![RateRange { channels: 2, min: 8_000, max: max_rate }],
+        max_bits,
+        exclusive: false,
+        shared_reason: Some("shared mode (fake)".into()),
+        ..Default::default()
+    }
+}
+
+fn events_until(engine: &EngineHandle, mut stop: impl FnMut(&Event) -> bool) -> Vec<Event> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let ev = engine.events.recv_timeout(left).unwrap_or_else(|_| panic!("timed out; saw {seen:?}"));
+        let done = stop(&ev);
+        seen.push(ev);
+        if done {
+            return seen;
+        }
+    }
+}
+
+#[test]
+fn gapless_queue_reports_each_track_as_it_plays() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 20_001, 1), pcm(2 * 9_999, 2));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let config = EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let started: Vec<_> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::TrackStarted { track_id, gapless, .. } => Some((track_id.as_str(), *gapless)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [("a", false), ("b", true)]);
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id }) if track_id == "b"));
+    assert_eq!(opens.load(Ordering::Relaxed), 1, "the device stayed open across the boundary");
+
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    let expected: Vec<i16> = a.iter().chain(&b).copied().collect();
+    assert!(out == expected, "played {} samples, expected {}", out.len(), expected.len());
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn signal_path_is_honest_and_follows_mode_switches_mid_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 2, 0);
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    // A 16/48 device: this 16/44.1 file can be bit-perfect, but only "requested" in shared mode.
+    let engine = spawn(config, Box::new(FakeBackend::new(caps(Some(16), 48_000))), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    let seen = events_until(&engine, |e| matches!(e, Event::SignalPath(_)));
+    assert!(matches!(seen.last(), Some(Event::SignalPath(p)) if p.bit_perfect == BitPerfectStatus::Off));
+
+    engine.send(Command::SetMode(PlaybackMode::BitPerfect));
+    let seen = events_until(&engine, |e| matches!(e, Event::SignalPath(_)));
+    let Some(Event::SignalPath(path)) = seen.last() else { unreachable!() };
+    assert_eq!(path.bit_perfect, BitPerfectStatus::Requested { reason: "shared mode (fake)".into() });
+    // Same track, still playing: nothing restarted.
+    assert!(!seen.iter().any(|e| matches!(e, Event::TrackStarted { .. })));
+    assert!(engine.status.bit_perfect.load(Ordering::Relaxed));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn hi_res_on_a_16_48_device_is_resampled_and_reported_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hr.wav");
+    std::fs::write(&path, crate::decode::tests::wav(96_000, 2, &pcm(2 * 9_600, 0))).unwrap();
+    let src = TrackSource { id: "hr".into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()) };
+    let config = EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.1 };
+    let device = DeviceCaps { active_bits: Some(16), ..caps(Some(16), 48_000) };
+    let engine = spawn(config, Box::new(FakeBackend::new(device)), None);
+    engine.send(Command::Play(src));
+    // It plays (never refused) and says why it isn't bit-perfect.
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let path = seen
+        .iter()
+        .find_map(|e| match e {
+            Event::SignalPath(p) => Some(p.clone()),
+            _ => None,
+        })
+        .expect("signal path");
+    assert_eq!(path.bit_perfect, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 16/96".into() });
+    assert!(path.resampled && path.dithered);
+    assert_eq!(path.device_rate, 48_000);
+    assert_eq!(path.summary(), "16/96 → 16/48 · resampled, dithered · device limit");
+    assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })));
+    engine.send(Command::Shutdown);
+}
+
+fn device(uid: &str, name: &str, kind: DeviceKind) -> DeviceInfo {
+    DeviceInfo { uid: uid.into(), name: name.into(), kind, caps: caps(Some(24), 192_000), is_default: false }
+}
+
+#[test]
+fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 0);
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
+    *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+
+    // Picking the DAC applies its default mode (bit-perfect: it's a wired DAC).
+    engine.send(Command::SelectDevice(Some("dac".into())));
+    let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, device: Some(d) } if d == "dac")));
+
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    thread::sleep(Duration::from_millis(100));
+
+    // Unplugged mid-track: Normal mode on the default, same track, from about where it was.
+    devices.lock().unwrap().retain(|d| d.uid != "dac");
+    events.lock().unwrap().push(DeviceEvent::ListChanged);
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::DeviceLost { name } if name == "DAC")));
+    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::Normal, device: Some(d) } if d == "spk")));
+    assert!(matches!(seen.last(), Some(Event::TrackStarted { track_id, .. }) if track_id == "a"));
+    assert!(engine.status.position_secs() > 0.5, "resumed mid-track, not from the start");
+    assert_eq!(engine.status.mode(), PlaybackMode::Normal);
+
+    // Plugged back in: offered, not switched to silently.
+    devices.lock().unwrap().push(device("dac", "DAC", DeviceKind::Usb));
+    events.lock().unwrap().push(DeviceEvent::ListChanged);
+    let seen = events_until(&engine, |e| matches!(e, Event::DeviceReturned { .. }));
+    assert!(matches!(seen.last(), Some(Event::DeviceReturned { uid, .. }) if uid == "dac"));
+    assert_eq!(engine.status.mode(), PlaybackMode::Normal);
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn remembered_modes_win_over_device_defaults() {
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    *backend.devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
+    let engine = spawn(EngineConfig::default(), Box::new(backend), None);
+    engine.send(Command::DeviceModes(HashMap::from([("dac".to_owned(), PlaybackMode::Normal), ("spk".to_owned(), PlaybackMode::BitPerfect)])));
+    engine.send(Command::SelectDevice(Some("spk".into())));
+    let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, .. })));
+    engine.send(Command::SelectDevice(Some("dac".into())));
+    let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::Normal, .. })));
+    engine.send(Command::Shutdown);
+}

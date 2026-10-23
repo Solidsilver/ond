@@ -1,0 +1,300 @@
+//! Thin, safe-ish wrappers over the CoreAudio HAL property API.
+//!
+//! Everything here runs on the engine thread (never in the render callback).
+
+use objc2_core_audio::{
+    AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
+    AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
+    AudioObjectSetPropertyData, AudioStreamRangedDescription, kAudioDevicePropertyAvailableNominalSampleRates,
+    kAudioDevicePropertyDataSource, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyHogMode,
+    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreams, kAudioDevicePropertyTransportType,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+    kAudioStreamPropertyAvailablePhysicalFormats, kAudioStreamPropertyPhysicalFormat,
+};
+use objc2_core_audio_types::{
+    AudioStreamBasicDescription, AudioValueRange, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonMixable,
+    kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM,
+};
+use objc2_core_foundation::{CFRetained, CFString};
+use std::ffi::c_void;
+use std::mem::{MaybeUninit, size_of};
+use std::ptr::{NonNull, null};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+pub type Id = AudioObjectID;
+
+pub const SYSTEM: Id = kAudioObjectSystemObject as Id;
+const GLOBAL: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal;
+const OUTPUT: AudioObjectPropertyScope = kAudioObjectPropertyScopeOutput;
+/// Built-in output data sources: 'ispk' (internal speakers) and 'hdpn' (headphones).
+pub const SOURCE_SPEAKERS: u32 = u32::from_be_bytes(*b"ispk");
+pub const SOURCE_HEADPHONES: u32 = u32::from_be_bytes(*b"hdpn");
+
+pub type Result<T> = std::result::Result<T, String>;
+
+fn addr(selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress { mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain }
+}
+
+fn check(status: i32, what: &str) -> Result<()> {
+    if status == 0 { Ok(()) } else { Err(format!("{what}: OSStatus {status}")) }
+}
+
+/// Reads a fixed-size property.
+fn get<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<T> {
+    let a = addr(selector, scope);
+    let mut value = MaybeUninit::<T>::zeroed();
+    let mut size = size_of::<T>() as u32;
+    // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
+    let status = unsafe {
+        AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast())
+    };
+    check(status, "get property")?;
+    // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
+    Ok(unsafe { value.assume_init() })
+}
+
+/// Reads an array property.
+fn get_vec<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<Vec<T>> {
+    let a = addr(selector, scope);
+    let mut size = 0u32;
+    // SAFETY: valid pointers to stack values.
+    let status = unsafe { AudioObjectGetPropertyDataSize(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size)) };
+    check(status, "get property size")?;
+    let n = size as usize / size_of::<T>();
+    let mut v: Vec<T> = Vec::with_capacity(n);
+    if n == 0 {
+        return Ok(v);
+    }
+    // SAFETY: `v` has room for `n` T's (`size` bytes); the HAL writes at most that and
+    // reports what it wrote in `size`.
+    unsafe {
+        let status = AudioObjectGetPropertyData(
+            obj,
+            NonNull::from(&a),
+            0,
+            null(),
+            NonNull::from(&mut size),
+            NonNull::new(v.as_mut_ptr()).expect("non-null").cast(),
+        );
+        check(status, "get property")?;
+        v.set_len((size as usize / size_of::<T>()).min(n));
+    }
+    Ok(v)
+}
+
+fn set<T>(obj: Id, selector: u32, scope: u32, value: &T) -> Result<()> {
+    let a = addr(selector, scope);
+    // SAFETY: `value` is a valid T of the size we pass.
+    let status = unsafe {
+        AudioObjectSetPropertyData(obj, NonNull::from(&a), 0, null(), size_of::<T>() as u32, NonNull::from(value).cast())
+    };
+    check(status, "set property")
+}
+
+fn get_string(obj: Id, selector: u32) -> Option<String> {
+    let a = addr(selector, GLOBAL);
+    let mut s: *mut CFString = std::ptr::null_mut();
+    let mut size = size_of::<*mut CFString>() as u32;
+    // SAFETY: the HAL writes a CFStringRef we own (+1) into `s`.
+    let status = unsafe {
+        AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut s).cast())
+    };
+    if status != 0 {
+        return None;
+    }
+    // SAFETY: a non-null +1 CFString from the call above.
+    NonNull::new(s).map(|p| unsafe { CFRetained::from_raw(p) }.to_string())
+}
+
+/// All devices with at least one output stream.
+pub fn output_devices() -> Vec<Id> {
+    get_vec::<Id>(SYSTEM, kAudioHardwarePropertyDevices, GLOBAL)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| !output_streams(*d).is_empty())
+        .collect()
+}
+
+pub fn default_output() -> Option<Id> {
+    get::<Id>(SYSTEM, kAudioHardwarePropertyDefaultOutputDevice, GLOBAL).ok().filter(|d| *d != 0)
+}
+
+pub fn uid(dev: Id) -> Option<String> {
+    get_string(dev, kAudioDevicePropertyDeviceUID)
+}
+
+pub fn name(dev: Id) -> String {
+    get_string(dev, kAudioObjectPropertyName).unwrap_or_else(|| format!("device {dev}"))
+}
+
+pub fn transport(dev: Id) -> u32 {
+    get::<u32>(dev, kAudioDevicePropertyTransportType, GLOBAL).unwrap_or(0)
+}
+
+pub fn data_source(dev: Id) -> Option<u32> {
+    get::<u32>(dev, kAudioDevicePropertyDataSource, OUTPUT).ok()
+}
+
+pub fn output_streams(dev: Id) -> Vec<Id> {
+    get_vec::<Id>(dev, kAudioDevicePropertyStreams, OUTPUT).unwrap_or_default()
+}
+
+pub fn physical_formats(stream: Id) -> Vec<AudioStreamRangedDescription> {
+    get_vec(stream, kAudioStreamPropertyAvailablePhysicalFormats, GLOBAL).unwrap_or_default()
+}
+
+pub fn physical_format(stream: Id) -> Option<AudioStreamBasicDescription> {
+    get(stream, kAudioStreamPropertyPhysicalFormat, GLOBAL).ok()
+}
+
+pub fn available_rates(dev: Id) -> Vec<AudioValueRange> {
+    get_vec(dev, kAudioDevicePropertyAvailableNominalSampleRates, GLOBAL).unwrap_or_default()
+}
+
+pub fn nominal_rate(dev: Id) -> Option<f64> {
+    get::<f64>(dev, kAudioDevicePropertyNominalSampleRate, GLOBAL).ok()
+}
+
+pub fn is_lpcm(f: &AudioStreamBasicDescription) -> bool {
+    f.mFormatID == kAudioFormatLinearPCM
+}
+
+pub fn is_int(f: &AudioStreamBasicDescription) -> bool {
+    is_lpcm(f) && f.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0 && f.mFormatFlags & kAudioFormatFlagIsFloat == 0
+}
+
+pub fn is_mixable(f: &AudioStreamBasicDescription) -> bool {
+    f.mFormatFlags & kAudioFormatFlagIsNonMixable == 0
+}
+
+/// Sets the device's nominal rate and waits (up to 2 s) for the HAL's
+/// rate-change notification confirming it.
+pub fn set_nominal_rate(dev: Id, rate: u32) -> Result<()> {
+    let target = rate as f64;
+    if nominal_rate(dev).is_some_and(|r| (r - target).abs() < 0.5) {
+        return Ok(());
+    }
+    let (tx, rx) = mpsc::channel();
+    let _listener = Listener::new(dev, kAudioDevicePropertyNominalSampleRate, GLOBAL, move || {
+        let _ = tx.send(());
+    })?;
+    set(dev, kAudioDevicePropertyNominalSampleRate, GLOBAL, &target)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let _ = rx.recv_timeout(Duration::from_millis(100));
+        if nominal_rate(dev).is_some_and(|r| (r - target).abs() < 0.5) {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(format!("device didn't switch to {rate} Hz"));
+        }
+    }
+}
+
+/// Sets a stream's physical format and waits (up to 2 s) until it reads back.
+pub fn set_physical_format(stream: Id, format: &AudioStreamBasicDescription) -> Result<()> {
+    let same = |f: &AudioStreamBasicDescription| {
+        f.mSampleRate as u32 == format.mSampleRate as u32
+            && f.mFormatID == format.mFormatID
+            && f.mFormatFlags == format.mFormatFlags
+            && f.mBitsPerChannel == format.mBitsPerChannel
+            && f.mChannelsPerFrame == format.mChannelsPerFrame
+            && f.mBytesPerFrame == format.mBytesPerFrame
+    };
+    if physical_format(stream).is_some_and(|f| same(&f)) {
+        return Ok(());
+    }
+    set(stream, kAudioStreamPropertyPhysicalFormat, GLOBAL, format)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !physical_format(stream).is_some_and(|f| same(&f)) {
+        if Instant::now() > deadline {
+            return Err("physical format didn't change".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+/// The pid holding the device exclusively, or -1.
+pub fn hog_pid(dev: Id) -> i32 {
+    get::<libc::pid_t>(dev, kAudioDevicePropertyHogMode, GLOBAL).unwrap_or(-1)
+}
+
+pub fn own_pid() -> i32 {
+    // SAFETY: getpid has no preconditions.
+    unsafe { libc::getpid() }
+}
+
+/// Takes (`true`) or releases exclusive access. Returns whether this process
+/// holds it afterwards.
+pub fn set_hog(dev: Id, take: bool) -> Result<bool> {
+    let me = own_pid();
+    let holder = hog_pid(dev);
+    if (holder == me) == take {
+        return Ok(take);
+    }
+    if take && holder != -1 {
+        return Err(format!("another process ({holder}) has exclusive access"));
+    }
+    let value: libc::pid_t = if take { me } else { -1 };
+    set(dev, kAudioDevicePropertyHogMode, GLOBAL, &value)?;
+    Ok(hog_pid(dev) == me)
+}
+
+/// A property listener; removed on drop. The callback runs on a HAL thread.
+pub struct Listener {
+    callback: Box<Box<dyn FnMut() + Send>>,
+    obj: Id,
+    addr: AudioObjectPropertyAddress,
+}
+
+// SAFETY: the callback is Send; the rest is plain data identifying the registration.
+unsafe impl Send for Listener {}
+
+impl Listener {
+    pub fn new(obj: Id, selector: u32, scope: u32, callback: impl FnMut() + Send + 'static) -> Result<Self> {
+        let callback: Box<Box<dyn FnMut() + Send>> = Box::new(Box::new(callback));
+        let a = addr(selector, scope);
+        // SAFETY: the boxed callback outlives the registration (removed in Drop).
+        let status = unsafe {
+            AudioObjectAddPropertyListener(obj, NonNull::from(&a), Some(shim), &*callback as *const _ as *mut c_void)
+        };
+        check(status, "add listener")?;
+        Ok(Self { callback, obj, addr: a })
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        // SAFETY: same registration as in `new`.
+        unsafe {
+            AudioObjectRemovePropertyListener(
+                self.obj,
+                NonNull::from(&self.addr),
+                Some(shim),
+                &*self.callback as *const _ as *mut c_void,
+            );
+        }
+    }
+}
+
+unsafe extern "C-unwind" fn shim(_: Id, _: u32, _: NonNull<AudioObjectPropertyAddress>, data: *mut c_void) -> i32 {
+    // SAFETY: `data` is the Box<dyn FnMut> registered in `Listener::new`, alive until removal.
+    let callback = unsafe { &mut *(data as *mut Box<dyn FnMut() + Send>) };
+    callback();
+    0
+}
+
+/// Listens for device list and default-output changes.
+pub fn watch_system(on_devices: impl FnMut() + Send + 'static, on_default: impl FnMut() + Send + 'static) -> Vec<Listener> {
+    [
+        Listener::new(SYSTEM, kAudioHardwarePropertyDevices, GLOBAL, on_devices),
+        Listener::new(SYSTEM, kAudioHardwarePropertyDefaultOutputDevice, GLOBAL, on_default),
+    ]
+    .into_iter()
+    .filter_map(|l| l.map_err(|e| tracing::warn!("device listener: {e}")).ok())
+    .collect()
+}
