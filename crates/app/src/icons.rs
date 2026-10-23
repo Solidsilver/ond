@@ -193,8 +193,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(-0.75, 0.8), p(0.75, 0.8)], line);
         }
         Icon::Heart => {
-            let pts = heart_points(48).into_iter().map(|(x, y)| p(x * 0.92, y * 0.92)).collect();
-            painter.add(Shape::closed_line(pts, Stroke::new((r * 0.17).max(1.1), color)));
+            // Two open halves, notch to tip, so neither sharp point gets a
+            // mitred spike from a joined line.
+            let pts: Vec<Pos2> = heart_points(48).into_iter().map(|(x, y)| p(x * 0.92, y * 0.92)).collect();
+            let stroke = Stroke::new((r * 0.16).max(1.1), color);
+            painter.add(Shape::line(pts[..=24].to_vec(), stroke));
+            painter.add(Shape::line(pts[24..].to_vec(), stroke));
         }
         Icon::HeartFilled => {
             // Each half is convex (the notch is on the split), which egui fills cleanly.

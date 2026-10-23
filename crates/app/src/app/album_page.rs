@@ -368,10 +368,16 @@ impl ListenerApp {
                 let half = rect.width() / 2.0;
                 for (i, c) in covers.iter().enumerate() {
                     let at = pos2(rect.left() + half * (i % 2) as f32, rect.top() + half * (i / 2) as f32);
-                    self.art.paint(ui, Rect::from_min_size(at, vec2(half, half)), Some(c), 0.0);
+                    // Only the mosaic's outer corners are rounded.
+                    let r = 6;
+                    let corners = match i {
+                        0 => egui::CornerRadius { nw: r, ..Default::default() },
+                        1 => egui::CornerRadius { ne: r, ..Default::default() },
+                        2 => egui::CornerRadius { sw: r, ..Default::default() },
+                        _ => egui::CornerRadius { se: r, ..Default::default() },
+                    };
+                    self.art.paint(ui, Rect::from_min_size(at, vec2(half, half)), Some(c), corners);
                 }
-                // Round the outer corners by masking with the background.
-                ui.painter().rect_stroke(rect.expand(1.5), 7.5, egui::Stroke::new(3.0, t.bg), egui::StrokeKind::Inside);
             }
         }
     }

@@ -186,10 +186,14 @@ fn shortcuts_ui(ui: &mut egui::Ui) {
             }
         });
     };
-    ui.horizontal_top(|ui| {
-        column(ui, &GROUPS[..2]);
-        ui.add_space(36.0);
-        column(ui, &GROUPS[2..]);
+    // Short windows scroll the list rather than cut it off.
+    let max_h = (ui.ctx().content_rect().height() - 140.0).max(200.0);
+    egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            column(ui, &GROUPS[..2]);
+            ui.add_space(36.0);
+            column(ui, &GROUPS[2..]);
+        });
     });
 }
 
