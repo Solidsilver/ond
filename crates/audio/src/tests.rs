@@ -124,6 +124,24 @@ fn events_until(engine: &EngineHandle, mut stop: impl FnMut(&Event) -> bool) -> 
 }
 
 #[test]
+fn pause_while_loading_holds_once_the_track_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 2, 0);
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(FakeBackend::new(caps(Some(24), 96_000))), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    // Sent right behind Play: the engine sees it while still Loading.
+    engine.send(Command::Pause);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    assert_eq!(engine.status.frames_played.load(Ordering::Relaxed), 0, "nothing played while paused");
+    engine.send(Command::Resume);
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
 fn a_decoder_panic_is_an_error_not_a_hang() {
     let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
     let engine = spawn(config, Box::new(FakeBackend::new(caps(Some(24), 96_000))), None);
