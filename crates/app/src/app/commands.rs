@@ -81,6 +81,7 @@ impl ListenerApp {
             }
             Cmd::ToggleQueue => self.actions.push(Action::ToggleQueue),
             Cmd::Lyrics => self.actions.push(Action::Lyrics),
+            Cmd::Info => self.actions.push(Action::Info),
             Cmd::TogglePlayer => self.actions.push(Action::TogglePlayer),
             Cmd::Full => self.actions.push(Action::SetMode(WindowMode::Full)),
             Cmd::Player => self.actions.push(Action::SetMode(WindowMode::Player)),

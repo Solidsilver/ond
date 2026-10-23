@@ -46,6 +46,7 @@ fn cmd_of(id: &str) -> Option<Cmd> {
         Cmd::Forward,
         Cmd::ToggleQueue,
         Cmd::Lyrics,
+        Cmd::Info,
         Cmd::TogglePlayer,
         Cmd::Full,
         Cmd::Player,
@@ -214,6 +215,7 @@ mod imp {
                 true,
                 &[
                     &item("Lyrics", Cmd::Lyrics),
+                    &item("Song Info", Cmd::Info),
                     &queue,
                     &diagnostics,
                     &sep(),

@@ -158,6 +158,12 @@ pub struct Song {
     pub starred: Option<String>,
     /// The user's 1–5 rating; absent or 0 when unrated.
     pub user_rating: Option<u8>,
+    /// How often the user has played it (Navidrome and OpenSubsonic servers).
+    #[serde(default)]
+    pub play_count: Option<u64>,
+    /// When the user last played it (RFC 3339), where the server tracks it.
+    #[serde(default)]
+    pub played: Option<String>,
 }
 
 /// `{ "name": ... }` objects: record labels, genres.
@@ -266,6 +272,11 @@ pub(crate) struct AlbumList {
 #[derive(Deserialize)]
 pub(crate) struct AlbumPayload {
     pub album: AlbumWithSongs,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SongPayload {
+    pub song: Song,
 }
 
 #[derive(Deserialize)]

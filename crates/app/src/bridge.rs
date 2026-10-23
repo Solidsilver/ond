@@ -53,6 +53,9 @@ pub enum Msg {
     Starred { starred: Starred, ratings: Vec<(String, u8)> },
     /// A track's lyrics arrived (`None`: the server has none).
     Lyrics { track_id: String, lyrics: Option<crate::lyrics::Lyrics> },
+    /// A song's play count and last-played time (`None` when the server
+    /// couldn't say).
+    SongStats { track_id: String, stats: Option<crate::app::SongStats> },
     /// Hearts and ratings seen while loading an album or playlist.
     UserMeta { meta: UserMeta, tracks: Vec<Track> },
     /// A heart change reached the server (`error` is `None`) or didn't.
@@ -520,6 +523,23 @@ impl Bridge {
                 }
             }
             this.send(Msg::Lyrics { track_id, lyrics });
+        });
+    }
+
+    /// The playing song's play count and when it was last played, for the
+    /// Info tab. Quietly nothing on failure.
+    pub fn fetch_song_stats(&self, client: Option<Client>, track_id: String) {
+        let Some(client) = client else { return };
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let stats = match client.song(&track_id).await {
+                Ok(s) => Some(crate::app::SongStats { plays: s.play_count, last_played: s.played }),
+                Err(e) => {
+                    tracing::debug!("getSong {track_id}: {e}");
+                    None
+                }
+            };
+            this.send(Msg::SongStats { track_id, stats });
         });
     }
 

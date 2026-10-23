@@ -1,0 +1,411 @@
+//! The sidebar's Info tab: everything known about the playing song, as quiet
+//! label/value rows. Credits by role (names link to their pages), the album
+//! it's from, the file and how it reaches the device, the loudness analysis
+//! when there is one, and the user's plays. It follows playback.
+
+use super::album_page::{Credit, credits};
+use super::widgets::{chip, elide, link};
+use super::{Action, ListenerApp, SongStats};
+use crate::icons::Icon;
+use crate::nav::{FilterKind, Route};
+use crate::theme::{Tokens, semibold};
+use egui::{Align, FontId, Layout, Sense, Ui, vec2};
+use library::Track;
+
+/// The label column's width, so values line up.
+const LABEL_W: f32 = 96.0;
+const VALUE: f32 = 12.5;
+
+impl ListenerApp {
+    /// `header`: lead with the song's artwork and title (not in the Player,
+    /// where they're right above).
+    pub(super) fn sidebar_info(&mut self, ui: &mut Ui, header: bool) {
+        let Some(track) = self.queue.current.as_ref().map(|c| c.track.clone()) else {
+            // Wrapped to the column: a long line must not widen the sidebar.
+            let t = Tokens::of(ui);
+            let width = ui.available_width();
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(width);
+                let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                crate::icons::paint(ui.painter(), r, Icon::Note, t.muted);
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Nothing playing").font(FontId::new(14.0, semibold())).color(t.text));
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(egui::RichText::new("Credits, the file and its analysis show here for the song that's playing.").size(12.0).color(t.muted)).wrap());
+            });
+            return;
+        };
+        self.ensure_song_stats(&track);
+        let album = self.data.album(&track.album_id).cloned();
+        egui::ScrollArea::vertical().id_salt(("info", &track.id)).auto_shrink(false).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if header {
+                self.info_header(ui, &track, album.as_ref());
+            } else {
+                ui.add_space(-12.0);
+            }
+
+            let people = song_credits(&track);
+            if !people.is_empty() {
+                info_section(ui, "Credits");
+                for c in &people {
+                    let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
+                    self.links_row(ui, &c.role, items);
+                }
+            }
+
+            if let Some(al) = &album {
+                info_section(ui, "Album");
+                self.links_row(ui, "Album", vec![(al.name.clone(), Action::Go(Route::Album(al.id.clone())))]);
+                if let Some(artist) = &al.artist {
+                    self.links_row(ui, "Album artist", vec![(artist.clone(), Action::Go(Route::Artist { name: artist.clone(), id: al.artist_ref.clone() }))]);
+                }
+                if let Some(place) = track_place(&track) {
+                    text_row(ui, "Track", &place);
+                }
+                if let Some(y) = al.year {
+                    self.links_row(ui, "Year", vec![(y.to_string(), Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }))]);
+                }
+                let genres: Vec<(String, Action)> =
+                    al.all_genres().into_iter().map(|g| (g.to_owned(), Action::Go(Route::Filter { kind: FilterKind::Genre, value: g.to_owned() }))).collect();
+                if !genres.is_empty() {
+                    self.links_row(ui, if genres.len() == 1 { "Genre" } else { "Genres" }, genres);
+                }
+                let labels: Vec<(String, Action)> =
+                    al.labels.iter().map(|l| (l.clone(), Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }))).collect();
+                if !labels.is_empty() {
+                    self.links_row(ui, "Label", labels);
+                }
+            }
+
+            let file = file_rows(&track, self.output.signal().map(|s| s.summary()));
+            if !file.is_empty() {
+                info_section(ui, "File");
+                for (k, v) in &file {
+                    text_row(ui, k, v);
+                }
+            }
+
+            info_section(ui, "Analysis");
+            self.analysis_rows(ui, &track);
+
+            let rating = self.favorites.rating(&track.id);
+            let plays = play_rows(self.song_stats.get(&track.id).and_then(Option::as_ref), rating);
+            if !plays.is_empty() {
+                info_section(ui, "Plays");
+                for (k, v) in &plays {
+                    text_row(ui, k, v);
+                }
+            }
+            ui.add_space(24.0);
+        });
+    }
+
+    /// Asks the server for a song's play count the first time Info shows it.
+    fn ensure_song_stats(&mut self, track: &Track) {
+        if !self.song_stats.contains_key(&track.id) && self.client.is_some() {
+            self.song_stats.insert(track.id.clone(), None);
+            self.bridge.fetch_song_stats(self.client.clone(), track.id.clone());
+        }
+    }
+
+    /// Small artwork, the title, and artist / album as links.
+    fn info_header(&mut self, ui: &mut Ui, track: &Track, album: Option<&library::Album>) {
+        let t = Tokens::of(ui);
+        let width = ui.available_width();
+        ui.add_space(4.0);
+        ui.horizontal_top(|ui| {
+            let (art, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
+            let cover = track.cover_art.clone().or_else(|| album.and_then(|a| a.cover_art.clone()));
+            self.art.paint(ui, art, cover.as_deref(), 4.0);
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let text_w = width - 66.0 - 8.0;
+                ui.add_space(4.0);
+                let title = elide(ui, &track.title, FontId::new(14.0, semibold()), t.text, text_w);
+                let (r, _) = ui.allocate_exact_size(title.size(), Sense::hover());
+                ui.painter().galley(r.min, title, t.text);
+                if let Some(artist) = &track.artist {
+                    let shown = elide(ui, artist, FontId::proportional(VALUE), t.accent, text_w).text().to_owned();
+                    if link(ui, &shown, FontId::proportional(VALUE), t.accent).clicked() {
+                        let id = track.artists.first().and_then(|a| a.id.clone()).or_else(|| track.artist_ref.clone());
+                        self.actions.push(Action::Go(Route::Artist { name: track.artists.first().map_or_else(|| artist.clone(), |a| a.name.clone()), id }));
+                    }
+                }
+                if let Some(al) = album {
+                    let shown = elide(ui, &al.name, FontId::proportional(VALUE), t.muted, text_w).text().to_owned();
+                    if link(ui, &shown, FontId::proportional(VALUE), t.muted).clicked() {
+                        self.reveal = Some(track.id.clone());
+                        self.actions.push(Action::Go(Route::Album(al.id.clone())));
+                    }
+                }
+            });
+        });
+    }
+
+    /// A label and one or more links ("Matthew West, Mark Hall"), wrapping.
+    fn links_row(&mut self, ui: &mut Ui, label: &str, items: Vec<(String, Action)>) {
+        let t = Tokens::of(ui);
+        row(ui, label, |ui| {
+            // Rows as tall as the text, so links sit level with their label
+            // (a wrapped row takes its height from this when it's created).
+            ui.spacing_mut().interact_size.y = 0.0;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
+                for (i, (text, action)) in items.into_iter().enumerate() {
+                    if i > 0 {
+                        ui.label(egui::RichText::new(", ").size(VALUE).color(t.muted));
+                    }
+                    if link(ui, &text, FontId::proportional(VALUE), t.accent).clicked() {
+                        self.actions.push(action);
+                    }
+                }
+            });
+        });
+    }
+
+    /// Loudness, peak and dynamic range, a chip per finding (evidence on
+    /// hover); or a way to measure it.
+    fn analysis_rows(&mut self, ui: &mut Ui, track: &Track) {
+        let t = Tokens::of(ui);
+        let Some(a) = self.analysis_of(track).cloned() else {
+            let busy = self.analyzer.pending([track.id.as_str()]) > 0;
+            row(ui, "Loudness", |ui| {
+                if busy {
+                    ui.label(egui::RichText::new("Analysing…").size(VALUE).color(t.muted));
+                } else if link(ui, "Analyze this song", FontId::proportional(VALUE), t.accent)
+                    .on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files")
+                    .clicked()
+                {
+                    self.actions.push(Action::Analyze(vec![track.clone()]));
+                }
+            });
+            return;
+        };
+        for (k, v) in measurement_rows(&a) {
+            text_row(ui, k, &v);
+        }
+        if !a.verdicts.is_empty() {
+            row(ui, "Finding", |ui| {
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.horizontal_wrapped(|ui| {
+                    for v in &a.verdicts {
+                        chip(ui, &v.label(), t.warn).on_hover_text(v.evidence());
+                    }
+                });
+            });
+        }
+    }
+}
+
+/// The song's own credits; a composer tag stands in when there are no
+/// structured contributors.
+fn song_credits(track: &Track) -> Vec<Credit> {
+    let mut people = credits(std::slice::from_ref(track));
+    if people.is_empty()
+        && let Some(c) = track.composer.as_deref().filter(|c| !c.trim().is_empty())
+    {
+        let names = c.split([';', '/']).flat_map(|p| p.split(", ")).map(str::trim).filter(|n| !n.is_empty());
+        people.push(Credit { role: "Composer".into(), people: names.map(|n| (n.to_owned(), None)).collect() });
+    }
+    people
+}
+
+/// "Disc 2 · Track 5", or just "5" on a single disc.
+fn track_place(t: &Track) -> Option<String> {
+    match (t.disc.filter(|d| *d > 1), t.track) {
+        (Some(d), Some(n)) => Some(format!("Disc {d} · Track {n}")),
+        (Some(d), None) => Some(format!("Disc {d}")),
+        (None, Some(n)) => Some(n.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// What the file is and how it plays: only rows with something to say.
+fn file_rows(t: &Track, signal: Option<String>) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if t.suffix.is_some() || t.sample_rate.is_some() {
+        rows.push(("Format", t.quality_label()));
+    }
+    if let Some(k) = t.bit_rate_kbps {
+        rows.push(("Bitrate", format!("{k} kbps")));
+    }
+    match t.channels {
+        Some(1) => rows.push(("Channels", "Mono".into())),
+        Some(2) => rows.push(("Channels", "Stereo".into())),
+        Some(n) => rows.push(("Channels", format!("{n} channels"))),
+        None => {}
+    }
+    if let Some(d) = t.duration_secs {
+        rows.push(("Length", super::mmss(f64::from(d))));
+    }
+    if let Some(b) = t.size {
+        rows.push(("Size", format!("{:.1} MB", b as f64 / 1_000_000.0)));
+    }
+    let db = |g: f32| format!("{g:+.1} dB").replace('-', "\u{2212}");
+    let mut gain = Vec::new();
+    if let Some(g) = t.track_gain {
+        gain.push(format!("track {}", db(g)));
+    }
+    if let Some(g) = t.album_gain {
+        gain.push(format!("album {}", db(g)));
+    }
+    if let Some(p) = t.track_peak {
+        gain.push(format!("peak {p:.2}"));
+    }
+    if !gain.is_empty() {
+        rows.push(("ReplayGain", gain.join(" · ")));
+    }
+    if let Some(s) = signal {
+        rows.push(("Playback", s));
+    }
+    rows
+}
+
+/// "−11.2 LUFS", "−0.4 dBTP", "DR9", loudness range.
+fn measurement_rows(a: &analysis::TrackAnalysis) -> Vec<(&'static str, String)> {
+    let signed = |v: f64| format!("{v:.1}").replace('-', "\u{2212}");
+    let mut rows = Vec::new();
+    if let Some(l) = a.integrated_lufs {
+        rows.push(("Loudness", format!("{} LUFS", signed(l))));
+    }
+    if let Some(r) = a.loudness_range_lu {
+        rows.push(("Range", format!("{r:.1} LU")));
+    }
+    if let Some(p) = a.true_peak_dbtp {
+        rows.push(("True peak", format!("{} dBTP", signed(p))));
+    }
+    if let Some(dr) = a.dr_rounded() {
+        rows.push(("Dynamic range", format!("DR{dr}")));
+    }
+    if let Some(b) = a.effective_bits {
+        rows.push(("Bits used", format!("{b}")));
+    }
+    rows
+}
+
+/// Plays, when last played, and the rating, as far as they're known.
+fn play_rows(stats: Option<&SongStats>, rating: u8) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if let Some(s) = stats {
+        if let Some(n) = s.plays {
+            rows.push(("Plays", if n == 1 { "Once".to_owned() } else { n.to_string() }));
+        }
+        if let Some(when) = s.last_played.as_deref().and_then(|w| chrono::DateTime::parse_from_rfc3339(w).ok()) {
+            rows.push(("Last played", when.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string()));
+        }
+    }
+    if rating > 0 {
+        rows.push(("Rating", format!("{}{}", "★".repeat(rating as usize), "☆".repeat(5 - (rating as usize).min(5)))));
+    }
+    rows
+}
+
+/// A section heading with room above it.
+fn info_section(ui: &mut Ui, title: &str) {
+    let t = Tokens::of(ui);
+    ui.add_space(18.0);
+    ui.label(egui::RichText::new(title).font(FontId::new(11.0, semibold())).color(t.muted));
+    ui.add_space(6.0);
+}
+
+/// A muted label in the label column, then the value laid out by `value`.
+fn row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
+    let t = Tokens::of(ui);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (r, _) = ui.allocate_exact_size(vec2(LABEL_W, VALUE + 4.0), Sense::hover());
+        let g = elide(ui, label, FontId::proportional(12.0), t.muted, LABEL_W - 4.0);
+        ui.painter().galley(r.min + vec2(0.0, 1.0), g, t.muted);
+        let rest = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(rest, 0.0), Layout::top_down(Align::Min), value);
+    });
+    ui.add_space(6.0);
+}
+
+fn text_row(ui: &mut Ui, label: &str, value: &str) {
+    let t = Tokens::of(ui);
+    row(ui, label, |ui| {
+        ui.add(egui::Label::new(egui::RichText::new(value).size(VALUE).color(t.text)).wrap());
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track() -> Track {
+        Track {
+            id: "t".into(),
+            album_id: "a".into(),
+            title: "x".into(),
+            artist: None,
+            artist_ref: None,
+            track: None,
+            disc: None,
+            duration_secs: None,
+            suffix: None,
+            content_type: None,
+            size: None,
+            bit_rate_kbps: None,
+            bit_depth: None,
+            sample_rate: None,
+            channels: None,
+            track_gain: None,
+            album_gain: None,
+            track_peak: None,
+            album_peak: None,
+            composer: None,
+            contributors: Vec::new(),
+            cover_art: None,
+            artists: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rows_only_say_what_is_known() {
+        let mut t = track();
+        assert!(file_rows(&t, None).is_empty());
+        assert_eq!(track_place(&t), None);
+        assert!(play_rows(None, 0).is_empty());
+        t.suffix = Some("flac".into());
+        t.bit_depth = Some(24);
+        t.sample_rate = Some(96_000);
+        t.channels = Some(2);
+        t.track_gain = Some(-6.3);
+        t.track = Some(3);
+        let rows = file_rows(&t, Some("24/96 · bit-perfect".into()));
+        assert_eq!(rows[0], ("Format", "FLAC 24/96".into()));
+        assert_eq!(rows[1], ("Channels", "Stereo".into()));
+        assert_eq!(rows[2], ("ReplayGain", "track \u{2212}6.3 dB".into()));
+        assert_eq!(rows[3], ("Playback", "24/96 · bit-perfect".into()));
+        assert_eq!(track_place(&t).as_deref(), Some("3"));
+        t.disc = Some(2);
+        assert_eq!(track_place(&t).as_deref(), Some("Disc 2 · Track 3"));
+    }
+
+    #[test]
+    fn plays_and_rating() {
+        let stats = SongStats { plays: Some(1), last_played: Some("not a date".into()) };
+        assert_eq!(play_rows(Some(&stats), 0), [("Plays", "Once".to_owned())]);
+        let stats = SongStats { plays: Some(12), last_played: Some("2026-10-21T20:15:00Z".into()) };
+        let rows = play_rows(Some(&stats), 3);
+        assert_eq!(rows[0], ("Plays", "12".into()));
+        assert_eq!(rows[1].0, "Last played");
+        assert!(rows[1].1.contains("2026"), "{}", rows[1].1);
+        assert_eq!(rows[2], ("Rating", "★★★☆☆".into()));
+    }
+
+    #[test]
+    fn a_composer_tag_stands_in_for_missing_credits() {
+        let mut t = track();
+        assert!(song_credits(&t).is_empty());
+        t.composer = Some("Matthew West, Mark Hall; Bernie Herms".into());
+        let c = song_credits(&t);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].role, "Composer");
+        assert_eq!(c[0].people.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Matthew West", "Mark Hall", "Bernie Herms"]);
+    }
+}

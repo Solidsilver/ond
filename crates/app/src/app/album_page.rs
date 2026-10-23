@@ -1,6 +1,7 @@
-//! An album: header with links for artist / genre / year / label, the track
-//! list (composer and actions appear on hover), and credits gathered from the
-//! tracks' OpenSubsonic contributors. Playlists reuse the track list.
+//! An album: header with links for artist / genre / year / label, then the
+//! track list (composer and actions appear on hover). Credits, gathered from
+//! the tracks' OpenSubsonic contributors, show in the sidebar's Info tab for
+//! the playing song. Playlists reuse the track list.
 
 use super::widgets::{Mark, chip, elide, heart_button, link, primary, secondary};
 use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction, mmss};
@@ -12,9 +13,6 @@ use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use analysis::TrackAnalysis;
 use library::Track;
-
-/// Credit roles shown before "Show all credits".
-const CREDITS_FOLDED: usize = 6;
 
 /// One line of credits: a role and the people in it, in first-seen order.
 #[derive(Debug, Clone, PartialEq)]
@@ -237,121 +235,23 @@ impl ListenerApp {
                 return;
             }
 
-            let credits = credits(&tracks);
-            let wide = ui.available_width() >= 860.0;
+            // Credits and per-track measurements live in the sidebar's Info tab
+            // (for the playing song); the page is just the album and its tracks.
             let source = Source::Album { id: album.id.clone(), name: album.name.clone() };
-            let list_w = if wide && !credits.is_empty() { ui.available_width() - 320.0 } else { ui.available_width() };
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(list_w);
-                    self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false, playlist: None });
-                    ui.add_space(14.0);
-                    let mins = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>().div_ceil(60);
-                    let n = tracks.len();
-                    ui.label(egui::RichText::new(format!("{n} song{}, {mins} minutes", if n == 1 { "" } else { "s" })).size(12.0).color(t.muted));
-                    if summary.analyzed > 0 {
-                        ui.add_space(14.0);
-                        self.analysis_ui(ui, &tracks, &found, summary.verdict.as_ref().map(|(v, _)| v));
-                    }
-                    if !wide {
-                        ui.add_space(20.0);
-                        self.credits_ui(ui, &credits);
-                    }
-                });
-                if wide && !credits.is_empty() {
-                    ui.add_space(40.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(280.0);
-                        self.credits_ui(ui, &credits);
-                    });
-                }
-            });
+            self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false, playlist: None });
+            ui.add_space(14.0);
+            let mins = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>().div_ceil(60);
+            let n = tracks.len();
+            let mut footer = format!("{n} song{}, {mins} minutes", if n == 1 { "" } else { "s" });
+            if let Some(y) = album.year {
+                footer.push_str(&format!(" · {y}"));
+            }
+            if let Some(l) = album.labels.first() {
+                footer.push_str(&format!(" · {l}"));
+            }
+            ui.label(egui::RichText::new(footer).size(12.0).color(t.muted));
             ui.add_space(24.0);
         });
-    }
-
-    /// Per-track measurements, folded away until asked for.
-    fn analysis_ui(&mut self, ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>) {
-        let t = Tokens::of(ui);
-        let label = if self.analysis_open { "Hide analysis" } else { "Show analysis" };
-        if link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
-            self.analysis_open = !self.analysis_open;
-        }
-        if !self.analysis_open {
-            return;
-        }
-        ui.add_space(8.0);
-        let small = |s: String, c| egui::RichText::new(s).size(12.0).color(c);
-        let title_w = (ui.available_width() - 330.0).clamp(120.0, 360.0);
-        egui::Grid::new("analysis").num_columns(6).spacing(vec2(16.0, 6.0)).show(ui, |ui| {
-            for h in ["", "", "Loudness", "Peak", "DR", ""] {
-                ui.label(small(h.to_owned(), t.muted));
-            }
-            ui.end_row();
-            for (i, (track, a)) in tracks.iter().zip(found).enumerate() {
-                ui.label(small(track.track.unwrap_or(i as u32 + 1).to_string(), t.muted));
-                let g = elide(ui, &track.title, FontId::proportional(12.0), t.text, title_w);
-                let (r, _) = ui.allocate_exact_size(vec2(title_w, g.size().y), Sense::hover());
-                ui.painter().galley(r.min, g, t.text);
-                match a {
-                    Some(a) => {
-                        let dash = || "–".to_owned();
-                        ui.label(small(a.integrated_lufs.map_or_else(dash, |l| format!("{} LUFS", signed(l))), t.text));
-                        ui.label(small(a.true_peak_dbtp.map_or_else(dash, |p| format!("{} dBTP", signed(p))), t.text));
-                        ui.label(small(a.dr_rounded().map_or_else(dash, |d| format!("DR{d}")), t.text));
-                        match a.verdicts.iter().find(|v| album_verdict.is_none_or(|av| !av.same_kind(v))) {
-                            Some(v) => {
-                                ui.label(small(v.label(), t.warn)).on_hover_text(v.evidence());
-                            }
-                            None => {
-                                ui.label("");
-                            }
-                        }
-                    }
-                    None => {
-                        ui.label(small("not analysed".into(), t.muted));
-                        for _ in 0..3 {
-                            ui.label("");
-                        }
-                    }
-                }
-                ui.end_row();
-            }
-        });
-    }
-
-    fn credits_ui(&mut self, ui: &mut Ui, credits: &[Credit]) {
-        if credits.is_empty() {
-            return;
-        }
-        let t = Tokens::of(ui);
-        super::widgets::section(ui, "Credits");
-        ui.add_space(4.0);
-        let shown = if self.credits_open { credits.len() } else { credits.len().min(CREDITS_FOLDED) };
-        egui::Grid::new("credits").num_columns(2).spacing(vec2(12.0, 7.0)).min_col_width(80.0).show(ui, |ui| {
-            for c in &credits[..shown] {
-                ui.label(egui::RichText::new(&c.role).size(13.0).color(t.muted));
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    for (i, (name, id)) in c.people.iter().enumerate() {
-                        if i > 0 {
-                            ui.label(egui::RichText::new(", ").color(t.muted));
-                        }
-                        if link(ui, name, FontId::proportional(13.0), t.accent).clicked() {
-                            self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: id.clone() }));
-                        }
-                    }
-                });
-                ui.end_row();
-            }
-        });
-        if credits.len() > CREDITS_FOLDED {
-            ui.add_space(6.0);
-            let label = if self.credits_open { "Show fewer".to_owned() } else { format!("Show all credits ({})", credits.len()) };
-            if link(ui, &label, FontId::proportional(12.0), t.accent).clicked() {
-                self.credits_open = !self.credits_open;
-            }
-        }
     }
 
     /// A playlist: a mosaic of its first albums' covers, name, length, Play /
