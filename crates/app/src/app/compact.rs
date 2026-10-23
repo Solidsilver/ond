@@ -30,7 +30,7 @@ pub(super) fn on_art(ui: &mut Ui) {
 
 impl ListenerApp {
     fn cover_of(&self, track: &Track) -> Option<String> {
-        track.cover_art.clone().or_else(|| self.data.album(&track.album_id).and_then(|a| a.cover_art.clone()))
+        self.data.cover_for(track).map(str::to_owned)
     }
 
     pub(super) fn mini_ui(&mut self, ui: &mut Ui) {

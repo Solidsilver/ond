@@ -211,7 +211,7 @@ impl ListenerApp {
             };
             ui.painter().rect_filled(rect, 6.0, fill);
             let art = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 16.0), vec2(32.0, 32.0));
-            let cover = item.track.cover_art.clone().or_else(|| self.data.album(&item.track.album_id).and_then(|a| a.cover_art.clone()));
+            let cover = self.data.cover_for(&item.track).map(str::to_owned);
             self.art.paint(ui, art, cover.as_deref(), 3.0);
             // Offline, songs that aren't downloaded will be skipped: say so on hover, dim them otherwise.
             let available = self.playable(&item.track);

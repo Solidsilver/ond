@@ -13,6 +13,7 @@ mod favorites;
 mod icons;
 mod keys;
 mod lyrics;
+mod memo;
 mod menu;
 mod nav;
 mod now_playing;
@@ -23,6 +24,7 @@ mod search;
 mod settings;
 mod sync;
 mod theme;
+mod tracks;
 mod window;
 
 fn main() -> eframe::Result {

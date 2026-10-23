@@ -4,6 +4,7 @@
 
 use library::Track;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 pub use subsonic::StarKind;
 
 /// Loved things for the Favorites view, newest first.
@@ -32,7 +33,8 @@ pub struct Favorites {
     pending: HashMap<(StarKind, String), u64>,
     pending_ratings: HashMap<String, u64>,
     seq: u64,
-    pub view: Starred,
+    /// Shared so the Favorites view draws it without a copy per frame.
+    pub view: Arc<Starred>,
     /// `getStarred2` has answered at least once.
     pub loaded: bool,
 }
@@ -59,7 +61,7 @@ impl Favorites {
 
     fn set(&mut self, kind: StarKind, id: &str, on: bool, track: Option<&Track>, name: Option<&str>) {
         let key = (kind, id.to_owned());
-        let v = &mut self.view;
+        let v = Arc::make_mut(&mut self.view);
         if on {
             self.on.insert(key);
             match kind {
@@ -152,7 +154,7 @@ impl Favorites {
         self.on.extend(starred.songs.iter().map(|s| (StarKind::Song, s.id.clone())));
         self.on.extend(starred.albums.iter().map(|a| (StarKind::Album, a.clone())));
         self.on.extend(starred.artists.iter().map(|(a, _)| (StarKind::Artist, a.clone())));
-        self.view = starred;
+        self.view = Arc::new(starred);
         for ((kind, id), on) in keep {
             let track = self.view.songs.iter().find(|s| s.id == id).cloned();
             self.set(kind, &id, on, track.as_ref(), None);

@@ -7,6 +7,7 @@ use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use std::sync::Arc;
 
 const TILE_MIN: f32 = 160.0;
 const GAP_X: f32 = 20.0;
@@ -161,12 +162,9 @@ impl ListenerApp {
         ui.add_space(10.0);
     }
 
-    fn cached_grid(&mut self, route: &Route) -> Vec<usize> {
-        let fresh = matches!(&self.grid, Some((r, s, v, _)) if r == route && *s == self.sort && *v == self.data.version);
-        if !fresh {
-            self.grid = Some((route.clone(), self.sort, self.data.version, grid_ids(route, self.sort, &self.data)));
-        }
-        self.grid.as_ref().map(|g| g.3.clone()).unwrap_or_default()
+    fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
+        let (sort, data) = (self.sort, &self.data);
+        self.grid.get((route.clone(), sort, data.version), || grid_ids(route, sort, data))
     }
 
     /// A full-height, virtualized grid: only visible rows are laid out, so only
@@ -265,11 +263,12 @@ impl ListenerApp {
             return;
         };
         // The server's artists (with ids) once synced, else album-artist names.
-        let artists: Vec<(String, Option<String>, usize)> = index.artists.iter().map(|a| (a.name.clone(), a.id.clone(), a.albums)).collect();
+        let artists = Arc::clone(&index.artists);
         self.heading(ui, "Artists", Some(artists.len().to_string()));
         egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).show_rows(ui, 32.0, artists.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (name, id, n) in &artists[range] {
+            for a in &artists[range] {
+                let (name, id, n) = (&a.name, &a.id, &a.albums);
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, 6.0, t.hover);

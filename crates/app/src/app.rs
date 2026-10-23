@@ -40,6 +40,7 @@ use crate::queue::{EndAction, Queue, Source};
 use crate::search::SearchIndex;
 use crate::settings::{Paths, Settings};
 use crate::theme::{self, ThemePref, Tokens};
+use crate::tracks::TrackSet;
 use crate::window::{Geometry, WindowMode, Windows};
 use audio::{Command, EngineHandle, PlayState, PlaybackMode, TrackSource};
 use library::{Album, Library, Track};
@@ -75,16 +76,15 @@ pub struct Data {
     /// Recently added, newest first (album ids from the server).
     pub newest: Vec<String>,
     pub playlists: Vec<subsonic::Playlist>,
-    /// Tracks of albums opened (or queued) so far.
-    pub tracks: HashMap<String, Vec<Track>>,
-    pub playlist_tracks: HashMap<String, Vec<Track>>,
+    /// Every stored track once, grouped by album and indexed by id, plus the
+    /// albums opened since (fresh from the server).
+    pub tracks: TrackSet,
+    pub playlist_tracks: HashMap<String, Arc<Vec<Track>>>,
     /// Album ids crediting a person, from stored tracks.
     pub credited: HashMap<String, Vec<String>>,
     /// The server's artists, as separate entities ("A, B & C" split).
     pub artists: Vec<library::Artist>,
-    /// Every stored track, grouped by album; the Songs view sorts these.
-    pub all_tracks: Arc<Vec<Track>>,
-    /// Bumped whenever `all_tracks` changes.
+    /// Bumped whenever the stored tracks (`tracks.all`) change.
     pub tracks_version: u64,
 }
 
@@ -99,16 +99,27 @@ impl Data {
         self.version += 1;
     }
 
-    fn set_all_tracks(&mut self, tracks: Vec<Track>) {
-        let mut by_album: HashMap<String, Vec<Track>> = HashMap::new();
-        for t in &tracks {
-            by_album.entry(t.album_id.clone()).or_default().push(t.clone());
-        }
-        // Stored tracks are the server's as of the last sync; anything fetched
-        // since (an album opened) is in the db too, so this replaces it all.
-        self.tracks = by_album;
-        self.all_tracks = Arc::new(tracks);
+    /// Takes the library's tracks, grouped and indexed (off the UI thread).
+    /// Stored tracks are the server's as of the last sync; anything fetched
+    /// since (an album opened) is in the db too, so this replaces it all.
+    fn set_tracks(&mut self, set: TrackSet) {
+        self.tracks = set;
         self.tracks_version += 1;
+    }
+
+    #[cfg(test)]
+    fn set_all_tracks(&mut self, tracks: Vec<Track>) {
+        self.set_tracks(TrackSet::new(tracks));
+    }
+
+    /// A track by id, from the stored library or albums opened since.
+    pub fn track(&self, id: &str) -> Option<&Track> {
+        self.tracks.track(id)
+    }
+
+    /// A track's artwork: its own, else its album's.
+    pub fn cover_for<'a>(&'a self, track: &'a Track) -> Option<&'a str> {
+        track.cover_art.as_deref().or_else(|| self.album(&track.album_id).and_then(|a| a.cover_art.as_deref()))
     }
 
     fn update_album(&mut self, album: Album) {
@@ -298,7 +309,7 @@ pub struct ListenerApp {
     nav: Nav,
     sort: AlbumSort,
     /// The album list for the current view, cached by (route, sort, data version).
-    grid: Option<(Route, AlbumSort, u64, Vec<usize>)>,
+    grid: crate::memo::Memo<(Route, AlbumSort, u64), Vec<usize>>,
     actions: Vec<Action>,
     pending: Vec<Pending>,
     art: Art,
@@ -329,10 +340,13 @@ pub struct ListenerApp {
     /// A seek that's been sent but not confirmed yet; shown instead of the engine position.
     pending_seek: Option<f64>,
 
-    /// Rebuilt whenever albums, artists or tracks change.
+    /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
+    /// the old one serves until the new one lands.
     search: Option<SearchIndex>,
     /// Albums, artists or tracks changed since the index was built.
     search_stale: bool,
+    /// The latest index build asked for; older builds that land late are dropped.
+    search_generation: u64,
     songs: songs::SongsView,
     /// A track sync is running (shows a stop button in the status bar).
     track_syncing: bool,
@@ -377,6 +391,10 @@ pub struct ListenerApp {
     settings: Option<Settings>,
     /// Stored analysis results by track id, with the file stamp they're for.
     analyses: HashMap<String, analysis::Record>,
+    /// Bumped whenever `analyses` changes, so counts over it know to recount.
+    analyses_version: u64,
+    /// How much of the library has no current analysis, per (analyses, tracks) version.
+    unanalysed: crate::memo::Memo<(u64, u64), (usize, f64)>,
     /// The stored results have been read (until then everything looks unanalysed).
     analyses_loaded: bool,
     analyzer: analyze::Runner,
@@ -534,7 +552,7 @@ impl ListenerApp {
             data: Data::default(),
             nav: Nav::default(),
             sort: AlbumSort::default(),
-            grid: None,
+            grid: Default::default(),
             actions: Vec::new(),
             pending: Vec::new(),
             art,
@@ -552,6 +570,7 @@ impl ListenerApp {
             pending_seek: None,
             search: None,
             search_stale: false,
+            search_generation: 0,
             songs: songs::SongsView::default(),
             track_syncing: false,
             album_syncing: false,
@@ -579,6 +598,8 @@ impl ListenerApp {
             diagnostics: diagnostics::Diagnostics::new(saved.as_ref().is_some_and(|s| s.diagnostics_bar)),
             settings: saved,
             analyses: HashMap::new(),
+            analyses_version: 0,
+            unanalysed: Default::default(),
             analyses_loaded: false,
             analyzer,
             favorites: Favorites::default(),
@@ -654,6 +675,11 @@ impl ListenerApp {
                 self.sync_label = "reconnecting…".into();
             }
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
+            Msg::SearchIndex { generation, index } => {
+                if generation == self.search_generation {
+                    self.install_search(*index);
+                }
+            }
             Msg::Albums(a) => {
                 self.data.set_albums(a);
                 self.search_stale = true;
@@ -662,15 +688,15 @@ impl ListenerApp {
                 self.data.artists = a;
                 self.search_stale = true;
             }
-            Msg::AllTracks(t) => {
-                self.data.set_all_tracks(t);
+            Msg::AllTracks(set) => {
+                self.data.set_tracks(*set);
                 self.search_stale = true;
                 // A sync may have added tracks to pinned albums. The library can be
                 // partial (a sync stopped or failed, a rebuilt database), so this may
                 // only add: removals wait for the server's own listing of the album.
                 let albums: Vec<String> = self.offline_snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
                 for id in albums {
-                    if let Some(tracks) = self.data.tracks.get(&id).cloned() {
+                    if let Some(tracks) = self.data.tracks.album(&id).cloned() {
                         self.refresh_pin(Pin::Album(id), &tracks, false);
                     }
                 }
@@ -678,9 +704,11 @@ impl ListenerApp {
             }
             Msg::Analyzed { track_id, record } => {
                 self.analyses.insert(track_id, record);
+                self.analyses_version += 1;
             }
             Msg::AnalysesLoaded(rows) => {
                 self.analyses.extend(rows);
+                self.analyses_version += 1;
                 self.analyses_loaded = true;
                 self.resume_library_analysis();
             }
@@ -693,7 +721,7 @@ impl ListenerApp {
                 self.track_syncing = false;
                 self.sync_progress = None;
                 let albums = self.data.albums.len();
-                let tracks = self.data.all_tracks.len();
+                let tracks = self.data.tracks.all.len();
                 self.sync_label = match outcome {
                     crate::sync::Outcome::Done { .. } => {
                         self.last_synced = Some(chrono::Local::now());
@@ -739,7 +767,7 @@ impl ListenerApp {
             }
             Msg::Tracks { album_id, tracks, fresh } => {
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
-                self.data.tracks.insert(album_id.clone(), tracks);
+                self.data.tracks.set_album(&album_id, tracks);
                 self.run_pending(&ListKey::Album(album_id));
             }
             Msg::Newest(ids) => {
@@ -750,7 +778,7 @@ impl ListenerApp {
             Msg::PlaylistTracks { id, tracks } => {
                 // Always the server's complete listing.
                 self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
-                self.data.playlist_tracks.insert(id.clone(), tracks);
+                self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 self.run_pending(&ListKey::Playlist(id));
             }
             Msg::Credited { name, album_ids } => {
@@ -844,7 +872,7 @@ impl ListenerApp {
         match pin {
             Pin::Album(id) => self.data.album(id).map(|a| a.name.clone()).unwrap_or_default(),
             Pin::Playlist(id) => self.data.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
-            Pin::Track(id) => self.data.all_tracks.iter().find(|t| &t.id == id).map(|t| t.title.clone()).unwrap_or_default(),
+            Pin::Track(id) => self.data.track(id).map(|t| t.title.clone()).unwrap_or_default(),
         }
     }
 
@@ -860,7 +888,7 @@ impl ListenerApp {
                 if !on {
                     return self.offline.unpin(&pin);
                 }
-                match self.data.tracks.get(&id).cloned() {
+                match self.data.tracks.album(&id).cloned() {
                     Some(tracks) => self.offline.pin(pin.clone(), self.pin_label(&pin), tracks.iter().map(track_ref).collect()),
                     None => {
                         self.wait_to_pin(ListKey::Album(id.clone()), pin);
@@ -920,12 +948,27 @@ impl ListenerApp {
             artist: track.artist.clone(),
             album: album.map(|a| a.name.clone()),
             duration_secs: track.duration_secs.map(f64::from),
-            cover: track.cover_art.clone().or_else(|| album.and_then(|a| a.cover_art.clone())),
+            cover: self.data.cover_for(track).map(str::to_owned),
         });
     }
 
+    /// Work owed once per batch of messages: a sync delivers albums, artists
+    /// and tracks back to back, so derived data is rebuilt once, not per message.
+    fn after_messages(&mut self) {
+        if std::mem::take(&mut self.search_stale) {
+            self.search_generation += 1;
+            self.bridge.build_search(self.search_generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
+        }
+    }
+
+    /// Builds the index here and now (fixtures and tests).
+    #[cfg(test)]
     fn rebuild_search(&mut self) {
-        let mut index = SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.all_tracks);
+        self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.tracks.all));
+    }
+
+    /// Swaps in a freshly built index; an open palette re-runs its query on it.
+    fn install_search(&mut self, mut index: SearchIndex) {
         if let Some(p) = self.palette.as_mut() {
             p.refresh(&mut index);
         }
@@ -1164,8 +1207,8 @@ impl ListenerApp {
         let Some(at) = self.pending.iter().position(|p| &p.key == key) else { return };
         let p = self.pending.remove(at);
         let tracks = match &p.source {
-            Source::Album { id, .. } => self.data.tracks.get(id).cloned(),
-            Source::Playlist { id, .. } => self.data.playlist_tracks.get(id).cloned(),
+            Source::Album { id, .. } => self.data.tracks.album(id).map(|s| s.to_vec()),
+            Source::Playlist { id, .. } => self.data.playlist_tracks.get(id).map(|v| v.to_vec()),
             _ => None,
         };
         if let Some(t) = tracks {
@@ -1195,8 +1238,8 @@ impl ListenerApp {
             Action::Album(id, action) => {
                 let name = self.data.album(&id).map(|a| a.name.clone()).unwrap_or_default();
                 let source = Source::Album { id: id.clone(), name };
-                match self.data.tracks.get(&id) {
-                    Some(t) => self.queue_tracks(t.clone(), source, action),
+                match self.data.tracks.album(&id) {
+                    Some(t) => self.queue_tracks(t.to_vec(), source, action),
                     None => {
                         self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action });
                         self.bridge.open_album(self.client.clone(), id);
@@ -1219,7 +1262,7 @@ impl ListenerApp {
                 let name = self.data.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
                 let source = Source::Playlist { id: id.clone(), name };
                 match self.data.playlist_tracks.get(&id) {
-                    Some(t) => self.queue_tracks(t.clone(), source, action),
+                    Some(t) => self.queue_tracks(t.to_vec(), source, action),
                     None => {
                         self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action });
                         self.bridge.open_playlist(self.client.clone(), id);
@@ -1461,8 +1504,8 @@ impl ListenerApp {
     /// Queues the whole library, once the tracks, the stored results and the
     /// server are all there (so finished tracks aren't redone).
     fn resume_library_analysis(&mut self) {
-        if self.analysis_library && self.analyses_loaded && self.client.is_some() && !self.data.all_tracks.is_empty() {
-            let all = self.data.all_tracks.clone();
+        if self.analysis_library && self.analyses_loaded && self.client.is_some() && !self.data.tracks.all.is_empty() {
+            let all = self.data.tracks.all.clone();
             self.enqueue_analysis(&all);
             if !self.analyzer.progress().active() {
                 self.finish_library_analysis();
@@ -1477,12 +1520,16 @@ impl ListenerApp {
     }
 
     /// Tracks in the library without a current analysis, and their total length.
-    pub fn unanalysed(&self) -> (usize, f64) {
-        self.data
-            .all_tracks
-            .iter()
-            .filter(|t| self.analysis_of(t).is_none())
-            .fold((0, 0.0), |(n, secs), t| (n + 1, secs + f64::from(t.duration_secs.unwrap_or(0))))
+    /// Counted once per change to either, not every frame Settings is open.
+    pub fn unanalysed(&mut self) -> (usize, f64) {
+        let key = (self.analyses_version, self.data.tracks_version);
+        let (analyses, tracks) = (&self.analyses, &self.data.tracks.all);
+        *self.unanalysed.get(key, || {
+            tracks
+                .iter()
+                .filter(|t| !analyses.get(&t.id).is_some_and(|r| r.stamp == crate::analyze::stamp_of(t)))
+                .fold((0, 0.0), |(n, secs), t| (n + 1, secs + f64::from(t.duration_secs.unwrap_or(0))))
+        })
     }
 
     /// Switches window mode (`None` toggles Mini) and saves the choice.
@@ -1527,9 +1574,9 @@ impl ListenerApp {
                     && !self.data.playlist_tracks.contains_key(&id)
                     && let Some((_, ids)) = self.offline.pin_tracks(&Pin::Playlist(id.clone()))
                 {
-                    let by_id: HashMap<&str, &Track> = self.data.all_tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+                    let by_id: HashMap<&str, &Track> = self.data.tracks.all.iter().map(|t| (t.id.as_str(), t)).collect();
                     let tracks: Vec<Track> = ids.iter().filter_map(|i| by_id.get(i.as_str()).map(|t| (*t).clone())).collect();
-                    self.data.playlist_tracks.insert(id.clone(), tracks);
+                    self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 }
                 self.bridge.open_playlist(self.client.clone(), id)
             }
@@ -1873,11 +1920,7 @@ impl eframe::App for ListenerApp {
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg);
         }
-        // Once per batch of messages: a sync delivers albums, artists and tracks
-        // back to back, and each rebuild is ~30 ms on a 20k-track library.
-        if std::mem::take(&mut self.search_stale) {
-            self.rebuild_search();
-        }
+        self.after_messages();
         let snap = self.offline.snapshot();
         if snap.version != self.offline_snap.version {
             // A download finished: what's next may now play from disk, or play at all.
@@ -1888,7 +1931,7 @@ impl eframe::App for ListenerApp {
                 self.sync_next();
             }
         }
-        if self.analysis_library && self.analyses_loaded && !self.data.all_tracks.is_empty() && !self.analyzer.progress().active() {
+        if self.analysis_library && self.analyses_loaded && !self.data.tracks.all.is_empty() && !self.analyzer.progress().active() {
             self.finish_library_analysis();
         }
         if let Some(menu) = self.menu.as_mut() {
@@ -2093,7 +2136,7 @@ mod tests {
         app.data.set_all_tracks(tracks.clone());
         app.rebuild_search();
         app.data.playlists = vec![subsonic::Playlist { id: "pl-1".into(), name: "Late night".into(), song_count: 3, duration: 900, cover_art: None, owner: None }];
-        app.data.playlist_tracks.insert("pl-1".into(), tracks[..3].to_vec());
+        app.data.playlist_tracks.insert("pl-1".into(), Arc::new(tracks[..3].to_vec()));
         app.data.credited.insert("Scott LaFaro".into(), vec!["al-1".into(), "al-0".into()]);
         app.queue.play_now(tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
         app.queue.play_next(tracks[..2].to_vec());
@@ -2201,6 +2244,42 @@ mod tests {
                 Err(_) => continue,
             }
         }
+    }
+
+    #[test]
+    fn the_search_index_is_built_off_the_ui_thread_and_stale_builds_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let album = |id: &str, name: &str| Album {
+            id: id.into(),
+            name: name.into(),
+            sort: None,
+            artist: Some("Bill Evans".into()),
+            artist_ref: None,
+            year: None,
+            genre: None,
+            song_count: 0,
+            duration_secs: 0,
+            cover_art: None,
+            created: None,
+            labels: Vec::new(),
+            genres: Vec::new(),
+            artists: Vec::new(),
+        };
+        app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz")]));
+        app.after_messages();
+        assert!(!app.search_stale, "the rebuild was handed off");
+        let first = app.search_generation;
+        // Before the first build lands, the library changes again.
+        app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz"), album("a2", "Explorations")]));
+        app.after_messages();
+        assert_eq!(app.search_generation, first + 1);
+        until(&mut app, |a| a.search.as_ref().is_some_and(|s| s.albums.len() == 2));
+        // The older build, if it lands now, doesn't replace the newer index.
+        let stale = SearchIndex::new(&[album("x", "Old")], &[], &[]);
+        app.handle(Msg::SearchIndex { generation: first, index: Box::new(stale) });
+        assert_eq!(app.search.as_ref().map(|s| s.albums.len()), Some(2));
     }
 
     #[test]
@@ -2313,7 +2392,7 @@ mod tests {
         std::fs::write(&file, b"fLaC").unwrap();
         let want = id.to_owned();
         app.offline.set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
-        let t = app.data.all_tracks.iter().find(|t| t.id == id).unwrap().clone();
+        let t = app.data.tracks.all.iter().find(|t| t.id == id).unwrap().clone();
         app.apply(Action::KeepOffline(Keep::Tracks(vec![t]), true));
         let start = std::time::Instant::now();
         while !app.offline.snapshot().is_done(id) {
@@ -2330,7 +2409,7 @@ mod tests {
         let mut app = app(&ctx, dir.path());
         download(&mut app, dir.path(), "t-2");
         assert!(!app.online);
-        let tracks: Vec<Track> = app.data.tracks["al-0"][..4].to_vec();
+        let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..4].to_vec();
         assert!(app.source(0, None, &tracks[0], None).is_none(), "offline and not downloaded: nothing to play");
         let local = app.source(0, None, &tracks[1], None).unwrap();
         assert!(local.url.starts_with("file://") && local.url.ends_with("t-2.flac"), "{}", local.url);
@@ -2412,8 +2491,8 @@ mod tests {
         app.offline_snap = app.offline.snapshot();
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
         // (The stored album now lists only y-1; a library-wide refresh sees that.)
-        let all = app.data.all_tracks.to_vec();
-        app.handle(Msg::AllTracks(all));
+        let all = app.data.tracks.all.to_vec();
+        app.handle(Msg::AllTracks(Box::new(TrackSet::new(all))));
         assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
         // The album changed on the server: the pin follows.
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });

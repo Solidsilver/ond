@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 const ALBUMS_N: usize = 2_000;
 const TRACKS_N: usize = 25_000;
 const QUEUE_N: usize = 500;
+const PINS_N: usize = 2_000;
 
 fn big_library(app: &mut ListenerApp) {
     let albums: Vec<Album> = (0..ALBUMS_N)
@@ -41,7 +42,7 @@ fn big_library(app: &mut ListenerApp) {
 }
 
 fn big_queue(app: &mut ListenerApp) {
-    let tracks: Vec<Track> = app.data.all_tracks.iter().take(QUEUE_N).cloned().collect();
+    let tracks: Vec<Track> = app.data.tracks.all.iter().take(QUEUE_N).cloned().collect();
     app.queue = Queue::default();
     app.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
 }
@@ -99,10 +100,10 @@ fn perf() {
     big_library(&mut app);
     *h.state_mut() = Some(app);
 
-    let mut results: Vec<(&str, Timing)> = Vec::new();
+    let mut results: Vec<(String, Timing)> = Vec::new();
 
     scene(&mut h, Route::Albums);
-    results.push(("albums grid", time_frames(&mut h, 60)));
+    results.push(("albums grid".into(), time_frames(&mut h, 60)));
 
     scene(&mut h, Route::Songs);
     h.hover_at(pos2(700.0, 500.0));
@@ -110,17 +111,17 @@ fn perf() {
         h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -20_000.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
         h.step();
     }
-    results.push(("songs, mid-scroll", time_frames(&mut h, 60)));
+    results.push(("songs, mid-scroll".into(), time_frames(&mut h, 60)));
     // Sanity: the frames really drew the list, scrolled away from the top.
     let rows: Vec<String> = h.query_all_by_label_contains(" part ").map(|n| format!("{n:?}").chars().take(80).collect()).take(2).collect();
     println!("  songs rows on screen, e.g. {rows:?}");
     assert!(!rows.is_empty(), "songs view drew no rows");
 
     scene(&mut h, Route::Album("big-7".into()));
-    results.push(("album page", time_frames(&mut h, 60)));
+    results.push(("album page".into(), time_frames(&mut h, 60)));
 
     scene(&mut h, Route::Recent);
-    results.push(("recent + 500-item queue", time_frames(&mut h, 60)));
+    results.push(("recent + 500-item queue".into(), time_frames(&mut h, 60)));
 
     scene(&mut h, Route::Albums);
     app_mut(&mut h).actions.push(Action::OpenPalette);
@@ -132,12 +133,93 @@ fn perf() {
             p.refresh(index);
         }
     }
-    results.push(("palette open", time_frames(&mut h, 60)));
+    results.push(("palette open".into(), time_frames(&mut h, 60)));
+
+    // The Songs view sorted by each column: the first frame pays the sort,
+    // the rest must reuse it.
+    let mut first_sort: Vec<(String, Duration)> = Vec::new();
+    for (col, name) in [
+        (songs::Column::Title, "title"),
+        (songs::Column::Artist, "artist"),
+        (songs::Column::Album, "album"),
+        (songs::Column::Time, "time"),
+        (songs::Column::Format, "format"),
+    ] {
+        scene(&mut h, Route::Songs);
+        app_mut(&mut h).songs.sort = col;
+        let t = Instant::now();
+        h.step();
+        first_sort.push((format!("songs by {name}, first frame"), t.elapsed()));
+        results.push((format!("songs by {name}"), time_frames(&mut h, 30)));
+    }
+
+    scene(&mut h, Route::Albums);
+    app_mut(&mut h).actions.push(Action::OpenSettings(settings_page::Section::Library));
+    h.run_steps(2);
+    results.push(("settings → library".into(), time_frames(&mut h, 60)));
+    app_mut(&mut h).overlay = None;
+
+    // 2,000 single-song downloads on the Offline page.
+    {
+        let app = app_mut(&mut h);
+        let pins = app.data.tracks.all.iter().take(PINS_N).map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect();
+        app.offline.pin_many(pins);
+        app.offline.set_paused(true);
+        app.offline_snap = app.offline.snapshot();
+    }
+    scene(&mut h, Route::Offline);
+    results.push((format!("offline, {PINS_N} song pins"), time_frames(&mut h, 60)));
+
+    // 2,000 loved songs.
+    {
+        let app = app_mut(&mut h);
+        let songs = app.data.tracks.all.iter().take(PINS_N).cloned().collect();
+        app.favorites.load(crate::favorites::Starred { songs, albums: Vec::new(), artists: Vec::new() }, Vec::new());
+    }
+    scene(&mut h, Route::Favorites);
+    results.push((format!("favorites, {PINS_N} songs"), time_frames(&mut h, 60)));
+
+    // What a sync costs the UI thread: the messages carrying the library, then
+    // the once-per-batch rebuild of derived data (the search index).
+    let (albums, tracks) = {
+        let app = app_mut(&mut h);
+        (app.data.albums.clone(), app.data.tracks.all.to_vec())
+    };
+    let mut sync_ui = Vec::new();
+    for _ in 0..5 {
+        let app = app_mut(&mut h);
+        // Grouping and indexing the tracks is the bridge's job (a worker thread).
+        let set = Box::new(crate::tracks::TrackSet::new(tracks.clone()));
+        let t = Instant::now();
+        app.handle(Msg::Albums(albums.clone()));
+        app.handle(Msg::AllTracks(set));
+        app.after_messages();
+        sync_ui.push(t.elapsed());
+    }
+    sync_ui.sort();
+
+    // Settings → Library shows how much is left to analyse (only with a
+    // server, so the frames above skip it): time the count itself.
+    let unanalysed = {
+        let app = app_mut(&mut h);
+        let _ = app.unanalysed();
+        let t = Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(app.unanalysed());
+        }
+        t.elapsed() / 10
+    };
 
     println!("frame times ({ALBUMS_N} albums, {TRACKS_N} tracks, {QUEUE_N}-item queue):");
     for (name, t) in &results {
         println!("  {name:<26} mean {:>6.2} ms   p95 {:>6.2} ms   max {:>6.2} ms", ms(t.mean), ms(t.p95), ms(t.max));
     }
+
+    for (name, d) in &first_sort {
+        println!("  {name:<26} {:>6.2} ms", ms(*d));
+    }
+    println!("  unanalysed() per call: {:.2} ms", ms(unanalysed));
+    println!("  sync messages + rebuild on the UI thread: median {:.2} ms", ms(sync_ui[2]));
 
     // Idle: nothing playing, nothing hovered, nothing animating. After the
     // frames settle, nothing should ask for another one.

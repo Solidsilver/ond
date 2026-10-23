@@ -288,7 +288,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         group(ui, "Sync", |ui| {
             let albums = self.data.albums.len();
-            let tracks = self.data.all_tracks.len();
+            let tracks = self.data.tracks.all.len();
             ui.label(egui::RichText::new(format!("{albums} albums · {tracks} tracks")).size(13.0).color(t.text));
             let when = if self.track_syncing {
                 self.sync_label.clone()
@@ -346,7 +346,7 @@ impl ListenerApp {
                     self.actions.push(Action::StopAnalysis);
                 }
             });
-        } else if self.client.is_some() && !self.data.all_tracks.is_empty() {
+        } else if self.client.is_some() && !self.data.tracks.all.is_empty() {
             let (n, secs) = self.unanalysed();
             if n == 0 {
                 ui.label(egui::RichText::new("Every track is analysed.").size(13.0).color(t.text));

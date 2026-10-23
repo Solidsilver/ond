@@ -140,7 +140,7 @@ impl ListenerApp {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
         };
-        let tracks = self.data.tracks.get(id).cloned().unwrap_or_default();
+        let tracks = self.data.tracks.album(id).cloned().unwrap_or_default();
         if self.download_key(ui) {
             let kept = self.offline_snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
             self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
@@ -254,7 +254,7 @@ impl ListenerApp {
                             if !summary.complete() && analysing == 0 && !tracks.is_empty() {
                                 ui.separator();
                                 if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
-                                    self.actions.push(Action::Analyze(tracks.clone()));
+                                    self.actions.push(Action::Analyze(tracks.to_vec()));
                                 }
                             }
                             if !tracks.is_empty() {
@@ -365,7 +365,7 @@ impl ListenerApp {
         let art_side = (ui.available_width() * 0.3).clamp(120.0, 180.0);
         ui.horizontal(|ui| {
             let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
-            self.mosaic(ui, art, tracks.as_deref().unwrap_or_default());
+            self.mosaic(ui, art, tracks.as_deref().map_or(&[], Vec::as_slice));
             ui.add_space(20.0);
             ui.vertical(|ui| {
                 ui.add_space((art_side - 118.0).max(0.0));
@@ -454,7 +454,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let mut covers: Vec<String> = Vec::new();
         for tr in tracks {
-            let cover = tr.cover_art.clone().or_else(|| self.data.album(&tr.album_id).and_then(|a| a.cover_art.clone()));
+            let cover = self.data.cover_for(tr).map(str::to_owned);
             if let Some(c) = cover
                 && !covers.contains(&c)
             {
@@ -541,12 +541,20 @@ impl ListenerApp {
                 self.focus = Focus::Main;
                 ui.scroll_to_rect(rect, Some(egui::Align::Center));
             }
+            // Off screen: the space is kept, nothing else to do (long lists).
+            if !ui.is_rect_visible(rect) {
+                continue;
+            }
             let selected = self.focus == Focus::Main && self.track_sel == Some(i);
             let hovered = resp.hovered() || resp.contains_pointer();
             let loved = self.favorites.is_on(StarKind::Song, &tr.id);
             // Drag: the selection's track (or this one) to a playlist; within
             // one's own playlist, also to a new place in it.
-            resp.dnd_set_drag_payload(DragTracks { tracks: vec![tr.clone()], from: opts.playlist.clone().map(|p| (p, i)) });
+            // (Built only when the drag starts, the one frame egui takes it: a
+            // copy per row per frame adds up on long lists.)
+            if resp.drag_started() {
+                resp.dnd_set_drag_payload(DragTracks { tracks: vec![tr.clone()], from: opts.playlist.clone().map(|p| (p, i)) });
+            }
             if let Some(pid) = &opts.playlist {
                 if let Some(drag) = resp.dnd_hover_payload::<DragTracks>()
                     && drag.from.as_ref().is_some_and(|(p, _)| p == pid)
@@ -715,8 +723,10 @@ impl ListenerApp {
         self.add_to_playlist_menu(ui, std::slice::from_ref(tr));
         if let Some(artist) = &tr.artist {
             ui.separator();
-            if ui.button(format!("Go to {artist}")).clicked() {
-                self.actions.push(Action::Go(Route::Artist { name: artist.clone(), id: tr.artist_ref.clone() }));
+            if ui.button(format!("Go to {artist}")).clicked()
+                && let Some(route) = Route::artist_of(tr)
+            {
+                self.actions.push(Action::Go(route));
             }
         }
         if !matches!(source, Source::Album { .. }) && ui.button("Go to album").clicked() {

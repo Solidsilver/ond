@@ -120,7 +120,7 @@ impl ListenerApp {
         ui.add_space(4.0);
         ui.horizontal_top(|ui| {
             let (art, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-            let cover = track.cover_art.clone().or_else(|| album.and_then(|a| a.cover_art.clone()));
+            let cover = self.data.cover_for(track).map(str::to_owned);
             self.art.paint(ui, art, cover.as_deref(), 4.0);
             ui.add_space(10.0);
             ui.vertical(|ui| {
@@ -132,9 +132,10 @@ impl ListenerApp {
                 ui.painter().galley(r.min, title, t.text);
                 if let Some(artist) = &track.artist {
                     let shown = elide(ui, artist, FontId::proportional(VALUE), t.accent, text_w).text().to_owned();
-                    if link(ui, &shown, FontId::proportional(VALUE), t.accent).clicked() {
-                        let id = track.artists.first().and_then(|a| a.id.clone()).or_else(|| track.artist_ref.clone());
-                        self.actions.push(Action::Go(Route::Artist { name: track.artists.first().map_or_else(|| artist.clone(), |a| a.name.clone()), id }));
+                    if link(ui, &shown, FontId::proportional(VALUE), t.accent).clicked()
+                        && let Some(route) = Route::artist_of(track)
+                    {
+                        self.actions.push(Action::Go(route));
                     }
                 }
                 if let Some(al) = album {
