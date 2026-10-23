@@ -1,3 +1,8 @@
 /target
 .DS_Store
 /.claude/
+
+# Editors
+.idea/
+.vscode/
+*.swp

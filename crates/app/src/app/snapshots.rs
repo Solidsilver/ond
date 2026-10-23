@@ -297,7 +297,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
         app.handle(m);
     }
     app.login = None;
-    app.session.server_label = "solidsilver · navidrome 0.64.2".into();
+    app.session.server_label = "demo · navidrome 0.64.2".into();
     app.sync.label = format!("{} albums", ALBUMS.len());
 
     let albums: Vec<Album> = (0..ALBUMS.len()).map(album).collect();
@@ -318,7 +318,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     app.data.tracks.all = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.session.online = true;
-    app.session.settings = Some(Settings { server: "https://music.example.com".into(), username: "solidsilver".into(), ..Default::default() });
+    app.session.settings = Some(Settings { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
     app.session.server_info = "navidrome 0.64.2".into();
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
@@ -1114,14 +1114,14 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm {
         server: "https://music.example.com".into(),
-        username: "solidsilver".into(),
+        username: "demo".into(),
         error: Some(crate::bridge::connect_error(&subsonic::Error::Api { code: 40, message: "Wrong username or password".into() })),
         ..Default::default()
     });
     s.shoot(h, "login-error");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "solidsilver".into(), busy: true, ..Default::default() });
+    app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() });
     s.shoot(h, "login-busy");
 }
 
