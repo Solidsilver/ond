@@ -432,6 +432,13 @@ pub struct Session {
     pub server_info: String,
 }
 
+impl Session {
+    /// The client, while the server answers.
+    pub fn live(&self) -> Option<&Client> {
+        self.client.as_ref().filter(|_| self.online)
+    }
+}
+
 /// Where the library sync is.
 #[derive(Default)]
 pub struct SyncState {
@@ -466,6 +473,26 @@ pub struct Downloads {
     pub pending_pins: Vec<(ListKey, Pin)>,
 }
 
+impl Downloads {
+    /// Takes in what changed since the last frame.
+    pub fn refresh(&mut self) {
+        self.snap = self.store.snapshot();
+    }
+
+    /// Applies the download actions that need nothing but the store.
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Unpin(pin) => {
+                self.store.unpin(&pin);
+                self.refresh();
+            }
+            Action::PauseDownloads(paused) => self.store.set_paused(paused),
+            Action::RetryDownloads => self.store.retry_failed(),
+            _ => unreachable!("not a download action"),
+        }
+    }
+}
+
 /// Library analysis: stored results and the background runner.
 pub struct Analysis {
     /// Stored analysis results by track id, with the file stamp they're for.
@@ -477,6 +504,13 @@ pub struct Analysis {
     /// The stored results have been read (until then everything looks unanalysed).
     pub loaded: bool,
     pub runner: analyze::Runner,
+}
+
+impl Analysis {
+    /// A track's analysis, if there is one for the file as it is now.
+    pub fn of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
+        self.records.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
+    }
 }
 
 impl ListenerApp {
@@ -941,7 +975,7 @@ impl ListenerApp {
                 } else {
                     self.downloads.store.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
                 }
-                self.downloads.snap = self.downloads.store.snapshot();
+                self.downloads.refresh();
                 return;
             }
         };
@@ -957,7 +991,7 @@ impl ListenerApp {
                 }
             }
         }
-        self.downloads.snap = self.downloads.store.snapshot();
+        self.downloads.refresh();
     }
 
     /// A media key, Control Center or headphone command.
@@ -1002,7 +1036,7 @@ impl ListenerApp {
         let mut notes = Vec::new();
         let sources = AppSources {
             offline: &self.downloads.store,
-            client: self.session.client.as_ref().filter(|_| self.session.online),
+            client: self.session.live(),
             output: &self.output,
             data: &self.data,
             now_playing: &self.now_playing,
@@ -1033,7 +1067,7 @@ impl ListenerApp {
         use player::Sources;
         let sources = AppSources {
             offline: &self.downloads.store,
-            client: self.session.client.as_ref().filter(|_| self.session.online),
+            client: self.session.live(),
             output: &self.output,
             data: &self.data,
             now_playing: &self.now_playing,
@@ -1265,12 +1299,7 @@ impl ListenerApp {
             }
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
-            Action::Unpin(pin) => {
-                self.downloads.store.unpin(&pin);
-                self.downloads.snap = self.downloads.store.snapshot();
-            }
-            Action::PauseDownloads(paused) => self.downloads.store.set_paused(paused),
-            Action::RetryDownloads => self.downloads.store.retry_failed(),
+            a @ (Action::Unpin(_) | Action::PauseDownloads(_) | Action::RetryDownloads) => self.downloads.apply(a),
             Action::SetOfflineLimit(bytes) => {
                 self.downloads.store.set_limit(bytes);
                 self.prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
@@ -1323,7 +1352,7 @@ impl ListenerApp {
 
     /// A track's analysis, if there is one for the file as it is now.
     pub fn analysis_of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
-        self.analysis.records.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
+        self.analysis.of(t)
     }
 
     /// Queues the tracks that have no current analysis; returns how many.
