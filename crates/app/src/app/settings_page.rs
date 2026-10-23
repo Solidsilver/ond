@@ -3,7 +3,7 @@
 //! ReplayGain, streaming, per-device modes, downloads, sync, analysis, the
 //! account) lives here; the popovers keep only what's needed in the moment.
 
-use super::widgets::{danger, menu_label, secondary, section, segmented, segmented_wide, thin_slider, toggle};
+use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, section, thin_slider, toggle};
 use super::{Action, ListenerApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{ThemePref, Tokens, semibold};
@@ -101,10 +101,9 @@ impl ListenerApp {
 
     fn general_settings(&mut self, ui: &mut Ui) {
         group(ui, "Appearance", |ui| {
-            let prefs = [ThemePref::System, ThemePref::Light, ThemePref::Dark];
-            let at = prefs.iter().position(|p| *p == self.theme).unwrap_or(0);
-            if let Some(i) = segmented_wide(ui, &["System", "Light", "Dark"], at, 240.0) {
-                self.actions.push(Action::SetTheme(prefs[i]));
+            let mut theme = self.theme;
+            if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
+                self.actions.push(Action::SetTheme(theme));
             }
         });
         group(ui, "Listening", |ui| {
@@ -133,11 +132,7 @@ impl ListenerApp {
         let mut p: PlaybackPrefs = self.output.prefs().clone();
         let before = p.clone();
         group(ui, "ReplayGain", |ui| {
-            let at = RgMode::ALL.iter().position(|m| *m == p.replay_gain).unwrap_or(0);
-            let labels: Vec<&str> = RgMode::ALL.iter().map(|m| m.label()).collect();
-            if let Some(i) = segmented_wide(ui, &labels, at, width.min(360.0)) {
-                p.replay_gain = RgMode::ALL[i];
-            }
+            choice(ui, &RgMode::ALL, &mut p.replay_gain, Some(width.min(360.0)), |m| m.label().into());
             hint(ui, p.replay_gain.hint());
             if p.replay_gain != RgMode::Off {
                 ui.add_space(12.0);
@@ -151,26 +146,15 @@ impl ListenerApp {
             }
         });
         group(ui, "Streaming", |ui| {
-            let at = QualityMode::ALL.iter().position(|q| *q == p.quality).unwrap_or(0);
-            if let Some(i) = segmented_wide(ui, &["Original", "Auto", "Transcoded"], at, width.min(360.0)) {
-                p.quality = QualityMode::ALL[i];
-            }
-            hint(ui, p.quality.label());
+            choice(ui, &QualityMode::ALL, &mut p.quality, Some(width.min(360.0)), |q| q.label().into());
+            hint(ui, p.quality.hint());
             if p.quality != QualityMode::Original {
                 ui.add_space(12.0);
                 row(ui, "Format", |ui| {
-                    let at = TranscodeFormat::ALL.iter().position(|f| *f == p.format).unwrap_or(0);
-                    if let Some(i) = segmented(ui, &["AAC", "MP3"], at) {
-                        p.format = TranscodeFormat::ALL[i];
-                    }
+                    choice(ui, &TranscodeFormat::ALL, &mut p.format, None, |f| f.label().into());
                 });
                 row(ui, "Bitrate", |ui| {
-                    let at = BITRATES.iter().position(|k| *k == p.kbps).unwrap_or(2);
-                    let labels: Vec<String> = BITRATES.iter().map(|k| k.to_string()).collect();
-                    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-                    if let Some(i) = segmented(ui, &labels, at) {
-                        p.kbps = BITRATES[i];
-                    }
+                    choice(ui, &BITRATES, &mut p.kbps, None, |k| k.to_string());
                 });
                 let network = crate::fmt::capitalize(self.output.network().label());
                 let now = match p.transcode(self.output.network()) {
@@ -216,11 +200,8 @@ impl ListenerApp {
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let at = usize::from(*mode == PlaybackMode::BitPerfect);
-                        if let Some(i) = segmented(ui, &["Normal", "Bit-perfect"], at)
-                            && i != at
-                        {
-                            let m = if i == 1 { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                        let mut m = *mode;
+                        if choice(ui, &MODES, &mut m, None, mode_label) {
                             self.actions.push(Action::SetDeviceMode(uid.clone(), m));
                         }
                     });

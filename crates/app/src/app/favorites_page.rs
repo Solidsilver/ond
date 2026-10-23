@@ -2,7 +2,7 @@
 
 use super::album_page::ListOpts;
 use super::browse::grid_metrics;
-use super::widgets::{elide, primary, secondary, segmented};
+use super::widgets::{choice, elide, primary, secondary};
 use super::{Action, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -27,16 +27,18 @@ impl ListenerApp {
     pub(super) fn favorites_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let v = self.favorites.view.clone();
-        let tabs = [FavTab::Songs, FavTab::Albums, FavTab::Artists];
-        let labels = [format!("Songs {}", v.songs.len()), format!("Albums {}", v.albums.len()), format!("Artists {}", v.artists.len())];
+        let label = |tab: FavTab| match tab {
+            FavTab::Songs => format!("Songs {}", v.songs.len()),
+            FavTab::Albums => format!("Albums {}", v.albums.len()),
+            FavTab::Artists => format!("Artists {}", v.artists.len()),
+        };
         ui.horizontal(|ui| {
             self.heading(ui, "Favorites", None);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let at = tabs.iter().position(|x| *x == self.fav_tab).unwrap_or(0);
-                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-                if let Some(i) = ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| segmented(ui, &labels, at)).inner {
-                    self.fav_tab = tabs[i];
-                }
+                // Right-to-left layout: the pill itself still reads left to right.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    choice(ui, &[FavTab::Songs, FavTab::Albums, FavTab::Artists], &mut self.fav_tab, None, label);
+                });
             });
         });
         let empty = |ui: &mut Ui, text: &str| super::widgets::empty_state(ui, Icon::Heart, "Nothing loved yet", text);

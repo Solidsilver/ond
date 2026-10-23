@@ -4,7 +4,7 @@
 //! The same column can show the playing track's lyrics (in the full window)
 //! or its details instead (Up Next · History · Lyrics · Info).
 
-use super::widgets::{elide, segmented};
+use super::widgets::{choice, elide};
 use super::{Action, Focus, ListenerApp, QueueTab};
 use crate::icons::{self, Icon};
 use crate::queue::{EndAction, Item, Source, clock_label, end_offset, start_offsets};
@@ -41,20 +41,16 @@ impl ListenerApp {
         };
         // Up Next · History · Lyrics · Info; the Player has its lyrics drawer
         // instead of a Lyrics tab.
-        let mut tabs = vec![("Up Next", QueueTab::UpNext), ("History", QueueTab::History)];
+        let mut tabs = vec![QueueTab::UpNext, QueueTab::History];
         if lyrics_tab {
-            tabs.push(("Lyrics", QueueTab::Lyrics));
+            tabs.push(QueueTab::Lyrics);
         }
-        tabs.push(("Info", QueueTab::Info));
+        tabs.push(QueueTab::Info);
         let until = (self.queue.current.is_some() && !self.queue.upcoming.is_empty() && self.queue_ui.tab == QueueTab::UpNext)
             .then(|| format!("until {}", clock_label(now, end_offset(remaining, &self.queue.upcoming))));
         let mut until_below = false;
         ui.horizontal(|ui| {
-            let labels: Vec<&str> = tabs.iter().map(|(l, _)| *l).collect();
-            let at = tabs.iter().position(|(_, tab)| *tab == self.queue_ui.tab).unwrap_or(0);
-            if let Some(i) = segmented(ui, &labels, at) {
-                self.queue_ui.tab = tabs[i].1;
-            }
+            choice(ui, &tabs, &mut self.queue_ui.tab, None, |t| t.label().into());
             if let Some(until) = &until {
                 // Beside the switch when there's room, else on its own line.
                 let w = ui.painter().layout_no_wrap(until.clone(), FontId::proportional(11.0), t.muted).size().x;

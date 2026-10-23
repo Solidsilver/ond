@@ -109,6 +109,36 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize
     segments(ui, options, &fit_segments(&natural, ui.available_width()), selected)
 }
 
+/// The two playback modes, in the order the switches show them.
+pub const MODES: [audio::PlaybackMode; 2] = [audio::PlaybackMode::Normal, audio::PlaybackMode::BitPerfect];
+
+pub fn mode_label(m: audio::PlaybackMode) -> String {
+    match m {
+        audio::PlaybackMode::Normal => "Normal".into(),
+        audio::PlaybackMode::BitPerfect => "Bit-perfect".into(),
+    }
+}
+
+/// One of `all` in a segmented control, each labelled by `label`. With a
+/// `width`, equal segments fill it; otherwise each fits its label. Writes the
+/// pick into `current` and says whether it changed.
+pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, all: &[T], current: &mut T, width: Option<f32>, label: impl Fn(T) -> String) -> bool {
+    let labels: Vec<String> = all.iter().map(|v| label(*v)).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let at = all.iter().position(|v| v == current).unwrap_or(0);
+    let picked = match width {
+        Some(w) => segmented_wide(ui, &labels, at, w),
+        None => segmented(ui, &labels, at),
+    };
+    match picked.map(|i| all[i]) {
+        Some(v) if v != *current => {
+            *current = v;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Segment widths for labels of `natural` width: comfortable padding when it
 /// fits in `room`, tighter padding next, and finally the room shared out (the
 /// labels then elide) — the control never grows past its column.

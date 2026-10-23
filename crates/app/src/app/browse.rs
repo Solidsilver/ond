@@ -1,7 +1,7 @@
 //! The main view's router and the album-grid places: Recently Added, Albums,
 //! Artists, an artist's page, and albums by genre / year / label.
 
-use super::widgets::{Mark, elide, segmented};
+use super::widgets::{Mark, choice, elide};
 use super::{Action, AlbumSort, Data, Keep, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
@@ -89,12 +89,10 @@ impl ListenerApp {
                 ui.horizontal(|ui| {
                     self.heading(ui, "Albums", Some(format!("{n}")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let order = [AlbumSort::Artist, AlbumSort::Title, AlbumSort::Year, AlbumSort::Added];
-                        let at = order.iter().position(|s| *s == self.sort).unwrap_or(0);
                         // Right-to-left layout: the pill itself still reads left to right.
-                        if let Some(i) = ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| segmented(ui, &["Artist", "Title", "Year", "Recently added"], at)).inner {
-                            self.sort = order[i];
-                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            choice(ui, &AlbumSort::ALL, &mut self.sort, None, |s| s.label().into());
+                        });
                     });
                 });
                 self.grid_place(ui, &route);

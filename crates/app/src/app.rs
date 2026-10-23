@@ -54,7 +54,7 @@ use subsonic::Client;
 pub use commands::PlaylistAction;
 pub use dialogs::Overlay;
 pub use palette::Palette;
-pub(crate) use widgets::{elide as elide_text, link as link_text, segmented_wide};
+pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
 
 
 #[derive(Default)]
@@ -252,6 +252,17 @@ pub enum QueueTab {
     Info,
 }
 
+impl QueueTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            QueueTab::UpNext => "Up Next",
+            QueueTab::History => "History",
+            QueueTab::Lyrics => "Lyrics",
+            QueueTab::Info => "Info",
+        }
+    }
+}
+
 /// A song's plays as the server counts them, for the Info tab.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SongStats {
@@ -282,6 +293,19 @@ pub enum AlbumSort {
     Title,
     Year,
     Added,
+}
+
+impl AlbumSort {
+    pub const ALL: [AlbumSort; 4] = [AlbumSort::Artist, AlbumSort::Title, AlbumSort::Year, AlbumSort::Added];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AlbumSort::Artist => "Artist",
+            AlbumSort::Title => "Title",
+            AlbumSort::Year => "Year",
+            AlbumSort::Added => "Recently added",
+        }
+    }
 }
 
 #[derive(Default)]
