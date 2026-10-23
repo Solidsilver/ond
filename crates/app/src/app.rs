@@ -661,8 +661,8 @@ impl ListenerApp {
             Msg::Remote(r) => self.remote(r),
             Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
             Msg::UserMeta { meta, tracks } => self.favorites.note(meta, &tracks),
-            Msg::StarDone { kind, id, on, error } => self.star_done(kind, id, on, error),
-            Msg::RatingDone { id, previous, error } => self.rating_done(id, previous, error),
+            Msg::StarDone { kind, id, on, seq, error } => self.star_done(kind, id, on, seq, error),
+            Msg::RatingDone { id, previous, seq, error } => self.rating_done(id, previous, seq, error),
             Msg::PlaylistCreated { id, name } => {
                 self.recent_playlists.insert(0, id.clone());
                 self.recent_playlists.truncate(3);

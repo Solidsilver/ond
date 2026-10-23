@@ -5,7 +5,7 @@ use crate::favorites::{StarKind, Starred, UserMeta};
 use crate::settings::{Paths, Settings};
 use crate::sync;
 use library::{Album, Library, Track};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -52,8 +52,8 @@ pub enum Msg {
     /// Hearts and ratings seen while loading an album or playlist.
     UserMeta { meta: UserMeta, tracks: Vec<Track> },
     /// A heart change reached the server (`error` is `None`) or didn't.
-    StarDone { kind: StarKind, id: String, on: bool, error: Option<String> },
-    RatingDone { id: String, previous: u8, error: Option<String> },
+    StarDone { kind: StarKind, id: String, on: bool, seq: u64, error: Option<String> },
+    RatingDone { id: String, previous: u8, seq: u64, error: Option<String> },
     /// A playlist was made; the app opens it.
     PlaylistCreated { id: String, name: String },
     /// Selected from the native menu bar.
@@ -105,11 +105,31 @@ pub struct Bridge {
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     /// A reconnect loop is running (one is enough).
     reconnecting: Arc<AtomicBool>,
+    /// The last request sent per heart or rating: the next one for the same
+    /// item waits for it, so the server sees them in the order they were made.
+    in_order: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, ctx: egui::Context, library: Arc<Library>) -> Self {
-        Self { rt, tx, ctx, library, sync_cancel: Arc::default(), reconnecting: Arc::default() }
+        Self { rt, tx, ctx, library, sync_cancel: Arc::default(), reconnecting: Arc::default(), in_order: Arc::default() }
+    }
+
+    /// Runs `job` after the previous job queued under `key` has finished.
+    fn after_previous<F>(&self, key: String, job: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut chains = self.in_order.lock().unwrap_or_else(|e| e.into_inner());
+        chains.retain(|_, h| !h.is_finished());
+        let previous = chains.remove(&key);
+        let handle = self.rt.spawn(async move {
+            if let Some(p) = previous {
+                let _ = p.await;
+            }
+            job.await;
+        });
+        chains.insert(key, handle);
     }
 
     pub fn ctx(&self) -> &egui::Context {
@@ -463,25 +483,26 @@ impl Bridge {
         });
     }
 
-    pub fn set_starred(&self, client: Option<Client>, kind: StarKind, id: String, on: bool) {
+    /// Loves or unloves; `seq` comes back in the reply so a stale one is recognised.
+    pub fn set_starred(&self, client: Option<Client>, kind: StarKind, id: String, on: bool, seq: u64) {
         let this = self.clone();
-        self.rt.spawn(async move {
+        self.after_previous(format!("star:{kind:?}:{id}"), async move {
             let error = match &client {
                 Some(c) => c.set_starred(kind, &id, on).await.err().map(|e| e.to_string()),
                 None => Some("not connected".into()),
             };
-            this.send(Msg::StarDone { kind, id, on, error });
+            this.send(Msg::StarDone { kind, id, on, seq, error });
         });
     }
 
-    pub fn set_rating(&self, client: Option<Client>, id: String, rating: u8, previous: u8) {
+    pub fn set_rating(&self, client: Option<Client>, id: String, rating: u8, previous: u8, seq: u64) {
         let this = self.clone();
-        self.rt.spawn(async move {
+        self.after_previous(format!("rating:{id}"), async move {
             let error = match &client {
                 Some(c) => c.set_rating(&id, rating).await.err().map(|e| e.to_string()),
                 None => Some("not connected".into()),
             };
-            this.send(Msg::RatingDone { id, previous, error });
+            this.send(Msg::RatingDone { id, previous, seq, error });
         });
     }
 
