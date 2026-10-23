@@ -731,9 +731,15 @@ impl ListenerApp {
         }
     }
 
+    /// Whether a list may take keys this frame: no palette or sheet is open
+    /// over it and no text field is being typed into.
+    pub(super) fn list_keys_free(&self, ui: &Ui) -> bool {
+        self.palette.is_none() && self.overlay.is_none() && !ui.ctx().memory(|m| m.focused().is_some())
+    }
+
     /// ⇧⌘D, when nothing else has the keyboard.
     pub(super) fn download_key(&self, ui: &Ui) -> bool {
-        if self.palette.is_some() || ui.ctx().memory(|m| m.focused().is_some()) {
+        if !self.list_keys_free(ui) {
             return false;
         }
         ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::D)))
@@ -742,7 +748,7 @@ impl ListenerApp {
     /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add. In the
     /// user's own playlist, ⌥↑/⌥↓ move the selected song and ⌫ removes it.
     fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) {
-        if self.focus != Focus::Main || self.palette.is_some() || self.overlay.is_some() || ui.ctx().memory(|m| m.focused().is_some()) || tracks.is_empty() {
+        if self.focus != Focus::Main || !self.list_keys_free(ui) || tracks.is_empty() {
             return;
         }
         use egui::{Key, Modifiers};

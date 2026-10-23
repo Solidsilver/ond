@@ -283,7 +283,7 @@ impl ListenerApp {
 
     /// With a queue item selected: ↑/↓ select, ⌥↑/⌥↓ move it, ⌫ remove, ⏎ play.
     fn queue_keys(&mut self, ui: &Ui) {
-        if self.focus != Focus::Queue || self.palette.is_some() || ui.ctx().memory(|m| m.focused().is_some()) {
+        if self.focus != Focus::Queue || !self.list_keys_free(ui) {
             return;
         }
         let Some(uid) = self.queue_ui.selected else { return };
