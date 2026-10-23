@@ -160,7 +160,7 @@ impl ViewCtx<'_> {
             }
             if let Some(al) = album {
                 if track.artist.is_some() {
-                    ui.label(egui::RichText::new("  —  ").font(font.clone()).color(t.muted));
+                    ui.label(egui::RichText::new("  ·  ").font(font.clone()).color(t.muted));
                 }
                 if link(ui, &al.name, font, t.muted).clicked() {
                     self.ui.reveal = Some(track.id.clone());
@@ -313,7 +313,7 @@ impl ViewCtx<'_> {
                             lyrics::Row::Text { text, line: Some(i) } => {
                                 let i = *i;
                                 let sung = Some(i) == cur;
-                                // A pause is a gap, or a quiet "• • •" while it's the sung line.
+                                // A pause is a gap, or a quiet "· · ·" while it's the sung line.
                                 if text.is_empty() && !sung {
                                     continue;
                                 }
@@ -325,14 +325,14 @@ impl ViewCtx<'_> {
                                 } else {
                                     (size, t.muted)
                                 };
-                                let shown = if text.is_empty() { "•  •  •" } else { text.as_str() };
+                                let shown = if text.is_empty() { "·  ·  ·" } else { text.as_str() };
                                 let galley = lyric_galley(ui, shown, FontId::new(px, semibold()), color, width);
                                 let (r, resp) = ui.allocate_exact_size(vec2(width, galley.size().y + 6.0), Sense::click());
                                 if resp.hovered() && !sung {
                                     ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
                                 }
                                 ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
-                                let label = format!("{} — {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0), text);
+                                let label = format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0));
                                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     seek_to = Some(lines[i].start_ms as f64 / 1000.0);

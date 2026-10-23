@@ -54,6 +54,10 @@ pub enum Icon {
     Heart,
     /// Loved.
     HeartFilled,
+    /// A rating star, empty.
+    Star,
+    /// A rating star, given.
+    StarFilled,
     /// New playlist.
     Plus,
     /// A question mark in a circle: help, the keyboard shortcuts.
@@ -61,6 +65,16 @@ pub enum Icon {
 }
 
 /// The heart's outline, top notch first, clockwise, in icon units (−1..1).
+/// A five-point star's outline, top point first, in icon units (−1..1):
+/// points and inner corners alternate.
+fn star_points() -> [(f32, f32); 10] {
+    std::array::from_fn(|k| {
+        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / 5.0;
+        let r = if k % 2 == 0 { 0.95 } else { 0.4 };
+        (r * a.cos(), r * a.sin() + 0.06)
+    })
+}
+
 fn heart_points(n: usize) -> Vec<(f32, f32)> {
     (0..=n)
         .map(|k| {
@@ -261,6 +275,21 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             };
             painter.add(Shape::convex_polygon(half(true), color, Stroke::NONE));
             painter.add(Shape::convex_polygon(half(false), color, Stroke::NONE));
+        }
+        Icon::Star => {
+            let pts: Vec<Pos2> = star_points().iter().map(|&(x, y)| p(x, y)).collect();
+            painter.add(Shape::closed_line(pts, Stroke::new((r * 0.12).max(1.0), color)));
+        }
+        Icon::StarFilled => {
+            // The star isn't convex: fill the inner pentagon and each point's
+            // triangle, which are.
+            let pts: Vec<Pos2> = star_points().iter().map(|&(x, y)| p(x, y)).collect();
+            let inner: Vec<Pos2> = pts.iter().skip(1).step_by(2).copied().collect();
+            painter.add(Shape::convex_polygon(inner, color, Stroke::NONE));
+            for k in (0..10).step_by(2) {
+                let tri = vec![pts[(k + 9) % 10], pts[k], pts[k + 1]];
+                painter.add(Shape::convex_polygon(tri, color, Stroke::NONE));
+            }
         }
         Icon::Plus => {
             painter.line_segment([p(0.0, -0.75), p(0.0, 0.75)], line);

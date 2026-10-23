@@ -16,6 +16,8 @@ mod keys;
 mod lyrics;
 mod memo;
 mod menu;
+#[cfg(test)]
+mod no_emoji;
 mod nav;
 mod now_playing;
 mod output;

@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(rows[0], ("Plays", "12".into()));
         assert_eq!(rows[1].0, "Last played");
         assert!(rows[1].1.contains("2026"), "{}", rows[1].1);
-        assert_eq!(rows[2], ("Rating", "★★★☆☆".into()));
+        assert_eq!(rows[2], ("Rating", "3 stars".into()));
     }
 
     #[test]

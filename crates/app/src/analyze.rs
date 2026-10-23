@@ -498,7 +498,9 @@ mod tests {
         // The second job has nothing to read: it fails normally, which only
         // happens if the worker survived the first.
         runner.enqueue([job("test-panic", 1.0), job("after", 1.0)]);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // The second job's failed fetch takes ~4 s on its own; leave room for a
+        // busy machine running the whole suite.
+        let deadline = Instant::now() + Duration::from_secs(20);
         while runner.progress().done < 2 {
             assert!(Instant::now() < deadline, "worker stalled: {:?}", runner.progress());
             std::thread::sleep(Duration::from_millis(10));

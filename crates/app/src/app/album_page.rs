@@ -662,13 +662,13 @@ impl ViewCtx<'_> {
         ui.menu_button("Rating", |ui| {
             let current = self.favorites.rating(&tr.id);
             for r in 1..=5u8 {
-                let stars = format!("{}{}", "★".repeat(r.into()), "☆".repeat((5 - r).into()));
-                if ui.add(egui::Button::selectable(current == r, stars)).clicked() {
+                if super::widgets::rating_choice(ui, r, current == r).clicked() {
                     self.actions.push(Action::Rate(tr.id.clone(), r));
+                    ui.close();
                 }
             }
             ui.separator();
-            if ui.add_enabled(current > 0, egui::Button::new("Clear Rating")).clicked() {
+            if ui.add_enabled(current > 0, egui::Button::new("Clear rating")).clicked() {
                 self.actions.push(Action::Rate(tr.id.clone(), 0));
             }
         });

@@ -138,7 +138,7 @@ impl OndApp {
         let (center_x, text_w) = if symmetric >= 140.0 { (rect.center().x, symmetric) } else { ((col_left + col_right) / 2.0, (col_right - col_left).max(40.0)) };
         let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_w);
         let sub_text = match (&item.track.artist, &album) {
-            (Some(a), Some(al)) => format!("{a} — {}", al.name),
+            (Some(a), Some(al)) => format!("{a} · {}", al.name),
             (Some(a), None) => a.clone(),
             (None, Some(al)) => al.name.clone(),
             _ => String::new(),
@@ -198,7 +198,7 @@ impl OndApp {
         if heart_resp.clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }
-        let label = format!("Now playing: {} — {sub_text}", item.track.title);
+        let label = format!("Now playing: {}, {sub_text}", item.track.title);
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         // The artwork switches to the player last used (Player or Mini); the
         // rest of the display opens the album.
