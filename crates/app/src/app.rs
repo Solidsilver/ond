@@ -16,6 +16,7 @@ mod settings_page;
 mod queue_panel;
 mod sidebar;
 mod songs;
+mod toasts;
 mod toolbar;
 mod widgets;
 
@@ -311,6 +312,12 @@ pub struct ListenerApp {
     songs: songs::SongsView,
     /// A track sync is running (shows a stop button in the status bar).
     track_syncing: bool,
+    /// The album list is being fetched (before the track sync).
+    album_syncing: bool,
+    /// Where the track sync is, while it runs.
+    sync_progress: Option<crate::sync::Progress>,
+    /// Errors and notices, shown as toasts.
+    toasts: toasts::Toasts,
     palette: Option<Palette>,
     theme: ThemePref,
 
@@ -497,6 +504,9 @@ impl ListenerApp {
             search_stale: false,
             songs: songs::SongsView::default(),
             track_syncing: false,
+            album_syncing: false,
+            sync_progress: None,
+            toasts: toasts::Toasts::default(),
             palette: None,
             theme: theme_pref,
             windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
@@ -536,6 +546,7 @@ impl ListenerApp {
                 self.server_info = server.clone();
                 self.login = None;
                 self.sync_label = "syncing…".into();
+                self.album_syncing = true;
                 self.bridge.sync_albums(client.clone());
                 self.bridge.fetch_home(client.clone());
                 self.art.set_client(client.clone());
@@ -606,10 +617,12 @@ impl ListenerApp {
             }
             Msg::TrackSync(p) => {
                 self.track_syncing = true;
+                self.sync_progress = Some(p);
                 self.sync_label = p.label();
             }
             Msg::TrackSyncDone(outcome) => {
                 self.track_syncing = false;
+                self.sync_progress = None;
                 let albums = self.data.albums.len();
                 let tracks = self.data.all_tracks.len();
                 self.sync_label = match outcome {
@@ -625,8 +638,12 @@ impl ListenerApp {
                 };
             }
             Msg::AlbumUpdated(a) => self.data.update_album(a),
-            Msg::SyncProgress(n) => self.sync_label = format!("syncing… {n}"),
+            Msg::SyncProgress(n) => {
+                self.album_syncing = true;
+                self.sync_label = format!("syncing… {n}");
+            }
             Msg::SyncDone(n) => {
+                self.album_syncing = false;
                 self.sync_label = format!("{n} albums");
                 self.track_syncing = true;
             }
@@ -668,7 +685,7 @@ impl ListenerApp {
             Msg::Menu(cmd) => self.command(cmd),
             Msg::Error(e) => {
                 self.probe();
-                // Offline, network errors are expected and the status bar already says so.
+                // Offline, network errors are expected and the offline pill already says so.
                 if self.online {
                     self.error = Some(e);
                 }
@@ -691,6 +708,8 @@ impl ListenerApp {
         self.client = None;
         self.offline.set_source(None);
         self.track_syncing = false;
+        self.album_syncing = false;
+        self.sync_progress = None;
     }
 
     /// Pins `pin` if it was waiting for these tracks, or refreshes its track
@@ -1137,6 +1156,7 @@ impl ListenerApp {
                     && !self.track_syncing
                 {
                     self.sync_label = "syncing…".into();
+                    self.album_syncing = true;
                     self.bridge.sync_albums(client);
                 }
             }
@@ -1454,6 +1474,16 @@ impl ListenerApp {
             WindowMode::Compact => self.compact_ui(ui),
             WindowMode::Mini => self.mini_ui(ui),
         }
+        if let Some(e) = self.error.take() {
+            self.toasts.push(e, true);
+        }
+        if let Some(n) = self.notice.take() {
+            self.toasts.push(n, false);
+        }
+        // Mini is all artwork; messages wait for a bigger window.
+        if self.windows.mode != WindowMode::Mini {
+            self.toasts.ui(&ctx, ctx.content_rect());
+        }
         // Commands become actions; apply those in the same frame too (bounded,
         // in case something keeps asking).
         for _ in 0..4 {
@@ -1516,11 +1546,6 @@ impl ListenerApp {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("status")
-            .exact_size(24.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
-            .show(ui, |ui| self.status_bar(ui));
         if rail {
             egui::Panel::left("sidebar-rail")
                 .exact_size(sidebar::RAIL_W)
@@ -1569,40 +1594,6 @@ impl ListenerApp {
         if modal.should_close() {
             self.queue_sheet = false;
         }
-    }
-
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let status = self.engine.status.clone();
-        let t = Tokens::of(ui);
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if let Some(e) = self.error.clone() {
-                ui.colored_label(t.warn, egui::RichText::new(e).small());
-                if crate::icons::sized_button(ui, crate::icons::Icon::Close, "Dismiss", egui::vec2(18.0, 18.0), 8.0, Some(t.muted)).clicked() {
-                    self.error = None;
-                }
-            } else if let Some(n) = self.notice.clone() {
-                ui.label(egui::RichText::new(n).small().color(t.muted));
-                if crate::icons::sized_button(ui, crate::icons::Icon::Close, "Dismiss", egui::vec2(18.0, 18.0), 8.0, Some(t.muted)).clicked() {
-                    self.notice = None;
-                }
-            } else {
-                if !self.online && self.settings.is_some() {
-                    crate::icons::inline(ui, crate::icons::Icon::Offline, t.muted);
-                }
-                ui.label(egui::RichText::new(format!("{} · {}", self.server_label, self.sync_label)).small().color(t.muted));
-                if self.track_syncing && widgets::link(ui, "Stop", egui::FontId::proportional(11.0), t.muted).clicked() {
-                    self.bridge.cancel_sync();
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    let codec = self.queue.current.as_ref().and_then(|c| c.track.suffix.as_deref()).map(str::to_uppercase);
-                    self.output.signal_ui(ui, &status, codec.as_deref());
-                });
-            });
-        });
     }
 }
 
