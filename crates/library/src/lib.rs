@@ -106,6 +106,85 @@ pub struct Library {
     db: Database,
 }
 
+/// Analysis results (track id → an opaque record), in a database of their
+/// own: the library database mirrors the server and may be thrown away and
+/// rebuilt at any time, while these took hours of decoding to compute.
+pub struct AnalysisStore {
+    db: Database,
+}
+
+impl AnalysisStore {
+    /// Opens (or creates) the store at `path`. An unreadable file is moved
+    /// aside (`<name>.bad-<unix secs>`) and a fresh store started.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let open = |p: &Path| -> Result<Self> {
+            let db = Database::create(p)?;
+            let wt = db.begin_write()?;
+            wt.open_table(ANALYSIS)?;
+            wt.commit()?;
+            Ok(Self { db })
+        };
+        match open(path) {
+            Err(e) if e.is_damage() => {
+                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let mut aside = path.as_os_str().to_owned();
+                aside.push(format!(".bad-{stamp}"));
+                std::fs::rename(path, PathBuf::from(aside)).map_err(|io| Error::Db(Box::new(redb::StorageError::Io(io).into())))?;
+                open(path)
+            }
+            other => other,
+        }
+    }
+
+    pub fn in_memory() -> Result<Self> {
+        let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
+        let wt = db.begin_write()?;
+        wt.open_table(ANALYSIS)?;
+        wt.commit()?;
+        Ok(Self { db })
+    }
+
+    /// Takes over records an older build kept in the library database (once:
+    /// they're removed there after they're safely here). Returns how many.
+    pub fn adopt(&self, library: &Library) -> Result<usize> {
+        let rows = library.legacy_analysis_records()?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let wt = self.db.begin_write()?;
+        {
+            let mut t = wt.open_table(ANALYSIS)?;
+            for (id, bytes) in &rows {
+                // A newer result already here wins.
+                if t.get(id.as_str())?.is_none() {
+                    t.insert(id.as_str(), bytes.as_slice())?;
+                }
+            }
+        }
+        wt.commit()?;
+        library.clear_legacy_analysis()?;
+        Ok(rows.len())
+    }
+
+    /// Every stored record, by track id.
+    pub fn records(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let rt = self.db.begin_read()?;
+        let mut out = Vec::new();
+        for entry in rt.open_table(ANALYSIS)?.iter()? {
+            let (id, bytes) = entry?;
+            out.push((id.value().to_owned(), bytes.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    pub fn put(&self, track_id: &str, record: &[u8]) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        wt.open_table(ANALYSIS)?.insert(track_id, record)?;
+        Ok(wt.commit()?)
+    }
+}
+
 impl Library {
     /// Opens (or creates) the database file at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -280,8 +359,9 @@ impl Library {
     }
 
     /// Stamps of albums whose tracks are stored and current as of that stamp.
-    /// Every stored analysis record, by track id.
-    pub fn analysis_records(&self) -> Result<Vec<(String, Vec<u8>)>> {
+    /// Analysis records stored here by older builds; they now live in an
+    /// [`AnalysisStore`], which takes them over with [`AnalysisStore::adopt`].
+    fn legacy_analysis_records(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let rt = self.db.begin_read()?;
         let mut out = Vec::new();
         for entry in rt.open_table(ANALYSIS)?.iter()? {
@@ -291,9 +371,9 @@ impl Library {
         Ok(out)
     }
 
-    pub fn put_analysis(&self, track_id: &str, record: &[u8]) -> Result<()> {
+    fn clear_legacy_analysis(&self) -> Result<()> {
         let wt = self.db.begin_write()?;
-        wt.open_table(ANALYSIS)?.insert(track_id, record)?;
+        wt.open_table(ANALYSIS)?.retain(|_, _| false)?;
         Ok(wt.commit()?)
     }
 

@@ -387,6 +387,13 @@ impl ListenerApp {
             tracing::warn!("library database was unreadable; moved to {} and starting fresh", aside.display());
             format!("Library database was unreadable and is being rebuilt (old copy: {})", aside.display())
         });
+        // Analysis results live apart from the (disposable) library mirror.
+        let analyses = Arc::new(library::AnalysisStore::open(paths.library_db.with_file_name("analysis.redb"))?);
+        match analyses.adopt(&library) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("moved {n} analysis results out of the library database"),
+            Err(e) => tracing::warn!("moving analysis results: {e}"),
+        }
         let library = Arc::new(library);
         let (tx, inbox) = channel();
         let bridge = Bridge::new(rt.handle().clone(), tx, ctx.clone(), library.clone());
@@ -437,11 +444,11 @@ impl ListenerApp {
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
         bridge.load_cached_albums();
-        bridge.load_analyses();
+        bridge.load_analyses(analyses.clone());
         let analyzer = {
             let (results, ticks) = (bridge.clone(), bridge.ctx().clone());
             analyze::Runner::start(analyze::Config {
-                library,
+                store: analyses,
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),

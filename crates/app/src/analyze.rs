@@ -9,7 +9,7 @@
 
 use analysis::{Record, TrackAnalysis};
 use audio::Status;
-use library::{Library, Track};
+use library::{AnalysisStore, Track};
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -114,7 +114,8 @@ impl Shared {
 }
 
 pub struct Config {
-    pub library: Arc<Library>,
+    /// Where results are kept.
+    pub store: Arc<AnalysisStore>,
     /// The playback cache: complete files there are read without a download.
     pub playback: StreamCache,
     /// Where files that aren't cached are fetched to.
@@ -281,7 +282,7 @@ fn run(shared: &Shared, cfg: &Config) {
                 st.wall_secs += started.elapsed().as_secs_f64();
                 drop(st);
                 let record = Record { stamp: job.stamp.clone(), analysis };
-                if let Err(e) = cfg.library.put_analysis(&job.track_id, &record.encode()) {
+                if let Err(e) = cfg.store.put(&job.track_id, &record.encode()) {
                     tracing::warn!("storing analysis: {e}");
                 }
                 (cfg.on_result)(job.track_id, record);
@@ -457,7 +458,7 @@ mod tests {
         let cache = |name: &str| StreamCache::new(streamcache::CacheConfig::new(dir.path().join(name)), rt.handle().clone()).unwrap();
         let status = Arc::new(Status::default());
         let cfg = Config {
-            library: Arc::new(Library::open(dir.path().join("lib.redb")).unwrap()),
+            store: Arc::new(AnalysisStore::in_memory().unwrap()),
             playback: cache("play"),
             scratch: cache("scratch"),
             status: status.clone(),

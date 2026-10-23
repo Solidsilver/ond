@@ -177,9 +177,9 @@ impl Bridge {
     }
 
     /// Reads the stored analysis results.
-    pub fn load_analyses(&self) {
+    pub fn load_analyses(&self, store: Arc<library::AnalysisStore>) {
         let this = self.clone();
-        self.rt.spawn_blocking(move || match this.library.analysis_records() {
+        self.rt.spawn_blocking(move || match store.records() {
             Ok(rows) => {
                 let records = rows.into_iter().filter_map(|(id, b)| analysis::Record::decode(&b).map(|r| (id, r))).collect();
                 this.send(Msg::AnalysesLoaded(records));
