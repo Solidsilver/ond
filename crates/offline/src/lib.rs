@@ -294,6 +294,26 @@ impl OfflineStore {
         self.inner.changed(st);
     }
 
+    /// Adds tracks to a pin without dropping any: for track lists that may be
+    /// partial (the local library mid-sync), which can grow a pin but must never
+    /// shrink it and delete downloads. Does nothing if it isn't pinned.
+    pub fn extend(&self, pin: &Pin, tracks: Vec<TrackRef>) {
+        let mut st = self.inner.lock();
+        let Some(rec) = st.pins.record(pin) else { return };
+        let have: std::collections::HashSet<&String> = rec.tracks.iter().collect();
+        let added: Vec<TrackRef> = tracks.into_iter().filter(|t| !have.contains(&t.id)).collect();
+        if added.is_empty() {
+            return;
+        }
+        let label = rec.label.clone();
+        let mut all: Vec<TrackRef> = rec.tracks.iter().filter_map(|id| st.pins.tracks.get(id).map(|s| s.r.clone())).collect();
+        all.extend(added);
+        let gone = st.pins.set(pin.clone(), label, all);
+        debug_assert!(gone.is_empty());
+        self.inner.persist(&st);
+        self.inner.changed(st);
+    }
+
     /// Unpins; files no other pin needs are deleted.
     pub fn unpin(&self, pin: &Pin) {
         let mut st = self.inner.lock();

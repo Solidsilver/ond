@@ -21,7 +21,9 @@ pub enum Msg {
     Albums(Vec<Album>),
     SyncProgress(usize),
     SyncDone(usize),
-    Tracks { album_id: String, tracks: Vec<Track> },
+    /// An album's tracks. `fresh`: straight from the server's `getAlbum` (the
+    /// complete list), not the local library (which may be partial).
+    Tracks { album_id: String, tracks: Vec<Track>, fresh: bool },
     /// An album row refreshed from `getAlbum` (labels, genres).
     AlbumUpdated(Album),
     /// Ids of the most recently added albums, newest first.
@@ -373,7 +375,7 @@ impl Bridge {
             if let Ok(Ok(tracks)) = tokio::task::spawn_blocking(move || lib.album_tracks(&id)).await
                 && !tracks.is_empty()
             {
-                this.send(Msg::Tracks { album_id: album_id.clone(), tracks });
+                this.send(Msg::Tracks { album_id: album_id.clone(), tracks, fresh: false });
             }
             let Some(client) = client else { return };
             let album = match client.album(&album_id).await {
@@ -395,7 +397,7 @@ impl Bridge {
                         this.send(Msg::AlbumUpdated(row));
                     }
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
-                    this.send(Msg::Tracks { album_id, tracks });
+                    this.send(Msg::Tracks { album_id, tracks, fresh: true });
                 }
                 Ok(Err(e)) => this.send(Msg::Error(format!("store album: {e}"))),
                 Err(_) => {}

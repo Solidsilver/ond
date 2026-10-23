@@ -587,11 +587,13 @@ impl ListenerApp {
             Msg::AllTracks(t) => {
                 self.data.set_all_tracks(t);
                 self.search_stale = true;
-                // A sync may have changed pinned albums' track lists.
+                // A sync may have added tracks to pinned albums. The library can be
+                // partial (a sync stopped or failed, a rebuilt database), so this may
+                // only add: removals wait for the server's own listing of the album.
                 let albums: Vec<String> = self.offline_snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
                 for id in albums {
                     if let Some(tracks) = self.data.tracks.get(&id).cloned() {
-                        self.refresh_pin(Pin::Album(id), &tracks);
+                        self.refresh_pin(Pin::Album(id), &tracks, false);
                     }
                 }
                 self.resume_library_analysis();
@@ -630,8 +632,8 @@ impl ListenerApp {
                 self.sync_label = format!("{n} albums");
                 self.track_syncing = true;
             }
-            Msg::Tracks { album_id, tracks } => {
-                self.refresh_pin(Pin::Album(album_id.clone()), &tracks);
+            Msg::Tracks { album_id, tracks, fresh } => {
+                self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.insert(album_id.clone(), tracks);
                 self.run_pending(&format!("album:{album_id}"));
             }
@@ -641,7 +643,8 @@ impl ListenerApp {
             }
             Msg::Playlists(p) => self.data.playlists = p,
             Msg::PlaylistTracks { id, tracks } => {
-                self.refresh_pin(Pin::Playlist(id.clone()), &tracks);
+                // Always the server's complete listing.
+                self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
                 self.data.playlist_tracks.insert(id.clone(), tracks);
                 self.run_pending(&format!("playlist:{id}"));
             }
@@ -694,15 +697,22 @@ impl ListenerApp {
     }
 
     /// Pins `pin` if it was waiting for these tracks, or refreshes its track
-    /// list if it's already pinned.
-    fn refresh_pin(&mut self, pin: Pin, tracks: &[Track]) {
+    /// list if it's already pinned. Only `complete` lists (the server's own
+    /// answer for that album or playlist) may drop tracks and delete their
+    /// downloads; anything else (the local library, which may be mid-sync or
+    /// rebuilt) can only add.
+    fn refresh_pin(&mut self, pin: Pin, tracks: &[Track], complete: bool) {
         let label = self.pin_label(&pin);
         let refs = || tracks.iter().map(track_ref).collect::<Vec<_>>();
         if let Some(at) = self.pending_pins.iter().position(|(_, p)| p == &pin) {
             self.pending_pins.remove(at);
             self.offline.pin(pin, label, refs());
-        } else if self.offline_snap.pin(&pin).is_some() {
-            self.offline.update(&pin, label, refs());
+        } else if self.offline.is_pinned(&pin) {
+            if complete {
+                self.offline.update(&pin, label, refs());
+            } else {
+                self.offline.extend(&pin, refs());
+            }
         }
     }
 
@@ -1903,7 +1913,7 @@ mod tests {
         assert_eq!(app.pending.len(), 1);
         // ...and runs when they arrive.
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
-        app.handle(Msg::Tracks { album_id: "al-12".into(), tracks });
+        app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
         assert_eq!(app.queue.upcoming.len(), before + 3);
         assert!(app.pending.is_empty());
         // Played next: right after what the user already chose to play next.
@@ -1997,12 +2007,18 @@ mod tests {
         app.apply(Action::KeepOffline(Keep::Album("al-5".into()), true));
         assert!(!app.offline.is_pinned(&Pin::Album("al-5".into())));
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
-        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone() });
+        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
         assert!(app.offline.is_pinned(&Pin::Album("al-5".into())));
         assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
-        // The album changed on the server: the pin follows.
+        // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
         app.offline_snap = app.offline.snapshot();
-        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec() });
+        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
+        // (The stored album now lists only y-1; a library-wide refresh sees that.)
+        let all = app.data.all_tracks.to_vec();
+        app.handle(Msg::AllTracks(all));
+        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+        // The album changed on the server: the pin follows.
+        app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
         assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
         download(&mut app, dir.path(), "t-3");
 
