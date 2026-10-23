@@ -157,6 +157,13 @@ impl Queue {
         self.move_to(uid, to)
     }
 
+    /// How many items one trip through the queue visits: the current item,
+    /// what's upcoming and, with "repeat queue", the replayed part of history.
+    pub fn pass_len(&self) -> usize {
+        let replay = if self.end == EndAction::RepeatQueue { self.history.len().saturating_sub(self.cycle_start) } else { 0 };
+        usize::from(self.current.is_some()) + self.upcoming.len() + replay
+    }
+
     /// The track the engine should line up after the current one.
     pub fn peek_next(&self) -> Option<&Item> {
         match self.upcoming.first() {

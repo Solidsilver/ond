@@ -878,11 +878,19 @@ impl ListenerApp {
         self.pending_seek = None;
         self.sent_next = None;
         let mut skipped = 0;
+        // With "repeat queue" the queue never runs out, so give up after one
+        // full pass in which nothing could play.
+        let limit = self.queue.pass_len().max(1);
         loop {
             let Some(item) = &self.queue.current else {
                 self.engine.send(Command::Stop);
                 break;
             };
+            if skipped >= limit {
+                self.engine.send(Command::Stop);
+                self.notice = Some("Nothing in the queue is downloaded".to_owned());
+                return;
+            }
             let prev = self.queue.history.last().map(|i| &i.track);
             let next = self.queue.peek_next().map(|i| &i.track);
             if let Some(src) = self.source(prev, &item.track, next) {
@@ -1813,6 +1821,19 @@ mod tests {
         let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
         // No renderer here to upload textures to.
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn repeat_queue_with_nothing_playable_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        app.online = false;
+        app.queue.end = crate::queue::EndAction::RepeatQueue;
+        let pass = app.queue.pass_len();
+        app.start_current();
+        assert!(app.queue.history.len() <= 2 * pass, "history grew to {}", app.queue.history.len());
+        assert_eq!(app.notice.as_deref(), Some("Nothing in the queue is downloaded"));
     }
 
     #[test]
