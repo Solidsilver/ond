@@ -7,18 +7,23 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 audio = { version = "0.1.0", path = "../audio" }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "accesskit"] }
 egui = "0.37.0"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 keyring = "4.2.0"
 library = { version = "0.1.0", path = "../library" }
 nucleo-matcher = "0.3.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 subsonic = { version = "0.1.0", path = "../subsonic" }
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -111,3 +111,38 @@ fn parses_artists_index() {
     let names: Vec<_> = p.artists.index.iter().flat_map(|i| &i.artist).map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["Air", "Miles Davis"]);
 }
+
+#[test]
+fn parses_navidrome_participants_and_labels() {
+    // Shape as Navidrome 0.55+ returns it from getAlbum (OpenSubsonic).
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2","openSubsonic":true,
+      "album":{"id":"al-7","name":"Sunday at the Village Vanguard","artist":"Bill Evans Trio","songCount":1,"duration":370,
+        "year":1961,"genre":"Jazz","recordLabels":[{"name":"Riverside"}],"genres":[{"name":"Jazz"},{"name":"Cool Jazz"}],
+        "song":[{"id":"s-1","title":"Gloria's Step","track":1,"duration":370,"displayComposer":"Scott LaFaro",
+          "contributors":[
+            {"role":"composer","artist":{"id":"ar-9","name":"Scott LaFaro"}},
+            {"role":"performer","subRole":"piano","artist":{"id":"ar-1","name":"Bill Evans"}},
+            {"role":"producer","artist":{"name":"Orrin Keepnews"}}
+          ]}]}}}"#;
+    let (_, p): (_, AlbumPayload) = parse_response(json).unwrap();
+    let a = p.album;
+    assert_eq!(a.album.record_labels, [Named { name: "Riverside".into() }]);
+    assert_eq!(a.album.genres.len(), 2);
+    let s = &a.song[0];
+    assert_eq!(s.display_composer.as_deref(), Some("Scott LaFaro"));
+    assert_eq!(s.contributors.len(), 3);
+    assert_eq!(s.contributors[1].sub_role.as_deref(), Some("piano"));
+    assert_eq!(s.contributors[2].artist.id, None);
+}
+
+#[test]
+fn parses_playlists() {
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "playlists":{"playlist":[{"id":"pl-1","name":"Late night","songCount":14,"duration":3600,"owner":"me"}]}}}"#;
+    let (_, p): (_, PlaylistsPayload) = parse_response(json).unwrap();
+    assert_eq!(p.playlists.playlist[0].name, "Late night");
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "playlist":{"id":"pl-1","name":"Late night","songCount":1,"duration":200,"entry":[{"id":"s-1","title":"Peace Piece","albumId":"al-3","duration":402}]}}}"#;
+    let (_, p): (_, PlaylistPayload) = parse_response(json).unwrap();
+    assert_eq!(p.playlist.entry[0].album_id.as_deref(), Some("al-3"));
+}

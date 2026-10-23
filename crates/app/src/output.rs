@@ -77,8 +77,9 @@ impl Outputs {
         }
     }
 
-    /// A small button with the device name and a status dot; the popup lists devices.
-    pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths) {
+    /// The output chip: device name with a status dot. Its popup lists devices
+    /// and holds the bit-perfect switch for the device in use.
+    pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths, bit_perfect: &mut bool) {
         if let Some((uid, name)) = self.returned.clone() {
             if ui.small_button(format!("Switch back to {name}")).clicked() {
                 self.choose(Some(uid), engine, paths);
@@ -87,23 +88,37 @@ impl Outputs {
             ui.weak(format!("{name} disconnected"));
         }
         let current = self.devices.iter().find(|d| Some(&d.uid) == self.current.as_ref());
-        let label = current.map_or("Output", |d| d.name.as_str());
+        let label = current.map_or("Output", |d| d.name.as_str()).to_owned();
         let dot = self.dot_color(ui);
-        let button = ui.add(egui::Button::new(label).small());
-        // The status dot sits just inside the button's left edge (painted: no glyph needed).
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 3.5, dot);
-        let button = match &self.signal {
-            Some(p) => button.on_hover_text(hover_text(p)),
-            None => button,
+        let t = crate::theme::Tokens::of(ui);
+        let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.0), t.text);
+        let size = egui::vec2(galley.size().x + 30.0, 24.0);
+        let (rect, chip) = ui.allocate_exact_size(size, egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            let fill = if chip.hovered() { t.hover } else { t.bg };
+            ui.painter().rect(rect, 12.0, fill, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+            ui.painter().galley(egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
+            ui.painter().circle_filled(egui::pos2(rect.right() - 12.0, rect.center().y), 3.5, dot);
+        }
+        chip.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, format!("Output: {label}")));
+        let chip = match &self.signal {
+            Some(p) => chip.on_hover_text(hover_text(p)),
+            None => chip,
         };
-        egui::Popup::menu(&button).show(|ui| {
-            ui.set_min_width(260.0);
-            let follows_default = self.devices.iter().find(|d| d.is_default).map(|d| d.name.as_str()).unwrap_or("default");
-            if ui.button(format!("System default ({follows_default})")).clicked() {
-                self.choose(None, engine, paths);
+        egui::Popup::menu(&chip).show(|ui| {
+            ui.set_min_width(280.0);
+            if ui.checkbox(bit_perfect, "Bit-perfect").changed() {
+                let mode = if *bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                engine.send(Command::SetMode(mode));
+                self.remember_mode(mode, engine, paths);
             }
+            ui.weak(if *bit_perfect { "Volume is your DAC's or the system's in this mode" } else { "Volume, resampling and dither allowed" });
             ui.separator();
+            let follows_default = self.devices.iter().find(|d| d.is_default).map(|d| d.name.as_str()).unwrap_or("default");
+            if ui.selectable_label(self.current.is_none(), format!("System default ({follows_default})")).clicked() {
+                self.choose(None, engine, paths);
+                ui.close();
+            }
             for d in self.devices.clone() {
                 let mode = self.saved_modes.get(&d.uid).map(String::as_str).unwrap_or_else(|| mode_name(d.default_mode()));
                 let selected = Some(&d.uid) == self.current.as_ref();
@@ -120,7 +135,7 @@ impl Outputs {
     fn dot_color(&self, ui: &egui::Ui) -> egui::Color32 {
         let v = ui.visuals();
         match self.signal.as_ref().map(|p| &p.bit_perfect) {
-            Some(BitPerfectStatus::Verified) => egui::Color32::from_rgb(0x4c, 0xaf, 0x50),
+            Some(BitPerfectStatus::Verified) => crate::theme::Tokens::of(ui).ok,
             Some(BitPerfectStatus::Unavailable { .. }) => v.warn_fg_color,
             Some(BitPerfectStatus::Requested { .. }) => v.text_color(),
             _ => v.weak_text_color(),

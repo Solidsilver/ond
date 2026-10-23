@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 const KEYRING_SERVICE: &str = "dev.listener.navidrome";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub server: String,
     pub username: String,
@@ -18,6 +18,30 @@ pub struct Settings {
     /// Playback mode the user picked per device UID: "normal" or "bit-perfect".
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub device_modes: std::collections::HashMap<String, String>,
+    /// Light, dark, or follow the system.
+    #[serde(default)]
+    pub theme: crate::theme::ThemePref,
+    /// Whether the queue column is open.
+    #[serde(default = "yes")]
+    pub show_queue: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            username: String::new(),
+            stream_cache_mb: None,
+            output_device: None,
+            device_modes: Default::default(),
+            theme: Default::default(),
+            show_queue: true,
+        }
+    }
 }
 
 pub struct Paths {
@@ -25,6 +49,8 @@ pub struct Paths {
     pub library_db: PathBuf,
     /// Streamed audio, evictable (`~/Library/Caches/...` on macOS).
     pub stream_cache: PathBuf,
+    /// Downloaded cover art, evictable.
+    pub art_cache: PathBuf,
 }
 
 impl Paths {
@@ -37,6 +63,7 @@ impl Paths {
             config_file: dirs.config_dir().join("settings.json"),
             library_db: dirs.data_dir().join("library.redb"),
             stream_cache: dirs.cache_dir().join("streams"),
+            art_cache: dirs.cache_dir().join("art"),
         })
     }
 }
@@ -50,6 +77,16 @@ impl Settings {
     pub fn save(&self, paths: &Paths) -> anyhow::Result<()> {
         std::fs::write(&paths.config_file, serde_json::to_vec_pretty(self)?)?;
         Ok(())
+    }
+
+    /// Loads, changes and saves the settings file (UI preferences the user just
+    /// changed). Does nothing before the first login has written the file.
+    pub fn update(paths: &Paths, change: impl FnOnce(&mut Settings)) {
+        let Some(mut s) = Self::load(paths) else { return };
+        change(&mut s);
+        if let Err(e) = s.save(paths) {
+            tracing::warn!("saving settings: {e}");
+        }
     }
 
     fn keyring_account(&self) -> String {

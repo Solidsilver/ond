@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bump when a model or index layout changes, and handle the step in `migrate`.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
 const ARTISTS: TableDefinition<&str, &[u8]> = TableDefinition::new("artists");
@@ -262,6 +262,22 @@ impl Library {
         Ok(out)
     }
 
+    /// Albums with a stored track crediting `name` (any role). Only covers albums
+    /// whose tracks have been synced, i.e. opened at least once.
+    pub fn albums_crediting(&self, name: &str) -> Result<Vec<String>> {
+        let rt = self.db.begin_read()?;
+        let tracks = rt.open_table(TRACKS)?;
+        let mut ids = std::collections::BTreeSet::new();
+        for entry in tracks.iter()? {
+            let (_, bytes) = entry?;
+            let t: Track = decode(bytes.value())?;
+            if t.contributors.iter().any(|c| c.name == name) || t.composer.as_deref() == Some(name) {
+                ids.insert(t.album_id);
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
     pub fn album_count(&self) -> Result<u64> {
         Ok(self.db.begin_read()?.open_table(ALBUMS)?.len()?)
     }
@@ -305,13 +321,32 @@ impl Library {
 
 /// Schema upgrades, run inside the opening write transaction. Each step takes
 /// the db from `from` to `from + 1`.
-fn migrate(_wt: &WriteTransaction, from: u32) -> Result<()> {
-    #[allow(clippy::match_single_binding)] // grows a branch per schema version
+fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
     for v in from..SCHEMA_VERSION {
         match v {
             // 0 => only possible for a db created before the meta table existed; nothing to do.
+            0 => {}
+            // v2 adds labels/genres to albums and credits/composer/cover to tracks.
+            // Index keys don't change, so rows are rewritten in place; the new
+            // fields fill in the next time an album is synced.
+            1 => {
+                rewrite_rows::<AlbumV1, AlbumV2>(&mut wt.open_table(ALBUMS)?)?;
+                rewrite_rows::<TrackV1, TrackV2>(&mut wt.open_table(TRACKS)?)?;
+            }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn rewrite_rows<Old: DeserializeOwned, New: Serialize + From<Old>>(table: &mut Table<&'static str, &'static [u8]>) -> Result<()> {
+    let mut rows = Vec::new();
+    for entry in table.iter()? {
+        let (id, bytes) = entry?;
+        rows.push((id.value().to_owned(), New::from(decode::<Old>(bytes.value())?)));
+    }
+    for (id, row) in rows {
+        table.insert(id.as_str(), encode(&row)?.as_slice())?;
     }
     Ok(())
 }

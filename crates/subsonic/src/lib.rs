@@ -118,6 +118,32 @@ impl Client {
         Ok(p.album)
     }
 
+    /// Cover art bytes as the server sends them (usually JPEG), scaled server-side to `size` px.
+    pub async fn cover_art(&self, cover_id: &str, size: Option<u32>) -> Result<Vec<u8>> {
+        let resp = self.http.get(self.cover_art_url(cover_id, size)).send().await?.error_for_status()?;
+        // Errors come back as a JSON envelope rather than an image.
+        let is_json = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("json"));
+        let bytes = resp.bytes().await?;
+        if is_json {
+            parse_response::<serde_json::Value>(&bytes)?;
+        }
+        Ok(bytes.to_vec())
+    }
+
+    pub async fn playlists(&self) -> Result<Vec<Playlist>> {
+        let (_, p): (_, PlaylistsPayload) = self.call("getPlaylists", &[]).await?;
+        Ok(p.playlists.playlist)
+    }
+
+    pub async fn playlist(&self, id: &str) -> Result<PlaylistWithSongs> {
+        let (_, p): (_, PlaylistPayload) = self.call("getPlaylist", &[("id", id)]).await?;
+        Ok(p.playlist)
+    }
+
     pub async fn artists(&self) -> Result<Vec<Artist>> {
         let (_, p): (_, ArtistsPayload) = self.call("getArtists", &[]).await?;
         Ok(p.artists.index.into_iter().flat_map(|i| i.artist).collect())

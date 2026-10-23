@@ -84,6 +84,12 @@ pub struct Album {
     pub play_count: Option<u64>,
     /// OpenSubsonic: sort-friendly name without leading articles.
     pub sort_name: Option<String>,
+    /// OpenSubsonic.
+    #[serde(default)]
+    pub record_labels: Vec<Named>,
+    /// OpenSubsonic: every genre, where `genre` is only the first.
+    #[serde(default)]
+    pub genres: Vec<Named>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -133,6 +139,55 @@ pub struct Song {
     pub channel_count: Option<u32>,
     /// OpenSubsonic.
     pub replay_gain: Option<ReplayGain>,
+    /// OpenSubsonic: composers joined for display.
+    pub display_composer: Option<String>,
+    /// OpenSubsonic: everyone credited besides the main artists, by role.
+    #[serde(default)]
+    pub contributors: Vec<Contributor>,
+}
+
+/// `{ "name": ... }` objects: record labels, genres.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct Named {
+    pub name: String,
+}
+
+/// OpenSubsonic credit: `role` is e.g. "composer", "producer", "performer";
+/// `subRole` narrows it, e.g. the instrument for a performer.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Contributor {
+    pub role: String,
+    pub sub_role: Option<String>,
+    pub artist: ArtistRef,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ArtistRef {
+    pub id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub song_count: u32,
+    /// Seconds.
+    #[serde(default)]
+    pub duration: u32,
+    pub cover_art: Option<String>,
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PlaylistWithSongs {
+    #[serde(flatten)]
+    pub playlist: Playlist,
+    #[serde(default)]
+    pub entry: Vec<Song>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -178,4 +233,20 @@ pub(crate) struct ArtistIndexes {
 pub(crate) struct ArtistIndex {
     #[serde(default)]
     pub artist: Vec<Artist>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistsPayload {
+    pub playlists: PlaylistList,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistList {
+    #[serde(default)]
+    pub playlist: Vec<Playlist>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistPayload {
+    pub playlist: PlaylistWithSongs,
 }

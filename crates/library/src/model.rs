@@ -4,8 +4,8 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 /// Current schema versions. When a model changes, add a `V2` struct, point the
 /// alias at it and rewrite rows in `Library::migrate`.
 pub type Artist = ArtistV1;
-pub type Album = AlbumV1;
-pub type Track = TrackV1;
+pub type Album = AlbumV2;
+pub type Track = TrackV2;
 
 /// Sort-key normalization: case- and accent-insensitive, so "Björk" sorts with
 /// "Bjork" and "bill evans" with "Bill Evans".
@@ -49,7 +49,25 @@ pub struct AlbumV1 {
     pub created: Option<String>,
 }
 
-impl AlbumV1 {
+/// Schema v2: adds record labels and all genres.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AlbumV2 {
+    pub id: String,
+    pub name: String,
+    pub sort: Option<String>,
+    pub artist: Option<String>,
+    pub artist_ref: Option<String>,
+    pub year: Option<i32>,
+    pub genre: Option<String>,
+    pub song_count: u32,
+    pub duration_secs: u32,
+    pub cover_art: Option<String>,
+    pub created: Option<String>,
+    pub labels: Vec<String>,
+    pub genres: Vec<String>,
+}
+
+impl AlbumV2 {
     /// Index key parts: artist, year, title, id. Groups an artist's albums
     /// chronologically; the id keeps same-named albums distinct.
     pub(crate) fn sort_parts(&self) -> (String, i32, String) {
@@ -59,9 +77,34 @@ impl AlbumV1 {
             fold(self.sort.as_deref().unwrap_or(&self.name)),
         )
     }
+
+    /// Every genre: the OpenSubsonic list, else the single legacy field.
+    pub fn all_genres(&self) -> Vec<&str> {
+        if self.genres.is_empty() { self.genre.as_deref().into_iter().collect() } else { self.genres.iter().map(String::as_str).collect() }
+    }
 }
 
-impl From<subsonic::Album> for AlbumV1 {
+impl From<AlbumV1> for AlbumV2 {
+    fn from(a: AlbumV1) -> Self {
+        Self {
+            id: a.id,
+            name: a.name,
+            sort: a.sort,
+            artist: a.artist,
+            artist_ref: a.artist_ref,
+            year: a.year,
+            genre: a.genre,
+            song_count: a.song_count,
+            duration_secs: a.duration_secs,
+            cover_art: a.cover_art,
+            created: a.created,
+            labels: Vec::new(),
+            genres: Vec::new(),
+        }
+    }
+}
+
+impl From<subsonic::Album> for AlbumV2 {
     fn from(a: subsonic::Album) -> Self {
         Self {
             id: a.id,
@@ -75,6 +118,8 @@ impl From<subsonic::Album> for AlbumV1 {
             duration_secs: a.duration,
             cover_art: a.cover_art,
             created: a.created,
+            labels: a.record_labels.into_iter().map(|l| l.name).collect(),
+            genres: a.genres.into_iter().map(|g| g.name).collect(),
         }
     }
 }
@@ -101,7 +146,72 @@ pub struct TrackV1 {
     pub album_peak: Option<f32>,
 }
 
-impl TrackV1 {
+/// A credit on a track: who, in what role ("composer", "performer" + "piano").
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Contributor {
+    pub role: String,
+    pub sub_role: Option<String>,
+    pub name: String,
+    pub artist_id: Option<String>,
+}
+
+/// Schema v2: adds the artist id, composer, credits and per-track cover art.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TrackV2 {
+    pub id: String,
+    pub album_id: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub artist_ref: Option<String>,
+    pub track: Option<u32>,
+    pub disc: Option<u32>,
+    pub duration_secs: Option<u32>,
+    pub suffix: Option<String>,
+    pub content_type: Option<String>,
+    pub size: Option<u64>,
+    pub bit_rate_kbps: Option<u32>,
+    pub bit_depth: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u32>,
+    pub track_gain: Option<f32>,
+    pub album_gain: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_peak: Option<f32>,
+    pub composer: Option<String>,
+    pub contributors: Vec<Contributor>,
+    pub cover_art: Option<String>,
+}
+
+impl From<TrackV1> for TrackV2 {
+    fn from(t: TrackV1) -> Self {
+        Self {
+            id: t.id,
+            album_id: t.album_id,
+            title: t.title,
+            artist: t.artist,
+            artist_ref: None,
+            track: t.track,
+            disc: t.disc,
+            duration_secs: t.duration_secs,
+            suffix: t.suffix,
+            content_type: t.content_type,
+            size: t.size,
+            bit_rate_kbps: t.bit_rate_kbps,
+            bit_depth: t.bit_depth,
+            sample_rate: t.sample_rate,
+            channels: t.channels,
+            track_gain: t.track_gain,
+            album_gain: t.album_gain,
+            track_peak: t.track_peak,
+            album_peak: t.album_peak,
+            composer: None,
+            contributors: Vec::new(),
+            cover_art: None,
+        }
+    }
+}
+
+impl TrackV2 {
     /// Index key parts after the album id: disc, track. Missing disc sorts as 1.
     pub(crate) fn order_parts(&self) -> (u32, u32) {
         (self.disc.unwrap_or(1), self.track.unwrap_or(0))
@@ -114,6 +224,7 @@ impl TrackV1 {
             album_id: s.album_id.unwrap_or_else(|| album_id.to_owned()),
             title: s.title,
             artist: s.artist,
+            artist_ref: s.artist_id,
             track: s.track,
             disc: s.disc_number,
             duration_secs: s.duration,
@@ -128,6 +239,13 @@ impl TrackV1 {
             album_gain: rg.album_gain,
             track_peak: rg.track_peak,
             album_peak: rg.album_peak,
+            composer: s.display_composer.filter(|c| !c.is_empty()),
+            contributors: s
+                .contributors
+                .into_iter()
+                .map(|c| Contributor { role: c.role, sub_role: c.sub_role, name: c.artist.name, artist_id: c.artist.id })
+                .collect(),
+            cover_art: s.cover_art,
         }
     }
 

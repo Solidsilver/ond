@@ -15,6 +15,8 @@ fn album(id: &str, name: &str, artist: &str, year: i32) -> subsonic::Album {
         starred: None,
         play_count: None,
         sort_name: None,
+        record_labels: Vec::new(),
+        genres: Vec::new(),
     }
 }
 
@@ -40,6 +42,8 @@ fn song(id: &str, album_id: &str, disc: u32, track: u32) -> subsonic::Song {
         sampling_rate: Some(88_200),
         channel_count: Some(2),
         replay_gain: None,
+        display_composer: None,
+        contributors: Vec::new(),
     }
 }
 
@@ -265,4 +269,88 @@ fn newer_schema_is_refused_not_destroyed() {
     assert!(matches!(err, Error::NewerSchema { .. }));
     assert!(err.to_string().contains("newer version of Listener"), "{err}");
     assert_eq!(files_in(dir.path()), ["library.redb"], "nothing moved or deleted");
+}
+
+#[test]
+fn v1_rows_migrate_to_v2() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.redb");
+    // Hand-build a v1 database: v1 rows and index entries, schema 1.
+    {
+        let db = redb::Database::create(&path).unwrap();
+        let wt = db.begin_write().unwrap();
+        {
+            wt.open_table(META).unwrap().insert(SCHEMA_KEY, 1).unwrap();
+            let v1 = AlbumV1 {
+                id: "al-1".into(),
+                name: "Kind of Blue".into(),
+                sort: None,
+                artist: Some("Miles Davis".into()),
+                artist_ref: None,
+                year: Some(1959),
+                genre: Some("Jazz".into()),
+                song_count: 1,
+                duration_secs: 562,
+                cover_art: None,
+                created: None,
+            };
+            wt.open_table(ALBUMS).unwrap().insert("al-1", encode(&v1).unwrap().as_slice()).unwrap();
+            wt.open_table(ALBUMS_BY_SORT).unwrap().insert(("miles davis", 1959, "kind of blue", "al-1"), ()).unwrap();
+            let t1 = TrackV1 {
+                id: "s-1".into(),
+                album_id: "al-1".into(),
+                title: "So What".into(),
+                artist: None,
+                track: Some(1),
+                disc: Some(1),
+                duration_secs: Some(562),
+                suffix: None,
+                content_type: None,
+                size: None,
+                bit_rate_kbps: None,
+                bit_depth: None,
+                sample_rate: None,
+                channels: None,
+                track_gain: None,
+                album_gain: None,
+                track_peak: None,
+                album_peak: None,
+            };
+            wt.open_table(TRACKS).unwrap().insert("s-1", encode(&t1).unwrap().as_slice()).unwrap();
+            wt.open_table(TRACKS_BY_ALBUM).unwrap().insert(("al-1", 1, 1, "s-1"), ()).unwrap();
+        }
+        wt.commit().unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    assert_eq!(lib.schema_version().unwrap(), 2);
+    let albums = lib.albums().unwrap();
+    assert_eq!(albums[0].name, "Kind of Blue");
+    assert_eq!(albums[0].all_genres(), ["Jazz"]);
+    assert!(albums[0].labels.is_empty());
+    let tracks = lib.album_tracks("al-1").unwrap();
+    assert_eq!(tracks[0].title, "So What");
+    assert!(tracks[0].contributors.is_empty());
+    assert!(lib.check_indexes().unwrap().is_empty());
+}
+
+#[test]
+fn credits_are_stored_and_findable() {
+    let lib = Library::in_memory().unwrap();
+    let mut s = song("s-1", "al-1", 1, 1);
+    s.display_composer = Some("Scott LaFaro".into());
+    s.contributors = vec![subsonic::Contributor {
+        role: "performer".into(),
+        sub_role: Some("piano".into()),
+        artist: subsonic::ArtistRef { id: Some("ar-1".into()), name: "Bill Evans".into() },
+    }];
+    let mut a = album("al-1", "Sunday at the Village Vanguard", "Bill Evans Trio", 1961);
+    a.record_labels = vec![subsonic::Named { name: "Riverside".into() }];
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a, song: vec![s] }).unwrap();
+    let t = &lib.album_tracks("al-1").unwrap()[0];
+    assert_eq!(t.composer.as_deref(), Some("Scott LaFaro"));
+    assert_eq!(t.contributors[0].sub_role.as_deref(), Some("piano"));
+    assert_eq!(lib.album("al-1").unwrap().unwrap().labels, ["Riverside"]);
+    assert_eq!(lib.albums_crediting("Bill Evans").unwrap(), ["al-1"]);
+    assert_eq!(lib.albums_crediting("Scott LaFaro").unwrap(), ["al-1"]);
+    assert!(lib.albums_crediting("Nobody").unwrap().is_empty());
 }

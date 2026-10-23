@@ -1,15 +1,18 @@
 //! Listener: a native Navidrome client.
 //!
-//! The UI here is a deliberately throwaway spike. It proves the plumbing:
-//! login → sync into the local db → browse → play through the audio engine,
+//! Login → sync into the local db → browse → play through the audio engine,
 //! with the UI thread never blocking.
 
 mod app;
+mod art;
 mod bridge;
 mod icons;
+mod nav;
 mod output;
+mod queue;
 mod search;
 mod settings;
+mod theme;
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt()
@@ -19,7 +22,7 @@ fn main() -> eframe::Result {
         .init();
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 720.0]).with_min_inner_size([640.0, 400.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1360.0, 860.0]).with_min_inner_size([900.0, 560.0]),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

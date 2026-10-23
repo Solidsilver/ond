@@ -120,6 +120,8 @@ mod tests {
             duration_secs: 0,
             cover_art: None,
             created: None,
+            labels: Vec::new(),
+            genres: Vec::new(),
         }
     }
 
