@@ -14,6 +14,8 @@ pub struct Palette {
     pub(super) query: String,
     results: Results,
     selected: usize,
+    /// The selection moved by keyboard: scroll it into view once.
+    follow: bool,
 }
 
 impl Palette {
@@ -34,6 +36,10 @@ enum Verb {
 
 const WIDTH: f32 = 640.0;
 const ROW_H: f32 = 44.0;
+const QUERY_H: f32 = 52.0;
+const HINTS_H: f32 = 34.0;
+/// A group's title line.
+const GROUP_H: f32 = 24.0;
 
 impl ListenerApp {
     pub(super) fn palette_ui(&mut self, ctx: &egui::Context) {
@@ -68,13 +74,22 @@ impl ListenerApp {
         if n > 0 {
             if down {
                 palette.selected = (palette.selected + 1) % n;
+                palette.follow = true;
             }
             if up {
                 palette.selected = (palette.selected + n - 1) % n;
+                palette.follow = true;
             }
         }
 
-        let modal = egui::Modal::new(egui::Id::unique("palette")).frame(egui::Frame::popup(&ctx.global_style()).inner_margin(0).corner_radius(12)).show(ctx, |ui| {
+        // Anchored near the top so the field stays put while results grow and
+        // shrink, as in Spotlight.
+        let screen = ctx.content_rect();
+        let top = (screen.height() * 0.12).clamp(24.0, 120.0);
+        let list_max = (screen.height() * 0.72 - QUERY_H - HINTS_H).max(ROW_H * 3.0);
+        let id = egui::Id::unique("palette");
+        let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, vec2(0.0, top));
+        let modal = egui::Modal::new(id).area(area).frame(egui::Frame::popup(&ctx.global_style()).inner_margin(0).corner_radius(12)).show(ctx, |ui| {
             let t = Tokens::of(ui);
             ui.set_width(WIDTH);
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -83,7 +98,7 @@ impl ListenerApp {
 
             // Query field.
             ui.horizontal(|ui| {
-                ui.set_height(52.0);
+                ui.set_height(QUERY_H);
                 ui.add_space(16.0);
                 let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                 icons::paint(ui.painter(), r, Icon::Search, t.muted);
@@ -99,6 +114,7 @@ impl ListenerApp {
                 if edit.changed() {
                     palette.results = index.search(&palette.query);
                     palette.selected = 0;
+                    palette.follow = true;
                 }
                 ui.label(egui::RichText::new("esc").size(11.0).color(t.muted));
             });
@@ -116,31 +132,41 @@ impl ListenerApp {
                     ui.add_space(14.0);
                 }
             } else {
-                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                let groups: [(&str, Vec<Hit>); 4] = [
+                    ("Top hit", r.top.into_iter().collect()),
+                    ("Artists", r.artists.iter().map(|&i| Hit::Artist(i)).collect()),
+                    ("Albums", r.albums.iter().map(|&i| Hit::Album(i)).collect()),
+                    ("Songs", r.tracks.iter().map(|&i| Hit::Track(i)).collect()),
+                ];
+                // Tall enough for everything when it fits, so groups aren't
+                // hidden behind a scroll; scrolls only past ~70% of the window.
+                let shown = groups.iter().filter(|(_, h)| !h.is_empty());
+                let content_h = 6.0 + shown.map(|(_, h)| GROUP_H + ROW_H * h.len() as f32 + 6.0).sum::<f32>();
+                let follow = std::mem::take(&mut palette.follow);
+                egui::ScrollArea::vertical().min_scrolled_height(content_h.min(list_max)).max_height(list_max).show(ui, |ui| {
                     ui.add_space(6.0);
                     let mut row = 0;
-                    let groups: [(&str, Vec<Hit>); 4] = [
-                        ("Top hit", r.top.into_iter().collect()),
-                        ("Artists", r.artists.iter().map(|&i| Hit::Artist(i)).collect()),
-                        ("Albums", r.albums.iter().map(|&i| Hit::Album(i)).collect()),
-                        ("Songs", r.tracks.iter().map(|&i| Hit::Track(i)).collect()),
-                    ];
                     for (title, hits) in groups {
                         if hits.is_empty() {
                             continue;
                         }
-                        ui.horizontal(|ui| {
-                            ui.add_space(18.0);
-                            ui.label(egui::RichText::new(title).font(FontId::new(11.0, semibold())).color(t.muted));
-                        });
-                        ui.add_space(4.0);
+                        let (head, _) = ui.allocate_exact_size(vec2(WIDTH, GROUP_H), Sense::hover());
+                        ui.painter().text(
+                            pos2(head.left() + 18.0, head.bottom() - 4.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            title,
+                            FontId::new(11.0, semibold()),
+                            t.muted,
+                        );
                         for hit in hits {
                             let selected = row == palette.selected;
                             let (rect, resp) = ui.allocate_exact_size(vec2(WIDTH, ROW_H), Sense::click());
                             let inner = rect.shrink2(vec2(8.0, 1.0));
                             if selected {
                                 ui.painter().rect_filled(inner, 8.0, t.selected);
-                                resp.scroll_to_me(None);
+                                if follow {
+                                    resp.scroll_to_me(None);
+                                }
                             } else if resp.hovered() {
                                 ui.painter().rect_filled(inner, 8.0, t.hover);
                             }
@@ -198,7 +224,7 @@ impl ListenerApp {
             }
 
             // Key hints.
-            let (bar, _) = ui.allocate_exact_size(vec2(WIDTH, 34.0), Sense::hover());
+            let (bar, _) = ui.allocate_exact_size(vec2(WIDTH, HINTS_H), Sense::hover());
             ui.painter().rect_filled(bar, egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 }, t.sidebar);
             ui.painter().hline(bar.x_range(), bar.top(), egui::Stroke::new(1.0, t.hairline));
             ui.painter().text(
