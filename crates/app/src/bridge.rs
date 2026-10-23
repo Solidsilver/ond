@@ -6,18 +6,20 @@ use crate::settings::{Paths, Settings};
 use crate::sync;
 use library::{Album, Library, Track};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use subsonic::{AlbumListType, Client, Credentials};
 
 pub enum Msg {
-    Connected { client: Client, settings: Box<Settings>, server: String },
+    /// `session`: the bridge's session when the connect began; the app drops
+    /// it if the user signed out since.
+    Connected { session: u64, client: Client, settings: Box<Settings>, server: String },
     ConnectFailed(String),
     /// The server can't be reached (saved login, so the app opens offline);
     /// reconnecting continues in the background and ends with `Connected`.
-    Unreachable { username: String, error: String },
+    Unreachable { session: u64, username: String, error: String },
     /// A ping's round trip, or `None` when it got no answer.
     Latency(Option<Duration>),
     Albums(Vec<Album>),
@@ -112,6 +114,9 @@ pub struct Bridge {
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     /// A reconnect loop is running (one is enough).
     reconnecting: Arc<AtomicBool>,
+    /// Bumped on sign-out: connects and reconnect loops started before it stop
+    /// and their results are ignored.
+    session: Arc<AtomicU64>,
     /// The last request sent per heart or rating: the next one for the same
     /// item waits for it, so the server sees them in the order they were made.
     in_order: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
@@ -119,7 +124,16 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, ctx: egui::Context, library: Arc<Library>) -> Self {
-        Self { rt, tx, ctx, library, sync_cancel: Arc::default(), reconnecting: Arc::default(), in_order: Arc::default() }
+        Self {
+            rt,
+            tx,
+            ctx,
+            library,
+            sync_cancel: Arc::default(),
+            reconnecting: Arc::default(),
+            session: Arc::default(),
+            in_order: Arc::default(),
+        }
     }
 
     /// Runs `job` after the previous job queued under `key` has finished.
@@ -137,6 +151,22 @@ impl Bridge {
             job.await;
         });
         chains.insert(key, handle);
+    }
+
+    /// The current login session (see [`end_session`](Self::end_session)).
+    pub fn session(&self) -> u64 {
+        self.session.load(Ordering::Acquire)
+    }
+
+    /// Signing out: connects and reconnect loops in flight give up, and
+    /// anything they still deliver is recognised as stale.
+    pub fn end_session(&self) {
+        self.session.fetch_add(1, Ordering::AcqRel);
+        self.reconnecting.store(false, Ordering::Relaxed);
+    }
+
+    fn live(&self, session: u64) -> bool {
+        self.session() == session
     }
 
     pub fn ctx(&self) -> &egui::Context {
@@ -209,6 +239,7 @@ impl Bridge {
     /// login failure: the app opens offline and keeps retrying until it's back.
     pub fn connect(&self, settings: Settings, password: Option<String>, paths: Arc<Paths>) {
         let this = self.clone();
+        let session = self.session();
         self.rt.spawn(async move {
             let saved = password.is_none();
             let password = match password {
@@ -225,7 +256,11 @@ impl Bridge {
                 Ok(c) => c,
                 Err(e) => return this.send(Msg::ConnectFailed(connect_error(&e))),
             };
-            match ping(&client).await {
+            let pinged = ping(&client).await;
+            if !this.live(session) {
+                return;
+            }
+            match pinged {
                 Ok(server) => {
                     let s = settings.clone();
                     let _ = tokio::task::spawn_blocking(move || {
@@ -237,11 +272,11 @@ impl Bridge {
                         }
                     })
                     .await;
-                    this.send(Msg::Connected { client, settings: Box::new(settings), server });
+                    this.send(Msg::Connected { session, client, settings: Box::new(settings), server });
                 }
                 Err(PingError::Unreachable(e)) if saved => {
-                    this.send(Msg::Unreachable { username: settings.username.clone(), error: e });
-                    this.reconnect(client, settings);
+                    this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
+                    this.reconnect(client, settings, session);
                 }
                 Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(Msg::ConnectFailed(e)),
             }
@@ -265,17 +300,21 @@ impl Bridge {
             return;
         }
         let this = self.clone();
+        let session = self.session();
         self.rt.spawn(async move {
-            if let Err(PingError::Unreachable(e)) = ping(&client).await {
-                this.send(Msg::Unreachable { username: settings.username.clone(), error: e });
-                this.reconnect(client, settings);
+            if let Err(PingError::Unreachable(e)) = ping(&client).await
+                && this.live(session)
+            {
+                this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
+                this.reconnect(client, settings, session);
             }
         });
     }
 
-    /// Pings with backoff (5 s, doubling to a minute) until the server answers.
-    fn reconnect(&self, client: Client, settings: Settings) {
-        if self.reconnecting.swap(true, Ordering::Relaxed) {
+    /// Pings with backoff (5 s, doubling to a minute) until the server answers,
+    /// or until the user signs out (`session` ends).
+    fn reconnect(&self, client: Client, settings: Settings, session: u64) {
+        if !self.live(session) || self.reconnecting.swap(true, Ordering::Relaxed) {
             return;
         }
         let this = self.clone();
@@ -283,10 +322,19 @@ impl Bridge {
             let mut delay = Duration::from_secs(5);
             loop {
                 tokio::time::sleep(delay).await;
-                match ping(&client).await {
+                if !this.live(session) {
+                    // Signed out: `end_session` already cleared `reconnecting`
+                    // (and a new loop may own it now).
+                    return;
+                }
+                let pinged = ping(&client).await;
+                if !this.live(session) {
+                    return;
+                }
+                match pinged {
                     Ok(server) => {
                         this.reconnecting.store(false, Ordering::Relaxed);
-                        return this.send(Msg::Connected { client, settings: Box::new(settings), server });
+                        return this.send(Msg::Connected { session, client, settings: Box::new(settings), server });
                     }
                     Err(PingError::Unreachable(_)) => delay = (delay * 2).min(Duration::from_secs(60)),
                     Err(PingError::Refused(e)) => {

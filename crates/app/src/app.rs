@@ -602,7 +602,9 @@ impl ListenerApp {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Connected { client, settings, server } => {
+            // From before a sign-out: stale, whatever it says.
+            Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
+            Msg::Connected { client, settings, server, .. } => {
                 self.server_label = format!("{} · {}", settings.username, server);
                 self.server_info = server.clone();
                 self.login = None;
@@ -644,7 +646,7 @@ impl ListenerApp {
                 form.busy = false;
                 form.error = Some(e);
             }
-            Msg::Unreachable { username, error } => {
+            Msg::Unreachable { username, error, .. } => {
                 tracing::info!("server unreachable: {error}");
                 self.login = None;
                 self.set_offline();
@@ -1505,7 +1507,11 @@ impl ListenerApp {
         self.overlay = None;
         self.favorites = Favorites::default();
         self.bridge.cancel_sync();
-        self.client = None;
+        // Reconnect loops and connects in flight stop; anything they still
+        // deliver is ignored. Downloads lose their server (and its credentials).
+        self.bridge.end_session();
+        self.set_offline();
+        self.unreachable = false;
         self.server_label.clear();
         let saved = Settings::load(&self.paths);
         if let Some(s) = saved.clone() {
@@ -2253,10 +2259,39 @@ mod tests {
 
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
-        app.handle(Msg::Connected { client, settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into() });
         assert!(app.online);
         assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
         assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
+    }
+
+    #[test]
+    fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+        // Signed in, then the server went away: a reconnect loop is running.
+        let before = app.bridge.session();
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        assert!(app.online && app.client.is_some());
+        app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
+        assert!(app.unreachable);
+
+        app.sign_out();
+        assert!(app.login.is_some());
+        assert!(app.client.is_none() && !app.online && !app.unreachable);
+        assert_ne!(app.bridge.session(), before, "sign-out ends the session");
+
+        // The old loop reaches the server after all: stale, ignored.
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
+        assert!(app.login.is_some(), "still on the login screen");
+        assert!(app.client.is_none() && !app.online && !app.unreachable);
+
+        // A fresh sign-in in the new session works.
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into() });
+        assert!(app.login.is_none() && app.online);
     }
 
     #[test]
