@@ -18,6 +18,7 @@ mod widgets;
 #[cfg(test)]
 mod snapshots;
 
+use crate::analyze;
 use crate::art::Art;
 use crate::bridge::{Bridge, Msg};
 use crate::nav::{Nav, Route};
@@ -152,6 +153,13 @@ pub enum Action {
     /// Into Mini, or back to where Mini was entered from.
     ToggleMini,
     SetScrobble(bool),
+    /// Analyse these tracks (those without a current result) in the background.
+    Analyze(Vec<Track>),
+    AnalyzeLibrary,
+    PauseAnalysis(bool),
+    /// Stop and forget everything queued for analysis.
+    StopAnalysis,
+    SetAnalyzePlaying(bool),
     /// Back to the login screen; the saved password is forgotten.
     SignOut,
     /// Keep (true) or stop keeping something on this computer.
@@ -296,6 +304,17 @@ pub struct ListenerApp {
     online: bool,
     /// The login in use, for reconnecting.
     settings: Option<Settings>,
+    /// Stored analysis results by track id, with the file stamp they're for.
+    analyses: HashMap<String, analysis::Record>,
+    /// The stored results have been read (until then everything looks unanalysed).
+    analyses_loaded: bool,
+    analyzer: analyze::Runner,
+    /// A library-wide analysis should be running (resumed after a restart).
+    analysis_library: bool,
+    /// Analyse each track as it plays (it's in the playback cache by then).
+    analyze_playing: bool,
+    /// The album page's analysis table is open.
+    analysis_open: bool,
 }
 
 impl ListenerApp {
@@ -315,7 +334,7 @@ impl ListenerApp {
         });
         let library = Arc::new(library);
         let (tx, inbox) = channel();
-        let bridge = Bridge::new(rt.handle().clone(), tx, ctx.clone(), library);
+        let bridge = Bridge::new(rt.handle().clone(), tx, ctx.clone(), library.clone());
 
         let saved = Settings::load(&paths);
         let theme_pref = saved.as_ref().map(|s| s.theme).unwrap_or_default();
@@ -342,6 +361,12 @@ impl ListenerApp {
             store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&audio::CacheKey::new(r.id.clone(), r.suffix.clone()))));
             store
         };
+        let playback_cache = cache.clone();
+        // Analysis fetches uncached files here, so a library-wide run doesn't
+        // evict what was just played.
+        let mut scratch_cfg = audio::CacheConfig::new(paths.stream_cache.with_file_name("analysis"));
+        scratch_cfg.max_bytes = 64 * 1024 * 1024;
+        let scratch_cache = audio::StreamCache::new(scratch_cfg, rt.handle().clone())?;
         let engine = audio::spawn(audio::EngineConfig::default(), backend, Some(cache));
         let output = Outputs::restore(&engine, saved.as_ref());
         let scrobble = saved.as_ref().is_none_or(|s| s.scrobble);
@@ -357,6 +382,18 @@ impl ListenerApp {
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
         bridge.load_cached_albums();
+        bridge.load_analyses();
+        let analyzer = {
+            let (results, ticks) = (bridge.clone(), bridge.ctx().clone());
+            analyze::Runner::start(analyze::Config {
+                library,
+                playback: playback_cache,
+                scratch: scratch_cache,
+                status: engine.status.clone(),
+                on_result: Arc::new(move |track_id, record| results.post(Msg::Analyzed { track_id, record })),
+                on_progress: Arc::new(move || ticks.request_repaint()),
+            })
+        };
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
 
         let login = match &saved {
@@ -418,7 +455,13 @@ impl ListenerApp {
             offline,
             pending_pins: Vec::new(),
             online: false,
+            analysis_library: saved.as_ref().is_some_and(|s| s.analysis_resume),
+            analyze_playing: saved.as_ref().is_some_and(|s| s.analyze_playing),
             settings: saved,
+            analyses: HashMap::new(),
+            analyses_loaded: false,
+            analyzer,
+            analysis_open: false,
         })
     }
 
@@ -449,6 +492,7 @@ impl ListenerApp {
                     self.sent_next = None;
                     self.sync_next();
                 }
+                self.resume_library_analysis();
             }
             Msg::ConnectFailed(e) => {
                 self.set_offline();
@@ -484,6 +528,15 @@ impl ListenerApp {
                         self.refresh_pin(Pin::Album(id), &tracks);
                     }
                 }
+                self.resume_library_analysis();
+            }
+            Msg::Analyzed { track_id, record } => {
+                self.analyses.insert(track_id, record);
+            }
+            Msg::AnalysesLoaded(rows) => {
+                self.analyses.extend(rows);
+                self.analyses_loaded = true;
+                self.resume_library_analysis();
             }
             Msg::TrackSync(p) => {
                 self.track_syncing = true;
@@ -676,6 +729,11 @@ impl ListenerApp {
         }
         match ev {
             audio::Event::TrackStarted { track_id, .. } => {
+                if self.analyze_playing
+                    && let Some(t) = self.playing_track(&track_id)
+                {
+                    self.enqueue_analysis(std::slice::from_ref(&t));
+                }
                 let is_current = self.queue.current.as_ref().is_some_and(|c| c.track.id == track_id);
                 let is_next = self.queue.peek_next().is_some_and(|n| n.track.id == track_id);
                 if !is_current && is_next {
@@ -1027,7 +1085,75 @@ impl ListenerApp {
                     }
                 }
             }
+            Action::Analyze(tracks) => {
+                self.analyzer.set_paused(false);
+                self.enqueue_analysis(&tracks);
+            }
+            Action::AnalyzeLibrary => {
+                self.analysis_library = true;
+                Settings::update(&self.paths, |s| s.analysis_resume = true);
+                self.analyzer.set_paused(false);
+                self.resume_library_analysis();
+            }
+            Action::PauseAnalysis(paused) => self.analyzer.set_paused(paused),
+            Action::StopAnalysis => {
+                self.analyzer.clear();
+                self.analyzer.set_paused(false);
+                self.finish_library_analysis();
+            }
+            Action::SetAnalyzePlaying(on) => {
+                self.analyze_playing = on;
+                Settings::update(&self.paths, |s| s.analyze_playing = on);
+            }
         }
+    }
+
+    /// The queue entry the engine just started: the current one, or the next (gapless).
+    fn playing_track(&self, id: &str) -> Option<Track> {
+        [self.queue.current.as_ref(), self.queue.peek_next()].into_iter().flatten().find(|i| i.track.id == id).map(|i| i.track.clone())
+    }
+
+    /// A track's analysis, if there is one for the file as it is now.
+    pub fn analysis_of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
+        self.analyses.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
+    }
+
+    /// Queues the tracks that have no current analysis; returns how many.
+    fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
+        let Some(client) = &self.client else { return 0 };
+        let jobs: Vec<analyze::Job> = tracks
+            .iter()
+            .filter(|t| self.analysis_of(t).is_none())
+            .map(|t| analyze::job_for(t, client.stream_url(&t.id).to_string()))
+            .collect();
+        self.analyzer.enqueue(jobs)
+    }
+
+    /// Queues the whole library, once the tracks, the stored results and the
+    /// server are all there (so finished tracks aren't redone).
+    fn resume_library_analysis(&mut self) {
+        if self.analysis_library && self.analyses_loaded && self.client.is_some() && !self.data.all_tracks.is_empty() {
+            let all = self.data.all_tracks.clone();
+            self.enqueue_analysis(&all);
+            if !self.analyzer.progress().active() {
+                self.finish_library_analysis();
+            }
+        }
+    }
+
+    fn finish_library_analysis(&mut self) {
+        if std::mem::take(&mut self.analysis_library) {
+            Settings::update(&self.paths, |s| s.analysis_resume = false);
+        }
+    }
+
+    /// Tracks in the library without a current analysis, and their total length.
+    pub fn unanalysed(&self) -> (usize, f64) {
+        self.data
+            .all_tracks
+            .iter()
+            .filter(|t| self.analysis_of(t).is_none())
+            .fold((0, 0.0), |(n, secs), t| (n + 1, secs + f64::from(t.duration_secs.unwrap_or(0))))
     }
 
     /// Switches window mode (`None` toggles Mini) and saves the choice.
@@ -1381,6 +1507,9 @@ impl eframe::App for ListenerApp {
             if done_changed && !self.online {
                 self.sync_next();
             }
+        }
+        if self.analysis_library && self.analyses_loaded && !self.data.all_tracks.is_empty() && !self.analyzer.progress().active() {
+            self.finish_library_analysis();
         }
         // Only the progress readout needs a clock; idle costs nothing. Buffering
         // animates the seek bar and spinner, so it ticks faster.

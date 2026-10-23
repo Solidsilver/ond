@@ -1,7 +1,7 @@
 //! Left column: search (opens the palette), library places, playlists, and
 //! settings. In narrow windows it collapses to a rail of icons.
 
-use super::widgets::toggle;
+use super::widgets::{link, toggle};
 use super::{Action, ListenerApp};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -169,6 +169,10 @@ impl ListenerApp {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(6.0);
+        margin(ui, &mut |ui| self.analysis_settings(ui));
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
         margin(ui, &mut |ui| {
             ui.horizontal(|ui| {
                 let account = if self.server_label.is_empty() { "Not connected".to_owned() } else { self.server_label.clone() };
@@ -195,6 +199,60 @@ impl ListenerApp {
         }
         let (done, total) = s.pins.iter().filter(|p| !p.complete()).fold((0u64, 0u64), |(d, t), p| (d + p.bytes_done, t + p.bytes_total));
         Some(if total > 0 { done as f32 / total as f32 } else { 0.0 })
+    }
+
+    /// Library analysis: start it, follow it, pause or stop it.
+    fn analysis_settings(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let small = |s: String| egui::RichText::new(s).size(12.0).color(t.muted);
+        ui.label(egui::RichText::new("Analysis").font(FontId::new(11.0, semibold())).color(t.muted));
+        ui.add_space(6.0);
+        let p = self.analyzer.progress();
+        if p.active() {
+            let status = if p.paused {
+                format!("Paused at {} of {}", p.done.min(p.total), p.total)
+            } else if p.waiting {
+                format!("{} of {} · waiting for playback", p.done.min(p.total), p.total)
+            } else {
+                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::analyze::about(p.eta_secs))
+            };
+            ui.label(small(status));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let (label, paused) = if p.paused { ("Resume", false) } else { ("Pause", true) };
+                if link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
+                    self.actions.push(Action::PauseAnalysis(paused));
+                }
+                ui.add_space(10.0);
+                if link(ui, "Stop", FontId::proportional(12.0), t.accent).clicked() {
+                    self.actions.push(Action::StopAnalysis);
+                }
+            });
+        } else if self.client.is_some() && !self.data.all_tracks.is_empty() {
+            let (n, secs) = self.unanalysed();
+            if n == 0 {
+                ui.label(small("Every track is analysed.".into()));
+            } else {
+                ui.horizontal(|ui| {
+                    if link(ui, "Analyze library", FontId::proportional(12.0), t.accent)
+                        .on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files. Runs in the background and pauses while playback needs the network.")
+                        .clicked()
+                    {
+                        self.actions.push(Action::AnalyzeLibrary);
+                    }
+                    let tracks = if n == 1 { "1 track".to_owned() } else { format!("{n} tracks") };
+                    ui.label(small(format!("  {tracks} · {}", crate::analyze::about(crate::analyze::assumed_eta(secs)))));
+                });
+            }
+        }
+        if p.failed > 0 {
+            ui.label(egui::RichText::new(format!("{} couldn't be read", p.failed)).size(11.0).color(t.muted));
+        }
+        ui.add_space(8.0);
+        let mut playing = self.analyze_playing;
+        if toggle(ui, &mut playing, "Analyze tracks as they play").on_hover_text("Measures each track after it has downloaded for playback").changed() {
+            self.actions.push(Action::SetAnalyzePlaying(playing));
+        }
     }
 
     /// The sidebar entry the current place belongs to.

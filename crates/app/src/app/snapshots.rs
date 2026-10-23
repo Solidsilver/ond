@@ -303,10 +303,44 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     app.data.credited.insert("Scott LaFaro".into(), vec![album_id(0), album_id(21), album_id(22)]);
     app.data.credited.insert("Bill Evans".into(), vec![album_id(0), album_id(1), album_id(21), album_id(22), album_id(23)]);
 
+    // Kind of Blue measured and clean; the Vanguard (a 24/96 release of a
+    // 1961 tape) flagged as upsampled, so both album-page variants show.
+    analysed(&mut app, 1, None);
+    let up = analysis::Verdict {
+        kind: analysis::VerdictKind::Upsampled { from_hz: 44_100, cutoff_hz: 21_400 },
+        confidence: analysis::Confidence::High,
+    };
+    analysed(&mut app, 0, Some(up));
+    app.analyses_loaded = true;
+
     fill_queue(&mut app);
     app.output.handle(&devices());
     app.output.handle(&signal());
     app
+}
+
+/// Stored results for every track of `album`, with plausible spread.
+fn analysed(app: &mut ListenerApp, album: usize, verdict: Option<analysis::Verdict>) {
+    let tracks = app.data.tracks.get(&album_id(album)).cloned().unwrap_or_default();
+    for (i, t) in tracks.iter().enumerate() {
+        let k = (i % 4) as f64;
+        let a = analysis::TrackAnalysis {
+            version: analysis::ANALYSIS_VERSION,
+            duration_secs: f64::from(t.duration_secs.unwrap_or(0)),
+            sample_rate: t.sample_rate.unwrap_or(44_100),
+            channels: 2,
+            bits: t.bit_depth,
+            integrated_lufs: Some(-17.8 + k * 0.9),
+            loudness_range_lu: Some(11.0 - k),
+            true_peak_dbtp: Some(-2.6 + k * 0.4),
+            sample_peak_dbfs: Some(-2.9 + k * 0.4),
+            dr: Some(13.4 - k * 0.5),
+            effective_bits: None,
+            cutoff_hz: verdict.as_ref().map(|_| 21_400),
+            verdicts: verdict.clone().into_iter().collect(),
+        };
+        app.analyses.insert(t.id.clone(), analysis::Record { stamp: crate::analyze::stamp_of(t), analysis: a });
+    }
 }
 
 fn fill_queue(app: &mut ListenerApp) {
@@ -360,6 +394,8 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.show_queue = true;
     app.queue_sheet = false;
     app.credits_open = false;
+    app.analysis_open = false;
+    app.analyzer.clear();
     app.queue_ui = QueueUi::default();
     app.login = None;
     app.nav = Nav::default();
@@ -425,6 +461,22 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, FULL, Route::Album(album_id(1)));
     s.shoot(h, "album-two-discs");
 
+    reset(h, FULL, Route::Album(album_id(0)));
+    app_mut(h).analysis_open = true;
+    s.shoot(h, "album-analysis");
+
+    reset(h, FULL, Route::Album(album_id(0)));
+    let header = egui::Rect::from_min_max(pos2(216.0, 52.0), pos2(1120.0, 300.0));
+    if !hover_label(h, "likely upsampled", header) {
+        eprintln!("  (verdict chip not found by label)");
+    }
+    h.run_steps(30);
+    s.shoot(h, "album-verdict-hover");
+
+    reset(h, FULL, Route::Album(album_id(1)));
+    app_mut(h).analysis_open = true;
+    s.shoot(h, "album-analysis-clean");
+
     reset(h, FULL, Route::Recent);
     let queue = egui::Rect::from_min_max(pos2(1120.0, 52.0), pos2(1440.0, 876.0));
     if !hover_label(h, "Blue in Green", queue) {
@@ -461,6 +513,18 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
         eprintln!("  (settings button not found by label)");
     }
     s.shoot(h, "settings");
+
+    // A library run waiting on playback (the preview status is mid-download).
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), url: String::new(), suffix: None, stamp: "s".into(), secs: 240.0 }).collect();
+        app.analyzer.enqueue(jobs);
+    }
+    if !click_label(h, "Settings", sidebar) {
+        eprintln!("  (settings button not found by label)");
+    }
+    s.shoot(h, "settings-analysing");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
     s.shoot(h, "narrow-recent");

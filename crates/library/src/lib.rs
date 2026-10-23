@@ -41,6 +41,9 @@ const TRACKS_BY_ALBUM: TableDefinition<(&str, u32, u32, &str), ()> = TableDefini
 const CREDITS: TableDefinition<(&str, &str, &str), ()> = TableDefinition::new("credits");
 /// album id → [`Album::sync_stamp`] of the album when its tracks were last stored.
 const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_stamps");
+/// Track id → an analysis record, opaque here (the `analysis` crate owns the format).
+/// A new table rather than a schema bump: older builds simply ignore it.
+const ANALYSIS: TableDefinition<&str, &[u8]> = TableDefinition::new("analysis");
 
 const SCHEMA_KEY: &str = "schema_version";
 
@@ -156,6 +159,7 @@ impl Library {
             wt.open_table(TRACKS_BY_ALBUM)?;
             wt.open_table(CREDITS)?;
             wt.open_table(ALBUM_STAMPS)?;
+            wt.open_table(ANALYSIS)?;
         }
         wt.commit()?;
         Ok(Self { db })
@@ -276,6 +280,23 @@ impl Library {
     }
 
     /// Stamps of albums whose tracks are stored and current as of that stamp.
+    /// Every stored analysis record, by track id.
+    pub fn analysis_records(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let rt = self.db.begin_read()?;
+        let mut out = Vec::new();
+        for entry in rt.open_table(ANALYSIS)?.iter()? {
+            let (id, bytes) = entry?;
+            out.push((id.value().to_owned(), bytes.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    pub fn put_analysis(&self, track_id: &str, record: &[u8]) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        wt.open_table(ANALYSIS)?.insert(track_id, record)?;
+        Ok(wt.commit()?)
+    }
+
     pub fn album_stamps(&self) -> Result<HashMap<String, u64>> {
         let rt = self.db.begin_read()?;
         let mut out = HashMap::new();

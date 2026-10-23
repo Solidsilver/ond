@@ -2,13 +2,14 @@
 //! list (composer and actions appear on hover), and credits gathered from the
 //! tracks' OpenSubsonic contributors. Playlists reuse the track list.
 
-use super::widgets::{Mark, elide, link, primary, secondary};
+use super::widgets::{Mark, chip, elide, link, primary, secondary};
 use super::{Action, Focus, Keep, ListenerApp, QueueAction, mmss};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use analysis::TrackAnalysis;
 use library::Track;
 
 /// Credit roles shown before "Show all credits".
@@ -69,6 +70,11 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// "−11.2" with a real minus sign.
+fn signed(v: f64) -> String {
+    format!("{v:.1}").replace('-', "\u{2212}")
+}
+
 /// `FLAC 16/44.1` when every track shares it.
 fn shared_format(tracks: &[Track]) -> Option<String> {
     let first = tracks.first()?.quality_label();
@@ -93,6 +99,9 @@ impl ListenerApp {
             let kept = self.offline_snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
             self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
         }
+        let found: Vec<Option<TrackAnalysis>> = tracks.iter().map(|t| self.analysis_of(t).cloned()).collect();
+        let summary = analysis::summarize(&found.iter().flatten().collect::<Vec<_>>(), tracks.len());
+        let analysing = self.analyzer.pending(tracks.iter().map(|t| t.id.as_str()));
         egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).show(ui, |ui| {
             // Header: art beside the text, or above it when there's no room.
             let avail = ui.available_width();
@@ -152,6 +161,24 @@ impl ListenerApp {
                             sep(ui);
                             ui.label(egui::RichText::new(f).size(12.0).color(t.muted));
                         }
+                        // Measurements once the whole album is known; a quiet
+                        // count while it's being worked on.
+                        if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
+                            sep(ui);
+                            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
+                                .on_hover_text("Dynamic range (DR meter): the album's average");
+                            sep(ui);
+                            ui.label(egui::RichText::new(format!("{} LUFS", signed(lufs))).size(12.0).color(t.muted))
+                                .on_hover_text("Integrated loudness (EBU R128), across the album");
+                        } else if analysing > 0 {
+                            sep(ui);
+                            ui.label(egui::RichText::new(format!("analysing {}/{}", summary.analyzed, tracks.len())).size(12.0).color(t.muted));
+                        }
+                        if let Some((v, n)) = &summary.verdict {
+                            ui.add_space(10.0);
+                            let tracks_note = if *n == summary.analyzed { "every analysed track".to_owned() } else { format!("{n} of {} analysed tracks", summary.analyzed) };
+                            chip(ui, &v.label(), t.warn).on_hover_text(format!("{}\n\nSeen in {tracks_note}.", v.evidence()));
+                        }
                     });
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
@@ -174,6 +201,12 @@ impl ListenerApp {
                             }
                             ui.separator();
                             super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Album(album.id.clone()), &mut self.actions);
+                            if !summary.complete() && analysing == 0 && !tracks.is_empty() {
+                                ui.separator();
+                                if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
+                                    self.actions.push(Action::Analyze(tracks.clone()));
+                                }
+                            }
                         });
                         ui.add_space(6.0);
                         self.pin_status(ui, &pin);
@@ -204,6 +237,10 @@ impl ListenerApp {
                     let mins = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>().div_ceil(60);
                     let n = tracks.len();
                     ui.label(egui::RichText::new(format!("{n} song{}, {mins} minutes", if n == 1 { "" } else { "s" })).size(12.0).color(t.muted));
+                    if summary.analyzed > 0 {
+                        ui.add_space(14.0);
+                        self.analysis_ui(ui, &tracks, &found, summary.verdict.as_ref().map(|(v, _)| v));
+                    }
                     if !wide {
                         ui.add_space(20.0);
                         self.credits_ui(ui, &credits);
@@ -218,6 +255,56 @@ impl ListenerApp {
                 }
             });
             ui.add_space(24.0);
+        });
+    }
+
+    /// Per-track measurements, folded away until asked for.
+    fn analysis_ui(&mut self, ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>) {
+        let t = Tokens::of(ui);
+        let label = if self.analysis_open { "Hide analysis" } else { "Show analysis" };
+        if link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
+            self.analysis_open = !self.analysis_open;
+        }
+        if !self.analysis_open {
+            return;
+        }
+        ui.add_space(8.0);
+        let small = |s: String, c| egui::RichText::new(s).size(12.0).color(c);
+        let title_w = (ui.available_width() - 330.0).clamp(120.0, 360.0);
+        egui::Grid::new("analysis").num_columns(6).spacing(vec2(16.0, 6.0)).show(ui, |ui| {
+            for h in ["", "", "Loudness", "Peak", "DR", ""] {
+                ui.label(small(h.to_owned(), t.muted));
+            }
+            ui.end_row();
+            for (i, (track, a)) in tracks.iter().zip(found).enumerate() {
+                ui.label(small(track.track.unwrap_or(i as u32 + 1).to_string(), t.muted));
+                let g = elide(ui, &track.title, FontId::proportional(12.0), t.text, title_w);
+                let (r, _) = ui.allocate_exact_size(vec2(title_w, g.size().y), Sense::hover());
+                ui.painter().galley(r.min, g, t.text);
+                match a {
+                    Some(a) => {
+                        let dash = || "–".to_owned();
+                        ui.label(small(a.integrated_lufs.map_or_else(dash, |l| format!("{} LUFS", signed(l))), t.text));
+                        ui.label(small(a.true_peak_dbtp.map_or_else(dash, |p| format!("{} dBTP", signed(p))), t.text));
+                        ui.label(small(a.dr_rounded().map_or_else(dash, |d| format!("DR{d}")), t.text));
+                        match a.verdicts.iter().find(|v| album_verdict.is_none_or(|av| !av.same_kind(v))) {
+                            Some(v) => {
+                                ui.label(small(v.label(), t.warn)).on_hover_text(v.evidence());
+                            }
+                            None => {
+                                ui.label("");
+                            }
+                        }
+                    }
+                    None => {
+                        ui.label(small("not analysed".into(), t.muted));
+                        for _ in 0..3 {
+                            ui.label("");
+                        }
+                    }
+                }
+                ui.end_row();
+            }
         });
     }
 

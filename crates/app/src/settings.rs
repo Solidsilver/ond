@@ -45,6 +45,12 @@ pub struct Settings {
     /// Downloads to move into `offline_dir` at the next launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offline_move_from: Option<PathBuf>,
+    /// Analyse each track as it plays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub analyze_playing: bool,
+    /// A library-wide analysis was started and hasn't finished: carry on next launch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub analysis_resume: bool,
 }
 
 fn yes() -> bool {
@@ -68,6 +74,8 @@ impl Default for Settings {
             offline_dir: None,
             offline_limit_gb: None,
             offline_move_from: None,
+            analyze_playing: false,
+            analysis_resume: false,
         }
     }
 }
