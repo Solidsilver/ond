@@ -347,10 +347,14 @@ fn app_mut<'h>(h: &'h mut Harness<'_, Option<ListenerApp>>) -> &'h mut ListenerA
 fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     h.remove_cursor();
     h.set_size(size);
+    // Popups (the output picker, menus) live in egui memory: close them so
+    // one scene's open popup doesn't leak into the next.
+    egui::Popup::close_all(&h.ctx);
     let app = app_mut(h);
     app.windows.mode = WindowMode::Full;
     app.palette = None;
     app.show_queue = true;
+    app.queue_sheet = false;
     app.credits_open = false;
     app.queue_ui = QueueUi::default();
     app.login = None;
@@ -447,8 +451,22 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     app_mut(h).engine.status.preview(PlayState::Buffering, 141.0, 383.0, 0.38);
     s.shoot(h, "buffering");
 
+    reset(h, FULL, Route::Recent);
+    let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 876.0));
+    if !click_label(h, "Settings", sidebar) {
+        eprintln!("  (settings button not found by label)");
+    }
+    s.shoot(h, "settings");
+
     reset(h, vec2(900.0, 700.0), Route::Recent);
     s.shoot(h, "narrow-recent");
+
+    reset(h, vec2(900.0, 700.0), Route::Recent);
+    app_mut(h).actions.push(Action::ToggleQueue);
+    s.shoot(h, "narrow-queue-sheet");
+
+    reset(h, vec2(760.0, 640.0), Route::Albums);
+    s.shoot(h, "narrow-rail");
 
     reset(h, vec2(900.0, 700.0), Route::Album(album_id(7)));
     s.shoot(h, "narrow-long-album");
@@ -475,6 +493,19 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
     s.shoot(h, "login");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(LoginForm {
+        server: "https://music.example.com".into(),
+        username: "solidsilver".into(),
+        error: Some("Wrong username or password (server said: Wrong username or password)".into()),
+        ..Default::default()
+    });
+    s.shoot(h, "login-error");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "solidsilver".into(), busy: true, ..Default::default() });
+    s.shoot(h, "login-busy");
 }
 
 #[test]
