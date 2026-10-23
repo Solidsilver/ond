@@ -295,6 +295,10 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     for i in [2, 20, 23] {
         app.data.tracks.insert(album_id(i), filler(i, 9));
     }
+    // The flat list the Songs view and search read (the per-album map stays as is).
+    let mut all: Vec<Track> = app.data.tracks.values().flatten().cloned().collect();
+    all.sort_by(|a, b| (&a.album_id, a.disc, a.track).cmp(&(&b.album_id, b.disc, b.track)));
+    app.data.all_tracks = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.online = true;
     app.settings = Some(Settings { server: "https://music.example.com".into(), username: "solidsilver".into(), ..Default::default() });
@@ -619,6 +623,25 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, vec2(900.0, 640.0), Route::Recent);
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
     s.shoot(h, "narrow-settings");
+
+    // Places and their empty states.
+    reset(h, FULL, Route::Songs);
+    s.shoot(h, "songs");
+
+    reset(h, FULL, Route::Songs);
+    let all = std::mem::take(&mut app_mut(h).data.all_tracks);
+    s.shoot(h, "songs-empty");
+    app_mut(h).data.all_tracks = all;
+
+    reset(h, FULL, Route::Offline);
+    s.shoot(h, "offline-empty");
+
+    reset(h, FULL, Route::Artists);
+    s.shoot(h, "artists");
+
+    reset(h, FULL, Route::Playlist { id: "pl-4".into(), name: "Car".into() });
+    app_mut(h).data.playlist_tracks.insert("pl-4".into(), Vec::new());
+    s.shoot(h, "playlist-empty");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
     s.shoot(h, "narrow-recent");

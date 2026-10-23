@@ -73,15 +73,12 @@ impl ListenerApp {
         ui.add_space(14.0);
 
         if snap.pins.is_empty() {
-            ui.add_space(40.0);
-            ui.vertical_centered(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                icons::paint(ui.painter(), r, Icon::Download, t.muted);
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("Nothing downloaded yet").font(FontId::new(15.0, semibold())).color(t.text));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Choose “Make available offline” from an album or playlist’s ⋯ menu, or press ⇧⌘D on its page.").size(12.5).color(t.muted));
-            });
+            super::widgets::empty_state(
+                ui,
+                Icon::Download,
+                "Nothing downloaded yet",
+                "Choose “Make available offline” from an album’s or playlist’s menu, or press ⇧⌘D on its page.",
+            );
             return;
         }
 

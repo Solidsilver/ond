@@ -39,15 +39,7 @@ impl ListenerApp {
                 }
             });
         });
-        let empty = |ui: &mut Ui, text: &str| {
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                icons::paint(ui.painter(), r, Icon::Heart, t.muted);
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new(text).color(t.muted));
-            });
-        };
+        let empty = |ui: &mut Ui, text: &str| super::widgets::empty_state(ui, Icon::Heart, "Nothing loved yet", text);
         if !self.favorites.loaded && self.client.is_some() {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
