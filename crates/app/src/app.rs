@@ -37,7 +37,7 @@ use crate::nav::{Nav, Route};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
-use crate::player::{self, Note, Player};
+use crate::player::{self, Note, Player, QueueEdit};
 use crate::prefs::{Loaded, Prefs};
 use crate::queue::{EndAction, Source};
 use crate::search::SearchIndex;
@@ -501,6 +501,19 @@ pub struct SyncState {
     pub last: Option<chrono::DateTime<chrono::Local>>,
 }
 
+impl SyncState {
+    /// Marks an album sync as started, if none is running; returns whether to
+    /// start one.
+    fn begin(&mut self) -> bool {
+        if self.albums || self.tracks {
+            return false;
+        }
+        self.label = "syncing…".into();
+        self.albums = true;
+        true
+    }
+}
+
 /// The palette's search index.
 #[derive(Default)]
 pub struct SearchState {
@@ -558,8 +571,8 @@ impl Downloads {
         self.snap = self.store.snapshot();
     }
 
-    /// Applies the download actions that need nothing but the store.
-    fn apply(&mut self, action: Action) {
+    /// Applies a download action. Returns a notice to show, or an error.
+    fn apply(&mut self, action: Action, prefs: &Prefs) -> Result<Option<String>, String> {
         match action {
             Action::Unpin(pin) => {
                 self.store.unpin(&pin);
@@ -567,8 +580,32 @@ impl Downloads {
             }
             Action::PauseDownloads(paused) => self.store.set_paused(paused),
             Action::RetryDownloads => self.store.retry_failed(),
+            Action::SetOfflineLimit(bytes) => {
+                self.store.set_limit(bytes);
+                prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
+            }
+            Action::RevealOffline => {
+                std::process::Command::new("open").arg(&self.base).spawn().map_err(|e| format!("open {}: {e}", self.base.display()))?;
+            }
+            Action::MoveOffline => {
+                let current = self.base.clone();
+                let start = current.parent().unwrap_or(&current).to_owned();
+                if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
+                    // Always a folder of our own inside the chosen one: the store
+                    // tidies files it doesn't know, which must never be the user's.
+                    let dir = if chosen.file_name().is_some_and(|n| n == "Listener Offline") { chosen } else { chosen.join("Listener Offline") };
+                    if dir != current {
+                        prefs.edit(|s| {
+                            s.offline_dir = Some(dir.clone());
+                            s.offline_move_from = Some(current.clone());
+                        });
+                        return Ok(Some(format!("Downloads will move to {} when Listener restarts", dir.display())));
+                    }
+                }
+            }
             _ => unreachable!("not a download action"),
         }
+        Ok(None)
     }
 }
 
@@ -586,6 +623,21 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// Applies the analysis actions that need only the runner and preferences.
+    fn apply(&mut self, action: Action, prefs: &Prefs) {
+        match action {
+            Action::PauseAnalysis(paused) => self.runner.set_paused(paused),
+            Action::StopAnalysis => {
+                self.runner.clear();
+                self.runner.set_paused(false);
+                // A library-wide run isn't resumed at the next launch either.
+                prefs.edit(|s| s.analysis_resume = false);
+            }
+            Action::SetAnalyzePlaying(on) => prefs.edit(|s| s.analyze_playing = on),
+            _ => unreachable!("not an analysis action"),
+        }
+    }
+
     /// A track's analysis, if there is one for the file as it is now.
     pub fn of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
         self.records.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
@@ -1137,8 +1189,15 @@ impl ListenerApp {
         result
     }
 
+    #[cfg(test)]
     fn start_current(&mut self) {
         self.with_player(|p, cx| p.start_current(cx));
+    }
+
+    fn queue_edit(&mut self, edit: QueueEdit) {
+        let mut selected = self.ui.queue_ui.selected;
+        self.with_player(|p, cx| p.edit(edit, &mut selected, cx));
+        self.ui.queue_ui.selected = selected;
     }
 
     /// Where `track` would play from now (tests).
@@ -1269,43 +1328,13 @@ impl ListenerApp {
                 }
             }
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
-            Action::JumpTo(uid) => {
-                if self.player.queue.jump_to(uid) {
-                    self.start_current();
-                }
-            }
-            Action::Replay(uid) => {
-                if self.player.queue.replay(uid) {
-                    self.start_current();
-                }
-            }
-            Action::Remove(uid) => {
-                if self.ui.queue_ui.selected == Some(uid) {
-                    // Keep a selection for repeated ⌫.
-                    let at = self.player.queue.position(uid).unwrap_or(0);
-                    self.player.queue.remove(uid);
-                    self.ui.queue_ui.selected = self.player.queue.upcoming.get(at).or(self.player.queue.upcoming.last()).map(|i| i.uid);
-                } else {
-                    self.player.queue.remove(uid);
-                }
-                self.sync_next();
-            }
-            Action::Move(uid, to) => {
-                self.player.queue.move_to(uid, to);
-                self.sync_next();
-            }
-            Action::MoveBy(uid, delta) => {
-                self.player.queue.move_by(uid, delta);
-                self.sync_next();
-            }
-            Action::ClearQueue => {
-                self.player.queue.clear();
-                self.sync_next();
-            }
-            Action::SetEnd(end) => {
-                self.player.queue.end = end;
-                self.sync_next();
-            }
+            Action::JumpTo(uid) => self.queue_edit(QueueEdit::JumpTo(uid)),
+            Action::Replay(uid) => self.queue_edit(QueueEdit::Replay(uid)),
+            Action::Remove(uid) => self.queue_edit(QueueEdit::Remove(uid)),
+            Action::Move(uid, to) => self.queue_edit(QueueEdit::Move(uid, to)),
+            Action::MoveBy(uid, delta) => self.queue_edit(QueueEdit::MoveBy(uid, delta)),
+            Action::ClearQueue => self.queue_edit(QueueEdit::Clear),
+            Action::SetEnd(end) => self.queue_edit(QueueEdit::SetEnd(end)),
             Action::PlayPause => self.play_pause(),
             Action::Next => self.next(),
             Action::Previous => self.previous(),
@@ -1358,13 +1387,9 @@ impl ListenerApp {
                 self.ui.overlay = Some(Overlay::Settings);
             }
             Action::SyncNow => {
-                if let Some(client) = self.session.client.clone()
-                    && self.session.online
-                    && !self.sync.albums
-                    && !self.sync.tracks
+                if let Some(client) = self.session.live().cloned()
+                    && self.sync.begin()
                 {
-                    self.sync.label = "syncing…".into();
-                    self.sync.albums = true;
                     self.bridge.sync_albums(client);
                 }
             }
@@ -1380,33 +1405,16 @@ impl ListenerApp {
             }
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
-            a @ (Action::Unpin(_) | Action::PauseDownloads(_) | Action::RetryDownloads) => self.downloads.apply(a),
-            Action::SetOfflineLimit(bytes) => {
-                self.downloads.store.set_limit(bytes);
-                self.prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
-            }
-            Action::RevealOffline => {
-                let dir = self.downloads.base.clone();
-                if let Err(e) = std::process::Command::new("open").arg(&dir).spawn() {
-                    self.show_error(format!("open {}: {e}", dir.display()));
-                }
-            }
-            Action::MoveOffline => {
-                let current = self.downloads.base.clone();
-                let start = current.parent().unwrap_or(&current).to_owned();
-                if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
-                    // Always a folder of our own inside the chosen one: the store
-                    // tidies files it doesn't know, which must never be the user's.
-                    let dir = if chosen.file_name().is_some_and(|n| n == "Listener Offline") { chosen } else { chosen.join("Listener Offline") };
-                    if dir != current {
-                        self.prefs.edit(|s| {
-                            s.offline_dir = Some(dir.clone());
-                            s.offline_move_from = Some(current.clone());
-                        });
-                        self.show_notice(format!("Downloads will move to {} when Listener restarts", dir.display()));
-                    }
-                }
-            }
+            a @ (Action::Unpin(_)
+            | Action::PauseDownloads(_)
+            | Action::RetryDownloads
+            | Action::SetOfflineLimit(_)
+            | Action::RevealOffline
+            | Action::MoveOffline) => match self.downloads.apply(a, &self.prefs) {
+                Ok(Some(notice)) => self.show_notice(notice),
+                Ok(None) => {}
+                Err(e) => self.show_error(e),
+            },
             Action::Analyze(tracks) => {
                 self.analysis.runner.set_paused(false);
                 self.enqueue_analysis(&tracks);
@@ -1416,13 +1424,7 @@ impl ListenerApp {
                 self.analysis.runner.set_paused(false);
                 self.resume_library_analysis();
             }
-            Action::PauseAnalysis(paused) => self.analysis.runner.set_paused(paused),
-            Action::StopAnalysis => {
-                self.analysis.runner.clear();
-                self.analysis.runner.set_paused(false);
-                self.finish_library_analysis();
-            }
-            Action::SetAnalyzePlaying(on) => self.prefs.edit(|s| s.analyze_playing = on),
+            a @ (Action::PauseAnalysis(_) | Action::StopAnalysis | Action::SetAnalyzePlaying(_)) => self.analysis.apply(a, &self.prefs),
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),
