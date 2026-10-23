@@ -915,16 +915,41 @@ fn free_space(_: &Path) -> Option<u64> {
     None
 }
 
-/// Moves a store's files from `from` to `to` (run before opening it at `to`).
-/// Renames where it can, copies across volumes. Files already at `to` win.
+/// Moves a store's files from `from` to `to` (run before opening it at `to`),
+/// including the per-account stores in folders under it. Renames where it can,
+/// copies across volumes. Files already at `to` win.
 pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
     if from == to || !from.is_dir() {
         return Ok(());
     }
+    move_files(from, to, true)
+}
+
+/// The folder for `account`'s downloads under the downloads folder `base`.
+/// Each server account keeps its own pins and files, so signing in somewhere
+/// else never fetches the old pins with the new server's URLs, and switching
+/// back finds them again. A store kept directly in `base` by an older version
+/// becomes this account's the first time.
+pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
+    let dir = base.join(format!("{account:08x}"));
+    if base.join(STATE_FILE).is_file() && !dir.join(STATE_FILE).exists() {
+        move_files(base, &dir, false)?;
+    }
+    Ok(dir)
+}
+
+fn move_files(from: &Path, to: &Path, folders: bool) -> io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;
-        if !e.file_type()?.is_file() {
+        let kind = e.file_type()?;
+        if kind.is_dir() {
+            if folders {
+                move_files(&e.path(), &to.join(e.file_name()), true)?;
+            }
+            continue;
+        }
+        if !kind.is_file() {
             continue;
         }
         let dest = to.join(e.file_name());

@@ -273,6 +273,20 @@ impl StreamCache {
         self.inner.lock_index().complete.contains_key(&name).then(|| self.inner.cfg.dir.join(name))
     }
 
+    /// Forgets every completed file and deletes it (in the background), for
+    /// when the files came from another server. Downloads in progress finish
+    /// on their own.
+    pub fn clear(&self) {
+        self.clear_prefetch();
+        let victims: Vec<String> = {
+            let mut idx = self.inner.lock_index();
+            idx.total = 0;
+            idx.complete.drain().map(|(name, _)| name).collect()
+        };
+        let inner = self.inner.clone();
+        self.inner.rt.spawn_blocking(move || inner.remove(victims));
+    }
+
     /// Bytes held by completed files.
     pub fn size(&self) -> u64 {
         self.inner.lock_index().total

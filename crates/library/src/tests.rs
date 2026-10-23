@@ -587,3 +587,26 @@ fn analysis_survives_a_library_rebuild_and_old_records_move_over() {
     rows.sort();
     assert_eq!(rows, [("new".to_owned(), b"kept".to_vec()), ("old".to_owned(), b"moved".to_vec())]);
 }
+
+#[test]
+fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
+    let lib = Library::in_memory().unwrap();
+    // A database from before accounts were recorded belongs to whoever claims it first.
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: vec![song("a", "al", 1, 1)] })
+        .unwrap();
+    lib.set_meta("bulk_done", Some(1)).unwrap();
+    assert!(!lib.claim_account(7).unwrap());
+    assert_eq!(lib.album_count().unwrap(), 1);
+    // Reconnecting as the same account changes nothing.
+    assert!(!lib.claim_account(7).unwrap());
+    assert_eq!(lib.track_count().unwrap(), 1);
+    // Another server or user: everything from the old one goes, flags included.
+    assert!(lib.claim_account(8).unwrap());
+    assert_eq!(lib.album_count().unwrap(), 0);
+    assert_eq!(lib.track_count().unwrap(), 0);
+    assert!(lib.album_stamps().unwrap().is_empty());
+    assert_eq!(lib.meta("bulk_done").unwrap(), None);
+    assert!(lib.check_indexes().unwrap().is_empty());
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+    assert!(!lib.claim_account(8).unwrap());
+}

@@ -46,6 +46,8 @@ const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_sta
 const ANALYSIS: TableDefinition<&str, &[u8]> = TableDefinition::new("analysis");
 
 const SCHEMA_KEY: &str = "schema_version";
+/// Which server account the mirror belongs to (a hash of server and user).
+const ACCOUNT_KEY: &str = "account";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -267,6 +269,38 @@ impl Library {
             };
         }
         Ok(wt.commit()?)
+    }
+
+    /// Records that the mirror belongs to `account` (a stable hash of server
+    /// and user). When it held another account's library, everything that came
+    /// from that server is cleared first and `true` is returned. A database
+    /// from before accounts were recorded is taken to be this account's.
+    pub fn claim_account(&self, account: u32) -> Result<bool> {
+        let wt = self.db.begin_write()?;
+        let cleared = {
+            let mut meta = wt.open_table(META)?;
+            let previous = meta.get(ACCOUNT_KEY)?.map(|v| v.value());
+            let other = previous.is_some_and(|p| p != account);
+            if other {
+                wt.open_table(ARTISTS)?.retain(|_, _| false)?;
+                wt.open_table(ALBUMS)?.retain(|_, _| false)?;
+                wt.open_table(TRACKS)?.retain(|_, _| false)?;
+                wt.open_table(ARTISTS_BY_NAME)?.retain(|_, _| false)?;
+                wt.open_table(ALBUMS_BY_SORT)?.retain(|_, _| false)?;
+                wt.open_table(TRACKS_BY_ALBUM)?.retain(|_, _| false)?;
+                wt.open_table(CREDITS)?.retain(|_, _| false)?;
+                wt.open_table(ALBUM_STAMPS)?.retain(|_, _| false)?;
+                wt.open_table(ANALYSIS)?.retain(|_, _| false)?;
+                // Sync progress and similar flags were about the old library.
+                meta.retain(|k, _| k == SCHEMA_KEY)?;
+            }
+            if previous != Some(account) {
+                meta.insert(ACCOUNT_KEY, account)?;
+            }
+            other
+        };
+        wt.commit()?;
+        Ok(cleared)
     }
 
     /// Replaces the whole artist list with what the server returned.

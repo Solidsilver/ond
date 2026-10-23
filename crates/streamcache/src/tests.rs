@@ -385,3 +385,23 @@ fn a_stalled_response_times_out_and_resumes() {
     let starts = starts.lock().unwrap().clone();
     assert!(starts.len() >= 2 && starts[1] > 0, "resumed with a Range request: {starts:?}");
 }
+
+#[test]
+fn clearing_forgets_and_deletes_every_file() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let server = Server::start(data(1_200), FAST);
+    for id in ["a", "b"] {
+        let key = CacheKey::new(id, None);
+        let mut src = cache.open(&key, &server.url, never()).unwrap();
+        let mut out = Vec::new();
+        src.read_to_end(&mut out).unwrap();
+        wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    }
+    assert_eq!(cache.size(), 2_400);
+    cache.clear();
+    assert_eq!(cache.size(), 0);
+    assert!(cache.complete_path(&CacheKey::new("a", None)).is_none());
+    wait_until("deletion", Duration::from_secs(5), || !dir.path().join("a").exists() && !dir.path().join("b").exists());
+}

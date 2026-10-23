@@ -232,7 +232,7 @@ impl ListenerApp {
             }
         });
         group(ui, "Location", |ui| {
-            let dir = self.downloads.store.dir().display().to_string();
+            let dir = self.downloads.base.display().to_string();
             let g = super::widgets::elide(ui, &dir, FontId::proportional(12.0), t.muted, ui.available_width());
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
             ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, t.muted);

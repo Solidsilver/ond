@@ -49,6 +49,7 @@ use audio::{Command, EngineHandle, PlayState, PlaybackMode, TrackSource};
 use library::{Album, Library, Track};
 use offline::{OfflineStore, Pin, TrackRef};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
@@ -108,6 +109,13 @@ impl Data {
     fn set_tracks(&mut self, set: TrackSet) {
         self.tracks = set;
         self.tracks_version += 1;
+    }
+
+    /// Empties it for another account's library. Versions only move forward,
+    /// so derived lists never mistake the empty library for one they've seen.
+    fn clear(&mut self) {
+        let (version, tracks_version) = (self.version + 1, self.tracks_version + 1);
+        *self = Data { version, tracks_version, ..Data::default() };
     }
 
     #[cfg(test)]
@@ -334,6 +342,8 @@ pub struct ListenerApp {
     actions: Vec<Action>,
     pending: Vec<Pending>,
     art: Art,
+    /// Played audio, kept for replay and seeking (also the engine's).
+    cache: streamcache::StreamCache,
 
     /// The queue and what the engine is told about it.
     player: Player,
@@ -471,9 +481,40 @@ pub struct Downloads {
     pub snap: Arc<offline::Snapshot>,
     /// Pins waiting for their track lists to load, by the same keys as `pending`.
     pub pending_pins: Vec<(ListKey, Pin)>,
+    /// The downloads folder; each account's store is a folder inside it.
+    pub base: PathBuf,
+    /// Whose store is open (`None` before anyone has signed in).
+    account: Option<u32>,
+    open: OpenStore,
 }
 
+/// Opens the offline store kept in a folder, with an optional size limit.
+type OpenStore = Arc<dyn Fn(PathBuf, Option<u64>) -> anyhow::Result<OfflineStore>>;
+
 impl Downloads {
+    /// The store folder for `account` under `base`. Before any sign-in there is
+    /// no account; an empty store stands in until one connects.
+    fn dir_for(base: &Path, account: Option<u32>) -> std::io::Result<PathBuf> {
+        match account {
+            Some(a) => offline::account_store(base, a),
+            None => Ok(base.join("signed-out")),
+        }
+    }
+
+    /// Opens `account`'s store in place of the current one (another server or
+    /// user signed in). Its pins and files stay apart from everyone else's.
+    fn switch_account(&mut self, account: Option<u32>, limit: Option<u64>) -> anyhow::Result<()> {
+        if account == self.account {
+            return Ok(());
+        }
+        let dir = Self::dir_for(&self.base, account)?;
+        self.store = (self.open)(dir, limit)?;
+        self.account = account;
+        self.pending_pins.clear();
+        self.refresh();
+        Ok(())
+    }
+
     /// Takes in what changed since the last frame.
     pub fn refresh(&mut self) {
         self.snap = self.store.snapshot();
@@ -530,10 +571,11 @@ impl ListenerApp {
         // The db is only a mirror of the server, so an unreadable one is set aside
         // and rebuilt by the sync that runs on connect.
         let (library, moved_aside) = Library::open_or_recover(&paths.library_db)?;
-        let notice = moved_aside.map(|aside| {
+        let mut notices: Vec<String> = Vec::new();
+        if let Some(aside) = moved_aside {
             tracing::warn!("library database was unreadable; moved to {} and starting fresh", aside.display());
-            format!("Library database was unreadable and is being rebuilt (old copy: {})", aside.display())
-        });
+            notices.push(format!("Library database was unreadable and is being rebuilt (old copy: {})", aside.display()));
+        }
         // Analysis results live apart from the (disposable) library mirror.
         let analyses = Arc::new(library::AnalysisStore::open(paths.library_db.with_file_name("analysis.redb"))?);
         match analyses.adopt(&library) {
@@ -547,10 +589,9 @@ impl ListenerApp {
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), library.clone());
 
         let (prefs, loaded) = Prefs::open(&paths.config_file);
-        let notice = match loaded {
-            Loaded::Unreadable { aside } => Some(format!("Settings couldn't be read and were reset; please sign in again (old copy: {})", aside.display())),
-            _ => notice,
-        };
+        if let Loaded::Unreadable { aside } = loaded {
+            notices.push(format!("Settings couldn't be read and were reset; please sign in again (old copy: {})", aside.display()));
+        }
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         let mut cache_cfg = streamcache::CacheConfig::new(&paths.stream_cache);
@@ -558,24 +599,33 @@ impl ListenerApp {
             cache_cfg.max_bytes = mb * 1024 * 1024;
         }
         let cache = streamcache::StreamCache::new(cache_cfg, rt.handle().clone())?;
-        let offline = {
-            let dir = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
+        let downloads = {
+            let base = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
             // A new location chosen last time: bring the downloads along first.
             if let Some(from) = saved.offline_move_from.clone() {
-                match offline::move_store(&from, &dir) {
+                match offline::move_store(&from, &base) {
                     Ok(()) => prefs.edit(|s| s.offline_move_from = None),
                     Err(e) => tracing::warn!("moving downloads from {}: {e}", from.display()),
                 }
             }
+            let open: OpenStore = {
+                let (rt, ctx, cache) = (rt.handle().clone(), ctx.clone(), cache.clone());
+                Arc::new(move |dir, limit| {
+                    let repaint = ctx.clone();
+                    let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.clone(), Arc::new(move || repaint.request_repaint()))?;
+                    // A track that finished streaming is linked in rather than downloaded again.
+                    let cached = cache.clone();
+                    store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&streamcache::CacheKey::original(r.id.clone(), r.suffix.clone()))));
+                    Ok(store)
+                })
+            };
+            let account = if prefs.has_login() { saved.account_id() } else { None };
             let limit = saved.offline_limit_gb.map(|gb| gb * 1_000_000_000);
-            let repaint = ctx.clone();
-            let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.handle().clone(), Arc::new(move || repaint.request_repaint()))?;
-            // A track that finished streaming is linked in rather than downloaded again.
-            let cached = cache.clone();
-            store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&streamcache::CacheKey::original(r.id.clone(), r.suffix.clone()))));
-            store
+            let store = open(Downloads::dir_for(&base, account)?, limit)?;
+            Downloads { snap: store.snapshot(), store, pending_pins: Vec::new(), base, account, open }
         };
         let playback_cache = cache.clone();
+        let app_cache = cache.clone();
         // Analysis fetches uncached files here, so a library-wide run doesn't
         // evict what was just played.
         let mut scratch_cfg = streamcache::CacheConfig::new(paths.stream_cache.with_file_name("analysis"));
@@ -638,6 +688,7 @@ impl ListenerApp {
             actions: Vec::new(),
             pending: Vec::new(),
             art,
+            cache: app_cache,
             player: Player::default(),
             queue_ui: QueueUi::default(),
             queue_sheet: false,
@@ -650,7 +701,7 @@ impl ListenerApp {
             search: SearchState::default(),
             songs: songs::SongsView::default(),
             // Something worth knowing at start-up (e.g. the library was rebuilt).
-            toasts: toasts::Toasts::with_notice(notice),
+            toasts: toasts::Toasts::with_notices(notices),
             palette: None,
             windows: saved.window.clone(),
             seen: None,
@@ -661,7 +712,7 @@ impl ListenerApp {
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
             now_playing,
-            downloads: Downloads { snap: offline.snapshot(), store: offline, pending_pins: Vec::new() },
+            downloads,
             diagnostics: diagnostics::Diagnostics::default(),
             prefs,
             analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
@@ -683,7 +734,14 @@ impl ListenerApp {
         match msg {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
-            Msg::Connected { client, settings, server, .. } => {
+            Msg::Connected { client, settings, server, new_account, .. } => {
+                if new_account {
+                    self.forget_library();
+                }
+                let limit = self.prefs.snapshot().offline_limit_gb.map(|gb| gb * 1_000_000_000);
+                if let Err(e) = self.downloads.switch_account(settings.account_id(), limit) {
+                    self.show_error(format!("downloads: {e}"));
+                }
                 self.session.server_label = format!("{} · {}", settings.username, server);
                 self.session.server_info = server.clone();
                 self.login = None;
@@ -900,6 +958,19 @@ impl ListenerApp {
     }
 
     /// The server's gone: browse what's stored, play what's downloaded.
+    /// Another server or user signed in: what was shown came from the old one.
+    /// The library database was cleared already; this drops the in-memory copy,
+    /// the queue and the cached audio, which a sync then refills.
+    fn forget_library(&mut self) {
+        self.with_player(|p, cx| p.reset(cx));
+        self.data.clear();
+        self.search.stale = true;
+        self.pending.clear();
+        self.favorites = Favorites::default();
+        self.nav = Nav::default();
+        self.cache.clear();
+    }
+
     fn set_offline(&mut self) {
         self.session.online = false;
         self.session.client = None;
@@ -1305,13 +1376,13 @@ impl ListenerApp {
                 self.prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
             }
             Action::RevealOffline => {
-                let dir = self.downloads.store.dir().to_owned();
+                let dir = self.downloads.base.clone();
                 if let Err(e) = std::process::Command::new("open").arg(&dir).spawn() {
                     self.show_error(format!("open {}: {e}", dir.display()));
                 }
             }
             Action::MoveOffline => {
-                let current = self.downloads.store.dir().to_owned();
+                let current = self.downloads.base.clone();
                 let start = current.parent().unwrap_or(&current).to_owned();
                 if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
                     // Always a folder of our own inside the chosen one: the store
@@ -2348,6 +2419,49 @@ mod tests {
     }
 
     #[test]
+    fn every_startup_notice_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("library.redb"), b"not a database").unwrap();
+        std::fs::write(dir.path().join("settings.json"), b"{ not json").unwrap();
+        let ctx = egui::Context::default();
+        let app = app(&ctx, dir.path());
+        let shown = app.toasts.texts();
+        assert!(shown.iter().any(|t| t.starts_with("Library database was unreadable")), "{shown:?}");
+        assert!(shown.iter().any(|t| t.starts_with("Settings couldn't be read")), "{shown:?}");
+    }
+
+    #[test]
+    fn another_account_gets_its_own_library_and_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+        let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
+        let connect = |app: &mut ListenerApp, user: &str, new_account: bool| {
+            let session = app.bridge.session();
+            app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account });
+        };
+        connect(&mut app, "luke", false);
+        download(&mut app, dir.path(), "t-2");
+        assert!(app.downloads.snap.is_done("t-2"));
+
+        // Someone else signs in: the shown library goes, and so do the queue
+        // and the old account's downloads (not deleted, just not theirs).
+        app.player.queue = crate::queue::Queue::default();
+        let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..2].to_vec();
+        app.queue_tracks(tracks, Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
+        connect(&mut app, "sam", true);
+        assert!(app.data.albums.is_empty() && app.data.tracks.all.is_empty());
+        assert!(app.player.queue.current.is_none());
+        assert!(app.downloads.snap.pins.is_empty(), "sam's store starts empty");
+        assert!(!app.downloads.store.snapshot().is_done("t-2"));
+
+        // Back to the first account: its downloads are where they were.
+        connect(&mut app, "luke", true);
+        assert!(app.downloads.store.snapshot().is_done("t-2"));
+    }
+
+    #[test]
     fn offline_the_queue_plays_only_what_is_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
@@ -2372,7 +2486,7 @@ mod tests {
 
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
-        app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into(), new_account: false });
         assert!(app.session.online);
         assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
         assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
@@ -2399,7 +2513,7 @@ mod tests {
         let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
         // Signed in, then the server went away: a reconnect loop is running.
         let before = app.bridge.session();
-        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         assert!(app.session.online && app.session.client.is_some());
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
         assert!(app.session.unreachable);
@@ -2410,13 +2524,13 @@ mod tests {
         assert_ne!(app.bridge.session(), before, "sign-out ends the session");
 
         // The old loop reaches the server after all: stale, ignored.
-        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
         assert!(app.login.is_some(), "still on the login screen");
         assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
 
         // A fresh sign-in in the new session works.
-        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         assert!(app.login.is_none() && app.session.online);
     }
 

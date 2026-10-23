@@ -15,7 +15,9 @@ use subsonic::{AlbumListType, Client, Credentials};
 pub enum Msg {
     /// `session`: the bridge's session when the connect began; the app drops
     /// it if the user signed out since.
-    Connected { session: u64, client: Client, settings: Box<Settings>, server: String },
+    /// Signed in. `new_account` means the local library belonged to another
+    /// server or user and was cleared for this one.
+    Connected { session: u64, client: Client, settings: Box<Settings>, server: String, new_account: bool },
     ConnectFailed(String),
     /// The server can't be reached (saved login, so the app opens offline);
     /// reconnecting continues in the background and ends with `Connected`.
@@ -307,7 +309,7 @@ impl Bridge {
                         }
                     })
                     .await;
-                    this.send(Msg::Connected { session, client, settings: Box::new(settings), server });
+                    this.connected(session, client, settings, server).await;
                 }
                 Err(PingError::Unreachable(e)) if saved => {
                     this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
@@ -316,6 +318,19 @@ impl Bridge {
                 Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(Msg::ConnectFailed(e)),
             }
         });
+    }
+
+    /// Claims the local library for this account (clearing another account's
+    /// mirror) and reports the sign-in.
+    async fn connected(&self, session: u64, client: Client, settings: Settings, server: String) {
+        let new_account = match settings.account_id() {
+            Some(id) => self.db(move |l| l.claim_account(id)).await.unwrap_or_else(|e| {
+                tracing::warn!("recording the account: {e}");
+                false
+            }),
+            None => false,
+        };
+        self.send(Msg::Connected { session, client, settings: Box::new(settings), server, new_account });
     }
 
     /// Times one ping (for the server popover and the diagnostics bar).
@@ -369,7 +384,7 @@ impl Bridge {
                 match pinged {
                     Ok(server) => {
                         this.reconnecting.store(false, Ordering::Relaxed);
-                        return this.send(Msg::Connected { session, client, settings: Box::new(settings), server });
+                        return this.connected(session, client, settings, server).await;
                     }
                     Err(PingError::Unreachable(_)) => delay = (delay * 2).min(Duration::from_secs(60)),
                     Err(PingError::Refused(e)) => {

@@ -156,9 +156,9 @@ impl ListenerApp {
                 limit_choices(ui, snap.limit, &mut self.actions);
             });
             ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
-            let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.downloads.store.dir().display().to_string());
+            let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.downloads.base.display().to_string());
             egui::Popup::menu(&resp).show(|ui| {
-                ui.label(egui::RichText::new(self.downloads.store.dir().display().to_string()).size(11.0).color(t.muted));
+                ui.label(egui::RichText::new(self.downloads.base.display().to_string()).size(11.0).color(t.muted));
                 if ui.button("Show in Finder").clicked() {
                     self.actions.push(Action::RevealOffline);
                 }

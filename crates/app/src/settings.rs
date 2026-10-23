@@ -162,6 +162,19 @@ impl Settings {
         serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     }
 
+    /// A stable id for the server account (server address and user), used to
+    /// keep each account's library mirror and downloads apart. `None` before a
+    /// login. The address is compared without case or a trailing slash.
+    pub fn account_id(&self) -> Option<u32> {
+        let server = self.server.trim().trim_end_matches('/').to_lowercase();
+        if server.is_empty() || self.username.is_empty() {
+            return None;
+        }
+        // FNV-1a: stable across builds and Rust versions, unlike `DefaultHasher`.
+        let key = format!("{server}\n{}", self.username);
+        Some(key.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193)))
+    }
+
     fn keyring_account(&self) -> String {
         format!("{}@{}", self.username, self.server)
     }
@@ -182,5 +195,26 @@ impl Settings {
     pub fn store_password(&self, password: &str) -> anyhow::Result<()> {
         keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())?.set_password(password)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn login(server: &str, user: &str) -> Settings {
+        Settings { server: server.into(), username: user.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn the_account_id_is_stable_and_tells_accounts_apart() {
+        let a = login("https://music.example.com/", "luke").account_id();
+        assert!(a.is_some());
+        assert_eq!(a, login("HTTPS://Music.Example.com", "luke").account_id());
+        assert_ne!(a, login("https://music.example.com", "sam").account_id());
+        assert_ne!(a, login("https://other.example.com", "luke").account_id());
+        assert_eq!(login("", "luke").account_id(), None);
+        // Fixed across builds: downloads live in a folder named after it.
+        assert_eq!(login("http://localhost:4533", "admin").account_id(), Some(0x5cd1_2c42));
     }
 }
