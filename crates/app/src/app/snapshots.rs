@@ -709,3 +709,6 @@ fn snapshots() {
         *h.state_mut() = None;
     }
 }
+
+#[cfg(test)]
+mod perf;
