@@ -51,8 +51,6 @@ pub enum EndAction {
     Stop,
     /// Start again from the first item played since the last "play now".
     RepeatQueue,
-    /// Not built yet: keep going with similar tracks from the library.
-    Similar,
 }
 
 /// A run of consecutive upcoming items with the same source.
@@ -416,14 +414,6 @@ mod tests {
         assert!(!ids(&q.upcoming).contains(&"old"));
     }
 
-    #[test]
-    fn similar_is_a_stub_that_stops() {
-        let mut q = Queue::default();
-        q.play_now(album(&["a1"]), 0, src("A"));
-        q.end = EndAction::Similar;
-        assert!(q.peek_next().is_none());
-        assert!(q.advance().is_none());
-    }
 
     #[test]
     fn back_jump_and_replay() {

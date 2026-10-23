@@ -96,7 +96,6 @@ impl ListenerApp {
                 let label = |e: EndAction| match e {
                     EndAction::Stop => "Stop",
                     EndAction::RepeatQueue => "Repeat queue",
-                    EndAction::Similar => "Continue with similar",
                 };
                 let mut end = self.player.queue.end;
                 let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text)
@@ -104,9 +103,6 @@ impl ListenerApp {
                 egui::Popup::menu(&button).show(|ui| {
                     ui.selectable_value(&mut end, EndAction::Stop, label(EndAction::Stop));
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
-                    ui.add_enabled_ui(false, |ui| ui.selectable_value(&mut end, EndAction::Similar, label(EndAction::Similar)))
-                        .response
-                        .on_disabled_hover_text("Not available yet");
                 });
                 if end != self.player.queue.end {
                     self.actions.push(Action::SetEnd(end));

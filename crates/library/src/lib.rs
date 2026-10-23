@@ -244,6 +244,7 @@ impl Library {
         Ok(Self { db })
     }
 
+    #[cfg(test)]
     pub fn schema_version(&self) -> Result<u32> {
         let rt = self.db.begin_read()?;
         Ok(rt.open_table(META)?.get(SCHEMA_KEY)?.map_or(0, |v| v.value()))
@@ -285,6 +286,7 @@ impl Library {
         Ok(wt.commit()?)
     }
 
+    #[cfg(test)]
     pub fn upsert_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
         let wt = self.db.begin_write()?;
         {
@@ -358,7 +360,6 @@ impl Library {
         Ok(wt.commit()?)
     }
 
-    /// Stamps of albums whose tracks are stored and current as of that stamp.
     /// Analysis records stored here by older builds; they now live in an
     /// [`AnalysisStore`], which takes them over with [`AnalysisStore::adopt`].
     fn legacy_analysis_records(&self) -> Result<Vec<(String, Vec<u8>)>> {
@@ -377,6 +378,7 @@ impl Library {
         Ok(wt.commit()?)
     }
 
+    /// Stamps of albums whose tracks are stored and current as of that stamp.
     pub fn album_stamps(&self) -> Result<HashMap<String, u64>> {
         let rt = self.db.begin_read()?;
         let mut out = HashMap::new();
@@ -409,6 +411,7 @@ impl Library {
         Ok(out)
     }
 
+    /// Number of stored tracks. Public for the app's sync tests.
     pub fn track_count(&self) -> Result<u64> {
         Ok(self.db.begin_read()?.open_table(TRACKS)?.len()?)
     }
@@ -521,12 +524,13 @@ impl Library {
         Ok(ids.into_iter().collect())
     }
 
+    #[cfg(test)]
     pub fn album_count(&self) -> Result<u64> {
         Ok(self.db.begin_read()?.open_table(ALBUMS)?.len()?)
     }
 
     /// Checks that every index entry points at a row and every row has exactly
-    /// its expected index entry. For tests and a future "verify library" command.
+    /// its expected index entry. Public for the app's sync tests.
     pub fn check_indexes(&self) -> Result<Vec<String>> {
         let rt = self.db.begin_read()?;
         let mut problems = Vec::new();

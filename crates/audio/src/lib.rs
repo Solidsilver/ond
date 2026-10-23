@@ -29,7 +29,6 @@ pub mod coreaudio;
 mod decode;
 mod device;
 mod dither;
-mod dsp;
 pub mod output;
 pub mod replaygain;
 mod resample;
@@ -37,7 +36,6 @@ mod signal;
 
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
-pub use dsp::Dsp;
 pub use output::{CpalBackend, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
 pub use dither::Tpdf;
@@ -217,7 +215,7 @@ pub struct Status {
     pub(crate) paused: AtomicBool,
     /// The callback is holding or prebuffering.
     pub(crate) buffering: AtomicBool,
-    /// The current mode: read by the callback (gain bypass) and the DSP stage.
+    /// The current mode: read by the output callback (gain bypass).
     pub(crate) bit_perfect: AtomicBool,
     /// ReplayGain per session track, read by the callback at each boundary.
     pub(crate) gains: TrackGains,

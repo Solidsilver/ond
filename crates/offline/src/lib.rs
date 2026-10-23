@@ -34,8 +34,8 @@ const MAX_ATTEMPTS: u32 = 6;
 /// Progress repaints at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
 
-/// Makes the stream URL for a track id. The store has none while the server
-/// is unreachable (see [`OfflineStore::set_source`]).
+/// Makes the stream URL for a track id. The store holds one only while the
+/// server is reachable (see [`OfflineStore::set_source`]).
 pub type UrlFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// Finds a complete copy of a track in the stream cache.
 pub type CacheLookup = Arc<dyn Fn(&TrackRef) -> Option<PathBuf> + Send + Sync>;

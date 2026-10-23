@@ -318,8 +318,6 @@ impl Bridge {
         });
     }
 
-    /// Checks the connection after something failed; if the server is gone,
-    /// says so and reconnects in the background.
     /// Times one ping (for the server popover and the diagnostics bar).
     pub fn measure_latency(&self, client: Client) {
         let this = self.clone();
@@ -330,6 +328,8 @@ impl Bridge {
         });
     }
 
+    /// Checks the connection after something failed; if the server is gone,
+    /// says so and reconnects in the background.
     pub fn probe(&self, client: Client, settings: Settings) {
         if self.reconnecting.load(Ordering::Relaxed) {
             return;

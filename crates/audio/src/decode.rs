@@ -14,7 +14,7 @@ use crate::output::{RingCtl, RingInput, StreamFormat};
 use crate::replaygain::{GainConfig, ReplayGain, applied_gain, parse_tag_value};
 use crate::resample::StreamResampler;
 use crate::signal::{DeviceCaps, choose_rate};
-use crate::{Dsp, EngineConfig, Status, TrackSource};
+use crate::{EngineConfig, Status, TrackSource};
 use symphonia::core::audio::Channels;
 use symphonia::core::meta::{StandardTag, Tag};
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -114,7 +114,6 @@ impl Session {
         }
         let mut ctx = Ctx {
             config,
-            dsp: Dsp::new(status.clone()),
             status,
             cache,
             msgs: msg_tx,
@@ -181,7 +180,6 @@ impl Session {
 
 struct Ctx {
     config: EngineConfig,
-    dsp: Dsp,
     status: Arc<Status>,
     cache: Option<StreamCache>,
     msgs: Sender<DecoderMsg>,
@@ -491,7 +489,6 @@ impl Ctx {
                 map.apply(&scratch, &mut self.mapped);
                 &mut self.mapped
             };
-            self.dsp.process(mapped);
             let Some(o) = out.as_mut() else { unreachable!("attach always leaves a ring") };
             let data = match o.resampler.as_mut() {
                 Some(r) => {
