@@ -30,6 +30,9 @@ pub struct Settings {
     /// Report plays to the server (which passes them on to Last.fm / ListenBrainz).
     #[serde(default = "yes")]
     pub scrobble: bool,
+    /// The user signed out: show the login screen instead of reconnecting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_out: bool,
 }
 
 fn yes() -> bool {
@@ -48,6 +51,7 @@ impl Default for Settings {
             show_queue: true,
             window: Default::default(),
             scrobble: true,
+            signed_out: false,
         }
     }
 }
@@ -104,6 +108,13 @@ impl Settings {
     /// Blocking: may show a Keychain prompt. Call off the UI thread.
     pub fn load_password(&self) -> Option<String> {
         keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account()).ok()?.get_password().ok()
+    }
+
+    /// Blocking: may show a Keychain prompt. Call off the UI thread.
+    pub fn forget_password(&self) {
+        if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account()) {
+            let _ = e.delete_credential();
+        }
     }
 
     /// Blocking: may show a Keychain prompt. Call off the UI thread.
