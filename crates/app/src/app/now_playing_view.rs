@@ -112,9 +112,9 @@ impl ListenerApp {
 
     /// Asks the server for `track`'s lyrics the first time something shows them.
     fn ensure_lyrics(&mut self, track: &Track) {
-        if !self.lyrics.contains_key(&track.id) && self.client.is_some() {
+        if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
             self.lyrics.insert(track.id.clone(), Fetch::Loading);
-            self.bridge.fetch_lyrics(self.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
+            self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
         }
     }
 
@@ -138,7 +138,7 @@ impl ListenerApp {
                 self.lyrics_block(ui, &track, &l, size, bg);
             }
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
-            _ if self.client.is_none() => note(ui, "Lyrics come from your server when it's connected."),
+            _ if self.session.client.is_none() => note(ui, "Lyrics come from your server when it's connected."),
             _ => note(ui, "No lyrics for this song."),
         }
     }

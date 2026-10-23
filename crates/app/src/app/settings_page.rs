@@ -214,7 +214,7 @@ impl ListenerApp {
 
     fn offline_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let snap = self.offline_snap.clone();
+        let snap = self.downloads.snap.clone();
         group(ui, "Storage", |ui| {
             ui.label(egui::RichText::new(super::offline_page::storage_used(&snap)).size(13.0).color(t.text));
             ui.add_space(10.0);
@@ -232,7 +232,7 @@ impl ListenerApp {
             }
         });
         group(ui, "Location", |ui| {
-            let dir = self.offline.dir().display().to_string();
+            let dir = self.downloads.store.dir().display().to_string();
             let g = super::widgets::elide(ui, &dir, FontId::proportional(12.0), t.muted, ui.available_width());
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
             ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, t.muted);
@@ -257,24 +257,24 @@ impl ListenerApp {
             let albums = self.data.albums.len();
             let tracks = self.data.tracks.all.len();
             ui.label(egui::RichText::new(format!("{albums} albums · {tracks} tracks")).size(13.0).color(t.text));
-            let when = if self.track_syncing {
-                self.sync_label.clone()
+            let when = if self.sync.tracks {
+                self.sync.label.clone()
             } else {
-                match self.last_synced {
+                match self.sync.last {
                     Some(at) => format!("Last synced at {}", at.format("%-I:%M %p")),
-                    None if self.client.is_some() => "Synced at launch".to_owned(),
+                    None if self.session.client.is_some() => "Synced at launch".to_owned(),
                     None => "Not connected".to_owned(),
                 }
             };
             hint(ui, &when);
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if self.track_syncing {
+                if self.sync.tracks {
                     if secondary(ui, "Stop").clicked() {
                         self.bridge.cancel_sync();
                     }
                 } else {
-                    let can = self.client.is_some() && self.online;
+                    let can = self.session.client.is_some() && self.session.online;
                     if ui.add_enabled_ui(can, |ui| secondary(ui, "Sync now")).inner.clicked() {
                         self.actions.push(Action::SyncNow);
                     }
@@ -287,7 +287,7 @@ impl ListenerApp {
     /// Library analysis: start it, follow it, pause or stop it.
     fn analysis_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let p = self.analyzer.progress();
+        let p = self.analysis.runner.progress();
         if p.active() {
             let status = if p.paused {
                 format!("Paused at {} of {}", p.done.min(p.total), p.total)
@@ -313,7 +313,7 @@ impl ListenerApp {
                     self.actions.push(Action::StopAnalysis);
                 }
             });
-        } else if self.client.is_some() && !self.data.tracks.all.is_empty() {
+        } else if self.session.client.is_some() && !self.data.tracks.all.is_empty() {
             let (n, secs) = self.unanalysed();
             if n == 0 {
                 ui.label(egui::RichText::new("Every track is analysed.").size(13.0).color(t.text));
@@ -338,7 +338,7 @@ impl ListenerApp {
 
     fn account_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let (server, user) = match &self.settings {
+        let (server, user) = match &self.session.settings {
             Some(s) => (s.server.clone(), s.username.clone()),
             None => (String::new(), String::new()),
         };
@@ -353,13 +353,13 @@ impl ListenerApp {
             row(ui, "User", |ui| {
                 ui.label(egui::RichText::new(&user).size(13.0).color(t.text));
             });
-            if !self.server_info.is_empty() {
+            if !self.session.server_info.is_empty() {
                 row(ui, "Server", |ui| {
-                    ui.label(egui::RichText::new(&self.server_info).size(13.0).color(t.text));
+                    ui.label(egui::RichText::new(&self.session.server_info).size(13.0).color(t.text));
                 });
             }
             row(ui, "Status", |ui| {
-                let (text, color) = if self.online { ("Connected", t.ok) } else { ("Can't reach the server", t.warn) };
+                let (text, color) = if self.session.online { ("Connected", t.ok) } else { ("Can't reach the server", t.warn) };
                 ui.label(egui::RichText::new(text).size(13.0).color(color));
             });
             ui.add_space(14.0);

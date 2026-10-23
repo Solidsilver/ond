@@ -163,12 +163,12 @@ impl ListenerApp {
         }
 
         // Background work.
-        if let Some(p) = self.sync_progress {
+        if let Some(p) = self.sync.progress {
             out.push(Segment { text: format!("sync {}/{}", p.done, p.total), detail: p.label(), tone: Tone::Normal });
-        } else if self.album_syncing {
+        } else if self.sync.albums {
             out.push(Segment { text: "sync albums…".into(), detail: "Fetching the album list".into(), tone: Tone::Normal });
         }
-        let a = self.analyzer.progress();
+        let a = self.analysis.runner.progress();
         if a.active() {
             let state = if a.paused {
                 " paused"
@@ -181,9 +181,9 @@ impl ListenerApp {
         }
 
         // Server.
-        if let Some(s) = &self.settings {
+        if let Some(s) = &self.session.settings {
             let host = server_host(&s.server);
-            let (text, tone) = if !self.online {
+            let (text, tone) = if !self.session.online {
                 (format!("{host} · offline"), Tone::Warn)
             } else {
                 match self.diagnostics.latency {
@@ -191,7 +191,7 @@ impl ListenerApp {
                     None => (host.clone(), Tone::Normal),
                 }
             };
-            let detail = format!("{}\n{}", s.server, if self.server_info.is_empty() { "Not connected" } else { &self.server_info });
+            let detail = format!("{}\n{}", s.server, if self.session.server_info.is_empty() { "Not connected" } else { &self.session.server_info });
             out.push(Segment { text, detail, tone });
         }
 

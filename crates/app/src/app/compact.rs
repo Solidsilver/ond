@@ -143,7 +143,7 @@ impl ListenerApp {
                             }
                             resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
                         }
-                        if !self.online && self.settings.is_some() {
+                        if !self.session.online && self.session.settings.is_some() {
                             let (g, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                             icons::paint(ui.painter(), g, Icon::Offline, t.muted);
                             resp.on_hover_text("Can't reach the server. Downloaded music still plays.");

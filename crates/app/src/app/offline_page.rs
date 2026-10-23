@@ -58,18 +58,18 @@ pub fn pin_text(snap: &Snapshot, s: &PinSummary) -> String {
 impl ListenerApp {
     /// A mark and a few words next to the Play buttons, only when `pin` is kept.
     pub(super) fn pin_status(&self, ui: &mut Ui, pin: &Pin) {
-        let Some(s) = self.offline_snap.pin(pin) else { return };
+        let Some(s) = self.downloads.snap.pin(pin) else { return };
         let Some(m) = Mark::of_pin(Some(s)) else { return };
         let t = Tokens::of(ui);
         let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
         super::widgets::mark(ui, r.center(), 12.0, m);
         resp.on_hover_text(m.hint());
-        ui.label(egui::RichText::new(pin_text(&self.offline_snap, s)).size(12.0).color(t.muted));
+        ui.label(egui::RichText::new(pin_text(&self.downloads.snap, s)).size(12.0).color(t.muted));
     }
 
     pub(super) fn offline_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let snap = self.offline_snap.clone();
+        let snap = self.downloads.snap.clone();
         let albums: Vec<(usize, &PinSummary)> =
             snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { self.data.by_id.get(id).map(|&i| (i, p)) } else { None }).collect();
         let playlists: Vec<&PinSummary> = snap.pins.iter().filter(|p| matches!(p.pin, Pin::Playlist(_))).collect();
@@ -83,7 +83,7 @@ impl ListenerApp {
         }
         self.heading(ui, "Offline", (!parts.is_empty()).then(|| parts.join(" · ")));
 
-        if !self.online && self.settings.is_some() {
+        if !self.session.online && self.session.settings.is_some() {
             ui.horizontal(|ui| {
                 icons::inline(ui, Icon::Offline, t.muted);
                 ui.label(egui::RichText::new("The server can't be reached. Downloaded music plays as usual.").size(12.5).color(t.muted));
@@ -156,9 +156,9 @@ impl ListenerApp {
                 limit_choices(ui, snap.limit, &mut self.actions);
             });
             ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
-            let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.offline.dir().display().to_string());
+            let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.downloads.store.dir().display().to_string());
             egui::Popup::menu(&resp).show(|ui| {
-                ui.label(egui::RichText::new(self.offline.dir().display().to_string()).size(11.0).color(t.muted));
+                ui.label(egui::RichText::new(self.downloads.store.dir().display().to_string()).size(11.0).color(t.muted));
                 if ui.button("Show in Finder").clicked() {
                     self.actions.push(Action::RevealOffline);
                 }

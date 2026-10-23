@@ -112,7 +112,7 @@ impl ListenerApp {
         let n = self.data.tracks.all.len();
         self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
         if n == 0 {
-            let (title, body) = if self.track_syncing {
+            let (title, body) = if self.sync.tracks {
                 ("Syncing your tracks…", "Songs appear here as the library comes in.")
             } else {
                 ("No songs yet", "They appear once the library has synced with your server.")
@@ -172,7 +172,7 @@ impl ListenerApp {
                     ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
                     let c = columns(rect);
                     let color = super::widgets::track_color(&t, playing, self.playable(tr));
-                    if let Some(m) = super::widgets::Mark::of_track(self.offline_snap.track(&tr.id)) {
+                    if let Some(m) = super::widgets::Mark::of_track(self.downloads.snap.track(&tr.id)) {
                         super::widgets::mark(ui, pos2(c.time.left() + 10.0, rect.center().y), 10.0, m);
                     }
                     let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };

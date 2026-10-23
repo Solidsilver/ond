@@ -42,7 +42,7 @@ impl ListenerApp {
             });
         });
         let empty = |ui: &mut Ui, text: &str| super::widgets::empty_state(ui, Icon::Heart, "Nothing loved yet", text);
-        if !self.favorites.loaded && self.client.is_some() {
+        if !self.favorites.loaded && self.session.client.is_some() {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
         }

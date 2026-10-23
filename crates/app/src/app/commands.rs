@@ -111,12 +111,12 @@ impl ListenerApp {
     /// Flips a heart now and tells the server; a refusal puts it back.
     pub(super) fn toggle_star(&mut self, kind: StarKind, id: String, track: Option<Track>, name: Option<String>) {
         let (on, seq) = self.favorites.toggle(kind, &id, track.as_ref(), name.as_deref());
-        self.bridge.set_starred(self.client.clone(), kind, id, on, seq);
+        self.bridge.set_starred(self.session.client.clone(), kind, id, on, seq);
     }
 
     pub(super) fn rate(&mut self, id: String, rating: u8) {
         let (previous, seq) = self.favorites.rate(&id, rating);
-        self.bridge.set_rating(self.client.clone(), id, rating, previous, seq);
+        self.bridge.set_rating(self.session.client.clone(), id, rating, previous, seq);
     }
 
     pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, seq: u64, error: Option<String>) {
@@ -148,7 +148,7 @@ impl ListenerApp {
     /// Applies a playlist change: locally first where the result is certain
     /// (so lists don't jump), then on the server, which sends back the truth.
     pub(super) fn playlist_action(&mut self, a: PlaylistAction) {
-        let client = self.client.clone();
+        let client = self.session.client.clone();
         match a {
             PlaylistAction::Create { name, tracks } => {
                 let name = if name.trim().is_empty() { "Untitled Playlist".to_owned() } else { name.trim().to_owned() };

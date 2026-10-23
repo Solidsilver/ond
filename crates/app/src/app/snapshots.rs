@@ -297,8 +297,8 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
         app.handle(m);
     }
     app.login = None;
-    app.server_label = "solidsilver · navidrome 0.64.2".into();
-    app.sync_label = format!("{} albums", ALBUMS.len());
+    app.session.server_label = "solidsilver · navidrome 0.64.2".into();
+    app.sync.label = format!("{} albums", ALBUMS.len());
 
     let albums: Vec<Album> = (0..ALBUMS.len()).map(album).collect();
     for i in 0..ALBUMS.len() {
@@ -317,9 +317,9 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     all.sort_by(|a, b| (&a.album_id, a.disc, a.track).cmp(&(&b.album_id, b.disc, b.track)));
     app.data.tracks.all = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
-    app.online = true;
-    app.settings = Some(Settings { server: "https://music.example.com".into(), username: "solidsilver".into(), ..Default::default() });
-    app.server_info = "navidrome 0.64.2".into();
+    app.session.online = true;
+    app.session.settings = Some(Settings { server: "https://music.example.com".into(), username: "solidsilver".into(), ..Default::default() });
+    app.session.server_info = "navidrome 0.64.2".into();
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
         .enumerate()
@@ -350,7 +350,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
         confidence: analysis::Confidence::High,
     };
     analysed(&mut app, 0, Some(up));
-    app.analyses_loaded = true;
+    app.analysis.loaded = true;
 
     fill_queue(&mut app);
     app.output.handle(&devices());
@@ -378,8 +378,8 @@ fn analysed(app: &mut ListenerApp, album: usize, verdict: Option<analysis::Verdi
             cutoff_hz: verdict.as_ref().map(|_| 21_400),
             verdicts: verdict.clone().into_iter().collect(),
         };
-        app.analyses.insert(t.id.clone(), analysis::Record { stamp: crate::analyze::stamp_of(t), analysis: a });
-        app.analyses_version += 1;
+        app.analysis.records.insert(t.id.clone(), analysis::Record { stamp: crate::analyze::stamp_of(t), analysis: a });
+        app.analysis.version += 1;
     }
 }
 
@@ -436,17 +436,17 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.fav_tab = favorites_page::FavTab::default();
     app.prefs.edit(|s| s.show_queue = true);
     app.queue_sheet = false;
-    app.analyzer.clear();
+    app.analysis.runner.clear();
     app.queue_ui = QueueUi::default();
     app.np_details = false;
     app.lyrics_follow = crate::lyrics::Follow::default();
     app.login = None;
-    app.online = true;
-    app.album_syncing = false;
-    app.track_syncing = false;
-    app.sync_progress = None;
+    app.session.online = true;
+    app.sync.albums = false;
+    app.sync.tracks = false;
+    app.sync.progress = None;
     app.toasts = super::toasts::Toasts::default();
-    app.unreachable = false;
+    app.session.unreachable = false;
     app.diagnostics = super::diagnostics::Diagnostics::default();
     app.prefs.edit(|s| s.diagnostics_bar = false);
     app.diagnostics.set_latency(Some(Duration::from_millis(14)));
@@ -824,7 +824,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     h.run_steps(2);
     {
         let app = app_mut(h);
-        if let (Some(p), Some(index)) = (app.palette.as_mut(), app.search.as_mut()) {
+        if let (Some(p), Some(index)) = (app.palette.as_mut(), app.search.index.as_mut()) {
             p.query = "bob".into();
             p.refresh(index);
         }
@@ -913,7 +913,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "footer-help-hover");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).online = false;
+    app_mut(h).session.online = false;
     s.shoot(h, "footer-connecting");
 
     // The diagnostics bar, on, while playing and syncing; and at a narrow width.
@@ -921,8 +921,8 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     {
         let app = app_mut(h);
         app.prefs.edit(|s| s.diagnostics_bar = true);
-        app.track_syncing = true;
-        app.sync_progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.sync.tracks = true;
+        app.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
         app.diagnostics.note_frame(Duration::from_micros(1800));
     }
     h.run_steps(2);
@@ -966,7 +966,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     {
         let app = app_mut(h);
         let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), url: String::new(), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
-        app.analyzer.enqueue(jobs);
+        app.analysis.runner.enqueue(jobs);
         app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
     s.shoot(h, "settings-analysing");
@@ -1047,8 +1047,8 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        app.track_syncing = true;
-        app.sync_progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.sync.tracks = true;
+        app.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
     }
     s.shoot(h, "sidebar-syncing");
     let side = egui::Rect::from_min_max(pos2(0.0, 700.0), pos2(216.0, 900.0));
@@ -1059,19 +1059,19 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "sidebar-syncing-hover");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).album_syncing = true;
+    app_mut(h).sync.albums = true;
     s.shoot(h, "sidebar-syncing-albums");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).online = false;
-    app_mut(h).unreachable = true;
+    app_mut(h).session.online = false;
+    app_mut(h).session.unreachable = true;
     s.shoot(h, "offline-pill");
 
     reset(h, vec2(760.0, 640.0), Route::Albums);
     {
         let app = app_mut(h);
-        app.track_syncing = true;
-        app.sync_progress = Some(crate::sync::Progress { done: 1200, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.sync.tracks = true;
+        app.sync.progress = Some(crate::sync::Progress { done: 1200, total: 1866, unit: crate::sync::Unit::Tracks });
     }
     s.shoot(h, "narrow-rail-syncing");
 

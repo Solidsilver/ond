@@ -321,9 +321,10 @@ pub struct ListenerApp {
     engine: EngineHandle,
 
     login: Option<LoginForm>,
-    client: Option<Client>,
-    server_label: String,
-    sync_label: String,
+    /// The server connection and who's signed in.
+    session: Session,
+    /// Where the library sync is.
+    sync: SyncState,
 
     data: Data,
     nav: Nav,
@@ -355,20 +356,9 @@ pub struct ListenerApp {
     /// Where the seek bar is being dragged to, in seconds.
     seek_preview: Option<f64>,
 
-    /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
-    /// the old one serves until the new one lands.
-    search: Option<SearchIndex>,
-    /// Albums, artists or tracks changed since the index was built.
-    search_stale: bool,
-    /// The latest index build asked for; older builds that land late are dropped.
-    search_generation: u64,
+    /// The palette's search index.
+    search: SearchState,
     songs: songs::SongsView,
-    /// A track sync is running (shows a stop button in the status bar).
-    track_syncing: bool,
-    /// The album list is being fetched (before the track sync).
-    album_syncing: bool,
-    /// Where the track sync is, while it runs.
-    sync_progress: Option<crate::sync::Progress>,
     /// Errors and notices, shown as toasts.
     toasts: toasts::Toasts,
     palette: Option<Palette>,
@@ -392,27 +382,12 @@ pub struct ListenerApp {
     /// OS Now Playing and server scrobbles.
     now_playing: now_playing::Session,
 
-    /// Offline downloads, and their state as of this frame.
-    offline: OfflineStore,
-    offline_snap: Arc<offline::Snapshot>,
-    /// Pins waiting for their track lists to load, by the same keys as `pending`.
-    pending_pins: Vec<(ListKey, Pin)>,
-    /// The server answered last time we asked. While it's unreachable only
-    /// downloaded tracks play.
-    online: bool,
-    /// The login in use, for reconnecting.
-    settings: Option<Settings>,
+    /// Offline downloads.
+    downloads: Downloads,
     /// The user's preferences: the one copy, saved in the background.
     prefs: Prefs,
-    /// Stored analysis results by track id, with the file stamp they're for.
-    analyses: HashMap<String, analysis::Record>,
-    /// Bumped whenever `analyses` changes, so counts over it know to recount.
-    analyses_version: u64,
-    /// How much of the library has no current analysis, per (analyses, tracks) version.
-    unanalysed: crate::memo::Memo<(u64, u64), (usize, f64)>,
-    /// The stored results have been read (until then everything looks unanalysed).
-    analyses_loaded: bool,
-    analyzer: analyze::Runner,
+    /// Loudness, dynamic range and fake hi-res checks.
+    analysis: Analysis,
     /// Hearts and ratings, mirrored from the server.
     favorites: Favorites,
     /// A sheet over the window, if one is open.
@@ -426,10 +401,6 @@ pub struct ListenerApp {
     fav_tab: favorites_page::FavTab,
     /// The Settings window's section.
     settings_section: settings_page::Section,
-    /// When the last full sync finished (this session).
-    last_synced: Option<chrono::DateTime<chrono::Local>>,
-    /// "navidrome 0.64.2", as the server reported it.
-    server_info: String,
     /// Lyrics by track id, fetched when a lyrics view first needs them.
     lyrics: HashMap<String, crate::lyrics::Fetch>,
     /// Play counts by track id for the Info tab: absent until asked for,
@@ -441,9 +412,71 @@ pub struct ListenerApp {
     np_details: bool,
     /// The diagnostics bar: whether it's on, and what it measures.
     diagnostics: diagnostics::Diagnostics,
+}
+
+/// The server connection and who's signed in.
+#[derive(Default)]
+pub struct Session {
+    pub client: Option<Client>,
+    /// The server answered last time we asked. While it's unreachable only
+    /// downloaded tracks play.
+    pub online: bool,
     /// The server stopped answering and reconnecting runs in the background
     /// (as opposed to the first connect still under way).
-    unreachable: bool,
+    pub unreachable: bool,
+    /// The login in use, for reconnecting.
+    pub settings: Option<Settings>,
+    /// "user · navidrome 0.64.2", or "user · offline".
+    pub server_label: String,
+    /// "navidrome 0.64.2", as the server reported it.
+    pub server_info: String,
+}
+
+/// Where the library sync is.
+#[derive(Default)]
+pub struct SyncState {
+    pub label: String,
+    /// The album list is being fetched (before the track sync).
+    pub albums: bool,
+    /// A track sync is running (shows a stop button).
+    pub tracks: bool,
+    /// Where the track sync is, while it runs.
+    pub progress: Option<crate::sync::Progress>,
+    /// When the last full sync finished (this session).
+    pub last: Option<chrono::DateTime<chrono::Local>>,
+}
+
+/// The palette's search index.
+#[derive(Default)]
+pub struct SearchState {
+    /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
+    /// the old one serves until the new one lands.
+    pub index: Option<SearchIndex>,
+    /// Albums, artists or tracks changed since the index was built.
+    pub stale: bool,
+    /// The latest index build asked for; older builds that land late are dropped.
+    pub generation: u64,
+}
+
+/// Offline downloads, and their state as of this frame.
+pub struct Downloads {
+    pub store: OfflineStore,
+    pub snap: Arc<offline::Snapshot>,
+    /// Pins waiting for their track lists to load, by the same keys as `pending`.
+    pub pending_pins: Vec<(ListKey, Pin)>,
+}
+
+/// Library analysis: stored results and the background runner.
+pub struct Analysis {
+    /// Stored analysis results by track id, with the file stamp they're for.
+    pub records: HashMap<String, analysis::Record>,
+    /// Bumped whenever `records` changes, so counts over it know to recount.
+    pub version: u64,
+    /// How much of the library has no current analysis, per (records, tracks) version.
+    pub unanalysed: crate::memo::Memo<(u64, u64), (usize, f64)>,
+    /// The stored results have been read (until then everything looks unanalysed).
+    pub loaded: bool,
+    pub runner: analyze::Runner,
 }
 
 impl ListenerApp {
@@ -562,9 +595,8 @@ impl ListenerApp {
             inbox,
             engine,
             login: Some(login),
-            client: None,
-            server_label: String::new(),
-            sync_label: String::new(),
+            session: Session { settings: prefs.has_login().then(|| saved.clone()), ..Default::default() },
+            sync: SyncState::default(),
             data: Data::default(),
             nav: Nav::default(),
             sort: AlbumSort::default(),
@@ -581,13 +613,8 @@ impl ListenerApp {
             output,
             bit_perfect: false,
             seek_preview: None,
-            search: None,
-            search_stale: false,
-            search_generation: 0,
+            search: SearchState::default(),
             songs: songs::SongsView::default(),
-            track_syncing: false,
-            album_syncing: false,
-            sync_progress: None,
             // Something worth knowing at start-up (e.g. the library was rebuilt).
             toasts: toasts::Toasts::with_notice(notice),
             palette: None,
@@ -600,18 +627,10 @@ impl ListenerApp {
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
             now_playing,
-            offline_snap: offline.snapshot(),
-            offline,
-            pending_pins: Vec::new(),
-            online: false,
+            downloads: Downloads { snap: offline.snapshot(), store: offline, pending_pins: Vec::new() },
             diagnostics: diagnostics::Diagnostics::default(),
-            settings: prefs.has_login().then(|| saved.clone()),
             prefs,
-            analyses: HashMap::new(),
-            analyses_version: 0,
-            unanalysed: Default::default(),
-            analyses_loaded: false,
-            analyzer,
+            analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
             favorites: Favorites::default(),
             overlay: None,
             menu: None,
@@ -619,13 +638,10 @@ impl ListenerApp {
             recent_playlists: Vec::new(),
             fav_tab: favorites_page::FavTab::default(),
             settings_section: settings_page::Section::default(),
-            last_synced: None,
-            server_info: String::new(),
             lyrics: HashMap::new(),
             song_stats: HashMap::new(),
             lyrics_follow: crate::lyrics::Follow::default(),
             np_details: false,
-            unreachable: false,
         })
     }
 
@@ -634,20 +650,20 @@ impl ListenerApp {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
             Msg::Connected { client, settings, server, .. } => {
-                self.server_label = format!("{} · {}", settings.username, server);
-                self.server_info = server.clone();
+                self.session.server_label = format!("{} · {}", settings.username, server);
+                self.session.server_info = server.clone();
                 self.login = None;
-                self.sync_label = "syncing…".into();
-                self.album_syncing = true;
+                self.sync.label = "syncing…".into();
+                self.sync.albums = true;
                 self.bridge.sync_albums(client.clone());
                 self.bridge.fetch_home(client.clone());
                 self.art.set_client(client.clone());
                 self.now_playing.set_client(client.clone());
                 self.output.connected(&settings.server);
                 let url = client.clone();
-                self.offline.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
+                self.downloads.store.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
                 // Pinned playlists follow the server: refetch them so additions download.
-                for p in &self.offline_snap.pins {
+                for p in &self.downloads.snap.pins {
                     if let Pin::Playlist(id) = &p.pin {
                         self.bridge.open_playlist(Some(client.clone()), id.clone());
                     }
@@ -655,12 +671,12 @@ impl ListenerApp {
                 self.bridge.fetch_starred(Some(client.clone()));
                 self.diagnostics.latency_asked();
                 self.bridge.measure_latency(client.clone());
-                self.unreachable = false;
-                self.client = Some(client);
+                self.session.unreachable = false;
+                self.session.client = Some(client);
                 self.prefs.set_login(&settings.server, &settings.username);
-                self.settings = Some(*settings);
-                if !self.online {
-                    self.online = true;
+                self.session.settings = Some(*settings);
+                if !self.session.online {
+                    self.session.online = true;
                     // Lined up while offline; the server can supply the rest again.
                     self.player.forget_next();
                     self.sync_next();
@@ -670,7 +686,7 @@ impl ListenerApp {
             Msg::ConnectFailed(e) => {
                 self.set_offline();
                 let form = self.login.get_or_insert_with(|| {
-                    let s = self.settings.clone().unwrap_or_default();
+                    let s = self.session.settings.clone().unwrap_or_default();
                     LoginForm { server: s.server, username: s.username, ..Default::default() }
                 });
                 form.busy = false;
@@ -680,32 +696,32 @@ impl ListenerApp {
                 tracing::info!("server unreachable: {error}");
                 self.login = None;
                 self.set_offline();
-                self.unreachable = true;
+                self.session.unreachable = true;
                 self.diagnostics.set_latency(None);
-                self.server_label = format!("{username} · offline");
-                self.sync_label = "reconnecting…".into();
+                self.session.server_label = format!("{username} · offline");
+                self.sync.label = "reconnecting…".into();
             }
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
             Msg::SearchIndex { generation, index } => {
-                if generation == self.search_generation {
+                if generation == self.search.generation {
                     self.install_search(*index);
                 }
             }
             Msg::Albums(a) => {
                 self.data.set_albums(a);
-                self.search_stale = true;
+                self.search.stale = true;
             }
             Msg::Artists(a) => {
                 self.data.artists = a;
-                self.search_stale = true;
+                self.search.stale = true;
             }
             Msg::AllTracks(set) => {
                 self.data.set_tracks(*set);
-                self.search_stale = true;
+                self.search.stale = true;
                 // A sync may have added tracks to pinned albums. The library can be
                 // partial (a sync stopped or failed, a rebuilt database), so this may
                 // only add: removals wait for the server's own listing of the album.
-                let albums: Vec<String> = self.offline_snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
+                let albums: Vec<String> = self.downloads.snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
                 for id in albums {
                     if let Some(tracks) = self.data.tracks.album(&id).cloned() {
                         self.refresh_pin(Pin::Album(id), &tracks, false);
@@ -714,28 +730,28 @@ impl ListenerApp {
                 self.resume_library_analysis();
             }
             Msg::Analyzed { track_id, record } => {
-                self.analyses.insert(track_id, record);
-                self.analyses_version += 1;
+                self.analysis.records.insert(track_id, record);
+                self.analysis.version += 1;
             }
             Msg::AnalysesLoaded(rows) => {
-                self.analyses.extend(rows);
-                self.analyses_version += 1;
-                self.analyses_loaded = true;
+                self.analysis.records.extend(rows);
+                self.analysis.version += 1;
+                self.analysis.loaded = true;
                 self.resume_library_analysis();
             }
             Msg::TrackSync(p) => {
-                self.track_syncing = true;
-                self.sync_progress = Some(p);
-                self.sync_label = p.label();
+                self.sync.tracks = true;
+                self.sync.progress = Some(p);
+                self.sync.label = p.label();
             }
             Msg::TrackSyncDone(outcome) => {
-                self.track_syncing = false;
-                self.sync_progress = None;
+                self.sync.tracks = false;
+                self.sync.progress = None;
                 let albums = self.data.albums.len();
                 let tracks = self.data.tracks.all.len();
-                self.sync_label = match outcome {
+                self.sync.label = match outcome {
                     crate::sync::Outcome::Done { .. } => {
-                        self.last_synced = Some(chrono::Local::now());
+                        self.sync.last = Some(chrono::Local::now());
                         format!("{albums} albums · {tracks} tracks")
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
@@ -747,20 +763,20 @@ impl ListenerApp {
             }
             Msg::AlbumUpdated(a) => self.data.update_album(a),
             Msg::SyncProgress(n) => {
-                self.album_syncing = true;
-                self.sync_label = format!("syncing… {n}");
+                self.sync.albums = true;
+                self.sync.label = format!("syncing… {n}");
             }
             Msg::AlbumSyncDone(Ok(n)) => {
-                self.album_syncing = false;
-                self.sync_label = format!("{n} albums");
-                self.track_syncing = true;
+                self.sync.albums = false;
+                self.sync.label = format!("{n} albums");
+                self.sync.tracks = true;
             }
             Msg::AlbumSyncDone(Err(e)) => {
                 // Nothing more follows (no artist or track sync): stop saying "syncing".
-                self.album_syncing = false;
-                self.sync_label = "sync failed".into();
+                self.sync.albums = false;
+                self.sync.label = "sync failed".into();
                 self.probe();
-                if self.online {
+                if self.session.online {
                     self.show_error(e);
                 }
             }
@@ -768,10 +784,10 @@ impl ListenerApp {
                 // Whatever waited for these tracks gives up, so it can't fire
                 // much later when they turn up for some other reason.
                 self.pending.retain(|p| p.key != key);
-                self.pending_pins.retain(|(k, _)| *k != key);
+                self.downloads.pending_pins.retain(|(k, _)| *k != key);
                 if let Some(e) = error {
                     self.probe();
-                    if self.online {
+                    if self.session.online {
                         self.show_error(e);
                     }
                 }
@@ -822,7 +838,7 @@ impl ListenerApp {
             Msg::Error(e) => {
                 self.probe();
                 // Offline, network errors are expected and the offline pill already says so.
-                if self.online {
+                if self.session.online {
                     self.show_error(e);
                 }
             }
@@ -842,8 +858,8 @@ impl ListenerApp {
 
     /// Something failed; if it was the network, find out whether the server is gone.
     fn probe(&self) {
-        if self.online
-            && let (Some(client), Some(settings)) = (&self.client, &self.settings)
+        if self.session.online
+            && let (Some(client), Some(settings)) = (&self.session.client, &self.session.settings)
         {
             self.bridge.probe(client.clone(), settings.clone());
         }
@@ -851,12 +867,12 @@ impl ListenerApp {
 
     /// The server's gone: browse what's stored, play what's downloaded.
     fn set_offline(&mut self) {
-        self.online = false;
-        self.client = None;
-        self.offline.set_source(None);
-        self.track_syncing = false;
-        self.album_syncing = false;
-        self.sync_progress = None;
+        self.session.online = false;
+        self.session.client = None;
+        self.downloads.store.set_source(None);
+        self.sync.tracks = false;
+        self.sync.albums = false;
+        self.sync.progress = None;
     }
 
     /// Pins `pin` if it was waiting for these tracks, or refreshes its track
@@ -867,14 +883,14 @@ impl ListenerApp {
     fn refresh_pin(&mut self, pin: Pin, tracks: &[Track], complete: bool) {
         let label = self.pin_label(&pin);
         let refs = || tracks.iter().map(track_ref).collect::<Vec<_>>();
-        if let Some(at) = self.pending_pins.iter().position(|(_, p)| p == &pin) {
-            self.pending_pins.remove(at);
-            self.offline.pin(pin, label, refs());
-        } else if self.offline.is_pinned(&pin) {
+        if let Some(at) = self.downloads.pending_pins.iter().position(|(_, p)| p == &pin) {
+            self.downloads.pending_pins.remove(at);
+            self.downloads.store.pin(pin, label, refs());
+        } else if self.downloads.store.is_pinned(&pin) {
             if complete {
-                self.offline.update(&pin, label, refs());
+                self.downloads.store.update(&pin, label, refs());
             } else {
-                self.offline.extend(&pin, refs());
+                self.downloads.store.extend(&pin, refs());
             }
         }
     }
@@ -889,7 +905,7 @@ impl ListenerApp {
 
     /// Whether `track` can play right now: downloaded, or the server is there.
     pub fn playable(&self, track: &Track) -> bool {
-        self.online || self.offline_snap.is_done(&track.id)
+        self.session.online || self.downloads.snap.is_done(&track.id)
     }
 
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
@@ -921,27 +937,27 @@ impl ListenerApp {
             // One pin per song, saved together: a big selection doesn't stall.
             Keep::Tracks(tracks) => {
                 if on {
-                    self.offline.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
+                    self.downloads.store.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
                 } else {
-                    self.offline.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
+                    self.downloads.store.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
                 }
-                self.offline_snap = self.offline.snapshot();
+                self.downloads.snap = self.downloads.store.snapshot();
                 return;
             }
         };
         match refs {
-            _ if !on => self.offline.unpin(&pin),
-            Some(refs) => self.offline.pin(pin.clone(), self.pin_label(&pin), refs),
+            _ if !on => self.downloads.store.unpin(&pin),
+            Some(refs) => self.downloads.store.pin(pin.clone(), self.pin_label(&pin), refs),
             None => {
                 self.wait_to_pin(key.clone(), pin);
                 match key {
-                    ListKey::Album(id) => self.bridge.open_album(self.client.clone(), id),
-                    ListKey::Playlist(id) => self.bridge.open_playlist(self.client.clone(), id),
+                    ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
+                    ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
                     ListKey::Artist(_) => {}
                 }
             }
         }
-        self.offline_snap = self.offline.snapshot();
+        self.downloads.snap = self.downloads.store.snapshot();
     }
 
     /// A media key, Control Center or headphone command.
@@ -952,9 +968,9 @@ impl ListenerApp {
     /// Work owed once per batch of messages: a sync delivers albums, artists
     /// and tracks back to back, so derived data is rebuilt once, not per message.
     fn after_messages(&mut self) {
-        if std::mem::take(&mut self.search_stale) {
-            self.search_generation += 1;
-            self.bridge.build_search(self.search_generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
+        if std::mem::take(&mut self.search.stale) {
+            self.search.generation += 1;
+            self.bridge.build_search(self.search.generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
         }
     }
 
@@ -969,7 +985,7 @@ impl ListenerApp {
         if let Some(p) = self.palette.as_mut() {
             p.refresh(&mut index);
         }
-        self.search = Some(index);
+        self.search.index = Some(index);
     }
 
     fn handle_engine(&mut self, ev: audio::Event) {
@@ -985,8 +1001,8 @@ impl ListenerApp {
     fn with_player<R>(&mut self, f: impl FnOnce(&mut Player, &mut player::Ctx<'_>) -> R) -> R {
         let mut notes = Vec::new();
         let sources = AppSources {
-            offline: &self.offline,
-            client: self.client.as_ref().filter(|_| self.online),
+            offline: &self.downloads.store,
+            client: self.session.client.as_ref().filter(|_| self.session.online),
             output: &self.output,
             data: &self.data,
             now_playing: &self.now_playing,
@@ -1016,8 +1032,8 @@ impl ListenerApp {
     fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
         use player::Sources;
         let sources = AppSources {
-            offline: &self.offline,
-            client: self.client.as_ref().filter(|_| self.online),
+            offline: &self.downloads.store,
+            client: self.session.client.as_ref().filter(|_| self.session.online),
             output: &self.output,
             data: &self.data,
             now_playing: &self.now_playing,
@@ -1067,8 +1083,8 @@ impl ListenerApp {
 
     /// Pins `pin` once its tracks load (once, however often it's asked).
     fn wait_to_pin(&mut self, key: ListKey, pin: Pin) {
-        if !self.pending_pins.iter().any(|(k, _)| *k == key) {
-            self.pending_pins.push((key, pin));
+        if !self.downloads.pending_pins.iter().any(|(k, _)| *k == key) {
+            self.downloads.pending_pins.push((key, pin));
         }
     }
 
@@ -1111,7 +1127,7 @@ impl ListenerApp {
                     Some(t) => self.queue_tracks(t.to_vec(), source, action),
                     None => {
                         self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action });
-                        self.bridge.open_album(self.client.clone(), id);
+                        self.bridge.open_album(self.session.client.clone(), id);
                     }
                 }
             }
@@ -1125,7 +1141,7 @@ impl ListenerApp {
                 // Playing an artist means all of their albums, shuffled.
                 let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Shuffle } else { action };
                 self.wait_for(Pending { key: key.clone(), source, action });
-                self.bridge.fetch_tracks(self.client.clone(), key, ids);
+                self.bridge.fetch_tracks(self.session.client.clone(), key, ids);
             }
             Action::Playlist(id, action) => {
                 let name = self.data.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
@@ -1134,7 +1150,7 @@ impl ListenerApp {
                     Some(t) => self.queue_tracks(t.to_vec(), source, action),
                     None => {
                         self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action });
-                        self.bridge.open_playlist(self.client.clone(), id);
+                        self.bridge.open_playlist(self.session.client.clone(), id);
                     }
                 }
             }
@@ -1181,7 +1197,7 @@ impl ListenerApp {
             Action::Previous => self.previous(),
             Action::Seek(to) => self.seek(to),
             Action::OpenPalette => {
-                if self.palette.is_none() && self.search.is_some() {
+                if self.palette.is_none() && self.search.index.is_some() {
                     self.palette = Some(Palette::default());
                 }
             }
@@ -1227,13 +1243,13 @@ impl ListenerApp {
                 self.overlay = Some(Overlay::Settings);
             }
             Action::SyncNow => {
-                if let Some(client) = self.client.clone()
-                    && self.online
-                    && !self.album_syncing
-                    && !self.track_syncing
+                if let Some(client) = self.session.client.clone()
+                    && self.session.online
+                    && !self.sync.albums
+                    && !self.sync.tracks
                 {
-                    self.sync_label = "syncing…".into();
-                    self.album_syncing = true;
+                    self.sync.label = "syncing…".into();
+                    self.sync.albums = true;
                     self.bridge.sync_albums(client);
                 }
             }
@@ -1250,23 +1266,23 @@ impl ListenerApp {
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
             Action::Unpin(pin) => {
-                self.offline.unpin(&pin);
-                self.offline_snap = self.offline.snapshot();
+                self.downloads.store.unpin(&pin);
+                self.downloads.snap = self.downloads.store.snapshot();
             }
-            Action::PauseDownloads(paused) => self.offline.set_paused(paused),
-            Action::RetryDownloads => self.offline.retry_failed(),
+            Action::PauseDownloads(paused) => self.downloads.store.set_paused(paused),
+            Action::RetryDownloads => self.downloads.store.retry_failed(),
             Action::SetOfflineLimit(bytes) => {
-                self.offline.set_limit(bytes);
+                self.downloads.store.set_limit(bytes);
                 self.prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
             }
             Action::RevealOffline => {
-                let dir = self.offline.dir().to_owned();
+                let dir = self.downloads.store.dir().to_owned();
                 if let Err(e) = std::process::Command::new("open").arg(&dir).spawn() {
                     self.show_error(format!("open {}: {e}", dir.display()));
                 }
             }
             Action::MoveOffline => {
-                let current = self.offline.dir().to_owned();
+                let current = self.downloads.store.dir().to_owned();
                 let start = current.parent().unwrap_or(&current).to_owned();
                 if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
                     // Always a folder of our own inside the chosen one: the store
@@ -1282,18 +1298,18 @@ impl ListenerApp {
                 }
             }
             Action::Analyze(tracks) => {
-                self.analyzer.set_paused(false);
+                self.analysis.runner.set_paused(false);
                 self.enqueue_analysis(&tracks);
             }
             Action::AnalyzeLibrary => {
                 self.prefs.edit(|s| s.analysis_resume = true);
-                self.analyzer.set_paused(false);
+                self.analysis.runner.set_paused(false);
                 self.resume_library_analysis();
             }
-            Action::PauseAnalysis(paused) => self.analyzer.set_paused(paused),
+            Action::PauseAnalysis(paused) => self.analysis.runner.set_paused(paused),
             Action::StopAnalysis => {
-                self.analyzer.clear();
-                self.analyzer.set_paused(false);
+                self.analysis.runner.clear();
+                self.analysis.runner.set_paused(false);
                 self.finish_library_analysis();
             }
             Action::SetAnalyzePlaying(on) => self.prefs.edit(|s| s.analyze_playing = on),
@@ -1307,7 +1323,7 @@ impl ListenerApp {
 
     /// A track's analysis, if there is one for the file as it is now.
     pub fn analysis_of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
-        self.analyses.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
+        self.analysis.records.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
     }
 
     /// Queues the tracks that have no current analysis; returns how many.
@@ -1317,8 +1333,8 @@ impl ListenerApp {
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
             .filter_map(|t| {
-                let local = self.offline.local_path(&t.id);
-                let url = match &self.client {
+                let local = self.downloads.store.local_path(&t.id);
+                let url = match &self.session.client {
                     Some(c) => c.stream_url(&t.id).to_string(),
                     None if local.is_some() => String::new(),
                     None => return None,
@@ -1326,16 +1342,16 @@ impl ListenerApp {
                 Some(analyze::job_for(t, url, local))
             })
             .collect();
-        self.analyzer.enqueue(jobs)
+        self.analysis.runner.enqueue(jobs)
     }
 
     /// Queues the whole library, once the tracks, the stored results and the
     /// server are all there (so finished tracks aren't redone).
     fn resume_library_analysis(&mut self) {
-        if self.analysis_library() && self.analyses_loaded && self.client.is_some() && !self.data.tracks.all.is_empty() {
+        if self.analysis_library() && self.analysis.loaded && self.session.client.is_some() && !self.data.tracks.all.is_empty() {
             let all = self.data.tracks.all.clone();
             self.enqueue_analysis(&all);
-            if !self.analyzer.progress().active() {
+            if !self.analysis.runner.progress().active() {
                 self.finish_library_analysis();
             }
         }
@@ -1395,9 +1411,9 @@ impl ListenerApp {
     /// Tracks in the library without a current analysis, and their total length.
     /// Counted once per change to either, not every frame Settings is open.
     pub fn unanalysed(&mut self) -> (usize, f64) {
-        let key = (self.analyses_version, self.data.tracks_version);
-        let (analyses, tracks) = (&self.analyses, &self.data.tracks.all);
-        *self.unanalysed.get(key, || {
+        let key = (self.analysis.version, self.data.tracks_version);
+        let (analyses, tracks) = (&self.analysis.records, &self.data.tracks.all);
+        *self.analysis.unanalysed.get(key, || {
             tracks
                 .iter()
                 .filter(|t| !analyses.get(&t.id).is_some_and(|r| r.stamp == crate::analyze::stamp_of(t)))
@@ -1438,21 +1454,21 @@ impl ListenerApp {
         self.track_sel = None;
         self.focus = Focus::Main;
         match self.nav.current().clone() {
-            Route::Album(id) => self.bridge.open_album(self.client.clone(), id),
+            Route::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
             Route::Artist { name, .. } => self.bridge.find_credited(name),
             Route::Playlist { id, .. } => {
                 // Offline, a kept playlist is rebuilt from its pin and the stored tracks.
-                if !self.online
+                if !self.session.online
                     && !self.data.playlist_tracks.contains_key(&id)
-                    && let Some((_, ids)) = self.offline.pin_tracks(&Pin::Playlist(id.clone()))
+                    && let Some((_, ids)) = self.downloads.store.pin_tracks(&Pin::Playlist(id.clone()))
                 {
                     let by_id: HashMap<&str, &Track> = self.data.tracks.all.iter().map(|t| (t.id.as_str(), t)).collect();
                     let tracks: Vec<Track> = ids.iter().filter_map(|i| by_id.get(i.as_str()).map(|t| (*t).clone())).collect();
                     self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 }
-                self.bridge.open_playlist(self.client.clone(), id)
+                self.bridge.open_playlist(self.session.client.clone(), id)
             }
-            Route::Favorites => self.bridge.fetch_starred(self.client.clone()),
+            Route::Favorites => self.bridge.fetch_starred(self.session.client.clone()),
             _ => {}
         }
     }
@@ -1469,8 +1485,8 @@ impl ListenerApp {
         // deliver is ignored. Downloads lose their server (and its credentials).
         self.bridge.end_session();
         self.set_offline();
-        self.unreachable = false;
-        self.server_label.clear();
+        self.session.unreachable = false;
+        self.session.server_label.clear();
         let saved = self.prefs.snapshot();
         if self.prefs.has_login() {
             let s = saved.clone();
@@ -1788,17 +1804,17 @@ impl eframe::App for ListenerApp {
             self.handle(msg);
         }
         self.after_messages();
-        let snap = self.offline.snapshot();
-        if snap.version != self.offline_snap.version {
+        let snap = self.downloads.store.snapshot();
+        if snap.version != self.downloads.snap.version {
             // A download finished: what's next may now play from disk, or play at all.
             let done_changed = snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count()
-                != self.offline_snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count();
-            self.offline_snap = snap;
-            if done_changed && !self.online {
+                != self.downloads.snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count();
+            self.downloads.snap = snap;
+            if done_changed && !self.session.online {
                 self.sync_next();
             }
         }
-        if self.analysis_library() && self.analyses_loaded && !self.data.tracks.all.is_empty() && !self.analyzer.progress().active() {
+        if self.analysis_library() && self.analysis.loaded && !self.data.tracks.all.is_empty() && !self.analysis.runner.progress().active() {
             self.finish_library_analysis();
         }
         let queue = if self.queue_narrow { self.queue_sheet } else { self.show_queue() };
@@ -1810,10 +1826,10 @@ impl eframe::App for ListenerApp {
         // The diagnostics bar keeps the server round trip fresh, but only while
         // something plays (idle stays idle).
         if self.diagnostics_shown()
-            && self.online
+            && self.session.online
             && self.engine.status.state() == PlayState::Playing
             && self.diagnostics.latency_stale()
-            && let Some(client) = self.client.clone()
+            && let Some(client) = self.session.client.clone()
         {
             self.diagnostics.latency_asked();
             self.bridge.measure_latency(client);
@@ -2060,7 +2076,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        app.online = false;
+        app.session.online = false;
         app.player.queue.end = crate::queue::EndAction::RepeatQueue;
         let pass = app.player.queue.pass_len();
         app.start_current();
@@ -2169,17 +2185,17 @@ mod tests {
         };
         app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz")]));
         app.after_messages();
-        assert!(!app.search_stale, "the rebuild was handed off");
-        let first = app.search_generation;
+        assert!(!app.search.stale, "the rebuild was handed off");
+        let first = app.search.generation;
         // Before the first build lands, the library changes again.
         app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz"), album("a2", "Explorations")]));
         app.after_messages();
-        assert_eq!(app.search_generation, first + 1);
-        until(&mut app, |a| a.search.as_ref().is_some_and(|s| s.albums.len() == 2));
+        assert_eq!(app.search.generation, first + 1);
+        until(&mut app, |a| a.search.index.as_ref().is_some_and(|s| s.albums.len() == 2));
         // The older build, if it lands now, doesn't replace the newer index.
         let stale = SearchIndex::new(&[album("x", "Old")], &[], &[]);
         app.handle(Msg::SearchIndex { generation: first, index: Box::new(stale) });
-        assert_eq!(app.search.as_ref().map(|s| s.albums.len()), Some(2));
+        assert_eq!(app.search.index.as_ref().map(|s| s.albums.len()), Some(2));
     }
 
     #[test]
@@ -2187,7 +2203,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        assert!(app.client.is_none(), "offline: nothing can be fetched");
+        assert!(app.session.client.is_none(), "offline: nothing can be fetched");
         let before = app.player.queue.upcoming.len();
         // Album 12 isn't stored either: the play and the pin both wait, once each.
         app.apply(Action::Album("al-12".into(), QueueAction::Add));
@@ -2195,14 +2211,14 @@ mod tests {
         app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
         app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
         assert_eq!(app.pending.len(), 1, "the newer action replaced the older");
-        assert_eq!(app.pending_pins.len(), 1);
+        assert_eq!(app.downloads.pending_pins.len(), 1);
         // The load fails: both give up.
-        until(&mut app, |a| a.pending.is_empty() && a.pending_pins.is_empty());
+        until(&mut app, |a| a.pending.is_empty() && a.downloads.pending_pins.is_empty());
         // The tracks turn up later anyway (browsing, a sync): nothing plays or pins.
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
         assert_eq!(app.player.queue.upcoming.len(), before, "a stale action played");
-        assert!(!app.offline.is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
+        assert!(!app.downloads.store.is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
     }
 
     #[test]
@@ -2210,17 +2226,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        app.online = true;
-        app.album_syncing = true;
+        app.session.online = true;
+        app.sync.albums = true;
         app.handle(Msg::AlbumSyncDone(Err("sync: timed out".into())));
-        assert!(!app.album_syncing && !app.track_syncing);
+        assert!(!app.sync.albums && !app.sync.tracks);
         assert!(app.toasts.texts().contains(&"sync: timed out"));
         // While an album sync runs, Sync now doesn't start a second one.
-        app.album_syncing = true;
-        app.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
-        app.sync_label = "syncing… 500".into();
+        app.sync.albums = true;
+        app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+        app.sync.label = "syncing… 500".into();
         app.apply(Action::SyncNow);
-        assert_eq!(app.sync_label, "syncing… 500", "a second album sync started");
+        assert_eq!(app.sync.label, "syncing… 500", "a second album sync started");
     }
 
     #[test]
@@ -2291,15 +2307,15 @@ mod tests {
         let file = dir.join(format!("cached-{id}.flac"));
         std::fs::write(&file, b"fLaC").unwrap();
         let want = id.to_owned();
-        app.offline.set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
+        app.downloads.store.set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
         let t = app.data.tracks.all.iter().find(|t| t.id == id).unwrap().clone();
         app.apply(Action::KeepOffline(Keep::Tracks(vec![t]), true));
         let start = std::time::Instant::now();
-        while !app.offline.snapshot().is_done(id) {
+        while !app.downloads.store.snapshot().is_done(id) {
             assert!(start.elapsed() < Duration::from_secs(5), "download of {id}");
             std::thread::sleep(Duration::from_millis(5));
         }
-        app.offline_snap = app.offline.snapshot();
+        app.downloads.snap = app.downloads.store.snapshot();
     }
 
     #[test]
@@ -2308,7 +2324,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
         download(&mut app, dir.path(), "t-2");
-        assert!(!app.online);
+        assert!(!app.session.online);
         let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..4].to_vec();
         assert!(app.source(0, None, &tracks[0], None).is_none(), "offline and not downloaded: nothing to play");
         let local = app.source(0, None, &tracks[1], None).unwrap();
@@ -2328,7 +2344,7 @@ mod tests {
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
         app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into() });
-        assert!(app.online);
+        assert!(app.session.online);
         assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
         assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
     }
@@ -2338,7 +2354,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        app.online = true;
+        app.session.online = true;
         // Two failures handled before the next frame: both get a toast.
         app.handle(Msg::Error("playlists: timed out".into()));
         app.handle(Msg::Error("favorites: timed out".into()));
@@ -2355,24 +2371,24 @@ mod tests {
         // Signed in, then the server went away: a reconnect loop is running.
         let before = app.bridge.session();
         app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
-        assert!(app.online && app.client.is_some());
+        assert!(app.session.online && app.session.client.is_some());
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
-        assert!(app.unreachable);
+        assert!(app.session.unreachable);
 
         app.sign_out();
         assert!(app.login.is_some());
-        assert!(app.client.is_none() && !app.online && !app.unreachable);
+        assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
         assert_ne!(app.bridge.session(), before, "sign-out ends the session");
 
         // The old loop reaches the server after all: stale, ignored.
         app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
         assert!(app.login.is_some(), "still on the login screen");
-        assert!(app.client.is_none() && !app.online && !app.unreachable);
+        assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
 
         // A fresh sign-in in the new session works.
         app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into() });
-        assert!(app.login.is_none() && app.online);
+        assert!(app.login.is_none() && app.session.online);
     }
 
     #[test]
@@ -2382,21 +2398,21 @@ mod tests {
         let mut app = app(&ctx, dir.path());
         // Album 5's tracks aren't loaded: the pin waits for them.
         app.apply(Action::KeepOffline(Keep::Album("al-5".into()), true));
-        assert!(!app.offline.is_pinned(&Pin::Album("al-5".into())));
+        assert!(!app.downloads.store.is_pinned(&Pin::Album("al-5".into())));
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
-        assert!(app.offline.is_pinned(&Pin::Album("al-5".into())));
-        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+        assert!(app.downloads.store.is_pinned(&Pin::Album("al-5".into())));
+        assert_eq!(app.downloads.store.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
         // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
-        app.offline_snap = app.offline.snapshot();
+        app.downloads.snap = app.downloads.store.snapshot();
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
         // (The stored album now lists only y-1; a library-wide refresh sees that.)
         let all = app.data.tracks.all.to_vec();
         app.handle(Msg::AllTracks(Box::new(TrackSet::new(all))));
-        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+        assert_eq!(app.downloads.store.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
         // The album changed on the server: the pin follows.
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
-        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
+        assert_eq!(app.downloads.store.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
         download(&mut app, dir.path(), "t-3");
 
         for route in [Route::Offline, Route::Album("al-5".into()), Route::Album("al-0".into()), Route::Recent, Route::Songs] {
@@ -2409,8 +2425,8 @@ mod tests {
         app.nav.go(Route::Album("al-5".into()));
         let key = egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT };
         frame(&ctx, &mut app, vec![key]);
-        assert!(!app.offline.is_pinned(&Pin::Album("al-5".into())));
-        assert!(app.offline.is_pinned(&Pin::Track("t-3".into())));
+        assert!(!app.downloads.store.is_pinned(&Pin::Album("al-5".into())));
+        assert!(app.downloads.store.is_pinned(&Pin::Track("t-3".into())));
     }
 
     #[test]

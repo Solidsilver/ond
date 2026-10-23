@@ -208,7 +208,7 @@ impl ListenerApp {
             let (name, artist) = (album.name.clone(), album.artist.clone().unwrap_or_default());
             self.art.paint(ui, art, cover.as_deref(), 6.0);
             // Only albums kept offline carry a mark; nothing otherwise.
-            let mark = Mark::of_pin(self.offline_snap.pin(&offline::Pin::Album(id.clone())));
+            let mark = Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Album(id.clone())));
             let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
             let title = elide(ui, &name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
@@ -241,7 +241,7 @@ impl ListenerApp {
         } else if resp.clicked() {
             self.actions.push(Action::Go(Route::Album(id.clone())));
         }
-        let kept = self.offline_snap.pin(&offline::Pin::Album(id.clone())).is_some();
+        let kept = self.downloads.snap.pin(&offline::Pin::Album(id.clone())).is_some();
         resp.context_menu(|ui| {
             collection_menu(ui, &Collection::Album(id.clone()), true, kept, None, &mut self.actions);
             if let Some(name) = artist {
@@ -255,7 +255,7 @@ impl ListenerApp {
 
     fn artists_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let Some(index) = &self.search else {
+        let Some(index) = &self.search.index else {
             self.heading(ui, "Artists", None);
             ui.label(egui::RichText::new("Loading your library…").color(t.muted));
             return;
@@ -336,7 +336,7 @@ impl ListenerApp {
                 }
             }
             if own.is_empty() && credited.is_empty() {
-                let text = if self.track_syncing { "Nothing found yet. Tracks are still syncing; credits fill in as they arrive." } else { "No albums credit this name." };
+                let text = if self.sync.tracks { "Nothing found yet. Tracks are still syncing; credits fill in as they arrive." } else { "No albums credit this name." };
                 ui.label(egui::RichText::new(text).color(t.muted));
             }
         });

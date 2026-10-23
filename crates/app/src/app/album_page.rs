@@ -130,12 +130,12 @@ impl ListenerApp {
         };
         let tracks = self.data.tracks.album(id).cloned().unwrap_or_default();
         if self.download_key(ui) {
-            let kept = self.offline_snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
+            let kept = self.downloads.snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
             self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
         }
         let found: Vec<Option<TrackAnalysis>> = tracks.iter().map(|t| self.analysis_of(t).cloned()).collect();
         let summary = analysis::summarize(&found.iter().flatten().collect::<Vec<_>>(), tracks.len());
-        let analysing = self.analyzer.pending(tracks.iter().map(|t| t.id.as_str()));
+        let analysing = self.analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
         egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).show(ui, |ui| {
             // Header: art beside the text, or above it when there's no room.
             let avail = ui.available_width();
@@ -225,7 +225,7 @@ impl ListenerApp {
                         }
                         let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
                         let pin = offline::Pin::Album(album.id.clone());
-                        let kept = self.offline_snap.pin(&pin).is_some();
+                        let kept = self.downloads.snap.pin(&pin).is_some();
                         egui::Popup::menu(&more).show(|ui| {
                             let c = super::browse::Collection::Album(album.id.clone());
                             super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), &mut self.actions);
@@ -334,7 +334,7 @@ impl ListenerApp {
         let mine = info.as_ref().is_some_and(|p| self.owns(p));
         let source = Source::Playlist { id: id.to_owned(), name: name.to_owned() };
         let pin = offline::Pin::Playlist(id.to_owned());
-        let kept = self.offline_snap.pin(&pin).is_some();
+        let kept = self.downloads.snap.pin(&pin).is_some();
         if self.download_key(ui) {
             self.actions.push(Action::KeepOffline(Keep::Playlist(id.to_owned()), !kept));
         }
@@ -410,7 +410,7 @@ impl ListenerApp {
 
     /// Playlists the user can change (others' public ones are read-only).
     pub(super) fn owns(&self, p: &subsonic::Playlist) -> bool {
-        match (&p.owner, &self.client) {
+        match (&p.owner, &self.session.client) {
             (Some(owner), Some(c)) => owner == c.username(),
             _ => true,
         }
@@ -549,7 +549,7 @@ impl ListenerApp {
                 // Offline, what isn't downloaded is dimmed rather than hidden.
                 let available = self.playable(tr);
                 let color = super::widgets::track_color(&t, playing, available);
-                if let Some(m) = Mark::of_track(self.offline_snap.track(&tr.id)) {
+                if let Some(m) = Mark::of_track(self.downloads.snap.track(&tr.id)) {
                     super::widgets::mark(ui, pos2(rect.right() - 48.0, cy), 10.0, m);
                 }
                 if opts.numbers {
@@ -685,8 +685,8 @@ impl ListenerApp {
         }
         // Kept on its own: can be removed on its own. Kept with an album or
         // playlist: that's where it's removed.
-        let alone = self.offline_snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
-        if alone || !self.offline_snap.is_done(&tr.id) {
+        let alone = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
+        if alone || !self.downloads.snap.is_done(&tr.id) {
             ui.separator();
             super::browse::offline_item(ui, alone, None, || Keep::Tracks(vec![tr.clone()]), &mut self.actions);
         }
