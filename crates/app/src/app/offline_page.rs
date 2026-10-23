@@ -87,7 +87,7 @@ impl ViewCtx<'_> {
         if !self.session.online && self.session.settings.is_some() {
             ui.horizontal(|ui| {
                 icons::inline(ui, Icon::Offline, t.muted);
-                ui.label(egui::RichText::new("The server can't be reached. Downloaded music plays as usual.").size(12.5).color(t.muted));
+                ui.label(egui::RichText::new("Can't reach the server. Downloaded music still plays.").size(12.5).color(t.muted));
             });
             ui.add_space(10.0);
         }

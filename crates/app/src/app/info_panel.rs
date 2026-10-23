@@ -30,7 +30,7 @@ impl ViewCtx<'_> {
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("Nothing playing").font(FontId::new(14.0, semibold())).color(t.text));
                 ui.add_space(4.0);
-                ui.add(egui::Label::new(egui::RichText::new("Credits, the file and its analysis show here for the song that's playing.").size(12.0).color(t.muted)).wrap());
+                ui.add(egui::Label::new(egui::RichText::new("Play a song to see its credits, file details and analysis.").size(12.0).color(t.muted)).wrap());
             });
             return;
         };
@@ -149,9 +149,9 @@ impl ViewCtx<'_> {
             let busy = self.analysis.runner.pending([track.id.as_str()]) > 0;
             kv_row(ui, "Loudness", |ui| {
                 if busy {
-                    ui.label(egui::RichText::new("Analysing…").size(VALUE).color(t.muted));
+                    ui.label(egui::RichText::new("Analyzing…").size(VALUE).color(t.muted));
                 } else if link(ui, "Analyze this song", FontId::proportional(VALUE), t.accent)
-                    .on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files")
+                    .on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files")
                     .clicked()
                 {
                     self.actions.push(Action::Analyze(vec![track.clone()]));

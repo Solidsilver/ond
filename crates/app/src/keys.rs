@@ -93,7 +93,7 @@ pub static BINDINGS: &[Binding] = &[
     b("Go", "Show playing track", "⌘L", CMD, Key::L, false, Cmd::Reveal),
     b("Go", "Back", "⌘[", CMD, Key::OpenBracket, false, Cmd::Back),
     b("Go", "Forward", "⌘]", CMD, Key::CloseBracket, false, Cmd::Forward),
-    b("Go", "Recently Added", "⌘1", CMD, Key::Num1, false, Cmd::Place(0)),
+    b("Go", "Recently added", "⌘1", CMD, Key::Num1, false, Cmd::Place(0)),
     b("Go", "Artists", "⌘2", CMD, Key::Num2, false, Cmd::Place(1)),
     b("Go", "Albums", "⌘3", CMD, Key::Num3, false, Cmd::Place(2)),
     b("Go", "Songs", "⌘4", CMD, Key::Num4, false, Cmd::Place(3)),

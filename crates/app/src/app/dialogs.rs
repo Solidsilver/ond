@@ -47,12 +47,12 @@ impl OndApp {
                         1 => format!("With “{}”", tracks[0].title),
                         n => format!("With {n} songs"),
                     };
-                    if let Some(ok) = name_dialog(ui, "New Playlist", &what, name, "Create") {
+                    if let Some(ok) = name_dialog(ui, "New playlist", &what, name, "Create") {
                         done = Some(ok.then(|| Action::PlaylistEdit(PlaylistAction::Create { name: name.clone(), tracks: std::mem::take(tracks) })));
                     }
                 }
                 Overlay::Rename { id, name } => {
-                    if let Some(ok) = name_dialog(ui, "Rename Playlist", "", name, "Rename") {
+                    if let Some(ok) = name_dialog(ui, "Rename playlist", "", name, "Rename") {
                         done = Some(ok.then(|| Action::PlaylistEdit(PlaylistAction::Rename { id: id.clone(), name: name.clone() })));
                     }
                 }
@@ -60,7 +60,7 @@ impl OndApp {
                     ui.set_width(DIALOG_W);
                     ui.label(egui::RichText::new(format!("Delete “{name}”?")).font(FontId::new(15.0, semibold())).color(t.text));
                     ui.add_space(6.0);
-                    ui.add(egui::Label::new(egui::RichText::new("The playlist is removed from the server. The songs stay in your library.").size(12.0).color(t.muted)).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new("This deletes the playlist on the server. The songs stay in your library.").size(12.0).color(t.muted)).wrap());
                     ui.add_space(18.0);
                     let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
                     ui.horizontal(|ui| {
@@ -145,7 +145,7 @@ fn shortcuts_ui(ui: &mut egui::Ui) {
     let width = COL_W * cols as f32 + GAP * (cols - 1) as f32;
     ui.set_width(width);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Keyboard Shortcuts").font(FontId::new(15.0, semibold())).color(t.text));
+        ui.label(egui::RichText::new("Keyboard shortcuts").font(FontId::new(15.0, semibold())).color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(egui::RichText::new("esc").size(11.0).color(t.muted));
         });

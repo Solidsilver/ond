@@ -125,7 +125,7 @@ impl OndApp {
             Some(e) => {
                 let track = self.favorites.view.songs.iter().find(|t| t.id == id).cloned().or_else(|| self.find_track(&id));
                 self.favorites.failed(kind, &id, on, seq, track.as_ref(), None);
-                self.show_error(format!("Couldn't {} that: {e}", if on { "love" } else { "unlove" }));
+                self.show_error(format!("Couldn't save the heart: {e}"));
             }
         }
     }
@@ -151,7 +151,7 @@ impl OndApp {
         let client = self.session.client.clone();
         match a {
             PlaylistAction::Create { name, tracks } => {
-                let name = if name.trim().is_empty() { "Untitled Playlist".to_owned() } else { name.trim().to_owned() };
+                let name = if name.trim().is_empty() { "Untitled playlist".to_owned() } else { name.trim().to_owned() };
                 let ids = tracks.iter().map(|t| t.id.clone()).collect();
                 self.bridge.create_playlist(client, name, ids);
             }

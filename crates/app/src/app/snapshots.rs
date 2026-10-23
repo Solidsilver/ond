@@ -847,12 +847,12 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "playlist");
 
     reset(h, FULL, Route::Album(album_id(0)));
-    // Right-click a track, then open "Add to Playlist".
+    // Right-click a track, then open "Add to playlist".
     if let Some(row) = h.query_all_by_label_contains("Solar").find(|n| main.contains(n.rect().center())) {
         row.click_secondary();
     }
     h.run_steps(3);
-    let sub: Option<Pos2> = h.query_all_by_label_contains("Add to Playlist").map(|n| n.rect().center()).next();
+    let sub: Option<Pos2> = h.query_all_by_label_contains("Add to playlist").map(|n| n.rect().center()).next();
     match sub {
         Some(p) => {
             h.hover_at(p);
@@ -861,6 +861,22 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         None => eprintln!("  (track menu didn't open; add-to-playlist shows the page)"),
     }
     s.shoot(h, "add-to-playlist");
+
+    // The same menu's Rating submenu: stars drawn as icons.
+    reset(h, FULL, Route::Album(album_id(0)));
+    if let Some(row) = h.query_all_by_label_contains("Solar").find(|n| main.contains(n.rect().center())) {
+        row.click_secondary();
+    }
+    h.run_steps(3);
+    let rating: Option<Pos2> = h.query_all_by_label("Rating").map(|n| n.rect().center()).next();
+    match rating {
+        Some(p) => {
+            h.hover_at(p);
+            h.run_steps(6);
+        }
+        None => eprintln!("  (track menu didn't open; rating-menu shows the page)"),
+    }
+    s.shoot(h, "rating-menu");
 
     reset(h, FULL, Route::Favorites);
     s.shoot(h, "favorites");
@@ -1173,7 +1189,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
     let check = |h: &mut Harness<'_, Option<OndApp>>, what: &str| {
         let right = app_mut(h).columns().right;
         let column = egui::Rect::from_x_y_ranges(FULL.x - right..=FULL.x, 0.0..=FULL.y);
-        for label in ["Up Next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
+        for label in ["Up next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
             for n in h.query_all_by_label_contains(label) {
                 let r = n.rect();
                 if r.center().x < FULL.x - right - 40.0 {

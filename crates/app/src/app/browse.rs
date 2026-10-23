@@ -19,7 +19,7 @@ const LABEL_H: f32 = 40.0;
 /// Short name for a place, for breadcrumbs.
 pub fn route_label(route: &Route, data: &Data) -> String {
     match route {
-        Route::Recent => "Recently Added".into(),
+        Route::Recent => "Recently added".into(),
         Route::Albums => "Albums".into(),
         Route::Artists => "Artists".into(),
         Route::Songs => "Songs".into(),
@@ -82,7 +82,7 @@ impl OndApp {
         let route = self.ui.nav.current().clone();
         match &route {
             Route::Recent => {
-                self.view().heading(ui, "Recently Added", None);
+                self.view().heading(ui, "Recently added", None);
                 self.view().grid_place(ui, &route);
             }
             Route::Albums => {
@@ -201,7 +201,7 @@ impl OndApp {
                 }
             }
             if own.is_empty() && credited.is_empty() {
-                let text = if self.sync.tracks { "Nothing found yet. Tracks are still syncing; credits fill in as they arrive." } else { "No albums credit this name." };
+                let text = if self.sync.tracks { "Nothing yet. Credits fill in while tracks sync." } else { "No albums credit this name." };
                 ui.label(egui::RichText::new(text).color(t.muted));
             }
         });
@@ -377,7 +377,7 @@ impl ViewCtx<'_> {
             }
         }
         let album = &self.data.albums[idx];
-        let label = format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("unknown artist"));
+        let label = format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist"));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         let artist = album.artist.clone();
         let artist_ref = album.artist_ref.clone();

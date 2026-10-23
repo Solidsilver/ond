@@ -263,7 +263,7 @@ pub enum QueueTab {
 impl QueueTab {
     pub fn label(self) -> &'static str {
         match self {
-            QueueTab::UpNext => "Up Next",
+            QueueTab::UpNext => "Up next",
             QueueTab::History => "History",
             QueueTab::Lyrics => "Lyrics",
             QueueTab::Info => "Info",
@@ -407,7 +407,7 @@ pub struct UiState {
     pub overlay: Option<Overlay>,
     /// ⌘L: select (and scroll to) this track once its album is shown.
     pub reveal: Option<String>,
-    /// Playlists added to lately, first in "Add to Playlist".
+    /// Playlists added to lately, first in "Add to playlist".
     pub recent_playlists: Vec<String>,
     pub fav_tab: favorites_page::FavTab,
     /// The Settings window's section.
@@ -674,7 +674,7 @@ impl OndApp {
         let mut notices: Vec<String> = Vec::new();
         if let Some(aside) = moved_aside {
             tracing::warn!("library database was unreadable; moved to {} and starting fresh", aside.display());
-            notices.push(format!("Library database was unreadable and is being rebuilt (old copy: {})", aside.display()));
+            notices.push(format!("Your library database couldn't be read, so Ond is rebuilding it. The old copy is at {}.", aside.display()));
         }
         // Analysis results live apart from the (disposable) library mirror.
         let analyses = Arc::new(library::AnalysisStore::open(paths.library_db.with_file_name("analysis.redb"))?);
@@ -690,7 +690,7 @@ impl OndApp {
 
         let (prefs, loaded) = Prefs::open(&paths.config_file);
         if let Loaded::Unreadable { aside } = loaded {
-            notices.push(format!("Settings couldn't be read and were reset; please sign in again (old copy: {})", aside.display()));
+            notices.push(format!("Your settings couldn't be read, so Ond reset them. Sign in again. The old file is at {}.", aside.display()));
         }
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
@@ -811,7 +811,7 @@ impl OndApp {
                 }
                 let limit = self.prefs.snapshot().offline_limit_gb.map(|gb| gb * 1_000_000_000);
                 if let Err(e) = self.downloads.switch_account(settings.account_id(), limit) {
-                    self.show_error(format!("downloads: {e}"));
+                    self.show_error(format!("Downloads: {e}"));
                 }
                 self.session.server_label = format!("{} · {}", settings.username, server);
                 self.session.server_info = server.clone();
@@ -927,7 +927,7 @@ impl OndApp {
             Msg::AlbumUpdated(a) => self.data.update_album(a),
             Msg::SyncProgress(n) => {
                 self.sync.albums = true;
-                self.sync.label = format!("syncing… {n}");
+                self.sync.label = format!("Syncing… {n}");
             }
             Msg::AlbumSyncDone(Ok(n)) => {
                 self.sync.albums = false;
@@ -937,7 +937,7 @@ impl OndApp {
             Msg::AlbumSyncDone(Err(e)) => {
                 // Nothing more follows (no artist or track sync): stop saying "syncing".
                 self.sync.albums = false;
-                self.sync.label = "sync failed".into();
+                self.sync.label = "Sync failed".into();
                 self.probe();
                 if self.session.online {
                     self.show_error(e);
@@ -1693,7 +1693,7 @@ impl OndApp {
                             r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
                         };
                         enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false);
-                        ui.label(egui::RichText::new("Your Navidrome URL, e.g. https://music.example.com").size(11.0).color(t.muted));
+                        ui.label(egui::RichText::new("Your Navidrome address, for example https://music.example.com").size(11.0).color(t.muted));
                         ui.add_space(10.0);
                         enter |= field(ui, "Username", &mut form.username, "", false);
                         ui.add_space(10.0);
@@ -2473,8 +2473,8 @@ mod tests {
         let ctx = egui::Context::default();
         let app = app(&ctx, dir.path());
         let shown = app.ui.toasts.texts();
-        assert!(shown.iter().any(|t| t.starts_with("Library database was unreadable")), "{shown:?}");
-        assert!(shown.iter().any(|t| t.starts_with("Settings couldn't be read")), "{shown:?}");
+        assert!(shown.iter().any(|t| t.starts_with("Your library database couldn't be read")), "{shown:?}");
+        assert!(shown.iter().any(|t| t.starts_with("Your settings couldn't be read")), "{shown:?}");
     }
 
     #[test]

@@ -276,7 +276,7 @@ impl Outputs {
             let why = if *bit_perfect {
                 "Samples reach the device untouched. Use your DAC's or the system's volume."
             } else {
-                "Volume, ReplayGain and resampling allowed."
+                "Ond can change the volume, apply ReplayGain and resample."
             };
             ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
         });
@@ -317,7 +317,7 @@ impl Outputs {
         let mut detail = format!("{}\n{}", p.summary(), hover_text(p));
         let underruns = status.underruns();
         if underruns > 0 {
-            detail.push_str(&format!("\n{underruns} underruns"));
+            detail.push_str(&format!("\n{underruns} dropouts"));
         }
         Some(readout_of(p, detail))
     }
@@ -470,8 +470,8 @@ fn device_row(ui: &mut egui::Ui, name: &str, sub: Option<&str>, selected: bool) 
 
 fn hover_text(p: &SignalPath) -> String {
     let verdict = match &p.bit_perfect {
-        BitPerfectStatus::Off => "Normal mode: volume, ReplayGain and resampling allowed".to_owned(),
-        BitPerfectStatus::Verified => "Bit-perfect: exclusive access, matching rate, untouched samples".to_owned(),
+        BitPerfectStatus::Off => "Normal mode, with volume, ReplayGain and resampling".to_owned(),
+        BitPerfectStatus::Verified => "Bit-perfect, with exclusive access, the file's sample rate and untouched samples".to_owned(),
         BitPerfectStatus::Requested { reason } => format!("Bit-perfect requested, not verified: {reason}"),
         BitPerfectStatus::Unavailable { reason } => format!("Not bit-perfect: {reason}"),
     };

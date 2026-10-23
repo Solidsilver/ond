@@ -157,10 +157,10 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, progress: impl Fn(u
     let mut offset = 0;
     let mut seen = HashSet::new();
     loop {
-        let page = fetch.album_page(ALBUM_PAGE, offset).await.map_err(|e| format!("sync: {e}"))?;
+        let page = fetch.album_page(ALBUM_PAGE, offset).await.map_err(|e| format!("Sync failed: {e}"))?;
         seen.extend(page.iter().map(|a| a.id.clone()));
         let n = page.len() as u32;
-        blocking(lib, move |l| l.upsert_albums(page)).await.map_err(|e| format!("store albums: {e}"))?;
+        blocking(lib, move |l| l.upsert_albums(page)).await.map_err(|e| format!("Couldn't save the album list: {e}"))?;
         // Only an empty page ends the list: a server may cap pages below what
         // was asked for, and stopping early would prune everything after it.
         if n == 0 {
@@ -181,7 +181,7 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, progress: impl Fn(u
 
 /// Replaces the stored artists with the server's; returns them as stored.
 pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F) -> Result<Vec<library::Artist>, String> {
-    let artists = fetch.artists().await.map_err(|e| format!("artists: {e}"))?;
+    let artists = fetch.artists().await.map_err(|e| format!("Couldn't load artists: {e}"))?;
     blocking(lib, move |l| l.replace_artists(artists).and_then(|_| l.artists())).await
 }
 
@@ -255,7 +255,7 @@ async fn bulk_pass<F: Fetch>(
             Err(e) => {
                 failures += 1;
                 if failures >= BULK_RETRIES {
-                    return Err(format!("track sync: {e}"));
+                    return Err(format!("Track sync failed: {e}"));
                 }
                 // A hiccup gets a moment to clear instead of three retries in
                 // the same millisecond.
@@ -322,7 +322,7 @@ async fn per_album<F: Fetch>(lib: &Arc<Library>, fetch: &F, cancel: &AtomicBool,
         progress(Progress { done, total, unit: Unit::Albums });
         if failures >= MAX_FAILURES {
             running.abort_all();
-            return Err(format!("track sync: {last_error}"));
+            return Err(format!("Track sync failed: {last_error}"));
         }
     }
     stored += batch.len();

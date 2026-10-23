@@ -239,7 +239,7 @@ impl OndApp {
             let resp = ui
                 .add_enabled_ui(!self.bit_perfect, |ui| super::widgets::thin_slider(ui, &mut level, width, "Volume"))
                 .inner
-                .on_disabled_hover_text("Bit-perfect: volume is controlled by your DAC or the system");
+                .on_disabled_hover_text("In bit-perfect mode, use your DAC's or the system's volume");
             if resp.changed() {
                 self.set_volume(level);
             }

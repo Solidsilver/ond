@@ -85,7 +85,7 @@ impl ViewCtx<'_> {
                 self.lyrics_block(ui, &track, &l, size, bg);
             }
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
-            _ if self.session.client.is_none() => note(ui, "Lyrics come from your server when it's connected."),
+            _ if self.session.client.is_none() => note(ui, "Lyrics load when the server is connected."),
             _ => note(ui, "No lyrics for this song."),
         }
     }
@@ -381,7 +381,7 @@ impl ViewCtx<'_> {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new("Not synced").size(11.0).color(t.muted.gamma_multiply(0.8)))
-                        .on_hover_text("These lyrics have no timing, so they don't follow the music");
+                        .on_hover_text("These lyrics have no timing, so they can't follow the music");
                     ui.add_space((size * 1.0).round());
                     let mut first = true;
                     for row in &rows {

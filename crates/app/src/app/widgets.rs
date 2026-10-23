@@ -114,7 +114,9 @@ pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: b
 pub fn rating_choice(ui: &mut Ui, rating: u8, current: bool) -> Response {
     let t = Tokens::of(ui);
     let star = 12.0;
-    let width = (ui.available_width()).max(5.0 * (star + 3.0) + 40.0);
+    // A fixed width: a menu sizes itself to its widest row, so taking the room
+    // offered would stretch the menu across the window.
+    let width = 26.0 + 5.0 * (star + 3.0) + 8.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect, 4.0, t.selected);

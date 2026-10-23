@@ -107,7 +107,7 @@ pub fn connect_error(e: &subsonic::Error) -> String {
         // 40: wrong credentials; 41: token auth not allowed for LDAP users.
         subsonic::Error::Api { code: 40 | 41, .. } => "Wrong username or password.".into(),
         subsonic::Error::Api { message, .. } if !message.is_empty() => format!("The server said: {message}"),
-        subsonic::Error::Url(_) => "That doesn't look like a server address (e.g. https://music.example.com).".into(),
+        subsonic::Error::Url(_) => "That doesn't look like a server address. Try something like https://music.example.com.".into(),
         subsonic::Error::Http(h) if h.is_connect() || h.is_timeout() => "Couldn't reach the server. Check the address and that it's running.".into(),
         subsonic::Error::Http(h) if h.status().is_some() => format!("The server answered with an error ({}).", h.status().map(|s| s.to_string()).unwrap_or_default()),
         subsonic::Error::Decode(_) => "That address answered, but not like a Navidrome server.".into(),
@@ -242,7 +242,7 @@ impl Bridge {
         self.rt.spawn_blocking(move || {
             match this.library.albums() {
                 Ok(a) => this.send(Msg::Albums(a)),
-                Err(e) => return this.send(Msg::Error(format!("read library: {e}"))),
+                Err(e) => return this.send(Msg::Error(format!("Couldn't read the library: {e}"))),
             }
             if let Ok(a) = this.library.artists() {
                 this.send(Msg::Artists(a));
@@ -267,7 +267,7 @@ impl Bridge {
     fn load_all_tracks(&self) {
         match self.library.all_tracks() {
             Ok(t) => self.send(Msg::AllTracks(Box::new(crate::tracks::TrackSet::new(t)))),
-            Err(e) => self.send(Msg::Error(format!("read tracks: {e}"))),
+            Err(e) => self.send(Msg::Error(format!("Couldn't read the library: {e}"))),
         }
     }
 
@@ -286,7 +286,7 @@ impl Bridge {
                     let s = settings.clone();
                     match tokio::task::spawn_blocking(move || s.load_password()).await.ok().flatten() {
                         Some(p) => p,
-                        None => return this.send(Msg::ConnectFailed("no saved password".into())),
+                        None => return this.send(Msg::ConnectFailed("No saved password. Sign in again.".into())),
                     }
                 }
             };
@@ -488,7 +488,7 @@ impl Bridge {
             };
             let album = match client.album(&album_id).await {
                 Ok(a) => a,
-                Err(e) => return this.send(Msg::LoadFailed { key, error: Some(format!("load album: {e}")) }),
+                Err(e) => return this.send(Msg::LoadFailed { key, error: Some(format!("Couldn't load the album: {e}")) }),
             };
             let mut meta = song_meta(&album.song);
             meta.starred.push((StarKind::Album, album_id.clone(), album.album.starred.is_some()));
@@ -507,7 +507,7 @@ impl Bridge {
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(Msg::Tracks { album_id, tracks, fresh: true });
                 }
-                Err(e) => this.send(Msg::LoadFailed { key, error: Some(format!("store album: {e}")) }),
+                Err(e) => this.send(Msg::LoadFailed { key, error: Some(format!("Couldn't save the album: {e}")) }),
             }
         });
     }
@@ -523,11 +523,11 @@ impl Bridge {
                     let _ = this.db(move |l| l.upsert_albums(albums)).await;
                     this.send(Msg::Newest(ids));
                 }
-                Err(e) => this.send(Msg::Error(format!("recently added: {e}"))),
+                Err(e) => this.send(Msg::Error(format!("Couldn't load Recently added: {e}"))),
             }
             match client.playlists().await {
                 Ok(p) => this.send(Msg::Playlists(p)),
-                Err(e) => this.send(Msg::Error(format!("playlists: {e}"))),
+                Err(e) => this.send(Msg::Error(format!("Couldn't load playlists: {e}"))),
             }
         });
     }
@@ -545,7 +545,7 @@ impl Bridge {
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(Msg::PlaylistTracks { id, tracks });
                 }
-                Err(e) => this.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: Some(format!("load playlist: {e}")) }),
+                Err(e) => this.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: Some(format!("Couldn't load the playlist: {e}")) }),
             }
         });
     }
@@ -566,7 +566,7 @@ impl Bridge {
                     };
                     this.send(Msg::Starred { starred, ratings });
                 }
-                Err(e) => this.send(Msg::Error(format!("favorites: {e}"))),
+                Err(e) => this.send(Msg::Error(format!("Couldn't load favorites: {e}"))),
             }
         });
     }
@@ -620,7 +620,7 @@ impl Bridge {
         self.after_previous(format!("star:{kind:?}:{id}"), async move {
             let error = match &client {
                 Some(c) => c.set_starred(kind, &id, on).await.err().map(|e| e.to_string()),
-                None => Some("not connected".into()),
+                None => Some("Not connected to a server".into()),
             };
             this.send(Msg::StarDone { kind, id, on, seq, error });
         });
@@ -631,7 +631,7 @@ impl Bridge {
         self.after_previous(format!("rating:{id}"), async move {
             let error = match &client {
                 Some(c) => c.set_rating(&id, rating).await.err().map(|e| e.to_string()),
-                None => Some("not connected".into()),
+                None => Some("Not connected to a server".into()),
             };
             this.send(Msg::RatingDone { id, previous, seq, error });
         });
@@ -639,7 +639,7 @@ impl Bridge {
 
     /// Makes a playlist of `song_ids`; the app opens it when it's there.
     pub fn create_playlist(&self, client: Option<Client>, name: String, song_ids: Vec<String>) {
-        let Some(client) = client else { return self.send(Msg::Error("not connected".into())) };
+        let Some(client) = client else { return self.send(Msg::Error("Not connected to a server".into())) };
         let this = self.clone();
         self.rt.spawn(async move {
             match client.create_playlist(&name, &song_ids).await {
@@ -647,7 +647,7 @@ impl Bridge {
                     this.refresh_playlists(&client).await;
                     this.send(Msg::PlaylistCreated { id: p.playlist.id, name: p.playlist.name });
                 }
-                Err(e) => this.send(Msg::Error(format!("new playlist: {e}"))),
+                Err(e) => this.send(Msg::Error(format!("Couldn't create the playlist: {e}"))),
             }
         });
     }
@@ -655,7 +655,7 @@ impl Bridge {
     /// Sends one edit, then reloads the playlist list and the playlist (which
     /// also undoes the app's optimistic copy if the edit failed).
     pub fn edit_playlist(&self, client: Option<Client>, id: String, edit: PlaylistEdit) {
-        let Some(client) = client else { return self.send(Msg::Error("not connected".into())) };
+        let Some(client) = client else { return self.send(Msg::Error("Not connected to a server".into())) };
         let this = self.clone();
         self.rt.spawn(async move {
             let result = match &edit {
@@ -666,7 +666,7 @@ impl Bridge {
                 PlaylistEdit::Delete => client.delete_playlist(&id).await,
             };
             if let Err(e) = result {
-                this.send(Msg::Error(format!("playlist: {e}")));
+                this.send(Msg::Error(format!("Couldn't change the playlist: {e}")));
             }
             this.refresh_playlists(&client).await;
             if !matches!(edit, PlaylistEdit::Delete) {
@@ -678,7 +678,7 @@ impl Bridge {
     async fn refresh_playlists(&self, client: &Client) {
         match client.playlists().await {
             Ok(p) => self.send(Msg::Playlists(p)),
-            Err(e) => self.send(Msg::Error(format!("playlists: {e}"))),
+            Err(e) => self.send(Msg::Error(format!("Couldn't load playlists: {e}"))),
         }
     }
 
@@ -726,7 +726,7 @@ enum PingError {
 /// Pings with a timeout, so a black-holed server can't hang the connect.
 async fn ping(client: &Client) -> Result<String, PingError> {
     match tokio::time::timeout(Duration::from_secs(10), client.ping()).await {
-        Err(_) => Err(PingError::Unreachable("no answer from the server".into())),
+        Err(_) => Err(PingError::Unreachable("The server didn't answer".into())),
         Ok(Err(e @ subsonic::Error::Http(_))) => Err(PingError::Unreachable(e.to_string())),
         Ok(Err(e)) => Err(PingError::Refused(connect_error(&e))),
         Ok(Ok(info)) => Ok(format!("{} {}", info.server_type.as_deref().unwrap_or("subsonic"), info.server_version.as_deref().unwrap_or(&info.version))),
