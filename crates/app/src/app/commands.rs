@@ -130,7 +130,7 @@ impl ListenerApp {
             Some(e) => {
                 let track = self.favorites.view.songs.iter().find(|t| t.id == id).cloned().or_else(|| self.find_track(&id));
                 self.favorites.failed(kind, &id, on, seq, track.as_ref(), None);
-                self.error = Some(format!("Couldn't {} that: {e}", if on { "love" } else { "unlove" }));
+                self.show_error(format!("Couldn't {} that: {e}", if on { "love" } else { "unlove" }));
             }
         }
     }
@@ -140,7 +140,7 @@ impl ListenerApp {
             None => self.favorites.rating_settled(&id, seq),
             Some(e) => {
                 self.favorites.rating_failed(&id, previous, seq);
-                self.error = Some(format!("Couldn't save the rating: {e}"));
+                self.show_error(format!("Couldn't save the rating: {e}"));
             }
         }
     }
@@ -174,7 +174,7 @@ impl ListenerApp {
                 }
                 let n = tracks.len();
                 let name = self.data.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
-                self.notice = Some(format!("Added {} to {name}", if n == 1 { tracks[0].title.clone() } else { format!("{n} songs") }));
+                self.show_notice(format!("Added {} to {name}", if n == 1 { tracks[0].title.clone() } else { format!("{n} songs") }));
                 self.bridge.edit_playlist(client, id, PlaylistEdit::Add(tracks.into_iter().map(|t| t.id).collect()));
             }
             PlaylistAction::Rename { id, name } => {

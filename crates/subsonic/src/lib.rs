@@ -19,8 +19,9 @@ pub const CLIENT_NAME: &str = "listener";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The request failed. The URL is stripped: it carries the auth token.
     #[error("http: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     #[error("invalid server url: {0}")]
     Url(#[from] url::ParseError),
     #[error("malformed response: {0}")]
@@ -29,7 +30,21 @@ pub enum Error {
     Api { code: i32, message: String },
 }
 
+impl From<reqwest::Error> for Error {
+    fn from(e: reqwest::Error) -> Self {
+        // reqwest appends " for url (...)" to its messages, and every request
+        // URL carries `u`, `t` and `s`: never let that reach a toast or a log.
+        Error::Http(e.without_url())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Give up connecting after this long.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Give up on a response that stops sending for this long (half-open
+/// connections would otherwise hang a request forever).
+pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct Client {
@@ -47,6 +62,8 @@ impl Client {
         }
         let http = reqwest::Client::builder()
             .user_agent(concat!("listener/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()?;
         Ok(Self { base, creds, http })
     }

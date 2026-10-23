@@ -29,7 +29,7 @@ mod snapshots;
 
 use crate::analyze;
 use crate::art::Art;
-use crate::bridge::{Bridge, Msg};
+use crate::bridge::{Bridge, ListKey, Msg};
 use crate::favorites::{Favorites, StarKind};
 use crate::keys::Cmd;
 use crate::nav::{Nav, Route};
@@ -259,7 +259,7 @@ pub enum Focus {
 
 /// A queue action waiting for tracks to load.
 struct Pending {
-    key: String,
+    key: ListKey,
     source: Source,
     action: QueueAction,
 }
@@ -293,9 +293,6 @@ pub struct ListenerApp {
     client: Option<Client>,
     server_label: String,
     sync_label: String,
-    error: Option<String>,
-    /// Something worth knowing that isn't an error (e.g. the library was rebuilt).
-    notice: Option<String>,
 
     data: Data,
     nav: Nav,
@@ -372,7 +369,7 @@ pub struct ListenerApp {
     offline: OfflineStore,
     offline_snap: Arc<offline::Snapshot>,
     /// Pins waiting for their track lists to load, by the same keys as `pending`.
-    pending_pins: Vec<(String, Pin)>,
+    pending_pins: Vec<(ListKey, Pin)>,
     /// The server answered last time we asked. While it's unreachable only
     /// downloaded tracks play.
     online: bool,
@@ -532,8 +529,6 @@ impl ListenerApp {
             client: None,
             server_label: String::new(),
             sync_label: String::new(),
-            error: None,
-            notice,
             data: Data::default(),
             nav: Nav::default(),
             sort: AlbumSort::default(),
@@ -559,7 +554,8 @@ impl ListenerApp {
             track_syncing: false,
             album_syncing: false,
             sync_progress: None,
-            toasts: toasts::Toasts::default(),
+            // Something worth knowing at start-up (e.g. the library was rebuilt).
+            toasts: toasts::Toasts::with_notice(notice),
             palette: None,
             theme: theme_pref,
             windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
@@ -602,7 +598,9 @@ impl ListenerApp {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Connected { client, settings, server } => {
+            // From before a sign-out: stale, whatever it says.
+            Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
+            Msg::Connected { client, settings, server, .. } => {
                 self.server_label = format!("{} · {}", settings.username, server);
                 self.server_info = server.clone();
                 self.login = None;
@@ -644,7 +642,7 @@ impl ListenerApp {
                 form.busy = false;
                 form.error = Some(e);
             }
-            Msg::Unreachable { username, error } => {
+            Msg::Unreachable { username, error, .. } => {
                 tracing::info!("server unreachable: {error}");
                 self.login = None;
                 self.set_offline();
@@ -701,7 +699,7 @@ impl ListenerApp {
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
                     crate::sync::Outcome::Failed(e) => {
-                        self.error = Some(e);
+                        self.show_error(e);
                         format!("{albums} albums · {tracks} tracks")
                     }
                 };
@@ -711,15 +709,36 @@ impl ListenerApp {
                 self.album_syncing = true;
                 self.sync_label = format!("syncing… {n}");
             }
-            Msg::SyncDone(n) => {
+            Msg::AlbumSyncDone(Ok(n)) => {
                 self.album_syncing = false;
                 self.sync_label = format!("{n} albums");
                 self.track_syncing = true;
             }
+            Msg::AlbumSyncDone(Err(e)) => {
+                // Nothing more follows (no artist or track sync): stop saying "syncing".
+                self.album_syncing = false;
+                self.sync_label = "sync failed".into();
+                self.probe();
+                if self.online {
+                    self.show_error(e);
+                }
+            }
+            Msg::LoadFailed { key, error } => {
+                // Whatever waited for these tracks gives up, so it can't fire
+                // much later when they turn up for some other reason.
+                self.pending.retain(|p| p.key != key);
+                self.pending_pins.retain(|(k, _)| *k != key);
+                if let Some(e) = error {
+                    self.probe();
+                    if self.online {
+                        self.show_error(e);
+                    }
+                }
+            }
             Msg::Tracks { album_id, tracks, fresh } => {
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.insert(album_id.clone(), tracks);
-                self.run_pending(&format!("album:{album_id}"));
+                self.run_pending(&ListKey::Album(album_id));
             }
             Msg::Newest(ids) => {
                 self.data.newest = ids;
@@ -730,7 +749,7 @@ impl ListenerApp {
                 // Always the server's complete listing.
                 self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
                 self.data.playlist_tracks.insert(id.clone(), tracks);
-                self.run_pending(&format!("playlist:{id}"));
+                self.run_pending(&ListKey::Playlist(id));
             }
             Msg::Credited { name, album_ids } => {
                 self.data.credited.insert(name, album_ids);
@@ -763,10 +782,21 @@ impl ListenerApp {
                 self.probe();
                 // Offline, network errors are expected and the offline pill already says so.
                 if self.online {
-                    self.error = Some(e);
+                    self.show_error(e);
                 }
             }
         }
+    }
+
+    /// Shows an error. Every message gets its own toast, so two failures in
+    /// one batch of messages are both seen.
+    pub(crate) fn show_error(&mut self, text: impl Into<String>) {
+        self.toasts.push(text.into(), true);
+    }
+
+    /// Shows something worth knowing that isn't an error.
+    pub(crate) fn show_notice(&mut self, text: impl Into<String>) {
+        self.toasts.push(text.into(), false);
     }
 
     /// Something failed; if it was the network, find out whether the server is gone.
@@ -831,7 +861,7 @@ impl ListenerApp {
                 match self.data.tracks.get(&id).cloned() {
                     Some(tracks) => self.offline.pin(pin.clone(), self.pin_label(&pin), tracks.iter().map(track_ref).collect()),
                     None => {
-                        self.pending_pins.push((format!("album:{id}"), pin));
+                        self.wait_to_pin(ListKey::Album(id.clone()), pin);
                         self.bridge.open_album(self.client.clone(), id);
                     }
                 }
@@ -844,7 +874,7 @@ impl ListenerApp {
                 match self.data.playlist_tracks.get(&id).cloned() {
                     Some(tracks) => self.offline.pin(pin.clone(), self.pin_label(&pin), tracks.iter().map(track_ref).collect()),
                     None => {
-                        self.pending_pins.push((format!("playlist:{id}"), pin));
+                        self.wait_to_pin(ListKey::Playlist(id.clone()), pin);
                         self.bridge.open_playlist(self.client.clone(), id);
                     }
                 }
@@ -942,7 +972,7 @@ impl ListenerApp {
             }
             audio::Event::Error { message, .. } => {
                 self.pending_seek = None;
-                self.error = Some(message);
+                self.show_error(message);
                 self.probe();
             }
             audio::Event::SignalPath(_)
@@ -997,7 +1027,7 @@ impl ListenerApp {
             };
             if skipped >= limit {
                 self.engine.send(Command::Stop);
-                self.notice = Some("Nothing in the queue is downloaded".to_owned());
+                self.show_notice("Nothing in the queue is downloaded".to_owned());
                 return;
             }
             let prev = self.queue.history.last().map(|i| &i.track);
@@ -1015,7 +1045,7 @@ impl ListenerApp {
             }
         }
         if skipped > 0 {
-            self.notice = Some(if skipped == 1 { "Skipped 1 song that isn't downloaded".to_owned() } else { format!("Skipped {skipped} songs that aren't downloaded") });
+            self.show_notice(if skipped == 1 { "Skipped 1 song that isn't downloaded".to_owned() } else { format!("Skipped {skipped} songs that aren't downloaded") });
         }
     }
 
@@ -1117,8 +1147,22 @@ impl ListenerApp {
         }
     }
 
-    fn run_pending(&mut self, key: &str) {
-        let Some(at) = self.pending.iter().position(|p| p.key == key) else { return };
+    /// Holds `p` until its tracks load. A newer action for the same list
+    /// replaces an older one still waiting.
+    fn wait_for(&mut self, p: Pending) {
+        self.pending.retain(|q| q.key != p.key);
+        self.pending.push(p);
+    }
+
+    /// Pins `pin` once its tracks load (once, however often it's asked).
+    fn wait_to_pin(&mut self, key: ListKey, pin: Pin) {
+        if !self.pending_pins.iter().any(|(k, _)| *k == key) {
+            self.pending_pins.push((key, pin));
+        }
+    }
+
+    fn run_pending(&mut self, key: &ListKey) {
+        let Some(at) = self.pending.iter().position(|p| &p.key == key) else { return };
         let p = self.pending.remove(at);
         let tracks = match &p.source {
             Source::Album { id, .. } => self.data.tracks.get(id).cloned(),
@@ -1155,21 +1199,21 @@ impl ListenerApp {
                 match self.data.tracks.get(&id) {
                     Some(t) => self.queue_tracks(t.clone(), source, action),
                     None => {
-                        self.pending.push(Pending { key: format!("album:{id}"), source, action });
+                        self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action });
                         self.bridge.open_album(self.client.clone(), id);
                     }
                 }
             }
             Action::Artist(name, action) => {
                 let ids: Vec<String> = self.data.albums.iter().filter(|a| a.has_artist(None, &name)).map(|a| a.id.clone()).collect();
-                let key = format!("artist:{name}");
+                let key = ListKey::Artist(name.clone());
                 let source = match action {
                     QueueAction::PlayNext | QueueAction::Add => Source::Added,
                     _ => Source::ArtistShuffle { name: format!("{name}, shuffled") },
                 };
                 // Playing an artist means all of their albums, shuffled.
                 let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Shuffle } else { action };
-                self.pending.push(Pending { key: key.clone(), source, action });
+                self.wait_for(Pending { key: key.clone(), source, action });
                 self.bridge.fetch_tracks(self.client.clone(), key, ids);
             }
             Action::Playlist(id, action) => {
@@ -1178,7 +1222,7 @@ impl ListenerApp {
                 match self.data.playlist_tracks.get(&id) {
                     Some(t) => self.queue_tracks(t.clone(), source, action),
                     None => {
-                        self.pending.push(Pending { key: format!("playlist:{id}"), source, action });
+                        self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action });
                         self.bridge.open_playlist(self.client.clone(), id);
                     }
                 }
@@ -1302,6 +1346,7 @@ impl ListenerApp {
             Action::SyncNow => {
                 if let Some(client) = self.client.clone()
                     && self.online
+                    && !self.album_syncing
                     && !self.track_syncing
                 {
                     self.sync_label = "syncing…".into();
@@ -1338,7 +1383,7 @@ impl ListenerApp {
             Action::RevealOffline => {
                 let dir = self.offline.dir().to_owned();
                 if let Err(e) = std::process::Command::new("open").arg(&dir).spawn() {
-                    self.error = Some(format!("open {}: {e}", dir.display()));
+                    self.show_error(format!("open {}: {e}", dir.display()));
                 }
             }
             Action::MoveOffline => {
@@ -1353,7 +1398,7 @@ impl ListenerApp {
                             s.offline_dir = Some(dir.clone());
                             s.offline_move_from = Some(current.clone());
                         });
-                        self.notice = Some(format!("Downloads will move to {} when Listener restarts", dir.display()));
+                        self.show_notice(format!("Downloads will move to {} when Listener restarts", dir.display()));
                     }
                 }
             }
@@ -1505,7 +1550,11 @@ impl ListenerApp {
         self.overlay = None;
         self.favorites = Favorites::default();
         self.bridge.cancel_sync();
-        self.client = None;
+        // Reconnect loops and connects in flight stop; anything they still
+        // deliver is ignored. Downloads lose their server (and its credentials).
+        self.bridge.end_session();
+        self.set_offline();
+        self.unreachable = false;
         self.server_label.clear();
         let saved = Settings::load(&self.paths);
         if let Some(s) = saved.clone() {
@@ -1648,12 +1697,6 @@ impl ListenerApp {
             }
             WindowMode::Player => self.player_ui(ui),
             WindowMode::Mini => self.mini_ui(ui),
-        }
-        if let Some(e) = self.error.take() {
-            self.toasts.push(e, true);
-        }
-        if let Some(n) = self.notice.take() {
-            self.toasts.push(n, false);
         }
         // Mini is all artwork; messages wait for a bigger window.
         if self.windows.mode != WindowMode::Mini {
@@ -2080,7 +2123,7 @@ mod tests {
         let pass = app.queue.pass_len();
         app.start_current();
         assert!(app.queue.history.len() <= 2 * pass, "history grew to {}", app.queue.history.len());
-        assert_eq!(app.notice.as_deref(), Some("Nothing in the queue is downloaded"));
+        assert_eq!(app.toasts.texts().last().copied(), Some("Nothing in the queue is downloaded"));
     }
 
     #[test]
@@ -2147,6 +2190,59 @@ mod tests {
         assert!(app.pending.is_empty());
         // Played next: right after what the user already chose to play next.
         assert_eq!(app.queue.upcoming[2].track.id, "x-1");
+    }
+
+    /// Handles what the bridge sends until `done` says so (or 3 s pass).
+    fn until(app: &mut ListenerApp, mut done: impl FnMut(&ListenerApp) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !done(app) {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting on the bridge");
+            match app.inbox.recv_timeout(Duration::from_millis(20)) {
+                Ok(msg) => app.handle(msg),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn a_load_that_fails_drops_what_waited_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        assert!(app.client.is_none(), "offline: nothing can be fetched");
+        let before = app.queue.upcoming.len();
+        // Album 12 isn't stored either: the play and the pin both wait, once each.
+        app.apply(Action::Album("al-12".into(), QueueAction::Add));
+        app.apply(Action::Album("al-12".into(), QueueAction::PlayNext));
+        app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
+        app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
+        assert_eq!(app.pending.len(), 1, "the newer action replaced the older");
+        assert_eq!(app.pending_pins.len(), 1);
+        // The load fails: both give up.
+        until(&mut app, |a| a.pending.is_empty() && a.pending_pins.is_empty());
+        // The tracks turn up later anyway (browsing, a sync): nothing plays or pins.
+        let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
+        app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
+        assert_eq!(app.queue.upcoming.len(), before, "a stale action played");
+        assert!(!app.offline.is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
+    }
+
+    #[test]
+    fn a_failed_album_sync_stops_saying_syncing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        app.online = true;
+        app.album_syncing = true;
+        app.handle(Msg::AlbumSyncDone(Err("sync: timed out".into())));
+        assert!(!app.album_syncing && !app.track_syncing);
+        assert!(app.toasts.texts().contains(&"sync: timed out"));
+        // While an album sync runs, Sync now doesn't start a second one.
+        app.album_syncing = true;
+        app.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+        app.sync_label = "syncing… 500".into();
+        app.apply(Action::SyncNow);
+        assert_eq!(app.sync_label, "syncing… 500", "a second album sync started");
     }
 
     #[test]
@@ -2244,7 +2340,7 @@ mod tests {
         app.queue = Queue::default();
         app.queue_tracks(tracks.clone(), Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
         assert_eq!(app.queue.current.as_ref().unwrap().track.id, "t-2");
-        assert_eq!(app.notice.as_deref(), Some("Skipped 1 song that isn't downloaded"));
+        assert_eq!(app.toasts.texts().last().copied(), Some("Skipped 1 song that isn't downloaded"));
         // Nothing after it can play, so the engine isn't told about a next track.
         assert_eq!(app.sent_next, None);
         // When it ends, the rest is skipped and playback stops cleanly.
@@ -2253,10 +2349,52 @@ mod tests {
 
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
-        app.handle(Msg::Connected { client, settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into() });
         assert!(app.online);
         assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
         assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
+    }
+
+    #[test]
+    fn errors_in_one_batch_are_all_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        app.online = true;
+        // Two failures handled before the next frame: both get a toast.
+        app.handle(Msg::Error("playlists: timed out".into()));
+        app.handle(Msg::Error("favorites: timed out".into()));
+        let shown = app.toasts.texts();
+        assert!(shown.contains(&"playlists: timed out") && shown.contains(&"favorites: timed out"), "{shown:?}");
+    }
+
+    #[test]
+    fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+        // Signed in, then the server went away: a reconnect loop is running.
+        let before = app.bridge.session();
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        assert!(app.online && app.client.is_some());
+        app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
+        assert!(app.unreachable);
+
+        app.sign_out();
+        assert!(app.login.is_some());
+        assert!(app.client.is_none() && !app.online && !app.unreachable);
+        assert_ne!(app.bridge.session(), before, "sign-out ends the session");
+
+        // The old loop reaches the server after all: stale, ignored.
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
+        assert!(app.login.is_some(), "still on the login screen");
+        assert!(app.client.is_none() && !app.online && !app.unreachable);
+
+        // A fresh sign-in in the new session works.
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into() });
+        assert!(app.login.is_none() && app.online);
     }
 
     #[test]

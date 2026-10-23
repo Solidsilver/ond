@@ -712,7 +712,8 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
     if have > 0 {
         req = req.header(RANGE, format!("bytes={have}-"));
     }
-    let mut resp = req.send().await.map_err(|e| JobError::Failed(e.to_string()))?;
+    // Errors drop the URL: it carries the auth token.
+    let mut resp = req.send().await.map_err(|e| JobError::Failed(e.without_url().to_string()))?;
     let status = resp.status();
     let total = match status {
         StatusCode::PARTIAL_CONTENT => resp
@@ -752,7 +753,7 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
             Ok(None) => break,
             Err(e) => {
                 let _ = file.flush();
-                return Err(JobError::Failed(e.to_string()));
+                return Err(JobError::Failed(e.without_url().to_string()));
             }
         };
         file.write_all(&chunk)?;

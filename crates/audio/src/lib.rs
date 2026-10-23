@@ -446,7 +446,9 @@ impl Engine {
         match cmd {
             Command::Play(src) => self.start(src, None),
             Command::Pause => {
-                if matches!(self.status.state(), PlayState::Playing | PlayState::Buffering) {
+                // Loading too: a pause pressed while a slow server answers must
+                // hold once the track opens (`open_ring` respects `paused`).
+                if matches!(self.status.state(), PlayState::Loading | PlayState::Playing | PlayState::Buffering) {
                     self.status.paused.store(true, Ordering::Relaxed);
                     self.status.set_state(PlayState::Paused);
                 }

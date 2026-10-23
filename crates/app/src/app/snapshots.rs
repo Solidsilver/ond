@@ -1074,11 +1074,11 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "narrow-rail-syncing");
 
     reset(h, FULL, Route::Album(album_id(0)));
-    app_mut(h).error = Some("Couldn't load Sunday at the Village Vanguard: the server didn't answer.".into());
+    app_mut(h).show_error("Couldn't load Sunday at the Village Vanguard: the server didn't answer.");
     h.run_steps(1);
-    app_mut(h).notice = Some("Skipped 1 song that isn't downloaded".into());
+    app_mut(h).show_notice("Skipped 1 song that isn't downloaded");
     h.run_steps(1);
-    app_mut(h).notice = Some("Added 6 songs to Late night, low volume".into());
+    app_mut(h).show_notice("Added 6 songs to Late night, low volume");
     s.shoot(h, "toasts");
 
     reset(h, vec2(380.0, 880.0), Route::Recent);
@@ -1278,5 +1278,57 @@ fn the_now_playing_heart_toggles_both_ways() {
     h.get_by_label("Love (⇧⌘L)").click();
     h.run_steps(2);
     assert!(loved(&mut h), "loved again from the now-playing display");
+    *h.state_mut() = None;
+}
+
+#[test]
+fn list_keys_stay_with_an_open_sheet() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<ListenerApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+
+    // Songs with a selection, Settings open on top.
+    reset(&mut h, FULL, Route::Songs);
+    let playing = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).queue.current.as_ref().map(|c| c.track.id.clone());
+    let before = playing(&mut h);
+    app_mut(&mut h).songs.selected = Some(0);
+    app_mut(&mut h).overlay = Some(Overlay::Settings);
+    h.run_steps(1);
+    h.key_press(egui::Key::ArrowDown);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).songs.selected, Some(0), "↓ moved the list under the sheet");
+    assert_eq!(playing(&mut h), before, "⏎ played from the list under the sheet");
+
+    // The queue with a selected item: ⌫ must not remove it.
+    let app = app_mut(&mut h);
+    let uid = app.queue.upcoming[0].uid;
+    let len = app.queue.upcoming.len();
+    app.focus = Focus::Queue;
+    app.queue_ui.selected = Some(uid);
+    h.run_steps(1);
+    h.key_press(egui::Key::Backspace);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).queue.upcoming.len(), len, "⌫ edited the queue under the sheet");
+
+    // Closed again: the same keys reach the queue.
+    app_mut(&mut h).overlay = None;
+    h.run_steps(1);
+    h.key_press(egui::Key::Backspace);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).queue.upcoming.len(), len - 1, "⌫ works once the sheet is closed");
     *h.state_mut() = None;
 }

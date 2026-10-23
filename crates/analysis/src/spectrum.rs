@@ -81,7 +81,9 @@ impl Spectrum {
 
     /// The content's upper edge, when it ends clearly below Nyquist.
     pub fn finish(self) -> Option<Edge> {
-        if self.windows < MIN_WINDOWS {
+        // Below 8 kHz there's no band worth judging (and the 1 kHz floor below
+        // would sit above Nyquist).
+        if self.windows < MIN_WINDOWS || self.rate < 8_000 {
             return None;
         }
         let bin_hz = f64::from(self.rate) / N as f64;
@@ -91,6 +93,9 @@ impl Spectrum {
 
         let nyquist = f64::from(self.rate) / 2.0;
         let (lo, hi) = (bin(1000.0), bin(0.985 * nyquist));
+        if lo >= hi {
+            return None;
+        }
         let floor = sm[bin(0.3 * nyquist).max(lo)..=hi].iter().copied().fold(f64::INFINITY, f64::min);
         let cut = (lo..=hi).rev().find(|&k| sm[k] > floor + ABOVE_FLOOR_DB)?;
         // Content all the way up: no edge to speak of.

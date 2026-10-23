@@ -124,7 +124,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                 // Asked past the end; whatever is missing must be before `start`.
                 failures += 1;
                 if failures > MAX_FAILURES {
-                    return Err(format!("fetch: {e}"));
+                    return Err(format!("fetch: {}", e.without_url()));
                 }
                 start = 0;
                 continue;
@@ -132,7 +132,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
             Err(e) => {
                 failures += 1;
                 if failures > MAX_FAILURES || e.status().is_some_and(|s| s.is_client_error()) {
-                    return Err(format!("fetch: {e}"));
+                    return Err(format!("fetch: {}", e.without_url()));
                 }
                 backoff(dl, failures).await;
                 continue;
@@ -161,7 +161,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
         } else {
             // 200: the whole body from byte 0. Range isn't supported; read it straight through.
             if ranged.is_none() {
-                tracing::debug!("{url}: server ignored Range, falling back to a sequential download");
+                tracing::debug!("{}: server ignored Range, falling back to a sequential download", redact(url));
             }
             ranged = Some(false);
             let len = resp.content_length();
@@ -224,9 +224,9 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                 Err(e) => {
                     failures += 1;
                     if failures > MAX_FAILURES {
-                        return Err(format!("fetch: {e}"));
+                        return Err(format!("fetch: {}", e.without_url()));
                     }
-                    tracing::debug!("{url}: {e}; retrying");
+                    tracing::debug!("{}: {}; retrying", redact(url), e.without_url());
                     backoff(dl, failures).await;
                     // Ranged: resume where it broke. Sequential: start over (bytes already written stay valid).
                     break Some(if ranged == Some(true) { pos } else { 0 });
@@ -251,6 +251,11 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
             }
         };
     }
+}
+
+/// A URL fit for logs: the path only. The query holds the auth token.
+pub(crate) fn redact(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(path, _)| path)
 }
 
 fn done_len(st: &DlState) -> Option<u64> {

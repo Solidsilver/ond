@@ -207,7 +207,7 @@ impl ListenerApp {
 
     /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
     fn songs_keys(&mut self, ui: &Ui, order: &[usize]) {
-        if self.focus != Focus::Main || self.palette.is_some() || ui.ctx().memory(|m| m.focused().is_some()) || order.is_empty() {
+        if self.focus != Focus::Main || !self.list_keys_free(ui) || order.is_empty() {
             return;
         }
         use egui::{Key, Modifiers};

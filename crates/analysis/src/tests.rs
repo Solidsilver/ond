@@ -64,6 +64,16 @@ fn sine(rate: u32, secs: f64, hz: f64, amp: f64) -> Vec<f32> {
         .collect()
 }
 
+#[test]
+fn very_low_sample_rates_do_not_panic() {
+    // At 1–2 kHz the 1 kHz floor sits at or above Nyquist; the spectrum
+    // check used to slice backwards and panic here.
+    for rate in [1_000, 1_500, 2_000, 4_000, 7_999] {
+        let a = run(rate, Some(16), &shaped_noise(rate, 20.0, -12.0, |_| 1.0));
+        assert!(a.verdicts.iter().all(|v| !matches!(v.kind, VerdictKind::Upsampled { .. } | VerdictKind::LossySource { .. })), "{rate} Hz");
+    }
+}
+
 fn kinds(a: &TrackAnalysis) -> Vec<&VerdictKind> {
     a.verdicts.iter().map(|v| &v.kind).collect()
 }

@@ -235,3 +235,15 @@ fn playlist_edits_repeat_their_params() {
     assert_eq!(adds, ["a", "b"]);
     assert_eq!(StarKind::Album.param(), "albumId");
 }
+
+#[tokio::test]
+async fn http_errors_never_carry_the_auth_token() {
+    // Nothing listens on port 1: the request fails, and reqwest would name the
+    // URL (with u, t and s) in its message.
+    let c = Client::new("http://127.0.0.1:1/", Credentials::new("joe", "sesame")).unwrap();
+    let e = c.ping().await.unwrap_err();
+    let shown = format!("{e} / {e:?}");
+    for leak in ["t=", "s=", "u=joe", "127.0.0.1:1/rest"] {
+        assert!(!shown.contains(leak), "{leak} leaked in {shown}");
+    }
+}

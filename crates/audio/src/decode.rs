@@ -131,7 +131,11 @@ impl Session {
         thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
-                if let Err((seq, message)) = ctx.run(first)
+                // A panic in a decoder (bad file, library bug) becomes an
+                // error for the track it hit, so the engine never waits forever.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.run(first)))
+                    .unwrap_or_else(|p| Err((ctx.at_seq.load(Ordering::Acquire), format!("decoder crashed: {}", panic_text(&*p)))));
+                if let Err((seq, message)) = result
                     && !ctx.cancel.load(Ordering::Relaxed)
                 {
                     let _ = ctx.msgs.send(DecoderMsg::Error { seq, message });
@@ -638,6 +642,15 @@ impl Ctx {
     }
 }
 
+/// The message a panic carried, for error reports.
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_owned())
+}
+
 /// Drops encoder delay/padding the decoder left in. Decoders that honour
 /// `gapless` (MP3, Vorbis) already produce exactly `dur` frames and are left
 /// alone; this only acts when the output still includes the trim.
@@ -705,8 +718,12 @@ fn replay_gain_from_tags<'a>(tags: impl Iterator<Item = &'a Tag>) -> ReplayGain 
     rg
 }
 
-/// `file://` for local files (tests, later the offline store); anything else goes through the stream cache.
+/// `file://` for local files (offline downloads, tests); anything else goes through the stream cache.
 fn open_source(src: &TrackSource, cache: Option<&StreamCache>, abort: Abort) -> Result<Box<dyn MediaSource>, String> {
+    #[cfg(test)]
+    if src.url == "test://panic" {
+        panic!("a decoder blew up");
+    }
     if let Some(path) = src.url.strip_prefix("file://") {
         let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
         return Ok(Box::new(f));
