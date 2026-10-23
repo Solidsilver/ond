@@ -379,6 +379,7 @@ fn analysed(app: &mut ListenerApp, album: usize, verdict: Option<analysis::Verdi
             verdicts: verdict.clone().into_iter().collect(),
         };
         app.analyses.insert(t.id.clone(), analysis::Record { stamp: crate::analyze::stamp_of(t), analysis: a });
+        app.analyses_version += 1;
     }
 }
 

@@ -22,6 +22,8 @@ pub enum Msg {
     Unreachable { session: u64, username: String, error: String },
     /// A ping's round trip, or `None` when it got no answer.
     Latency(Option<Duration>),
+    /// A search index built off the UI thread, for the request numbered `generation`.
+    SearchIndex { generation: u64, index: Box<crate::search::SearchIndex> },
     Albums(Vec<Album>),
     SyncProgress(usize),
     /// The album list sync finished (`Ok`: how many albums) or failed.
@@ -211,6 +213,16 @@ impl Bridge {
                 }
             })
             .expect("spawn event forwarder");
+    }
+
+    /// Builds the search index on a worker (tens of ms on a big library) and
+    /// sends it back tagged with `generation`, so a stale build can be dropped.
+    pub fn build_search(&self, generation: u64, albums: Vec<Album>, artists: Vec<library::Artist>, tracks: Arc<Vec<Track>>) {
+        let this = self.clone();
+        self.rt.spawn_blocking(move || {
+            let index = crate::search::SearchIndex::new(&albums, &artists, &tracks);
+            this.send(Msg::SearchIndex { generation, index: Box::new(index) });
+        });
     }
 
     /// Loads the cached library from disk without touching the network.

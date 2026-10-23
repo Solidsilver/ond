@@ -309,7 +309,7 @@ pub struct ListenerApp {
     nav: Nav,
     sort: AlbumSort,
     /// The album list for the current view, cached by (route, sort, data version).
-    grid: Option<(Route, AlbumSort, u64, Vec<usize>)>,
+    grid: crate::memo::Memo<(Route, AlbumSort, u64), Vec<usize>>,
     actions: Vec<Action>,
     pending: Vec<Pending>,
     art: Art,
@@ -340,10 +340,13 @@ pub struct ListenerApp {
     /// A seek that's been sent but not confirmed yet; shown instead of the engine position.
     pending_seek: Option<f64>,
 
-    /// Rebuilt whenever albums, artists or tracks change.
+    /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
+    /// the old one serves until the new one lands.
     search: Option<SearchIndex>,
     /// Albums, artists or tracks changed since the index was built.
     search_stale: bool,
+    /// The latest index build asked for; older builds that land late are dropped.
+    search_generation: u64,
     songs: songs::SongsView,
     /// A track sync is running (shows a stop button in the status bar).
     track_syncing: bool,
@@ -388,6 +391,10 @@ pub struct ListenerApp {
     settings: Option<Settings>,
     /// Stored analysis results by track id, with the file stamp they're for.
     analyses: HashMap<String, analysis::Record>,
+    /// Bumped whenever `analyses` changes, so counts over it know to recount.
+    analyses_version: u64,
+    /// How much of the library has no current analysis, per (analyses, tracks) version.
+    unanalysed: crate::memo::Memo<(u64, u64), (usize, f64)>,
     /// The stored results have been read (until then everything looks unanalysed).
     analyses_loaded: bool,
     analyzer: analyze::Runner,
@@ -545,7 +552,7 @@ impl ListenerApp {
             data: Data::default(),
             nav: Nav::default(),
             sort: AlbumSort::default(),
-            grid: None,
+            grid: Default::default(),
             actions: Vec::new(),
             pending: Vec::new(),
             art,
@@ -563,6 +570,7 @@ impl ListenerApp {
             pending_seek: None,
             search: None,
             search_stale: false,
+            search_generation: 0,
             songs: songs::SongsView::default(),
             track_syncing: false,
             album_syncing: false,
@@ -590,6 +598,8 @@ impl ListenerApp {
             diagnostics: diagnostics::Diagnostics::new(saved.as_ref().is_some_and(|s| s.diagnostics_bar)),
             settings: saved,
             analyses: HashMap::new(),
+            analyses_version: 0,
+            unanalysed: Default::default(),
             analyses_loaded: false,
             analyzer,
             favorites: Favorites::default(),
@@ -665,6 +675,11 @@ impl ListenerApp {
                 self.sync_label = "reconnecting…".into();
             }
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
+            Msg::SearchIndex { generation, index } => {
+                if generation == self.search_generation {
+                    self.install_search(*index);
+                }
+            }
             Msg::Albums(a) => {
                 self.data.set_albums(a);
                 self.search_stale = true;
@@ -689,9 +704,11 @@ impl ListenerApp {
             }
             Msg::Analyzed { track_id, record } => {
                 self.analyses.insert(track_id, record);
+                self.analyses_version += 1;
             }
             Msg::AnalysesLoaded(rows) => {
                 self.analyses.extend(rows);
+                self.analyses_version += 1;
                 self.analyses_loaded = true;
                 self.resume_library_analysis();
             }
@@ -855,7 +872,7 @@ impl ListenerApp {
         match pin {
             Pin::Album(id) => self.data.album(id).map(|a| a.name.clone()).unwrap_or_default(),
             Pin::Playlist(id) => self.data.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
-            Pin::Track(id) => self.data.tracks.all.iter().find(|t| &t.id == id).map(|t| t.title.clone()).unwrap_or_default(),
+            Pin::Track(id) => self.data.track(id).map(|t| t.title.clone()).unwrap_or_default(),
         }
     }
 
@@ -931,7 +948,7 @@ impl ListenerApp {
             artist: track.artist.clone(),
             album: album.map(|a| a.name.clone()),
             duration_secs: track.duration_secs.map(f64::from),
-            cover: track.cover_art.clone().or_else(|| album.and_then(|a| a.cover_art.clone())),
+            cover: self.data.cover_for(track).map(str::to_owned),
         });
     }
 
@@ -939,12 +956,19 @@ impl ListenerApp {
     /// and tracks back to back, so derived data is rebuilt once, not per message.
     fn after_messages(&mut self) {
         if std::mem::take(&mut self.search_stale) {
-            self.rebuild_search();
+            self.search_generation += 1;
+            self.bridge.build_search(self.search_generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
         }
     }
 
+    /// Builds the index here and now (fixtures and tests).
+    #[cfg(test)]
     fn rebuild_search(&mut self) {
-        let mut index = SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.tracks.all);
+        self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.tracks.all));
+    }
+
+    /// Swaps in a freshly built index; an open palette re-runs its query on it.
+    fn install_search(&mut self, mut index: SearchIndex) {
         if let Some(p) = self.palette.as_mut() {
             p.refresh(&mut index);
         }
@@ -1496,13 +1520,16 @@ impl ListenerApp {
     }
 
     /// Tracks in the library without a current analysis, and their total length.
-    pub fn unanalysed(&self) -> (usize, f64) {
-        self.data
-            .tracks
-            .all
-            .iter()
-            .filter(|t| self.analysis_of(t).is_none())
-            .fold((0, 0.0), |(n, secs), t| (n + 1, secs + f64::from(t.duration_secs.unwrap_or(0))))
+    /// Counted once per change to either, not every frame Settings is open.
+    pub fn unanalysed(&mut self) -> (usize, f64) {
+        let key = (self.analyses_version, self.data.tracks_version);
+        let (analyses, tracks) = (&self.analyses, &self.data.tracks.all);
+        *self.unanalysed.get(key, || {
+            tracks
+                .iter()
+                .filter(|t| !analyses.get(&t.id).is_some_and(|r| r.stamp == crate::analyze::stamp_of(t)))
+                .fold((0, 0.0), |(n, secs), t| (n + 1, secs + f64::from(t.duration_secs.unwrap_or(0))))
+        })
     }
 
     /// Switches window mode (`None` toggles Mini) and saves the choice.
@@ -2217,6 +2244,42 @@ mod tests {
                 Err(_) => continue,
             }
         }
+    }
+
+    #[test]
+    fn the_search_index_is_built_off_the_ui_thread_and_stale_builds_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let album = |id: &str, name: &str| Album {
+            id: id.into(),
+            name: name.into(),
+            sort: None,
+            artist: Some("Bill Evans".into()),
+            artist_ref: None,
+            year: None,
+            genre: None,
+            song_count: 0,
+            duration_secs: 0,
+            cover_art: None,
+            created: None,
+            labels: Vec::new(),
+            genres: Vec::new(),
+            artists: Vec::new(),
+        };
+        app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz")]));
+        app.after_messages();
+        assert!(!app.search_stale, "the rebuild was handed off");
+        let first = app.search_generation;
+        // Before the first build lands, the library changes again.
+        app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz"), album("a2", "Explorations")]));
+        app.after_messages();
+        assert_eq!(app.search_generation, first + 1);
+        until(&mut app, |a| a.search.as_ref().is_some_and(|s| s.albums.len() == 2));
+        // The older build, if it lands now, doesn't replace the newer index.
+        let stale = SearchIndex::new(&[album("x", "Old")], &[], &[]);
+        app.handle(Msg::SearchIndex { generation: first, index: Box::new(stale) });
+        assert_eq!(app.search.as_ref().map(|s| s.albums.len()), Some(2));
     }
 
     #[test]
