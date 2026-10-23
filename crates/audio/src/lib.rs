@@ -309,6 +309,21 @@ impl Status {
     }
 }
 
+/// How often the engine checks on playback while something is happening.
+const TICK: Duration = Duration::from_millis(10);
+/// The longest it sleeps while stopped or paused (it still notices devices
+/// coming and going). A command always wakes it at once.
+const IDLE_TICK: Duration = Duration::from_millis(250);
+
+/// The next wait after a quiet one: back to `TICK` while playing or loading,
+/// otherwise doubling up to `IDLE_TICK`, so a stopped engine barely wakes.
+fn next_wait(wait: Duration, state: PlayState) -> Duration {
+    match state {
+        PlayState::Stopped | PlayState::Paused => (wait * 2).min(IDLE_TICK),
+        _ => TICK,
+    }
+}
+
 fn secs(frames: u64, rate: u32) -> f64 {
     if rate == 0 { 0.0 } else { frames as f64 / rate as f64 }
 }
@@ -434,11 +449,15 @@ struct Engine {
 
 impl Engine {
     fn run(mut self, commands: Receiver<Command>) {
+        let mut wait = TICK;
         loop {
-            match commands.recv_timeout(Duration::from_millis(10)) {
+            match commands.recv_timeout(wait) {
                 Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-                Ok(cmd) => self.handle(cmd),
-                Err(RecvTimeoutError::Timeout) => {}
+                Ok(cmd) => {
+                    self.handle(cmd);
+                    wait = TICK;
+                }
+                Err(RecvTimeoutError::Timeout) => wait = next_wait(wait, self.status.state()),
             }
             self.poll_session();
             self.poll_fetch();

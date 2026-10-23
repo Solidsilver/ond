@@ -428,3 +428,18 @@ fn the_same_track_twice_is_told_apart_and_restarts_are_flagged() {
     assert!(matches!(seen.last(), Some(Event::Ended { token: 2, .. })), "{seen:?}");
     engine.send(Command::Shutdown);
 }
+
+
+#[test]
+fn an_idle_engine_backs_off_and_a_busy_one_does_not() {
+    use crate::{IDLE_TICK, TICK, next_wait};
+    let mut wait = TICK;
+    for _ in 0..10 {
+        wait = next_wait(wait, PlayState::Stopped);
+    }
+    assert_eq!(wait, IDLE_TICK, "stopped: wakes at most four times a second");
+    assert_eq!(next_wait(IDLE_TICK, PlayState::Paused), IDLE_TICK);
+    for state in [PlayState::Playing, PlayState::Loading, PlayState::Buffering] {
+        assert_eq!(next_wait(IDLE_TICK, state), TICK, "{state:?}: back to the fast tick");
+    }
+}
