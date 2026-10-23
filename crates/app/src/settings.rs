@@ -116,13 +116,15 @@ impl Settings {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// Writes the whole file: a temporary file renamed over the old one, so a
-    /// reader never sees half of it.
+    /// Writes the whole file. The app only ever changes it through
+    /// [`update`](Self::update) and [`save_login`](Self::save_login).
+    #[cfg(test)]
     pub fn save(&self, paths: &Paths) -> anyhow::Result<()> {
         let _one_writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
         self.write(paths)
     }
 
+    /// A temporary file renamed over the old one, so a reader never sees half of it.
     fn write(&self, paths: &Paths) -> anyhow::Result<()> {
         let tmp = paths.config_file.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
