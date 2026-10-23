@@ -3055,6 +3055,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "streamcache",
  "tempfile",
  "tokio",
  "tracing",
