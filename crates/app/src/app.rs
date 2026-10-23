@@ -293,9 +293,6 @@ pub struct ListenerApp {
     client: Option<Client>,
     server_label: String,
     sync_label: String,
-    error: Option<String>,
-    /// Something worth knowing that isn't an error (e.g. the library was rebuilt).
-    notice: Option<String>,
 
     data: Data,
     nav: Nav,
@@ -532,8 +529,6 @@ impl ListenerApp {
             client: None,
             server_label: String::new(),
             sync_label: String::new(),
-            error: None,
-            notice,
             data: Data::default(),
             nav: Nav::default(),
             sort: AlbumSort::default(),
@@ -559,7 +554,8 @@ impl ListenerApp {
             track_syncing: false,
             album_syncing: false,
             sync_progress: None,
-            toasts: toasts::Toasts::default(),
+            // Something worth knowing at start-up (e.g. the library was rebuilt).
+            toasts: toasts::Toasts::with_notice(notice),
             palette: None,
             theme: theme_pref,
             windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
@@ -703,7 +699,7 @@ impl ListenerApp {
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
                     crate::sync::Outcome::Failed(e) => {
-                        self.error = Some(e);
+                        self.show_error(e);
                         format!("{albums} albums · {tracks} tracks")
                     }
                 };
@@ -765,10 +761,21 @@ impl ListenerApp {
                 self.probe();
                 // Offline, network errors are expected and the offline pill already says so.
                 if self.online {
-                    self.error = Some(e);
+                    self.show_error(e);
                 }
             }
         }
+    }
+
+    /// Shows an error. Every message gets its own toast, so two failures in
+    /// one batch of messages are both seen.
+    pub(crate) fn show_error(&mut self, text: impl Into<String>) {
+        self.toasts.push(text.into(), true);
+    }
+
+    /// Shows something worth knowing that isn't an error.
+    pub(crate) fn show_notice(&mut self, text: impl Into<String>) {
+        self.toasts.push(text.into(), false);
     }
 
     /// Something failed; if it was the network, find out whether the server is gone.
@@ -944,7 +951,7 @@ impl ListenerApp {
             }
             audio::Event::Error { message, .. } => {
                 self.pending_seek = None;
-                self.error = Some(message);
+                self.show_error(message);
                 self.probe();
             }
             audio::Event::SignalPath(_)
@@ -999,7 +1006,7 @@ impl ListenerApp {
             };
             if skipped >= limit {
                 self.engine.send(Command::Stop);
-                self.notice = Some("Nothing in the queue is downloaded".to_owned());
+                self.show_notice("Nothing in the queue is downloaded".to_owned());
                 return;
             }
             let prev = self.queue.history.last().map(|i| &i.track);
@@ -1017,7 +1024,7 @@ impl ListenerApp {
             }
         }
         if skipped > 0 {
-            self.notice = Some(if skipped == 1 { "Skipped 1 song that isn't downloaded".to_owned() } else { format!("Skipped {skipped} songs that aren't downloaded") });
+            self.show_notice(if skipped == 1 { "Skipped 1 song that isn't downloaded".to_owned() } else { format!("Skipped {skipped} songs that aren't downloaded") });
         }
     }
 
@@ -1340,7 +1347,7 @@ impl ListenerApp {
             Action::RevealOffline => {
                 let dir = self.offline.dir().to_owned();
                 if let Err(e) = std::process::Command::new("open").arg(&dir).spawn() {
-                    self.error = Some(format!("open {}: {e}", dir.display()));
+                    self.show_error(format!("open {}: {e}", dir.display()));
                 }
             }
             Action::MoveOffline => {
@@ -1355,7 +1362,7 @@ impl ListenerApp {
                             s.offline_dir = Some(dir.clone());
                             s.offline_move_from = Some(current.clone());
                         });
-                        self.notice = Some(format!("Downloads will move to {} when Listener restarts", dir.display()));
+                        self.show_notice(format!("Downloads will move to {} when Listener restarts", dir.display()));
                     }
                 }
             }
@@ -1654,12 +1661,6 @@ impl ListenerApp {
             }
             WindowMode::Player => self.player_ui(ui),
             WindowMode::Mini => self.mini_ui(ui),
-        }
-        if let Some(e) = self.error.take() {
-            self.toasts.push(e, true);
-        }
-        if let Some(n) = self.notice.take() {
-            self.toasts.push(n, false);
         }
         // Mini is all artwork; messages wait for a bigger window.
         if self.windows.mode != WindowMode::Mini {
@@ -2086,7 +2087,7 @@ mod tests {
         let pass = app.queue.pass_len();
         app.start_current();
         assert!(app.queue.history.len() <= 2 * pass, "history grew to {}", app.queue.history.len());
-        assert_eq!(app.notice.as_deref(), Some("Nothing in the queue is downloaded"));
+        assert_eq!(app.toasts.texts().last().copied(), Some("Nothing in the queue is downloaded"));
     }
 
     #[test]
@@ -2250,7 +2251,7 @@ mod tests {
         app.queue = Queue::default();
         app.queue_tracks(tracks.clone(), Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
         assert_eq!(app.queue.current.as_ref().unwrap().track.id, "t-2");
-        assert_eq!(app.notice.as_deref(), Some("Skipped 1 song that isn't downloaded"));
+        assert_eq!(app.toasts.texts().last().copied(), Some("Skipped 1 song that isn't downloaded"));
         // Nothing after it can play, so the engine isn't told about a next track.
         assert_eq!(app.sent_next, None);
         // When it ends, the rest is skipped and playback stops cleanly.
@@ -2263,6 +2264,19 @@ mod tests {
         assert!(app.online);
         assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
         assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
+    }
+
+    #[test]
+    fn errors_in_one_batch_are_all_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        app.online = true;
+        // Two failures handled before the next frame: both get a toast.
+        app.handle(Msg::Error("playlists: timed out".into()));
+        app.handle(Msg::Error("favorites: timed out".into()));
+        let shown = app.toasts.texts();
+        assert!(shown.contains(&"playlists: timed out") && shown.contains(&"favorites: timed out"), "{shown:?}");
     }
 
     #[test]

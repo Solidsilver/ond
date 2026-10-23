@@ -26,6 +26,20 @@ pub struct Toasts {
 }
 
 impl Toasts {
+    /// Starts with `notice` showing, if there is one.
+    pub fn with_notice(notice: Option<String>) -> Self {
+        let mut t = Self::default();
+        if let Some(n) = notice {
+            t.push(n, false);
+        }
+        t
+    }
+
+    /// The messages showing, oldest first.
+    pub fn texts(&self) -> Vec<&str> {
+        self.items.iter().map(|t| t.text.as_str()).collect()
+    }
+
     /// Adds a message; the same text again just refreshes the one showing.
     pub fn push(&mut self, text: String, error: bool) {
         if let Some(t) = self.items.iter_mut().find(|t| t.text == text) {

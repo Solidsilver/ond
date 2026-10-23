@@ -1074,11 +1074,11 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "narrow-rail-syncing");
 
     reset(h, FULL, Route::Album(album_id(0)));
-    app_mut(h).error = Some("Couldn't load Sunday at the Village Vanguard: the server didn't answer.".into());
+    app_mut(h).show_error("Couldn't load Sunday at the Village Vanguard: the server didn't answer.");
     h.run_steps(1);
-    app_mut(h).notice = Some("Skipped 1 song that isn't downloaded".into());
+    app_mut(h).show_notice("Skipped 1 song that isn't downloaded");
     h.run_steps(1);
-    app_mut(h).notice = Some("Added 6 songs to Late night, low volume".into());
+    app_mut(h).show_notice("Added 6 songs to Late night, low volume");
     s.shoot(h, "toasts");
 
     reset(h, vec2(380.0, 880.0), Route::Recent);
