@@ -29,7 +29,7 @@ mod snapshots;
 
 use crate::analyze;
 use crate::art::Art;
-use crate::bridge::{Bridge, Msg};
+use crate::bridge::{Bridge, ListKey, Msg};
 use crate::favorites::{Favorites, StarKind};
 use crate::keys::Cmd;
 use crate::nav::{Nav, Route};
@@ -259,7 +259,7 @@ pub enum Focus {
 
 /// A queue action waiting for tracks to load.
 struct Pending {
-    key: String,
+    key: ListKey,
     source: Source,
     action: QueueAction,
 }
@@ -369,7 +369,7 @@ pub struct ListenerApp {
     offline: OfflineStore,
     offline_snap: Arc<offline::Snapshot>,
     /// Pins waiting for their track lists to load, by the same keys as `pending`.
-    pending_pins: Vec<(String, Pin)>,
+    pending_pins: Vec<(ListKey, Pin)>,
     /// The server answered last time we asked. While it's unreachable only
     /// downloaded tracks play.
     online: bool,
@@ -709,15 +709,36 @@ impl ListenerApp {
                 self.album_syncing = true;
                 self.sync_label = format!("syncing… {n}");
             }
-            Msg::SyncDone(n) => {
+            Msg::AlbumSyncDone(Ok(n)) => {
                 self.album_syncing = false;
                 self.sync_label = format!("{n} albums");
                 self.track_syncing = true;
             }
+            Msg::AlbumSyncDone(Err(e)) => {
+                // Nothing more follows (no artist or track sync): stop saying "syncing".
+                self.album_syncing = false;
+                self.sync_label = "sync failed".into();
+                self.probe();
+                if self.online {
+                    self.show_error(e);
+                }
+            }
+            Msg::LoadFailed { key, error } => {
+                // Whatever waited for these tracks gives up, so it can't fire
+                // much later when they turn up for some other reason.
+                self.pending.retain(|p| p.key != key);
+                self.pending_pins.retain(|(k, _)| *k != key);
+                if let Some(e) = error {
+                    self.probe();
+                    if self.online {
+                        self.show_error(e);
+                    }
+                }
+            }
             Msg::Tracks { album_id, tracks, fresh } => {
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.insert(album_id.clone(), tracks);
-                self.run_pending(&format!("album:{album_id}"));
+                self.run_pending(&ListKey::Album(album_id));
             }
             Msg::Newest(ids) => {
                 self.data.newest = ids;
@@ -728,7 +749,7 @@ impl ListenerApp {
                 // Always the server's complete listing.
                 self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
                 self.data.playlist_tracks.insert(id.clone(), tracks);
-                self.run_pending(&format!("playlist:{id}"));
+                self.run_pending(&ListKey::Playlist(id));
             }
             Msg::Credited { name, album_ids } => {
                 self.data.credited.insert(name, album_ids);
@@ -840,7 +861,7 @@ impl ListenerApp {
                 match self.data.tracks.get(&id).cloned() {
                     Some(tracks) => self.offline.pin(pin.clone(), self.pin_label(&pin), tracks.iter().map(track_ref).collect()),
                     None => {
-                        self.pending_pins.push((format!("album:{id}"), pin));
+                        self.wait_to_pin(ListKey::Album(id.clone()), pin);
                         self.bridge.open_album(self.client.clone(), id);
                     }
                 }
@@ -853,7 +874,7 @@ impl ListenerApp {
                 match self.data.playlist_tracks.get(&id).cloned() {
                     Some(tracks) => self.offline.pin(pin.clone(), self.pin_label(&pin), tracks.iter().map(track_ref).collect()),
                     None => {
-                        self.pending_pins.push((format!("playlist:{id}"), pin));
+                        self.wait_to_pin(ListKey::Playlist(id.clone()), pin);
                         self.bridge.open_playlist(self.client.clone(), id);
                     }
                 }
@@ -1126,8 +1147,22 @@ impl ListenerApp {
         }
     }
 
-    fn run_pending(&mut self, key: &str) {
-        let Some(at) = self.pending.iter().position(|p| p.key == key) else { return };
+    /// Holds `p` until its tracks load. A newer action for the same list
+    /// replaces an older one still waiting.
+    fn wait_for(&mut self, p: Pending) {
+        self.pending.retain(|q| q.key != p.key);
+        self.pending.push(p);
+    }
+
+    /// Pins `pin` once its tracks load (once, however often it's asked).
+    fn wait_to_pin(&mut self, key: ListKey, pin: Pin) {
+        if !self.pending_pins.iter().any(|(k, _)| *k == key) {
+            self.pending_pins.push((key, pin));
+        }
+    }
+
+    fn run_pending(&mut self, key: &ListKey) {
+        let Some(at) = self.pending.iter().position(|p| &p.key == key) else { return };
         let p = self.pending.remove(at);
         let tracks = match &p.source {
             Source::Album { id, .. } => self.data.tracks.get(id).cloned(),
@@ -1164,21 +1199,21 @@ impl ListenerApp {
                 match self.data.tracks.get(&id) {
                     Some(t) => self.queue_tracks(t.clone(), source, action),
                     None => {
-                        self.pending.push(Pending { key: format!("album:{id}"), source, action });
+                        self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action });
                         self.bridge.open_album(self.client.clone(), id);
                     }
                 }
             }
             Action::Artist(name, action) => {
                 let ids: Vec<String> = self.data.albums.iter().filter(|a| a.has_artist(None, &name)).map(|a| a.id.clone()).collect();
-                let key = format!("artist:{name}");
+                let key = ListKey::Artist(name.clone());
                 let source = match action {
                     QueueAction::PlayNext | QueueAction::Add => Source::Added,
                     _ => Source::ArtistShuffle { name: format!("{name}, shuffled") },
                 };
                 // Playing an artist means all of their albums, shuffled.
                 let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Shuffle } else { action };
-                self.pending.push(Pending { key: key.clone(), source, action });
+                self.wait_for(Pending { key: key.clone(), source, action });
                 self.bridge.fetch_tracks(self.client.clone(), key, ids);
             }
             Action::Playlist(id, action) => {
@@ -1187,7 +1222,7 @@ impl ListenerApp {
                 match self.data.playlist_tracks.get(&id) {
                     Some(t) => self.queue_tracks(t.clone(), source, action),
                     None => {
-                        self.pending.push(Pending { key: format!("playlist:{id}"), source, action });
+                        self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action });
                         self.bridge.open_playlist(self.client.clone(), id);
                     }
                 }
@@ -1311,6 +1346,7 @@ impl ListenerApp {
             Action::SyncNow => {
                 if let Some(client) = self.client.clone()
                     && self.online
+                    && !self.album_syncing
                     && !self.track_syncing
                 {
                     self.sync_label = "syncing…".into();
@@ -2154,6 +2190,59 @@ mod tests {
         assert!(app.pending.is_empty());
         // Played next: right after what the user already chose to play next.
         assert_eq!(app.queue.upcoming[2].track.id, "x-1");
+    }
+
+    /// Handles what the bridge sends until `done` says so (or 3 s pass).
+    fn until(app: &mut ListenerApp, mut done: impl FnMut(&ListenerApp) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !done(app) {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting on the bridge");
+            match app.inbox.recv_timeout(Duration::from_millis(20)) {
+                Ok(msg) => app.handle(msg),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn a_load_that_fails_drops_what_waited_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        assert!(app.client.is_none(), "offline: nothing can be fetched");
+        let before = app.queue.upcoming.len();
+        // Album 12 isn't stored either: the play and the pin both wait, once each.
+        app.apply(Action::Album("al-12".into(), QueueAction::Add));
+        app.apply(Action::Album("al-12".into(), QueueAction::PlayNext));
+        app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
+        app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
+        assert_eq!(app.pending.len(), 1, "the newer action replaced the older");
+        assert_eq!(app.pending_pins.len(), 1);
+        // The load fails: both give up.
+        until(&mut app, |a| a.pending.is_empty() && a.pending_pins.is_empty());
+        // The tracks turn up later anyway (browsing, a sync): nothing plays or pins.
+        let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
+        app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
+        assert_eq!(app.queue.upcoming.len(), before, "a stale action played");
+        assert!(!app.offline.is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
+    }
+
+    #[test]
+    fn a_failed_album_sync_stops_saying_syncing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        app.online = true;
+        app.album_syncing = true;
+        app.handle(Msg::AlbumSyncDone(Err("sync: timed out".into())));
+        assert!(!app.album_syncing && !app.track_syncing);
+        assert!(app.toasts.texts().contains(&"sync: timed out"));
+        // While an album sync runs, Sync now doesn't start a second one.
+        app.album_syncing = true;
+        app.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+        app.sync_label = "syncing… 500".into();
+        app.apply(Action::SyncNow);
+        assert_eq!(app.sync_label, "syncing… 500", "a second album sync started");
     }
 
     #[test]

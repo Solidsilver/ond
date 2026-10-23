@@ -24,7 +24,8 @@ pub enum Msg {
     Latency(Option<Duration>),
     Albums(Vec<Album>),
     SyncProgress(usize),
-    SyncDone(usize),
+    /// The album list sync finished (`Ok`: how many albums) or failed.
+    AlbumSyncDone(Result<usize, String>),
     /// An album's tracks. `fresh`: straight from the server's `getAlbum` (the
     /// complete list), not the local library (which may be partial).
     Tracks { album_id: String, tracks: Vec<Track>, fresh: bool },
@@ -37,7 +38,11 @@ pub enum Msg {
     /// Albums whose stored tracks credit `name`.
     Credited { name: String, album_ids: Vec<String> },
     /// Tracks of several albums, gathered for one queue action (`key` says which).
-    TrackBatch { key: String, tracks: Vec<Track> },
+    TrackBatch { key: ListKey, tracks: Vec<Track> },
+    /// An album's or playlist's tracks couldn't be loaded (offline with
+    /// nothing stored, or the server failed). Whatever waited for them gives
+    /// up. `error` is worth showing; `None` when offline explains it already.
+    LoadFailed { key: ListKey, error: Option<String> },
     /// The server's artists (split from joined credits), sorted.
     Artists(Vec<library::Artist>),
     /// Every stored track, grouped by album; sent after load and after a sync.
@@ -68,6 +73,15 @@ pub enum Msg {
     /// Selected from the native menu bar.
     Menu(crate::keys::Cmd),
     Error(String),
+}
+
+/// A track list something can wait for: an album's, a playlist's, or all of
+/// an artist's albums together.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ListKey {
+    Album(String),
+    Playlist(String),
+    Artist(String),
 }
 
 /// A change to a playlist, sent to the server.
@@ -357,14 +371,16 @@ impl Bridge {
             loop {
                 let page = match client.album_list(AlbumListType::AlphabeticalByArtist, PAGE, offset).await {
                     Ok(p) => p,
-                    Err(e) => return this.send(Msg::Error(format!("sync: {e}"))),
+                    Err(e) => return this.send(Msg::AlbumSyncDone(Err(format!("sync: {e}")))),
                 };
                 seen.extend(page.iter().map(|a| a.id.clone()));
                 let n = page.len() as u32;
                 let lib = this.library.clone();
                 let stored = tokio::task::spawn_blocking(move || lib.upsert_albums(page)).await;
-                if let Ok(Err(e)) = stored {
-                    return this.send(Msg::Error(format!("store albums: {e}")));
+                match stored {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return this.send(Msg::AlbumSyncDone(Err(format!("store albums: {e}")))),
+                    Err(e) => return this.send(Msg::AlbumSyncDone(Err(format!("store albums: {e}")))),
                 }
                 offset += n;
                 this.send(Msg::SyncProgress(offset as usize));
@@ -385,7 +401,7 @@ impl Bridge {
             if let Ok(Ok(albums)) = listed {
                 this.send(Msg::Albums(albums));
             }
-            this.send(Msg::SyncDone(offset as usize));
+            this.send(Msg::AlbumSyncDone(Ok(offset as usize)));
             this.sync_artists(client.clone()).await;
             this.sync_tracks(client);
         });
@@ -457,15 +473,23 @@ impl Bridge {
         self.rt.spawn(async move {
             let lib = this.library.clone();
             let id = album_id.clone();
+            let key = ListKey::Album(album_id.clone());
+            let mut cached = false;
             if let Ok(Ok(tracks)) = tokio::task::spawn_blocking(move || lib.album_tracks(&id)).await
                 && !tracks.is_empty()
             {
+                cached = true;
                 this.send(Msg::Tracks { album_id: album_id.clone(), tracks, fresh: false });
             }
-            let Some(client) = client else { return };
+            let Some(client) = client else {
+                if !cached {
+                    this.send(Msg::LoadFailed { key, error: None });
+                }
+                return;
+            };
             let album = match client.album(&album_id).await {
                 Ok(a) => a,
-                Err(e) => return this.send(Msg::Error(format!("load album: {e}"))),
+                Err(e) => return this.send(Msg::LoadFailed { key, error: Some(format!("load album: {e}")) }),
             };
             let mut meta = song_meta(&album.song);
             meta.starred.push((StarKind::Album, album_id.clone(), album.album.starred.is_some()));
@@ -484,8 +508,8 @@ impl Bridge {
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(Msg::Tracks { album_id, tracks, fresh: true });
                 }
-                Ok(Err(e)) => this.send(Msg::Error(format!("store album: {e}"))),
-                Err(_) => {}
+                Ok(Err(e)) => this.send(Msg::LoadFailed { key, error: Some(format!("store album: {e}")) }),
+                Err(_) => this.send(Msg::LoadFailed { key, error: None }),
             }
         });
     }
@@ -512,7 +536,9 @@ impl Bridge {
     }
 
     pub fn open_playlist(&self, client: Option<Client>, id: String) {
-        let Some(client) = client else { return };
+        let Some(client) = client else {
+            return self.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: None });
+        };
         let this = self.clone();
         self.rt.spawn(async move {
             match client.playlist(&id).await {
@@ -522,7 +548,7 @@ impl Bridge {
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(Msg::PlaylistTracks { id, tracks });
                 }
-                Err(e) => this.send(Msg::Error(format!("load playlist: {e}"))),
+                Err(e) => this.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: Some(format!("load playlist: {e}")) }),
             }
         });
     }
@@ -671,7 +697,7 @@ impl Bridge {
 
     /// Gathers the tracks of `album_ids` in order: stored ones straight from the
     /// db, the rest from the server (and stored on the way).
-    pub fn fetch_tracks(&self, client: Option<Client>, key: String, album_ids: Vec<String>) {
+    pub fn fetch_tracks(&self, client: Option<Client>, key: ListKey, album_ids: Vec<String>) {
         let this = self.clone();
         self.rt.spawn(async move {
             let mut all = Vec::new();
