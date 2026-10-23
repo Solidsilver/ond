@@ -184,12 +184,13 @@ impl Art {
         if self.pending.contains(&key) || self.missing.contains(&key) {
             return;
         }
-        let Some(client) = self.client.clone() else { return };
+        // No server: art already on disk still loads (offline browsing).
+        let client = self.client.clone();
         self.pending.insert(key.clone());
         let (tx, ctx, dir, permits) = (self.tx.clone(), self.ctx.clone(), self.dir.clone(), self.permits.clone());
         self.rt.spawn(async move {
             let image = match permits.acquire().await {
-                Ok(_permit) => load(&client, &dir, &key).await,
+                Ok(_permit) => load(client.as_ref(), &dir, &key).await,
                 Err(_) => None,
             };
             let _ = tx.send((key, image));
@@ -247,7 +248,9 @@ pub fn cover_file(dir: &Path, cover: &str, size: u32) -> PathBuf {
     dir.join(format!("{safe}-{size}"))
 }
 
-async fn load(client: &Client, dir: &Path, key: &Key) -> Option<ColorImage> {
+/// The cached file for `key`, else the server's (cached on the way); `None`
+/// when neither has it, or there's no server to ask.
+async fn load(client: Option<&Client>, dir: &Path, key: &Key) -> Option<ColorImage> {
     let path = file_for(dir, key);
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => {
@@ -258,7 +261,7 @@ async fn load(client: &Client, dir: &Path, key: &Key) -> Option<ColorImage> {
             b
         }
         Err(_) => {
-            let bytes = client.cover_art(&key.cover, Some(key.size)).await.ok()?;
+            let bytes = client?.cover_art(&key.cover, Some(key.size)).await.ok()?;
             let tmp = path.with_extension("part");
             if tokio::fs::create_dir_all(dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
                 let _ = tokio::fs::rename(&tmp, &path).await;
@@ -304,6 +307,40 @@ mod tests {
         assert_eq!(bucket(65.0), 128);
         assert_eq!(bucket(336.0), 512);
         assert_eq!(bucket(4000.0), 512);
+    }
+
+    #[test]
+    fn cached_art_loads_without_a_server() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // A 64 px cover already on disk from an earlier session.
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 40, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        std::fs::write(cover_file(dir.path(), "al-1", 64), png).unwrap();
+        let ctx = egui::Context::default();
+        let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned());
+        // Never connected: no client at all.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            art.poll();
+            if art.texture("al-1", 40.0).is_some() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "cached art never loaded offline");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Art that isn't cached can't load without a server, and isn't asked for again.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !art.missing.contains(&Key { cover: "al-2".into(), size: 64 }) {
+            art.poll();
+            assert!(art.texture("al-2", 40.0).is_none());
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
