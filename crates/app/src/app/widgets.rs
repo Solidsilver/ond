@@ -274,6 +274,29 @@ pub fn section(ui: &mut Ui, text: &str) {
     ui.label(egui::RichText::new(text).font(FontId::new(11.0, semibold())).color(t.muted));
 }
 
+/// A list row's background: the selection, else the hover tint, else none.
+pub fn row_fill(t: &Tokens, selected: bool, hovered: bool) -> Color32 {
+    if selected {
+        t.selected
+    } else if hovered {
+        t.hover
+    } else {
+        Color32::TRANSPARENT
+    }
+}
+
+/// A track title's colour in a list: the accent while it plays, dimmed when it
+/// can't play right now (offline and not downloaded).
+pub fn track_color(t: &Tokens, playing: bool, playable: bool) -> Color32 {
+    if playing {
+        t.accent
+    } else if playable {
+        t.text
+    } else {
+        t.muted.gamma_multiply(0.75)
+    }
+}
+
 /// The label column of [`kv_row`]s, so values line up down a section.
 const KV_LABEL_W: f32 = 96.0;
 /// Value text size in [`kv_row`]s.

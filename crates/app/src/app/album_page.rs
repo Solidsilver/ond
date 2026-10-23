@@ -563,25 +563,12 @@ impl ListenerApp {
                 }
             }
             if ui.is_rect_visible(rect) {
-                let fill = if selected {
-                    t.selected
-                } else if hovered {
-                    t.hover
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-                ui.painter().rect_filled(rect, 6.0, fill);
+                ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
                 let mut x = rect.left() + 10.0;
                 let cy = rect.center().y;
                 // Offline, what isn't downloaded is dimmed rather than hidden.
                 let available = self.playable(tr);
-                let color = if playing {
-                    t.accent
-                } else if available {
-                    t.text
-                } else {
-                    t.muted.gamma_multiply(0.75)
-                };
+                let color = super::widgets::track_color(&t, playing, available);
                 if let Some(m) = Mark::of_track(self.offline_snap.track(&tr.id)) {
                     super::widgets::mark(ui, pos2(rect.right() - 48.0, cy), 10.0, m);
                 }
@@ -739,61 +726,96 @@ impl ListenerApp {
         ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::D)))
     }
 
+    /// The list keys pressed this frame, consumed, when the list on `focus`
+    /// may take them (see [`list_keys_free`](Self::list_keys_free)); `None`
+    /// otherwise. `edit` also takes ⌥↑/⌥↓ and ⌫ (lists the user can change);
+    /// `escape` takes Esc.
+    pub(super) fn list_keys(&self, ui: &Ui, focus: Focus, edit: bool, escape: bool) -> Option<ListKeys> {
+        if self.focus != focus || !self.list_keys_free(ui) {
+            return None;
+        }
+        use egui::{Key, Modifiers};
+        Some(ui.input_mut(|i| {
+            let mut k = ListKeys {
+                up: i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                down: i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                enter: i.consume_key(Modifiers::NONE, Key::Enter),
+                play_next: i.consume_key(Modifiers::ALT, Key::Enter),
+                add: i.consume_key(Modifiers::SHIFT, Key::Enter),
+                ..ListKeys::default()
+            };
+            if edit {
+                k.move_up = i.consume_key(Modifiers::ALT, Key::ArrowUp);
+                k.move_down = i.consume_key(Modifiers::ALT, Key::ArrowDown);
+                k.remove = i.consume_key(Modifiers::NONE, Key::Backspace) | i.consume_key(Modifiers::NONE, Key::Delete);
+            }
+            if escape {
+                k.escape = i.consume_key(Modifiers::NONE, Key::Escape);
+            }
+            k
+        }))
+    }
+
     /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add. In the
     /// user's own playlist, ⌥↑/⌥↓ move the selected song and ⌫ removes it.
     fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) {
-        if self.focus != Focus::Main || !self.list_keys_free(ui) || tracks.is_empty() {
+        if tracks.is_empty() {
             return;
         }
-        use egui::{Key, Modifiers};
-        let (move_up, move_down, remove) = if playlist.is_some() {
-            ui.input_mut(|i| {
-                (
-                    i.consume_key(Modifiers::ALT, Key::ArrowUp),
-                    i.consume_key(Modifiers::ALT, Key::ArrowDown),
-                    i.consume_key(Modifiers::NONE, Key::Backspace) | i.consume_key(Modifiers::NONE, Key::Delete),
-                )
-            })
-        } else {
-            (false, false, false)
-        };
-        let (up, down, enter, next, add) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::ALT, Key::Enter),
-                i.consume_key(Modifiers::SHIFT, Key::Enter),
-            )
-        });
+        let Some(k) = self.list_keys(ui, Focus::Main, playlist.is_some(), false) else { return };
         let last = tracks.len() - 1;
-        if down {
-            self.track_sel = Some(self.track_sel.map_or(0, |s| (s + 1).min(last)));
-        }
-        if up {
-            self.track_sel = Some(self.track_sel.map_or(0, |s| s.saturating_sub(1)));
-        }
+        self.track_sel = k.step(self.track_sel, tracks.len());
         let Some(sel) = self.track_sel.filter(|s| *s <= last) else { return };
         if let Some(pid) = playlist {
-            if move_up && sel > 0 {
+            if k.move_up && sel > 0 {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel - 1 }));
             }
-            if move_down && sel < last {
+            if k.move_down && sel < last {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel + 1 }));
             }
-            if remove {
+            if k.remove {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Remove { id: pid.to_owned(), index: sel }));
             }
         }
-        if enter {
+        if k.enter {
             self.actions.push(Action::Tracks { tracks: tracks.to_vec(), source: source.clone(), action: QueueAction::Play { start: sel } });
         }
-        if next {
+        if k.play_next {
             self.actions.push(Action::Tracks { tracks: vec![tracks[sel].clone()], source: source.clone(), action: QueueAction::PlayNext });
         }
-        if add {
+        if k.add {
             self.actions.push(Action::Tracks { tracks: vec![tracks[sel].clone()], source: source.clone(), action: QueueAction::Add });
         }
+    }
+}
+
+/// The keys a list reacts to, as read (and consumed) by `list_keys`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ListKeys {
+    pub up: bool,
+    pub down: bool,
+    pub enter: bool,
+    pub play_next: bool,
+    pub add: bool,
+    pub move_up: bool,
+    pub move_down: bool,
+    pub remove: bool,
+    pub escape: bool,
+}
+
+impl ListKeys {
+    /// The selection after ↑/↓ in a list of `len` rows: the first row when
+    /// nothing was selected, clamped at both ends.
+    pub fn step(&self, sel: Option<usize>, len: usize) -> Option<usize> {
+        let last = len.checked_sub(1)?;
+        let mut sel = sel;
+        if self.down {
+            sel = Some(sel.map_or(0, |s| (s + 1).min(last)));
+        }
+        if self.up {
+            sel = Some(sel.map_or(0, |s| s.saturating_sub(1)));
+        }
+        sel
     }
 }
 
@@ -861,5 +883,17 @@ mod tests {
         b.bit_depth = Some(24);
         assert_eq!(shared_format(&[a, b]), None);
         assert_eq!(shared_format(&[]), None);
+    }
+
+    #[test]
+    fn arrow_keys_step_and_clamp() {
+        let down = ListKeys { down: true, ..ListKeys::default() };
+        let up = ListKeys { up: true, ..ListKeys::default() };
+        assert_eq!(down.step(None, 3), Some(0), "the first press selects the first row");
+        assert_eq!(down.step(Some(2), 3), Some(2), "stops at the end");
+        assert_eq!(up.step(Some(0), 3), Some(0), "stops at the top");
+        assert_eq!(up.step(Some(2), 3), Some(1));
+        assert_eq!(ListKeys::default().step(Some(1), 3), Some(1));
+        assert_eq!(down.step(None, 0), None, "an empty list has nothing to select");
     }
 }
