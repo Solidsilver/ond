@@ -13,6 +13,7 @@ mod output;
 mod queue;
 mod search;
 mod settings;
+mod sync;
 mod theme;
 mod window;
 

@@ -20,6 +20,7 @@ pub fn route_label(route: &Route, data: &Data) -> String {
         Route::Recent => "Recently Added".into(),
         Route::Albums => "Albums".into(),
         Route::Artists => "Artists".into(),
+        Route::Songs => "Songs".into(),
         Route::Offline => "Offline".into(),
         Route::Artist { name, .. } => name.clone(),
         Route::Album(id) => data.album(id).map_or_else(|| "Album".into(), |a| a.name.clone()),
@@ -44,12 +45,7 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, data: &Data) -> Vec<usize> {
             return ids;
         }
         Route::Albums => (0..albums.len()).collect(),
-        Route::Artist { name, id } => (0..albums.len())
-            .filter(|&i| {
-                let a = &albums[i];
-                a.artist.as_deref() == Some(name.as_str()) || (id.is_some() && a.artist_ref == *id)
-            })
-            .collect(),
+        Route::Artist { name, id } => (0..albums.len()).filter(|&i| albums[i].has_artist(id.as_deref(), name)).collect(),
         Route::Filter { kind, value } => (0..albums.len())
             .filter(|&i| {
                 let a = &albums[i];
@@ -102,6 +98,7 @@ impl ListenerApp {
                 self.grid_place(ui, &route);
             }
             Route::Artists => self.artists_page(ui),
+            Route::Songs => self.songs_page(ui),
             Route::Artist { name, .. } => self.artist_page(ui, &route, name),
             Route::Album(id) => self.album_page(ui, id),
             Route::Playlist { id, name } => self.playlist_page(ui, id, name),
@@ -263,11 +260,12 @@ impl ListenerApp {
             ui.label(egui::RichText::new("Loading your library…").color(t.muted));
             return;
         };
-        let artists: Vec<(String, usize)> = index.artists.iter().map(|a| (a.name.clone(), a.albums)).collect();
+        // The server's artists (with ids) once synced, else album-artist names.
+        let artists: Vec<(String, Option<String>, usize)> = index.artists.iter().map(|a| (a.name.clone(), a.id.clone(), a.albums)).collect();
         self.heading(ui, "Artists", Some(artists.len().to_string()));
         egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).show_rows(ui, 32.0, artists.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (name, n) in &artists[range] {
+            for (name, id, n) in &artists[range] {
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, 6.0, t.hover);
@@ -278,7 +276,7 @@ impl ListenerApp {
                 ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, count, FontId::proportional(12.0), t.muted);
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
                 if resp.clicked() {
-                    let id = self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name)).and_then(|a| a.artist_ref.clone());
+                    let id = id.clone().or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name)).and_then(|a| a.artist_ref.clone()));
                     self.actions.push(Action::Go(Route::Artist { name: name.clone(), id }));
                 }
                 resp.context_menu(|ui| artist_menu(ui, name, &mut self.actions));
@@ -330,7 +328,8 @@ impl ListenerApp {
                 }
             }
             if own.is_empty() && credited.is_empty() {
-                ui.label(egui::RichText::new("No albums for this name in your library yet. Credits appear here once albums that mention them have been opened.").color(t.muted));
+                let text = if self.track_syncing { "Nothing found yet. Tracks are still syncing; credits fill in as they arrive." } else { "No albums credit this name." };
+                ui.label(egui::RichText::new(text).color(t.muted));
             }
         });
     }
@@ -384,6 +383,7 @@ mod tests {
             created: Some(created.into()),
             labels: vec!["Riverside".into()],
             genres: Vec::new(),
+            artists: Vec::new(),
         }
     }
 

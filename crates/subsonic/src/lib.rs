@@ -157,6 +157,24 @@ impl Client {
         Ok(())
     }
 
+    /// One page of songs from `search3`. With an empty `query` Navidrome
+    /// returns the whole library, `count` at a time from `offset`.
+    pub async fn search_songs(&self, query: &str, count: u32, offset: u32) -> Result<Vec<Song>> {
+        let (_, p): (_, SearchResult3Payload) = self
+            .call(
+                "search3",
+                &[
+                    ("query", query),
+                    ("artistCount", "0"),
+                    ("albumCount", "0"),
+                    ("songCount", &count.to_string()),
+                    ("songOffset", &offset.to_string()),
+                ],
+            )
+            .await?;
+        Ok(p.search_result3.song)
+    }
+
     pub async fn artists(&self) -> Result<Vec<Artist>> {
         let (_, p): (_, ArtistsPayload) = self.call("getArtists", &[]).await?;
         Ok(p.artists.index.into_iter().flat_map(|i| i.artist).collect())

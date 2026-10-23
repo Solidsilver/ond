@@ -146,3 +146,32 @@ fn parses_playlists() {
     let (_, p): (_, PlaylistPayload) = parse_response(json).unwrap();
     assert_eq!(p.playlist.entry[0].album_id.as_deref(), Some("al-3"));
 }
+
+#[test]
+fn parses_search3_songs_and_split_artists() {
+    // Navidrome 0.64: a joined display string plus each artist as an entity.
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true,
+      "searchResult3":{"song":[
+        {"id":"s-1","title":"Ondes","albumId":"al-1","artist":"Johannes Motschmann, David Panzl, Boris Bolles",
+         "artists":[{"id":"ar-1","name":"Johannes Motschmann"},{"id":"ar-2","name":"David Panzl"},{"id":"ar-3","name":"Boris Bolles"}]},
+        {"id":"s-2","title":"No artists field","albumId":"al-2"}
+      ]}}}"#;
+    let (_, p): (_, SearchResult3Payload) = parse_response(json).unwrap();
+    let songs = p.search_result3.song;
+    assert_eq!(songs.len(), 2);
+    assert_eq!(songs[0].artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Johannes Motschmann", "David Panzl", "Boris Bolles"]);
+    assert!(songs[1].artists.is_empty());
+    // An empty result omits the key entirely.
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","searchResult3":{}}}"#;
+    let (_, p): (_, SearchResult3Payload) = parse_response(json).unwrap();
+    assert!(p.search_result3.song.is_empty());
+}
+
+#[test]
+fn parses_album_artist_entities() {
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "albumList2":{"album":[{"id":"al-1","name":"Duo","artist":"A & B","artists":[{"id":"ar-a","name":"A"},{"id":"ar-b","name":"B"}]}]}}}"#;
+    let (_, p): (_, AlbumList2Payload) = parse_response(json).unwrap();
+    assert_eq!(p.album_list2.album[0].artists.len(), 2);
+    assert_eq!(p.album_list2.album[0].artists[1].id.as_deref(), Some("ar-b"));
+}

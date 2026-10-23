@@ -1,0 +1,318 @@
+//! Songs: every synced track as a sortable table. Only visible rows are laid
+//! out; the sorted order is cached until the tracks or the sort change.
+//!
+//! Rows act like the album page's: double-click (or ⏎) plays the track's
+//! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
+
+use super::widgets::elide;
+use super::{Action, Focus, ListenerApp, QueueAction, mmss};
+use crate::icons::{self, Icon};
+use crate::queue::Source;
+use crate::theme::{Tokens, semibold};
+use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use library::{Track, fold};
+
+const ROW_H: f32 = 32.0;
+const TIME_W: f32 = 56.0;
+const FORMAT_W: f32 = 96.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Column {
+    Title,
+    #[default]
+    Artist,
+    Album,
+    Time,
+    Format,
+}
+
+#[derive(Default)]
+pub struct SongsView {
+    pub sort: Column,
+    pub descending: bool,
+    /// Indices into `Data::all_tracks`, sorted; with the version and sort they're for.
+    order: Option<(u64, Column, bool, Vec<usize>)>,
+    pub selected: Option<usize>,
+}
+
+/// Sorted indices into `tracks`. Ties fall back to album order (album, disc,
+/// track), so sorting by artist lists each album intact.
+pub fn sort_order(tracks: &[Track], album_names: &dyn Fn(&str) -> String, by: Column, descending: bool) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..tracks.len()).collect();
+    let album_key = |t: &Track| (fold(&album_names(&t.album_id)), t.album_id.clone(), t.disc.unwrap_or(1), t.track.unwrap_or(0));
+    match by {
+        Column::Title => idx.sort_by_cached_key(|&i| (fold(&tracks[i].title), album_key(&tracks[i]))),
+        Column::Artist => idx.sort_by_cached_key(|&i| (fold(tracks[i].artist.as_deref().unwrap_or("")), album_key(&tracks[i]))),
+        Column::Album => idx.sort_by_cached_key(|&i| album_key(&tracks[i])),
+        Column::Time => idx.sort_by_cached_key(|&i| (tracks[i].duration_secs.unwrap_or(0), album_key(&tracks[i]))),
+        // Best quality first when descending: depth, then rate.
+        Column::Format => idx.sort_by_cached_key(|&i| (tracks[i].bit_depth.unwrap_or(0), tracks[i].sample_rate.unwrap_or(0), album_key(&tracks[i]))),
+    }
+    if descending {
+        idx.reverse();
+    }
+    idx
+}
+
+impl ListenerApp {
+    fn songs_order(&mut self) -> Vec<usize> {
+        let v = &self.songs;
+        let fresh = matches!(&v.order, Some((ver, s, d, _)) if *ver == self.data.tracks_version && *s == v.sort && *d == v.descending);
+        if !fresh {
+            let data = &self.data;
+            let names = |id: &str| data.album(id).map(|a| a.name.clone()).unwrap_or_default();
+            let order = sort_order(&data.all_tracks, &names, v.sort, v.descending);
+            self.songs.order = Some((self.data.tracks_version, self.songs.sort, self.songs.descending, order));
+        }
+        self.songs.order.as_ref().map(|o| o.3.clone()).unwrap_or_default()
+    }
+
+    pub(super) fn songs_page(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let n = self.data.all_tracks.len();
+        self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
+        if n == 0 {
+            let text = if self.track_syncing { "Syncing your tracks…" } else { "No tracks yet. They appear once the library has synced." };
+            ui.label(egui::RichText::new(text).color(t.muted));
+            return;
+        }
+        let order = self.songs_order();
+        self.songs_keys(ui, &order);
+
+        // Header.
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width() - 12.0, 26.0), Sense::hover());
+        let cols = columns(head);
+        for (col, label, rect, right) in [
+            (Column::Title, "Title", cols.title, false),
+            (Column::Artist, "Artist", cols.artist, false),
+            (Column::Album, "Album", cols.album, false),
+            (Column::Time, "Time", cols.time, true),
+            (Column::Format, "Format", cols.format, false),
+        ] {
+            let resp = ui.interact(rect, ui.scope_id().with(("songs-col", label)), Sense::click());
+            let on = self.songs.sort == col;
+            let color = if on || resp.hovered() { t.text } else { t.muted };
+            let font = FontId::new(11.0, semibold());
+            let (anchor, x) = if right { (egui::Align2::RIGHT_CENTER, rect.right() - 10.0) } else { (egui::Align2::LEFT_CENTER, rect.left() + 10.0) };
+            let text_rect = ui.painter().text(pos2(x, rect.center().y), anchor, label, font, color);
+            if on {
+                let cx = if right { text_rect.left() - 8.0 } else { text_rect.right() + 8.0 };
+                sort_arrow(ui, pos2(cx, rect.center().y), self.songs.descending, color);
+            }
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, format!("Sort by {label}")));
+            if resp.clicked() {
+                if on {
+                    self.songs.descending = !self.songs.descending;
+                } else {
+                    self.songs.sort = col;
+                    self.songs.descending = false;
+                }
+            }
+        }
+        ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, t.hairline));
+
+        let tracks = self.data.all_tracks.clone();
+        let current = self.queue.current.as_ref().map(|c| c.track.id.clone());
+        egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false).show_rows(ui, ROW_H, order.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for row in range {
+                let tr = &tracks[order[row]];
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width() - 12.0, ROW_H), Sense::click());
+                let selected = self.focus == Focus::Main && self.songs.selected == Some(row);
+                if selected {
+                    resp.scroll_to_me(None);
+                }
+                let hovered = resp.hovered() || resp.contains_pointer();
+                let playing = current.as_deref() == Some(tr.id.as_str());
+                if ui.is_rect_visible(rect) {
+                    let fill = if selected {
+                        t.selected
+                    } else if hovered {
+                        t.hover
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    ui.painter().rect_filled(rect, 6.0, fill);
+                    let c = columns(rect);
+                    let color = if playing { t.accent } else { t.text };
+                    let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
+                    let mut title_x = c.title.left() + 10.0;
+                    if playing {
+                        icons::paint(ui.painter(), Rect::from_center_size(pos2(title_x + 4.0, rect.center().y), vec2(8.0, 8.0)), Icon::Play, t.accent);
+                        title_x += 16.0;
+                    }
+                    let cell = |ui: &Ui, text: &str, x: f32, w: f32, font: FontId, color| {
+                        let g = elide(ui, text, font, color, w - 20.0);
+                        ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
+                    };
+                    cell(ui, &tr.title, title_x, c.title.right() - title_x + 10.0, title_font, color);
+                    cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + 10.0, c.artist.width(), FontId::proportional(13.0), t.muted);
+                    let album = self.data.album(&tr.album_id).map(|a| a.name.clone()).unwrap_or_default();
+                    cell(ui, &album, c.album.left() + 10.0, c.album.width(), FontId::proportional(13.0), t.muted);
+                    let dur = tr.duration_secs.map(|d| mmss(f64::from(d))).unwrap_or_default();
+                    ui.painter().text(pos2(c.time.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
+                    cell(ui, &tr.quality_label(), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
+                }
+                let label = format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" });
+                resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
+                if resp.double_clicked() {
+                    self.play_from_album(tr, QueueAction::Play { start: 0 });
+                } else if resp.clicked() {
+                    self.songs.selected = Some(row);
+                    self.focus = Focus::Main;
+                }
+                let source = self.album_source(&tr.album_id);
+                resp.context_menu(|ui| {
+                    if ui.button("Play").clicked() {
+                        self.play_from_album(tr, QueueAction::Play { start: 0 });
+                    }
+                    self.track_menu(ui, tr, &source);
+                    if ui.button("Go to album").clicked() {
+                        self.actions.push(Action::Go(crate::nav::Route::Album(tr.album_id.clone())));
+                    }
+                });
+            }
+        });
+    }
+
+    fn album_source(&self, album_id: &str) -> Source {
+        Source::Album { id: album_id.to_owned(), name: self.data.album(album_id).map(|a| a.name.clone()).unwrap_or_default() }
+    }
+
+    /// Plays `tr`'s album starting at `tr` (`Play`), or queues just `tr`.
+    pub(super) fn play_from_album(&mut self, tr: &Track, action: QueueAction) {
+        let source = self.album_source(&tr.album_id);
+        match action {
+            QueueAction::Play { .. } | QueueAction::Shuffle => {
+                let album = self.data.tracks.get(&tr.album_id).cloned().unwrap_or_else(|| vec![tr.clone()]);
+                let start = album.iter().position(|t| t.id == tr.id).unwrap_or(0);
+                self.actions.push(Action::Tracks { tracks: album, source, action: QueueAction::Play { start } });
+            }
+            QueueAction::PlayNext | QueueAction::Add => self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source, action }),
+        }
+    }
+
+    /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
+    fn songs_keys(&mut self, ui: &Ui, order: &[usize]) {
+        if self.focus != Focus::Main || self.palette.is_some() || ui.ctx().memory(|m| m.focused().is_some()) || order.is_empty() {
+            return;
+        }
+        use egui::{Key, Modifiers};
+        let (up, down, enter, next, add) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::ALT, Key::Enter),
+                i.consume_key(Modifiers::SHIFT, Key::Enter),
+            )
+        });
+        let last = order.len() - 1;
+        if down {
+            self.songs.selected = Some(self.songs.selected.map_or(0, |s| (s + 1).min(last)));
+        }
+        if up {
+            self.songs.selected = Some(self.songs.selected.map_or(0, |s| s.saturating_sub(1)));
+        }
+        let Some(sel) = self.songs.selected.filter(|s| *s <= last) else { return };
+        let tr = self.data.all_tracks[order[sel]].clone();
+        if enter {
+            self.play_from_album(&tr, QueueAction::Play { start: 0 });
+        }
+        if next {
+            self.play_from_album(&tr, QueueAction::PlayNext);
+        }
+        if add {
+            self.play_from_album(&tr, QueueAction::Add);
+        }
+    }
+}
+
+struct Columns {
+    title: Rect,
+    artist: Rect,
+    album: Rect,
+    time: Rect,
+    format: Rect,
+}
+
+/// Title gets what's left after fixed time/format and proportional artist/album.
+fn columns(row: Rect) -> Columns {
+    let flex = (row.width() - TIME_W - FORMAT_W).max(0.0);
+    let title_w = flex * 0.4;
+    let other_w = flex * 0.3;
+    let col = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
+    let title = col(row.left(), title_w);
+    let artist = col(title.right(), other_w);
+    let album = col(artist.right(), other_w);
+    let time = col(album.right(), TIME_W);
+    let format = col(time.right(), FORMAT_W);
+    Columns { title, artist, album, time, format }
+}
+
+fn sort_arrow(ui: &Ui, at: egui::Pos2, descending: bool, color: egui::Color32) {
+    let (w, h) = (3.5, 2.5);
+    let pts = if descending {
+        vec![pos2(at.x - w, at.y - h), pos2(at.x + w, at.y - h), pos2(at.x, at.y + h)]
+    } else {
+        vec![pos2(at.x - w, at.y + h), pos2(at.x + w, at.y + h), pos2(at.x, at.y - h)]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: &str, album: &str, title: &str, artist: &str, n: u32, secs: u32, depth: u32) -> Track {
+        Track {
+            id: id.into(),
+            album_id: album.into(),
+            title: title.into(),
+            artist: Some(artist.into()),
+            artist_ref: None,
+            track: Some(n),
+            disc: Some(1),
+            duration_secs: Some(secs),
+            suffix: Some("flac".into()),
+            content_type: None,
+            size: None,
+            bit_rate_kbps: None,
+            bit_depth: Some(depth),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            track_gain: None,
+            album_gain: None,
+            track_peak: None,
+            album_peak: None,
+            composer: None,
+            contributors: Vec::new(),
+            cover_art: None,
+            artists: Vec::new(),
+        }
+    }
+
+    fn titles(tracks: &[Track], order: &[usize]) -> Vec<String> {
+        order.iter().map(|&i| tracks[i].title.clone()).collect()
+    }
+
+    #[test]
+    fn sorts_by_column_with_album_order_as_tiebreak() {
+        let tracks = vec![
+            track("1", "b", "Zebra", "Miles Davis", 2, 300, 24),
+            track("2", "a", "apple", "Bill Evans", 1, 200, 16),
+            track("3", "b", "Mango", "Miles Davis", 1, 100, 16),
+            track("4", "a", "Éclair", "bill evans", 2, 400, 24),
+        ];
+        let names = |id: &str| if id == "a" { "Portrait in Jazz".to_owned() } else { "Kind of Blue".to_owned() };
+        // Artist: case-insensitive, then album, then track number.
+        assert_eq!(titles(&tracks, &sort_order(&tracks, &names, Column::Artist, false)), ["apple", "Éclair", "Mango", "Zebra"]);
+        // Title folds accents: "Éclair" sorts with E.
+        assert_eq!(titles(&tracks, &sort_order(&tracks, &names, Column::Title, false)), ["apple", "Éclair", "Mango", "Zebra"]);
+        assert_eq!(titles(&tracks, &sort_order(&tracks, &names, Column::Album, false)), ["Mango", "Zebra", "apple", "Éclair"]);
+        assert_eq!(titles(&tracks, &sort_order(&tracks, &names, Column::Time, true)), ["Éclair", "Zebra", "apple", "Mango"]);
+        let mut best = titles(&tracks, &sort_order(&tracks, &names, Column::Format, true))[..2].to_vec();
+        best.sort();
+        assert_eq!(best, ["Zebra", "Éclair"]);
+    }
+}

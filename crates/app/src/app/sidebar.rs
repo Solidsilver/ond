@@ -26,7 +26,7 @@ impl ListenerApp {
 
         let active = self.sidebar_active();
         self.section(ui, "Library");
-        for (label, route) in [("Recently Added", Route::Recent), ("Artists", Route::Artists), ("Albums", Route::Albums), ("Offline", Route::Offline)] {
+        for (label, route) in [("Recently Added", Route::Recent), ("Artists", Route::Artists), ("Albums", Route::Albums), ("Songs", Route::Songs), ("Offline", Route::Offline)] {
             let on = active.as_ref() == Some(&route);
             if self.place(ui, label, on).clicked() {
                 self.actions.push(Action::Go(route));
