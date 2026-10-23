@@ -18,6 +18,7 @@ mod now_playing_view;
 mod palette;
 mod settings_page;
 mod queue_panel;
+mod seek;
 mod sidebar;
 mod songs;
 mod toasts;
