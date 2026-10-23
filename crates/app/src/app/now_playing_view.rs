@@ -1,102 +1,145 @@
-//! Now Playing: the playing track large (artwork, links, a big seek bar and
-//! the transport) with its lyrics beside it. Synced lyrics follow the music
-//! and seek when clicked; without lyrics the artwork takes the room. A quiet
-//! details strip folds out underneath.
-//!
-//! It's a place in the content area rather than a separate full-window mode:
-//! the queue stays beside it (what's next is the obvious companion to what's
-//! playing), back / ⌘[ / Esc close it like any other page, and Compact and Mini
-//! already cover "just the player".
+//! The Player window mode: the playing track large (artwork, links, a big
+//! seek bar and the transport) with the queue underneath, and the lyrics in a
+//! drawer that widens the window to the right, so the player never gets
+//! squeezed. Synced lyrics follow the music and seek when clicked. The same
+//! lyrics view, smaller, is the full window's sidebar "Lyrics" tab. A quiet
+//! details strip folds out under the transport.
 
-use super::widgets::{elide, empty_state, heart_button, link};
+use super::compact::{on_art, scrim};
+use super::widgets::{elide, heart_button, link};
 use super::{Action, ListenerApp, mmss};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::lyrics::{self, Fetch, Lyrics};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
+use crate::window::WindowMode;
 use audio::PlayState;
-use egui::{Align, Color32, FontId, Key, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use library::Track;
 
-/// Below this content width the lyrics go under the player instead of beside it.
-const TWO_COLUMNS_MIN_W: f32 = 760.0;
 /// Height of everything under the artwork in the player column.
-const BELOW_ART_H: f32 = 290.0;
+const BELOW_ART_H: f32 = 272.0;
 /// Room the open details strip takes.
 const DETAILS_H: f32 = 110.0;
-const LYRIC_SIZE: f32 = 20.0;
+/// The queue keeps at least this much of the Player window.
+const QUEUE_MIN_H: f32 = 250.0;
+/// Lyric text size in the Player's drawer and the full window's sidebar.
+const DRAWER_LYRIC: f32 = 18.0;
+const SIDEBAR_LYRIC: f32 = 15.0;
 
 impl ListenerApp {
-    pub(super) fn now_playing_view(&mut self, ui: &mut Ui) {
-        if self.overlay.is_none() && self.palette.is_none() && ui.input(|i| i.key_pressed(Key::Escape)) {
-            self.actions.push(Action::Back);
+    pub(super) fn player_ui(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        self.player_status_bar(ui);
+        if self.windows.lyrics_open {
+            egui::Panel::right("lyrics-drawer")
+                .exact_size(crate::window::DRAWER_W)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 20, right: 14, top: 14, bottom: 10 }))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Lyrics").font(FontId::new(12.0, semibold())).color(t.muted));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icons::sized_button(ui, Icon::Close, "Close lyrics (⌥⌘L)", vec2(22.0, 22.0), 9.0, Some(t.muted)).clicked() {
+                                self.actions.push(Action::SetLyricsDrawer(false));
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    self.lyrics_pane(ui, DRAWER_LYRIC);
+                });
         }
-        let Some(track) = self.queue.current.as_ref().map(|c| c.track.clone()) else {
-            empty_state(ui, Icon::Note, "Nothing playing", "Play something and it shows here, with its lyrics when your server has them.");
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 4 }))
+            .show(ui, |ui| {
+                let full = ui.available_rect_before_wrap();
+                let below = BELOW_ART_H + if self.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
+                let side = full.width().min(full.height() - below).max(120.0).floor();
+                match self.queue.current.as_ref().map(|c| c.track.clone()) {
+                    Some(track) => {
+                        self.ensure_lyrics(&track);
+                        self.player_block(ui, &track, Some(side), true);
+                    }
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+                            self.art.paint(ui, art, None, 8.0);
+                            self.art_corner_buttons(ui, art);
+                            ui.add_space(16.0);
+                            ui.label(egui::RichText::new("Not playing").size(14.0).color(t.muted));
+                        });
+                    }
+                }
+                ui.add_space(8.0);
+                let top = ui.cursor().top();
+                ui.painter().hline(full.x_range(), top, egui::Stroke::new(1.0, t.hairline));
+                let rest = Rect::from_min_max(pos2(full.left() - 8.0, top + 10.0), pos2(full.right() + 8.0, full.bottom()));
+                ui.scope_builder(UiBuilder::new().max_rect(rest).layout(Layout::top_down(Align::Min)), |ui| self.queue_panel(ui, false));
+            });
+    }
+
+    /// Full window and Mini, over the Player's artwork while it's hovered.
+    fn art_corner_buttons(&mut self, ui: &mut Ui, art: Rect) {
+        if !ui.rect_contains_pointer(art) {
             return;
-        };
+        }
+        let mut corner = ui.new_child(UiBuilder::new().max_rect(art.shrink(8.0)).layout(Layout::right_to_left(Align::Min)));
+        on_art(&mut corner);
+        corner.spacing_mut().item_spacing.x = 4.0;
+        for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⌥⌘3)", WindowMode::Mini)] {
+            let (r, _) = corner.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
+            corner.painter().circle_filled(r.center(), 13.0, scrim());
+            let mut b = corner.new_child(UiBuilder::new().max_rect(r));
+            if icons::sized_button(&mut b, icon, label, r.size(), 10.0, Some(Color32::from_rgb(0xE8, 0xE9, 0xEC))).clicked() {
+                self.actions.push(Action::SetMode(mode));
+            }
+        }
+    }
+
+    /// Asks the server for `track`'s lyrics the first time something shows them.
+    fn ensure_lyrics(&mut self, track: &Track) {
         if !self.lyrics.contains_key(&track.id) && self.client.is_some() {
             self.lyrics.insert(track.id.clone(), Fetch::Loading);
             self.bridge.fetch_lyrics(self.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
         }
-        let lyrics = match self.lyrics.get(&track.id) {
-            Some(Fetch::Done(Some(l))) => Some(l.clone()),
-            _ => None,
-        };
+    }
 
-        let area = ui.available_rect_before_wrap();
-        ui.add_space(8.0);
-        let area = Rect::from_min_max(pos2(area.left(), area.top() + 8.0), area.max);
-        // The player column scrolls if it ever outgrows the window (details open
-        // on a short one); the lyrics column scrolls on its own.
-        let player = |this: &mut Self, ui: &mut Ui, rect: Rect, side: Option<f32>| {
-            ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                egui::ScrollArea::vertical().id_salt("np-player").auto_shrink([false, true]).show(ui, |ui| this.player_block(ui, &track, side));
-            });
+    /// The playing track's lyrics at `size`, filling the rest of `ui`: synced
+    /// lines following playback, plain text, or a quiet line saying why not.
+    pub(super) fn lyrics_pane(&mut self, ui: &mut Ui, size: f32) {
+        let t = Tokens::of(ui);
+        let note = |ui: &mut Ui, text: &str| {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(text).size(12.5).color(t.muted));
         };
-        // Opening the details makes room by shrinking the artwork.
-        let below = BELOW_ART_H + if self.np_details { DETAILS_H } else { 0.0 };
-        match lyrics {
-            Some(l) if area.width() >= TWO_COLUMNS_MIN_W => {
-                // Player on the left, lyrics filling the rest.
-                let col = (area.width() * 0.42).clamp(300.0, 440.0);
-                let side = col.min(area.height() - below).max(160.0);
-                let left = Rect::from_min_size(area.min, vec2(col, area.height()));
-                let right = Rect::from_min_max(pos2(left.right() + 48.0, area.top()), area.max);
-                player(self, ui, left, Some(side));
-                ui.scope_builder(UiBuilder::new().max_rect(right), |ui| self.lyrics_block(ui, &track, &l));
+        let Some(track) = self.queue.current.as_ref().map(|c| c.track.clone()) else {
+            note(ui, "Nothing playing.");
+            return;
+        };
+        self.ensure_lyrics(&track);
+        match self.lyrics.get(&track.id) {
+            Some(Fetch::Done(Some(l))) => {
+                let l = l.clone();
+                let bg = t.panel;
+                self.lyrics_block(ui, &track, &l, size, bg);
             }
-            Some(l) => {
-                // Narrow: a compact player (small art beside the title), lyrics underneath.
-                let col = area.width().min(560.0);
-                let x = area.center().x - col / 2.0;
-                let bottom = ui
-                    .scope_builder(UiBuilder::new().max_rect(Rect::from_min_size(pos2(x, area.top()), vec2(col, area.height()))), |ui| {
-                        self.player_block(ui, &track, None);
-                        ui.min_rect().bottom()
-                    })
-                    .inner;
-                let rest = Rect::from_min_max(pos2(x, bottom + 20.0), pos2(x + col, area.bottom()));
-                if rest.height() > 100.0 {
-                    ui.scope_builder(UiBuilder::new().max_rect(rest), |ui| self.lyrics_block(ui, &track, &l));
-                }
-            }
-            None => {
-                // No lyrics (or not yet): the artwork takes the room.
-                let col = area.width().min(520.0);
-                let side = col.min(area.height() - below).max(160.0);
-                let x = area.center().x - side.max(col.min(side + 120.0)) / 2.0;
-                let w = side.max(col.min(side + 120.0));
-                player(self, ui, Rect::from_min_size(pos2(x, area.top()), vec2(w, area.height())), Some(side));
-            }
+            Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
+            _ if self.client.is_none() => note(ui, "Lyrics come from your server when it's connected."),
+            _ => note(ui, "No lyrics for this song."),
         }
-        ui.allocate_rect(area, Sense::hover());
+    }
+
+    /// The sidebar's Lyrics tab.
+    pub(super) fn sidebar_lyrics(&mut self, ui: &mut Ui) {
+        self.lyrics_pane(ui, SIDEBAR_LYRIC);
     }
 
     /// Artwork (`side` px square, or a small one beside the title when `None`),
-    /// title and links, the seek bar, transport, and the details strip.
-    fn player_block(&mut self, ui: &mut Ui, track: &Track, side: Option<f32>) {
+    /// title and links, the seek bar, transport, and the details strip. In the
+    /// Player window (`window`) the artwork carries Full / Mini buttons and the
+    /// details row a lyrics toggle.
+    fn player_block(&mut self, ui: &mut Ui, track: &Track, side: Option<f32>, window: bool) {
         let width = ui.available_width();
         let album = self.data.album(&track.album_id).cloned();
         let cover = track.cover_art.clone().or_else(|| album.as_ref().and_then(|a| a.cover_art.clone()));
@@ -106,6 +149,9 @@ impl ListenerApp {
             let shadow = egui::Shadow { offset: [0, (side / 40.0) as i8], blur: (side / 14.0).min(28.0) as u8, spread: 0, color: Color32::from_black_alpha(if dark { 110 } else { 46 }) };
             ui.painter().add(shadow.as_shape(art, 8));
             this.art.paint(ui, art, cover.as_deref(), if side < 120.0 { 6.0 } else { 8.0 });
+            if window && side >= 120.0 {
+                this.art_corner_buttons(ui, art);
+            }
         };
 
         let compact = side.is_none();
@@ -129,7 +175,7 @@ impl ListenerApp {
         self.big_transport(ui);
         if !compact {
             ui.add_space(14.0);
-            self.details_strip(ui, track);
+            self.details_strip(ui, track, window);
         }
     }
 
@@ -253,7 +299,7 @@ impl ListenerApp {
 
     /// "Details ›": source format, what reaches the device, ReplayGain, and the
     /// loudness analysis when there is one. Folded away by default.
-    fn details_strip(&mut self, ui: &mut Ui, track: &Track) {
+    fn details_strip(&mut self, ui: &mut Ui, track: &Track, lyrics_toggle: bool) {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -262,6 +308,20 @@ impl ListenerApp {
             icons::paint(ui.painter(), r.shrink(1.5), if self.np_details { Icon::ChevronDown } else { Icon::ChevronRight }, t.muted);
             if resp.clicked() {
                 self.np_details = !self.np_details;
+            }
+            if lyrics_toggle {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let open = self.windows.lyrics_open;
+                    let color = if open { t.accent } else { t.muted };
+                    let label = if open { "Hide lyrics (⌥⌘L)" } else { "Show lyrics (⌥⌘L)" };
+                    let b = icons::sized_button(ui, Icon::Lyrics, label, vec2(28.0, 24.0), 14.0, Some(color));
+                    if open {
+                        ui.painter().rect_filled(b.rect, 6.0, t.accent.gamma_multiply(0.12));
+                    }
+                    if b.clicked() {
+                        self.actions.push(Action::SetLyricsDrawer(!open));
+                    }
+                });
             }
         });
         if !self.np_details {
@@ -281,12 +341,12 @@ impl ListenerApp {
     /// The lyrics column. Synced lines follow playback (the sung line large and
     /// bright, the view keeping it centered) and seek when clicked; scrolling
     /// by hand pauses following for a few seconds or until "Follow".
-    fn lyrics_block(&mut self, ui: &mut Ui, track: &Track, l: &Lyrics) {
+    fn lyrics_block(&mut self, ui: &mut Ui, track: &Track, l: &Lyrics, size: f32, bg: Color32) {
         let t = Tokens::of(ui);
         let rect = ui.available_rect_before_wrap();
         let now = ui.input(|i| i.time);
         let pos_ms = (self.position_secs() * 1000.0) as i64;
-        let font = FontId::new(LYRIC_SIZE, semibold());
+        let font = FontId::new(size, semibold());
         let pad = (rect.height() * 0.42).max(24.0);
         let width = rect.width() - 8.0;
         // Hand-scrolling over the lyrics pauses following.
@@ -312,7 +372,7 @@ impl ListenerApp {
                         let sung = Some(i) == cur;
                         // A blank line is a pause: a gap, or a quiet "• • •" while it's the sung one.
                         if line.text.trim().is_empty() && !sung {
-                            ui.add_space(LYRIC_SIZE * 0.5);
+                            ui.add_space(size * 0.5);
                             continue;
                         }
                         let past = cur.is_some_and(|c| i < c);
@@ -332,7 +392,7 @@ impl ListenerApp {
                         if sung && following && changed {
                             ui.scroll_to_rect(r, Some(Align::Center));
                         }
-                        ui.add_space(12.0);
+                        ui.add_space((size * 0.6).round());
                     }
                     ui.add_space(pad);
                 });
@@ -345,7 +405,7 @@ impl ListenerApp {
                     ui.data_mut(|d| d.remove::<(Option<usize>, u64)>(id));
                     self.actions.push(Action::Seek(s));
                 }
-                edge_fades(ui, rect, t.bg, 36.0);
+                edge_fades(ui, rect, bg, 32.0);
                 if !following {
                     self.follow_button(ui, rect, id);
                 }
@@ -360,7 +420,7 @@ impl ListenerApp {
                 }
             }
             Lyrics::Plain(lines) => {
-                let plain = FontId::proportional(16.0);
+                let plain = FontId::proportional((size * 0.9).round());
                 egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).show(ui, |ui| {
                     ui.add_space(8.0);
                     for line in lines {

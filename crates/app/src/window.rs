@@ -1,7 +1,12 @@
-//! Window modes. Full, Compact and Mini are one window that changes size, so
+//! Window modes. Full, Player and Mini are one window that changes size, so
 //! playback state never has to be shared between windows. Each mode remembers
-//! where it was and how big; Mini and Compact stay anchored at the same
-//! top-left corner, so "Up next" grows the mini player downward.
+//! where it was and how big; Mini and Player stay anchored at the same
+//! top-left corner, so "Up next" grows the mini player into the player.
+//!
+//! The Player's lyrics open as a drawer that widens the window to the right;
+//! its remembered size is the player column alone, so the drawer never
+//! squeezes it. Mini is square: macOS keeps it so while resizing, elsewhere
+//! [`square`] snaps it back.
 
 use egui::{Context, ViewportCommand, WindowLevel};
 use serde::{Deserialize, Serialize};
@@ -12,15 +17,21 @@ use std::collections::HashMap;
 pub enum WindowMode {
     #[default]
     Full,
-    Compact,
+    /// Large artwork, transport and the queue; lyrics in a drawer beside it.
+    /// Older settings call it "compact".
+    #[serde(alias = "compact")]
+    Player,
     Mini,
 }
+
+/// Width the lyrics drawer adds to the Player window.
+pub const DRAWER_W: f32 = 340.0;
 
 impl WindowMode {
     fn default_size(self) -> [f32; 2] {
         match self {
             Self::Full => [1360.0, 860.0],
-            Self::Compact => [340.0, 660.0],
+            Self::Player => [380.0, 880.0],
             Self::Mini => [280.0, 280.0],
         }
     }
@@ -28,8 +39,8 @@ impl WindowMode {
     fn min_size(self) -> [f32; 2] {
         match self {
             Self::Full => [900.0, 560.0],
-            Self::Compact => [300.0, 420.0],
-            Self::Mini => [200.0, 200.0],
+            Self::Player => [320.0, 600.0],
+            Self::Mini => [180.0, 180.0],
         }
     }
 }
@@ -62,6 +73,8 @@ pub struct Plan {
     /// Mini has no title bar; it's dragged by its artwork.
     pub decorations: bool,
     pub on_top: bool,
+    /// Keep the window square while resizing (Mini).
+    pub square: bool,
 }
 
 impl Plan {
@@ -105,14 +118,69 @@ pub struct Windows {
     /// Keep the mini player above other windows.
     #[serde(default = "yes")]
     pub mini_on_top: bool,
-    /// The mode Mini returns to (Full or Compact).
+    /// The mode Mini returns to (Full or Player).
     #[serde(default)]
     pub before_mini: WindowMode,
+    /// The player last used (Player or Mini): where the artwork in the full
+    /// window's now-playing display takes you.
+    #[serde(default = "player")]
+    pub last_player: WindowMode,
+    /// The Player's lyrics drawer is open.
+    #[serde(default)]
+    pub lyrics_open: bool,
+}
+
+fn player() -> WindowMode {
+    WindowMode::Player
+}
+
+/// Asks the platform to keep the window's content square while it's resized
+/// (or to stop). Returns whether it could; where it can't, the app snaps the
+/// size back with [`square`] instead.
+#[cfg(target_os = "macos")]
+pub fn lock_square(on: bool) -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use objc2_core_foundation::CGSize;
+
+    let Some(mtm) = MainThreadMarker::new() else { return false };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(window) = app.mainWindow().or_else(|| app.keyWindow()).or_else(|| app.windows().firstObject()) else { return false };
+    let one = CGSize { width: 1.0, height: 1.0 };
+    if on {
+        window.setContentAspectRatio(one);
+    } else {
+        // Setting resize increments is how AppKit drops an aspect ratio.
+        window.setContentResizeIncrements(one);
+    }
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn lock_square(_: bool) -> bool {
+    false
+}
+
+/// The square nearest to `now` for a window that was `prev`: the side the
+/// user is dragging wins. `None` when it's already square (within a point).
+pub fn square(prev: [f32; 2], now: [f32; 2]) -> Option<[f32; 2]> {
+    if (now[0] - now[1]).abs() <= 1.0 {
+        return None;
+    }
+    let side = if (now[0] - prev[0]).abs() >= (now[1] - prev[1]).abs() { now[0] } else { now[1] };
+    Some([side, side])
 }
 
 impl Default for Windows {
     fn default() -> Self {
-        Self { mode: WindowMode::Full, geometry: HashMap::new(), mini_on_top: true, before_mini: WindowMode::Full }
+        Self {
+            mode: WindowMode::Full,
+            geometry: HashMap::new(),
+            mini_on_top: true,
+            before_mini: WindowMode::Full,
+            last_player: WindowMode::Player,
+            lyrics_open: false,
+        }
     }
 }
 
@@ -121,8 +189,15 @@ impl Windows {
     pub fn plan(&self) -> Plan {
         let mode = self.mode;
         let saved = self.geometry.get(&mode).copied();
-        let min = mode.min_size();
-        let size = saved.map_or(mode.default_size(), |g| [g.size[0].max(min[0]), g.size[1].max(min[1])]);
+        let mut min = mode.min_size();
+        let mut size = saved.map_or(mode.default_size(), |g| [g.size[0].max(min[0]), g.size[1].max(min[1])]);
+        if mode == WindowMode::Mini {
+            let side = size[0].max(size[1]);
+            size = [side, side];
+        }
+        let drawer = self.drawer_w();
+        size[0] += drawer;
+        min[0] += drawer;
         Plan {
             mode,
             size,
@@ -130,16 +205,24 @@ impl Windows {
             pos: saved.and_then(|g| g.pos),
             decorations: mode != WindowMode::Mini,
             on_top: mode == WindowMode::Mini && self.mini_on_top,
+            square: mode == WindowMode::Mini,
         }
     }
 
-    /// Records where the window is now, for the current mode.
-    pub fn remember(&mut self, now: Geometry) {
+    /// Width the drawer adds in the current mode (0 unless the Player has lyrics open).
+    pub fn drawer_w(&self) -> f32 {
+        if self.mode == WindowMode::Player && self.lyrics_open { DRAWER_W } else { 0.0 }
+    }
+
+    /// Records where the window is now, for the current mode. The Player is
+    /// remembered without its drawer.
+    pub fn remember(&mut self, mut now: Geometry) {
+        now.size[0] = (now.size[0] - self.drawer_w()).max(1.0);
         self.geometry.insert(self.mode, now);
     }
 
     /// Leaves the current mode for `to`, remembering where the window was.
-    /// Between Mini and Compact the window keeps its top-left corner, so it
+    /// Between Mini and Player the window keeps its top-left corner, so it
     /// grows downward and shrinks back up. `None` when already there.
     pub fn switch(&mut self, to: WindowMode, now: Option<Geometry>) -> Option<Plan> {
         let from = self.mode;
@@ -152,9 +235,12 @@ impl Windows {
         if to == WindowMode::Mini {
             self.before_mini = from;
         }
+        if to != WindowMode::Full {
+            self.last_player = to;
+        }
         self.mode = to;
         let mut plan = self.plan();
-        let small = |m| matches!(m, WindowMode::Mini | WindowMode::Compact);
+        let small = |m| matches!(m, WindowMode::Mini | WindowMode::Player);
         if small(from) && small(to)
             && let Some(p) = now.and_then(|g| g.pos)
         {
@@ -167,6 +253,31 @@ impl Windows {
     pub fn toggle_mini(&mut self, now: Option<Geometry>) -> Option<Plan> {
         let to = if self.mode == WindowMode::Mini { self.before_mini } else { WindowMode::Mini };
         self.switch(to, now)
+    }
+
+    /// From the full window to the player last used; from a player, back to full.
+    pub fn toggle_player(&mut self, now: Option<Geometry>) -> Option<Plan> {
+        let to = if self.mode == WindowMode::Full { self.last_player } else { WindowMode::Full };
+        self.switch(to, now)
+    }
+
+    /// Opens or closes the Player's lyrics drawer: the window widens (or
+    /// narrows) to the right, keeping its place. `None` outside the Player or
+    /// when nothing changes.
+    pub fn set_lyrics(&mut self, open: bool, now: Option<Geometry>) -> Option<Plan> {
+        if self.mode != WindowMode::Player || self.lyrics_open == open {
+            self.lyrics_open = open;
+            return None;
+        }
+        if let Some(g) = now {
+            self.remember(g);
+        }
+        self.lyrics_open = open;
+        let mut plan = self.plan();
+        if let Some(p) = now.and_then(|g| g.pos) {
+            plan.pos = Some(p);
+        }
+        Some(plan)
     }
 }
 
@@ -201,13 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn mini_grows_down_into_compact_and_back_up() {
+    fn mini_grows_down_into_the_player_and_back_up() {
         let mut w = Windows::default();
         w.switch(WindowMode::Mini, at(0.0, 0.0, 1360.0, 860.0));
-        // Compact was last somewhere else, but it opens where the mini player is.
-        w.geometry.insert(WindowMode::Compact, Geometry { pos: Some([5.0, 5.0]), size: [360.0, 700.0] });
-        let compact = w.switch(WindowMode::Compact, at(1500.0, 40.0, 280.0, 280.0)).unwrap();
-        assert_eq!((compact.pos, compact.size, compact.decorations), (Some([1500.0, 40.0]), [360.0, 700.0], true));
+        // The player was last somewhere else, but it opens where the mini player is.
+        w.geometry.insert(WindowMode::Player, Geometry { pos: Some([5.0, 5.0]), size: [360.0, 700.0] });
+        let player = w.switch(WindowMode::Player, at(1500.0, 40.0, 280.0, 280.0)).unwrap();
+        assert_eq!((player.pos, player.size, player.decorations), (Some([1500.0, 40.0]), [360.0, 700.0], true));
         let mini = w.switch(WindowMode::Mini, at(1490.0, 30.0, 360.0, 700.0)).unwrap();
         assert_eq!(mini.pos, Some([1490.0, 30.0]));
     }
@@ -215,18 +326,68 @@ mod tests {
     #[test]
     fn toggle_returns_to_where_mini_came_from() {
         let mut w = Windows::default();
-        w.switch(WindowMode::Compact, None);
+        w.switch(WindowMode::Player, None);
         assert_eq!(w.toggle_mini(None).unwrap().mode, WindowMode::Mini);
-        assert_eq!(w.toggle_mini(None).unwrap().mode, WindowMode::Compact);
-        assert_eq!(w.switch(WindowMode::Compact, None), None);
+        assert_eq!(w.toggle_mini(None).unwrap().mode, WindowMode::Player);
+        assert_eq!(w.switch(WindowMode::Player, None), None);
     }
 
     #[test]
     fn sizes_never_below_the_minimum_and_on_top_is_optional() {
         let mut w = Windows { mini_on_top: false, ..Default::default() };
-        w.geometry.insert(WindowMode::Mini, Geometry { pos: None, size: [50.0, 900.0] });
+        w.geometry.insert(WindowMode::Mini, Geometry { pos: None, size: [50.0, 90.0] });
         let mini = w.switch(WindowMode::Mini, None).unwrap();
-        assert_eq!((mini.size, mini.on_top), ([200.0, 900.0], false));
+        // Raised to the minimum, then made square.
+        assert_eq!((mini.size, mini.on_top, mini.square), ([180.0, 180.0], false, true));
+    }
+
+    #[test]
+    fn the_art_toggles_to_the_player_last_used() {
+        let mut w = Windows::default();
+        // Nothing used yet: the Player.
+        assert_eq!(w.toggle_player(None).unwrap().mode, WindowMode::Player);
+        assert_eq!(w.toggle_player(None).unwrap().mode, WindowMode::Full);
+        w.switch(WindowMode::Mini, None);
+        w.switch(WindowMode::Full, None);
+        assert_eq!(w.toggle_player(None).unwrap().mode, WindowMode::Mini);
+        assert_eq!(w.toggle_player(None).unwrap().mode, WindowMode::Full);
+    }
+
+    #[test]
+    fn the_lyrics_drawer_widens_the_player_without_squeezing_it() {
+        let mut w = Windows::default();
+        w.switch(WindowMode::Player, at(0.0, 0.0, 1360.0, 860.0));
+        let open = w.set_lyrics(true, at(200.0, 100.0, 400.0, 780.0)).unwrap();
+        assert_eq!((open.size, open.pos), ([400.0 + DRAWER_W, 780.0], Some([200.0, 100.0])));
+        assert_eq!(open.min_size[0], WindowMode::Player.min_size()[0] + DRAWER_W);
+        // The player column is what's remembered, whatever the drawer.
+        w.remember(Geometry { pos: Some([200.0, 100.0]), size: [420.0 + DRAWER_W, 800.0] });
+        assert_eq!(w.geometry[&WindowMode::Player].size, [420.0, 800.0]);
+        let closed = w.set_lyrics(false, at(200.0, 100.0, 420.0 + DRAWER_W, 800.0)).unwrap();
+        assert_eq!(closed.size, [420.0, 800.0]);
+        assert_eq!(w.set_lyrics(false, None), None);
+        // Reopening the player brings the drawer back as it was left.
+        w.set_lyrics(true, None);
+        w.switch(WindowMode::Full, None);
+        assert_eq!(w.switch(WindowMode::Player, None).unwrap().size, [420.0 + DRAWER_W, 800.0]);
+    }
+
+    #[test]
+    fn mini_stays_square() {
+        assert_eq!(square([280.0, 280.0], [280.0, 280.5]), None);
+        // Dragging the right edge: the width wins.
+        assert_eq!(square([280.0, 280.0], [340.0, 280.0]), Some([340.0, 340.0]));
+        // Dragging the bottom edge: the height wins.
+        assert_eq!(square([280.0, 280.0], [280.0, 250.0]), Some([250.0, 250.0]));
+    }
+
+    #[test]
+    fn compact_from_older_settings_becomes_the_player() {
+        let old = r#"{"mode":"compact","geometry":{"compact":{"pos":[1.0,2.0],"size":[340.0,660.0]},"full":{"pos":null,"size":[1200.0,800.0]}},"before_mini":"compact"}"#;
+        let w: Windows = serde_json::from_str(old).unwrap();
+        assert_eq!((w.mode, w.before_mini, w.last_player), (WindowMode::Player, WindowMode::Player, WindowMode::Player));
+        assert_eq!(w.geometry[&WindowMode::Player].size, [340.0, 660.0]);
+        assert!(serde_json::to_string(&w).unwrap().contains("\"player\""));
     }
 
     #[test]

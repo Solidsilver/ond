@@ -23,7 +23,6 @@ pub fn route_label(route: &Route, data: &Data) -> String {
         Route::Songs => "Songs".into(),
         Route::Favorites => "Favorites".into(),
         Route::Offline => "Offline".into(),
-        Route::NowPlaying => "Now Playing".into(),
         Route::Artist { name, .. } => name.clone(),
         Route::Album(id) => data.album(id).map_or_else(|| "Album".into(), |a| a.name.clone()),
         Route::Playlist { name, .. } => name.clone(),
@@ -115,7 +114,6 @@ impl ListenerApp {
                 self.grid_place(ui, &route);
             }
             Route::Offline => self.offline_page(ui),
-            Route::NowPlaying => self.now_playing_view(ui),
         }
     }
 

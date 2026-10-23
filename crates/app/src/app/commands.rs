@@ -80,16 +80,10 @@ impl ListenerApp {
                 }
             }
             Cmd::ToggleQueue => self.actions.push(Action::ToggleQueue),
-            Cmd::NowPlaying => {
-                if *self.nav.current() == Route::NowPlaying {
-                    self.actions.push(Action::Back);
-                } else {
-                    self.set_mode(Some(WindowMode::Full));
-                    self.actions.push(Action::Go(Route::NowPlaying));
-                }
-            }
+            Cmd::Lyrics => self.actions.push(Action::Lyrics),
+            Cmd::TogglePlayer => self.actions.push(Action::TogglePlayer),
             Cmd::Full => self.actions.push(Action::SetMode(WindowMode::Full)),
-            Cmd::Compact => self.actions.push(Action::SetMode(WindowMode::Compact)),
+            Cmd::Player => self.actions.push(Action::SetMode(WindowMode::Player)),
             Cmd::Mini => self.actions.push(Action::SetMode(WindowMode::Mini)),
             Cmd::ToggleMini => self.actions.push(Action::ToggleMini),
             Cmd::Settings => self.actions.push(Action::OpenSettings(self.settings_section)),

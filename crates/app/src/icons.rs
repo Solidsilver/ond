@@ -40,6 +40,8 @@ pub enum Icon {
     Grid,
     /// Songs.
     Note,
+    /// Lyrics: a speech bubble with lines of text.
+    Lyrics,
     /// Offline.
     Download,
     /// A filled circle with a down arrow: on this computer.
@@ -190,6 +192,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.25, 0.45), p(0.25, -0.8)], line);
             painter.add(Shape::line(vec![p(0.25, -0.8), p(0.7, -0.6), p(0.7, -0.3), p(0.25, -0.45)], line));
             painter.circle_filled(p(-0.1, 0.5), r * 0.33, color);
+        }
+        Icon::Lyrics => {
+            painter.add(Shape::line(
+                vec![p(-0.85, -0.7), p(0.85, -0.7), p(0.85, 0.4), p(-0.2, 0.4), p(-0.55, 0.8), p(-0.55, 0.4), p(-0.85, 0.4), p(-0.85, -0.7)],
+                line,
+            ));
+            painter.line_segment([p(-0.5, -0.3), p(0.5, -0.3)], line);
+            painter.line_segment([p(-0.5, 0.05), p(0.2, 0.05)], line);
         }
         Icon::Download => {
             painter.line_segment([p(0.0, -0.85), p(0.0, 0.3)], line);

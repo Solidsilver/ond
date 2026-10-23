@@ -1,6 +1,8 @@
 //! The queue column. Quiet by default: groups are an icon and a name, long
 //! groups fold to a count, and each item shows its duration, swapping in the
 //! time it will start when hovered. What happens at the end sits at the bottom.
+//! In the full window the same column can show the playing track's lyrics
+//! instead (Up Next · History · Lyrics).
 
 use super::widgets::{elide, segmented};
 use super::{Action, Focus, ListenerApp, QueueTab};
@@ -25,17 +27,25 @@ fn group_icon(s: &Source) -> Icon {
 }
 
 impl ListenerApp {
-    pub(super) fn queue_panel(&mut self, ui: &mut Ui) {
+    /// The column: Up Next or History, plus a Lyrics tab when `lyrics_tab`
+    /// (the full window; the Player has its lyrics drawer instead).
+    pub(super) fn queue_panel(&mut self, ui: &mut Ui, lyrics_tab: bool) {
         let t = Tokens::of(ui);
+        if !lyrics_tab && self.queue_ui.tab == QueueTab::Lyrics {
+            self.queue_ui.tab = QueueTab::UpNext;
+        }
         let now = chrono::Local::now().time();
         let remaining = match (self.queue.current.as_ref(), self.duration_secs()) {
             (Some(_), Some(d)) => d - self.position_secs(),
             _ => 0.0,
         };
         ui.horizontal(|ui| {
-            let at = usize::from(self.queue_ui.tab == QueueTab::History);
-            if let Some(i) = segmented(ui, &["Up Next", "History"], at) {
-                self.queue_ui.tab = if i == 0 { QueueTab::UpNext } else { QueueTab::History };
+            let tabs: &[(&str, QueueTab)] = &[("Up Next", QueueTab::UpNext), ("History", QueueTab::History), ("Lyrics", QueueTab::Lyrics)];
+            let tabs = if lyrics_tab { tabs } else { &tabs[..2] };
+            let labels: Vec<&str> = tabs.iter().map(|(l, _)| *l).collect();
+            let at = tabs.iter().position(|(_, tab)| *tab == self.queue_ui.tab).unwrap_or(0);
+            if let Some(i) = segmented(ui, &labels, at) {
+                self.queue_ui.tab = tabs[i].1;
             }
             if self.queue.current.is_some() && !self.queue.upcoming.is_empty() && self.queue_ui.tab == QueueTab::UpNext {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -46,6 +56,10 @@ impl ListenerApp {
             }
         });
         ui.add_space(6.0);
+        if self.queue_ui.tab == QueueTab::Lyrics {
+            self.sidebar_lyrics(ui);
+            return;
+        }
 
         let footer_h = 40.0;
         let list_h = (ui.available_height() - footer_h).max(60.0);
@@ -53,7 +67,7 @@ impl ListenerApp {
             ui.spacing_mut().item_spacing.y = 0.0;
             match self.queue_ui.tab {
                 QueueTab::UpNext => self.up_next(ui, now, remaining),
-                QueueTab::History => self.history(ui),
+                QueueTab::History | QueueTab::Lyrics => self.history(ui),
             }
         });
         self.queue_keys(ui);

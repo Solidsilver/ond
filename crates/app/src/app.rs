@@ -162,6 +162,13 @@ pub enum Action {
     SetMode(WindowMode),
     /// Into Mini, or back to where Mini was entered from.
     ToggleMini,
+    /// The full window ↔ the player last used (Player or Mini).
+    TogglePlayer,
+    /// Show the lyrics: the sidebar's Lyrics tab in the full window; in the
+    /// Player, open or close its drawer; from Mini, the Player with it open.
+    Lyrics,
+    /// Open or close the Player's lyrics drawer.
+    SetLyricsDrawer(bool),
     SetScrobble(bool),
     /// Open the Settings window at a section.
     OpenSettings(settings_page::Section),
@@ -224,6 +231,8 @@ pub enum QueueTab {
     #[default]
     UpNext,
     History,
+    /// The playing track's lyrics (the full window's sidebar only).
+    Lyrics,
 }
 
 /// Which side keyboard navigation applies to.
@@ -322,8 +331,12 @@ pub struct ListenerApp {
     palette: Option<Palette>,
     theme: ThemePref,
 
-    /// Full / Compact / Mini and where each was.
+    /// Full / Player / Mini and where each was.
     windows: Windows,
+    /// Mini is held square: what was last asked of the platform, and whether it
+    /// could (if not, the size is snapped back each frame instead).
+    square_wanted: Option<bool>,
+    square_native: bool,
     /// The window as last seen, saved on quit.
     seen: Option<Geometry>,
     /// After a mode switch: the size asked for, and frames left to wait for it.
@@ -374,11 +387,11 @@ pub struct ListenerApp {
     last_synced: Option<chrono::DateTime<chrono::Local>>,
     /// "navidrome 0.64.2", as the server reported it.
     server_info: String,
-    /// Lyrics by track id, fetched when the Now Playing view first needs them.
+    /// Lyrics by track id, fetched when a lyrics view first needs them.
     lyrics: HashMap<String, crate::lyrics::Fetch>,
     /// Whether the lyrics column follows the sung line.
     lyrics_follow: crate::lyrics::Follow,
-    /// The Now Playing details strip is open.
+    /// The Player's details strip is open.
     np_details: bool,
 }
 
@@ -526,6 +539,8 @@ impl ListenerApp {
             windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
             seen: None,
             settling: None,
+            square_wanted: None,
+            square_native: false,
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
             now_playing,
@@ -1191,6 +1206,35 @@ impl ListenerApp {
             Action::SignOut => self.sign_out(),
             Action::SetMode(mode) => self.set_mode(Some(mode)),
             Action::ToggleMini => self.set_mode(None),
+            Action::TogglePlayer => {
+                let plan = self.windows.toggle_player(self.seen);
+                self.follow_plan(plan);
+            }
+            Action::Lyrics => match self.windows.mode {
+                WindowMode::Full => {
+                    if self.queue_ui.tab == QueueTab::Lyrics && (self.show_queue || self.queue_sheet) {
+                        self.queue_ui.tab = QueueTab::UpNext;
+                    } else {
+                        self.queue_ui.tab = QueueTab::Lyrics;
+                        if self.queue_narrow {
+                            self.queue_sheet = true;
+                        } else if !self.show_queue {
+                            self.actions.push(Action::ToggleQueue);
+                        }
+                    }
+                }
+                WindowMode::Player => self.actions.push(Action::SetLyricsDrawer(!self.windows.lyrics_open)),
+                WindowMode::Mini => {
+                    self.windows.lyrics_open = true;
+                    self.set_mode(Some(WindowMode::Player));
+                }
+            },
+            Action::SetLyricsDrawer(open) => {
+                let plan = self.windows.set_lyrics(open, self.seen);
+                self.follow_plan(plan);
+                let w = self.windows.clone();
+                Settings::update(&self.paths, |s| s.window = w);
+            }
             Action::OpenSettings(section) => {
                 self.settings_section = section;
                 self.set_mode(Some(WindowMode::Full));
@@ -1336,11 +1380,16 @@ impl ListenerApp {
 
     /// Switches window mode (`None` toggles Mini) and saves the choice.
     fn set_mode(&mut self, to: Option<WindowMode>) {
-        let ctx = self.bridge.ctx().clone();
         let plan = match to {
             Some(m) => self.windows.switch(m, self.seen),
             None => self.windows.toggle_mini(self.seen),
         };
+        self.follow_plan(plan);
+    }
+
+    /// Resizes the window to `plan` (if any) and saves the window state.
+    fn follow_plan(&mut self, plan: Option<crate::window::Plan>) {
+        let ctx = self.bridge.ctx().clone();
         if let Some(plan) = plan {
             plan.apply(&ctx);
             // Until the window reports its new size, don't mistake the old one for it.
@@ -1517,7 +1566,7 @@ impl ListenerApp {
                 self.overlay_ui(&ctx);
                 self.drag_ghost(&ctx);
             }
-            WindowMode::Compact => self.compact_ui(ui),
+            WindowMode::Player => self.player_ui(ui),
             WindowMode::Mini => self.mini_ui(ui),
         }
         if let Some(e) = self.error.take() {
@@ -1610,7 +1659,7 @@ impl ListenerApp {
                 .exact_size(320.0)
                 .resizable(false)
                 .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 8, right: 8, top: 12, bottom: 8 }))
-                .show(ui, |ui| self.queue_panel(ui));
+                .show(ui, |ui| self.queue_panel(ui, true));
         }
         let content = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
@@ -1635,7 +1684,7 @@ impl ListenerApp {
             .show(ctx, |ui| {
                 ui.set_width(w - 16.0);
                 ui.set_height(content.height() - 20.0);
-                self.queue_panel(ui);
+                self.queue_panel(ui, true);
             });
         if modal.should_close() {
             self.queue_sheet = false;
@@ -1683,6 +1732,12 @@ impl eframe::App for ListenerApp {
             _ if self.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
             _ => {}
         }
+        let square = self.windows.mode == WindowMode::Mini;
+        // Until the window exists the platform can't lock it; keep asking.
+        if self.square_wanted != Some(square) || (square && !self.square_native) {
+            self.square_wanted = Some(square);
+            self.square_native = crate::window::lock_square(square) && square;
+        }
         if let Some(g) = Geometry::read(ctx) {
             match self.settling {
                 Some((want, left)) if left > 0 && ((g.size[0] - want[0]).abs() > 2.0 || (g.size[1] - want[1]).abs() > 2.0) => {
@@ -1691,6 +1746,13 @@ impl eframe::App for ListenerApp {
                 }
                 _ => {
                     self.settling = None;
+                    // Mini is square; where the platform doesn't hold it so, snap back.
+                    if square
+                        && !self.square_native
+                        && let Some(side) = crate::window::square(self.seen.map_or(g.size, |s| s.size), g.size)
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(side.into()));
+                    }
                     self.seen = Some(g);
                 }
             }
@@ -1946,7 +2008,7 @@ mod tests {
             }
         }
         frame(&ctx, &mut app, vec![key(egui::Key::Num2, egui::Modifiers::COMMAND | egui::Modifiers::ALT)]);
-        assert_eq!(app.windows.mode, WindowMode::Compact);
+        assert_eq!(app.windows.mode, WindowMode::Player);
         for _ in 0..2 {
             frame(&ctx, &mut app, vec![egui::Event::PointerMoved(egui::pos2(120.0, 60.0))]);
         }
@@ -1955,10 +2017,42 @@ mod tests {
         frame(&ctx, &mut app, Vec::new());
         assert_eq!(app.windows.mode, WindowMode::Full);
         // ⌘K from a small mode does too.
-        app.windows.mode = WindowMode::Compact;
+        app.windows.mode = WindowMode::Player;
         frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
         assert_eq!(app.windows.mode, WindowMode::Full);
         assert!(app.palette.is_some());
+    }
+
+    #[test]
+    fn lyrics_go_to_the_sidebar_or_the_players_drawer() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        frame(&ctx, &mut app, Vec::new());
+        // Full window: the sidebar switches to its Lyrics tab, and back.
+        app.apply(Action::Lyrics);
+        assert_eq!(app.queue_ui.tab, QueueTab::Lyrics);
+        app.apply(Action::Lyrics);
+        assert_eq!(app.queue_ui.tab, QueueTab::UpNext);
+        // The artwork toggles to the Player (nothing used yet), where ⌥⌘L opens the drawer.
+        app.apply(Action::TogglePlayer);
+        assert_eq!(app.windows.mode, WindowMode::Player);
+        app.apply(Action::Lyrics);
+        frame(&ctx, &mut app, Vec::new());
+        assert!(app.windows.lyrics_open);
+        // Mini, then back to full: the artwork now toggles to Mini.
+        app.apply(Action::ToggleMini);
+        app.apply(Action::SetMode(WindowMode::Full));
+        app.apply(Action::TogglePlayer);
+        assert_eq!(app.windows.mode, WindowMode::Mini);
+        // Lyrics from Mini open the Player with its drawer.
+        app.windows.lyrics_open = false;
+        app.apply(Action::Lyrics);
+        assert_eq!(app.windows.mode, WindowMode::Player);
+        assert!(app.windows.lyrics_open);
+        for _ in 0..2 {
+            frame(&ctx, &mut app, Vec::new());
+        }
     }
 
     /// Makes track `id` downloaded, the way a finished stream would: via a file
