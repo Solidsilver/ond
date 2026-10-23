@@ -2,8 +2,8 @@
 //! list (composer and actions appear on hover), and credits gathered from the
 //! tracks' OpenSubsonic contributors. Playlists reuse the track list.
 
-use super::widgets::{elide, link, primary, secondary};
-use super::{Action, Focus, ListenerApp, QueueAction, mmss};
+use super::widgets::{Mark, elide, link, primary, secondary};
+use super::{Action, Focus, Keep, ListenerApp, QueueAction, mmss};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::queue::Source;
@@ -89,6 +89,10 @@ impl ListenerApp {
             return;
         };
         let tracks = self.data.tracks.get(id).cloned().unwrap_or_default();
+        if self.download_key(ui) {
+            let kept = self.offline_snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
+            self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
+        }
         egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).show(ui, |ui| {
             // Header: art beside the text, or above it when there's no room.
             let avail = ui.available_width();
@@ -159,6 +163,8 @@ impl ListenerApp {
                             self.actions.push(Action::Album(album.id.clone(), QueueAction::Shuffle));
                         }
                         let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
+                        let pin = offline::Pin::Album(album.id.clone());
+                        let kept = self.offline_snap.pin(&pin).is_some();
                         egui::Popup::menu(&more).show(|ui| {
                             if ui.button("Play next").clicked() {
                                 self.actions.push(Action::Album(album.id.clone(), QueueAction::PlayNext));
@@ -166,7 +172,11 @@ impl ListenerApp {
                             if ui.button("Add to queue").clicked() {
                                 self.actions.push(Action::Album(album.id.clone(), QueueAction::Add));
                             }
+                            ui.separator();
+                            super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Album(album.id.clone()), &mut self.actions);
                         });
+                        ui.add_space(6.0);
+                        self.pin_status(ui, &pin);
                     });
                     ui.min_rect().bottom() - top
                 });
@@ -251,6 +261,11 @@ impl ListenerApp {
         let tracks = self.data.playlist_tracks.get(id).cloned().unwrap_or_default();
         let sub = info.as_ref().map(|p| format!("{} songs · {}", p.song_count, mmss(f64::from(p.duration))));
         self.heading(ui, name, sub);
+        let pin = offline::Pin::Playlist(id.to_owned());
+        let kept = self.offline_snap.pin(&pin).is_some();
+        if self.download_key(ui) {
+            self.actions.push(Action::KeepOffline(Keep::Playlist(id.to_owned()), !kept));
+        }
         ui.horizontal(|ui| {
             if primary(ui, Some(Icon::Play), "Play").clicked() {
                 self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Play { start: 0 }));
@@ -259,6 +274,20 @@ impl ListenerApp {
             if secondary(ui, "Shuffle").clicked() {
                 self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Shuffle));
             }
+            let t = Tokens::of(ui);
+            let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
+            egui::Popup::menu(&more).show(|ui| {
+                if ui.button("Play next").clicked() {
+                    self.actions.push(Action::Playlist(id.to_owned(), QueueAction::PlayNext));
+                }
+                if ui.button("Add to queue").clicked() {
+                    self.actions.push(Action::Playlist(id.to_owned(), QueueAction::Add));
+                }
+                ui.separator();
+                super::browse::offline_item(ui, kept, Some("⇧⌘D"), || Keep::Playlist(id.to_owned()), &mut self.actions);
+            });
+            ui.add_space(6.0);
+            self.pin_status(ui, &pin);
         });
         ui.add_space(16.0);
         if tracks.is_empty() {
@@ -304,7 +333,18 @@ impl ListenerApp {
                 ui.painter().rect_filled(rect, 6.0, fill);
                 let mut x = rect.left() + 10.0;
                 let cy = rect.center().y;
-                let color = if playing { t.accent } else { t.text };
+                // Offline, what isn't downloaded is dimmed rather than hidden.
+                let available = self.playable(tr);
+                let color = if playing {
+                    t.accent
+                } else if available {
+                    t.text
+                } else {
+                    t.muted.gamma_multiply(0.75)
+                };
+                if let Some(m) = Mark::of_track(self.offline_snap.track(&tr.id)) {
+                    super::widgets::mark(ui, pos2(rect.right() - 48.0, cy), 10.0, m);
+                }
                 if opts.numbers {
                     if playing {
                         icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 12.0, cy), vec2(9.0, 9.0)), Icon::Play, t.accent);
@@ -331,8 +371,14 @@ impl ListenerApp {
                     let title = elide(ui, &tr.title, title_font, color, text_w);
                     let title_w = title.size().x;
                     ui.painter().galley(pos2(x, cy - title.size().y / 2.0), title, color);
+                    if hovered && !available {
+                        let g = ui.painter().layout_no_wrap("Not downloaded".into(), FontId::proportional(12.0), t.muted);
+                        if title_w + 10.0 + g.size().x < text_w {
+                            ui.painter().galley(pos2(x + title_w + 10.0, cy - g.size().y / 2.0), g, t.muted);
+                        }
+                    }
                     // Composer, on hover only.
-                    if hovered && let Some(composer) = composer_of(tr) {
+                    else if hovered && let Some(composer) = composer_of(tr) {
                         let at = Rect::from_min_size(pos2(x + title_w + 10.0, cy - 8.0), vec2((text_w - title_w - 10.0).max(0.0), 16.0));
                         if at.width() > 40.0 {
                             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -384,6 +430,21 @@ impl ListenerApp {
         if !matches!(source, Source::Album { .. }) && ui.button("Go to album").clicked() {
             self.actions.push(Action::Go(Route::Album(tr.album_id.clone())));
         }
+        // Kept on its own: can be removed on its own. Kept with an album or
+        // playlist: that's where it's removed.
+        let alone = self.offline_snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
+        if alone || !self.offline_snap.is_done(&tr.id) {
+            ui.separator();
+            super::browse::offline_item(ui, alone, None, || Keep::Tracks(vec![tr.clone()]), &mut self.actions);
+        }
+    }
+
+    /// ⇧⌘D, when nothing else has the keyboard.
+    pub(super) fn download_key(&self, ui: &Ui) -> bool {
+        if self.palette.is_some() || ui.ctx().memory(|m| m.focused().is_some()) {
+            return false;
+        }
+        ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::D)))
     }
 
     /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add.

@@ -36,6 +36,15 @@ pub struct Settings {
     /// ReplayGain and streaming quality.
     #[serde(default)]
     pub playback: crate::playback::PlaybackPrefs,
+    /// Where offline downloads live; `None` uses the default (next to the library).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_dir: Option<PathBuf>,
+    /// Cap on offline downloads, in GB; `None` is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_limit_gb: Option<u64>,
+    /// Downloads to move into `offline_dir` at the next launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_move_from: Option<PathBuf>,
 }
 
 fn yes() -> bool {
@@ -56,6 +65,9 @@ impl Default for Settings {
             scrobble: true,
             signed_out: false,
             playback: Default::default(),
+            offline_dir: None,
+            offline_limit_gb: None,
+            offline_move_from: None,
         }
     }
 }
@@ -67,6 +79,8 @@ pub struct Paths {
     pub stream_cache: PathBuf,
     /// Downloaded cover art, evictable.
     pub art_cache: PathBuf,
+    /// Offline downloads, never evicted (default location).
+    pub offline: PathBuf,
 }
 
 impl Paths {
@@ -80,6 +94,7 @@ impl Paths {
             library_db: dirs.data_dir().join("library.redb"),
             stream_cache: dirs.cache_dir().join("streams"),
             art_cache: dirs.cache_dir().join("art"),
+            offline: dirs.data_dir().join("Offline"),
         })
     }
 }

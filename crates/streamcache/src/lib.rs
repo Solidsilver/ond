@@ -235,6 +235,13 @@ impl StreamCache {
         }
     }
 
+    /// The finished file for `key`, if it's cached (for the offline store to
+    /// hard-link instead of downloading again).
+    pub fn complete_path(&self, key: &CacheKey) -> Option<PathBuf> {
+        let name = key.file_name();
+        self.inner.lock_index().complete.contains_key(&name).then(|| self.inner.cfg.dir.join(name))
+    }
+
     /// Bytes held by completed files.
     pub fn size(&self) -> u64 {
         self.inner.lock_index().total

@@ -42,6 +42,10 @@ pub enum Icon {
     Note,
     /// Offline.
     Download,
+    /// A filled circle with a down arrow: on this computer.
+    Downloaded,
+    /// A cloud with a slash: the server can't be reached.
+    Offline,
 }
 
 /// Paints `icon` centred in `rect`.
@@ -170,9 +174,24 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.circle_filled(p(-0.1, 0.5), r * 0.33, color);
         }
         Icon::Download => {
-            painter.line_segment([p(0.0, -0.8), p(0.0, 0.3)], line);
-            painter.add(Shape::line(vec![p(-0.45, -0.1), p(0.0, 0.35), p(0.45, -0.1)], line));
-            painter.line_segment([p(-0.75, 0.8), p(0.75, 0.8)], line);
+            painter.line_segment([p(0.0, -0.85), p(0.0, 0.3)], line);
+            painter.add(Shape::line(vec![p(-0.45, -0.15), p(0.0, 0.3), p(0.45, -0.15)], line));
+            painter.add(Shape::line(vec![p(-0.8, 0.35), p(-0.8, 0.8), p(0.8, 0.8), p(0.8, 0.35)], line));
+        }
+        Icon::Downloaded => {
+            let thin = Stroke::new((r * 0.16).max(1.0), color);
+            painter.circle_stroke(c, r * 0.88, thin);
+            painter.line_segment([p(0.0, -0.45), p(0.0, 0.38)], thin);
+            painter.add(Shape::line(vec![p(-0.32, 0.08), p(0.0, 0.4), p(0.32, 0.08)], thin));
+        }
+        Icon::Offline => {
+            let arc = (0..=12).map(|k| {
+                let a = std::f32::consts::PI * (1.0 + k as f32 / 12.0);
+                p(0.1 + 0.45 * a.cos(), 0.1 + 0.45 * a.sin())
+            });
+            painter.add(Shape::line(arc.collect(), line));
+            painter.add(Shape::line(vec![p(-0.35, 0.1), p(-0.75, 0.1), p(-0.85, 0.35), p(-0.6, 0.55), p(0.65, 0.55), p(0.85, 0.3), p(0.55, 0.1)], line));
+            painter.line_segment([p(-0.8, -0.8), p(0.8, 0.8)], line);
         }
         Icon::Spinner => {
             let t = painter.ctx().input(|i| i.time) as f32;
@@ -202,4 +221,30 @@ pub fn sized_button(ui: &mut Ui, icon: Icon, label: &str, size: Vec2, glyph: f32
     let enabled = ui.is_enabled();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, label));
     resp.on_hover_text(label)
+}
+
+/// A thin progress ring (0..=1) around `center`, on a faint full circle.
+pub fn progress_ring(painter: &Painter, center: Pos2, radius: f32, fraction: f32, color: Color32, track: Color32) {
+    let width = (radius * 0.28).max(1.3);
+    painter.circle_stroke(center, radius, Stroke::new(width, track));
+    let f = fraction.clamp(0.0, 1.0);
+    if f <= 0.0 {
+        return;
+    }
+    let start = -std::f32::consts::FRAC_PI_2;
+    let steps = ((40.0 * f).ceil() as usize).max(2);
+    let pts = (0..=steps)
+        .map(|k| {
+            let a = start + std::f32::consts::TAU * f * k as f32 / steps as f32;
+            center + vec2(radius * a.cos(), radius * a.sin())
+        })
+        .collect();
+    painter.add(Shape::line(pts, Stroke::new(width, color)));
+}
+
+/// An icon inline with text, at text height.
+pub fn inline(ui: &mut Ui, icon: Icon, color: Color32) {
+    let h = ui.text_style_height(&egui::TextStyle::Body) * 0.7;
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(h), Sense::hover());
+    paint(ui.painter(), rect, icon, color);
 }

@@ -6,6 +6,7 @@
 mod app;
 mod art;
 mod bridge;
+mod folder;
 mod icons;
 mod nav;
 mod now_playing;

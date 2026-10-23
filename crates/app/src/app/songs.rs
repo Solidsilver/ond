@@ -134,7 +134,16 @@ impl ListenerApp {
                     };
                     ui.painter().rect_filled(rect, 6.0, fill);
                     let c = columns(rect);
-                    let color = if playing { t.accent } else { t.text };
+                    let color = if playing {
+                        t.accent
+                    } else if self.playable(tr) {
+                        t.text
+                    } else {
+                        t.muted.gamma_multiply(0.75)
+                    };
+                    if let Some(m) = super::widgets::Mark::of_track(self.offline_snap.track(&tr.id)) {
+                        super::widgets::mark(ui, pos2(c.time.left() + 10.0, rect.center().y), 10.0, m);
+                    }
                     let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
                     let mut title_x = c.title.left() + 10.0;
                     if playing {

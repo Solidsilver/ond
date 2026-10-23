@@ -270,6 +270,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
         library_db: dir.join("library.redb"),
         stream_cache: dir.join("streams"),
         art_cache: dir.join("art"),
+        offline: dir.join("offline"),
     };
     let mut app = ListenerApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
     // Let start-up messages (cached albums from the empty db, device list from

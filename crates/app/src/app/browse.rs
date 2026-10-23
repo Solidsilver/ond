@@ -1,8 +1,8 @@
 //! The main view's router and the album-grid places: Recently Added, Albums,
 //! Artists, an artist's page, and albums by genre / year / label.
 
-use super::widgets::{elide, segmented};
-use super::{Action, AlbumSort, Data, ListenerApp, QueueAction};
+use super::widgets::{Mark, elide, segmented};
+use super::{Action, AlbumSort, Data, Keep, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
@@ -111,12 +111,7 @@ impl ListenerApp {
                 self.heading(ui, value, Some(what.to_owned()));
                 self.grid_place(ui, &route);
             }
-            Route::Offline => {
-                self.heading(ui, "Offline", None);
-                let t = Tokens::of(ui);
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Albums you download for offline listening will appear here.").color(t.muted));
-            }
+            Route::Offline => self.offline_page(ui),
         }
     }
 
@@ -214,10 +209,16 @@ impl ListenerApp {
             let cover = album.cover_art.clone();
             let (name, artist) = (album.name.clone(), album.artist.clone().unwrap_or_default());
             self.art.paint(ui, art, cover.as_deref(), 6.0);
+            // Only albums kept offline carry a mark; nothing otherwise.
+            let mark = Mark::of_pin(self.offline_snap.pin(&offline::Pin::Album(id.clone())));
+            let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
             let title = elide(ui, &name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
-            let sub = elide(ui, &artist, FontId::proportional(12.0), t.muted, tile);
+            let sub = elide(ui, &artist, FontId::proportional(12.0), t.muted, tile - mark_w);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
+            if let Some(m) = mark {
+                super::widgets::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
+            }
             if resp.hovered() {
                 let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
                 let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", &id)), Sense::click());
@@ -242,8 +243,9 @@ impl ListenerApp {
         } else if resp.clicked() {
             self.actions.push(Action::Go(Route::Album(id.clone())));
         }
+        let kept = self.offline_snap.pin(&offline::Pin::Album(id.clone())).is_some();
         resp.context_menu(|ui| {
-            album_menu(ui, &id, &mut self.actions);
+            album_menu(ui, &id, kept, &mut self.actions);
             if let Some(name) = artist {
                 ui.separator();
                 if ui.button(format!("Go to {name}")).clicked() {
@@ -342,7 +344,7 @@ pub fn grid_metrics(width: f32) -> (usize, f32) {
     (cols, tile)
 }
 
-pub fn album_menu(ui: &mut Ui, id: &str, actions: &mut Vec<Action>) {
+pub fn album_menu(ui: &mut Ui, id: &str, kept: bool, actions: &mut Vec<Action>) {
     for (label, action) in [
         ("Play", QueueAction::Play { start: 0 }),
         ("Shuffle", QueueAction::Shuffle),
@@ -352,6 +354,21 @@ pub fn album_menu(ui: &mut Ui, id: &str, actions: &mut Vec<Action>) {
         if ui.button(label).clicked() {
             actions.push(Action::Album(id.to_owned(), action));
         }
+    }
+    ui.separator();
+    offline_item(ui, kept, None, || Keep::Album(id.to_owned()), actions);
+}
+
+/// "Make available offline" / "Remove download", with the key that does it
+/// where there is one.
+pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl FnOnce() -> Keep, actions: &mut Vec<Action>) {
+    let label = if kept { "Remove download" } else { "Make available offline" };
+    let mut button = egui::Button::new(label);
+    if let Some(keys) = shortcut {
+        button = button.shortcut_text(keys);
+    }
+    if ui.add(button).clicked() {
+        actions.push(Action::KeepOffline(what(), !kept));
     }
 }
 
