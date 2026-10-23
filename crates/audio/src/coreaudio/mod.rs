@@ -367,7 +367,14 @@ impl OutputBackend for CoreAudioBackend {
             self.mode = PlaybackMode::Normal;
             self.release_hog();
         }
-        let open = self.start_unit(dev, format, input, status).map_err(OutputError::Device)?;
+        let open = match self.start_unit(dev, format, input, status) {
+            Ok(o) => o,
+            Err(e) => {
+                // Nothing is playing: don't keep other apps off the device.
+                self.release_hog();
+                return Err(OutputError::Device(e));
+            }
+        };
         self.name = format!("CoreAudio · {}", hal::name(dev));
         self.open = Some(open);
         Ok(())
@@ -377,11 +384,14 @@ impl OutputBackend for CoreAudioBackend {
         self.drained.load(Ordering::Acquire)
     }
 
+    /// Stops the stream and lets go of the device: an idle player never keeps
+    /// other apps (or system sounds) off it. The next `open` takes it again.
     fn close(&mut self) {
         if let Some(mut open) = self.open.take() {
             // Stopping is synchronous: no render callback runs after it returns.
             let _ = open.unit.stop();
         }
+        self.release_hog();
     }
 }
 
@@ -469,7 +479,7 @@ mod tests {
         println!("{}: {:?}", b.name(), crate::assess(PlaybackMode::BitPerfect, &format, 44_100, Some(&caps)));
         std::thread::sleep(std::time::Duration::from_secs(1));
         b.close();
+        assert!(b.hogged.is_none(), "closing (playback stopped) releases exclusive access");
         b.set_mode(PlaybackMode::Normal);
-        assert!(b.hogged.is_none(), "exclusive access released");
     }
 }
