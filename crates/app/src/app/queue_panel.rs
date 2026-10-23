@@ -176,7 +176,10 @@ impl ListenerApp {
             let art = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 16.0), vec2(32.0, 32.0));
             let cover = item.track.cover_art.clone().or_else(|| self.data.album(&item.track.album_id).and_then(|a| a.cover_art.clone()));
             self.art.paint(ui, art, cover.as_deref(), 3.0);
+            // Offline, songs that aren't downloaded will be skipped: say so on hover, dim them otherwise.
+            let available = self.playable(&item.track);
             let right = match (&starts_at, resp.hovered()) {
+                (_, true) if !available => "not downloaded".to_owned(),
                 (Some(at), true) => format!("at {at}"),
                 _ => item.track.duration_secs.map(|d| super::mmss(f64::from(d))).unwrap_or_default(),
             };
@@ -184,8 +187,9 @@ impl ListenerApp {
             let text_w = rect.right() - 10.0 - right_g.size().x - 8.0 - (art.right() + 10.0);
             ui.painter().galley(pos2(rect.right() - 10.0 - right_g.size().x, rect.center().y - right_g.size().y / 2.0), right_g, t.muted);
             let x = art.right() + 10.0;
-            let title = elide(ui, &item.track.title, FontId::proportional(12.5), t.text, text_w);
-            ui.painter().galley(pos2(x, rect.center().y - title.size().y), title, t.text);
+            let color = if available { t.text } else { t.muted.gamma_multiply(0.75) };
+            let title = elide(ui, &item.track.title, FontId::proportional(12.5), color, text_w);
+            ui.painter().galley(pos2(x, rect.center().y - title.size().y), title, color);
             let sub = elide(ui, item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted, text_w);
             ui.painter().galley(pos2(x, rect.center().y + 1.0), sub, t.muted);
         }

@@ -14,6 +14,9 @@ use subsonic::{AlbumListType, Client, Credentials};
 pub enum Msg {
     Connected { client: Client, settings: Box<Settings>, server: String },
     ConnectFailed(String),
+    /// The server can't be reached (saved login, so the app opens offline);
+    /// reconnecting continues in the background and ends with `Connected`.
+    Unreachable { username: String, error: String },
     Albums(Vec<Album>),
     SyncProgress(usize),
     SyncDone(usize),
@@ -48,11 +51,13 @@ pub struct Bridge {
     library: Arc<Library>,
     /// Stops the running track sync, if any.
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// A reconnect loop is running (one is enough).
+    reconnecting: Arc<AtomicBool>,
 }
 
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, ctx: egui::Context, library: Arc<Library>) -> Self {
-        Self { rt, tx, ctx, library, sync_cancel: Arc::default() }
+        Self { rt, tx, ctx, library, sync_cancel: Arc::default(), reconnecting: Arc::default() }
     }
 
     pub fn ctx(&self) -> &egui::Context {
@@ -108,9 +113,13 @@ impl Bridge {
     }
 
     /// Pings the server; on success persists settings (+ password when `remember`).
+    ///
+    /// With a saved login (`password` is `None`) an unreachable server isn't a
+    /// login failure: the app opens offline and keeps retrying until it's back.
     pub fn connect(&self, settings: Settings, password: Option<String>, paths: Arc<Paths>) {
         let this = self.clone();
         self.rt.spawn(async move {
+            let saved = password.is_none();
             let password = match password {
                 Some(p) => p,
                 None => {
@@ -125,13 +134,8 @@ impl Bridge {
                 Ok(c) => c,
                 Err(e) => return this.send(Msg::ConnectFailed(e.to_string())),
             };
-            match client.ping().await {
-                Ok(info) => {
-                    let server = format!(
-                        "{} {}",
-                        info.server_type.as_deref().unwrap_or("subsonic"),
-                        info.server_version.as_deref().unwrap_or(&info.version)
-                    );
+            match ping(&client).await {
+                Ok(server) => {
                     let s = settings.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         if let Err(e) = s.save(&paths) {
@@ -144,7 +148,52 @@ impl Bridge {
                     .await;
                     this.send(Msg::Connected { client, settings: Box::new(settings), server });
                 }
-                Err(e) => this.send(Msg::ConnectFailed(e.to_string())),
+                Err(PingError::Unreachable(e)) if saved => {
+                    this.send(Msg::Unreachable { username: settings.username.clone(), error: e });
+                    this.reconnect(client, settings);
+                }
+                Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(Msg::ConnectFailed(e)),
+            }
+        });
+    }
+
+    /// Checks the connection after something failed; if the server is gone,
+    /// says so and reconnects in the background.
+    pub fn probe(&self, client: Client, settings: Settings) {
+        if self.reconnecting.load(Ordering::Relaxed) {
+            return;
+        }
+        let this = self.clone();
+        self.rt.spawn(async move {
+            if let Err(PingError::Unreachable(e)) = ping(&client).await {
+                this.send(Msg::Unreachable { username: settings.username.clone(), error: e });
+                this.reconnect(client, settings);
+            }
+        });
+    }
+
+    /// Pings with backoff (5 s, doubling to a minute) until the server answers.
+    fn reconnect(&self, client: Client, settings: Settings) {
+        if self.reconnecting.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let mut delay = Duration::from_secs(5);
+            loop {
+                tokio::time::sleep(delay).await;
+                match ping(&client).await {
+                    Ok(server) => {
+                        this.reconnecting.store(false, Ordering::Relaxed);
+                        return this.send(Msg::Connected { client, settings: Box::new(settings), server });
+                    }
+                    Err(PingError::Unreachable(_)) => delay = (delay * 2).min(Duration::from_secs(60)),
+                    Err(PingError::Refused(e)) => {
+                        // Reachable but turning us away (password changed): back to the login form.
+                        this.reconnecting.store(false, Ordering::Relaxed);
+                        return this.send(Msg::ConnectFailed(e));
+                    }
+                }
             }
         });
     }
@@ -364,5 +413,22 @@ impl Bridge {
             }
             this.send(Msg::TrackBatch { key, tracks: all });
         });
+    }
+}
+
+enum PingError {
+    /// No answer: network down, server off, timeout, or a proxy's error page.
+    Unreachable(String),
+    /// The server answered and said no (bad credentials, unsupported).
+    Refused(String),
+}
+
+/// Pings with a timeout, so a black-holed server can't hang the connect.
+async fn ping(client: &Client) -> Result<String, PingError> {
+    match tokio::time::timeout(Duration::from_secs(10), client.ping()).await {
+        Err(_) => Err(PingError::Unreachable("no answer from the server".into())),
+        Ok(Err(e @ subsonic::Error::Http(_))) => Err(PingError::Unreachable(e.to_string())),
+        Ok(Err(e)) => Err(PingError::Refused(e.to_string())),
+        Ok(Ok(info)) => Ok(format!("{} {}", info.server_type.as_deref().unwrap_or("subsonic"), info.server_version.as_deref().unwrap_or(&info.version))),
     }
 }

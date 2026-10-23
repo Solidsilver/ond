@@ -98,6 +98,60 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize
     clicked
 }
 
+/// How far along something is on its way to this computer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mark {
+    Done,
+    /// 0..=1; 0 while waiting its turn.
+    Progress(f32),
+    Failed,
+}
+
+impl Mark {
+    pub fn of_track(state: Option<&offline::TrackState>) -> Option<Mark> {
+        Some(match state? {
+            offline::TrackState::Done { .. } => Mark::Done,
+            offline::TrackState::Queued => Mark::Progress(0.0),
+            offline::TrackState::Downloading { done, total } => Mark::Progress(total.map_or(0.0, |t| *done as f32 / t.max(1) as f32)),
+            offline::TrackState::Failed { .. } => Mark::Failed,
+        })
+    }
+
+    pub fn of_pin(sum: Option<&offline::PinSummary>) -> Option<Mark> {
+        let sum = sum?;
+        Some(if sum.complete() {
+            Mark::Done
+        } else if sum.failed > 0 && !sum.downloading && sum.done + sum.failed == sum.total {
+            Mark::Failed
+        } else {
+            Mark::Progress(sum.fraction())
+        })
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Mark::Done => "Downloaded",
+            Mark::Progress(f) if f > 0.0 => "Downloading",
+            Mark::Progress(_) => "Waiting to download",
+            Mark::Failed => "Download failed",
+        }
+    }
+}
+
+/// The small glyph for a [`Mark`], centred at `center`, about `size` across.
+pub fn mark(ui: &Ui, center: egui::Pos2, size: f32, m: Mark) {
+    let t = Tokens::of(ui);
+    let r = size / 2.0;
+    match m {
+        Mark::Done => crate::icons::paint(ui.painter(), Rect::from_center_size(center, vec2(size, size)), crate::icons::Icon::Downloaded, t.muted),
+        Mark::Progress(f) => crate::icons::progress_ring(ui.painter(), center, r * 0.8, f, t.accent, t.hairline),
+        Mark::Failed => {
+            ui.painter().circle_stroke(center, r * 0.8, egui::Stroke::new(1.3, t.warn));
+            ui.painter().text(center, Align2::CENTER_CENTER, "!", FontId::new(size * 0.7, semibold()), t.warn);
+        }
+    }
+}
+
 /// Muted small-caps-ish section label.
 pub fn section(ui: &mut Ui, text: &str) {
     let t = Tokens::of(ui);

@@ -28,8 +28,14 @@ impl ListenerApp {
         self.section(ui, "Library");
         for (label, route) in [("Recently Added", Route::Recent), ("Artists", Route::Artists), ("Albums", Route::Albums), ("Songs", Route::Songs), ("Offline", Route::Offline)] {
             let on = active.as_ref() == Some(&route);
-            if self.place(ui, label, on).clicked() {
+            let is_offline = route == Route::Offline;
+            let resp = self.place(ui, label, on);
+            if resp.clicked() {
                 self.actions.push(Action::Go(route));
+            }
+            // While downloads run, a small ring says how far along they are.
+            if is_offline && let Some(f) = self.download_progress() {
+                icons::progress_ring(ui.painter(), pos2(resp.rect.right() - 12.0, resp.rect.center().y), 5.0, f, t.accent, t.hairline);
             }
         }
         ui.add_space(18.0);
@@ -80,6 +86,16 @@ impl ListenerApp {
                 }
             });
         });
+    }
+
+    /// Overall progress of unfinished downloads, while any are moving.
+    fn download_progress(&self) -> Option<f32> {
+        let s = &self.offline_snap;
+        if s.paused || s.active == 0 {
+            return None;
+        }
+        let (done, total) = s.pins.iter().filter(|p| !p.complete()).fold((0u64, 0u64), |(d, t), p| (d + p.bytes_done, t + p.bytes_total));
+        Some(if total > 0 { done as f32 / total as f32 } else { 0.0 })
     }
 
     /// The sidebar entry the current place belongs to.

@@ -30,6 +30,8 @@ enum Verb {
     Play,
     PlayNext,
     Add,
+    /// Toggle keeping it offline.
+    Download,
 }
 
 const WIDTH: f32 = 640.0;
@@ -53,14 +55,16 @@ impl ListenerApp {
                 i.consume_key(Modifiers::NONE, Key::Enter),
                 i.consume_key(Modifiers::NONE, Key::ArrowUp),
                 i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::D)),
             ]
         });
-        let [cmd_enter, alt_enter, shift_enter, enter, up, down] = keys;
+        let [cmd_enter, alt_enter, shift_enter, enter, up, down, download] = keys;
         let mut verb = match (cmd_enter, alt_enter, shift_enter, enter) {
             (true, ..) => Some(Verb::Play),
             (_, true, ..) => Some(Verb::PlayNext),
             (_, _, true, _) => Some(Verb::Add),
             (.., true) => Some(Verb::Open),
+            _ if download => Some(Verb::Download),
             _ => None,
         };
         let Some(palette) = self.palette.as_mut() else { return };
@@ -204,7 +208,7 @@ impl ListenerApp {
             ui.painter().text(
                 pos2(bar.left() + 18.0, bar.center().y),
                 egui::Align2::LEFT_CENTER,
-                "⏎ open    ⌘⏎ play    ⌥⏎ play next    ⇧⏎ add to queue    ↑↓ move",
+                "⏎ open    ⌘⏎ play    ⌥⏎ play next    ⇧⏎ add to queue    ⇧⌘D download",
                 FontId::proportional(11.0),
                 t.muted,
             );
@@ -245,16 +249,20 @@ impl ListenerApp {
                     Verb::Play => QueueAction::Play { start: 0 },
                     Verb::PlayNext => QueueAction::PlayNext,
                     Verb::Add => QueueAction::Add,
+                    // A whole artist is a lot to download by accident; do it per album.
+                    Verb::Download => return,
                 };
                 self.actions.push(Action::Artist(name, action));
             }
             Hit::Album(i) => {
                 let id = index.albums[i].id.clone();
+                let kept = self.offline_snap.pin(&offline::Pin::Album(id.clone())).is_some();
                 self.actions.push(match verb {
                     Verb::Open => Action::Go(Route::Album(id)),
                     Verb::Play => Action::Album(id, QueueAction::Play { start: 0 }),
                     Verb::PlayNext => Action::Album(id, QueueAction::PlayNext),
                     Verb::Add => Action::Album(id, QueueAction::Add),
+                    Verb::Download => Action::KeepOffline(super::Keep::Album(id), !kept),
                 });
             }
             Hit::Track(i) => {
@@ -266,6 +274,10 @@ impl ListenerApp {
                     Verb::Play => self.play_from_album(&tr, QueueAction::Play { start: 0 }),
                     Verb::PlayNext => self.play_from_album(&tr, QueueAction::PlayNext),
                     Verb::Add => self.play_from_album(&tr, QueueAction::Add),
+                    Verb::Download => {
+                        let kept = self.offline_snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
+                        self.actions.push(Action::KeepOffline(super::Keep::Tracks(vec![tr]), !kept));
+                    }
                 }
             }
         }

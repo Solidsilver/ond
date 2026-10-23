@@ -39,7 +39,7 @@ pub use output::{CpalBackend, OutputBackend, OutputError, PREBUFFER_SECS, RingCt
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
 pub use dither::Tpdf;
 pub use signal::{BitPerfectStatus, DeviceCaps, RateRange, SignalPath, assess, choose_rate, describe, khz};
-pub use streamcache::{CacheConfig, StreamCache};
+pub use streamcache::{CacheConfig, CacheKey, StreamCache};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use decode::{DecoderMsg, Session};
@@ -48,7 +48,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
-use streamcache::CacheKey;
 
 /// Start fetching the next track this long before the current one ends, even if
 /// the current download hasn't finished.

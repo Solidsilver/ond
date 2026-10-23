@@ -29,6 +29,7 @@ Double-click a track to play it. The rest of the album then plays in order.
 | `library`   | Local mirror in redb 4 (postcard rows + hand-written tuple-key index tables for artist, album and track order; schema version in a `meta` table). Artwork will live on disk, not in the db |
 | `audio`     | Engine: fetch → symphonia decode → DSP → `rtrb` ring → `OutputBackend`. `PlaybackMode::{Normal, BitPerfect}`, seeking (ring flushed by the output callback), next-track prefetch. Only the cpal backend exists today |
 | `streamcache` | Progressive, seekable download cache: a tokio task fills `<id>.<suffix>` with HTTP Range requests while a blocking `Read + Seek` reader plays from it. LRU-capped (2 GB default, `stream_cache_mb` in settings.json); partial files are discarded. Lives in `~/Library/Caches/dev.listener.Listener/streams` |
+| `offline`   | Offline downloads: pinned albums / playlists / tracks (refcounted, `offline.json`), a 2-at-a-time download queue that resumes with Range after interruptions and restarts, retries with backoff, verifies sizes, and hard-links complete stream-cache files instead of re-downloading. Never evicted; optional size limit. Lives in `~/Library/Application Support/dev.listener.Listener/Offline` (changeable from the Offline page) |
 | `analysis`  | Placeholder for waveform, spectrum, loudness/DR and fake-hi-res detection |
 
 ## Checks
