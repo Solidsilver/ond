@@ -1248,3 +1248,35 @@ fn column_edges_drag_and_persist() {
 
 #[cfg(test)]
 mod perf;
+
+#[test]
+fn the_now_playing_heart_toggles_both_ways() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<ListenerApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    let id = app_mut(&mut h).queue.current.as_ref().unwrap().track.id.clone();
+    let loved = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).favorites.is_on(StarKind::Song, &id);
+    assert!(loved(&mut h), "the fixture's playing song starts loved");
+    h.get_by_label("Unlove (⇧⌘L)").click();
+    h.run_steps(2);
+    assert!(!loved(&mut h), "unloved from the now-playing display");
+    // Clicking straight onto the heart again (the display under it reads as
+    // not hovered while the pointer is on the heart) must love it again.
+    h.get_by_label("Love (⇧⌘L)").click();
+    h.run_steps(2);
+    assert!(loved(&mut h), "loved again from the now-playing display");
+    *h.state_mut() = None;
+}

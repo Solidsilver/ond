@@ -212,7 +212,9 @@ impl ListenerApp {
         if readout_resp.as_ref().is_some_and(|r| r.clicked()) {
             self.output.request_open();
         }
-        let heart_resp = ui.interact(heart, ui.scope_id().with("lcd-heart"), if loved || hovering { Sense::click() } else { Sense::hover() });
+        // Always clickable: the heart sits over the display, so while the pointer
+        // is on it the display itself doesn't count as hovered.
+        let heart_resp = ui.interact(heart, ui.scope_id().with("lcd-heart"), Sense::click());
         if loved || hovering || heart_resp.hovered() {
             let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if heart_resp.hovered() { t.text } else { t.muted }) };
             icons::paint(&painter, Rect::from_center_size(heart.center(), vec2(11.0, 11.0)), icon, color);
