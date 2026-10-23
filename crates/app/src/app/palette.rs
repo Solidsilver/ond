@@ -297,9 +297,9 @@ impl ListenerApp {
                 match verb {
                     Verb::Open => self.actions.push(Action::Go(Route::Album(album_id))),
                     // Plays the album from this track, as double-clicking it there would.
-                    Verb::Play => self.play_from_album(&tr, QueueAction::Play { start: 0 }),
-                    Verb::PlayNext => self.play_from_album(&tr, QueueAction::PlayNext),
-                    Verb::Add => self.play_from_album(&tr, QueueAction::Add),
+                    Verb::Play => self.view().play_from_album(&tr, QueueAction::Play { start: 0 }),
+                    Verb::PlayNext => self.view().play_from_album(&tr, QueueAction::PlayNext),
+                    Verb::Add => self.view().play_from_album(&tr, QueueAction::Add),
                     Verb::Download => {
                         let kept = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
                         self.actions.push(Action::KeepOffline(super::Keep::Tracks(vec![tr]), !kept));

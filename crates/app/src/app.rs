@@ -23,6 +23,7 @@ mod sidebar;
 mod songs;
 mod toasts;
 mod toolbar;
+mod view_ctx;
 mod widgets;
 
 #[cfg(test)]
@@ -150,6 +151,8 @@ pub use crate::player::QueueAction;
 /// A state change requested by a view; applied after the frame is drawn.
 pub enum Action {
     Go(Route),
+    /// The Info tab wants a song's play count (asked once per song).
+    NeedSongStats(String),
     Back,
     Forward,
     BackBy(usize),
@@ -1281,6 +1284,12 @@ impl ListenerApp {
         }
         match action {
             Action::Go(route) => self.go(route),
+            Action::NeedSongStats(id) => {
+                if !self.song_stats.contains_key(&id) && self.session.client.is_some() {
+                    self.song_stats.insert(id.clone(), None);
+                    self.bridge.fetch_song_stats(self.session.client.clone(), id);
+                }
+            }
             Action::Back => {
                 self.ui.nav.back();
                 self.on_arrive();
@@ -1837,7 +1846,7 @@ impl ListenerApp {
                 .exact_size(diagnostics::BAR_H)
                 .resizable(false)
                 .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin::symmetric(12, 0)))
-                .show(ui, |ui| self.diagnostics_bar(ui));
+                .show(ui, |ui| self.view().diagnostics_bar(ui));
         }
         let left_panel = match plan.left {
             None => {

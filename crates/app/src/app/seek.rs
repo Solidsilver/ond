@@ -2,7 +2,8 @@
 //! or drag to seek, the downloaded part shaded, a pulse ahead of the position
 //! while buffering, and a knob while it's held or hovered.
 
-use super::{Action, ListenerApp};
+use super::Action;
+use super::view_ctx::ViewCtx;
 use audio::PlayState;
 use egui::{Color32, Rect, Response, Sense, Ui, pos2, vec2};
 
@@ -24,11 +25,11 @@ pub(super) struct SeekStyle {
     pub knob_r: f32,
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// Draws `bar` and handles seeking from `strip` (a taller area around it,
     /// easier to grab). Returns the position it shows (the drag preview while
     /// dragging) and the strip's response.
-    pub(super) fn seek_line(&mut self, ui: &mut Ui, bar: Rect, strip: Rect, id: &str, s: &SeekStyle) -> (f64, Response) {
+    pub fn seek_line(&mut self, ui: &mut Ui, bar: Rect, strip: Rect, id: &str, s: &SeekStyle) -> (f64, Response) {
         let state = self.engine.status.state();
         let dur = self.duration_secs().filter(|d| *d > 0.0);
         let seekable = dur.is_some() && matches!(state, PlayState::Playing | PlayState::Paused | PlayState::Buffering);
@@ -71,7 +72,7 @@ impl ListenerApp {
 
     /// The elapsed and remaining times for a line showing `shown`: "2:21",
     /// "−4:02" (empty while the length isn't known).
-    pub(super) fn seek_times(&self, shown: f64) -> (String, String) {
+    pub fn seek_times(&self, shown: f64) -> (String, String) {
         let remaining = self.duration_secs().filter(|d| *d > 0.0).map(|d| format!("−{}", crate::fmt::clock((d - shown).max(0.0)))).unwrap_or_default();
         (crate::fmt::clock(shown), remaining)
     }

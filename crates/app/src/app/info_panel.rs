@@ -5,7 +5,8 @@
 
 use super::album_page::{Credit, credits};
 use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link};
-use super::{Action, ListenerApp, SongStats};
+use super::view_ctx::ViewCtx;
+use super::{Action, SongStats};
 use crate::icons::Icon;
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
@@ -13,10 +14,10 @@ use egui::{FontId, Sense, Ui, vec2};
 use library::Track;
 
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// `header`: lead with the song's artwork and title (not in the Player,
     /// where they're right above).
-    pub(super) fn sidebar_info(&mut self, ui: &mut Ui, header: bool) {
+    pub fn sidebar_info(&mut self, ui: &mut Ui, header: bool) {
         let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
             // Wrapped to the column: a long line must not widen the sidebar.
             let t = Tokens::of(ui);
@@ -33,7 +34,9 @@ impl ListenerApp {
             });
             return;
         };
-        self.ensure_song_stats(&track);
+        if !self.song_stats.contains_key(&track.id) {
+            self.actions.push(Action::NeedSongStats(track.id.clone()));
+        }
         let album = self.data.album(&track.album_id).cloned();
         // Vertical only, and the content held to the column: a long name or
         // value wraps instead of widening (and then clipping) the sidebar.
@@ -51,31 +54,31 @@ impl ListenerApp {
                 kv_section(ui, "Credits");
                 for c in &people {
                     let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
-                    self.links_row(ui, &c.role, items);
+                    links_row(self.actions, ui, &c.role, items);
                 }
             }
 
             if let Some(al) = &album {
                 kv_section(ui, "Album");
-                self.links_row(ui, "Album", vec![(al.name.clone(), Action::Go(Route::Album(al.id.clone())))]);
+                links_row(self.actions, ui, "Album", vec![(al.name.clone(), Action::Go(Route::Album(al.id.clone())))]);
                 if let Some(artist) = &al.artist {
-                    self.links_row(ui, "Album artist", vec![(artist.clone(), Action::Go(Route::Artist { name: artist.clone(), id: al.artist_ref.clone() }))]);
+                    links_row(self.actions, ui, "Album artist", vec![(artist.clone(), Action::Go(Route::Artist { name: artist.clone(), id: al.artist_ref.clone() }))]);
                 }
                 if let Some(place) = track_place(&track) {
                     kv_text(ui, "Track", &place);
                 }
                 if let Some(y) = al.year {
-                    self.links_row(ui, "Year", vec![(y.to_string(), Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }))]);
+                    links_row(self.actions, ui, "Year", vec![(y.to_string(), Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }))]);
                 }
                 let genres: Vec<(String, Action)> =
                     al.all_genres().into_iter().map(|g| (g.to_owned(), Action::Go(Route::Filter { kind: FilterKind::Genre, value: g.to_owned() }))).collect();
                 if !genres.is_empty() {
-                    self.links_row(ui, if genres.len() == 1 { "Genre" } else { "Genres" }, genres);
+                    links_row(self.actions, ui, if genres.len() == 1 { "Genre" } else { "Genres" }, genres);
                 }
                 let labels: Vec<(String, Action)> =
                     al.labels.iter().map(|l| (l.clone(), Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }))).collect();
                 if !labels.is_empty() {
-                    self.links_row(ui, "Label", labels);
+                    links_row(self.actions, ui, "Label", labels);
                 }
             }
 
@@ -100,14 +103,6 @@ impl ListenerApp {
             }
             ui.add_space(24.0);
         });
-    }
-
-    /// Asks the server for a song's play count the first time Info shows it.
-    fn ensure_song_stats(&mut self, track: &Track) {
-        if !self.song_stats.contains_key(&track.id) && self.session.client.is_some() {
-            self.song_stats.insert(track.id.clone(), None);
-            self.bridge.fetch_song_stats(self.session.client.clone(), track.id.clone());
-        }
     }
 
     /// Small artwork, the title, and artist / album as links.
@@ -146,27 +141,6 @@ impl ListenerApp {
         });
     }
 
-    /// A label and one or more links ("Matthew West, Mark Hall"), wrapping.
-    pub(super) fn links_row(&mut self, ui: &mut Ui, label: &str, items: Vec<(String, Action)>) {
-        let t = Tokens::of(ui);
-        kv_row(ui, label, |ui| {
-            // Rows as tall as the text, so links sit level with their label
-            // (a wrapped row takes its height from this when it's created).
-            ui.spacing_mut().interact_size.y = 0.0;
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
-                for (i, (text, action)) in items.into_iter().enumerate() {
-                    if i > 0 {
-                        ui.label(egui::RichText::new(", ").size(VALUE).color(t.muted));
-                    }
-                    if link(ui, &text, FontId::proportional(VALUE), t.accent).clicked() {
-                        self.actions.push(action);
-                    }
-                }
-            });
-        });
-    }
-
     /// Loudness, peak and dynamic range, a chip per finding (evidence on
     /// hover); or a way to measure it.
     fn analysis_rows(&mut self, ui: &mut Ui, track: &Track) {
@@ -199,6 +173,27 @@ impl ListenerApp {
             });
         }
     }
+}
+
+/// A label and one or more links ("Matthew West, Mark Hall"), wrapping.
+pub(super) fn links_row(actions: &mut Vec<Action>, ui: &mut Ui, label: &str, items: Vec<(String, Action)>) {
+    let t = Tokens::of(ui);
+    kv_row(ui, label, |ui| {
+        // Rows as tall as the text, so links sit level with their label
+        // (a wrapped row takes its height from this when it's created).
+        ui.spacing_mut().interact_size.y = 0.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
+            for (i, (text, action)) in items.into_iter().enumerate() {
+                if i > 0 {
+                    ui.label(egui::RichText::new(", ").size(VALUE).color(t.muted));
+                }
+                if link(ui, &text, FontId::proportional(VALUE), t.accent).clicked() {
+                    actions.push(action);
+                }
+            }
+        });
+    });
 }
 
 /// The song's own credits; a composer tag stands in when there are no

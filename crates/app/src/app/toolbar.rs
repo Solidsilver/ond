@@ -168,8 +168,9 @@ impl ListenerApp {
             knob: t.text,
             knob_r: 3.5,
         };
-        let (shown, strip_resp) = self.seek_line(ui, bar, strip, "lcd-seek", &style);
-        let (elapsed, remaining) = self.seek_times(shown);
+        let mut v = self.view();
+        let (shown, strip_resp) = v.seek_line(ui, bar, strip, "lcd-seek", &style);
+        let (elapsed, remaining) = v.seek_times(shown);
         painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, elapsed, time_font.clone(), t.muted);
         painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
 

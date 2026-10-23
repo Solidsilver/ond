@@ -4,6 +4,7 @@
 //! Rows act like the album page's: double-click (or ⏎) plays the track's
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
+use super::view_ctx::ViewCtx;
 use super::widgets::elide;
 use super::{Action, Focus, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
@@ -110,7 +111,7 @@ impl ListenerApp {
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let n = self.data.tracks.all.len();
-        self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
+        self.view().heading(ui, "Songs", (n > 0).then(|| n.to_string()));
         if n == 0 {
             let (title, body) = if self.sync.tracks {
                 ("Syncing your tracks…", "Songs appear here as the library comes in.")
@@ -196,15 +197,15 @@ impl ListenerApp {
                 let label = format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" });
                 resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
                 if resp.double_clicked() {
-                    self.play_from_album(tr, QueueAction::Play { start: 0 });
+                    self.view().play_from_album(tr, QueueAction::Play { start: 0 });
                 } else if resp.clicked() {
                     self.ui.songs.selected = Some(row);
                     self.ui.focus = Focus::Main;
                 }
-                let source = self.album_source(&tr.album_id);
+                let source = self.view().album_source(&tr.album_id);
                 resp.context_menu(|ui| {
                     if ui.button("Play").clicked() {
-                        self.play_from_album(tr, QueueAction::Play { start: 0 });
+                        self.view().play_from_album(tr, QueueAction::Play { start: 0 });
                     }
                     self.track_menu(ui, tr, &source);
                     if ui.button("Go to album").clicked() {
@@ -213,23 +214,6 @@ impl ListenerApp {
                 });
             }
         });
-    }
-
-    fn album_source(&self, album_id: &str) -> Source {
-        Source::Album { id: album_id.to_owned(), name: self.data.album(album_id).map(|a| a.name.clone()).unwrap_or_default() }
-    }
-
-    /// Plays `tr`'s album starting at `tr` (`Play`), or queues just `tr`.
-    pub(super) fn play_from_album(&mut self, tr: &Track, action: QueueAction) {
-        let source = self.album_source(&tr.album_id);
-        match action {
-            QueueAction::Play { .. } | QueueAction::Shuffle => {
-                let album = self.data.tracks.album(&tr.album_id).map(|s| s.to_vec()).unwrap_or_else(|| vec![tr.clone()]);
-                let start = album.iter().position(|t| t.id == tr.id).unwrap_or(0);
-                self.actions.push(Action::Tracks { tracks: album, source, action: QueueAction::Play { start } });
-            }
-            QueueAction::PlayNext | QueueAction::Add => self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source, action }),
-        }
     }
 
     /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
@@ -242,13 +226,13 @@ impl ListenerApp {
         let Some(sel) = self.ui.songs.selected.filter(|s| *s < order.len()) else { return };
         let tr = self.data.tracks.all[order[sel]].clone();
         if k.enter {
-            self.play_from_album(&tr, QueueAction::Play { start: 0 });
+            self.view().play_from_album(&tr, QueueAction::Play { start: 0 });
         }
         if k.play_next {
-            self.play_from_album(&tr, QueueAction::PlayNext);
+            self.view().play_from_album(&tr, QueueAction::PlayNext);
         }
         if k.add {
-            self.play_from_album(&tr, QueueAction::Add);
+            self.view().play_from_album(&tr, QueueAction::Add);
         }
     }
 }
@@ -283,6 +267,25 @@ fn sort_arrow(ui: &Ui, at: egui::Pos2, descending: bool, color: egui::Color32) {
         vec![pos2(at.x - w, at.y + h), pos2(at.x + w, at.y + h), pos2(at.x, at.y - h)]
     };
     ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+}
+
+impl ViewCtx<'_> {
+    pub(super) fn album_source(&self, album_id: &str) -> Source {
+        Source::Album { id: album_id.to_owned(), name: self.data.album(album_id).map(|a| a.name.clone()).unwrap_or_default() }
+    }
+
+    /// Plays `tr`'s album starting at `tr` (`Play`), or queues just `tr`.
+    pub(super) fn play_from_album(&mut self, tr: &Track, action: QueueAction) {
+        let source = self.album_source(&tr.album_id);
+        match action {
+            QueueAction::Play { .. } | QueueAction::Shuffle => {
+                let album = self.data.tracks.album(&tr.album_id).map(|s| s.to_vec()).unwrap_or_else(|| vec![tr.clone()]);
+                let start = album.iter().position(|t| t.id == tr.id).unwrap_or(0);
+                self.actions.push(Action::Tracks { tracks: album, source, action: QueueAction::Play { start } });
+            }
+            QueueAction::PlayNext | QueueAction::Add => self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source, action }),
+        }
+    }
 }
 
 #[cfg(test)]

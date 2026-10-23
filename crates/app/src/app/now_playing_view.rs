@@ -240,8 +240,9 @@ impl ListenerApp {
             knob: t.text,
             knob_r: 6.0,
         };
-        let (shown, _) = self.seek_line(ui, bar, rect, "player-seek", &style);
-        let (elapsed, remaining) = self.seek_times(shown);
+        let mut v = self.view();
+        let (shown, _) = v.seek_line(ui, bar, rect, "player-seek", &style);
+        let (elapsed, remaining) = v.seek_times(shown);
         let small = FontId::proportional(11.5);
         ui.horizontal(|ui| {
             // Line the times up with the bar's ends.

@@ -241,7 +241,7 @@ impl ListenerApp {
                             }
                         });
                         ui.add_space(6.0);
-                        self.pin_status(ui, &pin);
+                        self.view().pin_status(ui, &pin);
                     });
                     ui.min_rect().bottom() - top
                 });
@@ -302,7 +302,7 @@ impl ListenerApp {
                 super::widgets::kv_section(ui, "Credits");
                 for c in &people {
                     let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
-                    self.links_row(ui, &c.role, items);
+                    super::info_panel::links_row(&mut self.actions, ui, &c.role, items);
                 }
             }
             super::widgets::kv_section(ui, "Analysis");
@@ -379,7 +379,7 @@ impl ListenerApp {
                         }
                     });
                     ui.add_space(6.0);
-                    self.pin_status(ui, &pin);
+                    self.view().pin_status(ui, &pin);
                 });
             });
         });

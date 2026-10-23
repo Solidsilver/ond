@@ -4,7 +4,7 @@
 //! shows is removed from anywhere else. Values refresh at most twice a second
 //! and the bar asks for no repaints of its own.
 
-use super::ListenerApp;
+use super::view_ctx::ViewCtx;
 use crate::theme::Tokens;
 use audio::{BitPerfectStatus, PlayState, PlaybackMode};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
@@ -90,7 +90,7 @@ impl Diagnostics {
     }
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// The readings, recomputed at most every [`REFRESH`].
     fn diagnostics_segments(&mut self) -> Arc<Vec<Segment>> {
         let now = Instant::now();
@@ -204,7 +204,7 @@ impl ListenerApp {
 
     /// Draws the bar: segments left to right, divided by hairlines, dropping
     /// whatever doesn't fit.
-    pub(super) fn diagnostics_bar(&mut self, ui: &mut Ui) {
+    pub fn diagnostics_bar(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let segs = self.diagnostics_segments();
         let rect = ui.available_rect_before_wrap();

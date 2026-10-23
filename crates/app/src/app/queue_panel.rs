@@ -74,7 +74,7 @@ impl ListenerApp {
         match self.ui.queue_ui.tab {
             QueueTab::Lyrics => return self.sidebar_lyrics(ui),
             // The Player already shows the song large right above.
-            QueueTab::Info => return self.sidebar_info(ui, lyrics_tab),
+            QueueTab::Info => return self.view().sidebar_info(ui, lyrics_tab),
             QueueTab::UpNext | QueueTab::History => {}
         }
 

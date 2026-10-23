@@ -4,7 +4,8 @@
 
 use super::browse::grid_metrics;
 use super::widgets::{Mark, elide, link};
-use super::{Action, ListenerApp, QueueAction};
+use super::view_ctx::ViewCtx;
+use super::{Action, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
@@ -55,7 +56,7 @@ pub fn pin_text(snap: &Snapshot, s: &PinSummary) -> String {
     }
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// A mark and a few words next to the Play buttons, only when `pin` is kept.
     pub(super) fn pin_status(&self, ui: &mut Ui, pin: &Pin) {
         let Some(s) = self.downloads.snap.pin(pin) else { return };
@@ -140,7 +141,7 @@ impl ListenerApp {
     }
 
     /// The storage summary, then the limit and Finder.
-    fn storage_line(&mut self, ui: &mut Ui, snap: &Snapshot) {
+    pub(super) fn storage_line(&mut self, ui: &mut Ui, snap: &Snapshot) {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -153,7 +154,7 @@ impl ListenerApp {
             let resp = link(ui, &limit, FontId::proportional(12.0), t.muted);
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new("Storage limit").font(FontId::new(12.0, semibold())));
-                limit_choices(ui, snap.limit, &mut self.actions);
+                limit_choices(ui, snap.limit, self.actions);
             });
             ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
             let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.downloads.base.display().to_string());
@@ -170,7 +171,7 @@ impl ListenerApp {
     }
 
     /// What's still downloading, with pause / resume and retry.
-    fn in_progress(&mut self, ui: &mut Ui, snap: &Snapshot, pins: &[&PinSummary]) {
+    pub(super) fn in_progress(&mut self, ui: &mut Ui, snap: &Snapshot, pins: &[&PinSummary]) {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             super::widgets::section(ui, "In progress");
@@ -194,7 +195,7 @@ impl ListenerApp {
 
     /// One kept album / playlist / song: art, name, status, and a thin bar
     /// while it's on its way. Click opens it; right-click removes.
-    fn pin_row(&mut self, ui: &mut Ui, snap: &Snapshot, p: &PinSummary) {
+    pub(super) fn pin_row(&mut self, ui: &mut Ui, snap: &Snapshot, p: &PinSummary) {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(760.0), 48.0), Sense::click());
         // Off screen: keep the space, skip the rest (thousands of kept songs).

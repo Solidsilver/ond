@@ -33,7 +33,7 @@ impl ListenerApp {
             FavTab::Artists => format!("Artists {}", v.artists.len()),
         };
         ui.horizontal(|ui| {
-            self.heading(ui, "Favorites", None);
+            self.view().heading(ui, "Favorites", None);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Right-to-left layout: the pill itself still reads left to right.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -69,7 +69,7 @@ impl ListenerApp {
                 let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
                 egui::ScrollArea::vertical().id_salt("favorite-albums").auto_shrink(false).show(ui, |ui| {
                     for chunk in ids.chunks(cols) {
-                        self.grid_row(ui, chunk, tile);
+                        self.view().grid_row(ui, chunk, tile);
                     }
                 });
             }
