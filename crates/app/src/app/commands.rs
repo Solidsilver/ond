@@ -7,9 +7,8 @@ use crate::bridge::PlaylistEdit;
 use crate::favorites::StarKind;
 use crate::keys::Cmd;
 use crate::nav::Route;
-use crate::theme::ThemePref;
 use crate::window::WindowMode;
-use audio::{Command, PlaybackMode};
+use audio::PlaybackMode;
 use library::Track;
 
 /// A change to a playlist, from a view.
@@ -50,8 +49,7 @@ impl ListenerApp {
                 // Bit-perfect leaves volume to the DAC.
                 if !self.bit_perfect {
                     let step = if cmd == Cmd::VolumeUp { VOLUME_STEP } else { -VOLUME_STEP };
-                    self.volume = (self.volume + step).clamp(0.0, 1.0);
-                    self.engine.send(Command::SetVolume(self.volume));
+                    self.set_volume(self.volume() + step);
                 }
             }
             Cmd::SeekForward | Cmd::SeekBack => {
@@ -103,14 +101,10 @@ impl ListenerApp {
             Cmd::ToggleBitPerfect => {
                 self.bit_perfect = !self.bit_perfect;
                 let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                self.engine.send(Command::SetMode(mode));
-                self.output.remember_mode(mode, &self.engine, &self.paths);
+                self.output.set_mode_in_use(mode, &self.engine);
             }
-            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics.shown)),
-            Cmd::Appearance(i) => {
-                let pref = [ThemePref::System, ThemePref::Light, ThemePref::Dark][usize::from(i.min(2))];
-                self.actions.push(Action::SetTheme(pref));
-            }
+            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics_shown())),
+            Cmd::Appearance(pref) => self.actions.push(Action::SetTheme(pref)),
         }
     }
 

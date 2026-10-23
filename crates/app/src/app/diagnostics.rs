@@ -19,7 +19,6 @@ const LATENCY_MAX_AGE: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct Diagnostics {
-    pub shown: bool,
     latency: Option<Duration>,
     latency_at: Option<Instant>,
     latency_pending: bool,
@@ -48,10 +47,6 @@ pub enum Tone {
 }
 
 impl Diagnostics {
-    pub fn new(shown: bool) -> Self {
-        Self { shown, ..Default::default() }
-    }
-
     pub fn latency(&self) -> Option<Duration> {
         self.latency
     }

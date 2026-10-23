@@ -2,7 +2,7 @@
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
 use crate::favorites::{StarKind, Starred, UserMeta};
-use crate::settings::{Paths, Settings};
+use crate::settings::Settings;
 use crate::sync;
 use library::{Album, Library, Track};
 use std::collections::{HashMap, HashSet};
@@ -260,11 +260,11 @@ impl Bridge {
         }
     }
 
-    /// Pings the server; on success persists settings (+ password when `remember`).
+    /// Pings the server; on success stores the password in the keychain.
     ///
     /// With a saved login (`password` is `None`) an unreachable server isn't a
     /// login failure: the app opens offline and keeps retrying until it's back.
-    pub fn connect(&self, settings: Settings, password: Option<String>, paths: Arc<Paths>) {
+    pub fn connect(&self, settings: Settings, password: Option<String>) {
         let this = self.clone();
         let session = self.session();
         self.rt.spawn(async move {
@@ -289,11 +289,10 @@ impl Bridge {
             }
             match pinged {
                 Ok(server) => {
+                    // The account itself is recorded by the app (in its preferences)
+                    // when `Connected` arrives for a live session.
                     let s = settings.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        if let Err(e) = s.save_login(&paths) {
-                            tracing::warn!("save settings: {e}");
-                        }
                         if let Err(e) = s.store_password(&password) {
                             tracing::warn!("keychain: {e}");
                         }

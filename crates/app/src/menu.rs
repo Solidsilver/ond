@@ -9,6 +9,7 @@
 //! through to egui.
 
 use crate::keys::Cmd;
+use crate::theme::ThemePref;
 
 #[cfg(target_os = "macos")]
 pub use imp::MenuBar;
@@ -21,7 +22,7 @@ impl MenuBar {
     pub fn install(_post: impl Fn(Cmd) + Send + Sync + 'static) -> Option<Self> {
         None
     }
-    pub fn sync(&mut self, _queue: bool, _bit_perfect: bool, _theme: u8) {}
+    pub fn sync(&mut self, _queue: bool, _bit_perfect: bool, _theme: ThemePref) {}
     pub fn set_diagnostics(&mut self, _on: bool) {}
 }
 
@@ -63,16 +64,16 @@ fn cmd_of(id: &str) -> Option<Cmd> {
         Cmd::Place(3),
         Cmd::Place(4),
         Cmd::Place(5),
-        Cmd::Appearance(0),
-        Cmd::Appearance(1),
-        Cmd::Appearance(2),
+        Cmd::Appearance(ThemePref::System),
+        Cmd::Appearance(ThemePref::Light),
+        Cmd::Appearance(ThemePref::Dark),
     ];
     ALL.iter().copied().find(|c| id_of(*c) == id)
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{cmd_of, id_of};
+    use super::{ThemePref, cmd_of, id_of};
     use crate::keys::{Cmd, keys_for};
     use muda::accelerator::Accelerator;
     use muda::{AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -83,7 +84,7 @@ mod imp {
         bit_perfect: CheckMenuItem,
         themes: [CheckMenuItem; 3],
         diagnostics: CheckMenuItem,
-        shown: Option<(bool, bool, u8)>,
+        shown: Option<(bool, bool, ThemePref)>,
         diagnostics_shown: Option<bool>,
     }
 
@@ -192,7 +193,7 @@ mod imp {
             .ok()?;
             let queue = check("Show Queue", Cmd::ToggleQueue);
             let diagnostics = check("Diagnostics Bar", Cmd::ToggleDiagnostics);
-            let themes = [check("System", Cmd::Appearance(0)), check("Light", Cmd::Appearance(1)), check("Dark", Cmd::Appearance(2))];
+            let themes = ThemePref::ALL.map(|t| check(t.label(), Cmd::Appearance(t)));
             let appearance = Submenu::with_items("Appearance", true, &[&themes[0], &themes[1], &themes[2]]).ok()?;
             let go = Submenu::with_items(
                 "Go",
@@ -257,7 +258,7 @@ mod imp {
         }
 
         /// Keeps the check marks in step with the app (cheap when nothing changed).
-        pub fn sync(&mut self, queue: bool, bit_perfect: bool, theme: u8) {
+        pub fn sync(&mut self, queue: bool, bit_perfect: bool, theme: ThemePref) {
             if self.shown == Some((queue, bit_perfect, theme)) {
                 return;
             }
@@ -265,7 +266,7 @@ mod imp {
             self.queue.set_checked(queue);
             self.bit_perfect.set_checked(bit_perfect);
             for (i, t) in self.themes.iter().enumerate() {
-                t.set_checked(i == usize::from(theme));
+                t.set_checked(ThemePref::ALL[i] == theme);
             }
         }
     }
@@ -294,7 +295,7 @@ mod tests {
 
     #[test]
     fn ids_round_trip() {
-        for cmd in [Cmd::Next, Cmd::Place(3), Cmd::Appearance(2), Cmd::ToggleBitPerfect] {
+        for cmd in [Cmd::Next, Cmd::Place(3), Cmd::Appearance(ThemePref::Dark), Cmd::ToggleBitPerfect] {
             assert_eq!(cmd_of(&id_of(cmd)), Some(cmd));
         }
         assert_eq!(cmd_of("nonsense"), None);

@@ -101,26 +101,26 @@ impl ListenerApp {
 
     fn general_settings(&mut self, ui: &mut Ui) {
         group(ui, "Appearance", |ui| {
-            let mut theme = self.theme;
+            let mut theme = self.theme();
             if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
                 self.actions.push(Action::SetTheme(theme));
             }
         });
         group(ui, "Listening", |ui| {
-            let mut scrobble = self.scrobble;
+            let mut scrobble = self.scrobble();
             if narrow_toggle(ui, &mut scrobble, "Scrobble plays").changed() {
                 self.actions.push(Action::SetScrobble(scrobble));
             }
             hint(ui, "Plays are reported to your server, which passes them on to Last.fm or ListenBrainz if set up.");
             ui.add_space(10.0);
-            let mut playing = self.analyze_playing;
+            let mut playing = self.analyze_playing();
             if narrow_toggle(ui, &mut playing, "Analyze tracks as they play").changed() {
                 self.actions.push(Action::SetAnalyzePlaying(playing));
             }
             hint(ui, "Measures loudness and dynamic range once a track has downloaded for playback.");
         });
         group(ui, "Advanced", |ui| {
-            let mut shown = self.diagnostics.shown;
+            let mut shown = self.diagnostics_shown();
             if narrow_toggle(ui, &mut shown, "Show diagnostics bar").changed() {
                 self.actions.push(Action::SetDiagnostics(shown));
             }

@@ -20,6 +20,7 @@ mod nav;
 mod now_playing;
 mod output;
 mod playback;
+mod prefs;
 mod queue;
 mod search;
 mod settings;
@@ -32,7 +33,7 @@ fn main() -> eframe::Result {
     init_logging();
 
     // Reopen in the mode (and place) the app was left in.
-    let windows = settings::Paths::resolve().ok().and_then(|p| settings::Settings::load(&p)).map(|s| s.window).unwrap_or_default();
+    let windows = settings::Paths::resolve().ok().and_then(|p| settings::Settings::read(&p.config_file)).map(|s| s.window).unwrap_or_default();
     let options = eframe::NativeOptions {
         viewport: windows.plan().builder(egui::ViewportBuilder::default().with_icon(window_icon())),
         renderer: eframe::Renderer::Wgpu,

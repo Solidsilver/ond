@@ -128,7 +128,7 @@ impl ListenerApp {
             .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    if self.output.picker_ui(ui, &self.engine, &self.paths, &mut self.bit_perfect) {
+                    if self.output.picker_ui(ui, &self.engine, &mut self.bit_perfect) {
                         self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
                     }
                     // The same few characters of signal path as the full window's display.

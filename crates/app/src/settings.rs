@@ -1,12 +1,37 @@
-//! Non-secret settings live in a JSON file; the password lives in the system keychain.
+//! Non-secret settings live in a JSON file; the password lives in the system
+//! keychain. The app reads and changes them through [`crate::prefs::Prefs`].
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const KEYRING_SERVICE: &str = "dev.listener.navidrome";
 
-/// One settings writer at a time (the UI thread and background tasks both save).
-static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// How a device plays, as remembered per device. Saved as "normal" /
+/// "bit-perfect", as earlier builds wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceMode {
+    Normal,
+    BitPerfect,
+}
+
+impl From<audio::PlaybackMode> for DeviceMode {
+    fn from(m: audio::PlaybackMode) -> Self {
+        match m {
+            audio::PlaybackMode::Normal => DeviceMode::Normal,
+            audio::PlaybackMode::BitPerfect => DeviceMode::BitPerfect,
+        }
+    }
+}
+
+impl From<DeviceMode> for audio::PlaybackMode {
+    fn from(m: DeviceMode) -> Self {
+        match m {
+            DeviceMode::Normal => audio::PlaybackMode::Normal,
+            DeviceMode::BitPerfect => audio::PlaybackMode::BitPerfect,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -18,9 +43,9 @@ pub struct Settings {
     /// Output device UID; `None` follows the system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
-    /// Playback mode the user picked per device UID: "normal" or "bit-perfect".
+    /// Playback mode the user picked per device UID.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub device_modes: std::collections::HashMap<String, String>,
+    pub device_modes: std::collections::HashMap<String, DeviceMode>,
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
@@ -63,10 +88,17 @@ pub struct Settings {
     /// The queue column's width as last dragged; `None` is the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_width: Option<f32>,
+    /// Software volume, 0..=1 (unused in bit-perfect mode).
+    #[serde(default = "full")]
+    pub volume: f32,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn full() -> f32 {
+    1.0
 }
 
 impl Default for Settings {
@@ -91,6 +123,7 @@ impl Default for Settings {
             diagnostics_bar: false,
             sidebar_width: None,
             queue_width: None,
+            volume: 1.0,
         }
     }
 }
@@ -123,53 +156,10 @@ impl Paths {
 }
 
 impl Settings {
-    pub fn load(paths: &Paths) -> Option<Self> {
-        let bytes = std::fs::read(&paths.config_file).ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
-    /// Writes the whole file. The app only ever changes it through
-    /// [`update`](Self::update) and [`save_login`](Self::save_login).
-    #[cfg(test)]
-    pub fn save(&self, paths: &Paths) -> anyhow::Result<()> {
-        let _one_writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-        self.write(paths)
-    }
-
-    /// A temporary file renamed over the old one, so a reader never sees half of it.
-    fn write(&self, paths: &Paths) -> anyhow::Result<()> {
-        let tmp = paths.config_file.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, &paths.config_file)?;
-        Ok(())
-    }
-
-    /// Loads, changes and saves the settings file (UI preferences the user just
-    /// changed). Does nothing before the first login has written the file.
-    /// Changes from any thread are applied one at a time, so none is lost.
-    pub fn update(paths: &Paths, change: impl FnOnce(&mut Settings)) {
-        let _one_writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(mut s) = Self::load(paths) else { return };
-        change(&mut s);
-        if let Err(e) = s.write(paths) {
-            tracing::warn!("saving settings: {e}");
-        }
-    }
-
-    /// After a successful login: records the account in the settings file,
-    /// keeping every other preference as it is on disk now (they may have
-    /// changed while the login was in flight).
-    pub fn save_login(&self, paths: &Paths) -> anyhow::Result<()> {
-        let _one_writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-        match Self::load(paths) {
-            Some(mut s) => {
-                s.server = self.server.clone();
-                s.username = self.username.clone();
-                s.signed_out = false;
-                s.write(paths)
-            }
-            None => self.write(paths),
-        }
+    /// Reads the settings file without changing anything (the window's first
+    /// size, before the app starts). `None` when missing or unreadable.
+    pub fn read(path: &Path) -> Option<Self> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     }
 
     fn keyring_account(&self) -> String {
@@ -192,62 +182,5 @@ impl Settings {
     pub fn store_password(&self, password: &str) -> anyhow::Result<()> {
         keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())?.set_password(password)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn paths(dir: &std::path::Path) -> Paths {
-        Paths {
-            config_file: dir.join("settings.json"),
-            library_db: dir.join("library.redb"),
-            stream_cache: dir.join("streams"),
-            art_cache: dir.join("art"),
-            offline: dir.join("offline"),
-        }
-    }
-
-    #[test]
-    fn a_login_keeps_preferences_changed_meanwhile() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = paths(dir.path());
-        let loaded = Settings { server: "https://old".into(), username: "me".into(), ..Default::default() };
-        loaded.save(&paths).unwrap();
-        // While the login is in flight the user picks a theme and the app clears a move.
-        Settings::update(&paths, |s| {
-            s.theme = crate::theme::ThemePref::Dark;
-            s.offline_move_from = None;
-        });
-        let login = Settings { server: "https://new".into(), ..loaded };
-        login.save_login(&paths).unwrap();
-        let now = Settings::load(&paths).unwrap();
-        assert_eq!(now.server, "https://new");
-        assert_eq!(now.theme, crate::theme::ThemePref::Dark);
-    }
-
-    #[test]
-    fn concurrent_updates_are_all_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = std::sync::Arc::new(paths(dir.path()));
-        Settings::default().save(&paths).unwrap();
-        let threads: Vec<_> = (0..8)
-            .map(|i| {
-                let paths = paths.clone();
-                std::thread::spawn(move || {
-                    for k in 0..10 {
-                        Settings::update(&paths, |s| {
-                            s.device_modes.insert(format!("dev-{i}-{k}"), "normal".into());
-                        });
-                    }
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().unwrap();
-        }
-        let s = Settings::load(&paths).expect("the file is always whole");
-        assert_eq!(s.device_modes.len(), 80);
     }
 }

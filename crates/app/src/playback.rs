@@ -128,15 +128,22 @@ impl Default for PlaybackPrefs {
     }
 }
 
-impl PlaybackPrefs {
-    pub fn gain_config(&self) -> GainConfig {
-        let mode = match self.replay_gain {
+/// The engine's mode for the one the user picked (the engine has no serde;
+/// this is the only place the two meet).
+impl From<RgMode> for GainMode {
+    fn from(m: RgMode) -> Self {
+        match m {
             RgMode::Off => GainMode::Off,
             RgMode::Track => GainMode::Track,
             RgMode::Album => GainMode::Album,
             RgMode::Auto => GainMode::Auto,
-        };
-        GainConfig { mode, preamp_db: self.preamp_db, fallback_db: self.untagged_db }
+        }
+    }
+}
+
+impl PlaybackPrefs {
+    pub fn gain_config(&self) -> GainConfig {
+        GainConfig { mode: self.replay_gain.into(), preamp_db: self.preamp_db, fallback_db: self.untagged_db }
     }
 
     /// The transcode to ask for, given where the server is. An unknown network
@@ -187,22 +194,16 @@ pub fn classify(ip: IpAddr) -> Network {
     if home { Network::Home } else { Network::Away }
 }
 
-/// Host and port from a server URL like `https://music.example.com:4533/navidrome`.
+/// Host and port from a server URL like `https://music.example.com:4533/navidrome`
+/// (a bare `host:port` is taken as http).
 pub fn host_port(server: &str) -> Option<(String, u16)> {
-    let (scheme, rest) = server.split_once("://").unwrap_or(("http", server));
-    let authority = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
-    let default_port = if scheme.eq_ignore_ascii_case("https") { 443 } else { 80 };
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-        let (host, after) = v6.split_once(']')?;
-        (host, after.strip_prefix(':'))
-    } else {
-        match authority.rsplit_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (authority, None),
-        }
+    let url = if server.contains("://") { url::Url::parse(server) } else { url::Url::parse(&format!("http://{server}")) }.ok()?;
+    let host = match url.host()? {
+        url::Host::Domain(d) => d.to_owned(),
+        url::Host::Ipv4(v4) => v4.to_string(),
+        url::Host::Ipv6(v6) => v6.to_string(),
     };
-    let port = port.and_then(|p| p.parse().ok()).unwrap_or(default_port);
-    (!host.is_empty()).then(|| (host.to_owned(), port))
+    Some((host, url.port_or_known_default()?))
 }
 
 /// Resolves the server once, off the UI thread, and remembers the answer.

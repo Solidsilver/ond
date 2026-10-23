@@ -37,6 +37,7 @@ use crate::nav::{Nav, Route};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
+use crate::prefs::{Loaded, Prefs};
 use crate::queue::{EndAction, Queue, Source};
 use crate::search::SearchIndex;
 use crate::settings::{Paths, Settings};
@@ -320,7 +321,6 @@ pub struct QueueUi {
 pub struct ListenerApp {
     // Kept alive for the app's lifetime; the bridge holds a handle to it.
     _rt: tokio::runtime::Runtime,
-    paths: Arc<Paths>,
     bridge: Bridge,
     inbox: Receiver<Msg>,
     engine: EngineHandle,
@@ -342,7 +342,6 @@ pub struct ListenerApp {
     queue: Queue,
     /// The queue item last sent as `SetNext`, so the engine isn't told twice.
     sent_next: Option<u64>,
-    show_queue: bool,
     /// Sidebar and queue column widths (dragged by their inner edges).
     columns: layout::Columns,
     /// The album page's "Album details" is unfolded (for this session).
@@ -359,7 +358,6 @@ pub struct ListenerApp {
     /// Output devices and what reaches the one in use.
     output: Outputs,
     bit_perfect: bool,
-    volume: f32,
     /// Where the seek bar is being dragged to, in seconds.
     seek_preview: Option<f64>,
     /// A seek that's been sent but not confirmed yet; shown instead of the engine position.
@@ -382,7 +380,6 @@ pub struct ListenerApp {
     /// Errors and notices, shown as toasts.
     toasts: toasts::Toasts,
     palette: Option<Palette>,
-    theme: ThemePref,
 
     /// Full / Player / Mini and where each was.
     windows: Windows,
@@ -402,7 +399,6 @@ pub struct ListenerApp {
     bars_shown: bool,
     /// OS Now Playing and server scrobbles.
     now_playing: now_playing::Session,
-    scrobble: bool,
 
     /// Offline downloads, and their state as of this frame.
     offline: OfflineStore,
@@ -414,6 +410,8 @@ pub struct ListenerApp {
     online: bool,
     /// The login in use, for reconnecting.
     settings: Option<Settings>,
+    /// The user's preferences: the one copy, saved in the background.
+    prefs: Prefs,
     /// Stored analysis results by track id, with the file stamp they're for.
     analyses: HashMap<String, analysis::Record>,
     /// Bumped whenever `analyses` changes, so counts over it know to recount.
@@ -423,10 +421,6 @@ pub struct ListenerApp {
     /// The stored results have been read (until then everything looks unanalysed).
     analyses_loaded: bool,
     analyzer: analyze::Runner,
-    /// A library-wide analysis should be running (resumed after a restart).
-    analysis_library: bool,
-    /// Analyse each track as it plays (it's in the playback cache by then).
-    analyze_playing: bool,
     /// Hearts and ratings, mirrored from the server.
     favorites: Favorites,
     /// A sheet over the window, if one is open.
@@ -492,24 +486,28 @@ impl ListenerApp {
         let (tx, inbox) = channel();
         let bridge = Bridge::new(rt.handle().clone(), tx, ctx.clone(), library.clone());
 
-        let saved = Settings::load(&paths);
-        let theme_pref = saved.as_ref().map(|s| s.theme).unwrap_or_default();
-        theme::install(ctx, theme_pref);
+        let (prefs, loaded) = Prefs::open(&paths.config_file);
+        let notice = match loaded {
+            Loaded::Unreadable { aside } => Some(format!("Settings couldn't be read and were reset; please sign in again (old copy: {})", aside.display())),
+            _ => notice,
+        };
+        let saved = prefs.snapshot();
+        theme::install(ctx, saved.theme);
         let mut cache_cfg = audio::CacheConfig::new(&paths.stream_cache);
-        if let Some(mb) = saved.as_ref().and_then(|s| s.stream_cache_mb) {
+        if let Some(mb) = saved.stream_cache_mb {
             cache_cfg.max_bytes = mb * 1024 * 1024;
         }
         let cache = audio::StreamCache::new(cache_cfg, rt.handle().clone())?;
         let offline = {
-            let dir = saved.as_ref().and_then(|s| s.offline_dir.clone()).unwrap_or_else(|| paths.offline.clone());
+            let dir = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
             // A new location chosen last time: bring the downloads along first.
-            if let Some(from) = saved.as_ref().and_then(|s| s.offline_move_from.clone()) {
+            if let Some(from) = saved.offline_move_from.clone() {
                 match offline::move_store(&from, &dir) {
-                    Ok(()) => Settings::update(&paths, |s| s.offline_move_from = None),
+                    Ok(()) => prefs.edit(|s| s.offline_move_from = None),
                     Err(e) => tracing::warn!("moving downloads from {}: {e}", from.display()),
                 }
             }
-            let limit = saved.as_ref().and_then(|s| s.offline_limit_gb).map(|gb| gb * 1_000_000_000);
+            let limit = saved.offline_limit_gb.map(|gb| gb * 1_000_000_000);
             let repaint = ctx.clone();
             let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.handle().clone(), Arc::new(move || repaint.request_repaint()))?;
             // A track that finished streaming is linked in rather than downloaded again.
@@ -524,8 +522,9 @@ impl ListenerApp {
         scratch_cfg.max_bytes = 64 * 1024 * 1024;
         let scratch_cache = audio::StreamCache::new(scratch_cfg, rt.handle().clone())?;
         let engine = audio::spawn(audio::EngineConfig::default(), backend, Some(cache));
-        let output = Outputs::restore(&engine, saved.as_ref());
-        let scrobble = saved.as_ref().is_none_or(|s| s.scrobble);
+        let output = Outputs::restore(&engine, prefs.clone());
+        engine.send(Command::SetVolume(saved.volume));
+        let scrobble = saved.scrobble;
         let remote_bridge = bridge.clone();
         let now_playing = now_playing::Session::start(now_playing::Config {
             status: engine.status.clone(),
@@ -552,21 +551,19 @@ impl ListenerApp {
         };
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
 
-        let login = match &saved {
-            Some(s) if s.signed_out => LoginForm { server: s.server.clone(), username: s.username.clone(), ..Default::default() },
-            Some(s) => {
-                bridge.connect(s.clone(), None, paths.clone());
-                LoginForm { server: s.server.clone(), username: s.username.clone(), busy: true, ..Default::default() }
-            }
-            None => LoginForm { server: "http://localhost:4533".into(), ..Default::default() },
+        let login = if !prefs.has_login() {
+            LoginForm { server: "http://localhost:4533".into(), ..Default::default() }
+        } else if saved.signed_out {
+            LoginForm { server: saved.server.clone(), username: saved.username.clone(), ..Default::default() }
+        } else {
+            bridge.connect(saved.clone(), None);
+            LoginForm { server: saved.server.clone(), username: saved.username.clone(), busy: true, ..Default::default() }
         };
 
         Ok(Self {
             _rt: rt,
-            show_queue: saved.as_ref().is_none_or(|s| s.show_queue),
             album_details_open: false,
-            columns: layout::Columns::restore(saved.as_ref().and_then(|s| s.sidebar_width), saved.as_ref().and_then(|s| s.queue_width)),
-            paths,
+            columns: layout::Columns::restore(saved.sidebar_width, saved.queue_width),
             bridge,
             inbox,
             engine,
@@ -590,7 +587,6 @@ impl ListenerApp {
             track_sel: None,
             output,
             bit_perfect: false,
-            volume: 1.0,
             seek_preview: None,
             pending_seek: None,
             search: None,
@@ -603,8 +599,7 @@ impl ListenerApp {
             // Something worth knowing at start-up (e.g. the library was rebuilt).
             toasts: toasts::Toasts::with_notice(notice),
             palette: None,
-            theme: theme_pref,
-            windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
+            windows: saved.window.clone(),
             seen: None,
             settling: None,
             switch_started: None,
@@ -613,15 +608,13 @@ impl ListenerApp {
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
             now_playing,
-            scrobble,
             offline_snap: offline.snapshot(),
             offline,
             pending_pins: Vec::new(),
             online: false,
-            analysis_library: saved.as_ref().is_some_and(|s| s.analysis_resume),
-            analyze_playing: saved.as_ref().is_some_and(|s| s.analyze_playing),
-            diagnostics: diagnostics::Diagnostics::new(saved.as_ref().is_some_and(|s| s.diagnostics_bar)),
-            settings: saved,
+            diagnostics: diagnostics::Diagnostics::default(),
+            settings: prefs.has_login().then(|| saved.clone()),
+            prefs,
             analyses: HashMap::new(),
             analyses_version: 0,
             unanalysed: Default::default(),
@@ -672,6 +665,7 @@ impl ListenerApp {
                 self.bridge.measure_latency(client.clone());
                 self.unreachable = false;
                 self.client = Some(client);
+                self.prefs.set_login(&settings.server, &settings.username);
                 self.settings = Some(*settings);
                 if !self.online {
                     self.online = true;
@@ -909,14 +903,14 @@ impl ListenerApp {
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
     /// it's already showing that tab.
     fn toggle_side_tab(&mut self, tab: QueueTab) {
-        if self.queue_ui.tab == tab && (self.show_queue || self.queue_sheet) {
+        if self.queue_ui.tab == tab && (self.show_queue() || self.queue_sheet) {
             self.queue_ui.tab = QueueTab::UpNext;
             return;
         }
         self.queue_ui.tab = tab;
         if self.queue_narrow {
             self.queue_sheet = true;
-        } else if !self.show_queue {
+        } else if !self.show_queue() {
             self.actions.push(Action::ToggleQueue);
         }
     }
@@ -1020,7 +1014,7 @@ impl ListenerApp {
         }
         match ev {
             audio::Event::TrackStarted { track_id, token, gapless, restart, .. } => {
-                if self.analyze_playing
+                if self.analyze_playing()
                     && !restart
                     && let Some(t) = self.playing_track(&track_id)
                 {
@@ -1355,16 +1349,11 @@ impl ListenerApp {
                 }
             }
             Action::SetTheme(pref) => {
-                self.theme = pref;
                 theme::set_pref(self.bridge.ctx(), pref);
-                Settings::update(&self.paths, |s| s.theme = pref);
+                self.prefs.edit(|s| s.theme = pref);
             }
             Action::ToggleQueue if self.queue_narrow => self.queue_sheet = !self.queue_sheet,
-            Action::ToggleQueue => {
-                self.show_queue = !self.show_queue;
-                let show = self.show_queue;
-                Settings::update(&self.paths, |s| s.show_queue = show);
-            }
+            Action::ToggleQueue => self.prefs.edit(|s| s.show_queue = !s.show_queue),
             Action::SignOut => self.sign_out(),
             Action::SetMode(mode) => self.set_mode(Some(mode)),
             Action::ToggleMini => self.set_mode(None),
@@ -1393,8 +1382,7 @@ impl ListenerApp {
             Action::SetLyricsDrawer(open) => {
                 let plan = self.windows.set_lyrics(open, self.seen);
                 self.follow_plan(plan);
-                let w = self.windows.clone();
-                Settings::update(&self.paths, |s| s.window = w);
+                self.save_windows();
             }
             Action::OpenSettings(section) => {
                 self.settings_section = section;
@@ -1412,21 +1400,17 @@ impl ListenerApp {
                     self.bridge.sync_albums(client);
                 }
             }
-            Action::SetPlaybackPrefs(prefs) => self.output.set_prefs(prefs, &self.engine, &self.paths),
+            Action::SetPlaybackPrefs(prefs) => self.output.set_prefs(prefs, &self.engine),
             Action::SetDeviceMode(uid, mode) => {
-                if self.output.set_device_mode(&uid, mode, &self.engine, &self.paths) {
+                if self.output.set_device_mode(&uid, mode, &self.engine) {
                     self.bit_perfect = mode == PlaybackMode::BitPerfect;
                 }
             }
             Action::SetScrobble(on) => {
-                self.scrobble = on;
                 self.now_playing.set_scrobbling(on);
-                Settings::update(&self.paths, |s| s.scrobble = on);
+                self.prefs.edit(|s| s.scrobble = on);
             }
-            Action::SetDiagnostics(on) => {
-                self.diagnostics.shown = on;
-                Settings::update(&self.paths, |s| s.diagnostics_bar = on);
-            }
+            Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
             Action::Unpin(pin) => {
                 self.offline.unpin(&pin);
@@ -1436,7 +1420,7 @@ impl ListenerApp {
             Action::RetryDownloads => self.offline.retry_failed(),
             Action::SetOfflineLimit(bytes) => {
                 self.offline.set_limit(bytes);
-                Settings::update(&self.paths, |s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
+                self.prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
             }
             Action::RevealOffline => {
                 let dir = self.offline.dir().to_owned();
@@ -1452,7 +1436,7 @@ impl ListenerApp {
                     // tidies files it doesn't know, which must never be the user's.
                     let dir = if chosen.file_name().is_some_and(|n| n == "Listener Offline") { chosen } else { chosen.join("Listener Offline") };
                     if dir != current {
-                        Settings::update(&self.paths, |s| {
+                        self.prefs.edit(|s| {
                             s.offline_dir = Some(dir.clone());
                             s.offline_move_from = Some(current.clone());
                         });
@@ -1465,8 +1449,7 @@ impl ListenerApp {
                 self.enqueue_analysis(&tracks);
             }
             Action::AnalyzeLibrary => {
-                self.analysis_library = true;
-                Settings::update(&self.paths, |s| s.analysis_resume = true);
+                self.prefs.edit(|s| s.analysis_resume = true);
                 self.analyzer.set_paused(false);
                 self.resume_library_analysis();
             }
@@ -1476,10 +1459,7 @@ impl ListenerApp {
                 self.analyzer.set_paused(false);
                 self.finish_library_analysis();
             }
-            Action::SetAnalyzePlaying(on) => {
-                self.analyze_playing = on;
-                Settings::update(&self.paths, |s| s.analyze_playing = on);
-            }
+            Action::SetAnalyzePlaying(on) => self.prefs.edit(|s| s.analyze_playing = on),
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),
@@ -1520,7 +1500,7 @@ impl ListenerApp {
     /// Queues the whole library, once the tracks, the stored results and the
     /// server are all there (so finished tracks aren't redone).
     fn resume_library_analysis(&mut self) {
-        if self.analysis_library && self.analyses_loaded && self.client.is_some() && !self.data.tracks.all.is_empty() {
+        if self.analysis_library() && self.analyses_loaded && self.client.is_some() && !self.data.tracks.all.is_empty() {
             let all = self.data.tracks.all.clone();
             self.enqueue_analysis(&all);
             if !self.analyzer.progress().active() {
@@ -1530,9 +1510,54 @@ impl ListenerApp {
     }
 
     fn finish_library_analysis(&mut self) {
-        if std::mem::take(&mut self.analysis_library) {
-            Settings::update(&self.paths, |s| s.analysis_resume = false);
+        if self.analysis_library() {
+            self.prefs.edit(|s| s.analysis_resume = false);
         }
+    }
+
+    /// A library-wide analysis should be running (resumed after a restart).
+    fn analysis_library(&self) -> bool {
+        self.prefs.get(|s| s.analysis_resume)
+    }
+
+    /// Analyse each track as it plays (it's in the playback cache by then).
+    pub fn analyze_playing(&self) -> bool {
+        self.prefs.get(|s| s.analyze_playing)
+    }
+
+    /// Whether the queue column is open (in windows wide enough to dock it).
+    pub fn show_queue(&self) -> bool {
+        self.prefs.get(|s| s.show_queue)
+    }
+
+    pub fn theme(&self) -> ThemePref {
+        self.prefs.get(|s| s.theme)
+    }
+
+    pub fn scrobble(&self) -> bool {
+        self.prefs.get(|s| s.scrobble)
+    }
+
+    pub fn diagnostics_shown(&self) -> bool {
+        self.prefs.get(|s| s.diagnostics_bar)
+    }
+
+    /// Software volume, 0..=1.
+    pub fn volume(&self) -> f32 {
+        self.prefs.get(|s| s.volume)
+    }
+
+    /// Sets the volume now; the preference is saved once the change settles.
+    pub fn set_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.engine.send(Command::SetVolume(volume));
+        self.prefs.edit(|s| s.volume = volume);
+    }
+
+    /// Saves the window modes and where each was.
+    fn save_windows(&self) {
+        let w = self.windows.clone();
+        self.prefs.edit(|s| s.window = w);
     }
 
     /// Tracks in the library without a current analysis, and their total length.
@@ -1567,8 +1592,7 @@ impl ListenerApp {
             self.settling = Some((plan.size, 30));
             self.switch_started = Some(std::time::Instant::now());
             tracing::debug!(target: "listener::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
-            let w = self.windows.clone();
-            Settings::update(&self.paths, |s| s.window = w);
+            self.save_windows();
         }
     }
 
@@ -1618,15 +1642,13 @@ impl ListenerApp {
         self.set_offline();
         self.unreachable = false;
         self.server_label.clear();
-        let saved = Settings::load(&self.paths);
-        if let Some(s) = saved.clone() {
+        let saved = self.prefs.snapshot();
+        if self.prefs.has_login() {
+            let s = saved.clone();
             std::thread::spawn(move || s.forget_password());
         }
-        Settings::update(&self.paths, |s| s.signed_out = true);
-        self.login = Some(match saved {
-            Some(s) => LoginForm { server: s.server, username: s.username, ..Default::default() },
-            None => LoginForm::default(),
-        });
+        self.prefs.edit(|s| s.signed_out = true);
+        self.login = Some(LoginForm { server: saved.server, username: saved.username, ..Default::default() });
     }
 
     fn login_ui(&mut self, ui: &mut egui::Ui) {
@@ -1705,9 +1727,9 @@ impl ListenerApp {
                 server: form.server.trim().to_owned(),
                 username: form.username.trim().to_owned(),
                 signed_out: false,
-                ..Settings::load(&self.paths).unwrap_or_default()
+                ..self.prefs.snapshot()
             };
-            self.bridge.connect(settings, Some(std::mem::take(&mut form.password)), self.paths.clone());
+            self.bridge.connect(settings, Some(std::mem::take(&mut form.password)));
         }
     }
 
@@ -1827,7 +1849,7 @@ impl ListenerApp {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.toolbar(ui));
-        if self.diagnostics.shown {
+        if self.diagnostics_shown() {
             egui::Panel::bottom("diagnostics")
                 .exact_size(diagnostics::BAR_H)
                 .resizable(false)
@@ -1856,7 +1878,7 @@ impl ListenerApp {
                     .rect,
             ),
         };
-        let right_panel = (self.show_queue && !self.queue_narrow).then(|| {
+        let right_panel = (self.show_queue() && !self.queue_narrow).then(|| {
             egui::Panel::right("queue")
                 .exact_size(self.columns.right)
                 .resizable(false)
@@ -1876,7 +1898,7 @@ impl ListenerApp {
         let mut save = false;
         if let Some(r) = left_panel {
             let d = layout::edge_handle(ui, egui::Id::unique("sidebar-edge"), r.right(), r.top(), r.bottom());
-            let limit = self.columns.left_limit(width, plan.queue_docked && self.show_queue);
+            let limit = self.columns.left_limit(width, plan.queue_docked && self.show_queue());
             if d.reset {
                 self.columns.left = layout::LEFT_DEFAULT.min(limit);
                 save = true;
@@ -1898,7 +1920,7 @@ impl ListenerApp {
         }
         if save {
             let c = self.columns;
-            Settings::update(&self.paths, |s| {
+            self.prefs.edit(|s| {
                 s.sidebar_width = (c.left != layout::LEFT_DEFAULT).then_some(c.left);
                 s.queue_width = (c.right != layout::RIGHT_DEFAULT).then_some(c.right);
             });
@@ -1947,22 +1969,18 @@ impl eframe::App for ListenerApp {
                 self.sync_next();
             }
         }
-        if self.analysis_library && self.analyses_loaded && !self.data.tracks.all.is_empty() && !self.analyzer.progress().active() {
+        if self.analysis_library() && self.analyses_loaded && !self.data.tracks.all.is_empty() && !self.analyzer.progress().active() {
             self.finish_library_analysis();
         }
+        let queue = if self.queue_narrow { self.queue_sheet } else { self.show_queue() };
+        let (theme, diagnostics) = self.prefs.get(|s| (s.theme, s.diagnostics_bar));
         if let Some(menu) = self.menu.as_mut() {
-            let queue = if self.queue_narrow { self.queue_sheet } else { self.show_queue };
-            let theme = match self.theme {
-                ThemePref::System => 0,
-                ThemePref::Light => 1,
-                ThemePref::Dark => 2,
-            };
             menu.sync(queue, self.bit_perfect, theme);
-            menu.set_diagnostics(self.diagnostics.shown);
+            menu.set_diagnostics(diagnostics);
         }
         // The diagnostics bar keeps the server round trip fresh, but only while
         // something plays (idle stays idle).
-        if self.diagnostics.shown
+        if self.diagnostics_shown()
             && self.online
             && self.engine.status.state() == PlayState::Playing
             && self.diagnostics.latency_stale()
@@ -2030,8 +2048,8 @@ impl eframe::App for ListenerApp {
         if let Some(g) = self.seen {
             self.windows.remember(g);
         }
-        let w = self.windows.clone();
-        Settings::update(&self.paths, |s| s.window = w);
+        self.save_windows();
+        self.prefs.flush();
     }
 }
 
@@ -2210,7 +2228,7 @@ mod tests {
         app.queue_ui.tab = QueueTab::History;
         app.queue.advance();
         frame(&ctx, &mut app, Vec::new());
-        app.show_queue = false;
+        app.prefs.edit(|s| s.show_queue = false);
         frame(&ctx, &mut app, Vec::new());
         app.nav.go(Route::Album("al-0".into()));
         frame(&ctx, &mut app, Vec::new());

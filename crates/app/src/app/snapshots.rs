@@ -434,7 +434,7 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.palette = None;
     app.overlay = None;
     app.fav_tab = favorites_page::FavTab::default();
-    app.show_queue = true;
+    app.prefs.edit(|s| s.show_queue = true);
     app.queue_sheet = false;
     app.analyzer.clear();
     app.queue_ui = QueueUi::default();
@@ -447,7 +447,8 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.sync_progress = None;
     app.toasts = super::toasts::Toasts::default();
     app.unreachable = false;
-    app.diagnostics = super::diagnostics::Diagnostics::new(false);
+    app.diagnostics = super::diagnostics::Diagnostics::default();
+    app.prefs.edit(|s| s.diagnostics_bar = false);
     app.diagnostics.set_latency(Some(Duration::from_millis(14)));
     app.output.handle(&signal());
     app.columns = super::layout::Columns::default();
@@ -919,7 +920,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        app.diagnostics.shown = true;
+        app.prefs.edit(|s| s.diagnostics_bar = true);
         app.track_syncing = true;
         app.sync_progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
         app.diagnostics.note_frame(Duration::from_micros(1800));
@@ -934,7 +935,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "diagnostics-bar-hover");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
-    app_mut(h).diagnostics.shown = true;
+    app_mut(h).prefs.edit(|s| s.diagnostics_bar = true);
     h.run_steps(2);
     s.shoot(h, "narrow-diagnostics-bar");
 
@@ -1216,8 +1217,6 @@ fn column_edges_drag_and_persist() {
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
-    // A signed-in user has a settings file; widths are saved into it.
-    Settings::default().save(&app_mut(&mut h).paths).unwrap();
     // (The harness's own panel has an 8 pt margin around the app.)
     let edge = pos2(8.0 + super::layout::LEFT_DEFAULT, 400.0);
     h.hover_at(edge);
@@ -1241,7 +1240,8 @@ fn column_edges_drag_and_persist() {
     let c = app_mut(&mut h).columns;
     assert_eq!(c.right, c.right_limit(FULL.x));
     // Saved when let go, and restored from there.
-    let saved = Settings::load(&app_mut(&mut h).paths).expect("settings written");
+    app_mut(&mut h).prefs.flush();
+    let saved = Settings::read(&dir.path().join("settings.json")).expect("settings written");
     let restored = super::layout::Columns::restore(saved.sidebar_width, saved.queue_width);
     assert_eq!(restored, c);
     *h.state_mut() = None;
