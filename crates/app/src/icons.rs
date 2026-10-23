@@ -32,6 +32,8 @@ pub enum Icon {
     MiniPlayer,
     /// Arrows pointing out to the corners: back to the full window.
     Expand,
+    /// A tall window with artwork on top and lines below: the Player.
+    Player,
     /// Settings.
     Gear,
     /// Recently added.
@@ -166,6 +168,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::MiniPlayer => {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
             painter.rect_filled(Rect::from_min_max(p(0.05, 0.05), p(0.6, 0.45)), r * 0.08, color);
+        }
+        Icon::Player => {
+            painter.rect_stroke(Rect::from_min_max(p(-0.6, -0.9), p(0.6, 0.9)), r * 0.15, line, egui::StrokeKind::Middle);
+            painter.rect_filled(Rect::from_min_max(p(-0.35, -0.65), p(0.35, 0.05)), r * 0.06, color);
+            painter.line_segment([p(-0.35, 0.35), p(0.35, 0.35)], line);
+            painter.line_segment([p(-0.35, 0.62), p(0.15, 0.62)], line);
         }
         Icon::Expand => {
             painter.add(Shape::line(vec![p(0.15, -0.8), p(0.8, -0.8), p(0.8, -0.15)], line));
