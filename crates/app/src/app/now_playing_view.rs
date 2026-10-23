@@ -25,8 +25,8 @@ const DETAILS_H: f32 = 110.0;
 /// The queue keeps at least this much of the Player window.
 const QUEUE_MIN_H: f32 = 250.0;
 /// Lyric text size in the Player's drawer and the full window's sidebar.
-const DRAWER_LYRIC: f32 = 18.0;
-const SIDEBAR_LYRIC: f32 = 15.0;
+const DRAWER_LYRIC: f32 = 17.0;
+const SIDEBAR_LYRIC: f32 = 15.5;
 
 impl ListenerApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
@@ -338,17 +338,17 @@ impl ListenerApp {
         });
     }
 
-    /// The lyrics column. Synced lines follow playback (the sung line large and
-    /// bright, the view keeping it centered) and seek when clicked; scrolling
-    /// by hand pauses following for a few seconds or until "Follow".
+    /// The lyrics column, as stanzas under small section labels. Synced lines
+    /// follow playback (the sung line bright and a touch larger, kept about a
+    /// third of the way down) and seek when clicked; scrolling by hand pauses
+    /// following for a few seconds or until "Follow". Plain lyrics are calm
+    /// text with a quiet "Not synced" note.
     fn lyrics_block(&mut self, ui: &mut Ui, track: &Track, l: &Lyrics, size: f32, bg: Color32) {
         let t = Tokens::of(ui);
         let rect = ui.available_rect_before_wrap();
         let now = ui.input(|i| i.time);
         let pos_ms = (self.position_secs() * 1000.0) as i64;
-        let font = FontId::new(size, semibold());
-        let pad = (rect.height() * 0.42).max(24.0);
-        let width = rect.width() - 8.0;
+        let width = (rect.width() - 12.0).min(size * 30.0);
         // Hand-scrolling over the lyrics pauses following.
         let wheel = ui.input(|i| i.smooth_scroll_delta.y != 0.0);
         if wheel && ui.rect_contains_pointer(rect) {
@@ -359,53 +359,74 @@ impl ListenerApp {
 
         match l {
             Lyrics::Synced(lines) => {
+                let rows = lyrics::rows_synced(lines);
                 let cur = lyrics::current(lines, pos_ms);
-                // The line last centered, and the pass it was seen on: a stale
-                // entry (the view was closed meanwhile) re-centers on reopening.
+                // The line last followed, and the pass it was seen on: a stale
+                // entry (the view was closed meanwhile) re-places it on reopening.
                 let pass = ui.ctx().cumulative_pass_nr();
                 let last: Option<(Option<usize>, u64)> = ui.data(|d| d.get_temp(id));
                 let changed = last.is_none_or(|(c, seen)| c != cur || seen + 1 < pass);
+                let view_h = rect.height();
                 let mut seek_to = None;
                 egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).show(ui, |ui| {
-                    ui.add_space(pad);
-                    for (i, line) in lines.iter().enumerate() {
-                        let sung = Some(i) == cur;
-                        // A blank line is a pause: a gap, or a quiet "• • •" while it's the sung one.
-                        if line.text.trim().is_empty() && !sung {
-                            ui.add_space(size * 0.5);
-                            continue;
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add_space((view_h * 0.3).max(24.0));
+                    let mut first = true;
+                    for row in &rows {
+                        match row {
+                            lyrics::Row::Section(s) => section_label(ui, s, size, !first),
+                            lyrics::Row::Break => ui.add_space((size * 0.8).round()),
+                            lyrics::Row::Text { text, line: Some(i) } => {
+                                let i = *i;
+                                let sung = Some(i) == cur;
+                                // A pause is a gap, or a quiet "• • •" while it's the sung line.
+                                if text.is_empty() && !sung {
+                                    continue;
+                                }
+                                let past = cur.is_some_and(|c| i < c);
+                                let (px, color) = if sung {
+                                    ((size * 1.06).round(), t.text)
+                                } else if past {
+                                    (size, t.muted.gamma_multiply(0.55))
+                                } else {
+                                    (size, t.muted)
+                                };
+                                let shown = if text.is_empty() { "•  •  •" } else { text.as_str() };
+                                let galley = lyric_galley(ui, shown, FontId::new(px, semibold()), color, width);
+                                let (r, resp) = ui.allocate_exact_size(vec2(width, galley.size().y + 6.0), Sense::click());
+                                if resp.hovered() && !sung {
+                                    ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
+                                }
+                                ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
+                                let label = format!("{} — {}", mmss(lines[i].start_ms as f64 / 1000.0), text);
+                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+                                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    seek_to = Some(lines[i].start_ms as f64 / 1000.0);
+                                }
+                                if sung && following && changed {
+                                    // The sung line sits about a third of the way down.
+                                    let lead = view_h * 0.3;
+                                    let target = Rect::from_min_size(pos2(r.left(), r.top() - lead), vec2(r.width(), lead + r.height()));
+                                    ui.scroll_to_rect(target, Some(Align::Min));
+                                }
+                                ui.add_space((size * 0.3).round());
+                            }
+                            lyrics::Row::Text { line: None, .. } => {}
                         }
-                        let past = cur.is_some_and(|c| i < c);
-                        let color = if sung { t.text } else if past { t.muted.gamma_multiply(0.7) } else { t.muted };
-                        let text = if line.text.trim().is_empty() { "•  •  •".to_owned() } else { line.text.clone() };
-                        let galley = ui.painter().layout(text, font.clone(), color, width);
-                        let (r, resp) = ui.allocate_exact_size(vec2(width, galley.size().y), Sense::click());
-                        if resp.hovered() && !sung {
-                            ui.painter().rect_filled(r.expand2(vec2(6.0, 3.0)), 6.0, t.hover);
-                        }
-                        ui.painter().galley(r.min, galley, color);
-                        let label = format!("{} — {}", mmss(line.start_ms as f64 / 1000.0), line.text);
-                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            seek_to = Some(line.start_ms as f64 / 1000.0);
-                        }
-                        if sung && following && changed {
-                            ui.scroll_to_rect(r, Some(Align::Center));
-                        }
-                        ui.add_space((size * 0.6).round());
+                        first = false;
                     }
-                    ui.add_space(pad);
+                    ui.add_space(view_h * 0.6);
                 });
                 if following {
                     ui.data_mut(|d| d.insert_temp(id, (cur, pass)));
                 }
                 if let Some(s) = seek_to {
                     self.lyrics_follow.resume();
-                    // Re-center on the clicked line once playback gets there.
+                    // Re-place the clicked line once playback gets there.
                     ui.data_mut(|d| d.remove::<(Option<usize>, u64)>(id));
                     self.actions.push(Action::Seek(s));
                 }
-                edge_fades(ui, rect, bg, 32.0);
+                edge_fades(ui, rect, bg, 32.0, true);
                 if !following {
                     self.follow_button(ui, rect, id);
                 }
@@ -420,19 +441,30 @@ impl ListenerApp {
                 }
             }
             Lyrics::Plain(lines) => {
-                let plain = FontId::proportional((size * 0.9).round());
+                let rows = lyrics::rows_plain(lines);
+                let font = FontId::proportional(size);
                 egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).show(ui, |ui| {
-                    ui.add_space(8.0);
-                    for line in lines {
-                        if line.is_empty() {
-                            ui.add_space(14.0);
-                            continue;
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Not synced").size(11.0).color(t.muted.gamma_multiply(0.8)))
+                        .on_hover_text("These lyrics have no timing, so they don't follow the music");
+                    ui.add_space((size * 1.0).round());
+                    let mut first = true;
+                    for row in &rows {
+                        match row {
+                            lyrics::Row::Section(s) => section_label(ui, s, size, !first),
+                            lyrics::Row::Break => ui.add_space((size * 0.8).round()),
+                            lyrics::Row::Text { text, .. } => {
+                                let galley = lyric_galley(ui, text, font.clone(), t.text, width);
+                                let (r, _) = ui.allocate_exact_size(vec2(width, galley.size().y), Sense::hover());
+                                ui.painter().galley(r.min, galley, t.text);
+                            }
                         }
-                        ui.add(egui::Label::new(egui::RichText::new(line).font(plain.clone()).color(t.text)).wrap());
-                        ui.add_space(4.0);
+                        first = false;
                     }
-                    ui.add_space(24.0);
+                    ui.add_space(32.0);
                 });
+                edge_fades(ui, rect, bg, 28.0, false);
             }
         }
     }
@@ -457,9 +489,12 @@ impl ListenerApp {
 
 /// Soft fades at the top and bottom of a scrolling column, so lines dissolve
 /// into the page instead of being cut.
-fn edge_fades(ui: &Ui, rect: Rect, bg: Color32, h: f32) {
+fn edge_fades(ui: &Ui, rect: Rect, bg: Color32, h: f32, top_too: bool) {
     let clear = Color32::TRANSPARENT;
     for (top, a, b) in [(true, bg, clear), (false, clear, bg)] {
+        if top && !top_too {
+            continue;
+        }
         let r = if top { Rect::from_min_size(rect.min, vec2(rect.width(), h)) } else { Rect::from_min_max(pos2(rect.left(), rect.bottom() - h), rect.max) };
         let mut mesh = egui::Mesh::default();
         mesh.colored_vertex(r.left_top(), a);
@@ -470,6 +505,34 @@ fn edge_fades(ui: &Ui, rect: Rect, bg: Color32, h: f32) {
         mesh.add_triangle(1, 3, 2);
         ui.painter().add(egui::Shape::mesh(mesh));
     }
+}
+
+/// A lyric line laid out at `width` with comfortable leading (1.45×), so
+/// wrapped lines read as one line continuing.
+fn lyric_galley(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    let line_height = Some((font.size * 1.45).round());
+    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), egui::TextFormat { font_id: font, color, line_height, ..Default::default() });
+    job.wrap.max_width = width;
+    ui.painter().layout_job(job)
+}
+
+/// "VERSE 1": small, spaced capitals above a stanza, with room above it
+/// unless it opens the lyrics.
+fn section_label(ui: &mut Ui, label: &str, size: f32, space_above: bool) {
+    let t = Tokens::of(ui);
+    if space_above {
+        ui.add_space((size * 1.1).round());
+    }
+    let format = egui::TextFormat {
+        font_id: FontId::new((size * 0.66).round().max(10.0), semibold()),
+        color: t.muted,
+        extra_letter_spacing: 0.9,
+        ..Default::default()
+    };
+    let galley = ui.painter().layout_job(egui::text::LayoutJob::single_section(label.to_uppercase(), format));
+    let (r, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    ui.painter().galley(r.min, galley, t.muted);
+    ui.add_space((size * 0.45).round());
 }
 
 /// The details strip's rows: only the ones there is something to say about.
