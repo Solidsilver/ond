@@ -125,6 +125,7 @@ fn album(i: usize) -> Album {
         created: Some(format!("2026-10-{:02}", 22 - (i % 20))),
         labels: vec![label.into()],
         genres: vec![genre.into()],
+        artists: vec![library::ArtistLink { id: None, name: artist.into() }],
     }
 }
 
@@ -170,6 +171,7 @@ fn track(id: String, album: usize, title: &str, artist: &str, n: u32, disc: u32,
         composer: composer.map(Into::into),
         contributors,
         cover_art: Some(album_id(album)),
+        artists: vec![library::ArtistLink { id: None, name: artist.into() }],
     }
 }
 
@@ -283,7 +285,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     }
     app.data.newest = albums.iter().map(|a| a.id.clone()).collect();
     app.data.set_albums(albums);
-    app.search = Some(SearchIndex::new(&app.data.albums));
+    app.rebuild_search();
     app.data.tracks.insert(album_id(0), vanguard());
     app.data.tracks.insert(album_id(1), kind_of_blue());
     for i in [2, 20, 23] {
