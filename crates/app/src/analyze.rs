@@ -27,6 +27,8 @@ pub struct Job {
     pub suffix: Option<String>,
     pub stamp: String,
     pub secs: f64,
+    /// A downloaded copy (offline store), read directly instead of fetching.
+    pub local: Option<std::path::PathBuf>,
 }
 
 /// The stamp a track's stored analysis must carry to still be current.
@@ -34,13 +36,14 @@ pub fn stamp_of(t: &Track) -> String {
     analysis::stamp(t.size, t.suffix.as_deref(), t.bit_depth, t.sample_rate)
 }
 
-pub fn job_for(t: &Track, url: String) -> Job {
+pub fn job_for(t: &Track, url: String, local: Option<std::path::PathBuf>) -> Job {
     Job {
         track_id: t.id.clone(),
         url,
         suffix: t.suffix.clone(),
         stamp: stamp_of(t),
         secs: f64::from(t.duration_secs.unwrap_or(0)),
+        local,
     }
 }
 
@@ -305,7 +308,18 @@ fn run(shared: &Shared, cfg: &Config) {
     }
 }
 
+/// Reads the job's downloaded copy, if it has one that opens.
+fn analyze_local(job: &Job, stop: &(dyn Fn() -> bool + Sync)) -> Option<Result<TrackAnalysis, analysis::AnalyzeError>> {
+    let file = std::fs::File::open(job.local.as_ref()?).ok()?;
+    let len = file.metadata().ok().map(|m| m.len());
+    Some(analysis::analyze_reader(file, len, job.suffix.as_deref(), stop))
+}
+
 fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Result<TrackAnalysis, analysis::AnalyzeError> {
+    // A downloaded copy first: no network, no cache churn.
+    if let Some(out) = analyze_local(job, stop) {
+        return out;
+    }
     let key = CacheKey::new(job.track_id.clone(), job.suffix.clone());
     let cached = cfg.playback.progress(&key).is_some_and(|p| p.complete);
     let cache = if cached { &cfg.playback } else { &cfg.scratch };
@@ -356,7 +370,42 @@ mod tests {
     use super::*;
 
     fn job(id: &str, secs: f64) -> Job {
-        Job { track_id: id.into(), url: String::new(), suffix: None, stamp: "s".into(), secs }
+        Job { track_id: id.into(), url: String::new(), suffix: None, stamp: "s".into(), secs, local: None }
+    }
+
+    #[test]
+    fn downloaded_copies_are_read_from_disk() {
+        // One second of a 1 kHz sine, 16-bit mono WAV at 44.1 kHz.
+        let rate = 44_100u32;
+        let samples: Vec<i16> = (0..rate).map(|i| ((i as f32 * std::f32::consts::TAU * 1000.0 / rate as f32).sin() * 8000.0) as i16).collect();
+        let mut wav = Vec::new();
+        let data_len = (samples.len() * 2) as u32;
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for s in &samples {
+            wav.extend_from_slice(&s.to_le_bytes());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.wav");
+        std::fs::write(&path, wav).unwrap();
+        let mut j = job("t", 1.0);
+        j.suffix = Some("wav".into());
+        // No URL at all: only the local file can be used.
+        assert!(analyze_local(&j, &|| false).is_none(), "no local copy: falls through to fetching");
+        j.local = Some(path);
+        let out = analyze_local(&j, &|| false).expect("local copy is used").expect("decodes");
+        assert_eq!(out.sample_rate, 44_100);
+        assert!(out.true_peak_dbtp.is_some_and(f64::is_finite));
     }
 
     #[test]

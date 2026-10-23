@@ -295,8 +295,14 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     for i in [2, 20, 23] {
         app.data.tracks.insert(album_id(i), filler(i, 9));
     }
+    // The flat list the Songs view and search read (the per-album map stays as is).
+    let mut all: Vec<Track> = app.data.tracks.values().flatten().cloned().collect();
+    all.sort_by(|a, b| (&a.album_id, a.disc, a.track).cmp(&(&b.album_id, b.disc, b.track)));
+    app.data.all_tracks = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.online = true;
+    app.settings = Some(Settings { server: "https://music.example.com".into(), username: "solidsilver".into(), ..Default::default() });
+    app.server_info = "navidrome 0.64.2".into();
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
         .enumerate()
@@ -584,19 +590,58 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     if !click_label(h, "Settings", sidebar) {
         eprintln!("  (settings button not found by label)");
     }
-    s.shoot(h, "settings");
+    s.shoot(h, "gear-menu");
+
+    for section in settings_page::Section::ALL {
+        reset(h, FULL, Route::Recent);
+        app_mut(h).actions.push(Action::OpenSettings(section));
+        s.shoot(h, &format!("settings-{}", section.label().to_lowercase()));
+    }
+
+    // Playback with ReplayGain and a transcode on, so every control shows.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        let mut p = app.output.prefs().clone();
+        p.replay_gain = crate::playback::RgMode::Auto;
+        p.quality = crate::playback::QualityMode::Auto;
+        app.actions.push(Action::SetPlaybackPrefs(p));
+        app.actions.push(Action::OpenSettings(settings_page::Section::Playback));
+    }
+    s.shoot(h, "settings-playback-on");
 
     // A library run waiting on playback (the preview status is mid-download).
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), url: String::new(), suffix: None, stamp: "s".into(), secs: 240.0 }).collect();
+        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), url: String::new(), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
         app.analyzer.enqueue(jobs);
-    }
-    if !click_label(h, "Settings", sidebar) {
-        eprintln!("  (settings button not found by label)");
+        app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
     s.shoot(h, "settings-analysing");
+
+    reset(h, vec2(900.0, 640.0), Route::Recent);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
+    s.shoot(h, "narrow-settings");
+
+    // Places and their empty states.
+    reset(h, FULL, Route::Songs);
+    s.shoot(h, "songs");
+
+    reset(h, FULL, Route::Songs);
+    let all = std::mem::take(&mut app_mut(h).data.all_tracks);
+    s.shoot(h, "songs-empty");
+    app_mut(h).data.all_tracks = all;
+
+    reset(h, FULL, Route::Offline);
+    s.shoot(h, "offline-empty");
+
+    reset(h, FULL, Route::Artists);
+    s.shoot(h, "artists");
+
+    reset(h, FULL, Route::Playlist { id: "pl-4".into(), name: "Car".into() });
+    app_mut(h).data.playlist_tracks.insert("pl-4".into(), Vec::new());
+    s.shoot(h, "playlist-empty");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
     s.shoot(h, "narrow-recent");
@@ -687,3 +732,6 @@ fn snapshots() {
         *h.state_mut() = None;
     }
 }
+
+#[cfg(test)]
+mod perf;

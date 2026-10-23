@@ -72,8 +72,12 @@ impl ListenerApp {
         let n = self.data.all_tracks.len();
         self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
         if n == 0 {
-            let text = if self.track_syncing { "Syncing your tracks…" } else { "No tracks yet. They appear once the library has synced." };
-            ui.label(egui::RichText::new(text).color(t.muted));
+            let (title, body) = if self.track_syncing {
+                ("Syncing your tracks…", "Songs appear here as the library comes in.")
+            } else {
+                ("No songs yet", "They appear once the library has synced with your server.")
+            };
+            super::widgets::empty_state(ui, crate::icons::Icon::Note, title, body);
             return;
         }
         let order = self.songs_order();

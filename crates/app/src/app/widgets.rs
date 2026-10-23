@@ -303,3 +303,21 @@ pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
 }
+
+/// The one empty-state layout: a muted glyph, a short title, a line or two
+/// of how to fill it. Centred, with the same spacing everywhere.
+pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &str) {
+    let t = Tokens::of(ui);
+    ui.add_space(48.0);
+    ui.vertical_centered(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+        crate::icons::paint(ui.painter(), r, icon, t.muted);
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
+        ui.add_space(6.0);
+        ui.scope(|ui| {
+            ui.set_max_width(440.0);
+            ui.add(egui::Label::new(egui::RichText::new(body).size(13.0).color(t.muted)).wrap());
+        });
+    });
+}

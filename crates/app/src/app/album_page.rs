@@ -378,8 +378,15 @@ impl ListenerApp {
                 ui.add_space((art_side - 118.0).max(0.0));
                 ui.label(egui::RichText::new("Playlist").font(FontId::new(11.0, semibold())).color(t.muted));
                 ui.add(egui::Label::new(egui::RichText::new(name).font(FontId::new(26.0, semibold())).color(t.text)).truncate());
-                let sub = match &info {
-                    Some(p) if p.song_count > 0 => format!("{} song{} · {}", p.song_count, if p.song_count == 1 { "" } else { "s" }, length(p.duration)),
+                // The loaded songs are newer than the playlist list's counts
+                // (an edit since the last refresh).
+                let counts = match (&tracks, &info) {
+                    (Some(ts), _) => Some((ts.len(), ts.iter().filter_map(|t| t.duration_secs).sum::<u32>())),
+                    (None, Some(p)) => Some((p.song_count as usize, p.duration)),
+                    (None, None) => None,
+                };
+                let sub = match counts {
+                    Some((n, secs)) if n > 0 => format!("{n} song{} · {}", if n == 1 { "" } else { "s" }, length(secs)),
                     Some(_) => "Empty".to_owned(),
                     None => String::new(),
                 };
@@ -422,8 +429,8 @@ impl ListenerApp {
             return;
         };
         if tracks.is_empty() {
-            let hint = if mine { "Nothing here yet. Drag songs onto this playlist in the sidebar, or use “Add to Playlist” on any song." } else { "This playlist is empty." };
-            ui.label(egui::RichText::new(hint).color(t.muted));
+            let hint = if mine { "Drag songs onto this playlist in the sidebar, or use “Add to Playlist” on any song." } else { "Its owner hasn’t added any songs." };
+            super::widgets::empty_state(ui, Icon::Note, "This playlist is empty", hint);
             return;
         }
         egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).show(ui, |ui| {

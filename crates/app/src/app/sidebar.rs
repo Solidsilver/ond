@@ -1,11 +1,10 @@
 //! Left column: search (opens the palette), library places, playlists, and
 //! settings. In narrow windows it collapses to a rail of icons.
 
-use super::widgets::{link, toggle};
 use super::{Action, DragTracks, ListenerApp, PlaylistAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
-use crate::theme::{ThemePref, Tokens, semibold};
+use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 /// Width of the full sidebar and of the icon rail.
@@ -133,7 +132,7 @@ impl ListenerApp {
             ui.add_space(12.0);
             let lists = icons::sized_button(ui, Icon::List, "Playlists", size, 14.0, Some(t.muted));
             egui::Popup::menu(&lists).show(|ui| {
-                ui.set_min_width(200.0);
+                ui.set_width(220.0);
                 if self.data.playlists.is_empty() {
                     ui.weak("No playlists yet");
                 }
@@ -162,67 +161,25 @@ impl ListenerApp {
         }
     }
 
-    /// The gear and its popover: appearance, scrobbling, the account.
+    /// The gear: a small menu for Settings, the shortcut list and signing out.
     fn settings_button(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let button = icons::sized_button(ui, Icon::Gear, "Settings", vec2(28.0, 28.0), 15.0, Some(t.muted));
-        egui::Popup::menu(&button)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .width(SETTINGS_W)
-            .show(|ui| self.settings_ui(ui));
-    }
-
-    pub(super) fn settings_ui(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
-        ui.set_width(SETTINGS_W);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let margin = |ui: &mut Ui, f: &mut dyn FnMut(&mut Ui)| {
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.set_width(SETTINGS_W - 16.0);
-                    f(ui);
-                });
-            });
-        };
-        ui.add_space(6.0);
-        margin(ui, &mut |ui| {
-            ui.label(egui::RichText::new("Appearance").font(FontId::new(11.0, semibold())).color(t.muted));
-            ui.add_space(6.0);
-            let prefs = [ThemePref::System, ThemePref::Light, ThemePref::Dark];
-            let at = prefs.iter().position(|p| *p == self.theme).unwrap_or(0);
-            if let Some(i) = super::widgets::segmented_wide(ui, &["System", "Light", "Dark"], at, SETTINGS_W - 16.0) {
-                self.actions.push(Action::SetTheme(prefs[i]));
+        egui::Popup::menu(&button).show(|ui| {
+            ui.set_width(220.0);
+            if menu_item(ui, "Settings…", "⌘,") {
+                self.actions.push(Action::OpenSettings(self.settings_section));
             }
-            ui.add_space(12.0);
-            let mut scrobble = self.scrobble;
-            if toggle(ui, &mut scrobble, "Scrobble plays").on_hover_text("Report plays to the server, which passes them on to Last.fm / ListenBrainz").changed() {
-                self.actions.push(Action::SetScrobble(scrobble));
+            if menu_item(ui, "Keyboard Shortcuts", "⌘/") {
+                self.actions.push(Action::Command(crate::keys::Cmd::Shortcuts));
+            }
+            if !self.server_label.is_empty() {
+                ui.separator();
+                if menu_item(ui, "Sign Out", "") {
+                    self.actions.push(Action::SignOut);
+                }
             }
         });
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(6.0);
-        margin(ui, &mut |ui| self.analysis_settings(ui));
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(6.0);
-        margin(ui, &mut |ui| {
-            ui.horizontal(|ui| {
-                let account = if self.server_label.is_empty() { "Not connected".to_owned() } else { self.server_label.clone() };
-                let w = ui.available_width() - 64.0;
-                let g = super::widgets::elide(ui, &account, FontId::proportional(12.0), t.muted, w);
-                let (r, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
-                ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, t.muted);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !self.server_label.is_empty() && super::widgets::link(ui, "Sign out", FontId::proportional(12.0), t.accent).clicked() {
-                        self.actions.push(Action::SignOut);
-                        ui.close();
-                    }
-                });
-            });
-        });
-        ui.add_space(4.0);
     }
 
     /// Overall progress of unfinished downloads, while any are moving.
@@ -233,60 +190,6 @@ impl ListenerApp {
         }
         let (done, total) = s.pins.iter().filter(|p| !p.complete()).fold((0u64, 0u64), |(d, t), p| (d + p.bytes_done, t + p.bytes_total));
         Some(if total > 0 { done as f32 / total as f32 } else { 0.0 })
-    }
-
-    /// Library analysis: start it, follow it, pause or stop it.
-    fn analysis_settings(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
-        let small = |s: String| egui::RichText::new(s).size(12.0).color(t.muted);
-        ui.label(egui::RichText::new("Analysis").font(FontId::new(11.0, semibold())).color(t.muted));
-        ui.add_space(6.0);
-        let p = self.analyzer.progress();
-        if p.active() {
-            let status = if p.paused {
-                format!("Paused at {} of {}", p.done.min(p.total), p.total)
-            } else if p.waiting {
-                format!("{} of {} · waiting for playback", p.done.min(p.total), p.total)
-            } else {
-                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::analyze::about(p.eta_secs))
-            };
-            ui.label(small(status));
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let (label, paused) = if p.paused { ("Resume", false) } else { ("Pause", true) };
-                if link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
-                    self.actions.push(Action::PauseAnalysis(paused));
-                }
-                ui.add_space(10.0);
-                if link(ui, "Stop", FontId::proportional(12.0), t.accent).clicked() {
-                    self.actions.push(Action::StopAnalysis);
-                }
-            });
-        } else if self.client.is_some() && !self.data.all_tracks.is_empty() {
-            let (n, secs) = self.unanalysed();
-            if n == 0 {
-                ui.label(small("Every track is analysed.".into()));
-            } else {
-                ui.horizontal(|ui| {
-                    if link(ui, "Analyze library", FontId::proportional(12.0), t.accent)
-                        .on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files. Runs in the background and pauses while playback needs the network.")
-                        .clicked()
-                    {
-                        self.actions.push(Action::AnalyzeLibrary);
-                    }
-                    let tracks = if n == 1 { "1 track".to_owned() } else { format!("{n} tracks") };
-                    ui.label(small(format!("  {tracks} · {}", crate::analyze::about(crate::analyze::assumed_eta(secs)))));
-                });
-            }
-        }
-        if p.failed > 0 {
-            ui.label(egui::RichText::new(format!("{} couldn't be read", p.failed)).size(11.0).color(t.muted));
-        }
-        ui.add_space(8.0);
-        let mut playing = self.analyze_playing;
-        if toggle(ui, &mut playing, "Analyze tracks as they play").on_hover_text("Measures each track after it has downloaded for playback").changed() {
-            self.actions.push(Action::SetAnalyzePlaying(playing));
-        }
     }
 
     /// The sidebar entry the current place belongs to.
@@ -308,7 +211,7 @@ impl ListenerApp {
         ui.add_space(4.0);
     }
 
-    fn place(&self, ui: &mut Ui, label: &str, on: bool) -> egui::Response {
+    pub(super) fn place(&self, ui: &mut Ui, label: &str, on: bool) -> egui::Response {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
         if ui.is_rect_visible(rect) {
@@ -330,4 +233,25 @@ impl ListenerApp {
     }
 }
 
-const SETTINGS_W: f32 = 260.0;
+
+/// A menu row with a right-aligned shortcut hint. True when chosen.
+fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 5.0, t.hover);
+        }
+        ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
+        if !keys.is_empty() {
+            ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), t.muted);
+        }
+    }
+    let label = label.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
+    if resp.clicked() {
+        ui.close();
+        return true;
+    }
+    false
+}

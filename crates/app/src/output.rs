@@ -1,7 +1,7 @@
 //! Output device picker and the signal-path line under the transport.
 
 use crate::icons::{self, Icon};
-use crate::playback::{BITRATES, NetworkProbe, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
+use crate::playback::{NetworkProbe, PlaybackPrefs};
 use crate::settings::{Paths, Settings};
 use audio::{BitPerfectStatus, Command, DeviceInfo, EngineHandle, PlayState, PlaybackMode, SignalPath, Transcode};
 use crate::theme::Tokens;
@@ -24,6 +24,8 @@ pub struct Outputs {
     returned: Option<(String, String)>,
     /// Name of a device that just went away.
     lost: Option<String>,
+    /// "Playback settings…" was clicked in the popup this frame.
+    wants_settings: bool,
 }
 
 impl Outputs {
@@ -54,51 +56,57 @@ impl Outputs {
         Settings::update(paths, |s| s.playback = prefs);
     }
 
-    /// ReplayGain and streaming quality, inside the output popup.
-    fn playback_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths, bit_perfect: bool) {
-        let before = self.prefs.clone();
-        ui.strong("ReplayGain");
-        ui.horizontal(|ui| {
-            for m in RgMode::ALL {
-                ui.selectable_value(&mut self.prefs.replay_gain, m, m.label()).on_hover_text(m.hint());
-            }
+    /// ReplayGain and streaming preferences, as saved.
+    pub fn prefs(&self) -> &PlaybackPrefs {
+        &self.prefs
+    }
+
+    /// Where the server is relative to this computer, as last checked.
+    pub fn network(&self) -> crate::playback::Network {
+        self.network.get()
+    }
+
+    /// Applies and saves new playback preferences (the engine hears about gain
+    /// changes at once; streaming changes apply from the next track loaded).
+    pub fn set_prefs(&mut self, prefs: PlaybackPrefs, engine: &EngineHandle, paths: &Paths) {
+        if prefs == self.prefs {
+            return;
+        }
+        if prefs.gain_config() != self.prefs.gain_config() {
+            engine.send(Command::SetGain(prefs.gain_config()));
+        }
+        self.prefs = prefs;
+        self.save_prefs(paths);
+    }
+
+    /// The devices macOS reports, and which one is in use (`None`: following the default).
+    pub fn devices(&self) -> (&[DeviceInfo], Option<&str>) {
+        (&self.devices, self.current.as_deref())
+    }
+
+    /// The mode `d` plays in: remembered, else its kind's default.
+    pub fn device_mode(&self, d: &DeviceInfo) -> PlaybackMode {
+        match self.saved_modes.get(&d.uid).map(String::as_str) {
+            Some("bit-perfect") => PlaybackMode::BitPerfect,
+            Some(_) => PlaybackMode::Normal,
+            None => d.default_mode(),
+        }
+    }
+
+    /// Remembers `mode` for device `uid`. Returns true when that's the device
+    /// in use (the engine switches mode now; the caller updates its own flag).
+    pub fn set_device_mode(&mut self, uid: &str, mode: PlaybackMode, engine: &EngineHandle, paths: &Paths) -> bool {
+        self.saved_modes.insert(uid.to_owned(), mode_name(mode).into());
+        engine.send(Command::DeviceModes(modes(&self.saved_modes)));
+        let key = uid.to_owned();
+        Settings::update(paths, |s| {
+            s.device_modes.insert(key, mode_name(mode).into());
         });
-        if self.prefs.replay_gain != RgMode::Off {
-            ui.add(egui::Slider::new(&mut self.prefs.preamp_db, -12.0..=12.0).step_by(0.5).suffix(" dB").text("Pre-amp"));
-            ui.add(egui::Slider::new(&mut self.prefs.untagged_db, -12.0..=0.0).step_by(0.5).suffix(" dB").text("Untagged"))
-                .on_hover_text("Gain for tracks without ReplayGain tags");
-            if bit_perfect {
-                ui.weak("Bypassed in bit-perfect mode");
-            }
+        let in_use = self.current.as_deref() == Some(uid);
+        if in_use {
+            engine.send(Command::SetMode(mode));
         }
-        ui.separator();
-        ui.strong("Streaming");
-        for q in QualityMode::ALL {
-            ui.selectable_value(&mut self.prefs.quality, q, q.label());
-        }
-        if self.prefs.quality != QualityMode::Original {
-            ui.horizontal(|ui| {
-                for f in TranscodeFormat::ALL {
-                    ui.selectable_value(&mut self.prefs.format, f, f.id().to_ascii_uppercase());
-                }
-                ui.separator();
-                for k in BITRATES {
-                    ui.selectable_value(&mut self.prefs.kbps, k, k.to_string());
-                }
-                ui.weak("kbps");
-            });
-            let now = match self.transcode() {
-                Some(t) => format!("{} · new tracks stream as {}", self.network.get().label(), t.label()),
-                None => format!("{} · new tracks stream as original files", self.network.get().label()),
-            };
-            ui.weak(now);
-        }
-        if self.prefs != before {
-            if self.prefs.gain_config() != before.gain_config() {
-                engine.send(Command::SetGain(self.prefs.gain_config()));
-            }
-            self.save_prefs(paths);
-        }
+        in_use
     }
 
     /// Takes the engine events this module cares about. Returns the mode the engine
@@ -151,7 +159,8 @@ impl Outputs {
 
     /// The output chip: device name with a status dot. Its popup lists devices
     /// and holds the bit-perfect switch for the device in use.
-    pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths, bit_perfect: &mut bool) {
+    /// Returns true when "Playback settings…" was chosen in the popup.
+    pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths, bit_perfect: &mut bool) -> bool {
         if let Some((uid, name)) = self.returned.clone() {
             if ui.small_button(format!("Switch back to {name}")).clicked() {
                 self.choose(Some(uid), engine, paths);
@@ -181,6 +190,7 @@ impl Outputs {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .width(POPUP_W)
             .show(|ui| self.popup_ui(ui, engine, paths, bit_perfect));
+        std::mem::take(&mut self.wants_settings)
     }
 
     /// What's playing through what, the devices, and the mode for the one in use.
@@ -245,14 +255,14 @@ impl Outputs {
         });
         ui.add_space(8.0);
         ui.separator();
-        let bp = *bit_perfect;
-        egui::CollapsingHeader::new(egui::RichText::new("ReplayGain & streaming").size(12.0))
-            .id_salt("playback-prefs")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                self.playback_ui(ui, engine, paths, bp);
-            });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if crate::app::link_text(ui, "Playback settings…", egui::FontId::proportional(12.0), t.accent).clicked() {
+                self.wants_settings = true;
+                ui.close();
+            }
+        });
         ui.add_space(4.0);
     }
 

@@ -84,10 +84,7 @@ impl ListenerApp {
             Cmd::Compact => self.actions.push(Action::SetMode(WindowMode::Compact)),
             Cmd::Mini => self.actions.push(Action::SetMode(WindowMode::Mini)),
             Cmd::ToggleMini => self.actions.push(Action::ToggleMini),
-            Cmd::Settings => {
-                self.set_mode(Some(WindowMode::Full));
-                self.overlay = Some(super::dialogs::Overlay::Settings);
-            }
+            Cmd::Settings => self.actions.push(Action::OpenSettings(self.settings_section)),
             Cmd::Shortcuts => {
                 self.set_mode(Some(WindowMode::Full));
                 self.overlay = match self.overlay {
