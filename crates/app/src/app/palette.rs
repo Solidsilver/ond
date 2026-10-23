@@ -1,8 +1,9 @@
 //! ⌘K: search the library and act on a result without leaving the keyboard.
 //! ⏎ opens · ⌘⏎ plays · ⌥⏎ plays next · ⇧⏎ adds to the queue.
 
+use super::view_ctx::ViewCtx;
 use super::widgets::elide;
-use super::{Action, ListenerApp, QueueAction};
+use super::{Action, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::search::{Hit, Results, SearchIndex};
@@ -43,7 +44,7 @@ const HINTS_H: f32 = 34.0;
 /// A group's title line.
 const GROUP_H: f32 = 24.0;
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     pub(super) fn palette_ui(&mut self, ctx: &egui::Context) {
         if self.ui.palette.is_none() {
             return;
@@ -297,9 +298,9 @@ impl ListenerApp {
                 match verb {
                     Verb::Open => self.actions.push(Action::Go(Route::Album(album_id))),
                     // Plays the album from this track, as double-clicking it there would.
-                    Verb::Play => self.view().play_from_album(&tr, QueueAction::Play { start: 0 }),
-                    Verb::PlayNext => self.view().play_from_album(&tr, QueueAction::PlayNext),
-                    Verb::Add => self.view().play_from_album(&tr, QueueAction::Add),
+                    Verb::Play => self.play_from_album(&tr, QueueAction::Play { start: 0 }),
+                    Verb::PlayNext => self.play_from_album(&tr, QueueAction::PlayNext),
+                    Verb::Add => self.play_from_album(&tr, QueueAction::Add),
                     Verb::Download => {
                         let kept = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
                         self.actions.push(Action::KeepOffline(super::Keep::Tracks(vec![tr]), !kept));

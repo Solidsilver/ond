@@ -99,11 +99,11 @@ impl ListenerApp {
                 self.view().grid_place(ui, &route);
             }
             Route::Artists => self.view().artists_page(ui),
-            Route::Songs => self.songs_page(ui),
+            Route::Songs => self.view().songs_page(ui),
             Route::Artist { name, .. } => self.artist_page(ui, &route, name),
-            Route::Album(id) => self.album_page(ui, id),
-            Route::Playlist { id, name } => self.playlist_page(ui, id, name),
-            Route::Favorites => self.favorites_page(ui),
+            Route::Album(id) => self.view().album_page(ui, id),
+            Route::Playlist { id, name } => self.view().playlist_page(ui, id, name),
+            Route::Favorites => self.view().favorites_page(ui),
             Route::Filter { kind, value } => {
                 let what = match kind {
                     FilterKind::Genre => "Genre",

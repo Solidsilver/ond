@@ -23,7 +23,11 @@ pub struct ViewCtx<'a> {
     pub output: &'a Outputs,
     pub session: &'a Session,
     pub sync: &'a SyncState,
-    pub search: &'a SearchState,
+    /// The palette scores with the index's own scratch space.
+    pub search: &'a mut SearchState,
+    /// Lyrics by track id, as fetched so far.
+    pub lyrics: &'a HashMap<String, crate::lyrics::Fetch>,
+    pub prefs: &'a crate::prefs::Prefs,
     pub song_stats: &'a HashMap<String, Option<SongStats>>,
     /// Artwork loads as it's first drawn.
     pub art: &'a mut Art,
@@ -40,6 +44,16 @@ impl ViewCtx<'_> {
 
     pub fn duration_secs(&self) -> Option<f64> {
         self.player.duration_secs(self.engine)
+    }
+
+    /// Whether `track` can play right now: downloaded, or the server is there.
+    pub fn playable(&self, track: &Track) -> bool {
+        super::playable(self.session, self.downloads, track)
+    }
+
+    /// The Player's lyrics drawer is open.
+    pub fn lyrics_drawer(&self) -> bool {
+        self.prefs.get(|s| s.window.lyrics_open)
     }
 
     /// A track's analysis, if there is one for the file as it is now.
@@ -61,7 +75,9 @@ impl ListenerApp {
             output: &self.output,
             session: &self.session,
             sync: &self.sync,
-            search: &self.search,
+            search: &mut self.search,
+            lyrics: &self.lyrics,
+            prefs: &self.prefs,
             song_stats: &self.song_stats,
             art: &mut self.art,
             diagnostics: &mut self.diagnostics,

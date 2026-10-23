@@ -76,7 +76,7 @@ impl ListenerApp {
             for p in self.data.playlists.clone() {
                 let route = Route::Playlist { id: p.id.clone(), name: p.name.clone() };
                 let on = active.as_ref() == Some(&route);
-                let mine = self.owns(&p);
+                let mine = self.view().owns(&p);
                 let resp = self.place(ui, &p.name, on);
                 // A drop target for songs dragged from any list.
                 if mine && dragging {
@@ -98,7 +98,7 @@ impl ListenerApp {
                     super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, &mut self.actions);
                     if mine {
                         ui.separator();
-                        self.playlist_edit_items(ui, &p.id, &p.name);
+                        self.view().playlist_edit_items(ui, &p.id, &p.name);
                     }
                 });
             }

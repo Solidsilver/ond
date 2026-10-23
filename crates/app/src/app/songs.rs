@@ -6,7 +6,7 @@
 
 use super::view_ctx::ViewCtx;
 use super::widgets::elide;
-use super::{Action, Focus, ListenerApp, QueueAction};
+use super::{Action, Focus, QueueAction};
 use crate::icons::{self, Icon};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
@@ -96,8 +96,8 @@ pub fn sort_with(tracks: &[Track], keys: &SortKeys, by: Column, descending: bool
     idx
 }
 
-impl ListenerApp {
-    fn songs_order(&mut self) -> Arc<Vec<usize>> {
+impl ViewCtx<'_> {
+    pub(super) fn songs_order(&mut self) -> Arc<Vec<usize>> {
         let data = &self.data;
         let versions = (data.tracks_version, data.version);
         let keys = self.ui.songs.keys.get(versions, || {
@@ -111,7 +111,7 @@ impl ListenerApp {
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let n = self.data.tracks.all.len();
-        self.view().heading(ui, "Songs", (n > 0).then(|| n.to_string()));
+        self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
         if n == 0 {
             let (title, body) = if self.sync.tracks {
                 ("Syncing your tracks…", "Songs appear here as the library comes in.")
@@ -197,15 +197,15 @@ impl ListenerApp {
                 let label = format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" });
                 resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
                 if resp.double_clicked() {
-                    self.view().play_from_album(tr, QueueAction::Play { start: 0 });
+                    self.play_from_album(tr, QueueAction::Play { start: 0 });
                 } else if resp.clicked() {
                     self.ui.songs.selected = Some(row);
                     self.ui.focus = Focus::Main;
                 }
-                let source = self.view().album_source(&tr.album_id);
+                let source = self.album_source(&tr.album_id);
                 resp.context_menu(|ui| {
                     if ui.button("Play").clicked() {
-                        self.view().play_from_album(tr, QueueAction::Play { start: 0 });
+                        self.play_from_album(tr, QueueAction::Play { start: 0 });
                     }
                     self.track_menu(ui, tr, &source);
                     if ui.button("Go to album").clicked() {
@@ -217,7 +217,7 @@ impl ListenerApp {
     }
 
     /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
-    fn songs_keys(&mut self, ui: &Ui, order: &[usize]) {
+    pub(super) fn songs_keys(&mut self, ui: &Ui, order: &[usize]) {
         if order.is_empty() {
             return;
         }
@@ -226,13 +226,13 @@ impl ListenerApp {
         let Some(sel) = self.ui.songs.selected.filter(|s| *s < order.len()) else { return };
         let tr = self.data.tracks.all[order[sel]].clone();
         if k.enter {
-            self.view().play_from_album(&tr, QueueAction::Play { start: 0 });
+            self.play_from_album(&tr, QueueAction::Play { start: 0 });
         }
         if k.play_next {
-            self.view().play_from_album(&tr, QueueAction::PlayNext);
+            self.play_from_album(&tr, QueueAction::PlayNext);
         }
         if k.add {
-            self.view().play_from_album(&tr, QueueAction::Add);
+            self.play_from_album(&tr, QueueAction::Add);
         }
     }
 }

@@ -153,6 +153,8 @@ pub enum Action {
     Go(Route),
     /// The Info tab wants a song's play count (asked once per song).
     NeedSongStats(String),
+    /// A lyrics view wants a song's lyrics (asked once per song).
+    NeedLyrics(Box<Track>),
     Back,
     Forward,
     BackBy(usize),
@@ -463,6 +465,11 @@ impl UiState {
             bars_shown: false,
         }
     }
+}
+
+/// Whether `track` can play right now: downloaded, or the server is there.
+fn playable(session: &Session, downloads: &Downloads, track: &Track) -> bool {
+    session.online || downloads.snap.is_done(&track.id)
 }
 
 /// The server connection and who's signed in.
@@ -1072,11 +1079,6 @@ impl ListenerApp {
         }
     }
 
-    /// Whether `track` can play right now: downloaded, or the server is there.
-    pub fn playable(&self, track: &Track) -> bool {
-        self.session.online || self.downloads.snap.is_done(&track.id)
-    }
-
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
     /// it's already showing that tab.
     fn toggle_side_tab(&mut self, tab: QueueTab) {
@@ -1284,6 +1286,12 @@ impl ListenerApp {
         }
         match action {
             Action::Go(route) => self.go(route),
+            Action::NeedLyrics(track) => {
+                if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
+                    self.lyrics.insert(track.id.clone(), crate::lyrics::Fetch::Loading);
+                    self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
+                }
+            }
             Action::NeedSongStats(id) => {
                 if !self.song_stats.contains_key(&id) && self.session.client.is_some() {
                     self.song_stats.insert(id.clone(), None);
@@ -1766,7 +1774,7 @@ impl ListenerApp {
         match self.window_mode() {
             WindowMode::Full => {
                 self.full_ui(ui);
-                self.palette_ui(&ctx);
+                self.view().palette_ui(&ctx);
                 self.overlay_ui(&ctx);
                 self.drag_ghost(&ctx);
             }
@@ -1877,7 +1885,7 @@ impl ListenerApp {
                 .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 8, right: 8, top: 12, bottom: 8 }))
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
-                    self.queue_panel(ui, true)
+                    self.view().queue_panel(ui, true)
                 })
                 .response
                 .rect
@@ -1930,7 +1938,7 @@ impl ListenerApp {
             .show(ctx, |ui| {
                 ui.set_width(w - 16.0);
                 ui.set_height(content.height() - 20.0);
-                self.queue_panel(ui, true);
+                self.view().queue_panel(ui, true);
             });
         if modal.should_close() {
             self.ui.queue_sheet = false;

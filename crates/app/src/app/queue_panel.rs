@@ -4,8 +4,9 @@
 //! The same column can show the playing track's lyrics (in the full window)
 //! or its details instead (Up Next · History · Lyrics · Info).
 
+use super::view_ctx::ViewCtx;
 use super::widgets::{choice, elide};
-use super::{Action, Focus, ListenerApp, QueueTab};
+use super::{Action, Focus, QueueTab};
 use crate::icons::{self, Icon};
 use crate::queue::{EndAction, Item, Source, clock_label, end_offset, start_offsets};
 use crate::theme::{Tokens, semibold};
@@ -26,7 +27,7 @@ fn group_icon(s: &Source) -> Icon {
     }
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// The column: Up Next or History, plus a Lyrics tab when `lyrics_tab`
     /// (the full window; the Player has its lyrics drawer instead).
     pub(super) fn queue_panel(&mut self, ui: &mut Ui, lyrics_tab: bool) {
@@ -74,7 +75,7 @@ impl ListenerApp {
         match self.ui.queue_ui.tab {
             QueueTab::Lyrics => return self.sidebar_lyrics(ui),
             // The Player already shows the song large right above.
-            QueueTab::Info => return self.view().sidebar_info(ui, lyrics_tab),
+            QueueTab::Info => return self.sidebar_info(ui, lyrics_tab),
             QueueTab::UpNext | QueueTab::History => {}
         }
 
@@ -121,7 +122,7 @@ impl ListenerApp {
         });
     }
 
-    fn up_next(&mut self, ui: &mut Ui, now: chrono::NaiveTime, remaining: f64) {
+    pub(super) fn up_next(&mut self, ui: &mut Ui, now: chrono::NaiveTime, remaining: f64) {
         let t = Tokens::of(ui);
         if self.player.queue.upcoming.is_empty() {
             ui.add_space(24.0);
@@ -173,7 +174,7 @@ impl ListenerApp {
         }
     }
 
-    fn history(&mut self, ui: &mut Ui) {
+    pub(super) fn history(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         if self.player.queue.history.is_empty() {
             ui.add_space(24.0);
@@ -188,7 +189,7 @@ impl ListenerApp {
 
     /// One queue item. `index` is its place in `upcoming` (None in history).
     /// Drag to reorder; double-click plays; right-click has the actions.
-    fn queue_row(&mut self, ui: &mut Ui, item: &Item, index: Option<usize>, starts_at: Option<String>) {
+    pub(super) fn queue_row(&mut self, ui: &mut Ui, item: &Item, index: Option<usize>, starts_at: Option<String>) {
         let t = Tokens::of(ui);
         let sense = if index.is_some() { Sense::click_and_drag() } else { Sense::click() };
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
@@ -269,7 +270,7 @@ impl ListenerApp {
     }
 
     /// With a queue item selected: ↑/↓ select, ⌥↑/⌥↓ move it, ⌫ remove, ⏎ play.
-    fn queue_keys(&mut self, ui: &Ui) {
+    pub(super) fn queue_keys(&mut self, ui: &Ui) {
         let Some(uid) = self.ui.queue_ui.selected else { return };
         let Some(at) = self.player.queue.position(uid) else { return };
         let Some(k) = self.list_keys(ui, Focus::Queue, true, true) else { return };

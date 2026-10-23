@@ -4,8 +4,9 @@
 //! per-track measurements, folded away until asked for. Playlists reuse the
 //! track list.
 
+use super::view_ctx::ViewCtx;
 use super::widgets::{Mark, chip, elide, heart_button, link};
-use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction};
+use super::{Action, DragTracks, Focus, Keep, Overlay, PlaylistAction, QueueAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
@@ -121,7 +122,7 @@ pub(super) struct ListOpts {
     pub playlist: Option<String>,
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     pub(super) fn album_page(&mut self, ui: &mut Ui, id: &str) {
         let t = Tokens::of(ui);
         let Some(album) = self.data.album(id).cloned() else {
@@ -228,7 +229,7 @@ impl ListenerApp {
                         let kept = self.downloads.snap.pin(&pin).is_some();
                         egui::Popup::menu(&more).show(|ui| {
                             let c = super::browse::Collection::Album(album.id.clone());
-                            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), &mut self.actions);
+                            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
                             if !summary.complete() && analysing == 0 && !tracks.is_empty() {
                                 ui.separator();
                                 if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
@@ -241,7 +242,7 @@ impl ListenerApp {
                             }
                         });
                         ui.add_space(6.0);
-                        self.view().pin_status(ui, &pin);
+                        self.pin_status(ui, &pin);
                     });
                     ui.min_rect().bottom() - top
                 });
@@ -277,7 +278,7 @@ impl ListenerApp {
 
     /// "Album details ›": the album's credits and its per-track measurements,
     /// folded away until asked for (open stays open for the session).
-    fn album_details(&mut self, ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>, analysing: bool) {
+    pub(super) fn album_details(&mut self, ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>, analysing: bool) {
         let t = Tokens::of(ui);
         let open = self.ui.album_details_open;
         let toggle = ui.horizontal(|ui| {
@@ -302,7 +303,7 @@ impl ListenerApp {
                 super::widgets::kv_section(ui, "Credits");
                 for c in &people {
                     let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
-                    super::info_panel::links_row(&mut self.actions, ui, &c.role, items);
+                    super::info_panel::links_row(self.actions, ui, &c.role, items);
                 }
             }
             super::widgets::kv_section(ui, "Analysis");
@@ -372,14 +373,14 @@ impl ListenerApp {
                     let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
                     egui::Popup::menu(&more).show(|ui| {
                         let c = super::browse::Collection::Playlist(id.to_owned());
-                        super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), &mut self.actions);
+                        super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
                         if mine {
                             ui.separator();
                             self.playlist_edit_items(ui, id, name);
                         }
                     });
                     ui.add_space(6.0);
-                    self.view().pin_status(ui, &pin);
+                    self.pin_status(ui, &pin);
                 });
             });
         });
@@ -417,7 +418,7 @@ impl ListenerApp {
     }
 
     /// Up to four album covers in a 2×2 square (one fills it; none: a note glyph).
-    fn mosaic(&mut self, ui: &mut Ui, rect: Rect, tracks: &[Track]) {
+    pub(super) fn mosaic(&mut self, ui: &mut Ui, rect: Rect, tracks: &[Track]) {
         let t = Tokens::of(ui);
         let mut covers: Vec<String> = Vec::new();
         for tr in tracks {
@@ -636,7 +637,7 @@ impl ListenerApp {
     }
 
     /// [`track_menu`](Self::track_menu), plus Remove from Playlist in the user's own.
-    fn track_row_menu(&mut self, ui: &mut Ui, tr: &Track, index: usize, source: &Source, playlist: Option<&str>) {
+    pub(super) fn track_row_menu(&mut self, ui: &mut Ui, tr: &Track, index: usize, source: &Source, playlist: Option<&str>) {
         self.track_menu(ui, tr, source);
         if let Some(pid) = playlist {
             ui.separator();
@@ -688,7 +689,7 @@ impl ListenerApp {
         let alone = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
         if alone || !self.downloads.snap.is_done(&tr.id) {
             ui.separator();
-            super::browse::offline_item(ui, alone, None, || Keep::Tracks(vec![tr.clone()]), &mut self.actions);
+            super::browse::offline_item(ui, alone, None, || Keep::Tracks(vec![tr.clone()]), self.actions);
         }
     }
 
@@ -738,7 +739,7 @@ impl ListenerApp {
 
     /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add. In the
     /// user's own playlist, ⌥↑/⌥↓ move the selected song and ⌫ removes it.
-    fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) {
+    pub(super) fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) {
         if tracks.is_empty() {
             return;
         }
