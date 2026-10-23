@@ -30,6 +30,9 @@ pub struct Settings {
     /// Report plays to the server (which passes them on to Last.fm / ListenBrainz).
     #[serde(default = "yes")]
     pub scrobble: bool,
+    /// ReplayGain and streaming quality.
+    #[serde(default)]
+    pub playback: crate::playback::PlaybackPrefs,
 }
 
 fn yes() -> bool {
@@ -48,6 +51,7 @@ impl Default for Settings {
             show_queue: true,
             window: Default::default(),
             scrobble: true,
+            playback: Default::default(),
         }
     }
 }

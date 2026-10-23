@@ -178,7 +178,7 @@ fn hi_res_on_a_16_48_device_is_resampled_and_reported_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hr.wav");
     std::fs::write(&path, crate::decode::tests::wav(96_000, 2, &pcm(2 * 9_600, 0))).unwrap();
-    let src = TrackSource { id: "hr".into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()) };
+    let src = TrackSource { id: "hr".into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() };
     let config = EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.1 };
     let device = DeviceCaps { active_bits: Some(16), ..caps(Some(16), 48_000) };
     let engine = spawn(config, Box::new(FakeBackend::new(device)), None);
@@ -198,6 +198,73 @@ fn hi_res_on_a_16_48_device_is_resampled_and_reported_unavailable() {
     assert_eq!(path.summary(), "16/96 → 16/48 · resampled, dithered · device limit");
     assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })));
     engine.send(Command::Shutdown);
+}
+
+#[test]
+fn replay_gain_switches_at_the_gapless_boundary_and_is_reported() {
+    use replaygain::db_to_linear;
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 20_001, 1), pcm(2 * 9_999, 2));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(backend), None);
+    engine.send(Command::SetVolume(1.0));
+    engine.send(Command::SetGain(GainConfig { mode: GainMode::Track, ..Default::default() }));
+    let mut first = file_source(&dir, "a", &a);
+    first.replay_gain = ReplayGain { track_gain: Some(-6.0), ..Default::default() };
+    let mut second = file_source(&dir, "b", &b);
+    second.replay_gain = ReplayGain { track_gain: Some(-12.0), ..Default::default() };
+    engine.send(Command::Play(first));
+    engine.send(Command::SetNext(Some(second)));
+
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let paths: Vec<_> = seen.iter().filter_map(|e| if let Event::SignalPath(p) = e { Some(p.clone()) } else { None }).collect();
+    assert!(paths.iter().any(|p| p.summary() == "16/44.1 · RG −6.0 dB track"), "{paths:?}");
+    assert!(paths.iter().any(|p| p.summary() == "16/44.1 · RG −12.0 dB track"), "{paths:?}");
+
+    let out = played.lock().unwrap().clone();
+    assert_eq!(out.len(), a.len() + b.len(), "every sample played once (none gained to silence)");
+    let (ga, gb) = (db_to_linear(-6.0), db_to_linear(-12.0));
+    let at = |s: i16, g: f32| s as f32 / 32_768.0 * g;
+    // After the start-up fade, A sits at its gain up to its last sample...
+    let tail = a.len() - 100..a.len();
+    assert!(tail.clone().all(|i| (out[i] - at(a[i], ga)).abs() < 1e-7));
+    // ...and B is at its own from its very first sample.
+    assert!((0..b.len()).all(|i| (out[a.len() + i] - at(b[i], gb)).abs() < 1e-7), "B's gain must start on its first sample");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn bit_perfect_bypasses_replay_gain_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 8_000, 4);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let config = EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(backend), None);
+    engine.send(Command::SetGain(GainConfig { mode: GainMode::Track, preamp_db: 3.0, ..Default::default() }));
+    let mut src = file_source(&dir, "a", &a);
+    src.replay_gain = ReplayGain { track_gain: Some(-9.0), ..Default::default() };
+    engine.send(Command::Play(src));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let path = seen.iter().find_map(|e| if let Event::SignalPath(p) = e { Some(p.clone()) } else { None }).unwrap();
+    assert_eq!(path.gain, GainState::Bypassed);
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    assert!(out == a, "samples untouched");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn transcoded_and_original_copies_are_cached_apart() {
+    let original = TrackSource { id: "t1".into(), suffix: Some("flac".into()), ..Default::default() };
+    let aac256 = TrackSource { transcode: Some(Transcode { format: "aac".into(), kbps: 256 }), ..original.clone() };
+    let aac128 = TrackSource { transcode: Some(Transcode { format: "aac".into(), kbps: 128 }), ..original.clone() };
+    let keys = [original.cache_key(), aac256.cache_key(), aac128.cache_key()];
+    assert_ne!(keys[0], keys[1]);
+    assert_ne!(keys[1], keys[2]);
+    assert_eq!(keys[1].suffix.as_deref(), Some("aac"));
+    assert_eq!(aac256.transcode.unwrap().label(), "AAC 256");
 }
 
 fn device(uid: &str, name: &str, kind: DeviceKind) -> DeviceInfo {

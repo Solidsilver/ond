@@ -9,10 +9,14 @@
 //! resampler converts on this thread. Gapless needs the same source rate *and*
 //! the same device format, so one resampler carries across the boundary.
 
+use crate::channels::{ChannelChange, ChannelMap, output_channels};
 use crate::output::{RingCtl, RingInput, StreamFormat};
+use crate::replaygain::{GainConfig, ReplayGain, applied_gain, parse_tag_value};
 use crate::resample::StreamResampler;
 use crate::signal::{DeviceCaps, choose_rate};
 use crate::{Dsp, EngineConfig, Status, TrackSource};
+use symphonia::core::audio::Channels;
+use symphonia::core::meta::{StandardTag, Tag};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rtrb::{Producer, RingBuffer};
 use std::io::{Read, Seek, SeekFrom};
@@ -34,8 +38,17 @@ use symphonia::core::units::{Time, TimeBase, Timestamp};
 pub(crate) enum DecoderMsg {
     /// Track `seq` (0 = the session's first) produced its first audio. `format`
     /// is the file's; `output` what reaches the device (rate after resampling).
-    /// `total_frames` counts frames at the output rate.
-    Track { seq: u64, src: TrackSource, format: StreamFormat, output: StreamFormat, total_frames: Option<u64> },
+    /// `total_frames` counts frames at the output rate. `replay_gain` is the
+    /// source's, gaps filled from the file's tags.
+    Track {
+        seq: u64,
+        src: TrackSource,
+        format: StreamFormat,
+        output: StreamFormat,
+        total_frames: Option<u64>,
+        replay_gain: ReplayGain,
+        channels: ChannelChange,
+    },
     /// A new ring whose first track is `first_seq`: open (or reopen) the device for it.
     Ring { format: StreamFormat, input: RingInput, first_seq: u64 },
     /// A seek in track `seq` landed.
@@ -75,6 +88,7 @@ impl Session {
         status: Arc<Status>,
         cache: Option<StreamCache>,
         caps: Option<DeviceCaps>,
+        gain: Arc<Mutex<GainConfig>>,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
@@ -98,7 +112,9 @@ impl Session {
             seek_rx,
             next,
             caps,
+            gain,
             resampled: Vec::new(),
+            mapped: Vec::new(),
         };
         thread::Builder::new()
             .name("audio-decode".into())
@@ -153,8 +169,12 @@ struct Ctx {
     next: NextSlot,
     /// The output device, as it was when the session started (picks the ring's rate).
     caps: Option<DeviceCaps>,
+    /// ReplayGain settings, shared with (and updated by) the engine.
+    gain: Arc<Mutex<GainConfig>>,
     /// Resampler output for one packet.
     resampled: Vec<f32>,
+    /// Channel-mapped samples for one packet.
+    mapped: Vec<f32>,
 }
 
 /// Timing facts needed to turn timestamps into frame counts.
@@ -187,6 +207,8 @@ struct Track {
     bits: Option<u32>,
     /// The rate the device plays this track at (set from the first packet; 0 before).
     out_rate: u32,
+    /// ReplayGain from the file's tags.
+    tag_gain: ReplayGain,
 }
 
 impl Track {
@@ -211,6 +233,9 @@ struct Out {
     done: Arc<AtomicBool>,
     ctl: Arc<RingCtl>,
     pushed: u64,
+    /// The tracks' channel count before mapping: a different layout starts a new
+    /// ring, since a downmix changes whether the samples need dither.
+    src_channels: u16,
     resampler: Option<StreamResampler>,
     /// `pushed` when the resampler last started from zero: its output frame `n`
     /// is ring sample `rs_base + n * channels`.
@@ -298,10 +323,11 @@ impl Ctx {
         if let Some(ext) = &src.suffix {
             hint.with_extension(ext);
         }
-        let reader = symphonia::default::get_probe()
+        let mut reader = symphonia::default::get_probe()
             .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
             .map_err(|e| format!("probe: {e}"))?;
         probed.store(true, Ordering::Relaxed);
+        let tag_gain = tag_replay_gain(reader.as_mut());
         let track = reader.default_track(TrackType::Audio).ok_or("no audio track")?;
         let track_id = track.id;
         let total_frames = track.num_frames;
@@ -326,9 +352,10 @@ impl Ctx {
             bits: params.bits_per_sample,
             out_rate: choose_rate(
                 params.sample_rate.unwrap_or(0),
-                params.channels.as_ref().map_or(2, |c| c.count() as u16),
+                output_channels(params.channels.as_ref().map_or(2, |c| c.count() as u16), self.caps.as_ref()),
                 self.caps.as_ref(),
             ),
+            tag_gain,
         })
     }
 
@@ -336,6 +363,7 @@ impl Ctx {
         let mut scratch: Vec<f32> = Vec::new();
         let mut skip_until: Option<Timestamp> = None;
         let mut started = false;
+        let mut map = ChannelMap::Identity;
 
         loop {
             if self.cancel.load(Ordering::Relaxed) {
@@ -372,6 +400,10 @@ impl Ctx {
             };
             let spec = buf.spec();
             let channels = spec.channels().count().max(1);
+            let positions = match spec.channels() {
+                Channels::Positioned(p) => Some(p.bits()),
+                _ => None,
+            };
             let rate = spec.rate();
             scratch.resize(buf.samples_interleaved(), 0.0);
             buf.copy_to_slice_interleaved(&mut scratch);
@@ -394,29 +426,56 @@ impl Ctx {
             if scratch.is_empty() {
                 continue;
             }
-            self.dsp.process(&mut scratch);
 
             let mut fresh = None;
             if !started {
                 started = true;
                 let format = StreamFormat { sample_rate: rate, channels: channels as u16, bits_per_sample: t.bits };
-                let output = StreamFormat { sample_rate: choose_rate(rate, format.channels, self.caps.as_ref()), ..format };
+                let out_channels = output_channels(format.channels, self.caps.as_ref());
+                let (m, change) = ChannelMap::new(format.channels, positions, out_channels);
+                map = m;
+                let output = StreamFormat {
+                    sample_rate: choose_rate(rate, out_channels, self.caps.as_ref()),
+                    channels: out_channels,
+                    ..format
+                };
                 t.out_rate = output.sample_rate;
-                match self.attach(output, rate, out) {
+                // The gain must be in place before the boundary marker goes in.
+                let replay_gain = src.replay_gain.or(t.tag_gain);
+                let cfg = *self.gain.lock().unwrap_or_else(|e| e.into_inner());
+                let linear = applied_gain(&cfg, &replay_gain, src.album_context).map_or(1.0, |g| g.linear);
+                self.status.gains.set(seq, linear);
+                let downmixed = matches!(change, ChannelChange::Downmix { .. });
+                match self.attach(output, rate, format.channels, downmixed, out) {
                     Some(f) => fresh = f,
                     None => return Ok(TrackEnd::Cancelled),
                 }
                 let total_frames = t.total_frames.map(|f| t.to_output(f));
-                let _ = self.msgs.send(DecoderMsg::Track { seq, src: src.clone(), format, output, total_frames });
+                let _ = self.msgs.send(DecoderMsg::Track {
+                    seq,
+                    src: src.clone(),
+                    format,
+                    output,
+                    total_frames,
+                    replay_gain,
+                    channels: change,
+                });
             }
+            let mapped = if map.is_identity() {
+                &mut scratch
+            } else {
+                map.apply(&scratch, &mut self.mapped);
+                &mut self.mapped
+            };
+            self.dsp.process(mapped);
             let Some(o) = out.as_mut() else { unreachable!("attach always leaves a ring") };
             let data = match o.resampler.as_mut() {
                 Some(r) => {
                     self.resampled.clear();
-                    r.process(&scratch, &mut self.resampled);
+                    r.process(mapped, &mut self.resampled);
                     &self.resampled
                 }
-                None => &scratch,
+                None => &*mapped,
             };
             match push_all(&mut o.samples, data, &mut o.pushed, &self.cancel, &self.seek_pending) {
                 Push::Done | Push::Interrupted => {}
@@ -435,9 +494,16 @@ impl Ctx {
     /// the format matches (gapless: just mark where the track begins), else let
     /// it drain and make a new one. Returns the consumer side of a new ring, or
     /// `None` if cancelled while draining.
-    fn attach(&mut self, format: StreamFormat, src_rate: u32, out: &mut Option<Out>) -> Option<Option<RingInput>> {
+    fn attach(
+        &mut self,
+        format: StreamFormat,
+        src_rate: u32,
+        src_channels: u16,
+        downmixed: bool,
+        out: &mut Option<Out>,
+    ) -> Option<Option<RingInput>> {
         if let Some(o) = out.as_mut() {
-            if o.format == format && o.src_rate == src_rate {
+            if o.format == format && o.src_rate == src_rate && o.src_channels == src_channels {
                 // With a resampler carrying on, the next track starts where its first
                 // input frame lands in the output, which may still be inside the filter.
                 let at = match &o.resampler {
@@ -483,8 +549,8 @@ impl Ctx {
             }
         };
         let input = RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone())
-            .with_source(format.bits_per_sample, resampler.is_some());
-        *out = Some(Out { format, src_rate, samples, markers, done, ctl, pushed: 0, resampler, rs_base: 0 });
+            .with_source(format.bits_per_sample, resampler.is_some() || downmixed);
+        *out = Some(Out { format, src_rate, samples, markers, done, ctl, pushed: 0, src_channels, resampler, rs_base: 0 });
         Some(Some(input))
     }
 
@@ -567,6 +633,56 @@ fn trim_padding(scratch: &mut Vec<f32>, channels: usize, packet: &symphonia::cor
         scratch.truncate((decoded - end) * channels);
         scratch.drain(..start * channels);
     }
+}
+
+/// ReplayGain from the file's tags, in every metadata revision the reader has
+/// (container tags, ID3 in front of it, per-track tags).
+fn tag_replay_gain(reader: &mut dyn FormatReader) -> ReplayGain {
+    let mut rg = ReplayGain::default();
+    let mut meta = reader.metadata();
+    loop {
+        if let Some(rev) = meta.current() {
+            let tags = rev.media.tags.iter().chain(rev.per_track.iter().flat_map(|t| t.metadata.tags.iter()));
+            rg = rg.or(replay_gain_from_tags(tags));
+        }
+        if meta.pop().is_none() {
+            break;
+        }
+    }
+    rg
+}
+
+/// Reads ReplayGain from tags, by standard tag or by raw key
+/// (`REPLAYGAIN_TRACK_GAIN`, `TXXX:replaygain_track_gain`, iTunes `----:…:replaygain_track_gain`).
+fn replay_gain_from_tags<'a>(tags: impl Iterator<Item = &'a Tag>) -> ReplayGain {
+    let mut rg = ReplayGain::default();
+    for tag in tags {
+        let (slot, value) = match &tag.std {
+            Some(StandardTag::ReplayGainTrackGain(v)) => (&mut rg.track_gain, v.as_str().to_owned()),
+            Some(StandardTag::ReplayGainAlbumGain(v)) => (&mut rg.album_gain, v.as_str().to_owned()),
+            Some(StandardTag::ReplayGainTrackPeak(v)) => (&mut rg.track_peak, v.as_str().to_owned()),
+            Some(StandardTag::ReplayGainAlbumPeak(v)) => (&mut rg.album_peak, v.as_str().to_owned()),
+            _ => {
+                let key = tag.raw.key.to_ascii_uppercase();
+                let slot = if key.ends_with("REPLAYGAIN_TRACK_GAIN") {
+                    &mut rg.track_gain
+                } else if key.ends_with("REPLAYGAIN_ALBUM_GAIN") {
+                    &mut rg.album_gain
+                } else if key.ends_with("REPLAYGAIN_TRACK_PEAK") {
+                    &mut rg.track_peak
+                } else if key.ends_with("REPLAYGAIN_ALBUM_PEAK") {
+                    &mut rg.album_peak
+                } else {
+                    continue;
+                };
+                (slot, tag.raw.value.to_string())
+            }
+        };
+        if slot.is_none() {
+            *slot = parse_tag_value(&value);
+        }
+    }
+    rg
 }
 
 /// `file://` for local files (tests, later the offline store); anything else goes through the stream cache.

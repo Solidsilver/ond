@@ -96,8 +96,11 @@ pub struct RingInput {
     pub ctl: Arc<RingCtl>,
     /// Samples consumed since the ring started or was last flushed.
     pos: u64,
-    /// Current software gain (ramps toward the target).
+    /// Current volume gain (ramps toward the volume).
     gain: f32,
+    /// Current ReplayGain factor: jumps to the next track's value on its first
+    /// sample, glides when the setting changes mid-track. Multiplied with `gain`.
+    rg: f32,
     /// Silent until enough audio is queued.
     buffering: bool,
     /// Hold generation whose fade-out has been played.
@@ -116,21 +119,35 @@ impl std::fmt::Debug for RingInput {
 
 impl RingInput {
     pub fn new(samples: Consumer<f32>, markers: Consumer<u64>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
-        Self { samples, markers, input_done, ctl, pos: 0, gain: 1.0, buffering: true, faded: 0, source_bits: None, resampled: false }
+        Self {
+            samples,
+            markers,
+            input_done,
+            ctl,
+            pos: 0,
+            gain: 1.0,
+            rg: 1.0,
+            buffering: true,
+            faded: 0,
+            source_bits: None,
+            resampled: false,
+        }
     }
 
-    /// Describes what's in the ring, for the dither decision.
-    pub fn with_source(mut self, bits: Option<u32>, resampled: bool) -> Self {
+    /// Describes what's in the ring, for the dither decision. `processed` means
+    /// the decoder recomputed samples (resampled or downmixed).
+    pub fn with_source(mut self, bits: Option<u32>, processed: bool) -> Self {
         self.source_bits = bits;
-        self.resampled = resampled;
+        self.resampled = processed;
         self
     }
 
     /// Whether samples may be off a `device_bits`-bit integer grid and need
-    /// requantizing: resampled, under a gain other than unity, or from a deeper
-    /// (or lossy) source. A bit-perfect signal never needs it.
+    /// requantizing: resampled or downmixed, under a gain other than unity
+    /// (volume or ReplayGain), or from a deeper (or lossy) source. A
+    /// bit-perfect signal never needs it.
     pub fn needs_dither(&self, device_bits: u32) -> bool {
-        self.resampled || self.gain != 1.0 || self.source_bits.is_none_or(|b| b > device_bits)
+        self.resampled || self.gain * self.rg != 1.0 || self.source_bits.is_none_or(|b| b > device_bits)
     }
 
     /// The realtime path for an integer device seen through a float stream:
@@ -178,7 +195,7 @@ impl RingInput {
     }
 
     /// The realtime path: copy what's available, split at track boundaries,
-    /// apply the gain ramp (Normal mode only), pad with silence, update atomics.
+    /// apply volume and ReplayGain (Normal mode only), pad with silence, update atomics.
     /// Returns whether everything has been played out (input done, ring empty).
     pub fn fill<T>(&mut self, out: &mut [T], channels: usize, rate: u32, status: &Status) -> bool
     where
@@ -220,6 +237,7 @@ impl RingInput {
                 // Fade in from silence (Normal mode); bit-perfect starts on the exact sample.
                 if !bit_perfect {
                     self.gain = 0.0;
+                    self.rg = status.gains.get(status.track_seq.load(Ordering::Acquire));
                 }
             } else {
                 out.fill(silence);
@@ -240,16 +258,23 @@ impl RingInput {
                     // The next track's first sample is about to play.
                     let _ = self.markers.pop();
                     status.frames_played.store(0, Ordering::Relaxed);
-                    status.track_seq.fetch_add(1, Ordering::AcqRel);
+                    let seq = status.track_seq.fetch_add(1, Ordering::AcqRel) + 1;
+                    // Its ReplayGain applies from exactly this sample.
+                    if !bit_perfect {
+                        self.rg = status.gains.get(seq);
+                    }
                     continue;
                 }
                 Ok(&m) => (m - self.pos) as usize,
                 Err(_) => usize::MAX,
             };
+            let rg_target =
+                if bit_perfect { 1.0 } else { status.gains.get(status.track_seq.load(Ordering::Acquire)) };
             let n = (avail - written).min(until);
             let Ok(chunk) = self.samples.read_chunk(n) else { break };
             let (a, b) = chunk.as_slices();
-            apply_gain(&mut out[written..written + n], a, b, channels, &mut self.gain, target, step);
+            let gains = Gains { vol: &mut self.gain, vol_target: target, rg: &mut self.rg, rg_target, step };
+            apply_gain(&mut out[written..written + n], a, b, channels, gains);
             chunk.commit_all();
             written += n;
             self.pos += n as u64;
@@ -278,8 +303,9 @@ impl RingInput {
         let total = (n / channels).max(1) as f32;
         if let Ok(chunk) = self.samples.read_chunk(n) {
             let (a, b) = chunk.as_slices();
+            let level = self.gain * self.rg;
             for (i, (o, s)) in out.iter_mut().zip(a.iter().chain(b)).enumerate() {
-                let g = (self.gain * (1.0 - (i / channels) as f32 / total)).clamp(0.0, 1.0);
+                let g = (level * (1.0 - (i / channels) as f32 / total)).clamp(0.0, 1.0);
                 *o = T::from_sample(*s * g);
             }
             chunk.commit_all();
@@ -288,29 +314,48 @@ impl RingInput {
     }
 }
 
-/// Copies `a` then `b` into `dst`. At unity gain (always the case in
-/// bit-perfect mode once any ramp has finished) samples are copied untouched;
-/// no multiply happens at all.
-fn apply_gain<T>(dst: &mut [T], a: &[f32], b: &[f32], channels: usize, gain: &mut f32, target: f32, step: f32)
+/// The two gain factors of the callback and where each is heading.
+struct Gains<'a> {
+    vol: &'a mut f32,
+    vol_target: f32,
+    rg: &'a mut f32,
+    rg_target: f32,
+    /// Largest change per frame for either factor.
+    step: f32,
+}
+
+fn toward(x: f32, target: f32, step: f32) -> f32 {
+    if x < target { (x + step).min(target) } else { (x - step).max(target) }
+}
+
+/// Copies `a` then `b` into `dst` under volume × ReplayGain: one multiply per
+/// sample. At unity (always the case in bit-perfect mode once any ramp has
+/// finished) samples are copied untouched; no multiply happens at all.
+fn apply_gain<T>(dst: &mut [T], a: &[f32], b: &[f32], channels: usize, g: Gains<'_>)
 where
     T: SizedSample + FromSample<f32>,
 {
     let src = a.iter().chain(b);
-    if *gain == target && target == 1.0 {
-        for (o, s) in dst.iter_mut().zip(src) {
-            *o = T::from_sample(*s);
-        }
-    } else if *gain == target {
-        let g = *gain;
-        for (o, s) in dst.iter_mut().zip(src) {
-            *o = T::from_sample(*s * g);
+    if *g.vol == g.vol_target && *g.rg == g.rg_target {
+        let f = *g.vol * *g.rg;
+        if f == 1.0 {
+            for (o, s) in dst.iter_mut().zip(src) {
+                *o = T::from_sample(*s);
+            }
+        } else {
+            for (o, s) in dst.iter_mut().zip(src) {
+                *o = T::from_sample(*s * f);
+            }
         }
     } else {
+        let mut f = *g.vol * *g.rg;
         for (i, (o, s)) in dst.iter_mut().zip(src).enumerate() {
             if i % channels == 0 {
-                *gain = if *gain < target { (*gain + step).min(target) } else { (*gain - step).max(target) };
+                *g.vol = toward(*g.vol, g.vol_target, g.step);
+                *g.rg = toward(*g.rg, g.rg_target, g.step);
+                f = *g.vol * *g.rg;
             }
-            *o = T::from_sample(*s * *gain);
+            *o = T::from_sample(*s * f);
         }
     }
 }
@@ -644,6 +689,79 @@ mod tests {
         // ~7.5 frames of ramp (0.5 → 1.0), then exact copies.
         assert_eq!(input.gain, 1.0);
         assert_eq!(out[20..].iter().map(|s| s.to_bits()).collect::<Vec<_>>(), src[44..64].iter().map(|s| s.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn replay_gain_switches_on_the_first_sample_of_the_next_track() {
+        let status = Status::default();
+        status.set_volume(1.0);
+        status.gains.set(0, 0.5);
+        status.gains.set(1, 0.25);
+        // Track A: 3 stereo frames, B starts at sample 6. All samples 0.8.
+        let (_p, mut m, mut input) = ring(&[0.8; 12], false);
+        input.rg = 0.5; // as set when A's prebuffer finished
+        m.push(6).unwrap();
+        let mut out = [0.0f32; 12];
+        input.fill(&mut out, 2, RATE, &status);
+        assert_eq!(&out[..6], &[0.4; 6], "A at its gain");
+        assert_eq!(&out[6..], &[0.2; 6], "B at its gain from its first sample, no glide across the boundary");
+        assert_eq!(status.track_seq.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn replay_gain_and_volume_multiply_once() {
+        let status = Status::default();
+        status.set_volume(0.5);
+        status.gains.set(0, 0.5);
+        let (_p, _m, mut input) = ring(&[1.0; 8], false);
+        (input.gain, input.rg) = (0.5, 0.5);
+        let mut out = [0.0f32; 8];
+        input.fill(&mut out, 2, RATE, &status);
+        assert_eq!(out, [0.25; 8]);
+        assert!(input.needs_dither(24), "a gained signal is off the integer grid");
+    }
+
+    #[test]
+    fn changing_replay_gain_mid_track_glides() {
+        let status = Status::default();
+        status.set_volume(1.0);
+        let (_p, _m, mut input) = ring(&[1.0; 64], false);
+        status.gains.set(0, 0.5);
+        let mut out = [0.0f32; 40];
+        input.fill(&mut out, 1, RATE, &status);
+        let steps: Vec<f32> = out.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+        assert!(steps.iter().all(|s| *s <= 1.0 / 15.0 + 1e-6), "no jumps: {out:?}");
+        assert!(out[20..].iter().all(|s| *s == 0.5), "settles on the new gain: {out:?}");
+    }
+
+    #[test]
+    fn bit_perfect_ignores_replay_gain() {
+        let status = bit_perfect_status();
+        status.set_volume(0.3);
+        status.gains.set(0, 0.4);
+        status.gains.set(1, 0.2);
+        let src: Vec<f32> = (0..32).map(|i| (i as f32 * 0.123_456_7).sin()).collect();
+        let (_p, mut m, mut input) = ring(&src, false);
+        m.push(16).unwrap();
+        let mut out = [0.0f32; 32];
+        input.fill(&mut out, 2, RATE, &status);
+        assert_eq!(out.map(f32::to_bits).to_vec(), src.iter().map(|s| s.to_bits()).collect::<Vec<_>>());
+        assert_eq!(status.track_seq.load(Ordering::Relaxed), 1);
+        assert_eq!(input.gain * input.rg, 1.0, "nothing to dither away");
+    }
+
+    #[test]
+    fn prebuffer_end_picks_up_the_current_tracks_gain() {
+        let status = Status::default();
+        status.set_volume(1.0);
+        status.gains.set(0, 0.5);
+        let (_p, _m, mut input) = ring(&[1.0; 64], false);
+        input.buffering = true;
+        let mut out = [0.0f32; 40];
+        input.fill(&mut out, 1, RATE, &status);
+        // Fades in from silence to the track's gain; never overshoots it.
+        assert!(out.iter().all(|s| *s <= 0.5 + 1e-6), "{out:?}");
+        assert_eq!(out[39], 0.5);
     }
 
     #[test]

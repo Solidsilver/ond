@@ -23,6 +23,7 @@
 //! device, and which mode each device gets, is the engine's call too: the UI
 //! hands it the remembered per-device modes and is told what happened.
 
+mod channels;
 #[cfg(target_os = "macos")]
 pub mod coreaudio;
 mod decode;
@@ -30,21 +31,25 @@ mod device;
 mod dither;
 mod dsp;
 pub mod output;
+pub mod replaygain;
 mod resample;
 mod signal;
 
+pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
 pub use dsp::Dsp;
 pub use output::{CpalBackend, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
 pub use dither::Tpdf;
-pub use signal::{BitPerfectStatus, DeviceCaps, RateRange, SignalPath, assess, choose_rate, describe, khz};
+pub use replaygain::{GainConfig, GainMode, ReplayGain};
+pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, adjust, assess, choose_rate, describe, khz};
 pub use streamcache::{CacheConfig, StreamCache};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use decode::{DecoderMsg, Session};
+use replaygain::{TrackGains, applied_gain};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -77,17 +82,42 @@ impl Default for EngineConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TrackSource {
     pub id: String,
     pub url: String,
     /// File extension from the server (`flac`, `m4a`, ...) to speed up probing.
+    /// For a transcoded stream, the transcode's format.
     pub suffix: Option<String>,
+    /// From the server or library; the file's own tags fill any gaps.
+    pub replay_gain: ReplayGain,
+    /// The track plays as part of its album (album gain under [`GainMode::Auto`]).
+    pub album_context: bool,
+    /// The server converts the file on the fly; `None` streams the original.
+    pub transcode: Option<Transcode>,
+}
+
+/// A server-side conversion, e.g. AAC at 256 kbps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transcode {
+    pub format: String,
+    pub kbps: u32,
+}
+
+impl Transcode {
+    /// "AAC 256".
+    pub fn label(&self) -> String {
+        format!("{} {}", self.format.to_ascii_uppercase(), self.kbps)
+    }
 }
 
 impl TrackSource {
+    /// Original and transcoded copies of a track are cached separately.
     fn cache_key(&self) -> CacheKey {
-        CacheKey::new(self.id.clone(), self.suffix.clone())
+        match &self.transcode {
+            None => CacheKey::new(self.id.clone(), self.suffix.clone()),
+            Some(t) => CacheKey::new(format!("{}~{}{}", self.id, t.format, t.kbps), Some(t.format.clone())),
+        }
     }
 
     fn is_local(&self) -> bool {
@@ -102,6 +132,9 @@ pub enum Command {
     Resume,
     Stop,
     SetVolume(f32),
+    /// ReplayGain settings. Applies to the current track at once (with a short
+    /// glide) and to every track after it.
+    SetGain(GainConfig),
     /// Takes effect immediately: the gain stage is bypassed (after a 15 ms glide
     /// to unity) and the signal-path status is re-judged.
     SetMode(PlaybackMode),
@@ -176,6 +209,8 @@ pub struct Status {
     pub(crate) buffering: AtomicBool,
     /// The current mode: read by the callback (gain bypass) and the DSP stage.
     pub(crate) bit_perfect: AtomicBool,
+    /// ReplayGain per session track, read by the callback at each boundary.
+    pub(crate) gains: TrackGains,
 }
 
 impl Status {
@@ -269,6 +304,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 status: st,
                 events: ev_tx,
                 cache,
+                gain: Arc::default(),
                 session: None,
                 tracks: Vec::new(),
                 out_seq: 0,
@@ -291,10 +327,19 @@ struct SessionTrack {
     src: TrackSource,
     /// The file's format.
     format: StreamFormat,
-    /// What the device plays (after resampling).
+    /// What the device plays (after channel mapping and resampling).
     output: StreamFormat,
     /// At the output rate.
     total_frames: Option<u64>,
+    /// The source's ReplayGain merged with the file's tags.
+    replay_gain: ReplayGain,
+    channels: ChannelChange,
+}
+
+impl SessionTrack {
+    fn gain(&self, cfg: &GainConfig) -> Option<replaygain::AppliedGain> {
+        applied_gain(cfg, &self.replay_gain, self.src.album_context)
+    }
 }
 
 /// The ring currently connected to the device.
@@ -309,6 +354,8 @@ struct Engine {
     status: Arc<Status>,
     events: Sender<Event>,
     cache: Option<StreamCache>,
+    /// Shared with the decode thread, which sets each new track's gain as it starts.
+    gain: Arc<Mutex<GainConfig>>,
     session: Option<Session>,
     /// Indexed by session sequence number.
     tracks: Vec<SessionTrack>,
@@ -363,6 +410,13 @@ impl Engine {
             }
             Command::Stop => self.stop(),
             Command::SetVolume(v) => self.status.set_volume(v),
+            Command::SetGain(cfg) => {
+                *self.gain.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
+                for seq in self.out_seq..self.tracks.len() as u64 {
+                    self.store_gain(seq);
+                }
+                self.report_signal_path();
+            }
             Command::SetMode(m) => self.apply_mode(m),
             Command::Seek(to) => self.seek(to),
             Command::SetNext(next) => self.set_next(next),
@@ -402,8 +456,15 @@ impl Engine {
         self.status.set_state(PlayState::Loading);
         self.status.paused.store(false, Ordering::Relaxed);
         let caps = self.backend.device_caps();
-        let session =
-            Session::start(src, start_at, self.config.clone(), self.status.clone(), self.cache.clone(), caps);
+        let session = Session::start(
+            src,
+            start_at,
+            self.config.clone(),
+            self.status.clone(),
+            self.cache.clone(),
+            caps,
+            self.gain.clone(),
+        );
         session.set_next(0, self.next.clone());
         self.session = Some(session);
     }
@@ -424,6 +485,14 @@ impl Engine {
         self.status.fetched_bytes.store(0, Ordering::Relaxed);
         self.status.total_bytes.store(0, Ordering::Relaxed);
         self.status.buffering.store(false, Ordering::Relaxed);
+        self.status.gains.reset();
+    }
+
+    /// Publishes track `seq`'s ReplayGain for the callback (1.0 when off).
+    fn store_gain(&self, seq: u64) {
+        let Some(t) = self.tracks.get(seq as usize) else { return };
+        let cfg = *self.gain.lock().unwrap_or_else(|e| e.into_inner());
+        self.status.gains.set(seq, t.gain(&cfg).map_or(1.0, |g| g.linear));
     }
 
     fn current(&self) -> Option<&SessionTrack> {
@@ -544,13 +613,29 @@ impl Engine {
     fn report_signal_path(&mut self) {
         let (Some(ring), Some(track)) = (self.ring.as_ref(), self.current()) else { return };
         let (source, device_rate) = (track.format, ring.format.sample_rate);
+        let channels = track.channels;
+        let transcoded = track.src.transcode.as_ref().map(Transcode::label);
+        let gain_cfg = *self.gain.lock().unwrap_or_else(|e| e.into_inner());
+        let gain = match track.gain(&gain_cfg) {
+            None => GainState::Off,
+            Some(_) if self.config.mode == PlaybackMode::BitPerfect => GainState::Bypassed,
+            Some(g) => GainState::Applied(g),
+        };
         let caps = self.backend.device_caps();
-        let bit_perfect = assess(self.config.mode, &source, device_rate, caps.as_ref());
+        // Judged on what reaches the device channel-wise; the mapping itself is folded in below.
+        let sent = StreamFormat { channels: ring.format.channels, ..source };
+        let bit_perfect = adjust(
+            assess(self.config.mode, &sent, device_rate, caps.as_ref()),
+            channels,
+            transcoded.as_deref(),
+        );
         // The integer format actually in use: what the callback dithers to.
         let device_bits = caps.as_ref().and_then(|c| c.active_bits);
         let resampled = device_rate != source.sample_rate;
+        let recomputed = matches!(channels, ChannelChange::Downmix { .. })
+            || matches!(gain, GainState::Applied(g) if g.linear != 1.0);
         let dithered = device_bits
-            .is_some_and(|b| b < 32 && (resampled || source.bits_per_sample.is_none_or(|s| s > b)));
+            .is_some_and(|b| b < 32 && (resampled || recomputed || source.bits_per_sample.is_none_or(|s| s > b)));
         let path = SignalPath {
             output: self.backend.name().to_owned(),
             source,
@@ -559,6 +644,9 @@ impl Engine {
             resampled,
             dithered,
             bit_perfect,
+            channels,
+            gain,
+            transcoded,
         };
         let _ = self.events.send(Event::SignalPath(path));
     }
@@ -593,9 +681,11 @@ impl Engine {
         let finished = self.session.as_ref().is_some_and(Session::finished);
         while let Some(msg) = self.session.as_ref().and_then(Session::try_msg) {
             match msg {
-                DecoderMsg::Track { seq, src, format, output, total_frames } => {
+                DecoderMsg::Track { seq, src, format, output, total_frames, replay_gain, channels } => {
                     debug_assert_eq!(seq as usize, self.tracks.len());
-                    self.tracks.push(SessionTrack { src, format, output, total_frames });
+                    self.tracks.push(SessionTrack { src, format, output, total_frames, replay_gain, channels });
+                    // The decoder set it already; this catches a settings change it raced with.
+                    self.store_gain(seq);
                 }
                 DecoderMsg::Ring { format, input, first_seq } => {
                     if !self.open_ring(format, input, first_seq) {
@@ -629,12 +719,16 @@ impl Engine {
 
         // Track boundaries the callback has played past.
         let crossed = self.status.track_seq.load(Ordering::Acquire);
-        while self.out_seq < crossed {
-            self.out_seq += 1;
-            // The UI names the new next once it hears about this track.
-            self.next = None;
-            self.prefetched = None;
-            self.announce(true);
+        if self.out_seq < crossed {
+            while self.out_seq < crossed {
+                self.out_seq += 1;
+                // The UI names the new next once it hears about this track.
+                self.next = None;
+                self.prefetched = None;
+                self.announce(true);
+            }
+            // Same device format, but the gain, transcode or channel layout may differ.
+            self.report_signal_path();
         }
 
         if self.session.is_some() && finished && (self.ring.is_none() || self.backend.drained()) {
