@@ -24,6 +24,9 @@ pub struct Settings {
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
+    /// Full / Compact / Mini, and where each was.
+    #[serde(default)]
+    pub window: crate::window::Windows,
 }
 
 fn yes() -> bool {
@@ -40,6 +43,7 @@ impl Default for Settings {
             device_modes: Default::default(),
             theme: Default::default(),
             show_queue: true,
+            window: Default::default(),
         }
     }
 }

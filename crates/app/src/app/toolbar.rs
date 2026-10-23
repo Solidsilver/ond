@@ -10,7 +10,7 @@ use audio::{Command, PlayState};
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
 const LEFT_W: f32 = 120.0;
-const RIGHT_W: f32 = 330.0;
+const RIGHT_W: f32 = 370.0;
 const LCD_MAX_W: f32 = 520.0;
 const LCD_H: f32 = 38.0;
 
@@ -21,19 +21,20 @@ impl ListenerApp {
         let right = Rect::from_min_max(pos2(full.right() - RIGHT_W, full.top()), full.max);
         let middle = Rect::from_min_max(pos2(left.right() + 12.0, full.top()), pos2(right.left() - 12.0, full.bottom()));
 
-        ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui));
+        ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, None));
         let lcd_w = middle.width().clamp(160.0, LCD_MAX_W);
         let lcd = Rect::from_center_size(middle.center(), vec2(lcd_w, LCD_H));
         self.lcd(ui, lcd);
         ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| self.toolbar_right(ui));
     }
 
-    /// Previous · play/pause (a spinner while buffering) · next.
-    pub(super) fn transport(&mut self, ui: &mut Ui) {
+    /// Previous · play/pause (a spinner while buffering) · next. `color`
+    /// overrides the icons' color (e.g. over artwork).
+    pub(super) fn transport(&mut self, ui: &mut Ui, color: Option<egui::Color32>) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = 2.0;
         let state = self.engine.status.state();
-        if icons::sized_button(ui, Icon::Previous, "Previous", vec2(32.0, 32.0), 13.0, None).clicked() {
+        if icons::sized_button(ui, Icon::Previous, "Previous", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Previous);
         }
         let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.pending_seek.is_some();
@@ -42,10 +43,10 @@ impl ListenerApp {
             PlayState::Playing => (Icon::Pause, "Pause"),
             _ => (Icon::Play, "Play"),
         };
-        if icons::sized_button(ui, icon, label, vec2(36.0, 32.0), 17.0, Some(t.text)).clicked() {
+        if icons::sized_button(ui, icon, label, vec2(36.0, 32.0), 17.0, Some(color.unwrap_or(t.text))).clicked() {
             self.actions.push(Action::PlayPause);
         }
-        if icons::sized_button(ui, Icon::Next, "Next", vec2(32.0, 32.0), 13.0, None).clicked() {
+        if icons::sized_button(ui, Icon::Next, "Next", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Next);
         }
     }
@@ -145,6 +146,9 @@ impl ListenerApp {
         }
         if queue_icon.clicked() {
             self.actions.push(Action::ToggleQueue);
+        }
+        if icons::sized_button(ui, Icon::MiniPlayer, "Mini player (⇧⌘M)", vec2(28.0, 28.0), 14.0, Some(t.muted)).clicked() {
+            self.actions.push(Action::ToggleMini);
         }
         ui.scope(|ui| {
             ui.spacing_mut().slider_width = 72.0;

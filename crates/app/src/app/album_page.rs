@@ -92,11 +92,18 @@ impl ListenerApp {
         egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).show(ui, |ui| {
             // Header.
             ui.horizontal_top(|ui| {
-                let (art, _) = ui.allocate_exact_size(vec2(220.0, 220.0), Sense::hover());
+                const ART: f32 = 220.0;
+                let (art, _) = ui.allocate_exact_size(vec2(ART, ART), Sense::hover());
                 self.art.paint(ui, art, album.cover_art.as_deref(), 6.0);
                 ui.add_space(20.0);
-                ui.vertical(|ui| {
-                    ui.add_space(220.0 - 150.0);
+                // The text block sits on the artwork's bottom edge. Its height
+                // (it wraps) is known after drawing, so use last frame's and
+                // redo the frame when it changed.
+                let measured = ui.scope_id().with(("album-header-h", id));
+                let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(150.0);
+                let block = ui.vertical(|ui| {
+                    ui.add_space((ART - last_h).max(0.0));
+                    let top = ui.cursor().top();
                     ui.add(egui::Label::new(egui::RichText::new(&album.name).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
                     if let Some(artist) = &album.artist
                         && link(ui, artist, FontId::proportional(18.0), t.accent).clicked()
@@ -156,7 +163,13 @@ impl ListenerApp {
                             }
                         });
                     });
+                    ui.min_rect().bottom() - top
                 });
+                let h = block.inner.round();
+                if (h - last_h).abs() > 0.5 {
+                    ui.data_mut(|d| d.insert_temp(measured, h));
+                    ui.ctx().request_discard("album header height changed");
+                }
             });
             ui.add_space(24.0);
             if tracks.is_empty() {

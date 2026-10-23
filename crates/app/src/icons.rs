@@ -29,6 +29,10 @@ pub enum Icon {
     List,
     More,
     Sliders,
+    /// A window with a small player in its corner: switch to the mini player.
+    MiniPlayer,
+    /// Arrows pointing out to the corners: back to the full window.
+    Expand,
 }
 
 /// Paints `icon` centred in `rect`.
@@ -129,6 +133,16 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 painter.line_segment([p(-0.8, y), p(0.8, y)], line);
                 painter.circle_filled(p(knob, y), r * 0.16, color);
             }
+        }
+        Icon::MiniPlayer => {
+            painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
+            painter.rect_filled(Rect::from_min_max(p(0.05, 0.05), p(0.6, 0.45)), r * 0.08, color);
+        }
+        Icon::Expand => {
+            painter.add(Shape::line(vec![p(0.15, -0.8), p(0.8, -0.8), p(0.8, -0.15)], line));
+            painter.line_segment([p(0.8, -0.8), p(0.2, -0.2)], line);
+            painter.add(Shape::line(vec![p(-0.15, 0.8), p(-0.8, 0.8), p(-0.8, 0.15)], line));
+            painter.line_segment([p(-0.8, 0.8), p(-0.2, 0.2)], line);
         }
         Icon::Spinner => {
             let t = painter.ctx().input(|i| i.time) as f32;
