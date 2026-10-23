@@ -9,7 +9,7 @@ use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFor
 use crate::theme::{ThemePref, Tokens, semibold};
 use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use offline::human_bytes;
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Section {
@@ -172,7 +172,7 @@ impl ListenerApp {
                         p.kbps = BITRATES[i];
                     }
                 });
-                let network = capitalize(self.output.network().label());
+                let network = crate::fmt::capitalize(self.output.network().label());
                 let now = match p.transcode(self.output.network()) {
                     Some(t) => format!("{network} · new tracks stream as {}", t.label()),
                     None => format!("{network} · new tracks stream as original files"),
@@ -235,15 +235,15 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let snap = self.offline_snap.clone();
         group(ui, "Storage", |ui| {
-            let mut used = format!("{} on this computer", human_bytes(snap.used_bytes));
+            let mut used = format!("{} on this computer", crate::fmt::bytes(snap.used_bytes));
             if let Some(free) = snap.free_bytes {
-                used.push_str(&format!(" · {} free", human_bytes(free)));
+                used.push_str(&format!(" · {} free", crate::fmt::bytes(free)));
             }
             ui.label(egui::RichText::new(used).size(13.0).color(t.text));
             ui.add_space(10.0);
             row(ui, "Limit", |ui| {
                 let label = match snap.limit {
-                    Some(b) => human_bytes(b),
+                    Some(b) => crate::fmt::bytes(b),
                     None => "No limit".to_owned(),
                 };
                 let resp = menu_label(ui, &label, t.text);
@@ -327,7 +327,7 @@ impl ListenerApp {
             } else if p.waiting {
                 format!("{} of {} · waiting for playback", p.done.min(p.total), p.total)
             } else {
-                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::analyze::about(p.eta_secs))
+                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::fmt::about(p.eta_secs))
             };
             ui.label(egui::RichText::new(status).size(13.0).color(t.text));
             ui.add_space(6.0);
@@ -351,8 +351,8 @@ impl ListenerApp {
             if n == 0 {
                 ui.label(egui::RichText::new("Every track is analysed.").size(13.0).color(t.text));
             } else {
-                let tracks = if n == 1 { "1 track".to_owned() } else { format!("{n} tracks") };
-                ui.label(egui::RichText::new(format!("{tracks} not analysed yet · about {}", crate::analyze::about(crate::analyze::assumed_eta(secs)))).size(13.0).color(t.text));
+                let text = format!("{} not analysed yet · {}", crate::fmt::plural(n, "track"), crate::fmt::about(crate::analyze::assumed_eta(secs)));
+                ui.label(egui::RichText::new(text).size(13.0).color(t.text));
                 ui.add_space(10.0);
                 if secondary(ui, "Analyze library").clicked() {
                     self.actions.push(Action::AnalyzeLibrary);
@@ -444,18 +444,10 @@ fn db_row(ui: &mut Ui, label: &str, db: &mut f32, range: std::ops::RangeInclusiv
         if thin_slider(ui, &mut v, (width - LABEL_W - 80.0).clamp(140.0, 240.0), label).changed() {
             *db = ((lo + v * (hi - lo)) * 2.0).round() / 2.0;
         }
-        let readout = if db.abs() < 0.05 { "0 dB".to_owned() } else { format!("{:+.1} dB", *db).replace('-', "−") };
+        let readout = crate::fmt::gain(*db);
         let (r, _) = ui.allocate_exact_size(vec2(56.0, 18.0), Sense::hover());
         ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, readout, FontId::proportional(12.0), t.muted);
     });
-}
-
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().chain(c).collect(),
-        None => String::new(),
-    }
 }
 
 /// A switch row kept to a readable width, so the switch sits near its label.

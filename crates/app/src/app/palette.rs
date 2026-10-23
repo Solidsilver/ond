@@ -180,7 +180,7 @@ impl ListenerApp {
                                     let a = &index.artists[i];
                                     ui.painter().circle_filled(tile.center(), 15.0, t.field);
                                     icons::paint(ui.painter(), tile.shrink(8.0), Icon::Person, t.muted);
-                                    (a.name.clone(), format!("Artist · {} album{}", a.albums, if a.albums == 1 { "" } else { "s" }))
+                                    (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
                                 }
                                 Hit::Album(i) => {
                                     let a = &index.albums[i];

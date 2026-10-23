@@ -9,7 +9,7 @@ use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use offline::{Pin, PinSummary, Snapshot, human_bytes};
+use offline::{Pin, PinSummary, Snapshot};
 
 /// Storage caps offered in the limit menu, in GB.
 pub(super) const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
@@ -18,7 +18,7 @@ pub(super) const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
 pub fn pin_text(snap: &Snapshot, s: &PinSummary) -> String {
     let count = format!("{} of {}", s.done, s.total);
     if s.complete() {
-        return format!("Downloaded · {}", human_bytes(s.bytes_done));
+        return format!("Downloaded · {}", crate::fmt::bytes(s.bytes_done));
     }
     if snap.paused {
         format!("Paused · {count}")
@@ -54,9 +54,9 @@ impl ListenerApp {
         let songs: Vec<&PinSummary> = snap.pins.iter().filter(|p| matches!(p.pin, Pin::Track(_))).collect();
 
         let mut parts = Vec::new();
-        for (n, one, many) in [(albums.len(), "album", "albums"), (playlists.len(), "playlist", "playlists"), (songs.len(), "song", "songs")] {
+        for (n, word) in [(albums.len(), "album"), (playlists.len(), "playlist"), (songs.len(), "song")] {
             if n > 0 {
-                parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+                parts.push(crate::fmt::plural(n, word));
             }
         }
         self.heading(ui, "Offline", (!parts.is_empty()).then(|| parts.join(" · ")));
@@ -122,14 +122,14 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            let mut text = format!("{} on this computer", human_bytes(snap.used_bytes));
+            let mut text = format!("{} on this computer", crate::fmt::bytes(snap.used_bytes));
             if let Some(free) = snap.free_bytes {
-                text.push_str(&format!(" · {} free", human_bytes(free)));
+                text.push_str(&format!(" · {} free", crate::fmt::bytes(free)));
             }
             ui.label(egui::RichText::new(text).size(12.0).color(t.muted));
             ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
             let limit = match snap.limit {
-                Some(b) => format!("Limit {}", human_bytes(b)),
+                Some(b) => format!("Limit {}", crate::fmt::bytes(b)),
                 None => "No limit".to_owned(),
             };
             let resp = link(ui, &limit, FontId::proportional(12.0), t.muted);

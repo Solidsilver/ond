@@ -2,7 +2,7 @@
 //! window, output / volume / queue on the right.
 
 use super::widgets::elide;
-use super::{Action, ListenerApp, mmss};
+use super::{Action, ListenerApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -191,8 +191,8 @@ impl ListenerApp {
         if seeking {
             painter.circle_filled(pos2(x, line.center().y), 3.5, t.text);
         }
-        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, mmss(shown), time_font.clone(), t.muted);
-        let remaining = dur.map(|d| format!("−{}", mmss((d - shown).max(0.0)))).unwrap_or_default();
+        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, crate::fmt::clock(shown), time_font.clone(), t.muted);
+        let remaining = dur.map(|d| format!("−{}", crate::fmt::clock((d - shown).max(0.0)))).unwrap_or_default();
         painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
 
         let hovering = body.hovered() || strip_resp.hovered() || self.seek_preview.is_some();

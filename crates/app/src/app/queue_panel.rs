@@ -218,7 +218,7 @@ impl ListenerApp {
             let right = match (&starts_at, resp.hovered()) {
                 (_, true) if !available => "not downloaded".to_owned(),
                 (Some(at), true) => format!("at {at}"),
-                _ => item.track.duration_secs.map(|d| super::mmss(f64::from(d))).unwrap_or_default(),
+                _ => item.track.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default(),
             };
             let right_g = ui.painter().layout_no_wrap(right, FontId::proportional(11.0), t.muted);
             let text_w = rect.right() - 10.0 - right_g.size().x - 8.0 - (art.right() + 10.0);

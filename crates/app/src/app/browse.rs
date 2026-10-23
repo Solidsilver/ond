@@ -275,7 +275,7 @@ impl ListenerApp {
                 }
                 let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 100.0);
                 ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
-                let count = format!("{n} album{}", if *n == 1 { "" } else { "s" });
+                let count = crate::fmt::plural(*n, "album");
                 ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, count, FontId::proportional(12.0), t.muted);
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
                 if resp.clicked() {

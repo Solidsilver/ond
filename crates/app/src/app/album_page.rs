@@ -5,7 +5,7 @@
 //! track list.
 
 use super::widgets::{Mark, chip, elide, heart_button, link, primary, secondary};
-use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction, mmss};
+use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
@@ -35,8 +35,8 @@ pub fn credits(tracks: &[Track]) -> Vec<Credit> {
                 continue;
             }
             let label = match (&role[..], c.sub_role.as_deref()) {
-                ("performer", Some(sub)) if !sub.is_empty() => capitalize(sub),
-                _ => capitalize(&role),
+                ("performer", Some(sub)) if !sub.is_empty() => crate::fmt::capitalize(sub),
+                _ => crate::fmt::capitalize(&role),
             };
             let entry = match out.iter_mut().position(|e| e.role == label) {
                 Some(i) => &mut out[i],
@@ -62,23 +62,11 @@ pub fn credits(tracks: &[Track]) -> Vec<Credit> {
     out
 }
 
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().chain(c).collect(),
-        None => String::new(),
-    }
-}
-
-/// "−11.2" with a real minus sign.
-fn signed(v: f64) -> String {
-    format!("{v:.1}").replace('-', "\u{2212}")
-}
 
 /// `FLAC 16/44.1` when every track shares it.
 fn shared_format(tracks: &[Track]) -> Option<String> {
-    let first = tracks.first()?.quality_label();
-    tracks.iter().all(|t| t.quality_label() == first).then_some(first)
+    let first = crate::fmt::quality(tracks.first()?);
+    tracks.iter().all(|t| crate::fmt::quality(t) == first).then_some(first)
 }
 
 /// Per-track loudness, peak and dynamic range, with any finding the album as a
@@ -100,8 +88,8 @@ fn analysis_table(ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>]
             match a {
                 Some(a) => {
                     let dash = || "–".to_owned();
-                    ui.label(small(a.integrated_lufs.map_or_else(dash, |l| format!("{} LUFS", signed(l))), t.text));
-                    ui.label(small(a.true_peak_dbtp.map_or_else(dash, |p| format!("{} dBTP", signed(p))), t.text));
+                    ui.label(small(a.integrated_lufs.map_or_else(dash, |l| crate::fmt::level(l, "LUFS")), t.text));
+                    ui.label(small(a.true_peak_dbtp.map_or_else(dash, |p| crate::fmt::level(p, "dBTP")), t.text));
                     ui.label(small(a.dr_rounded().map_or_else(dash, |d| format!("DR{d}")), t.text));
                     match a.verdicts.iter().find(|v| album_verdict.is_none_or(|av| !av.same_kind(v))) {
                         Some(v) => {
@@ -214,7 +202,7 @@ impl ListenerApp {
                             ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
                                 .on_hover_text("Dynamic range (DR meter): the album's average");
                             sep(ui);
-                            ui.label(egui::RichText::new(format!("{} LUFS", signed(lufs))).size(12.0).color(t.muted))
+                            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
                                 .on_hover_text("Integrated loudness (EBU R128), across the album");
                         } else if analysing > 0 {
                             sep(ui);
@@ -282,9 +270,8 @@ impl ListenerApp {
             let source = Source::Album { id: album.id.clone(), name: album.name.clone() };
             self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false, playlist: None });
             ui.add_space(14.0);
-            let mins = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>().div_ceil(60);
-            let n = tracks.len();
-            let mut footer = format!("{n} song{}, {mins} minutes", if n == 1 { "" } else { "s" });
+            let secs = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>();
+            let mut footer = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
             if let Some(y) = album.year {
                 footer.push_str(&format!(" · {y}"));
             }
@@ -379,7 +366,7 @@ impl ListenerApp {
                     (None, None) => None,
                 };
                 let sub = match counts {
-                    Some((n, secs)) if n > 0 => format!("{n} song{} · {}", if n == 1 { "" } else { "s" }, length(secs)),
+                    Some((n, secs)) if n > 0 => format!("{} · {}", crate::fmt::plural(n, "song"), crate::fmt::span(secs)),
                     Some(_) => "Empty".to_owned(),
                     None => String::new(),
                 };
@@ -610,7 +597,7 @@ impl ListenerApp {
                     icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 4.0, cy), vec2(8.0, 8.0)), Icon::Play, t.accent);
                     x += 16.0;
                 }
-                let dur = tr.duration_secs.map(|d| mmss(f64::from(d))).unwrap_or_default();
+                let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
                 ui.painter().text(pos2(rect.right() - 10.0, cy), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
                 // The heart sits just left of the duration: always when loved,
                 // on hover otherwise.
@@ -813,11 +800,6 @@ impl ListenerApp {
     }
 }
 
-/// "41 min", "1 hr 12 min".
-fn length(secs: u32) -> String {
-    let mins = secs.div_ceil(60);
-    if mins >= 60 { format!("{} hr {} min", mins / 60, mins % 60) } else { format!("{mins} min") }
-}
 
 fn composer_of(t: &Track) -> Option<String> {
     t.composer.clone().or_else(|| t.contributors.iter().find(|c| c.role.eq_ignore_ascii_case("composer")).map(|c| c.name.clone()))

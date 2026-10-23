@@ -327,13 +327,6 @@ fn a_moved_store_opens_with_its_downloads() {
 }
 
 #[test]
-fn sizes_read_well() {
-    assert_eq!(human_bytes(512), "512 bytes");
-    assert_eq!(human_bytes(1_234_000), "1.2 MB");
-    assert_eq!(human_bytes(42_000_000_000), "42 GB");
-}
-
-#[test]
 fn pinning_many_tracks_at_once_returns_at_once_and_is_saved() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();

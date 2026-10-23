@@ -4,7 +4,7 @@
 //! bottom status line lives here too.
 
 use super::widgets::elide;
-use super::{Action, ListenerApp, mmss};
+use super::{Action, ListenerApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::window::WindowMode;
@@ -89,9 +89,9 @@ impl ListenerApp {
             let time_w = ui.painter().layout_no_wrap("−88:88".into(), font.clone(), ON_ART_MUTED).size().x;
             let bar = Rect::from_min_max(pos2(inner.left() + time_w + 8.0, seek_y - 1.5), pos2(inner.right() - time_w - 8.0, seek_y + 1.5));
             let shown = self.seek_bar(&mut ui, bar, Color32::from_white_alpha(56), ON_ART);
-            ui.painter().text(pos2(bar.left() - 8.0, seek_y), egui::Align2::RIGHT_CENTER, mmss(shown), font.clone(), ON_ART_MUTED);
+            ui.painter().text(pos2(bar.left() - 8.0, seek_y), egui::Align2::RIGHT_CENTER, crate::fmt::clock(shown), font.clone(), ON_ART_MUTED);
             if let Some(d) = self.duration_secs() {
-                ui.painter().text(pos2(bar.right() + 8.0, seek_y), egui::Align2::LEFT_CENTER, format!("−{}", mmss((d - shown).max(0.0))), font, ON_ART_MUTED);
+                ui.painter().text(pos2(bar.right() + 8.0, seek_y), egui::Align2::LEFT_CENTER, format!("−{}", crate::fmt::clock((d - shown).max(0.0))), font, ON_ART_MUTED);
             }
         }
         let row = Rect::from_center_size(pos2(inner.center().x, inner.bottom() - 15.0), vec2(120.0, 32.0));

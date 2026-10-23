@@ -943,21 +943,5 @@ pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// "1.2 GB", "340 MB".
-pub fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1000.0 && u < UNITS.len() - 1 {
-        v /= 1000.0;
-        u += 1;
-    }
-    match u {
-        0 => format!("{n} bytes"),
-        _ if v < 10.0 => format!("{v:.1} {}", UNITS[u]),
-        _ => format!("{v:.0} {}", UNITS[u]),
-    }
-}
-
 #[cfg(test)]
 mod tests;

@@ -103,12 +103,6 @@ fn album_tracks_in_disc_track_order_and_replaced_on_resync() {
 }
 
 #[test]
-fn quality_label() {
-    let t = Track::from_song(song("a", "al", 1, 1), "al");
-    assert_eq!(t.quality_label(), "FLAC 24/88.2");
-}
-
-#[test]
 fn persists_to_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lib.redb");

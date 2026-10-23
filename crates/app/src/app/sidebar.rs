@@ -205,7 +205,7 @@ impl ListenerApp {
                 Some(f) => format!("Syncing · {:.0}%", 100.0 * f),
                 None => "Syncing…".to_owned(),
             };
-            let (done, total) = (thousands(p.done), thousands(p.total));
+            let (done, total) = (crate::fmt::thousands(p.done), crate::fmt::thousands(p.total));
             let what = match p.unit {
                 crate::sync::Unit::Tracks => "tracks",
                 crate::sync::Unit::Albums => "albums",
@@ -481,17 +481,4 @@ impl ServerState {
             ServerState::Offline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
         }
     }
-}
-
-/// 1866 → "1,866".
-fn thousands(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }

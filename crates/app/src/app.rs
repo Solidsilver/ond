@@ -2042,10 +2042,6 @@ pub fn track_ref(t: &Track) -> TrackRef {
     TrackRef::new(t.id.clone(), t.suffix.clone(), t.size)
 }
 
-pub fn mmss(secs: f64) -> String {
-    let s = secs.max(0.0) as u64;
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
-}
 
 #[cfg(test)]
 mod tests {

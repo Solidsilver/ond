@@ -6,7 +6,7 @@
 //! details strip folds out under the transport.
 
 use super::widgets::{elide, heart_button, link};
-use super::{Action, ListenerApp, mmss};
+use super::{Action, ListenerApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::lyrics::{self, Fetch, Lyrics};
@@ -266,9 +266,9 @@ impl ListenerApp {
         ui.horizontal(|ui| {
             // Line the times up with the bar's ends.
             ui.set_max_width(width);
-            ui.label(egui::RichText::new(mmss(shown)).font(small.clone()).color(t.muted));
+            ui.label(egui::RichText::new(crate::fmt::clock(shown)).font(small.clone()).color(t.muted));
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                let left = dur.map(|d| format!("−{}", mmss((d - shown).max(0.0)))).unwrap_or_default();
+                let left = dur.map(|d| format!("−{}", crate::fmt::clock((d - shown).max(0.0)))).unwrap_or_default();
                 ui.label(egui::RichText::new(left).font(small).color(t.muted));
             });
         });
@@ -407,7 +407,7 @@ impl ListenerApp {
                                     ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
                                 }
                                 ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
-                                let label = format!("{} — {}", mmss(lines[i].start_ms as f64 / 1000.0), text);
+                                let label = format!("{} — {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0), text);
                                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     seek_to = Some(lines[i].start_ms as f64 / 1000.0);
@@ -545,48 +545,12 @@ fn section_label(ui: &mut Ui, label: &str, size: f32, space_above: bool) {
 }
 
 /// The details strip's rows: only the ones there is something to say about.
+/// The Info tab's file facts minus what the Player already shows (length on
+/// the seek bar; channels), then the analysis in one line.
 fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysis::TrackAnalysis>) -> Vec<(&'static str, String)> {
-    let mut rows = Vec::new();
-    let mut source = Vec::new();
-    if let Some(s) = &track.suffix {
-        source.push(s.to_uppercase());
-    }
-    if let Some(rate) = track.sample_rate {
-        source.push(audio::describe(track.bit_depth, rate));
-    }
-    if let Some(k) = track.bit_rate_kbps {
-        source.push(format!("{k} kbps"));
-    }
-    if let Some(b) = track.size {
-        source.push(format!("{:.1} MB", b as f64 / 1_000_000.0));
-    }
-    if !source.is_empty() {
-        rows.push(("File", source.join(" · ")));
-    }
-    if let Some(s) = signal {
-        rows.push(("Playback", s));
-    }
-    let gain = |g: Option<f32>| g.map(|g| format!("{g:+.1} dB").replace('-', "−"));
-    match (gain(track.track_gain), gain(track.album_gain)) {
-        (Some(tg), Some(ag)) => rows.push(("ReplayGain", format!("track {tg} · album {ag}"))),
-        (Some(tg), None) => rows.push(("ReplayGain", format!("track {tg}"))),
-        (None, Some(ag)) => rows.push(("ReplayGain", format!("album {ag}"))),
-        (None, None) => {}
-    }
-    if let Some(a) = analysis {
-        let mut parts = Vec::new();
-        if let Some(dr) = a.dr {
-            parts.push(format!("DR{}", dr.round() as i64));
-        }
-        if let Some(l) = a.integrated_lufs {
-            parts.push(format!("{l:.1} LUFS").replace('-', "−"));
-        }
-        if let Some(p) = a.true_peak_dbtp {
-            parts.push(format!("peak {p:.1} dBTP").replace('-', "−"));
-        }
-        if !parts.is_empty() {
-            rows.push(("Loudness", parts.join(" · ")));
-        }
+    let mut rows: Vec<_> = crate::fmt::track_facts(track, signal).into_iter().filter(|(k, _)| !matches!(*k, "Length" | "Channels")).collect();
+    if let Some(line) = analysis.and_then(crate::fmt::loudness_line) {
+        rows.push(("Loudness", line));
     }
     rows
 }
@@ -628,8 +592,8 @@ mod tests {
         t.sample_rate = Some(96_000);
         t.track_gain = Some(-6.3);
         let rows = details_rows(&t, Some("24/96 · bit-perfect".into()), None);
-        assert_eq!(rows[0], ("File", "FLAC · 24/96".into()));
-        assert_eq!(rows[1], ("Playback", "24/96 · bit-perfect".into()));
-        assert_eq!(rows[2].1, "track −6.3 dB");
+        assert_eq!(rows[0], ("Format", "FLAC 24/96".into()));
+        assert_eq!(rows[1], ("ReplayGain", "track −6.3 dB".into()));
+        assert_eq!(rows[2], ("Playback", "24/96 · bit-perfect".into()));
     }
 }

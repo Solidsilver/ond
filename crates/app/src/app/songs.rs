@@ -5,7 +5,7 @@
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
 use super::widgets::elide;
-use super::{Action, Focus, ListenerApp, QueueAction, mmss};
+use super::{Action, Focus, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
@@ -202,9 +202,9 @@ impl ListenerApp {
                     cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + 10.0, c.artist.width(), FontId::proportional(13.0), t.muted);
                     let album = self.data.album(&tr.album_id).map(|a| a.name.clone()).unwrap_or_default();
                     cell(ui, &album, c.album.left() + 10.0, c.album.width(), FontId::proportional(13.0), t.muted);
-                    let dur = tr.duration_secs.map(|d| mmss(f64::from(d))).unwrap_or_default();
+                    let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
                     ui.painter().text(pos2(c.time.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
-                    cell(ui, &tr.quality_label(), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
+                    cell(ui, &crate::fmt::quality(tr), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
                 }
                 let label = format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" });
                 resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));

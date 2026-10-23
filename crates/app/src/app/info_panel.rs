@@ -82,7 +82,7 @@ impl ListenerApp {
                 }
             }
 
-            let file = file_rows(&track, self.output.signal().map(|s| s.summary()));
+            let file = crate::fmt::track_facts(&track, self.output.signal().map(|s| s.summary()));
             if !file.is_empty() {
                 info_section(ui, "File");
                 for (k, v) in &file {
@@ -188,7 +188,7 @@ impl ListenerApp {
             });
             return;
         };
-        for (k, v) in measurement_rows(&a) {
+        for (k, v) in crate::fmt::measurements(&a) {
             text_row(ui, k, &v);
         }
         if !a.verdicts.is_empty() {
@@ -227,69 +227,6 @@ fn track_place(t: &Track) -> Option<String> {
     }
 }
 
-/// What the file is and how it plays: only rows with something to say.
-fn file_rows(t: &Track, signal: Option<String>) -> Vec<(&'static str, String)> {
-    let mut rows = Vec::new();
-    if t.suffix.is_some() || t.sample_rate.is_some() {
-        rows.push(("Format", t.quality_label()));
-    }
-    if let Some(k) = t.bit_rate_kbps {
-        rows.push(("Bitrate", format!("{k} kbps")));
-    }
-    match t.channels {
-        Some(1) => rows.push(("Channels", "Mono".into())),
-        Some(2) => rows.push(("Channels", "Stereo".into())),
-        Some(n) => rows.push(("Channels", format!("{n} channels"))),
-        None => {}
-    }
-    if let Some(d) = t.duration_secs {
-        rows.push(("Length", super::mmss(f64::from(d))));
-    }
-    if let Some(b) = t.size {
-        rows.push(("Size", format!("{:.1} MB", b as f64 / 1_000_000.0)));
-    }
-    let db = |g: f32| format!("{g:+.1} dB").replace('-', "\u{2212}");
-    let mut gain = Vec::new();
-    if let Some(g) = t.track_gain {
-        gain.push(format!("track {}", db(g)));
-    }
-    if let Some(g) = t.album_gain {
-        gain.push(format!("album {}", db(g)));
-    }
-    if let Some(p) = t.track_peak {
-        gain.push(format!("peak {p:.2}"));
-    }
-    if !gain.is_empty() {
-        rows.push(("ReplayGain", gain.join(" · ")));
-    }
-    if let Some(s) = signal {
-        rows.push(("Playback", s));
-    }
-    rows
-}
-
-/// "−11.2 LUFS", "−0.4 dBTP", "DR9", loudness range.
-fn measurement_rows(a: &analysis::TrackAnalysis) -> Vec<(&'static str, String)> {
-    let signed = |v: f64| format!("{v:.1}").replace('-', "\u{2212}");
-    let mut rows = Vec::new();
-    if let Some(l) = a.integrated_lufs {
-        rows.push(("Loudness", format!("{} LUFS", signed(l))));
-    }
-    if let Some(r) = a.loudness_range_lu {
-        rows.push(("Range", format!("{r:.1} LU")));
-    }
-    if let Some(p) = a.true_peak_dbtp {
-        rows.push(("True peak", format!("{} dBTP", signed(p))));
-    }
-    if let Some(dr) = a.dr_rounded() {
-        rows.push(("Dynamic range", format!("DR{dr}")));
-    }
-    if let Some(b) = a.effective_bits {
-        rows.push(("Bits used", format!("{b}")));
-    }
-    rows
-}
-
 /// Plays, when last played, and the rating, as far as they're known.
 fn play_rows(stats: Option<&SongStats>, rating: u8) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
@@ -302,7 +239,7 @@ fn play_rows(stats: Option<&SongStats>, rating: u8) -> Vec<(&'static str, String
         }
     }
     if rating > 0 {
-        rows.push(("Rating", format!("{}{}", "★".repeat(rating as usize), "☆".repeat(5 - (rating as usize).min(5)))));
+        rows.push(("Rating", crate::fmt::stars(rating)));
     }
     rows
 }
@@ -371,7 +308,7 @@ mod tests {
     #[test]
     fn rows_only_say_what_is_known() {
         let mut t = track();
-        assert!(file_rows(&t, None).is_empty());
+        assert!(crate::fmt::track_facts(&t, None).is_empty());
         assert_eq!(track_place(&t), None);
         assert!(play_rows(None, 0).is_empty());
         t.suffix = Some("flac".into());
@@ -380,7 +317,7 @@ mod tests {
         t.channels = Some(2);
         t.track_gain = Some(-6.3);
         t.track = Some(3);
-        let rows = file_rows(&t, Some("24/96 · bit-perfect".into()));
+        let rows = crate::fmt::track_facts(&t, Some("24/96 · bit-perfect".into()));
         assert_eq!(rows[0], ("Format", "FLAC 24/96".into()));
         assert_eq!(rows[1], ("Channels", "Stereo".into()));
         assert_eq!(rows[2], ("ReplayGain", "track \u{2212}6.3 dB".into()));
