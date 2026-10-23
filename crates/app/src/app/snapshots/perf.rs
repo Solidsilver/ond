@@ -42,7 +42,7 @@ fn big_library(app: &mut ListenerApp) {
 }
 
 fn big_queue(app: &mut ListenerApp) {
-    let tracks: Vec<Track> = app.data.all_tracks.iter().take(QUEUE_N).cloned().collect();
+    let tracks: Vec<Track> = app.data.tracks.all.iter().take(QUEUE_N).cloned().collect();
     app.queue = Queue::default();
     app.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
 }
@@ -162,7 +162,7 @@ fn perf() {
     // 2,000 single-song downloads on the Offline page.
     {
         let app = app_mut(&mut h);
-        let pins = app.data.all_tracks.iter().take(PINS_N).map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect();
+        let pins = app.data.tracks.all.iter().take(PINS_N).map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect();
         app.offline.pin_many(pins);
         app.offline.set_paused(true);
         app.offline_snap = app.offline.snapshot();
@@ -173,7 +173,7 @@ fn perf() {
     // 2,000 loved songs.
     {
         let app = app_mut(&mut h);
-        let songs = app.data.all_tracks.iter().take(PINS_N).cloned().collect();
+        let songs = app.data.tracks.all.iter().take(PINS_N).cloned().collect();
         app.favorites.load(crate::favorites::Starred { songs, albums: Vec::new(), artists: Vec::new() }, Vec::new());
     }
     scene(&mut h, Route::Favorites);
@@ -183,14 +183,16 @@ fn perf() {
     // the once-per-batch rebuild of derived data (the search index).
     let (albums, tracks) = {
         let app = app_mut(&mut h);
-        (app.data.albums.clone(), app.data.all_tracks.to_vec())
+        (app.data.albums.clone(), app.data.tracks.all.to_vec())
     };
     let mut sync_ui = Vec::new();
     for _ in 0..5 {
         let app = app_mut(&mut h);
+        // Grouping and indexing the tracks is the bridge's job (a worker thread).
+        let set = Box::new(crate::tracks::TrackSet::new(tracks.clone()));
         let t = Instant::now();
         app.handle(Msg::Albums(albums.clone()));
-        app.handle(Msg::AllTracks(tracks.clone()));
+        app.handle(Msg::AllTracks(set));
         app.after_messages();
         sync_ui.push(t.elapsed());
     }

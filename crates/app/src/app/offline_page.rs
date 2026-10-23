@@ -194,7 +194,7 @@ impl ListenerApp {
             }
             Pin::Playlist(id) => (None, p.label.clone(), Some(Route::Playlist { id: id.clone(), name: p.label.clone() })),
             Pin::Track(id) => {
-                let tr = self.data.all_tracks.iter().find(|t| &t.id == id);
+                let tr = self.data.tracks.all.iter().find(|t| &t.id == id);
                 let cover = tr.and_then(|t| self.data.album(&t.album_id)).and_then(|a| a.cover_art.clone());
                 (cover, p.label.clone(), tr.map(|t| Route::Album(t.album_id.clone())))
             }
@@ -236,7 +236,7 @@ impl ListenerApp {
                 Pin::Album(id) => self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 })),
                 Pin::Playlist(id) => self.actions.push(Action::Playlist(id.clone(), QueueAction::Play { start: 0 })),
                 Pin::Track(id) => {
-                    if let Some(tr) = self.data.all_tracks.iter().find(|t| &t.id == id).cloned() {
+                    if let Some(tr) = self.data.tracks.all.iter().find(|t| &t.id == id).cloned() {
                         self.play_from_album(&tr, QueueAction::Play { start: 0 });
                     }
                 }

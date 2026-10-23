@@ -307,15 +307,15 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     app.data.newest = albums.iter().map(|a| a.id.clone()).collect();
     app.data.set_albums(albums);
     app.rebuild_search();
-    app.data.tracks.insert(album_id(0), vanguard());
-    app.data.tracks.insert(album_id(1), kind_of_blue());
+    app.data.tracks.set_album(&album_id(0), vanguard());
+    app.data.tracks.set_album(&album_id(1), kind_of_blue());
     for i in [2, 20, 23] {
-        app.data.tracks.insert(album_id(i), filler(i, 9));
+        app.data.tracks.set_album(&album_id(i), filler(i, 9));
     }
     // The flat list the Songs view and search read (the per-album map stays as is).
-    let mut all: Vec<Track> = app.data.tracks.values().flatten().cloned().collect();
+    let mut all: Vec<Track> = app.data.tracks.by_album.values().flat_map(|s| s.iter()).cloned().collect();
     all.sort_by(|a, b| (&a.album_id, a.disc, a.track).cmp(&(&b.album_id, b.disc, b.track)));
-    app.data.all_tracks = Arc::new(all);
+    app.data.tracks.all = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.online = true;
     app.settings = Some(Settings { server: "https://music.example.com".into(), username: "solidsilver".into(), ..Default::default() });
@@ -330,7 +330,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     mix.extend(kind_of_blue().into_iter().take(2));
     mix.extend(vanguard().into_iter().skip(2).take(3));
     mix.extend(filler(23, 2));
-    app.data.playlist_tracks.insert("pl-0".into(), mix);
+    app.data.playlist_tracks.insert("pl-0".into(), Arc::new(mix));
     // Loved: the playing track and another, an album, an artist; a rating.
     let vg = vanguard();
     let mut loved_songs = vec![vg[1].clone(), vg[4].clone()];
@@ -360,7 +360,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
 
 /// Stored results for every track of `album`, with plausible spread.
 fn analysed(app: &mut ListenerApp, album: usize, verdict: Option<analysis::Verdict>) {
-    let tracks = app.data.tracks.get(&album_id(album)).cloned().unwrap_or_default();
+    let tracks = app.data.tracks.album(&album_id(album)).cloned().unwrap_or_default();
     for (i, t) in tracks.iter().enumerate() {
         let k = (i % 4) as f64;
         let a = analysis::TrackAnalysis {
@@ -978,9 +978,9 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "songs");
 
     reset(h, FULL, Route::Songs);
-    let all = std::mem::take(&mut app_mut(h).data.all_tracks);
+    let all = std::mem::take(&mut app_mut(h).data.tracks.all);
     s.shoot(h, "songs-empty");
-    app_mut(h).data.all_tracks = all;
+    app_mut(h).data.tracks.all = all;
 
     reset(h, FULL, Route::Offline);
     s.shoot(h, "offline-empty");
@@ -989,7 +989,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "artists");
 
     reset(h, FULL, Route::Playlist { id: "pl-4".into(), name: "Car".into() });
-    app_mut(h).data.playlist_tracks.insert("pl-4".into(), Vec::new());
+    app_mut(h).data.playlist_tracks.insert("pl-4".into(), Arc::default());
     s.shoot(h, "playlist-empty");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);

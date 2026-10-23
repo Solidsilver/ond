@@ -2,6 +2,7 @@
 //! [`Action`]s; these apply them.
 
 use super::{Action, ListenerApp, sidebar};
+use std::sync::Arc;
 use crate::bridge::PlaylistEdit;
 use crate::favorites::StarKind;
 use crate::keys::Cmd;
@@ -147,7 +148,7 @@ impl ListenerApp {
 
     /// A track we know of, from any album or playlist loaded.
     fn find_track(&self, id: &str) -> Option<Track> {
-        self.data.tracks.values().chain(self.data.playlist_tracks.values()).flatten().find(|t| t.id == id).cloned()
+        self.data.track(id).or_else(|| self.data.playlist_tracks.values().flat_map(|v| v.iter()).find(|t| t.id == id)).cloned()
     }
 
     /// Applies a playlist change: locally first where the result is certain
@@ -166,7 +167,7 @@ impl ListenerApp {
                 }
                 self.note_recent_playlist(&id);
                 if let Some(list) = self.data.playlist_tracks.get_mut(&id) {
-                    list.extend(tracks.iter().cloned());
+                    Arc::make_mut(list).extend(tracks.iter().cloned());
                 }
                 if let Some(p) = self.data.playlists.iter_mut().find(|p| p.id == id) {
                     p.song_count += tracks.len() as u32;
@@ -201,7 +202,7 @@ impl ListenerApp {
                 if index >= list.len() {
                     return;
                 }
-                let gone = list.remove(index);
+                let gone = Arc::make_mut(list).remove(index);
                 if let Some(p) = self.data.playlists.iter_mut().find(|p| p.id == id) {
                     p.song_count = p.song_count.saturating_sub(1);
                     p.duration = p.duration.saturating_sub(gone.duration_secs.unwrap_or(0));
@@ -211,7 +212,7 @@ impl ListenerApp {
             }
             PlaylistAction::Move { id, from, to } => {
                 let Some(list) = self.data.playlist_tracks.get_mut(&id) else { return };
-                if !move_item(list, from, to) {
+                if !move_item(Arc::make_mut(list), from, to) {
                     return;
                 }
                 if self.track_sel == Some(from) {

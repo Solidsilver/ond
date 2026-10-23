@@ -61,7 +61,7 @@ impl ListenerApp {
         if !fresh {
             let data = &self.data;
             let names = |id: &str| data.album(id).map(|a| a.name.clone()).unwrap_or_default();
-            let order = sort_order(&data.all_tracks, &names, v.sort, v.descending);
+            let order = sort_order(&data.tracks.all, &names, v.sort, v.descending);
             self.songs.order = Some((self.data.tracks_version, self.songs.sort, self.songs.descending, order));
         }
         self.songs.order.as_ref().map(|o| o.3.clone()).unwrap_or_default()
@@ -69,7 +69,7 @@ impl ListenerApp {
 
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let n = self.data.all_tracks.len();
+        let n = self.data.tracks.all.len();
         self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
         if n == 0 {
             let (title, body) = if self.track_syncing {
@@ -115,7 +115,7 @@ impl ListenerApp {
         }
         ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, t.hairline));
 
-        let tracks = self.data.all_tracks.clone();
+        let tracks = self.data.tracks.all.clone();
         let current = self.queue.current.as_ref().map(|c| c.track.id.clone());
         egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false).show_rows(ui, ROW_H, order.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -197,7 +197,7 @@ impl ListenerApp {
         let source = self.album_source(&tr.album_id);
         match action {
             QueueAction::Play { .. } | QueueAction::Shuffle => {
-                let album = self.data.tracks.get(&tr.album_id).cloned().unwrap_or_else(|| vec![tr.clone()]);
+                let album = self.data.tracks.album(&tr.album_id).map(|s| s.to_vec()).unwrap_or_else(|| vec![tr.clone()]);
                 let start = album.iter().position(|t| t.id == tr.id).unwrap_or(0);
                 self.actions.push(Action::Tracks { tracks: album, source, action: QueueAction::Play { start } });
             }
@@ -228,7 +228,7 @@ impl ListenerApp {
             self.songs.selected = Some(self.songs.selected.map_or(0, |s| s.saturating_sub(1)));
         }
         let Some(sel) = self.songs.selected.filter(|s| *s <= last) else { return };
-        let tr = self.data.all_tracks[order[sel]].clone();
+        let tr = self.data.tracks.all[order[sel]].clone();
         if enter {
             self.play_from_album(&tr, QueueAction::Play { start: 0 });
         }

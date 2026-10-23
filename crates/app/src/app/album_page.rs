@@ -140,7 +140,7 @@ impl ListenerApp {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
         };
-        let tracks = self.data.tracks.get(id).cloned().unwrap_or_default();
+        let tracks = self.data.tracks.album(id).cloned().unwrap_or_default();
         if self.download_key(ui) {
             let kept = self.offline_snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
             self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
@@ -254,7 +254,7 @@ impl ListenerApp {
                             if !summary.complete() && analysing == 0 && !tracks.is_empty() {
                                 ui.separator();
                                 if ui.button("Analyze album").on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files").clicked() {
-                                    self.actions.push(Action::Analyze(tracks.clone()));
+                                    self.actions.push(Action::Analyze(tracks.to_vec()));
                                 }
                             }
                             if !tracks.is_empty() {
@@ -365,7 +365,7 @@ impl ListenerApp {
         let art_side = (ui.available_width() * 0.3).clamp(120.0, 180.0);
         ui.horizontal(|ui| {
             let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
-            self.mosaic(ui, art, tracks.as_deref().unwrap_or_default());
+            self.mosaic(ui, art, tracks.as_deref().map_or(&[], Vec::as_slice));
             ui.add_space(20.0);
             ui.vertical(|ui| {
                 ui.add_space((art_side - 118.0).max(0.0));

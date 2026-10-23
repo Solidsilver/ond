@@ -46,7 +46,8 @@ pub enum Msg {
     /// The server's artists (split from joined credits), sorted.
     Artists(Vec<library::Artist>),
     /// Every stored track, grouped by album; sent after load and after a sync.
-    AllTracks(Vec<Track>),
+    /// Every stored track, grouped and indexed (built here, off the UI thread).
+    AllTracks(Box<crate::tracks::TrackSet>),
     TrackSync(sync::Progress),
     TrackSyncDone(sync::Outcome),
     /// A track's analysis just finished.
@@ -242,7 +243,7 @@ impl Bridge {
     /// Blocking: reads every stored track and sends them to the UI.
     fn load_all_tracks(&self) {
         match self.library.all_tracks() {
-            Ok(t) => self.send(Msg::AllTracks(t)),
+            Ok(t) => self.send(Msg::AllTracks(Box::new(crate::tracks::TrackSet::new(t)))),
             Err(e) => self.send(Msg::Error(format!("read tracks: {e}"))),
         }
     }

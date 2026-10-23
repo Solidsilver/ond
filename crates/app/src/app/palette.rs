@@ -293,7 +293,7 @@ impl ListenerApp {
             }
             Hit::Track(i) => {
                 let (id, album_id) = (index.tracks[i].id.clone(), index.tracks[i].album_id.clone());
-                let Some(tr) = self.data.tracks.get(&album_id).and_then(|ts| ts.iter().find(|t| t.id == id)).cloned() else { return };
+                let Some(tr) = self.data.tracks.album(&album_id).and_then(|ts| ts.iter().find(|t| t.id == id)).cloned() else { return };
                 match verb {
                     Verb::Open => self.actions.push(Action::Go(Route::Album(album_id))),
                     // Plays the album from this track, as double-clicking it there would.
