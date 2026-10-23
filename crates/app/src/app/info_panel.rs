@@ -17,7 +17,7 @@ impl ListenerApp {
     /// `header`: lead with the song's artwork and title (not in the Player,
     /// where they're right above).
     pub(super) fn sidebar_info(&mut self, ui: &mut Ui, header: bool) {
-        let Some(track) = self.queue.current.as_ref().map(|c| c.track.clone()) else {
+        let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
             // Wrapped to the column: a long line must not widen the sidebar.
             let t = Tokens::of(ui);
             let width = ui.available_width();
@@ -104,9 +104,9 @@ impl ListenerApp {
 
     /// Asks the server for a song's play count the first time Info shows it.
     fn ensure_song_stats(&mut self, track: &Track) {
-        if !self.song_stats.contains_key(&track.id) && self.client.is_some() {
+        if !self.song_stats.contains_key(&track.id) && self.session.client.is_some() {
             self.song_stats.insert(track.id.clone(), None);
-            self.bridge.fetch_song_stats(self.client.clone(), track.id.clone());
+            self.bridge.fetch_song_stats(self.session.client.clone(), track.id.clone());
         }
     }
 
@@ -172,7 +172,7 @@ impl ListenerApp {
     fn analysis_rows(&mut self, ui: &mut Ui, track: &Track) {
         let t = Tokens::of(ui);
         let Some(a) = self.analysis_of(track).cloned() else {
-            let busy = self.analyzer.pending([track.id.as_str()]) > 0;
+            let busy = self.analysis.runner.pending([track.id.as_str()]) > 0;
             kv_row(ui, "Loudness", |ui| {
                 if busy {
                     ui.label(egui::RichText::new("Analysing…").size(VALUE).color(t.muted));

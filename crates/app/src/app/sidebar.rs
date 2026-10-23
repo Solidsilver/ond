@@ -94,7 +94,7 @@ impl ListenerApp {
                     self.actions.push(Action::Go(route));
                 }
                 resp.context_menu(|ui| {
-                    let kept = self.offline_snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
+                    let kept = self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
                     super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, &mut self.actions);
                     if mine {
                         ui.separator();
@@ -198,8 +198,8 @@ impl ListenerApp {
     }
 
     fn server_state(&self) -> ServerState {
-        let host = self.settings.as_ref().map(|s| super::diagnostics::server_host(&s.server)).unwrap_or_default();
-        if let Some(p) = self.sync_progress {
+        let host = self.session.settings.as_ref().map(|s| super::diagnostics::server_host(&s.server)).unwrap_or_default();
+        if let Some(p) = self.sync.progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
             // Short enough for the footer; the counts are in the tooltip and popover.
             let label = match fraction {
@@ -214,13 +214,13 @@ impl ListenerApp {
             let detail = format!("{}\n{done} of {total} {what}", p.label());
             return ServerState::Syncing { host, label, detail, fraction };
         }
-        if self.online && (self.album_syncing || self.track_syncing) {
+        if self.session.online && (self.sync.albums || self.sync.tracks) {
             return ServerState::Syncing { host, label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None };
         }
-        if self.online {
+        if self.session.online {
             return ServerState::Connected { host };
         }
-        if self.unreachable {
+        if self.session.unreachable {
             return ServerState::Offline { host };
         }
         ServerState::Connecting { host }
@@ -233,14 +233,14 @@ impl ListenerApp {
             ui.set_width(250.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             // Opening the popover refreshes the round trip if it's old.
-            if self.online
+            if self.session.online
                 && self.diagnostics.latency_stale()
-                && let Some(c) = self.client.clone()
+                && let Some(c) = self.session.client.clone()
             {
                 self.diagnostics.latency_asked();
                 self.bridge.measure_latency(c);
             }
-            let (server, user) = self.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
+            let (server, user) = self.session.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
@@ -268,21 +268,21 @@ impl ListenerApp {
             if !user.is_empty() {
                 info_row(ui, "User", &user, t.text);
             }
-            if !self.server_info.is_empty() {
-                info_row(ui, "Server", &self.server_info, t.text);
+            if !self.session.server_info.is_empty() {
+                info_row(ui, "Server", &self.session.server_info, t.text);
             }
             let synced = match state {
                 ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
-                _ => match self.last_synced {
+                _ => match self.sync.last {
                     Some(at) => at.format("%-I:%M %p").to_string(),
-                    None if self.client.is_some() => "At launch".to_owned(),
+                    None if self.session.client.is_some() => "At launch".to_owned(),
                     None => "Not yet".to_owned(),
                 },
             };
             info_row(ui, "Last sync", &synced, t.text);
-            let action = if self.track_syncing {
+            let action = if self.sync.tracks {
                 Some("Stop sync")
-            } else if self.client.is_some() && self.online {
+            } else if self.session.client.is_some() && self.session.online {
                 Some("Sync now")
             } else {
                 None
@@ -292,7 +292,7 @@ impl ListenerApp {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     if super::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
-                        if self.track_syncing {
+                        if self.sync.tracks {
                             self.bridge.cancel_sync();
                         } else {
                             self.actions.push(Action::SyncNow);
@@ -331,7 +331,7 @@ impl ListenerApp {
 
     /// Overall progress of unfinished downloads, while any are moving.
     fn download_progress(&self) -> Option<f32> {
-        let s = &self.offline_snap;
+        let s = &self.downloads.snap;
         if s.paused || s.active == 0 {
             return None;
         }

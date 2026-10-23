@@ -1,5 +1,7 @@
-//! Background track sync: every album's tracks into the local db, so search,
-//! the Songs view and credits cover the whole library, not just albums opened.
+//! Background library sync: the album list and the artists ([`albums`],
+//! [`artists`]), then every album's tracks ([`run`]) into the local db, so
+//! search, the Songs view and credits cover the whole library, not just albums
+//! opened.
 //!
 //! First run pages through `search3` with an empty query, which Navidrome
 //! answers with the whole library, 500 songs a request (~40 requests for 20k
@@ -16,10 +18,13 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use subsonic::{AlbumWithSongs, Client, Song};
+use std::collections::HashSet;
+use subsonic::{AlbumListType, AlbumWithSongs, Client, Song};
 use tokio::task::JoinSet;
 
 pub const BULK_PAGE: u32 = 500;
+/// Albums per `getAlbumList2` request.
+pub const ALBUM_PAGE: u32 = 500;
 /// `getAlbum` requests in flight at once.
 pub const CONCURRENCY: usize = 4;
 /// Albums stored per write transaction during per-album sync.
@@ -43,12 +48,23 @@ const BULK_OFFSET: &str = "tracks_bulk_offset";
 
 /// Where the tracks come from; [`Client`] in the app, a fake in tests.
 pub trait Fetch: Clone + Send + Sync + 'static {
+    /// One page of the album list, alphabetical by artist.
+    fn album_page(&self, size: u32, offset: u32) -> impl Future<Output = Result<Vec<subsonic::Album>, String>> + Send;
+    fn artists(&self) -> impl Future<Output = Result<Vec<subsonic::Artist>, String>> + Send;
     fn album(&self, id: String) -> impl Future<Output = Result<AlbumWithSongs, String>> + Send;
     /// One page of every song in the library.
     fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> impl Future<Output = Result<Vec<Song>, String>> + Send;
 }
 
 impl Fetch for Client {
+    async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, String> {
+        self.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await.map_err(|e| e.to_string())
+    }
+
+    async fn artists(&self) -> Result<Vec<subsonic::Artist>, String> {
+        Client::artists(self).await.map_err(|e| e.to_string())
+    }
+
     async fn album(&self, id: String) -> Result<AlbumWithSongs, String> {
         Client::album(self, &id).await.map_err(|e| e.to_string())
     }
@@ -121,12 +137,50 @@ pub fn bulk_stamps(albums: &[Album], counts: &HashMap<String, u32>) -> Vec<(Stri
         .collect()
 }
 
-async fn blocking<T: Send + 'static>(lib: &Arc<Library>, f: impl FnOnce(&Library) -> library::Result<T> + Send + 'static) -> Result<T, String> {
+/// Runs `f` on the library off the async workers (redb blocks).
+pub async fn blocking<T: Send + 'static>(lib: &Arc<Library>, f: impl FnOnce(&Library) -> library::Result<T> + Send + 'static) -> Result<T, String> {
     let lib = lib.clone();
     match tokio::task::spawn_blocking(move || f(&lib)).await {
         Ok(r) => r.map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Pages through the server's album list into the library; `progress` gets
+/// the count so far. Once the whole list has arrived, albums no longer on the
+/// server are removed. Returns every stored album. A failure part-way stores
+/// what came but removes nothing (an incomplete list proves nothing).
+///
+/// A page shorter than [`ALBUM_PAGE`] ends the list (Navidrome serves full
+/// pages until the last).
+pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, progress: impl Fn(usize)) -> Result<Vec<Album>, String> {
+    let mut offset = 0;
+    let mut seen = HashSet::new();
+    loop {
+        let page = fetch.album_page(ALBUM_PAGE, offset).await.map_err(|e| format!("sync: {e}"))?;
+        seen.extend(page.iter().map(|a| a.id.clone()));
+        let n = page.len() as u32;
+        blocking(lib, move |l| l.upsert_albums(page)).await.map_err(|e| format!("store albums: {e}"))?;
+        offset += n;
+        progress(offset as usize);
+        if n < ALBUM_PAGE {
+            break;
+        }
+    }
+    blocking(lib, move |l| {
+        let removed = l.retain_albums(&seen)?;
+        if removed > 0 {
+            tracing::info!("sync: removed {removed} albums no longer on the server");
+        }
+        l.albums()
+    })
+    .await
+}
+
+/// Replaces the stored artists with the server's; returns them as stored.
+pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F) -> Result<Vec<library::Artist>, String> {
+    let artists = fetch.artists().await.map_err(|e| format!("artists: {e}"))?;
+    blocking(lib, move |l| l.replace_artists(artists).and_then(|_| l.artists())).await
 }
 
 /// Runs a full sync pass. `progress` is called after every page or album.
@@ -354,6 +408,8 @@ mod tests {
         page_calls: Arc<AtomicUsize>,
         /// Cancel after this many pages.
         cancel_after_pages: Option<(usize, Arc<AtomicBool>)>,
+        /// The album list fails from this offset on.
+        list_fails_at: Option<u32>,
     }
 
     impl Fake {
@@ -365,6 +421,7 @@ mod tests {
                 album_calls: Arc::default(),
                 page_calls: Arc::default(),
                 cancel_after_pages: None,
+                list_fails_at: None,
             }
         }
 
@@ -374,6 +431,17 @@ mod tests {
     }
 
     impl Fetch for Fake {
+        async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, String> {
+            if self.list_fails_at.is_some_and(|at| offset >= at) {
+                return Err("server went away".into());
+            }
+            Ok(self.albums.lock().unwrap().iter().skip(offset as usize).take(size as usize).cloned().collect())
+        }
+
+        async fn artists(&self) -> Result<Vec<subsonic::Artist>, String> {
+            Ok(vec![subsonic::Artist { id: "ar1".into(), name: "Bill Evans".into(), album_count: 3, cover_art: None, sort_name: None }])
+        }
+
         async fn album(&self, id: String) -> Result<AlbumWithSongs, String> {
             self.album_calls.lock().unwrap().push(id.clone());
             let a = self.albums.lock().unwrap().iter().find(|a| a.id == id).cloned().ok_or("not found")?;
@@ -535,5 +603,45 @@ mod tests {
         let fake = Fake::new(Vec::new(), false);
         let out = rt().block_on(run(lib, fake, Arc::default(), |_| {}));
         assert!(matches!(out, Outcome::Failed(e) if e.contains("not found")));
+    }
+
+    fn stored_ids(lib: &Library) -> Vec<String> {
+        let mut ids: Vec<String> = lib.albums().unwrap().into_iter().map(|a| a.id).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn the_album_list_pages_in_and_drops_what_the_server_lost() {
+        // Two full pages and a short one; one stored album is gone from the server.
+        let server = many(1001, 1);
+        let lib = library(&[album("zz-gone", 1)]);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let stored = rt().block_on(albums(&lib, &Fake::new(server.clone(), false), |n| seen.lock().unwrap().push(n))).unwrap();
+        assert_eq!(*seen.lock().unwrap(), [500, 1000, 1001]);
+        assert_eq!(stored.len(), 1001);
+        let mut want: Vec<String> = server.iter().map(|a| a.id.clone()).collect();
+        want.sort();
+        assert_eq!(stored_ids(&lib), want, "zz-gone is pruned");
+    }
+
+    #[test]
+    fn a_list_that_breaks_off_removes_nothing() {
+        let server = many(700, 1);
+        let lib = library(&[album("zz-kept", 1)]);
+        let mut fake = Fake::new(server, false);
+        fake.list_fails_at = Some(500);
+        let err = rt().block_on(albums(&lib, &fake, |_| {})).unwrap_err();
+        assert!(err.contains("server went away"), "{err}");
+        let ids = stored_ids(&lib);
+        assert_eq!(ids.len(), 501, "the first page is stored");
+        assert!(ids.contains(&"zz-kept".to_owned()), "nothing pruned on an incomplete list");
+    }
+
+    #[test]
+    fn artists_replace_what_was_stored() {
+        let lib = library(&[]);
+        let stored = rt().block_on(artists(&lib, &Fake::new(Vec::new(), false))).unwrap();
+        assert_eq!(stored.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Bill Evans"]);
     }
 }

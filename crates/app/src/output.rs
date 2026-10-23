@@ -3,21 +3,19 @@
 
 use crate::icons::{self, Icon};
 use crate::playback::{NetworkProbe, PlaybackPrefs};
-use crate::settings::{Paths, Settings};
+use crate::prefs::Prefs;
+use crate::settings::DeviceMode;
 use audio::{BitPerfectStatus, Command, DeviceInfo, EngineHandle, PlayState, PlaybackMode, SignalPath, Transcode};
 use crate::theme::Tokens;
 use std::collections::HashMap;
 
 const POPUP_W: f32 = 300.0;
 
-#[derive(Default)]
 pub struct Outputs {
-    /// ReplayGain and streaming quality.
-    prefs: PlaybackPrefs,
+    /// ReplayGain, streaming quality, the device and per-device modes live here.
+    prefs: Prefs,
     /// Whether the server is on this network (for "transcode only when away").
     network: NetworkProbe,
-    /// Remembered modes per device UID, as saved ("normal" / "bit-perfect").
-    saved_modes: HashMap<String, String>,
     devices: Vec<DeviceInfo>,
     current: Option<String>,
     signal: Option<SignalPath>,
@@ -58,14 +56,23 @@ pub enum Verdict {
 impl Outputs {
     /// Restores the saved device and per-device modes into a fresh engine. The
     /// engine answers with the device's mode (`ModeChanged`) and the device list.
-    pub fn restore(engine: &EngineHandle, settings: Option<&Settings>) -> Self {
-        let saved_modes = settings.map(|s| s.device_modes.clone()).unwrap_or_default();
-        let prefs = settings.map(|s| s.playback.clone()).unwrap_or_default();
-        engine.send(Command::DeviceModes(modes(&saved_modes)));
-        engine.send(Command::SelectDevice(settings.and_then(|s| s.output_device.clone())));
+    pub fn restore(engine: &EngineHandle, prefs: Prefs) -> Self {
+        let (modes, device, playback) = prefs.get(|s| (engine_modes(&s.device_modes), s.output_device.clone(), s.playback.clone()));
+        engine.send(Command::DeviceModes(modes));
+        engine.send(Command::SelectDevice(device));
         engine.send(Command::RefreshDevices);
-        engine.send(Command::SetGain(prefs.gain_config()));
-        Self { saved_modes, prefs, ..Self::default() }
+        engine.send(Command::SetGain(playback.gain_config()));
+        Self {
+            prefs,
+            network: NetworkProbe::default(),
+            devices: Vec::new(),
+            current: None,
+            signal: None,
+            returned: None,
+            lost: None,
+            wants_settings: false,
+            open_requested: false,
+        }
     }
 
     /// Checks (in the background) whether `server` is on this network.
@@ -80,17 +87,13 @@ impl Outputs {
 
     /// The transcode new tracks should be streamed with, if any.
     pub fn transcode(&self) -> Option<Transcode> {
-        self.prefs.transcode(self.network.get())
+        let network = self.network.get();
+        self.prefs.get(|s| s.playback.transcode(network))
     }
 
-    fn save_prefs(&self, paths: &Paths) {
-        let prefs = self.prefs.clone();
-        Settings::update(paths, |s| s.playback = prefs);
-    }
-
-    /// ReplayGain and streaming preferences, as saved.
-    pub fn prefs(&self) -> &PlaybackPrefs {
-        &self.prefs
+    /// ReplayGain and streaming preferences.
+    pub fn prefs(&self) -> PlaybackPrefs {
+        self.prefs.get(|s| s.playback.clone())
     }
 
     /// Where the server is relative to this computer, as last checked.
@@ -100,15 +103,15 @@ impl Outputs {
 
     /// Applies and saves new playback preferences (the engine hears about gain
     /// changes at once; streaming changes apply from the next track loaded).
-    pub fn set_prefs(&mut self, prefs: PlaybackPrefs, engine: &EngineHandle, paths: &Paths) {
-        if prefs == self.prefs {
+    pub fn set_prefs(&mut self, prefs: PlaybackPrefs, engine: &EngineHandle) {
+        let old = self.prefs();
+        if prefs == old {
             return;
         }
-        if prefs.gain_config() != self.prefs.gain_config() {
+        if prefs.gain_config() != old.gain_config() {
             engine.send(Command::SetGain(prefs.gain_config()));
         }
-        self.prefs = prefs;
-        self.save_prefs(paths);
+        self.prefs.edit(|s| s.playback = prefs);
     }
 
     /// The devices macOS reports, and which one is in use (`None`: following the default).
@@ -118,27 +121,38 @@ impl Outputs {
 
     /// The mode `d` plays in: remembered, else its kind's default.
     pub fn device_mode(&self, d: &DeviceInfo) -> PlaybackMode {
-        match self.saved_modes.get(&d.uid).map(String::as_str) {
-            Some("bit-perfect") => PlaybackMode::BitPerfect,
-            Some(_) => PlaybackMode::Normal,
-            None => d.default_mode(),
-        }
+        self.prefs.get(|s| s.device_modes.get(&d.uid).map(|&m| m.into())).unwrap_or_else(|| d.default_mode())
     }
 
-    /// Remembers `mode` for device `uid`. Returns true when that's the device
-    /// in use (the engine switches mode now; the caller updates its own flag).
-    pub fn set_device_mode(&mut self, uid: &str, mode: PlaybackMode, engine: &EngineHandle, paths: &Paths) -> bool {
-        self.saved_modes.insert(uid.to_owned(), mode_name(mode).into());
-        engine.send(Command::DeviceModes(modes(&self.saved_modes)));
-        let key = uid.to_owned();
-        Settings::update(paths, |s| {
-            s.device_modes.insert(key, mode_name(mode).into());
-        });
+    /// Remembers `mode` for device `uid`; the engine switches now when that's
+    /// the device in use. Returns whether it is (the caller updates its flag).
+    pub fn set_device_mode(&mut self, uid: &str, mode: PlaybackMode, engine: &EngineHandle) -> bool {
         let in_use = self.current.as_deref() == Some(uid);
+        self.remember(uid, mode, engine);
         if in_use {
             engine.send(Command::SetMode(mode));
         }
         in_use
+    }
+
+    /// Switches the device in use to `mode` now, remembering it for that device
+    /// (following the system default, there's no device to remember it for).
+    pub fn set_mode_in_use(&mut self, mode: PlaybackMode, engine: &EngineHandle) {
+        engine.send(Command::SetMode(mode));
+        if let Some(uid) = self.current.clone() {
+            self.remember(&uid, mode, engine);
+        }
+    }
+
+    fn remember(&mut self, uid: &str, mode: PlaybackMode, engine: &EngineHandle) {
+        let modes = {
+            let key = uid.to_owned();
+            self.prefs.edit(|s| {
+                s.device_modes.insert(key, DeviceMode::from(mode));
+            });
+            self.prefs.get(|s| engine_modes(&s.device_modes))
+        };
+        engine.send(Command::DeviceModes(modes));
     }
 
     /// Takes the engine events this module cares about. Returns the mode the engine
@@ -164,30 +178,20 @@ impl Outputs {
         None
     }
 
-    /// Remembers `mode` for the device in use (in settings and in the engine).
-    pub fn remember_mode(&mut self, mode: PlaybackMode, engine: &EngineHandle, paths: &Paths) {
-        let Some(uid) = self.current.clone() else { return };
-        self.saved_modes.insert(uid.clone(), mode_name(mode).into());
-        engine.send(Command::DeviceModes(modes(&self.saved_modes)));
-        Settings::update(paths, |s| {
-            s.device_modes.insert(uid, mode_name(mode).into());
-        });
-    }
-
-    fn choose(&mut self, uid: Option<String>, engine: &EngineHandle, paths: &Paths) {
+    fn choose(&mut self, uid: Option<String>, engine: &EngineHandle) {
         self.returned = None;
         self.lost = None;
         engine.send(Command::SelectDevice(uid.clone()));
-        Settings::update(paths, |s| s.output_device = uid);
+        self.prefs.edit(|s| s.output_device = uid);
     }
 
     /// The output chip: device name with a status dot. Its popup lists devices
     /// and holds the bit-perfect switch for the device in use.
     /// Returns true when "Playback settings…" was chosen in the popup.
-    pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths, bit_perfect: &mut bool) -> bool {
+    pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool) -> bool {
         if let Some((uid, name)) = self.returned.clone() {
             if ui.small_button(format!("Switch back to {name}")).clicked() {
-                self.choose(Some(uid), engine, paths);
+                self.choose(Some(uid), engine);
             }
         } else if let Some(name) = &self.lost {
             ui.weak(format!("{name} disconnected"));
@@ -216,12 +220,12 @@ impl Outputs {
         egui::Popup::menu(&chip)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .width(POPUP_W)
-            .show(|ui| self.popup_ui(ui, engine, paths, bit_perfect));
+            .show(|ui| self.popup_ui(ui, engine, bit_perfect));
         std::mem::take(&mut self.wants_settings)
     }
 
     /// What's playing through what, the devices, and the mode for the one in use.
-    fn popup_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths, bit_perfect: &mut bool) {
+    fn popup_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool) {
         let t = Tokens::of(ui);
         ui.set_width(POPUP_W);
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -242,16 +246,16 @@ impl Outputs {
         }
         let follows_default = self.devices.iter().find(|d| d.is_default).map(|d| d.name.clone()).unwrap_or_else(|| "default".into());
         if device_row(ui, &format!("System default ({follows_default})"), None, self.current.is_none()).clicked() {
-            self.choose(None, engine, paths);
+            self.choose(None, engine);
             ui.close();
         }
         for d in self.devices.clone() {
-            let mode = self.saved_modes.get(&d.uid).map(String::as_str).unwrap_or_else(|| mode_name(d.default_mode()));
+            let mode = mode_name(self.device_mode(&d));
             let selected = Some(&d.uid) == self.current.as_ref();
             let caps = d.capability_line();
             let sub = if caps.is_empty() { mode.to_owned() } else { format!("{caps} · {mode}") };
             if device_row(ui, &d.name, Some(&sub), selected).clicked() {
-                self.choose(Some(d.uid.clone()), engine, paths);
+                self.choose(Some(d.uid.clone()), engine);
                 ui.close();
             }
         }
@@ -263,8 +267,7 @@ impl Outputs {
             let mut mode = if *bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
             if crate::app::choice(ui, &crate::app::MODES, &mut mode, Some(POPUP_W - 16.0), crate::app::mode_label) {
                 *bit_perfect = mode == PlaybackMode::BitPerfect;
-                engine.send(Command::SetMode(mode));
-                self.remember_mode(mode, engine, paths);
+                self.set_mode_in_use(mode, engine);
             }
         });
         ui.add_space(6.0);
@@ -482,9 +485,6 @@ fn mode_name(mode: PlaybackMode) -> &'static str {
     }
 }
 
-fn modes(saved: &HashMap<String, String>) -> HashMap<String, PlaybackMode> {
-    saved
-        .iter()
-        .map(|(uid, m)| (uid.clone(), if m == "bit-perfect" { PlaybackMode::BitPerfect } else { PlaybackMode::Normal }))
-        .collect()
+fn engine_modes(saved: &HashMap<String, DeviceMode>) -> HashMap<String, PlaybackMode> {
+    saved.iter().map(|(uid, &m)| (uid.clone(), m.into())).collect()
 }

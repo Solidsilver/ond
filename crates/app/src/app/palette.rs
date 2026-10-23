@@ -48,7 +48,7 @@ impl ListenerApp {
         if self.palette.is_none() {
             return;
         }
-        if self.search.is_none() {
+        if self.search.index.is_none() {
             self.palette = None;
             return;
         }
@@ -98,7 +98,7 @@ impl ListenerApp {
             ui.set_width(WIDTH);
             ui.spacing_mut().item_spacing.y = 0.0;
             let palette = self.palette.as_mut()?;
-            let index = self.search.as_mut()?;
+            let index = self.search.index.as_mut()?;
 
             // Query field.
             ui.horizontal(|ui| {
@@ -261,7 +261,7 @@ impl ListenerApp {
     }
 
     fn run_hit(&mut self, hit: Hit, verb: Verb) {
-        let Some(index) = self.search.as_ref() else { return };
+        let Some(index) = self.search.index.as_ref() else { return };
         match hit {
             Hit::Artist(i) => {
                 let name = index.artists[i].name.clone();
@@ -282,7 +282,7 @@ impl ListenerApp {
             }
             Hit::Album(i) => {
                 let id = index.albums[i].id.clone();
-                let kept = self.offline_snap.pin(&offline::Pin::Album(id.clone())).is_some();
+                let kept = self.downloads.snap.pin(&offline::Pin::Album(id.clone())).is_some();
                 self.actions.push(match verb {
                     Verb::Open => Action::Go(Route::Album(id)),
                     Verb::Play => Action::Album(id, QueueAction::Play { start: 0 }),
@@ -301,7 +301,7 @@ impl ListenerApp {
                     Verb::PlayNext => self.play_from_album(&tr, QueueAction::PlayNext),
                     Verb::Add => self.play_from_album(&tr, QueueAction::Add),
                     Verb::Download => {
-                        let kept = self.offline_snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
+                        let kept = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
                         self.actions.push(Action::KeepOffline(super::Keep::Tracks(vec![tr]), !kept));
                     }
                 }

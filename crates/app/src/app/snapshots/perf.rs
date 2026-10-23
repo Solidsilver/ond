@@ -43,8 +43,8 @@ fn big_library(app: &mut ListenerApp) {
 
 fn big_queue(app: &mut ListenerApp) {
     let tracks: Vec<Track> = app.data.tracks.all.iter().take(QUEUE_N).cloned().collect();
-    app.queue = Queue::default();
-    app.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
+    app.player.queue = crate::queue::Queue::default();
+    app.player.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
 }
 
 struct Timing {
@@ -128,7 +128,7 @@ fn perf() {
     h.run_steps(2);
     {
         let app = app_mut(&mut h);
-        if let (Some(p), Some(index)) = (app.palette.as_mut(), app.search.as_mut()) {
+        if let (Some(p), Some(index)) = (app.palette.as_mut(), app.search.index.as_mut()) {
             p.query = "blue part".into();
             p.refresh(index);
         }
@@ -163,9 +163,9 @@ fn perf() {
     {
         let app = app_mut(&mut h);
         let pins = app.data.tracks.all.iter().take(PINS_N).map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect();
-        app.offline.pin_many(pins);
-        app.offline.set_paused(true);
-        app.offline_snap = app.offline.snapshot();
+        app.downloads.store.pin_many(pins);
+        app.downloads.store.set_paused(true);
+        app.downloads.snap = app.downloads.store.snapshot();
     }
     scene(&mut h, Route::Offline);
     results.push((format!("offline, {PINS_N} song pins"), time_frames(&mut h, 60)));

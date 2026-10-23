@@ -44,7 +44,7 @@ pub enum Cmd {
     /// The diagnostics bar along the bottom.
     ToggleDiagnostics,
     /// System / Light / Dark (menu only).
-    Appearance(u8),
+    Appearance(crate::theme::ThemePref),
 }
 
 /// A key and what it does. `idle` keys only fire when no text field has focus

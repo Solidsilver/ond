@@ -64,7 +64,7 @@ impl ListenerApp {
                 let full = ui.available_rect_before_wrap();
                 let below = BELOW_ART_H + if self.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
                 let side = full.width().min(full.height() - below).max(120.0).floor();
-                match self.queue.current.as_ref().map(|c| c.track.clone()) {
+                match self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     Some(track) => {
                         self.ensure_lyrics(&track);
                         self.player_block(ui, &track, Some(side), true);
@@ -112,9 +112,9 @@ impl ListenerApp {
 
     /// Asks the server for `track`'s lyrics the first time something shows them.
     fn ensure_lyrics(&mut self, track: &Track) {
-        if !self.lyrics.contains_key(&track.id) && self.client.is_some() {
+        if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
             self.lyrics.insert(track.id.clone(), Fetch::Loading);
-            self.bridge.fetch_lyrics(self.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
+            self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
         }
     }
 
@@ -126,7 +126,7 @@ impl ListenerApp {
             ui.add_space(8.0);
             ui.label(egui::RichText::new(text).size(12.5).color(t.muted));
         };
-        let Some(track) = self.queue.current.as_ref().map(|c| c.track.clone()) else {
+        let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
             note(ui, "Nothing playing.");
             return;
         };
@@ -138,7 +138,7 @@ impl ListenerApp {
                 self.lyrics_block(ui, &track, &l, size, bg);
             }
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
-            _ if self.client.is_none() => note(ui, "Lyrics come from your server when it's connected."),
+            _ if self.session.client.is_none() => note(ui, "Lyrics come from your server when it's connected."),
             _ => note(ui, "No lyrics for this song."),
         }
     }
@@ -257,7 +257,7 @@ impl ListenerApp {
     fn big_transport(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let state = self.engine.status.state();
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.pending_seek.is_some();
+        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some();
         let (icon, label) = match state {
             _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
             PlayState::Playing => (Icon::Pause, "Pause"),

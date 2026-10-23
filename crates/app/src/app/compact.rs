@@ -36,9 +36,9 @@ impl ListenerApp {
     pub(super) fn mini_ui(&mut self, ui: &mut Ui) {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
             let rect = ui.max_rect();
-            let cover = self.queue.current.as_ref().and_then(|i| self.cover_of(&i.track));
+            let cover = self.player.queue.current.as_ref().and_then(|i| self.cover_of(&i.track));
             self.art.paint(ui, rect, cover.as_deref(), 0.0);
-            if self.queue.current.is_none() {
+            if self.player.queue.current.is_none() {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), ON_ART_MUTED);
             }
             // No title bar: the artwork moves the window, and a double-click goes back.
@@ -53,7 +53,7 @@ impl ListenerApp {
             // At rest: a thin line inset from the edges, just to show where the
             // song is. Seeking happens in the overlay, away from the window's
             // edges and resize zones.
-            if shown < 1.0 && self.queue.current.is_some() {
+            if shown < 1.0 && self.player.queue.current.is_some() {
                 let line = Rect::from_min_max(pos2(rect.left() + 12.0, rect.bottom() - 9.0), pos2(rect.right() - 12.0, rect.bottom() - 7.0));
                 let frac = self.duration_secs().filter(|d| *d > 0.0).map_or(0.0, |d| (self.position_secs() / d).clamp(0.0, 1.0) as f32);
                 let fade = 1.0 - shown;
@@ -75,7 +75,7 @@ impl ListenerApp {
         let panel = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 112.0), rect.max);
         ui.painter().rect_filled(panel, 0.0, scrim());
         let inner = panel.shrink2(vec2(14.0, 10.0));
-        if let Some(item) = &self.queue.current {
+        if let Some(item) = &self.player.queue.current {
             let title = elide(&ui, &item.track.title, FontId::new(13.0, semibold()), ON_ART, inner.width());
             let artist = elide(&ui, item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.5), ON_ART_MUTED, inner.width());
             let title_h = title.size().y;
@@ -84,7 +84,7 @@ impl ListenerApp {
         }
         // The seek bar, inset from every edge, with the times at its ends.
         let seek_y = inner.top() + 46.0;
-        if self.queue.current.is_some() {
+        if self.player.queue.current.is_some() {
             let font = FontId::proportional(10.0);
             let time_w = ui.painter().layout_no_wrap("−88:88".into(), font.clone(), ON_ART_MUTED).size().x;
             let bar = Rect::from_min_max(pos2(inner.left() + time_w + 8.0, seek_y - 1.5), pos2(inner.right() - time_w - 8.0, seek_y + 1.5));
@@ -128,7 +128,7 @@ impl ListenerApp {
             .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    if self.output.picker_ui(ui, &self.engine, &self.paths, &mut self.bit_perfect) {
+                    if self.output.picker_ui(ui, &self.engine, &mut self.bit_perfect) {
                         self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
                     }
                     // The same few characters of signal path as the full window's display.
@@ -143,7 +143,7 @@ impl ListenerApp {
                             }
                             resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
                         }
-                        if !self.online && self.settings.is_some() {
+                        if !self.session.online && self.session.settings.is_some() {
                             let (g, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                             icons::paint(ui.painter(), g, Icon::Offline, t.muted);
                             resp.on_hover_text("Can't reach the server. Downloaded music still plays.");

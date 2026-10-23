@@ -2,10 +2,10 @@
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
 use crate::favorites::{StarKind, Starred, UserMeta};
-use crate::settings::{Paths, Settings};
+use crate::settings::Settings;
 use crate::sync;
 use library::{Album, Library, Track};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -121,11 +121,14 @@ fn song_meta(songs: &[subsonic::Song]) -> UserMeta {
     }
 }
 
+/// Wakes the UI so it reads what was sent (a repaint, in the app).
+pub type Notify = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Bridge {
     rt: tokio::runtime::Handle,
     tx: Sender<Msg>,
-    ctx: egui::Context,
+    notify: Notify,
     library: Arc<Library>,
     /// Stops the running track sync, if any.
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
@@ -140,11 +143,11 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, ctx: egui::Context, library: Arc<Library>) -> Self {
+    pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, library: Arc<Library>) -> Self {
         Self {
             rt,
             tx,
-            ctx,
+            notify,
             library,
             sync_cancel: Arc::default(),
             reconnecting: Arc::default(),
@@ -186,13 +189,19 @@ impl Bridge {
         self.session() == session
     }
 
-    pub fn ctx(&self) -> &egui::Context {
-        &self.ctx
+    /// The UI's wake-up, for other background work to share.
+    pub fn notifier(&self) -> Notify {
+        self.notify.clone()
     }
 
     fn send(&self, msg: Msg) {
         let _ = self.tx.send(msg);
-        self.ctx.request_repaint();
+        (self.notify)();
+    }
+
+    /// Runs `f` on the library off the async workers (redb blocks).
+    async fn db<T: Send + 'static>(&self, f: impl FnOnce(&Library) -> library::Result<T> + Send + 'static) -> Result<T, String> {
+        crate::sync::blocking(&self.library, f).await
     }
 
     /// Delivers `msg` to the UI from any thread.
@@ -260,11 +269,11 @@ impl Bridge {
         }
     }
 
-    /// Pings the server; on success persists settings (+ password when `remember`).
+    /// Pings the server; on success stores the password in the keychain.
     ///
     /// With a saved login (`password` is `None`) an unreachable server isn't a
     /// login failure: the app opens offline and keeps retrying until it's back.
-    pub fn connect(&self, settings: Settings, password: Option<String>, paths: Arc<Paths>) {
+    pub fn connect(&self, settings: Settings, password: Option<String>) {
         let this = self.clone();
         let session = self.session();
         self.rt.spawn(async move {
@@ -289,11 +298,10 @@ impl Bridge {
             }
             match pinged {
                 Ok(server) => {
+                    // The account itself is recorded by the app (in its preferences)
+                    // when `Connected` arrives for a live session.
                     let s = settings.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        if let Err(e) = s.save_login(&paths) {
-                            tracing::warn!("save settings: {e}");
-                        }
                         if let Err(e) = s.store_password(&password) {
                             tracing::warn!("keychain: {e}");
                         }
@@ -378,57 +386,21 @@ impl Bridge {
     pub fn sync_albums(&self, client: Client) {
         let this = self.clone();
         self.rt.spawn(async move {
-            const PAGE: u32 = 500;
-            let mut offset = 0;
-            let mut seen = HashSet::new();
-            loop {
-                let page = match client.album_list(AlbumListType::AlphabeticalByArtist, PAGE, offset).await {
-                    Ok(p) => p,
-                    Err(e) => return this.send(Msg::AlbumSyncDone(Err(format!("sync: {e}")))),
-                };
-                seen.extend(page.iter().map(|a| a.id.clone()));
-                let n = page.len() as u32;
-                let lib = this.library.clone();
-                let stored = tokio::task::spawn_blocking(move || lib.upsert_albums(page)).await;
-                match stored {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => return this.send(Msg::AlbumSyncDone(Err(format!("store albums: {e}")))),
-                    Err(e) => return this.send(Msg::AlbumSyncDone(Err(format!("store albums: {e}")))),
+            let progress = |n| this.send(Msg::SyncProgress(n));
+            match crate::sync::albums(&this.library, &client, progress).await {
+                Ok(albums) => {
+                    let n = albums.len();
+                    this.send(Msg::Albums(albums));
+                    this.send(Msg::AlbumSyncDone(Ok(n)));
                 }
-                offset += n;
-                this.send(Msg::SyncProgress(offset as usize));
-                if n < PAGE {
-                    break;
-                }
+                Err(e) => return this.send(Msg::AlbumSyncDone(Err(e))),
             }
-            // The full list arrived, so anything else stored is gone from the server.
-            let lib = this.library.clone();
-            let listed = tokio::task::spawn_blocking(move || {
-                let removed = lib.retain_albums(&seen)?;
-                if removed > 0 {
-                    tracing::info!("sync: removed {removed} albums no longer on the server");
-                }
-                lib.albums()
-            })
-            .await;
-            if let Ok(Ok(albums)) = listed {
-                this.send(Msg::Albums(albums));
+            match crate::sync::artists(&this.library, &client).await {
+                Ok(stored) => this.send(Msg::Artists(stored)),
+                Err(e) => this.send(Msg::Error(e)),
             }
-            this.send(Msg::AlbumSyncDone(Ok(offset as usize)));
-            this.sync_artists(client.clone()).await;
             this.sync_tracks(client);
         });
-    }
-
-    async fn sync_artists(&self, client: Client) {
-        let artists = match client.artists().await {
-            Ok(a) => a,
-            Err(e) => return self.send(Msg::Error(format!("artists: {e}"))),
-        };
-        let lib = self.library.clone();
-        if let Ok(Ok(stored)) = tokio::task::spawn_blocking(move || lib.replace_artists(artists).and_then(|_| lib.artists())).await {
-            self.send(Msg::Artists(stored));
-        }
     }
 
     /// Fetches the tracks of every album that changed since the last sync, in
@@ -484,11 +456,10 @@ impl Bridge {
     pub fn open_album(&self, client: Option<Client>, album_id: String) {
         let this = self.clone();
         self.rt.spawn(async move {
-            let lib = this.library.clone();
             let id = album_id.clone();
             let key = ListKey::Album(album_id.clone());
             let mut cached = false;
-            if let Ok(Ok(tracks)) = tokio::task::spawn_blocking(move || lib.album_tracks(&id)).await
+            if let Ok(tracks) = this.db(move |l| l.album_tracks(&id)).await
                 && !tracks.is_empty()
             {
                 cached = true;
@@ -506,23 +477,22 @@ impl Bridge {
             };
             let mut meta = song_meta(&album.song);
             meta.starred.push((StarKind::Album, album_id.clone(), album.album.starred.is_some()));
-            let lib = this.library.clone();
             let id = album_id.clone();
-            let stored = tokio::task::spawn_blocking(move || {
-                lib.upsert_album_tracks(album)?;
-                Ok::<_, library::Error>((lib.album(&id)?, lib.album_tracks(&id)?))
-            })
-            .await;
+            let stored = this
+                .db(move |l| {
+                    l.upsert_album_tracks(album)?;
+                    Ok((l.album(&id)?, l.album_tracks(&id)?))
+                })
+                .await;
             match stored {
-                Ok(Ok((row, tracks))) => {
+                Ok((row, tracks)) => {
                     if let Some(row) = row {
                         this.send(Msg::AlbumUpdated(row));
                     }
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(Msg::Tracks { album_id, tracks, fresh: true });
                 }
-                Ok(Err(e)) => this.send(Msg::LoadFailed { key, error: Some(format!("store album: {e}")) }),
-                Err(_) => this.send(Msg::LoadFailed { key, error: None }),
+                Err(e) => this.send(Msg::LoadFailed { key, error: Some(format!("store album: {e}")) }),
             }
         });
     }
@@ -534,9 +504,8 @@ impl Bridge {
             match client.album_list(AlbumListType::Newest, 120, 0).await {
                 Ok(albums) => {
                     let ids = albums.iter().map(|a| a.id.clone()).collect();
-                    let lib = this.library.clone();
                     // Newest albums may predate the last full sync.
-                    let _ = tokio::task::spawn_blocking(move || lib.upsert_albums(albums)).await;
+                    let _ = this.db(move |l| l.upsert_albums(albums)).await;
                     this.send(Msg::Newest(ids));
                 }
                 Err(e) => this.send(Msg::Error(format!("recently added: {e}"))),
@@ -715,17 +684,15 @@ impl Bridge {
         self.rt.spawn(async move {
             let mut all = Vec::new();
             for id in album_ids {
-                let lib = this.library.clone();
                 let lookup = id.clone();
-                let stored = tokio::task::spawn_blocking(move || lib.album_tracks(&lookup)).await.ok().and_then(Result::ok).unwrap_or_default();
+                let stored = this.db(move |l| l.album_tracks(&lookup)).await.unwrap_or_default();
                 if !stored.is_empty() {
                     all.extend(stored);
                     continue;
                 }
                 let Some(client) = &client else { continue };
                 let Ok(album) = client.album(&id).await else { continue };
-                let lib = this.library.clone();
-                if let Ok(Ok(tracks)) = tokio::task::spawn_blocking(move || lib.upsert_album_tracks(album).and_then(|_| lib.album_tracks(&id))).await {
+                if let Ok(tracks) = this.db(move |l| l.upsert_album_tracks(album).and_then(|_| l.album_tracks(&id))).await {
                     all.extend(tracks);
                 }
             }

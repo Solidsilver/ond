@@ -37,7 +37,9 @@ use crate::nav::{Nav, Route};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
-use crate::queue::{EndAction, Queue, Source};
+use crate::player::{self, Note, Player};
+use crate::prefs::{Loaded, Prefs};
+use crate::queue::{EndAction, Source};
 use crate::search::SearchIndex;
 use crate::settings::{Paths, Settings};
 use crate::theme::{self, ThemePref, Tokens};
@@ -135,15 +137,7 @@ impl Data {
     }
 }
 
-/// What a queue action does with a set of tracks.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum QueueAction {
-    /// Play now, starting at this track.
-    Play { start: usize },
-    Shuffle,
-    PlayNext,
-    Add,
-}
+pub use crate::player::QueueAction;
 
 /// A state change requested by a view; applied after the frame is drawn.
 pub enum Action {
@@ -320,15 +314,17 @@ pub struct QueueUi {
 pub struct ListenerApp {
     // Kept alive for the app's lifetime; the bridge holds a handle to it.
     _rt: tokio::runtime::Runtime,
-    paths: Arc<Paths>,
+    /// The window's egui context (for theme changes and window commands).
+    ctx: egui::Context,
     bridge: Bridge,
     inbox: Receiver<Msg>,
     engine: EngineHandle,
 
     login: Option<LoginForm>,
-    client: Option<Client>,
-    server_label: String,
-    sync_label: String,
+    /// The server connection and who's signed in.
+    session: Session,
+    /// Where the library sync is.
+    sync: SyncState,
 
     data: Data,
     nav: Nav,
@@ -339,10 +335,8 @@ pub struct ListenerApp {
     pending: Vec<Pending>,
     art: Art,
 
-    queue: Queue,
-    /// The queue item last sent as `SetNext`, so the engine isn't told twice.
-    sent_next: Option<u64>,
-    show_queue: bool,
+    /// The queue and what the engine is told about it.
+    player: Player,
     /// Sidebar and queue column widths (dragged by their inner edges).
     columns: layout::Columns,
     /// The album page's "Album details" is unfolded (for this session).
@@ -359,30 +353,15 @@ pub struct ListenerApp {
     /// Output devices and what reaches the one in use.
     output: Outputs,
     bit_perfect: bool,
-    volume: f32,
     /// Where the seek bar is being dragged to, in seconds.
     seek_preview: Option<f64>,
-    /// A seek that's been sent but not confirmed yet; shown instead of the engine position.
-    pending_seek: Option<f64>,
 
-    /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
-    /// the old one serves until the new one lands.
-    search: Option<SearchIndex>,
-    /// Albums, artists or tracks changed since the index was built.
-    search_stale: bool,
-    /// The latest index build asked for; older builds that land late are dropped.
-    search_generation: u64,
+    /// The palette's search index.
+    search: SearchState,
     songs: songs::SongsView,
-    /// A track sync is running (shows a stop button in the status bar).
-    track_syncing: bool,
-    /// The album list is being fetched (before the track sync).
-    album_syncing: bool,
-    /// Where the track sync is, while it runs.
-    sync_progress: Option<crate::sync::Progress>,
     /// Errors and notices, shown as toasts.
     toasts: toasts::Toasts,
     palette: Option<Palette>,
-    theme: ThemePref,
 
     /// Full / Player / Mini and where each was.
     windows: Windows,
@@ -402,31 +381,13 @@ pub struct ListenerApp {
     bars_shown: bool,
     /// OS Now Playing and server scrobbles.
     now_playing: now_playing::Session,
-    scrobble: bool,
 
-    /// Offline downloads, and their state as of this frame.
-    offline: OfflineStore,
-    offline_snap: Arc<offline::Snapshot>,
-    /// Pins waiting for their track lists to load, by the same keys as `pending`.
-    pending_pins: Vec<(ListKey, Pin)>,
-    /// The server answered last time we asked. While it's unreachable only
-    /// downloaded tracks play.
-    online: bool,
-    /// The login in use, for reconnecting.
-    settings: Option<Settings>,
-    /// Stored analysis results by track id, with the file stamp they're for.
-    analyses: HashMap<String, analysis::Record>,
-    /// Bumped whenever `analyses` changes, so counts over it know to recount.
-    analyses_version: u64,
-    /// How much of the library has no current analysis, per (analyses, tracks) version.
-    unanalysed: crate::memo::Memo<(u64, u64), (usize, f64)>,
-    /// The stored results have been read (until then everything looks unanalysed).
-    analyses_loaded: bool,
-    analyzer: analyze::Runner,
-    /// A library-wide analysis should be running (resumed after a restart).
-    analysis_library: bool,
-    /// Analyse each track as it plays (it's in the playback cache by then).
-    analyze_playing: bool,
+    /// Offline downloads.
+    downloads: Downloads,
+    /// The user's preferences: the one copy, saved in the background.
+    prefs: Prefs,
+    /// Loudness, dynamic range and fake hi-res checks.
+    analysis: Analysis,
     /// Hearts and ratings, mirrored from the server.
     favorites: Favorites,
     /// A sheet over the window, if one is open.
@@ -440,10 +401,6 @@ pub struct ListenerApp {
     fav_tab: favorites_page::FavTab,
     /// The Settings window's section.
     settings_section: settings_page::Section,
-    /// When the last full sync finished (this session).
-    last_synced: Option<chrono::DateTime<chrono::Local>>,
-    /// "navidrome 0.64.2", as the server reported it.
-    server_info: String,
     /// Lyrics by track id, fetched when a lyrics view first needs them.
     lyrics: HashMap<String, crate::lyrics::Fetch>,
     /// Play counts by track id for the Info tab: absent until asked for,
@@ -455,9 +412,105 @@ pub struct ListenerApp {
     np_details: bool,
     /// The diagnostics bar: whether it's on, and what it measures.
     diagnostics: diagnostics::Diagnostics,
+}
+
+/// The server connection and who's signed in.
+#[derive(Default)]
+pub struct Session {
+    pub client: Option<Client>,
+    /// The server answered last time we asked. While it's unreachable only
+    /// downloaded tracks play.
+    pub online: bool,
     /// The server stopped answering and reconnecting runs in the background
     /// (as opposed to the first connect still under way).
-    unreachable: bool,
+    pub unreachable: bool,
+    /// The login in use, for reconnecting.
+    pub settings: Option<Settings>,
+    /// "user · navidrome 0.64.2", or "user · offline".
+    pub server_label: String,
+    /// "navidrome 0.64.2", as the server reported it.
+    pub server_info: String,
+}
+
+impl Session {
+    /// The client, while the server answers.
+    pub fn live(&self) -> Option<&Client> {
+        self.client.as_ref().filter(|_| self.online)
+    }
+}
+
+/// Where the library sync is.
+#[derive(Default)]
+pub struct SyncState {
+    pub label: String,
+    /// The album list is being fetched (before the track sync).
+    pub albums: bool,
+    /// A track sync is running (shows a stop button).
+    pub tracks: bool,
+    /// Where the track sync is, while it runs.
+    pub progress: Option<crate::sync::Progress>,
+    /// When the last full sync finished (this session).
+    pub last: Option<chrono::DateTime<chrono::Local>>,
+}
+
+/// The palette's search index.
+#[derive(Default)]
+pub struct SearchState {
+    /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
+    /// the old one serves until the new one lands.
+    pub index: Option<SearchIndex>,
+    /// Albums, artists or tracks changed since the index was built.
+    pub stale: bool,
+    /// The latest index build asked for; older builds that land late are dropped.
+    pub generation: u64,
+}
+
+/// Offline downloads, and their state as of this frame.
+pub struct Downloads {
+    pub store: OfflineStore,
+    pub snap: Arc<offline::Snapshot>,
+    /// Pins waiting for their track lists to load, by the same keys as `pending`.
+    pub pending_pins: Vec<(ListKey, Pin)>,
+}
+
+impl Downloads {
+    /// Takes in what changed since the last frame.
+    pub fn refresh(&mut self) {
+        self.snap = self.store.snapshot();
+    }
+
+    /// Applies the download actions that need nothing but the store.
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Unpin(pin) => {
+                self.store.unpin(&pin);
+                self.refresh();
+            }
+            Action::PauseDownloads(paused) => self.store.set_paused(paused),
+            Action::RetryDownloads => self.store.retry_failed(),
+            _ => unreachable!("not a download action"),
+        }
+    }
+}
+
+/// Library analysis: stored results and the background runner.
+pub struct Analysis {
+    /// Stored analysis results by track id, with the file stamp they're for.
+    pub records: HashMap<String, analysis::Record>,
+    /// Bumped whenever `records` changes, so counts over it know to recount.
+    pub version: u64,
+    /// How much of the library has no current analysis, per (records, tracks) version.
+    pub unanalysed: crate::memo::Memo<(u64, u64), (usize, f64)>,
+    /// The stored results have been read (until then everything looks unanalysed).
+    pub loaded: bool,
+    pub runner: analyze::Runner,
+}
+
+impl Analysis {
+    /// A track's analysis, if there is one for the file as it is now.
+    pub fn of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
+        self.records.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
+    }
 }
 
 impl ListenerApp {
@@ -490,26 +543,31 @@ impl ListenerApp {
         }
         let library = Arc::new(library);
         let (tx, inbox) = channel();
-        let bridge = Bridge::new(rt.handle().clone(), tx, ctx.clone(), library.clone());
+        let repaint = ctx.clone();
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), library.clone());
 
-        let saved = Settings::load(&paths);
-        let theme_pref = saved.as_ref().map(|s| s.theme).unwrap_or_default();
-        theme::install(ctx, theme_pref);
+        let (prefs, loaded) = Prefs::open(&paths.config_file);
+        let notice = match loaded {
+            Loaded::Unreadable { aside } => Some(format!("Settings couldn't be read and were reset; please sign in again (old copy: {})", aside.display())),
+            _ => notice,
+        };
+        let saved = prefs.snapshot();
+        theme::install(ctx, saved.theme);
         let mut cache_cfg = audio::CacheConfig::new(&paths.stream_cache);
-        if let Some(mb) = saved.as_ref().and_then(|s| s.stream_cache_mb) {
+        if let Some(mb) = saved.stream_cache_mb {
             cache_cfg.max_bytes = mb * 1024 * 1024;
         }
         let cache = audio::StreamCache::new(cache_cfg, rt.handle().clone())?;
         let offline = {
-            let dir = saved.as_ref().and_then(|s| s.offline_dir.clone()).unwrap_or_else(|| paths.offline.clone());
+            let dir = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
             // A new location chosen last time: bring the downloads along first.
-            if let Some(from) = saved.as_ref().and_then(|s| s.offline_move_from.clone()) {
+            if let Some(from) = saved.offline_move_from.clone() {
                 match offline::move_store(&from, &dir) {
-                    Ok(()) => Settings::update(&paths, |s| s.offline_move_from = None),
+                    Ok(()) => prefs.edit(|s| s.offline_move_from = None),
                     Err(e) => tracing::warn!("moving downloads from {}: {e}", from.display()),
                 }
             }
-            let limit = saved.as_ref().and_then(|s| s.offline_limit_gb).map(|gb| gb * 1_000_000_000);
+            let limit = saved.offline_limit_gb.map(|gb| gb * 1_000_000_000);
             let repaint = ctx.clone();
             let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.handle().clone(), Arc::new(move || repaint.request_repaint()))?;
             // A track that finished streaming is linked in rather than downloaded again.
@@ -524,8 +582,9 @@ impl ListenerApp {
         scratch_cfg.max_bytes = 64 * 1024 * 1024;
         let scratch_cache = audio::StreamCache::new(scratch_cfg, rt.handle().clone())?;
         let engine = audio::spawn(audio::EngineConfig::default(), backend, Some(cache));
-        let output = Outputs::restore(&engine, saved.as_ref());
-        let scrobble = saved.as_ref().is_none_or(|s| s.scrobble);
+        let output = Outputs::restore(&engine, prefs.clone());
+        engine.send(Command::SetVolume(saved.volume));
+        let scrobble = saved.scrobble;
         let remote_bridge = bridge.clone();
         let now_playing = now_playing::Session::start(now_playing::Config {
             status: engine.status.clone(),
@@ -540,40 +599,38 @@ impl ListenerApp {
         bridge.load_cached_albums();
         bridge.load_analyses(analyses.clone());
         let analyzer = {
-            let (results, ticks) = (bridge.clone(), bridge.ctx().clone());
+            let (results, ticks) = (bridge.clone(), bridge.notifier());
             analyze::Runner::start(analyze::Config {
                 store: analyses,
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
                 on_result: Arc::new(move |track_id, record| results.post(Msg::Analyzed { track_id, record })),
-                on_progress: Arc::new(move || ticks.request_repaint()),
+                on_progress: ticks,
             })
         };
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
 
-        let login = match &saved {
-            Some(s) if s.signed_out => LoginForm { server: s.server.clone(), username: s.username.clone(), ..Default::default() },
-            Some(s) => {
-                bridge.connect(s.clone(), None, paths.clone());
-                LoginForm { server: s.server.clone(), username: s.username.clone(), busy: true, ..Default::default() }
-            }
-            None => LoginForm { server: "http://localhost:4533".into(), ..Default::default() },
+        let login = if !prefs.has_login() {
+            LoginForm { server: "http://localhost:4533".into(), ..Default::default() }
+        } else if saved.signed_out {
+            LoginForm { server: saved.server.clone(), username: saved.username.clone(), ..Default::default() }
+        } else {
+            bridge.connect(saved.clone(), None);
+            LoginForm { server: saved.server.clone(), username: saved.username.clone(), busy: true, ..Default::default() }
         };
 
         Ok(Self {
             _rt: rt,
-            show_queue: saved.as_ref().is_none_or(|s| s.show_queue),
+            ctx: ctx.clone(),
             album_details_open: false,
-            columns: layout::Columns::restore(saved.as_ref().and_then(|s| s.sidebar_width), saved.as_ref().and_then(|s| s.queue_width)),
-            paths,
+            columns: layout::Columns::restore(saved.sidebar_width, saved.queue_width),
             bridge,
             inbox,
             engine,
             login: Some(login),
-            client: None,
-            server_label: String::new(),
-            sync_label: String::new(),
+            session: Session { settings: prefs.has_login().then(|| saved.clone()), ..Default::default() },
+            sync: SyncState::default(),
             data: Data::default(),
             nav: Nav::default(),
             sort: AlbumSort::default(),
@@ -581,8 +638,7 @@ impl ListenerApp {
             actions: Vec::new(),
             pending: Vec::new(),
             art,
-            queue: Queue::default(),
-            sent_next: None,
+            player: Player::default(),
             queue_ui: QueueUi::default(),
             queue_sheet: false,
             queue_narrow: false,
@@ -590,21 +646,13 @@ impl ListenerApp {
             track_sel: None,
             output,
             bit_perfect: false,
-            volume: 1.0,
             seek_preview: None,
-            pending_seek: None,
-            search: None,
-            search_stale: false,
-            search_generation: 0,
+            search: SearchState::default(),
             songs: songs::SongsView::default(),
-            track_syncing: false,
-            album_syncing: false,
-            sync_progress: None,
             // Something worth knowing at start-up (e.g. the library was rebuilt).
             toasts: toasts::Toasts::with_notice(notice),
             palette: None,
-            theme: theme_pref,
-            windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
+            windows: saved.window.clone(),
             seen: None,
             settling: None,
             switch_started: None,
@@ -613,20 +661,10 @@ impl ListenerApp {
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
             now_playing,
-            scrobble,
-            offline_snap: offline.snapshot(),
-            offline,
-            pending_pins: Vec::new(),
-            online: false,
-            analysis_library: saved.as_ref().is_some_and(|s| s.analysis_resume),
-            analyze_playing: saved.as_ref().is_some_and(|s| s.analyze_playing),
-            diagnostics: diagnostics::Diagnostics::new(saved.as_ref().is_some_and(|s| s.diagnostics_bar)),
-            settings: saved,
-            analyses: HashMap::new(),
-            analyses_version: 0,
-            unanalysed: Default::default(),
-            analyses_loaded: false,
-            analyzer,
+            downloads: Downloads { snap: offline.snapshot(), store: offline, pending_pins: Vec::new() },
+            diagnostics: diagnostics::Diagnostics::default(),
+            prefs,
+            analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
             favorites: Favorites::default(),
             overlay: None,
             menu: None,
@@ -634,13 +672,10 @@ impl ListenerApp {
             recent_playlists: Vec::new(),
             fav_tab: favorites_page::FavTab::default(),
             settings_section: settings_page::Section::default(),
-            last_synced: None,
-            server_info: String::new(),
             lyrics: HashMap::new(),
             song_stats: HashMap::new(),
             lyrics_follow: crate::lyrics::Follow::default(),
             np_details: false,
-            unreachable: false,
         })
     }
 
@@ -649,20 +684,20 @@ impl ListenerApp {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
             Msg::Connected { client, settings, server, .. } => {
-                self.server_label = format!("{} · {}", settings.username, server);
-                self.server_info = server.clone();
+                self.session.server_label = format!("{} · {}", settings.username, server);
+                self.session.server_info = server.clone();
                 self.login = None;
-                self.sync_label = "syncing…".into();
-                self.album_syncing = true;
+                self.sync.label = "syncing…".into();
+                self.sync.albums = true;
                 self.bridge.sync_albums(client.clone());
                 self.bridge.fetch_home(client.clone());
                 self.art.set_client(client.clone());
                 self.now_playing.set_client(client.clone());
                 self.output.connected(&settings.server);
                 let url = client.clone();
-                self.offline.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
+                self.downloads.store.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
                 // Pinned playlists follow the server: refetch them so additions download.
-                for p in &self.offline_snap.pins {
+                for p in &self.downloads.snap.pins {
                     if let Pin::Playlist(id) = &p.pin {
                         self.bridge.open_playlist(Some(client.clone()), id.clone());
                     }
@@ -670,13 +705,14 @@ impl ListenerApp {
                 self.bridge.fetch_starred(Some(client.clone()));
                 self.diagnostics.latency_asked();
                 self.bridge.measure_latency(client.clone());
-                self.unreachable = false;
-                self.client = Some(client);
-                self.settings = Some(*settings);
-                if !self.online {
-                    self.online = true;
+                self.session.unreachable = false;
+                self.session.client = Some(client);
+                self.prefs.set_login(&settings.server, &settings.username);
+                self.session.settings = Some(*settings);
+                if !self.session.online {
+                    self.session.online = true;
                     // Lined up while offline; the server can supply the rest again.
-                    self.sent_next = None;
+                    self.player.forget_next();
                     self.sync_next();
                 }
                 self.resume_library_analysis();
@@ -684,7 +720,7 @@ impl ListenerApp {
             Msg::ConnectFailed(e) => {
                 self.set_offline();
                 let form = self.login.get_or_insert_with(|| {
-                    let s = self.settings.clone().unwrap_or_default();
+                    let s = self.session.settings.clone().unwrap_or_default();
                     LoginForm { server: s.server, username: s.username, ..Default::default() }
                 });
                 form.busy = false;
@@ -694,32 +730,32 @@ impl ListenerApp {
                 tracing::info!("server unreachable: {error}");
                 self.login = None;
                 self.set_offline();
-                self.unreachable = true;
+                self.session.unreachable = true;
                 self.diagnostics.set_latency(None);
-                self.server_label = format!("{username} · offline");
-                self.sync_label = "reconnecting…".into();
+                self.session.server_label = format!("{username} · offline");
+                self.sync.label = "reconnecting…".into();
             }
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
             Msg::SearchIndex { generation, index } => {
-                if generation == self.search_generation {
+                if generation == self.search.generation {
                     self.install_search(*index);
                 }
             }
             Msg::Albums(a) => {
                 self.data.set_albums(a);
-                self.search_stale = true;
+                self.search.stale = true;
             }
             Msg::Artists(a) => {
                 self.data.artists = a;
-                self.search_stale = true;
+                self.search.stale = true;
             }
             Msg::AllTracks(set) => {
                 self.data.set_tracks(*set);
-                self.search_stale = true;
+                self.search.stale = true;
                 // A sync may have added tracks to pinned albums. The library can be
                 // partial (a sync stopped or failed, a rebuilt database), so this may
                 // only add: removals wait for the server's own listing of the album.
-                let albums: Vec<String> = self.offline_snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
+                let albums: Vec<String> = self.downloads.snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
                 for id in albums {
                     if let Some(tracks) = self.data.tracks.album(&id).cloned() {
                         self.refresh_pin(Pin::Album(id), &tracks, false);
@@ -728,28 +764,28 @@ impl ListenerApp {
                 self.resume_library_analysis();
             }
             Msg::Analyzed { track_id, record } => {
-                self.analyses.insert(track_id, record);
-                self.analyses_version += 1;
+                self.analysis.records.insert(track_id, record);
+                self.analysis.version += 1;
             }
             Msg::AnalysesLoaded(rows) => {
-                self.analyses.extend(rows);
-                self.analyses_version += 1;
-                self.analyses_loaded = true;
+                self.analysis.records.extend(rows);
+                self.analysis.version += 1;
+                self.analysis.loaded = true;
                 self.resume_library_analysis();
             }
             Msg::TrackSync(p) => {
-                self.track_syncing = true;
-                self.sync_progress = Some(p);
-                self.sync_label = p.label();
+                self.sync.tracks = true;
+                self.sync.progress = Some(p);
+                self.sync.label = p.label();
             }
             Msg::TrackSyncDone(outcome) => {
-                self.track_syncing = false;
-                self.sync_progress = None;
+                self.sync.tracks = false;
+                self.sync.progress = None;
                 let albums = self.data.albums.len();
                 let tracks = self.data.tracks.all.len();
-                self.sync_label = match outcome {
+                self.sync.label = match outcome {
                     crate::sync::Outcome::Done { .. } => {
-                        self.last_synced = Some(chrono::Local::now());
+                        self.sync.last = Some(chrono::Local::now());
                         format!("{albums} albums · {tracks} tracks")
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
@@ -761,20 +797,20 @@ impl ListenerApp {
             }
             Msg::AlbumUpdated(a) => self.data.update_album(a),
             Msg::SyncProgress(n) => {
-                self.album_syncing = true;
-                self.sync_label = format!("syncing… {n}");
+                self.sync.albums = true;
+                self.sync.label = format!("syncing… {n}");
             }
             Msg::AlbumSyncDone(Ok(n)) => {
-                self.album_syncing = false;
-                self.sync_label = format!("{n} albums");
-                self.track_syncing = true;
+                self.sync.albums = false;
+                self.sync.label = format!("{n} albums");
+                self.sync.tracks = true;
             }
             Msg::AlbumSyncDone(Err(e)) => {
                 // Nothing more follows (no artist or track sync): stop saying "syncing".
-                self.album_syncing = false;
-                self.sync_label = "sync failed".into();
+                self.sync.albums = false;
+                self.sync.label = "sync failed".into();
                 self.probe();
-                if self.online {
+                if self.session.online {
                     self.show_error(e);
                 }
             }
@@ -782,10 +818,10 @@ impl ListenerApp {
                 // Whatever waited for these tracks gives up, so it can't fire
                 // much later when they turn up for some other reason.
                 self.pending.retain(|p| p.key != key);
-                self.pending_pins.retain(|(k, _)| *k != key);
+                self.downloads.pending_pins.retain(|(k, _)| *k != key);
                 if let Some(e) = error {
                     self.probe();
-                    if self.online {
+                    if self.session.online {
                         self.show_error(e);
                     }
                 }
@@ -836,7 +872,7 @@ impl ListenerApp {
             Msg::Error(e) => {
                 self.probe();
                 // Offline, network errors are expected and the offline pill already says so.
-                if self.online {
+                if self.session.online {
                     self.show_error(e);
                 }
             }
@@ -856,8 +892,8 @@ impl ListenerApp {
 
     /// Something failed; if it was the network, find out whether the server is gone.
     fn probe(&self) {
-        if self.online
-            && let (Some(client), Some(settings)) = (&self.client, &self.settings)
+        if self.session.online
+            && let (Some(client), Some(settings)) = (&self.session.client, &self.session.settings)
         {
             self.bridge.probe(client.clone(), settings.clone());
         }
@@ -865,12 +901,12 @@ impl ListenerApp {
 
     /// The server's gone: browse what's stored, play what's downloaded.
     fn set_offline(&mut self) {
-        self.online = false;
-        self.client = None;
-        self.offline.set_source(None);
-        self.track_syncing = false;
-        self.album_syncing = false;
-        self.sync_progress = None;
+        self.session.online = false;
+        self.session.client = None;
+        self.downloads.store.set_source(None);
+        self.sync.tracks = false;
+        self.sync.albums = false;
+        self.sync.progress = None;
     }
 
     /// Pins `pin` if it was waiting for these tracks, or refreshes its track
@@ -881,14 +917,14 @@ impl ListenerApp {
     fn refresh_pin(&mut self, pin: Pin, tracks: &[Track], complete: bool) {
         let label = self.pin_label(&pin);
         let refs = || tracks.iter().map(track_ref).collect::<Vec<_>>();
-        if let Some(at) = self.pending_pins.iter().position(|(_, p)| p == &pin) {
-            self.pending_pins.remove(at);
-            self.offline.pin(pin, label, refs());
-        } else if self.offline.is_pinned(&pin) {
+        if let Some(at) = self.downloads.pending_pins.iter().position(|(_, p)| p == &pin) {
+            self.downloads.pending_pins.remove(at);
+            self.downloads.store.pin(pin, label, refs());
+        } else if self.downloads.store.is_pinned(&pin) {
             if complete {
-                self.offline.update(&pin, label, refs());
+                self.downloads.store.update(&pin, label, refs());
             } else {
-                self.offline.extend(&pin, refs());
+                self.downloads.store.extend(&pin, refs());
             }
         }
     }
@@ -903,20 +939,20 @@ impl ListenerApp {
 
     /// Whether `track` can play right now: downloaded, or the server is there.
     pub fn playable(&self, track: &Track) -> bool {
-        self.online || self.offline_snap.is_done(&track.id)
+        self.session.online || self.downloads.snap.is_done(&track.id)
     }
 
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
     /// it's already showing that tab.
     fn toggle_side_tab(&mut self, tab: QueueTab) {
-        if self.queue_ui.tab == tab && (self.show_queue || self.queue_sheet) {
+        if self.queue_ui.tab == tab && (self.show_queue() || self.queue_sheet) {
             self.queue_ui.tab = QueueTab::UpNext;
             return;
         }
         self.queue_ui.tab = tab;
         if self.queue_narrow {
             self.queue_sheet = true;
-        } else if !self.show_queue {
+        } else if !self.show_queue() {
             self.actions.push(Action::ToggleQueue);
         }
     }
@@ -935,67 +971,40 @@ impl ListenerApp {
             // One pin per song, saved together: a big selection doesn't stall.
             Keep::Tracks(tracks) => {
                 if on {
-                    self.offline.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
+                    self.downloads.store.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
                 } else {
-                    self.offline.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
+                    self.downloads.store.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
                 }
-                self.offline_snap = self.offline.snapshot();
+                self.downloads.refresh();
                 return;
             }
         };
         match refs {
-            _ if !on => self.offline.unpin(&pin),
-            Some(refs) => self.offline.pin(pin.clone(), self.pin_label(&pin), refs),
+            _ if !on => self.downloads.store.unpin(&pin),
+            Some(refs) => self.downloads.store.pin(pin.clone(), self.pin_label(&pin), refs),
             None => {
                 self.wait_to_pin(key.clone(), pin);
                 match key {
-                    ListKey::Album(id) => self.bridge.open_album(self.client.clone(), id),
-                    ListKey::Playlist(id) => self.bridge.open_playlist(self.client.clone(), id),
+                    ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
+                    ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
                     ListKey::Artist(_) => {}
                 }
             }
         }
-        self.offline_snap = self.offline.snapshot();
+        self.downloads.refresh();
     }
 
     /// A media key, Control Center or headphone command.
     fn remote(&mut self, r: Remote) {
-        let state = self.engine.status.state();
-        match r {
-            Remote::Play if state == PlayState::Paused => self.engine.send(Command::Resume),
-            Remote::Play if state == PlayState::Stopped => self.play_pause(),
-            Remote::Pause if !matches!(state, PlayState::Paused | PlayState::Stopped) => self.engine.send(Command::Pause),
-            Remote::Play | Remote::Pause => {}
-            Remote::Toggle => self.play_pause(),
-            Remote::Next => self.next(),
-            Remote::Previous => self.previous(),
-            Remote::Seek(to) => self.seek(to.max(0.0)),
-            Remote::SkipBy(by) => {
-                let end = self.duration_secs().unwrap_or(f64::MAX);
-                self.seek((self.position_secs() + by).clamp(0.0, end));
-            }
-        }
-    }
-
-    /// Describes `track` for Now Playing before the engine reaches it.
-    fn announce(&self, track: &Track) {
-        let album = self.data.album(&track.album_id);
-        self.now_playing.known(now_playing::Info {
-            track_id: track.id.clone(),
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: album.map(|a| a.name.clone()),
-            duration_secs: track.duration_secs.map(f64::from),
-            cover: self.data.cover_for(track).map(str::to_owned),
-        });
+        self.with_player(|p, cx| p.remote(r, cx));
     }
 
     /// Work owed once per batch of messages: a sync delivers albums, artists
     /// and tracks back to back, so derived data is rebuilt once, not per message.
     fn after_messages(&mut self) {
-        if std::mem::take(&mut self.search_stale) {
-            self.search_generation += 1;
-            self.bridge.build_search(self.search_generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
+        if std::mem::take(&mut self.search.stale) {
+            self.search.generation += 1;
+            self.bridge.build_search(self.search.generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
         }
     }
 
@@ -1010,7 +1019,7 @@ impl ListenerApp {
         if let Some(p) = self.palette.as_mut() {
             p.refresh(&mut index);
         }
-        self.search = Some(index);
+        self.search.index = Some(index);
     }
 
     fn handle_engine(&mut self, ev: audio::Event) {
@@ -1018,213 +1027,85 @@ impl ListenerApp {
             // The engine picked the mode for a new device (remembered, or its default).
             self.bit_perfect = mode == PlaybackMode::BitPerfect;
         }
-        match ev {
-            audio::Event::TrackStarted { track_id, token, gapless, restart, .. } => {
-                if self.analyze_playing
-                    && !restart
-                    && let Some(t) = self.playing_track(&track_id)
-                {
-                    self.enqueue_analysis(std::slice::from_ref(&t));
-                }
-                // Matched by queue item (the token), so the same song twice in a row
-                // still moves the queue along. With "repeat queue" over a single
-                // item, the next item *is* the current one: a gapless start of it
-                // is the next pass.
-                let is_next = self.queue.peek_next().is_some_and(|n| n.uid == token);
-                let is_current = self.queue.current.as_ref().is_some_and(|c| c.uid == token);
-                if is_next && (gapless || !is_current) {
-                    // The engine moved on gaplessly; line up the track after this one.
-                    self.queue.advance();
-                    self.pending_seek = None;
-                    self.sent_next = None;
-                    self.sync_next();
-                }
-            }
-            audio::Event::Seeked { .. } => self.pending_seek = None,
-            // The engine ran out of queued tracks. If the queue has more (the next one
-            // was named too late to play gaplessly), carry on from there.
-            audio::Event::Ended { .. } => {
-                if self.queue.advance().is_some() {
-                    self.start_current();
-                } else {
-                    self.sent_next = None;
-                }
-            }
-            audio::Event::Error { message, .. } => {
-                self.pending_seek = None;
-                self.show_error(message);
-                self.probe();
-            }
-            audio::Event::SignalPath(_)
-            | audio::Event::Devices { .. }
-            | audio::Event::ModeChanged { .. }
-            | audio::Event::DeviceLost { .. }
-            | audio::Event::DeviceReturned { .. } => {}
-        }
+        self.with_player(|p, cx| p.handle_engine(&ev, cx));
     }
 
-    /// What the engine needs to play `track`: the downloaded file first
-    /// (instant, no network), else the server while it's reachable (original or
-    /// transcoded), with its ReplayGain and whether it plays as part of its album
-    /// (from its queue neighbours `prev` and `next`). `token` is the queue item's
-    /// id, echoed back by the engine so two plays of one track stay apart.
-    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
-        let replay_gain = playback::replay_gain(track);
-        let album_context = playback::in_album(prev, track, next);
-        if let Some(path) = self.offline.local_path(&track.id) {
-            return Some(TrackSource {
-                id: track.id.clone(),
-                url: format!("file://{}", path.display()),
-                suffix: track.suffix.clone(),
-                replay_gain,
-                album_context,
-                transcode: None,
-                token,
-            });
-        }
-        let client = self.client.as_ref().filter(|_| self.online)?;
-        let transcode = self.output.transcode();
-        let (url, suffix) = match &transcode {
-            None => (client.stream_url(&track.id), track.suffix.clone()),
-            Some(t) => (client.transcoded_stream_url(&track.id, &t.format, t.kbps), Some(t.format.clone())),
+    /// Runs `f` on the player with the engine and the app's sources, then acts
+    /// on what it reports.
+    fn with_player<R>(&mut self, f: impl FnOnce(&mut Player, &mut player::Ctx<'_>) -> R) -> R {
+        let mut notes = Vec::new();
+        let sources = AppSources {
+            offline: &self.downloads.store,
+            client: self.session.live(),
+            output: &self.output,
+            data: &self.data,
+            now_playing: &self.now_playing,
         };
-        Some(TrackSource { id: track.id.clone(), url: url.to_string(), suffix, replay_gain, album_context, transcode, token })
+        let result = f(&mut self.player, &mut player::Ctx { engine: &self.engine, sources: &sources, notes: &mut notes });
+        for note in notes {
+            match note {
+                Note::Notice(text) => self.show_notice(text),
+                Note::Error(text) => self.show_error(text),
+                Note::Probe => self.probe(),
+                Note::Started { track, restart } => {
+                    if self.analyze_playing() && !restart {
+                        self.enqueue_analysis(std::slice::from_ref(&*track));
+                    }
+                }
+            }
+        }
+        result
     }
 
-    /// Starts the queue's current item from the top (or stops when there is
-    /// none). Tracks that can't play (offline, not downloaded) are skipped.
     fn start_current(&mut self) {
-        self.pending_seek = None;
-        self.sent_next = None;
-        let mut skipped = 0;
-        // With "repeat queue" the queue never runs out, so give up after one
-        // full pass in which nothing could play.
-        let limit = self.queue.pass_len().max(1);
-        loop {
-            let Some(item) = &self.queue.current else {
-                self.engine.send(Command::Stop);
-                break;
-            };
-            if skipped >= limit {
-                self.engine.send(Command::Stop);
-                self.show_notice("Nothing in the queue is downloaded".to_owned());
-                return;
-            }
-            let prev = self.queue.history.last().map(|i| &i.track);
-            let next = self.queue.peek_next().map(|i| &i.track);
-            if let Some(src) = self.source(item.uid, prev, &item.track, next) {
-                self.announce(&item.track);
-                self.engine.send(Command::Play(src));
-                self.sync_next();
-                break;
-            }
-            skipped += 1;
-            if self.queue.advance().is_none() {
-                self.engine.send(Command::Stop);
-                break;
-            }
-        }
-        if skipped > 0 {
-            self.show_notice(if skipped == 1 { "Skipped 1 song that isn't downloaded".to_owned() } else { format!("Skipped {skipped} songs that aren't downloaded") });
-        }
+        self.with_player(|p, cx| p.start_current(cx));
     }
 
-    /// Tells the engine what follows the current track (prefetch + gapless), if
-    /// that changed. A next track that can't play isn't named; when the current
-    /// one ends, `start_current` skips past it.
+    /// Where `track` would play from now (tests).
+    #[cfg(test)]
+    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
+        use player::Sources;
+        let sources = AppSources {
+            offline: &self.downloads.store,
+            client: self.session.live(),
+            output: &self.output,
+            data: &self.data,
+            now_playing: &self.now_playing,
+        };
+        sources.source(token, prev, track, next)
+    }
+
     fn sync_next(&mut self) {
-        if self.queue.current.is_none() {
-            return;
-        }
-        let next = self.queue.peek_next().map(|i| (i.uid, i.track.clone()));
-        let current = self.queue.current.as_ref().map(|i| &i.track);
-        let after = self.queue.upcoming.get(1).map(|i| &i.track);
-        let source = next.as_ref().and_then(|(uid, t)| self.source(*uid, current, t, after));
-        // By queue item, not track: the same song queued twice is two items.
-        let sent = source.as_ref().map(|s| s.token);
-        if sent != self.sent_next {
-            if let Some((_, t)) = next.as_ref().filter(|_| source.is_some()) {
-                self.announce(t);
-            }
-            self.engine.send(Command::SetNext(source));
-            self.sent_next = sent;
-        }
+        self.with_player(|p, cx| p.sync_next(cx));
     }
 
     fn position_secs(&self) -> f64 {
-        self.pending_seek.unwrap_or_else(|| self.engine.status.position_secs())
+        self.player.position_secs(&self.engine)
     }
 
     fn duration_secs(&self) -> Option<f64> {
-        self.engine
-            .status
-            .duration_secs()
-            .or_else(|| self.queue.current.as_ref().and_then(|c| c.track.duration_secs).map(f64::from))
+        self.player.duration_secs(&self.engine)
     }
 
     fn play_pause(&mut self) {
-        match self.engine.status.state() {
-            PlayState::Playing | PlayState::Buffering | PlayState::Loading => self.engine.send(Command::Pause),
-            PlayState::Paused => self.engine.send(Command::Resume),
-            PlayState::Stopped => {
-                if self.queue.current.is_some() || self.queue.advance().is_some() {
-                    self.start_current();
-                }
-            }
-        }
+        self.with_player(|p, cx| p.play_pause(cx));
     }
 
     fn next(&mut self) {
-        if self.queue.advance().is_some() {
-            self.start_current();
-        } else {
-            self.engine.send(Command::Stop);
-            self.sent_next = None;
-        }
+        self.with_player(|p, cx| p.next(cx));
     }
 
-    /// Restarts the track when it's past the first few seconds, else goes back one.
     fn previous(&mut self) {
-        if self.position_secs() > 3.0 || self.queue.history.is_empty() {
-            self.seek(0.0);
-        } else if self.queue.back().is_some() {
-            self.start_current();
-        }
+        self.with_player(|p, cx| p.previous(cx));
     }
 
     fn seek(&mut self, to: f64) {
-        if self.queue.current.is_none() {
-            return;
-        }
-        self.pending_seek = Some(to);
-        self.engine.send(Command::Seek(Duration::from_secs_f64(to)));
+        self.with_player(|p, cx| p.seek(to, cx));
     }
 
     /// Applies a queue action once the tracks are known.
     fn queue_tracks(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction) {
-        if tracks.is_empty() {
-            return;
-        }
-        match action {
-            QueueAction::Play { start } => {
-                self.queue.play_now(tracks, start, source);
-                self.start_current();
-            }
-            QueueAction::Shuffle => {
-                let mut tracks = tracks;
-                shuffle(&mut tracks);
-                self.queue.play_now(tracks, 0, source);
-                self.start_current();
-            }
-            QueueAction::PlayNext => {
-                self.queue.play_next(tracks);
-                self.sync_next();
-            }
-            QueueAction::Add => {
-                self.queue.add(tracks);
-                self.sync_next();
-            }
-        }
+        self.with_player(|p, cx| p.queue_tracks(tracks, source, action, cx));
     }
 
     /// Holds `p` until its tracks load. A newer action for the same list
@@ -1236,8 +1117,8 @@ impl ListenerApp {
 
     /// Pins `pin` once its tracks load (once, however often it's asked).
     fn wait_to_pin(&mut self, key: ListKey, pin: Pin) {
-        if !self.pending_pins.iter().any(|(k, _)| *k == key) {
-            self.pending_pins.push((key, pin));
+        if !self.downloads.pending_pins.iter().any(|(k, _)| *k == key) {
+            self.downloads.pending_pins.push((key, pin));
         }
     }
 
@@ -1280,7 +1161,7 @@ impl ListenerApp {
                     Some(t) => self.queue_tracks(t.to_vec(), source, action),
                     None => {
                         self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action });
-                        self.bridge.open_album(self.client.clone(), id);
+                        self.bridge.open_album(self.session.client.clone(), id);
                     }
                 }
             }
@@ -1294,7 +1175,7 @@ impl ListenerApp {
                 // Playing an artist means all of their albums, shuffled.
                 let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Shuffle } else { action };
                 self.wait_for(Pending { key: key.clone(), source, action });
-                self.bridge.fetch_tracks(self.client.clone(), key, ids);
+                self.bridge.fetch_tracks(self.session.client.clone(), key, ids);
             }
             Action::Playlist(id, action) => {
                 let name = self.data.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
@@ -1303,46 +1184,46 @@ impl ListenerApp {
                     Some(t) => self.queue_tracks(t.to_vec(), source, action),
                     None => {
                         self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action });
-                        self.bridge.open_playlist(self.client.clone(), id);
+                        self.bridge.open_playlist(self.session.client.clone(), id);
                     }
                 }
             }
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
             Action::JumpTo(uid) => {
-                if self.queue.jump_to(uid) {
+                if self.player.queue.jump_to(uid) {
                     self.start_current();
                 }
             }
             Action::Replay(uid) => {
-                if self.queue.replay(uid) {
+                if self.player.queue.replay(uid) {
                     self.start_current();
                 }
             }
             Action::Remove(uid) => {
                 if self.queue_ui.selected == Some(uid) {
                     // Keep a selection for repeated ⌫.
-                    let at = self.queue.position(uid).unwrap_or(0);
-                    self.queue.remove(uid);
-                    self.queue_ui.selected = self.queue.upcoming.get(at).or(self.queue.upcoming.last()).map(|i| i.uid);
+                    let at = self.player.queue.position(uid).unwrap_or(0);
+                    self.player.queue.remove(uid);
+                    self.queue_ui.selected = self.player.queue.upcoming.get(at).or(self.player.queue.upcoming.last()).map(|i| i.uid);
                 } else {
-                    self.queue.remove(uid);
+                    self.player.queue.remove(uid);
                 }
                 self.sync_next();
             }
             Action::Move(uid, to) => {
-                self.queue.move_to(uid, to);
+                self.player.queue.move_to(uid, to);
                 self.sync_next();
             }
             Action::MoveBy(uid, delta) => {
-                self.queue.move_by(uid, delta);
+                self.player.queue.move_by(uid, delta);
                 self.sync_next();
             }
             Action::ClearQueue => {
-                self.queue.clear();
+                self.player.queue.clear();
                 self.sync_next();
             }
             Action::SetEnd(end) => {
-                self.queue.end = end;
+                self.player.queue.end = end;
                 self.sync_next();
             }
             Action::PlayPause => self.play_pause(),
@@ -1350,21 +1231,16 @@ impl ListenerApp {
             Action::Previous => self.previous(),
             Action::Seek(to) => self.seek(to),
             Action::OpenPalette => {
-                if self.palette.is_none() && self.search.is_some() {
+                if self.palette.is_none() && self.search.index.is_some() {
                     self.palette = Some(Palette::default());
                 }
             }
             Action::SetTheme(pref) => {
-                self.theme = pref;
-                theme::set_pref(self.bridge.ctx(), pref);
-                Settings::update(&self.paths, |s| s.theme = pref);
+                theme::set_pref(&self.ctx, pref);
+                self.prefs.edit(|s| s.theme = pref);
             }
             Action::ToggleQueue if self.queue_narrow => self.queue_sheet = !self.queue_sheet,
-            Action::ToggleQueue => {
-                self.show_queue = !self.show_queue;
-                let show = self.show_queue;
-                Settings::update(&self.paths, |s| s.show_queue = show);
-            }
+            Action::ToggleQueue => self.prefs.edit(|s| s.show_queue = !s.show_queue),
             Action::SignOut => self.sign_out(),
             Action::SetMode(mode) => self.set_mode(Some(mode)),
             Action::ToggleMini => self.set_mode(None),
@@ -1393,8 +1269,7 @@ impl ListenerApp {
             Action::SetLyricsDrawer(open) => {
                 let plan = self.windows.set_lyrics(open, self.seen);
                 self.follow_plan(plan);
-                let w = self.windows.clone();
-                Settings::update(&self.paths, |s| s.window = w);
+                self.save_windows();
             }
             Action::OpenSettings(section) => {
                 self.settings_section = section;
@@ -1402,57 +1277,48 @@ impl ListenerApp {
                 self.overlay = Some(Overlay::Settings);
             }
             Action::SyncNow => {
-                if let Some(client) = self.client.clone()
-                    && self.online
-                    && !self.album_syncing
-                    && !self.track_syncing
+                if let Some(client) = self.session.client.clone()
+                    && self.session.online
+                    && !self.sync.albums
+                    && !self.sync.tracks
                 {
-                    self.sync_label = "syncing…".into();
-                    self.album_syncing = true;
+                    self.sync.label = "syncing…".into();
+                    self.sync.albums = true;
                     self.bridge.sync_albums(client);
                 }
             }
-            Action::SetPlaybackPrefs(prefs) => self.output.set_prefs(prefs, &self.engine, &self.paths),
+            Action::SetPlaybackPrefs(prefs) => self.output.set_prefs(prefs, &self.engine),
             Action::SetDeviceMode(uid, mode) => {
-                if self.output.set_device_mode(&uid, mode, &self.engine, &self.paths) {
+                if self.output.set_device_mode(&uid, mode, &self.engine) {
                     self.bit_perfect = mode == PlaybackMode::BitPerfect;
                 }
             }
             Action::SetScrobble(on) => {
-                self.scrobble = on;
                 self.now_playing.set_scrobbling(on);
-                Settings::update(&self.paths, |s| s.scrobble = on);
+                self.prefs.edit(|s| s.scrobble = on);
             }
-            Action::SetDiagnostics(on) => {
-                self.diagnostics.shown = on;
-                Settings::update(&self.paths, |s| s.diagnostics_bar = on);
-            }
+            Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
-            Action::Unpin(pin) => {
-                self.offline.unpin(&pin);
-                self.offline_snap = self.offline.snapshot();
-            }
-            Action::PauseDownloads(paused) => self.offline.set_paused(paused),
-            Action::RetryDownloads => self.offline.retry_failed(),
+            a @ (Action::Unpin(_) | Action::PauseDownloads(_) | Action::RetryDownloads) => self.downloads.apply(a),
             Action::SetOfflineLimit(bytes) => {
-                self.offline.set_limit(bytes);
-                Settings::update(&self.paths, |s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
+                self.downloads.store.set_limit(bytes);
+                self.prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
             }
             Action::RevealOffline => {
-                let dir = self.offline.dir().to_owned();
+                let dir = self.downloads.store.dir().to_owned();
                 if let Err(e) = std::process::Command::new("open").arg(&dir).spawn() {
                     self.show_error(format!("open {}: {e}", dir.display()));
                 }
             }
             Action::MoveOffline => {
-                let current = self.offline.dir().to_owned();
+                let current = self.downloads.store.dir().to_owned();
                 let start = current.parent().unwrap_or(&current).to_owned();
                 if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
                     // Always a folder of our own inside the chosen one: the store
                     // tidies files it doesn't know, which must never be the user's.
                     let dir = if chosen.file_name().is_some_and(|n| n == "Listener Offline") { chosen } else { chosen.join("Listener Offline") };
                     if dir != current {
-                        Settings::update(&self.paths, |s| {
+                        self.prefs.edit(|s| {
                             s.offline_dir = Some(dir.clone());
                             s.offline_move_from = Some(current.clone());
                         });
@@ -1461,25 +1327,21 @@ impl ListenerApp {
                 }
             }
             Action::Analyze(tracks) => {
-                self.analyzer.set_paused(false);
+                self.analysis.runner.set_paused(false);
                 self.enqueue_analysis(&tracks);
             }
             Action::AnalyzeLibrary => {
-                self.analysis_library = true;
-                Settings::update(&self.paths, |s| s.analysis_resume = true);
-                self.analyzer.set_paused(false);
+                self.prefs.edit(|s| s.analysis_resume = true);
+                self.analysis.runner.set_paused(false);
                 self.resume_library_analysis();
             }
-            Action::PauseAnalysis(paused) => self.analyzer.set_paused(paused),
+            Action::PauseAnalysis(paused) => self.analysis.runner.set_paused(paused),
             Action::StopAnalysis => {
-                self.analyzer.clear();
-                self.analyzer.set_paused(false);
+                self.analysis.runner.clear();
+                self.analysis.runner.set_paused(false);
                 self.finish_library_analysis();
             }
-            Action::SetAnalyzePlaying(on) => {
-                self.analyze_playing = on;
-                Settings::update(&self.paths, |s| s.analyze_playing = on);
-            }
+            Action::SetAnalyzePlaying(on) => self.prefs.edit(|s| s.analyze_playing = on),
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),
@@ -1488,14 +1350,9 @@ impl ListenerApp {
         }
     }
 
-    /// The queue entry the engine just started: the current one, or the next (gapless).
-    fn playing_track(&self, id: &str) -> Option<Track> {
-        [self.queue.current.as_ref(), self.queue.peek_next()].into_iter().flatten().find(|i| i.track.id == id).map(|i| i.track.clone())
-    }
-
     /// A track's analysis, if there is one for the file as it is now.
     pub fn analysis_of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
-        self.analyses.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
+        self.analysis.of(t)
     }
 
     /// Queues the tracks that have no current analysis; returns how many.
@@ -1505,8 +1362,8 @@ impl ListenerApp {
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
             .filter_map(|t| {
-                let local = self.offline.local_path(&t.id);
-                let url = match &self.client {
+                let local = self.downloads.store.local_path(&t.id);
+                let url = match &self.session.client {
                     Some(c) => c.stream_url(&t.id).to_string(),
                     None if local.is_some() => String::new(),
                     None => return None,
@@ -1514,33 +1371,78 @@ impl ListenerApp {
                 Some(analyze::job_for(t, url, local))
             })
             .collect();
-        self.analyzer.enqueue(jobs)
+        self.analysis.runner.enqueue(jobs)
     }
 
     /// Queues the whole library, once the tracks, the stored results and the
     /// server are all there (so finished tracks aren't redone).
     fn resume_library_analysis(&mut self) {
-        if self.analysis_library && self.analyses_loaded && self.client.is_some() && !self.data.tracks.all.is_empty() {
+        if self.analysis_library() && self.analysis.loaded && self.session.client.is_some() && !self.data.tracks.all.is_empty() {
             let all = self.data.tracks.all.clone();
             self.enqueue_analysis(&all);
-            if !self.analyzer.progress().active() {
+            if !self.analysis.runner.progress().active() {
                 self.finish_library_analysis();
             }
         }
     }
 
     fn finish_library_analysis(&mut self) {
-        if std::mem::take(&mut self.analysis_library) {
-            Settings::update(&self.paths, |s| s.analysis_resume = false);
+        if self.analysis_library() {
+            self.prefs.edit(|s| s.analysis_resume = false);
         }
+    }
+
+    /// A library-wide analysis should be running (resumed after a restart).
+    fn analysis_library(&self) -> bool {
+        self.prefs.get(|s| s.analysis_resume)
+    }
+
+    /// Analyse each track as it plays (it's in the playback cache by then).
+    pub fn analyze_playing(&self) -> bool {
+        self.prefs.get(|s| s.analyze_playing)
+    }
+
+    /// Whether the queue column is open (in windows wide enough to dock it).
+    pub fn show_queue(&self) -> bool {
+        self.prefs.get(|s| s.show_queue)
+    }
+
+    pub fn theme(&self) -> ThemePref {
+        self.prefs.get(|s| s.theme)
+    }
+
+    pub fn scrobble(&self) -> bool {
+        self.prefs.get(|s| s.scrobble)
+    }
+
+    pub fn diagnostics_shown(&self) -> bool {
+        self.prefs.get(|s| s.diagnostics_bar)
+    }
+
+    /// Software volume, 0..=1.
+    pub fn volume(&self) -> f32 {
+        self.prefs.get(|s| s.volume)
+    }
+
+    /// Sets the volume now; the preference is saved once the change settles.
+    pub fn set_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.engine.send(Command::SetVolume(volume));
+        self.prefs.edit(|s| s.volume = volume);
+    }
+
+    /// Saves the window modes and where each was.
+    fn save_windows(&self) {
+        let w = self.windows.clone();
+        self.prefs.edit(|s| s.window = w);
     }
 
     /// Tracks in the library without a current analysis, and their total length.
     /// Counted once per change to either, not every frame Settings is open.
     pub fn unanalysed(&mut self) -> (usize, f64) {
-        let key = (self.analyses_version, self.data.tracks_version);
-        let (analyses, tracks) = (&self.analyses, &self.data.tracks.all);
-        *self.unanalysed.get(key, || {
+        let key = (self.analysis.version, self.data.tracks_version);
+        let (analyses, tracks) = (&self.analysis.records, &self.data.tracks.all);
+        *self.analysis.unanalysed.get(key, || {
             tracks
                 .iter()
                 .filter(|t| !analyses.get(&t.id).is_some_and(|r| r.stamp == crate::analyze::stamp_of(t)))
@@ -1559,7 +1461,7 @@ impl ListenerApp {
 
     /// Resizes the window to `plan` (if any) and saves the window state.
     fn follow_plan(&mut self, plan: Option<crate::window::Plan>) {
-        let ctx = self.bridge.ctx().clone();
+        let ctx = self.ctx.clone();
         if let Some(plan) = plan {
             plan.apply(&ctx);
             // Until the window reports its new size, don't mistake the old one for it.
@@ -1567,8 +1469,7 @@ impl ListenerApp {
             self.settling = Some((plan.size, 30));
             self.switch_started = Some(std::time::Instant::now());
             tracing::debug!(target: "listener::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
-            let w = self.windows.clone();
-            Settings::update(&self.paths, |s| s.window = w);
+            self.save_windows();
         }
     }
 
@@ -1582,21 +1483,21 @@ impl ListenerApp {
         self.track_sel = None;
         self.focus = Focus::Main;
         match self.nav.current().clone() {
-            Route::Album(id) => self.bridge.open_album(self.client.clone(), id),
+            Route::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
             Route::Artist { name, .. } => self.bridge.find_credited(name),
             Route::Playlist { id, .. } => {
                 // Offline, a kept playlist is rebuilt from its pin and the stored tracks.
-                if !self.online
+                if !self.session.online
                     && !self.data.playlist_tracks.contains_key(&id)
-                    && let Some((_, ids)) = self.offline.pin_tracks(&Pin::Playlist(id.clone()))
+                    && let Some((_, ids)) = self.downloads.store.pin_tracks(&Pin::Playlist(id.clone()))
                 {
                     let by_id: HashMap<&str, &Track> = self.data.tracks.all.iter().map(|t| (t.id.as_str(), t)).collect();
                     let tracks: Vec<Track> = ids.iter().filter_map(|i| by_id.get(i.as_str()).map(|t| (*t).clone())).collect();
                     self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 }
-                self.bridge.open_playlist(self.client.clone(), id)
+                self.bridge.open_playlist(self.session.client.clone(), id)
             }
-            Route::Favorites => self.bridge.fetch_starred(self.client.clone()),
+            Route::Favorites => self.bridge.fetch_starred(self.session.client.clone()),
             _ => {}
         }
     }
@@ -1604,10 +1505,7 @@ impl ListenerApp {
     /// Stops playback, forgets the saved password and shows the login screen
     /// with the server and username filled in.
     fn sign_out(&mut self) {
-        self.engine.send(Command::Stop);
-        self.queue.clear();
-        self.queue.current = None;
-        self.sent_next = None;
+        self.with_player(|p, cx| p.reset(cx));
         self.palette = None;
         self.overlay = None;
         self.favorites = Favorites::default();
@@ -1616,17 +1514,15 @@ impl ListenerApp {
         // deliver is ignored. Downloads lose their server (and its credentials).
         self.bridge.end_session();
         self.set_offline();
-        self.unreachable = false;
-        self.server_label.clear();
-        let saved = Settings::load(&self.paths);
-        if let Some(s) = saved.clone() {
+        self.session.unreachable = false;
+        self.session.server_label.clear();
+        let saved = self.prefs.snapshot();
+        if self.prefs.has_login() {
+            let s = saved.clone();
             std::thread::spawn(move || s.forget_password());
         }
-        Settings::update(&self.paths, |s| s.signed_out = true);
-        self.login = Some(match saved {
-            Some(s) => LoginForm { server: s.server, username: s.username, ..Default::default() },
-            None => LoginForm::default(),
-        });
+        self.prefs.edit(|s| s.signed_out = true);
+        self.login = Some(LoginForm { server: saved.server, username: saved.username, ..Default::default() });
     }
 
     fn login_ui(&mut self, ui: &mut egui::Ui) {
@@ -1705,9 +1601,9 @@ impl ListenerApp {
                 server: form.server.trim().to_owned(),
                 username: form.username.trim().to_owned(),
                 signed_out: false,
-                ..Settings::load(&self.paths).unwrap_or_default()
+                ..self.prefs.snapshot()
             };
-            self.bridge.connect(settings, Some(std::mem::take(&mut form.password)), self.paths.clone());
+            self.bridge.connect(settings, Some(std::mem::take(&mut form.password)));
         }
     }
 
@@ -1827,7 +1723,7 @@ impl ListenerApp {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.toolbar(ui));
-        if self.diagnostics.shown {
+        if self.diagnostics_shown() {
             egui::Panel::bottom("diagnostics")
                 .exact_size(diagnostics::BAR_H)
                 .resizable(false)
@@ -1856,7 +1752,7 @@ impl ListenerApp {
                     .rect,
             ),
         };
-        let right_panel = (self.show_queue && !self.queue_narrow).then(|| {
+        let right_panel = (self.show_queue() && !self.queue_narrow).then(|| {
             egui::Panel::right("queue")
                 .exact_size(self.columns.right)
                 .resizable(false)
@@ -1876,7 +1772,7 @@ impl ListenerApp {
         let mut save = false;
         if let Some(r) = left_panel {
             let d = layout::edge_handle(ui, egui::Id::unique("sidebar-edge"), r.right(), r.top(), r.bottom());
-            let limit = self.columns.left_limit(width, plan.queue_docked && self.show_queue);
+            let limit = self.columns.left_limit(width, plan.queue_docked && self.show_queue());
             if d.reset {
                 self.columns.left = layout::LEFT_DEFAULT.min(limit);
                 save = true;
@@ -1898,7 +1794,7 @@ impl ListenerApp {
         }
         if save {
             let c = self.columns;
-            Settings::update(&self.paths, |s| {
+            self.prefs.edit(|s| {
                 s.sidebar_width = (c.left != layout::LEFT_DEFAULT).then_some(c.left);
                 s.queue_width = (c.right != layout::RIGHT_DEFAULT).then_some(c.right);
             });
@@ -1937,36 +1833,32 @@ impl eframe::App for ListenerApp {
             self.handle(msg);
         }
         self.after_messages();
-        let snap = self.offline.snapshot();
-        if snap.version != self.offline_snap.version {
+        let snap = self.downloads.store.snapshot();
+        if snap.version != self.downloads.snap.version {
             // A download finished: what's next may now play from disk, or play at all.
             let done_changed = snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count()
-                != self.offline_snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count();
-            self.offline_snap = snap;
-            if done_changed && !self.online {
+                != self.downloads.snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count();
+            self.downloads.snap = snap;
+            if done_changed && !self.session.online {
                 self.sync_next();
             }
         }
-        if self.analysis_library && self.analyses_loaded && !self.data.tracks.all.is_empty() && !self.analyzer.progress().active() {
+        if self.analysis_library() && self.analysis.loaded && !self.data.tracks.all.is_empty() && !self.analysis.runner.progress().active() {
             self.finish_library_analysis();
         }
+        let queue = if self.queue_narrow { self.queue_sheet } else { self.show_queue() };
+        let (theme, diagnostics) = self.prefs.get(|s| (s.theme, s.diagnostics_bar));
         if let Some(menu) = self.menu.as_mut() {
-            let queue = if self.queue_narrow { self.queue_sheet } else { self.show_queue };
-            let theme = match self.theme {
-                ThemePref::System => 0,
-                ThemePref::Light => 1,
-                ThemePref::Dark => 2,
-            };
             menu.sync(queue, self.bit_perfect, theme);
-            menu.set_diagnostics(self.diagnostics.shown);
+            menu.set_diagnostics(diagnostics);
         }
         // The diagnostics bar keeps the server round trip fresh, but only while
         // something plays (idle stays idle).
-        if self.diagnostics.shown
-            && self.online
+        if self.diagnostics_shown()
+            && self.session.online
             && self.engine.status.state() == PlayState::Playing
             && self.diagnostics.latency_stale()
-            && let Some(client) = self.client.clone()
+            && let Some(client) = self.session.client.clone()
         {
             self.diagnostics.latency_asked();
             self.bridge.measure_latency(client);
@@ -1976,7 +1868,7 @@ impl eframe::App for ListenerApp {
         match self.engine.status.state() {
             PlayState::Playing => ctx.request_repaint_after(Duration::from_millis(250)),
             PlayState::Buffering | PlayState::Loading => ctx.request_repaint_after(Duration::from_millis(33)),
-            _ if self.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
+            _ if self.player.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
             _ => {}
         }
         crate::chrome::sync(ctx, crate::chrome::Bar { height: self.title_bar_h() });
@@ -2030,8 +1922,8 @@ impl eframe::App for ListenerApp {
         if let Some(g) = self.seen {
             self.windows.remember(g);
         }
-        let w = self.windows.clone();
-        Settings::update(&self.paths, |s| s.window = w);
+        self.save_windows();
+        self.prefs.flush();
     }
 }
 
@@ -2043,13 +1935,54 @@ impl Drop for ListenerApp {
 }
 
 /// Fisher–Yates with a small xorshift; good enough for a play order.
-fn shuffle<T>(v: &mut [T]) {
-    let mut s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.as_nanos() as u64) | 1;
-    for i in (1..v.len()).rev() {
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        v.swap(i, (s % (i as u64 + 1)) as usize);
+/// Where queue items play from: a downloaded file first (instant, no
+/// network), else the server while it's reachable (original or transcoded).
+struct AppSources<'a> {
+    offline: &'a OfflineStore,
+    /// Only while the server answers.
+    client: Option<&'a Client>,
+    output: &'a Outputs,
+    data: &'a Data,
+    now_playing: &'a now_playing::Session,
+}
+
+impl player::Sources for AppSources<'_> {
+    /// With its ReplayGain, and whether it plays as part of its album (from
+    /// its queue neighbours `prev` and `next`).
+    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
+        let replay_gain = playback::replay_gain(track);
+        let album_context = playback::in_album(prev, track, next);
+        if let Some(path) = self.offline.local_path(&track.id) {
+            return Some(TrackSource {
+                id: track.id.clone(),
+                url: format!("file://{}", path.display()),
+                suffix: track.suffix.clone(),
+                replay_gain,
+                album_context,
+                transcode: None,
+                token,
+            });
+        }
+        let client = self.client?;
+        let transcode = self.output.transcode();
+        let (url, suffix) = match &transcode {
+            None => (client.stream_url(&track.id), track.suffix.clone()),
+            Some(t) => (client.transcoded_stream_url(&track.id, &t.format, t.kbps), Some(t.format.clone())),
+        };
+        Some(TrackSource { id: track.id.clone(), url: url.to_string(), suffix, replay_gain, album_context, transcode, token })
+    }
+
+    /// Describes `track` for Now Playing before the engine reaches it.
+    fn announce(&self, track: &Track) {
+        let album = self.data.album(&track.album_id);
+        self.now_playing.known(now_playing::Info {
+            track_id: track.id.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: album.map(|a| a.name.clone()),
+            duration_secs: track.duration_secs.map(f64::from),
+            cover: self.data.cover_for(track).map(str::to_owned),
+        });
     }
 }
 
@@ -2150,9 +2083,9 @@ mod tests {
         app.data.playlists = vec![subsonic::Playlist { id: "pl-1".into(), name: "Late night".into(), song_count: 3, duration: 900, cover_art: None, owner: None }];
         app.data.playlist_tracks.insert("pl-1".into(), Arc::new(tracks[..3].to_vec()));
         app.data.credited.insert("Scott LaFaro".into(), vec!["al-1".into(), "al-0".into()]);
-        app.queue.play_now(tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
-        app.queue.play_next(tracks[..2].to_vec());
-        app.queue.add(tracks[5..15].to_vec());
+        app.player.queue.play_now(tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
+        app.player.queue.play_next(tracks[..2].to_vec());
+        app.player.queue.add(tracks[5..15].to_vec());
         app
     }
 
@@ -2172,11 +2105,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        app.online = false;
-        app.queue.end = crate::queue::EndAction::RepeatQueue;
-        let pass = app.queue.pass_len();
+        app.session.online = false;
+        app.player.queue.end = crate::queue::EndAction::RepeatQueue;
+        let pass = app.player.queue.pass_len();
         app.start_current();
-        assert!(app.queue.history.len() <= 2 * pass, "history grew to {}", app.queue.history.len());
+        assert!(app.player.queue.history.len() <= 2 * pass, "history grew to {}", app.player.queue.history.len());
         assert_eq!(app.toasts.texts().last().copied(), Some("Nothing in the queue is downloaded"));
     }
 
@@ -2208,9 +2141,9 @@ mod tests {
             }
         }
         app.queue_ui.tab = QueueTab::History;
-        app.queue.advance();
+        app.player.queue.advance();
         frame(&ctx, &mut app, Vec::new());
-        app.show_queue = false;
+        app.prefs.edit(|s| s.show_queue = false);
         frame(&ctx, &mut app, Vec::new());
         app.nav.go(Route::Album("al-0".into()));
         frame(&ctx, &mut app, Vec::new());
@@ -2230,20 +2163,20 @@ mod tests {
         frame(&ctx, &mut app, vec![egui::Event::Text("album 12".into())]);
         frame(&ctx, &mut app, Vec::new());
         assert_eq!(app.palette.as_ref().map(|p| p.query.as_str()), Some("album 12"));
-        let before = app.queue.upcoming.len();
+        let before = app.player.queue.upcoming.len();
         let alt_enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
         frame(&ctx, &mut app, vec![alt_enter]);
         assert!(app.palette.is_none());
         // Album 12's tracks aren't loaded, so the action waits for them...
-        assert_eq!(app.queue.upcoming.len(), before);
+        assert_eq!(app.player.queue.upcoming.len(), before);
         assert_eq!(app.pending.len(), 1);
         // ...and runs when they arrive.
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
-        assert_eq!(app.queue.upcoming.len(), before + 3);
+        assert_eq!(app.player.queue.upcoming.len(), before + 3);
         assert!(app.pending.is_empty());
         // Played next: right after what the user already chose to play next.
-        assert_eq!(app.queue.upcoming[2].track.id, "x-1");
+        assert_eq!(app.player.queue.upcoming[2].track.id, "x-1");
     }
 
     /// Handles what the bridge sends until `done` says so (or 3 s pass).
@@ -2281,17 +2214,17 @@ mod tests {
         };
         app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz")]));
         app.after_messages();
-        assert!(!app.search_stale, "the rebuild was handed off");
-        let first = app.search_generation;
+        assert!(!app.search.stale, "the rebuild was handed off");
+        let first = app.search.generation;
         // Before the first build lands, the library changes again.
         app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz"), album("a2", "Explorations")]));
         app.after_messages();
-        assert_eq!(app.search_generation, first + 1);
-        until(&mut app, |a| a.search.as_ref().is_some_and(|s| s.albums.len() == 2));
+        assert_eq!(app.search.generation, first + 1);
+        until(&mut app, |a| a.search.index.as_ref().is_some_and(|s| s.albums.len() == 2));
         // The older build, if it lands now, doesn't replace the newer index.
         let stale = SearchIndex::new(&[album("x", "Old")], &[], &[]);
         app.handle(Msg::SearchIndex { generation: first, index: Box::new(stale) });
-        assert_eq!(app.search.as_ref().map(|s| s.albums.len()), Some(2));
+        assert_eq!(app.search.index.as_ref().map(|s| s.albums.len()), Some(2));
     }
 
     #[test]
@@ -2299,22 +2232,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        assert!(app.client.is_none(), "offline: nothing can be fetched");
-        let before = app.queue.upcoming.len();
+        assert!(app.session.client.is_none(), "offline: nothing can be fetched");
+        let before = app.player.queue.upcoming.len();
         // Album 12 isn't stored either: the play and the pin both wait, once each.
         app.apply(Action::Album("al-12".into(), QueueAction::Add));
         app.apply(Action::Album("al-12".into(), QueueAction::PlayNext));
         app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
         app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
         assert_eq!(app.pending.len(), 1, "the newer action replaced the older");
-        assert_eq!(app.pending_pins.len(), 1);
+        assert_eq!(app.downloads.pending_pins.len(), 1);
         // The load fails: both give up.
-        until(&mut app, |a| a.pending.is_empty() && a.pending_pins.is_empty());
+        until(&mut app, |a| a.pending.is_empty() && a.downloads.pending_pins.is_empty());
         // The tracks turn up later anyway (browsing, a sync): nothing plays or pins.
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
-        assert_eq!(app.queue.upcoming.len(), before, "a stale action played");
-        assert!(!app.offline.is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
+        assert_eq!(app.player.queue.upcoming.len(), before, "a stale action played");
+        assert!(!app.downloads.store.is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
     }
 
     #[test]
@@ -2322,17 +2255,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        app.online = true;
-        app.album_syncing = true;
+        app.session.online = true;
+        app.sync.albums = true;
         app.handle(Msg::AlbumSyncDone(Err("sync: timed out".into())));
-        assert!(!app.album_syncing && !app.track_syncing);
+        assert!(!app.sync.albums && !app.sync.tracks);
         assert!(app.toasts.texts().contains(&"sync: timed out"));
         // While an album sync runs, Sync now doesn't start a second one.
-        app.album_syncing = true;
-        app.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
-        app.sync_label = "syncing… 500".into();
+        app.sync.albums = true;
+        app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+        app.sync.label = "syncing… 500".into();
         app.apply(Action::SyncNow);
-        assert_eq!(app.sync_label, "syncing… 500", "a second album sync started");
+        assert_eq!(app.sync.label, "syncing… 500", "a second album sync started");
     }
 
     #[test]
@@ -2403,15 +2336,15 @@ mod tests {
         let file = dir.join(format!("cached-{id}.flac"));
         std::fs::write(&file, b"fLaC").unwrap();
         let want = id.to_owned();
-        app.offline.set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
+        app.downloads.store.set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
         let t = app.data.tracks.all.iter().find(|t| t.id == id).unwrap().clone();
         app.apply(Action::KeepOffline(Keep::Tracks(vec![t]), true));
         let start = std::time::Instant::now();
-        while !app.offline.snapshot().is_done(id) {
+        while !app.downloads.store.snapshot().is_done(id) {
             assert!(start.elapsed() < Duration::from_secs(5), "download of {id}");
             std::thread::sleep(Duration::from_millis(5));
         }
-        app.offline_snap = app.offline.snapshot();
+        app.downloads.snap = app.downloads.store.snapshot();
     }
 
     #[test]
@@ -2420,27 +2353,27 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
         download(&mut app, dir.path(), "t-2");
-        assert!(!app.online);
+        assert!(!app.session.online);
         let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..4].to_vec();
         assert!(app.source(0, None, &tracks[0], None).is_none(), "offline and not downloaded: nothing to play");
         let local = app.source(0, None, &tracks[1], None).unwrap();
         assert!(local.url.starts_with("file://") && local.url.ends_with("t-2.flac"), "{}", local.url);
 
         // Playing from the top skips to the downloaded song and says so.
-        app.queue = Queue::default();
+        app.player.queue = crate::queue::Queue::default();
         app.queue_tracks(tracks.clone(), Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
-        assert_eq!(app.queue.current.as_ref().unwrap().track.id, "t-2");
+        assert_eq!(app.player.queue.current.as_ref().unwrap().track.id, "t-2");
         assert_eq!(app.toasts.texts().last().copied(), Some("Skipped 1 song that isn't downloaded"));
         // Nothing after it can play, so the engine isn't told about a next track.
-        assert_eq!(app.sent_next, None);
+        assert_eq!(app.player.sent_next(), None);
         // When it ends, the rest is skipped and playback stops cleanly.
         app.handle_engine(audio::Event::Ended { track_id: "t-2".into(), token: 0 });
-        assert!(app.queue.current.is_none());
+        assert!(app.player.queue.current.is_none());
 
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
         app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into() });
-        assert!(app.online);
+        assert!(app.session.online);
         assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
         assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
     }
@@ -2450,7 +2383,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        app.online = true;
+        app.session.online = true;
         // Two failures handled before the next frame: both get a toast.
         app.handle(Msg::Error("playlists: timed out".into()));
         app.handle(Msg::Error("favorites: timed out".into()));
@@ -2467,24 +2400,24 @@ mod tests {
         // Signed in, then the server went away: a reconnect loop is running.
         let before = app.bridge.session();
         app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
-        assert!(app.online && app.client.is_some());
+        assert!(app.session.online && app.session.client.is_some());
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
-        assert!(app.unreachable);
+        assert!(app.session.unreachable);
 
         app.sign_out();
         assert!(app.login.is_some());
-        assert!(app.client.is_none() && !app.online && !app.unreachable);
+        assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
         assert_ne!(app.bridge.session(), before, "sign-out ends the session");
 
         // The old loop reaches the server after all: stale, ignored.
         app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
         assert!(app.login.is_some(), "still on the login screen");
-        assert!(app.client.is_none() && !app.online && !app.unreachable);
+        assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
 
         // A fresh sign-in in the new session works.
         app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into() });
-        assert!(app.login.is_none() && app.online);
+        assert!(app.login.is_none() && app.session.online);
     }
 
     #[test]
@@ -2494,21 +2427,21 @@ mod tests {
         let mut app = app(&ctx, dir.path());
         // Album 5's tracks aren't loaded: the pin waits for them.
         app.apply(Action::KeepOffline(Keep::Album("al-5".into()), true));
-        assert!(!app.offline.is_pinned(&Pin::Album("al-5".into())));
+        assert!(!app.downloads.store.is_pinned(&Pin::Album("al-5".into())));
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
-        assert!(app.offline.is_pinned(&Pin::Album("al-5".into())));
-        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+        assert!(app.downloads.store.is_pinned(&Pin::Album("al-5".into())));
+        assert_eq!(app.downloads.store.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
         // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
-        app.offline_snap = app.offline.snapshot();
+        app.downloads.snap = app.downloads.store.snapshot();
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
         // (The stored album now lists only y-1; a library-wide refresh sees that.)
         let all = app.data.tracks.all.to_vec();
         app.handle(Msg::AllTracks(Box::new(TrackSet::new(all))));
-        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+        assert_eq!(app.downloads.store.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
         // The album changed on the server: the pin follows.
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
-        assert_eq!(app.offline.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
+        assert_eq!(app.downloads.store.pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
         download(&mut app, dir.path(), "t-3");
 
         for route in [Route::Offline, Route::Album("al-5".into()), Route::Album("al-0".into()), Route::Recent, Route::Songs] {
@@ -2521,8 +2454,8 @@ mod tests {
         app.nav.go(Route::Album("al-5".into()));
         let key = egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT };
         frame(&ctx, &mut app, vec![key]);
-        assert!(!app.offline.is_pinned(&Pin::Album("al-5".into())));
-        assert!(app.offline.is_pinned(&Pin::Track("t-3".into())));
+        assert!(!app.downloads.store.is_pinned(&Pin::Album("al-5".into())));
+        assert!(app.downloads.store.is_pinned(&Pin::Track("t-3".into())));
     }
 
     #[test]
@@ -2530,7 +2463,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
-        let next = app.queue.peek_next().unwrap().clone();
+        let next = app.player.queue.peek_next().unwrap().clone();
         let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
         let started = |i: &crate::queue::Item| audio::Event::TrackStarted {
             track_id: i.track.id.clone(),
@@ -2540,11 +2473,11 @@ mod tests {
             restart: false,
         };
         app.handle_engine(started(&next));
-        assert_eq!(app.queue.current.as_ref().unwrap().uid, next.uid);
+        assert_eq!(app.player.queue.current.as_ref().unwrap().uid, next.uid);
         // A repeat of the same event (or the current track) changes nothing.
-        let upcoming = app.queue.upcoming.len();
+        let upcoming = app.player.queue.upcoming.len();
         app.handle_engine(started(&next));
-        assert_eq!(app.queue.upcoming.len(), upcoming);
+        assert_eq!(app.player.queue.upcoming.len(), upcoming);
     }
 
     #[test]
@@ -2561,23 +2494,23 @@ mod tests {
             restart: false,
         };
         // "Play next" on the song that's playing: the same track, a new queue item.
-        let playing = app.queue.current.clone().unwrap();
-        app.queue.clear();
-        app.queue.play_next(vec![playing.track.clone()]);
-        let copy = app.queue.peek_next().unwrap().clone();
+        let playing = app.player.queue.current.clone().unwrap();
+        app.player.queue.clear();
+        app.player.queue.play_next(vec![playing.track.clone()]);
+        let copy = app.player.queue.peek_next().unwrap().clone();
         assert_eq!(copy.track.id, playing.track.id);
         assert_ne!(copy.uid, playing.uid);
         app.handle_engine(started(&copy));
-        assert_eq!(app.queue.current.as_ref().unwrap().uid, copy.uid, "the queue moved to the copy");
+        assert_eq!(app.player.queue.current.as_ref().unwrap().uid, copy.uid, "the queue moved to the copy");
 
         // Repeat queue over a single item: each gapless start is the next pass.
-        app.queue = Queue::default();
-        app.queue.end = crate::queue::EndAction::RepeatQueue;
-        app.queue.play_now(vec![playing.track.clone()], 0, Source::Added);
-        let first = app.queue.current.clone().unwrap();
+        app.player.queue = crate::queue::Queue::default();
+        app.player.queue.end = crate::queue::EndAction::RepeatQueue;
+        app.player.queue.play_now(vec![playing.track.clone()], 0, Source::Added);
+        let first = app.player.queue.current.clone().unwrap();
         app.handle_engine(started(&first));
-        let second = app.queue.current.clone().unwrap();
+        let second = app.player.queue.current.clone().unwrap();
         assert_ne!(second.uid, first.uid, "a new pass began");
-        assert_eq!(app.queue.history.len(), 1);
+        assert_eq!(app.player.queue.history.len(), 1);
     }
 }

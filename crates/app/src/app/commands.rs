@@ -7,9 +7,8 @@ use crate::bridge::PlaylistEdit;
 use crate::favorites::StarKind;
 use crate::keys::Cmd;
 use crate::nav::Route;
-use crate::theme::ThemePref;
 use crate::window::WindowMode;
-use audio::{Command, PlaybackMode};
+use audio::PlaybackMode;
 use library::Track;
 
 /// A change to a playlist, from a view.
@@ -50,24 +49,23 @@ impl ListenerApp {
                 // Bit-perfect leaves volume to the DAC.
                 if !self.bit_perfect {
                     let step = if cmd == Cmd::VolumeUp { VOLUME_STEP } else { -VOLUME_STEP };
-                    self.volume = (self.volume + step).clamp(0.0, 1.0);
-                    self.engine.send(Command::SetVolume(self.volume));
+                    self.set_volume(self.volume() + step);
                 }
             }
             Cmd::SeekForward | Cmd::SeekBack => {
-                if self.queue.current.is_some() {
+                if self.player.queue.current.is_some() {
                     let by = if cmd == Cmd::SeekForward { SKIP_SECS } else { -SKIP_SECS };
                     let end = self.duration_secs().unwrap_or(f64::MAX);
                     self.actions.push(Action::Seek((self.position_secs() + by).clamp(0.0, end)));
                 }
             }
             Cmd::Love => {
-                if let Some(t) = self.queue.current.as_ref().map(|c| c.track.clone()) {
+                if let Some(t) = self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: t.id.clone(), track: Some(Box::new(t)), name: None });
                 }
             }
             Cmd::Reveal => {
-                if let Some(t) = self.queue.current.as_ref().map(|c| c.track.clone()) {
+                if let Some(t) = self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     self.reveal = Some(t.id.clone());
                     self.actions.push(Action::Go(Route::Album(t.album_id)));
                 }
@@ -103,26 +101,22 @@ impl ListenerApp {
             Cmd::ToggleBitPerfect => {
                 self.bit_perfect = !self.bit_perfect;
                 let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                self.engine.send(Command::SetMode(mode));
-                self.output.remember_mode(mode, &self.engine, &self.paths);
+                self.output.set_mode_in_use(mode, &self.engine);
             }
-            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics.shown)),
-            Cmd::Appearance(i) => {
-                let pref = [ThemePref::System, ThemePref::Light, ThemePref::Dark][usize::from(i.min(2))];
-                self.actions.push(Action::SetTheme(pref));
-            }
+            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics_shown())),
+            Cmd::Appearance(pref) => self.actions.push(Action::SetTheme(pref)),
         }
     }
 
     /// Flips a heart now and tells the server; a refusal puts it back.
     pub(super) fn toggle_star(&mut self, kind: StarKind, id: String, track: Option<Track>, name: Option<String>) {
         let (on, seq) = self.favorites.toggle(kind, &id, track.as_ref(), name.as_deref());
-        self.bridge.set_starred(self.client.clone(), kind, id, on, seq);
+        self.bridge.set_starred(self.session.client.clone(), kind, id, on, seq);
     }
 
     pub(super) fn rate(&mut self, id: String, rating: u8) {
         let (previous, seq) = self.favorites.rate(&id, rating);
-        self.bridge.set_rating(self.client.clone(), id, rating, previous, seq);
+        self.bridge.set_rating(self.session.client.clone(), id, rating, previous, seq);
     }
 
     pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, seq: u64, error: Option<String>) {
@@ -154,7 +148,7 @@ impl ListenerApp {
     /// Applies a playlist change: locally first where the result is certain
     /// (so lists don't jump), then on the server, which sends back the truth.
     pub(super) fn playlist_action(&mut self, a: PlaylistAction) {
-        let client = self.client.clone();
+        let client = self.session.client.clone();
         match a {
             PlaylistAction::Create { name, tracks } => {
                 let name = if name.trim().is_empty() { "Untitled Playlist".to_owned() } else { name.trim().to_owned() };
