@@ -38,7 +38,10 @@ impl ListenerApp {
         };
         self.ensure_song_stats(&track);
         let album = self.data.album(&track.album_id).cloned();
-        egui::ScrollArea::vertical().id_salt(("info", &track.id)).auto_shrink(false).show(ui, |ui| {
+        // Vertical only, and the content held to the column: a long name or
+        // value wraps instead of widening (and then clipping) the sidebar.
+        egui::ScrollArea::vertical().id_salt("info").auto_shrink(false).show(ui, |ui| {
+            ui.set_max_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
             if header {
                 self.info_header(ui, &track, album.as_ref());
@@ -146,7 +149,7 @@ impl ListenerApp {
     }
 
     /// A label and one or more links ("Matthew West, Mark Hall"), wrapping.
-    fn links_row(&mut self, ui: &mut Ui, label: &str, items: Vec<(String, Action)>) {
+    pub(super) fn links_row(&mut self, ui: &mut Ui, label: &str, items: Vec<(String, Action)>) {
         let t = Tokens::of(ui);
         row(ui, label, |ui| {
             // Rows as tall as the text, so links sit level with their label
@@ -304,7 +307,7 @@ fn play_rows(stats: Option<&SongStats>, rating: u8) -> Vec<(&'static str, String
 }
 
 /// A section heading with room above it.
-fn info_section(ui: &mut Ui, title: &str) {
+pub(super) fn info_section(ui: &mut Ui, title: &str) {
     let t = Tokens::of(ui);
     ui.add_space(18.0);
     ui.label(egui::RichText::new(title).font(FontId::new(11.0, semibold())).color(t.muted));
@@ -312,7 +315,7 @@ fn info_section(ui: &mut Ui, title: &str) {
 }
 
 /// A muted label in the label column, then the value laid out by `value`.
-fn row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
+pub(super) fn row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
     let t = Tokens::of(ui);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;

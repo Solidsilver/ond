@@ -449,6 +449,8 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.diagnostics = super::diagnostics::Diagnostics::new(false);
     app.diagnostics.set_latency(Some(Duration::from_millis(14)));
     app.output.handle(&signal());
+    app.columns = super::layout::Columns::default();
+    app.album_details_open = false;
     app.nav = Nav::default();
     app.nav.go(route);
     app.on_arrive();
@@ -568,6 +570,29 @@ In case the rain remembers12Embed";
 fn scraped_lyrics(app: &mut ListenerApp) {
     let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
     app.lyrics.insert(id, crate::lyrics::Fetch::Done(crate::lyrics::from_text(SCRAPED)));
+}
+
+/// The playing song made as long-winded as the one in the user's screenshot:
+/// a composer credit with a comma in it, and every ReplayGain value. Returns
+/// the song as it was, to put back.
+fn long_info(app: &mut ListenerApp) -> Option<Item> {
+    let saved = app.queue.current.clone();
+    if let Some(cur) = app.queue.current.as_mut() {
+        let t = &mut cur.track;
+        t.id = "long-credits".into();
+        t.title = "Leaning on the Everlasting Arms (Live at the Old Dominican Chapel)".into();
+        t.contributors = vec![
+            person("composer", None, "Anthony Johnson Showalter"),
+            person("composer", None, "Elisha A. Hoffman, Anthony Johnson Showalter"),
+            person("performer", Some("mandolin and harmony vocals"), "Brother Joseph-Anthony Kress, O.P."),
+        ];
+        t.track_gain = Some(-6.0);
+        t.album_gain = Some(-7.0);
+        t.track_peak = Some(0.987_654);
+        t.size = Some(19_000_000);
+        t.bit_rate_kbps = Some(899);
+    }
+    saved
 }
 
 /// Play stats for the playing song, as the server would report them.
@@ -721,6 +746,52 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     h.run_steps(2);
     s.shoot(h, "info-nothing");
     app_mut(h).queue.current = saved;
+
+    // Long credits and a long ReplayGain line wrap inside the column, at the
+    // default width and at the narrowest; then a short song in the same app
+    // shows nothing left over from the long one.
+    reset(h, FULL, Route::Album(album_id(0)));
+    let saved = long_info(app_mut(h));
+    info_fixture(app_mut(h));
+    app_mut(h).queue_ui.tab = QueueTab::Info;
+    h.run_steps(3);
+    s.shoot(h, "info-long");
+    app_mut(h).columns.right = super::layout::RIGHT_MIN;
+    h.run_steps(3);
+    s.shoot(h, "info-long-min");
+    app_mut(h).columns.right = super::layout::RIGHT_DEFAULT;
+    app_mut(h).queue.current = saved;
+    info_fixture(app_mut(h));
+    h.run_steps(3);
+    s.shoot(h, "info-after-long");
+
+    // Column edges: the sidebar's under the pointer, then both dragged wide
+    // and narrow.
+    reset(h, FULL, Route::Recent);
+    h.hover_at(pos2(8.0 + super::layout::LEFT_DEFAULT, 400.0));
+    h.run_steps(2);
+    s.shoot(h, "sidebar-edge-hover");
+    reset(h, FULL, Route::Recent);
+    app_mut(h).columns = super::layout::Columns { left: super::layout::LEFT_MAX, right: super::layout::RIGHT_MAX };
+    h.run_steps(3);
+    s.shoot(h, "columns-wide");
+    reset(h, FULL, Route::Recent);
+    app_mut(h).columns = super::layout::Columns { left: super::layout::LEFT_MIN, right: super::layout::RIGHT_MIN };
+    h.run_steps(3);
+    s.shoot(h, "columns-narrow");
+
+    // Album details unfolded: credits and the per-track measurements, and an
+    // album not yet measured.
+    // (A taller window, so the unfolded section is in view.)
+    let tall = vec2(FULL.x, 1300.0);
+    reset(h, tall, Route::Album(album_id(0)));
+    app_mut(h).album_details_open = true;
+    h.run_steps(3);
+    s.shoot(h, "album-details");
+    reset(h, tall, Route::Album(album_id(2)));
+    app_mut(h).album_details_open = true;
+    h.run_steps(3);
+    s.shoot(h, "album-details-unanalysed");
 
     // The Player's queue area has the same Info tab.
     reset(h, vec2(380.0, 880.0), Route::Recent);
@@ -1075,6 +1146,104 @@ fn snapshots() {
         // Drop the app (and its engine/runtime) before the next theme.
         *h.state_mut() = None;
     }
+}
+
+/// A song with long credits and a long ReplayGain line in the Info tab, then a
+/// short one in the same app: at both column widths everything stays inside
+/// the queue column (nothing widened it, nothing scrolled it sideways).
+#[test]
+fn info_stays_inside_its_column_after_a_long_song() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<ListenerApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let check = |h: &mut Harness<'_, Option<ListenerApp>>, what: &str| {
+        let right = app_mut(h).columns.right;
+        let column = egui::Rect::from_x_y_ranges(FULL.x - right..=FULL.x, 0.0..=FULL.y);
+        for label in ["Up Next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
+            for n in h.query_all_by_label_contains(label) {
+                let r = n.rect();
+                if r.center().x < FULL.x - right - 40.0 {
+                    continue; // the same word elsewhere in the window
+                }
+                assert!(column.contains(r.min) && r.max.x <= column.max.x + 0.5, "{what}: “{label}” at {r:?} outside the column {column:?}");
+            }
+        }
+    };
+    for right in [super::layout::RIGHT_DEFAULT, super::layout::RIGHT_MIN] {
+        reset(&mut h, FULL, Route::Album(album_id(0)));
+        app_mut(&mut h).columns.right = right;
+        let saved = long_info(app_mut(&mut h));
+        app_mut(&mut h).queue_ui.tab = QueueTab::Info;
+        h.run_steps(4);
+        check(&mut h, "long song");
+        app_mut(&mut h).queue.current = saved;
+        h.run_steps(4);
+        check(&mut h, "short song after the long one");
+    }
+    *h.state_mut() = None;
+}
+
+/// The column edges answer the pointer: a resize cursor over them, dragging
+/// changes the width (within its range), and the widths are saved.
+#[test]
+fn column_edges_drag_and_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<ListenerApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    // A signed-in user has a settings file; widths are saved into it.
+    Settings::default().save(&app_mut(&mut h).paths).unwrap();
+    // (The harness's own panel has an 8 pt margin around the app.)
+    let edge = pos2(8.0 + super::layout::LEFT_DEFAULT, 400.0);
+    h.hover_at(edge);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::ResizeHorizontal, "resize cursor over the sidebar's edge");
+    h.drag_at(edge);
+    h.run_steps(1);
+    h.hover_at(edge + vec2(60.0, 0.0));
+    h.run_steps(1);
+    h.drop_at(edge + vec2(60.0, 0.0));
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).columns.left, super::layout::LEFT_DEFAULT + 60.0);
+    // The queue's edge, dragged far out, stops at its limit.
+    let q = pos2(FULL.x - 8.0 - super::layout::RIGHT_DEFAULT, 400.0);
+    h.drag_at(q);
+    h.run_steps(1);
+    h.hover_at(q - vec2(600.0, 0.0));
+    h.run_steps(1);
+    h.drop_at(q - vec2(600.0, 0.0));
+    h.run_steps(2);
+    let c = app_mut(&mut h).columns;
+    assert_eq!(c.right, c.right_limit(FULL.x));
+    // Saved when let go, and restored from there.
+    let saved = Settings::load(&app_mut(&mut h).paths).expect("settings written");
+    let restored = super::layout::Columns::restore(saved.sidebar_width, saved.queue_width);
+    assert_eq!(restored, c);
+    *h.state_mut() = None;
 }
 
 #[cfg(test)]

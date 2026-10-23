@@ -16,15 +16,27 @@ pub fn elide(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> A
 /// Text that reads as plain until hovered, then underlines: links where they
 /// earn it, without turning the page blue.
 pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    // Never wider than the room it's in: a long name wraps (in a wrapping row,
+    // across the whole row) instead of widening its column.
+    let cap = if ui.layout().main_wrap { ui.max_rect().width() } else { ui.available_width() };
+    let job = |underline: bool| {
+        let mut job = LayoutJob::single_section(
+            text.to_owned(),
+            egui::TextFormat {
+                font_id: font.clone(),
+                color,
+                underline: if underline { egui::Stroke::new(1.0, color) } else { egui::Stroke::NONE },
+                ..Default::default()
+            },
+        );
+        job.wrap.max_width = cap.max(24.0);
+        job
+    };
+    let galley = ui.painter().layout_job(job(false));
     let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
     if ui.is_rect_visible(rect) {
-        let hovered = resp.hovered();
+        let galley = if resp.hovered() { ui.painter().layout_job(job(true)) } else { galley };
         ui.painter().galley(rect.min, galley, color);
-        if hovered {
-            let y = rect.bottom() - 1.0;
-            ui.painter().line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(1.0, color));
-        }
     }
     let label = text.to_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, &label));
@@ -93,8 +105,22 @@ pub fn secondary(ui: &mut Ui, text: &str) -> Response {
 /// Returns the index clicked, if any.
 pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize> {
     let font = FontId::proportional(12.0);
-    let widths: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), font.clone(), Color32::WHITE).size().x + 22.0).collect();
-    segments(ui, options, &widths, selected)
+    let natural: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), font.clone(), Color32::WHITE).size().x).collect();
+    segments(ui, options, &fit_segments(&natural, ui.available_width()), selected)
+}
+
+/// Segment widths for labels of `natural` width: comfortable padding when it
+/// fits in `room`, tighter padding next, and finally the room shared out (the
+/// labels then elide) — the control never grows past its column.
+pub fn fit_segments(natural: &[f32], room: f32) -> Vec<f32> {
+    let room = (room - 4.0).max(0.0);
+    for pad in [22.0, 14.0, 8.0] {
+        let w: Vec<f32> = natural.iter().map(|n| n + pad).collect();
+        if w.iter().sum::<f32>() <= room {
+            return w;
+        }
+    }
+    vec![room / natural.len().max(1) as f32; natural.len()]
 }
 
 /// [`segmented`] with equal segments filling `width`.
@@ -121,7 +147,8 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
             ui.painter().rect_filled(r, 5.0, t.hover);
         }
         let color = if i == selected { t.text } else { t.muted };
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, *opt, font.clone(), color);
+        let g = elide(ui, opt, font.clone(), color, w - 6.0);
+        ui.painter().galley(r.center() - g.size() / 2.0, g, color);
         let label = (*opt).to_owned();
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, i == selected, &label));
         if resp.clicked() {

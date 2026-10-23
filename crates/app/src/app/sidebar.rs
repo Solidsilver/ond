@@ -7,8 +7,7 @@ use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
-/// Width of the full sidebar and of the icon rail.
-pub const SIDEBAR_W: f32 = 216.0;
+/// Width of the icon rail (the full sidebar's is the user's, see `layout`).
 pub const RAIL_W: f32 = 52.0;
 /// The footer's buttons (and the server status row's height).
 const FOOTER_BUTTON: f32 = 28.0;

@@ -1,7 +1,8 @@
 //! An album: header with links for artist / genre / year / label, then the
-//! track list (composer and actions appear on hover). Credits, gathered from
-//! the tracks' OpenSubsonic contributors, show in the sidebar's Info tab for
-//! the playing song. Playlists reuse the track list.
+//! track list (composer and actions appear on hover), then "Album details":
+//! credits gathered from the tracks' OpenSubsonic contributors and the
+//! per-track measurements, folded away until asked for. Playlists reuse the
+//! track list.
 
 use super::widgets::{Mark, chip, elide, heart_button, link, primary, secondary};
 use super::{Action, DragTracks, Focus, Keep, ListenerApp, Overlay, PlaylistAction, QueueAction, mmss};
@@ -78,6 +79,49 @@ fn signed(v: f64) -> String {
 fn shared_format(tracks: &[Track]) -> Option<String> {
     let first = tracks.first()?.quality_label();
     tracks.iter().all(|t| t.quality_label() == first).then_some(first)
+}
+
+/// Per-track loudness, peak and dynamic range, with any finding the album as a
+/// whole doesn't already show. The title column takes what's left.
+fn analysis_table(ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>) {
+    let t = Tokens::of(ui);
+    let small = |s: String, c| egui::RichText::new(s).size(12.0).color(c);
+    let title_w = (ui.available_width() - 360.0).clamp(90.0, 320.0);
+    egui::Grid::new("album-analysis").num_columns(6).spacing(vec2(14.0, 6.0)).show(ui, |ui| {
+        for h in ["", "", "Loudness", "Peak", "DR", ""] {
+            ui.label(small(h.to_owned(), t.muted));
+        }
+        ui.end_row();
+        for (i, (track, a)) in tracks.iter().zip(found).enumerate() {
+            ui.label(small(track.track.unwrap_or(i as u32 + 1).to_string(), t.muted));
+            let g = elide(ui, &track.title, FontId::proportional(12.0), t.text, title_w);
+            let (r, _) = ui.allocate_exact_size(vec2(title_w, g.size().y), Sense::hover());
+            ui.painter().galley(r.min, g, t.text);
+            match a {
+                Some(a) => {
+                    let dash = || "–".to_owned();
+                    ui.label(small(a.integrated_lufs.map_or_else(dash, |l| format!("{} LUFS", signed(l))), t.text));
+                    ui.label(small(a.true_peak_dbtp.map_or_else(dash, |p| format!("{} dBTP", signed(p))), t.text));
+                    ui.label(small(a.dr_rounded().map_or_else(dash, |d| format!("DR{d}")), t.text));
+                    match a.verdicts.iter().find(|v| album_verdict.is_none_or(|av| !av.same_kind(v))) {
+                        Some(v) => {
+                            chip(ui, &v.label(), t.warn).on_hover_text(v.evidence());
+                        }
+                        None => {
+                            ui.label("");
+                        }
+                    }
+                }
+                None => {
+                    ui.label(small("not analysed".into(), t.muted));
+                    for _ in 0..3 {
+                        ui.label("");
+                    }
+                }
+            }
+            ui.end_row();
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -235,8 +279,6 @@ impl ListenerApp {
                 return;
             }
 
-            // Credits and per-track measurements live in the sidebar's Info tab
-            // (for the playing song); the page is just the album and its tracks.
             let source = Source::Album { id: album.id.clone(), name: album.name.clone() };
             self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false, playlist: None });
             ui.add_space(14.0);
@@ -250,7 +292,58 @@ impl ListenerApp {
                 footer.push_str(&format!(" · {l}"));
             }
             ui.label(egui::RichText::new(footer).size(12.0).color(t.muted));
+            ui.add_space(10.0);
+            self.album_details(ui, &tracks, &found, summary.verdict.as_ref().map(|(v, _)| v), analysing > 0);
             ui.add_space(24.0);
+        });
+    }
+
+    /// "Album details ›": the album's credits and its per-track measurements,
+    /// folded away until asked for (open stays open for the session).
+    fn album_details(&mut self, ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>, analysing: bool) {
+        let t = Tokens::of(ui);
+        let open = self.album_details_open;
+        let toggle = ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let l = link(ui, "Album details", FontId::proportional(12.0), t.accent);
+            let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            icons::paint(ui.painter(), rect, if open { Icon::ChevronDown } else { Icon::ChevronRight }, t.accent);
+            l
+        });
+        if toggle.inner.clicked() {
+            self.album_details_open = !open;
+        }
+        if !open {
+            return;
+        }
+        let width = ui.available_width().min(720.0);
+        ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_max_width(width);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let people = credits(tracks);
+            if !people.is_empty() {
+                super::info_panel::info_section(ui, "Credits");
+                for c in &people {
+                    let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
+                    self.links_row(ui, &c.role, items);
+                }
+            }
+            super::info_panel::info_section(ui, "Analysis");
+            if found.iter().all(Option::is_none) {
+                super::info_panel::row(ui, "Loudness", |ui| {
+                    if analysing {
+                        ui.label(egui::RichText::new("Analysing…").size(12.5).color(t.muted));
+                    } else if link(ui, "Analyze album", FontId::proportional(12.5), t.accent)
+                        .on_hover_text("Loudness, dynamic range, and a check for upsampled or lossy-sourced files")
+                        .clicked()
+                    {
+                        self.actions.push(Action::Analyze(tracks.to_vec()));
+                    }
+                });
+            } else {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                analysis_table(ui, tracks, found, album_verdict);
+            }
         });
     }
 
