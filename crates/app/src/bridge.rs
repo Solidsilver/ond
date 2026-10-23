@@ -202,7 +202,7 @@ impl Bridge {
                 Ok(server) => {
                     let s = settings.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        if let Err(e) = s.save(&paths) {
+                        if let Err(e) = s.save_login(&paths) {
                             tracing::warn!("save settings: {e}");
                         }
                         if let Err(e) = s.store_password(&password) {
