@@ -128,7 +128,7 @@ fn perf() {
     h.run_steps(2);
     {
         let app = app_mut(&mut h);
-        if let (Some(p), Some(index)) = (app.palette.as_mut(), app.search.index.as_mut()) {
+        if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
             p.query = "blue part".into();
             p.refresh(index);
         }
@@ -146,7 +146,7 @@ fn perf() {
         (songs::Column::Format, "format"),
     ] {
         scene(&mut h, Route::Songs);
-        app_mut(&mut h).songs.sort = col;
+        app_mut(&mut h).ui.songs.sort = col;
         let t = Instant::now();
         h.step();
         first_sort.push((format!("songs by {name}, first frame"), t.elapsed()));
@@ -157,7 +157,7 @@ fn perf() {
     app_mut(&mut h).actions.push(Action::OpenSettings(settings_page::Section::Library));
     h.run_steps(2);
     results.push(("settings → library".into(), time_frames(&mut h, 60)));
-    app_mut(&mut h).overlay = None;
+    app_mut(&mut h).ui.overlay = None;
 
     // 2,000 single-song downloads on the Offline page.
     {

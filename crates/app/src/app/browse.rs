@@ -1,6 +1,7 @@
 //! The main view's router and the album-grid places: Recently Added, Albums,
 //! Artists, an artist's page, and albums by genre / year / label.
 
+use super::view_ctx::ViewCtx;
 use super::widgets::{Mark, choice, elide};
 use super::{Action, AlbumSort, Data, Keep, ListenerApp, QueueAction};
 use crate::icons::{self, Icon};
@@ -78,41 +79,41 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, data: &Data) -> Vec<usize> {
 impl ListenerApp {
     pub(super) fn main_view(&mut self, ui: &mut Ui) {
         self.trail_bar(ui);
-        let route = self.nav.current().clone();
+        let route = self.ui.nav.current().clone();
         match &route {
             Route::Recent => {
-                self.heading(ui, "Recently Added", None);
-                self.grid_place(ui, &route);
+                self.view().heading(ui, "Recently Added", None);
+                self.view().grid_place(ui, &route);
             }
             Route::Albums => {
                 let n = self.data.albums.len();
                 ui.horizontal(|ui| {
-                    self.heading(ui, "Albums", Some(format!("{n}")));
+                    self.view().heading(ui, "Albums", Some(format!("{n}")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Right-to-left layout: the pill itself still reads left to right.
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            choice(ui, &AlbumSort::ALL, &mut self.sort, None, |s| s.label().into());
+                            choice(ui, &AlbumSort::ALL, &mut self.ui.sort, None, |s| s.label().into());
                         });
                     });
                 });
-                self.grid_place(ui, &route);
+                self.view().grid_place(ui, &route);
             }
-            Route::Artists => self.artists_page(ui),
-            Route::Songs => self.songs_page(ui),
+            Route::Artists => self.view().artists_page(ui),
+            Route::Songs => self.view().songs_page(ui),
             Route::Artist { name, .. } => self.artist_page(ui, &route, name),
-            Route::Album(id) => self.album_page(ui, id),
-            Route::Playlist { id, name } => self.playlist_page(ui, id, name),
-            Route::Favorites => self.favorites_page(ui),
+            Route::Album(id) => self.view().album_page(ui, id),
+            Route::Playlist { id, name } => self.view().playlist_page(ui, id, name),
+            Route::Favorites => self.view().favorites_page(ui),
             Route::Filter { kind, value } => {
                 let what = match kind {
                     FilterKind::Genre => "Genre",
                     FilterKind::Year => "Year",
                     FilterKind::Label => "Label",
                 };
-                self.heading(ui, value, Some(what.to_owned()));
-                self.grid_place(ui, &route);
+                self.view().heading(ui, value, Some(what.to_owned()));
+                self.view().grid_place(ui, &route);
             }
-            Route::Offline => self.offline_page(ui),
+            Route::Offline => self.view().offline_page(ui),
         }
     }
 
@@ -121,17 +122,17 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let back = ui.add_enabled_ui(self.nav.can_back(), |ui| icons::sized_button(ui, Icon::ChevronLeft, "Back (⌘[)", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
+            let back = ui.add_enabled_ui(self.ui.nav.can_back(), |ui| icons::sized_button(ui, Icon::ChevronLeft, "Back (⌘[)", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
             if back.clicked() {
                 self.actions.push(Action::Back);
             }
-            let fwd = ui.add_enabled_ui(self.nav.can_forward(), |ui| icons::sized_button(ui, Icon::ChevronRight, "Forward (⌘])", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
+            let fwd = ui.add_enabled_ui(self.ui.nav.can_forward(), |ui| icons::sized_button(ui, Icon::ChevronRight, "Forward (⌘])", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
             if fwd.clicked() {
                 self.actions.push(Action::Forward);
             }
             ui.add_space(8.0);
             ui.spacing_mut().item_spacing.x = 6.0;
-            let trail = self.nav.trail();
+            let trail = self.ui.nav.trail();
             let n = trail.len();
             let labels: Vec<String> = trail.iter().map(|r| route_label(r, &self.data)).collect();
             for (i, label) in labels.iter().enumerate() {
@@ -149,147 +150,11 @@ impl ListenerApp {
         ui.add_space(6.0);
     }
 
-    pub(super) fn heading(&self, ui: &mut Ui, title: &str, sub: Option<String>) {
-        let t = Tokens::of(ui);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
-            if let Some(sub) = sub {
-                ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
-            }
-        });
-        ui.add_space(10.0);
-    }
-
-    fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
-        let (sort, data) = (self.sort, &self.data);
-        self.grid.get((route.clone(), sort, data.version), || grid_ids(route, sort, data))
-    }
-
-    /// A full-height, virtualized grid: only visible rows are laid out, so only
-    /// visible covers are requested.
-    fn grid_place(&mut self, ui: &mut Ui, route: &Route) {
-        let ids = self.cached_grid(route);
-        if ids.is_empty() {
-            let t = Tokens::of(ui);
-            ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
-            return;
-        }
-        let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
-        let rows = ids.len().div_ceil(cols);
-        egui::ScrollArea::vertical().id_salt(("grid", format!("{route:?}"))).auto_shrink(false).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
-            for row in range {
-                let slice = &ids[row * cols..((row + 1) * cols).min(ids.len())];
-                self.grid_row(ui, slice, tile);
-            }
-        });
-    }
-
-    /// One grid row of tiles, followed by the row gap.
-    pub(super) fn grid_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32) {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = GAP_X;
-            for &i in ids {
-                self.album_tile(ui, i, tile);
-            }
-        });
-        ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
-    }
-
-    /// Cover, title and artist. Click opens; double-click or the hover play
-    /// button plays; right-click has the queue actions.
-    fn album_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32) {
-        let t = Tokens::of(ui);
-        let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
-        let album = &self.data.albums[idx];
-        let id = album.id.clone();
-        if ui.is_rect_visible(rect) {
-            let art = Rect::from_min_size(rect.min, vec2(tile, tile));
-            let cover = album.cover_art.clone();
-            let (name, artist) = (album.name.clone(), album.artist.clone().unwrap_or_default());
-            self.art.paint(ui, art, cover.as_deref(), 6.0);
-            // Only albums kept offline carry a mark; nothing otherwise.
-            let mark = Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Album(id.clone())));
-            let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
-            let title = elide(ui, &name, FontId::proportional(13.0), t.text, tile);
-            ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
-            let sub = elide(ui, &artist, FontId::proportional(12.0), t.muted, tile - mark_w);
-            ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
-            if let Some(m) = mark {
-                super::widgets::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
-            }
-            if resp.hovered() {
-                let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
-                let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", &id)), Sense::click());
-                let fill = if play_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
-                let fg = if play_resp.hovered() { t.on_accent } else { t.text };
-                ui.painter().circle_filled(play.center(), 16.0, fill);
-                icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(1.0, 0.0), vec2(12.0, 12.0)), Icon::Play, fg);
-                play_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Play album"));
-                if play_resp.clicked() {
-                    self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
-                    return;
-                }
-            }
-        }
-        let album = &self.data.albums[idx];
-        let label = format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("unknown artist"));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        let artist = album.artist.clone();
-        let artist_ref = album.artist_ref.clone();
-        if resp.double_clicked() {
-            self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
-        } else if resp.clicked() {
-            self.actions.push(Action::Go(Route::Album(id.clone())));
-        }
-        let kept = self.downloads.snap.pin(&offline::Pin::Album(id.clone())).is_some();
-        resp.context_menu(|ui| {
-            collection_menu(ui, &Collection::Album(id.clone()), true, kept, None, &mut self.actions);
-            if let Some(name) = artist {
-                ui.separator();
-                if ui.button(format!("Go to {name}")).clicked() {
-                    self.actions.push(Action::Go(Route::Artist { name, id: artist_ref }));
-                }
-            }
-        });
-    }
-
-    fn artists_page(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
-        let Some(index) = &self.search.index else {
-            self.heading(ui, "Artists", None);
-            ui.label(egui::RichText::new("Loading your library…").color(t.muted));
-            return;
-        };
-        // The server's artists (with ids) once synced, else album-artist names.
-        let artists = Arc::clone(&index.artists);
-        self.heading(ui, "Artists", Some(artists.len().to_string()));
-        egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).show_rows(ui, 32.0, artists.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for a in &artists[range] {
-                let (name, id, n) = (&a.name, &a.id, &a.albums);
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
-                if resp.hovered() {
-                    ui.painter().rect_filled(rect, 6.0, t.hover);
-                }
-                let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 100.0);
-                ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
-                let count = crate::fmt::plural(*n, "album");
-                ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, count, FontId::proportional(12.0), t.muted);
-                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-                if resp.clicked() {
-                    let id = id.clone().or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name)).and_then(|a| a.artist_ref.clone()));
-                    self.actions.push(Action::Go(Route::Artist { name: name.clone(), id }));
-                }
-                resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(name.clone()), true, false, None, &mut self.actions));
-            }
-        });
-    }
-
     /// An artist's albums, then the albums that credit them elsewhere (from
     /// tracks synced so far).
     fn artist_page(&mut self, ui: &mut Ui, route: &Route, name: &str) {
         let t = Tokens::of(ui);
-        let own = self.cached_grid(route);
+        let own = self.view().cached_grid(route);
         let own_ids: std::collections::HashSet<&str> = own.iter().map(|&i| self.data.albums[i].id.as_str()).collect();
         let credited: Vec<usize> = self
             .data
@@ -302,7 +167,7 @@ impl ListenerApp {
             1 => Some("1 album".to_owned()),
             n => Some(format!("{n} albums")),
         };
-        self.heading(ui, name, sub);
+        self.view().heading(ui, name, sub);
         if !own.is_empty() {
             ui.horizontal(|ui| {
                 if super::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
@@ -325,14 +190,14 @@ impl ListenerApp {
         let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
         egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).show(ui, |ui| {
             for chunk in own.chunks(cols) {
-                self.grid_row(ui, chunk, tile);
+                self.view().grid_row(ui, chunk, tile);
             }
             if !credited.is_empty() {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("Also credited on").font(FontId::new(15.0, semibold())).color(t.text));
                 ui.add_space(8.0);
                 for chunk in credited.chunks(cols) {
-                    self.grid_row(ui, chunk, tile);
+                    self.view().grid_row(ui, chunk, tile);
                 }
             }
             if own.is_empty() && credited.is_empty() {
@@ -427,6 +292,144 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
     }
 }
 
+
+impl ViewCtx<'_> {
+    pub(super) fn heading(&self, ui: &mut Ui, title: &str, sub: Option<String>) {
+        let t = Tokens::of(ui);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
+            if let Some(sub) = sub {
+                ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
+            }
+        });
+        ui.add_space(10.0);
+    }
+
+    pub(super) fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
+        let (sort, data) = (self.ui.sort, &self.data);
+        self.ui.grid.get((route.clone(), sort, data.version), || grid_ids(route, sort, data))
+    }
+
+    /// A full-height, virtualized grid: only visible rows are laid out, so only
+    /// visible covers are requested.
+    pub(super) fn grid_place(&mut self, ui: &mut Ui, route: &Route) {
+        let ids = self.cached_grid(route);
+        if ids.is_empty() {
+            let t = Tokens::of(ui);
+            ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
+            return;
+        }
+        let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
+        let rows = ids.len().div_ceil(cols);
+        egui::ScrollArea::vertical().id_salt(("grid", format!("{route:?}"))).auto_shrink(false).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
+            for row in range {
+                let slice = &ids[row * cols..((row + 1) * cols).min(ids.len())];
+                self.grid_row(ui, slice, tile);
+            }
+        });
+    }
+
+    /// One grid row of tiles, followed by the row gap.
+    pub(super) fn grid_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32) {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP_X;
+            for &i in ids {
+                self.album_tile(ui, i, tile);
+            }
+        });
+        ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
+    }
+
+    /// Cover, title and artist. Click opens; double-click or the hover play
+    /// button plays; right-click has the queue actions.
+    pub(super) fn album_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32) {
+        let t = Tokens::of(ui);
+        let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
+        let album = &self.data.albums[idx];
+        let id = album.id.clone();
+        if ui.is_rect_visible(rect) {
+            let art = Rect::from_min_size(rect.min, vec2(tile, tile));
+            let cover = album.cover_art.clone();
+            let (name, artist) = (album.name.clone(), album.artist.clone().unwrap_or_default());
+            self.art.paint(ui, art, cover.as_deref(), 6.0);
+            // Only albums kept offline carry a mark; nothing otherwise.
+            let mark = Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Album(id.clone())));
+            let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
+            let title = elide(ui, &name, FontId::proportional(13.0), t.text, tile);
+            ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
+            let sub = elide(ui, &artist, FontId::proportional(12.0), t.muted, tile - mark_w);
+            ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
+            if let Some(m) = mark {
+                super::widgets::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
+            }
+            if resp.hovered() {
+                let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
+                let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", &id)), Sense::click());
+                let fill = if play_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
+                let fg = if play_resp.hovered() { t.on_accent } else { t.text };
+                ui.painter().circle_filled(play.center(), 16.0, fill);
+                icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(1.0, 0.0), vec2(12.0, 12.0)), Icon::Play, fg);
+                play_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Play album"));
+                if play_resp.clicked() {
+                    self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
+                    return;
+                }
+            }
+        }
+        let album = &self.data.albums[idx];
+        let label = format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("unknown artist"));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        let artist = album.artist.clone();
+        let artist_ref = album.artist_ref.clone();
+        if resp.double_clicked() {
+            self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
+        } else if resp.clicked() {
+            self.actions.push(Action::Go(Route::Album(id.clone())));
+        }
+        let kept = self.downloads.snap.pin(&offline::Pin::Album(id.clone())).is_some();
+        resp.context_menu(|ui| {
+            collection_menu(ui, &Collection::Album(id.clone()), true, kept, None, self.actions);
+            if let Some(name) = artist {
+                ui.separator();
+                if ui.button(format!("Go to {name}")).clicked() {
+                    self.actions.push(Action::Go(Route::Artist { name, id: artist_ref }));
+                }
+            }
+        });
+    }
+
+    pub(super) fn artists_page(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let Some(index) = &self.search.index else {
+            self.heading(ui, "Artists", None);
+            ui.label(egui::RichText::new("Loading your library…").color(t.muted));
+            return;
+        };
+        // The server's artists (with ids) once synced, else album-artist names.
+        let artists = Arc::clone(&index.artists);
+        self.heading(ui, "Artists", Some(artists.len().to_string()));
+        egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).show_rows(ui, 32.0, artists.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for a in &artists[range] {
+                let (name, id, n) = (&a.name, &a.id, &a.albums);
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(rect, 6.0, t.hover);
+                }
+                let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 100.0);
+                ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
+                let count = crate::fmt::plural(*n, "album");
+                ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, count, FontId::proportional(12.0), t.muted);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+                if resp.clicked() {
+                    let id = id.clone().or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name)).and_then(|a| a.artist_ref.clone()));
+                    self.actions.push(Action::Go(Route::Artist { name: name.clone(), id }));
+                }
+                resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(name.clone()), true, false, None, self.actions));
+            }
+        });
+    }
+}
 
 #[cfg(test)]
 mod tests {

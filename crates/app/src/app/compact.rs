@@ -99,8 +99,9 @@ impl ListenerApp {
                 knob: ON_ART,
                 knob_r: 5.0,
             };
-            let (shown, _) = self.seek_line(&mut ui, bar, bar.expand2(vec2(4.0, 7.0)), "mini-seek", &style);
-            let (elapsed, remaining) = self.seek_times(shown);
+            let mut v = self.view();
+            let (shown, _) = v.seek_line(&mut ui, bar, bar.expand2(vec2(4.0, 7.0)), "mini-seek", &style);
+            let (elapsed, remaining) = v.seek_times(shown);
             ui.painter().text(pos2(bar.left() - 8.0, seek_y), egui::Align2::RIGHT_CENTER, elapsed, font.clone(), ON_ART_MUTED);
             ui.painter().text(pos2(bar.right() + 8.0, seek_y), egui::Align2::LEFT_CENTER, remaining, font, ON_ART_MUTED);
         }

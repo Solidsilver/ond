@@ -4,8 +4,9 @@
 //! Rows act like the album page's: double-click (or ⏎) plays the track's
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
+use super::view_ctx::ViewCtx;
 use super::widgets::elide;
-use super::{Action, Focus, ListenerApp, QueueAction};
+use super::{Action, Focus, QueueAction};
 use crate::icons::{self, Icon};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
@@ -95,16 +96,16 @@ pub fn sort_with(tracks: &[Track], keys: &SortKeys, by: Column, descending: bool
     idx
 }
 
-impl ListenerApp {
-    fn songs_order(&mut self) -> Arc<Vec<usize>> {
+impl ViewCtx<'_> {
+    pub(super) fn songs_order(&mut self) -> Arc<Vec<usize>> {
         let data = &self.data;
         let versions = (data.tracks_version, data.version);
-        let keys = self.songs.keys.get(versions, || {
+        let keys = self.ui.songs.keys.get(versions, || {
             let names = |id: &str| data.album(id).map(|a| a.name.clone()).unwrap_or_default();
             SortKeys::new(&data.tracks.all, &names)
         });
-        let (sort, descending) = (self.songs.sort, self.songs.descending);
-        self.songs.order.get((versions.0, versions.1, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
+        let (sort, descending) = (self.ui.songs.sort, self.ui.songs.descending);
+        self.ui.songs.order.get((versions.0, versions.1, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
     }
 
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {
@@ -134,22 +135,22 @@ impl ListenerApp {
             (Column::Format, "Format", cols.format, false),
         ] {
             let resp = ui.interact(rect, ui.scope_id().with(("songs-col", label)), Sense::click());
-            let on = self.songs.sort == col;
+            let on = self.ui.songs.sort == col;
             let color = if on || resp.hovered() { t.text } else { t.muted };
             let font = FontId::new(11.0, semibold());
             let (anchor, x) = if right { (egui::Align2::RIGHT_CENTER, rect.right() - 10.0) } else { (egui::Align2::LEFT_CENTER, rect.left() + 10.0) };
             let text_rect = ui.painter().text(pos2(x, rect.center().y), anchor, label, font, color);
             if on {
                 let cx = if right { text_rect.left() - 8.0 } else { text_rect.right() + 8.0 };
-                sort_arrow(ui, pos2(cx, rect.center().y), self.songs.descending, color);
+                sort_arrow(ui, pos2(cx, rect.center().y), self.ui.songs.descending, color);
             }
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, format!("Sort by {label}")));
             if resp.clicked() {
                 if on {
-                    self.songs.descending = !self.songs.descending;
+                    self.ui.songs.descending = !self.ui.songs.descending;
                 } else {
-                    self.songs.sort = col;
-                    self.songs.descending = false;
+                    self.ui.songs.sort = col;
+                    self.ui.songs.descending = false;
                 }
             }
         }
@@ -162,7 +163,7 @@ impl ListenerApp {
             for row in range {
                 let tr = &tracks[order[row]];
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width() - 12.0, ROW_H), Sense::click());
-                let selected = self.focus == Focus::Main && self.songs.selected == Some(row);
+                let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(row);
                 if selected {
                     resp.scroll_to_me(None);
                 }
@@ -198,8 +199,8 @@ impl ListenerApp {
                 if resp.double_clicked() {
                     self.play_from_album(tr, QueueAction::Play { start: 0 });
                 } else if resp.clicked() {
-                    self.songs.selected = Some(row);
-                    self.focus = Focus::Main;
+                    self.ui.songs.selected = Some(row);
+                    self.ui.focus = Focus::Main;
                 }
                 let source = self.album_source(&tr.album_id);
                 resp.context_menu(|ui| {
@@ -215,31 +216,14 @@ impl ListenerApp {
         });
     }
 
-    fn album_source(&self, album_id: &str) -> Source {
-        Source::Album { id: album_id.to_owned(), name: self.data.album(album_id).map(|a| a.name.clone()).unwrap_or_default() }
-    }
-
-    /// Plays `tr`'s album starting at `tr` (`Play`), or queues just `tr`.
-    pub(super) fn play_from_album(&mut self, tr: &Track, action: QueueAction) {
-        let source = self.album_source(&tr.album_id);
-        match action {
-            QueueAction::Play { .. } | QueueAction::Shuffle => {
-                let album = self.data.tracks.album(&tr.album_id).map(|s| s.to_vec()).unwrap_or_else(|| vec![tr.clone()]);
-                let start = album.iter().position(|t| t.id == tr.id).unwrap_or(0);
-                self.actions.push(Action::Tracks { tracks: album, source, action: QueueAction::Play { start } });
-            }
-            QueueAction::PlayNext | QueueAction::Add => self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source, action }),
-        }
-    }
-
     /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
-    fn songs_keys(&mut self, ui: &Ui, order: &[usize]) {
+    pub(super) fn songs_keys(&mut self, ui: &Ui, order: &[usize]) {
         if order.is_empty() {
             return;
         }
         let Some(k) = self.list_keys(ui, Focus::Main, false, false) else { return };
-        self.songs.selected = k.step(self.songs.selected, order.len());
-        let Some(sel) = self.songs.selected.filter(|s| *s < order.len()) else { return };
+        self.ui.songs.selected = k.step(self.ui.songs.selected, order.len());
+        let Some(sel) = self.ui.songs.selected.filter(|s| *s < order.len()) else { return };
         let tr = self.data.tracks.all[order[sel]].clone();
         if k.enter {
             self.play_from_album(&tr, QueueAction::Play { start: 0 });
@@ -283,6 +267,25 @@ fn sort_arrow(ui: &Ui, at: egui::Pos2, descending: bool, color: egui::Color32) {
         vec![pos2(at.x - w, at.y + h), pos2(at.x + w, at.y + h), pos2(at.x, at.y - h)]
     };
     ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+}
+
+impl ViewCtx<'_> {
+    pub(super) fn album_source(&self, album_id: &str) -> Source {
+        Source::Album { id: album_id.to_owned(), name: self.data.album(album_id).map(|a| a.name.clone()).unwrap_or_default() }
+    }
+
+    /// Plays `tr`'s album starting at `tr` (`Play`), or queues just `tr`.
+    pub(super) fn play_from_album(&mut self, tr: &Track, action: QueueAction) {
+        let source = self.album_source(&tr.album_id);
+        match action {
+            QueueAction::Play { .. } | QueueAction::Shuffle => {
+                let album = self.data.tracks.album(&tr.album_id).map(|s| s.to_vec()).unwrap_or_else(|| vec![tr.clone()]);
+                let start = album.iter().position(|t| t.id == tr.id).unwrap_or(0);
+                self.actions.push(Action::Tracks { tracks: album, source, action: QueueAction::Play { start } });
+            }
+            QueueAction::PlayNext | QueueAction::Add => self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source, action }),
+        }
+    }
 }
 
 #[cfg(test)]

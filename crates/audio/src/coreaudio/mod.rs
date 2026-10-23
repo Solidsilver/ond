@@ -75,11 +75,6 @@ impl CoreAudioBackend {
         let (d, f) = (devices_changed.clone(), default_changed.clone());
         let listeners =
             hal::watch_system(move || d.store(true, Ordering::Release), move || f.store(true, Ordering::Release));
-        if cfg!(debug_assertions)
-            && let Err(e) = bit_perfect_self_check()
-        {
-            tracing::error!("bit-perfect self-check failed: {e}");
-        }
         Ok(Self {
             name: "CoreAudio".into(),
             selected: None,
@@ -399,7 +394,8 @@ impl OutputBackend for CoreAudioBackend {
 /// uses (ring → callback fill → dither decision) into a buffer instead of the
 /// hardware, then converts it the way the HAL does for an integer device and
 /// compares bit for bit. Also checks that a resampled ring *is* requantized.
-pub fn bit_perfect_self_check() -> Result<(), String> {
+#[cfg(test)]
+fn bit_perfect_self_check() -> Result<(), String> {
     let frames = 4_096;
     // Spread over the whole 24-bit range, both signs, odd values included.
     let pattern: Vec<i32> = (0..frames as i64 * 2).map(|i| ((i * 2_654_435) % (1 << 24) - (1 << 23)) as i32).collect();

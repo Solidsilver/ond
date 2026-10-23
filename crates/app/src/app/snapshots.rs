@@ -429,32 +429,32 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     // one scene's open popup doesn't leak into the next.
     egui::Popup::close_all(&h.ctx);
     let app = app_mut(h);
-    app.windows.mode = WindowMode::Full;
-    app.windows.lyrics_open = false;
-    app.palette = None;
-    app.overlay = None;
-    app.fav_tab = favorites_page::FavTab::default();
+    app.edit_windows(|w| w.mode = WindowMode::Full);
+    app.edit_windows(|w| w.lyrics_open = false);
+    app.ui.palette = None;
+    app.ui.overlay = None;
+    app.ui.fav_tab = favorites_page::FavTab::default();
     app.prefs.edit(|s| s.show_queue = true);
-    app.queue_sheet = false;
+    app.ui.queue_sheet = false;
     app.analysis.runner.clear();
-    app.queue_ui = QueueUi::default();
-    app.np_details = false;
-    app.lyrics_follow = crate::lyrics::Follow::default();
+    app.ui.queue_ui = QueueUi::default();
+    app.ui.np_details = false;
+    app.ui.lyrics_follow = crate::lyrics::Follow::default();
     app.login = None;
     app.session.online = true;
     app.sync.albums = false;
     app.sync.tracks = false;
     app.sync.progress = None;
-    app.toasts = super::toasts::Toasts::default();
+    app.ui.toasts = super::toasts::Toasts::default();
     app.session.unreachable = false;
     app.diagnostics = super::diagnostics::Diagnostics::default();
     app.prefs.edit(|s| s.diagnostics_bar = false);
     app.diagnostics.set_latency(Some(Duration::from_millis(14)));
     app.output.handle(&signal());
-    app.columns = super::layout::Columns::default();
-    app.album_details_open = false;
-    app.nav = Nav::default();
-    app.nav.go(route);
+    app.set_columns(super::layout::Columns::default());
+    app.ui.album_details_open = false;
+    app.ui.nav = Nav::default();
+    app.ui.nav.go(route);
     app.on_arrive();
     fill_queue(app);
     // Settle layout (measured header heights etc.) before anything is hovered.
@@ -608,46 +608,46 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     // widens the window.
     let player = vec2(380.0, 880.0);
     reset(h, player, Route::Recent);
-    app_mut(h).windows.mode = WindowMode::Player;
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     fixture_lyrics(app_mut(h), true);
     h.run_steps(4);
     s.shoot(h, "player");
 
     reset(h, vec2(player.x + crate::window::DRAWER_W, player.y), Route::Recent);
-    app_mut(h).windows.mode = WindowMode::Player;
-    app_mut(h).windows.lyrics_open = true;
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    app_mut(h).edit_windows(|w| w.lyrics_open = true);
     fixture_lyrics(app_mut(h), true);
     h.run_steps(20);
     s.shoot(h, "player-lyrics");
 
     reset(h, vec2(player.x + crate::window::DRAWER_W, player.y), Route::Recent);
-    app_mut(h).windows.mode = WindowMode::Player;
-    app_mut(h).windows.lyrics_open = true;
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    app_mut(h).edit_windows(|w| w.lyrics_open = true);
     fixture_lyrics(app_mut(h), false);
     h.run_steps(4);
     s.shoot(h, "player-lyrics-plain");
 
     reset(h, player, Route::Recent);
-    app_mut(h).windows.mode = WindowMode::Player;
-    app_mut(h).np_details = true;
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    app_mut(h).ui.np_details = true;
     h.hover_at(pos2(190.0, 150.0));
     h.run_steps(4);
     s.shoot(h, "player-details-art-hover");
 
     // The full window's sidebar on its Lyrics tab.
     reset(h, FULL, Route::Recent);
-    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Lyrics;
     fixture_lyrics(app_mut(h), true);
     h.run_steps(20);
     s.shoot(h, "sidebar-lyrics");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Lyrics;
     fixture_lyrics(app_mut(h), false);
     s.shoot(h, "sidebar-lyrics-plain");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Lyrics;
     if let Some(id) = app_mut(h).player.queue.current.as_ref().map(|c| c.track.id.clone()) {
         app_mut(h).lyrics.insert(id, crate::lyrics::Fetch::Done(None));
     }
@@ -656,21 +656,21 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     // Unsynced lyrics straight from a scraper, after cleaning: stanzas under
     // section labels, no debris.
     reset(h, FULL, Route::Recent);
-    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Lyrics;
     scraped_lyrics(app_mut(h));
     h.run_steps(2);
     s.shoot(h, "sidebar-lyrics-scraped");
 
     reset(h, vec2(player.x + crate::window::DRAWER_W, player.y), Route::Recent);
-    app_mut(h).windows.mode = WindowMode::Player;
-    app_mut(h).windows.lyrics_open = true;
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    app_mut(h).edit_windows(|w| w.lyrics_open = true);
     scraped_lyrics(app_mut(h));
     h.run_steps(4);
     s.shoot(h, "player-lyrics-scraped");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
-    app_mut(h).queue_ui.tab = QueueTab::Lyrics;
-    app_mut(h).queue_sheet = true;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Lyrics;
+    app_mut(h).ui.queue_sheet = true;
     fixture_lyrics(app_mut(h), true);
     h.run_steps(20);
     s.shoot(h, "narrow-lyrics-sheet");
@@ -693,7 +693,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "recent");
 
     reset(h, FULL, Route::Albums);
-    app_mut(h).sort = AlbumSort::Year;
+    app_mut(h).ui.sort = AlbumSort::Year;
     s.shoot(h, "albums-by-year");
 
     reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: None });
@@ -715,15 +715,15 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     // The Info tab: the playing song's credits, album, file, analysis, plays.
     reset(h, FULL, Route::Album(album_id(0)));
     info_fixture(app_mut(h));
-    app_mut(h).queue_ui.tab = QueueTab::Info;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Info;
     h.run_steps(2);
     s.shoot(h, "info");
 
     // Narrow: the Info tab in the queue sheet.
     reset(h, vec2(900.0, 700.0), Route::Recent);
     info_fixture(app_mut(h));
-    app_mut(h).queue_ui.tab = QueueTab::Info;
-    app_mut(h).queue_sheet = true;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Info;
+    app_mut(h).ui.queue_sheet = true;
     h.run_steps(2);
     s.shoot(h, "narrow-info-sheet");
 
@@ -741,7 +741,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
         t.track_peak = None;
         t.size = None;
     }
-    app_mut(h).queue_ui.tab = QueueTab::Info;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Info;
     h.run_steps(2);
     s.shoot(h, "info-sparse");
     app_mut(h).player.queue.current = None;
@@ -755,13 +755,13 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, FULL, Route::Album(album_id(0)));
     let saved = long_info(app_mut(h));
     info_fixture(app_mut(h));
-    app_mut(h).queue_ui.tab = QueueTab::Info;
+    app_mut(h).ui.queue_ui.tab = QueueTab::Info;
     h.run_steps(3);
     s.shoot(h, "info-long");
-    app_mut(h).columns.right = super::layout::RIGHT_MIN;
+    { let mut c = app_mut(h).columns(); c.right = super::layout::RIGHT_MIN; app_mut(h).set_columns(c); }
     h.run_steps(3);
     s.shoot(h, "info-long-min");
-    app_mut(h).columns.right = super::layout::RIGHT_DEFAULT;
+    { let mut c = app_mut(h).columns(); c.right = super::layout::RIGHT_DEFAULT; app_mut(h).set_columns(c); }
     app_mut(h).player.queue.current = saved;
     info_fixture(app_mut(h));
     h.run_steps(3);
@@ -774,11 +774,11 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     h.run_steps(2);
     s.shoot(h, "sidebar-edge-hover");
     reset(h, FULL, Route::Recent);
-    app_mut(h).columns = super::layout::Columns { left: super::layout::LEFT_MAX, right: super::layout::RIGHT_MAX };
+    app_mut(h).set_columns(super::layout::Columns { left: super::layout::LEFT_MAX, right: super::layout::RIGHT_MAX });
     h.run_steps(3);
     s.shoot(h, "columns-wide");
     reset(h, FULL, Route::Recent);
-    app_mut(h).columns = super::layout::Columns { left: super::layout::LEFT_MIN, right: super::layout::RIGHT_MIN };
+    app_mut(h).set_columns(super::layout::Columns { left: super::layout::LEFT_MIN, right: super::layout::RIGHT_MIN });
     h.run_steps(3);
     s.shoot(h, "columns-narrow");
 
@@ -787,19 +787,19 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     // (A taller window, so the unfolded section is in view.)
     let tall = vec2(FULL.x, 1300.0);
     reset(h, tall, Route::Album(album_id(0)));
-    app_mut(h).album_details_open = true;
+    app_mut(h).ui.album_details_open = true;
     h.run_steps(3);
     s.shoot(h, "album-details");
     reset(h, tall, Route::Album(album_id(2)));
-    app_mut(h).album_details_open = true;
+    app_mut(h).ui.album_details_open = true;
     h.run_steps(3);
     s.shoot(h, "album-details-unanalysed");
 
     // The Player's queue area has the same Info tab.
     reset(h, vec2(380.0, 880.0), Route::Recent);
     info_fixture(app_mut(h));
-    app_mut(h).windows.mode = WindowMode::Player;
-    app_mut(h).queue_ui.tab = QueueTab::Info;
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    app_mut(h).ui.queue_ui.tab = QueueTab::Info;
     h.run_steps(4);
     s.shoot(h, "player-info");
 
@@ -824,7 +824,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     h.run_steps(2);
     {
         let app = app_mut(h);
-        if let (Some(p), Some(index)) = (app.palette.as_mut(), app.search.index.as_mut()) {
+        if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
             p.query = "bob".into();
             p.refresh(index);
         }
@@ -866,13 +866,13 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     s.shoot(h, "favorites");
 
     reset(h, FULL, Route::Favorites);
-    app_mut(h).fav_tab = favorites_page::FavTab::Albums;
+    app_mut(h).ui.fav_tab = favorites_page::FavTab::Albums;
     s.shoot(h, "favorites-albums");
 
     reset(h, FULL, Route::Favorites);
     let loved = {
         let app = app_mut(h);
-        app.fav_tab = favorites_page::FavTab::Artists;
+        app.ui.fav_tab = favorites_page::FavTab::Artists;
         let loved = std::mem::take(&mut app.favorites);
         app.favorites.load(crate::favorites::Starred::default(), Vec::new());
         loved
@@ -881,19 +881,19 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     app_mut(h).favorites = loved;
 
     reset(h, FULL, Route::Album(album_id(0)));
-    app_mut(h).overlay = Some(Overlay::Shortcuts);
+    app_mut(h).ui.overlay = Some(Overlay::Shortcuts);
     s.shoot(h, "shortcuts");
 
     reset(h, vec2(900.0, 640.0), Route::Album(album_id(0)));
-    app_mut(h).overlay = Some(Overlay::Shortcuts);
+    app_mut(h).ui.overlay = Some(Overlay::Shortcuts);
     s.shoot(h, "narrow-shortcuts");
 
     reset(h, FULL, Route::Album(album_id(0)));
-    app_mut(h).overlay = Some(Overlay::new_playlist(vec![vanguard().remove(2)]));
+    app_mut(h).ui.overlay = Some(Overlay::new_playlist(vec![vanguard().remove(2)]));
     s.shoot(h, "new-playlist");
 
     reset(h, FULL, Route::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() });
-    app_mut(h).overlay = Some(Overlay::Delete { id: "pl-0".into(), name: "Late night, low volume".into() });
+    app_mut(h).ui.overlay = Some(Overlay::Delete { id: "pl-0".into(), name: "Late night, low volume".into() });
     s.shoot(h, "delete-playlist");
 
     // The sidebar footer: server status (click for details), shortcuts, settings.
@@ -1009,7 +1009,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
 
 
     reset(h, vec2(280.0, 280.0), Route::Recent);
-    app_mut(h).windows.mode = WindowMode::Mini;
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
     s.shoot(h, "mini");
     h.hover_at(pos2(140.0, 140.0));
     h.run_steps(6);
@@ -1086,7 +1086,7 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     reset(h, vec2(380.0, 880.0), Route::Recent);
     {
         let app = app_mut(h);
-        app.windows.mode = WindowMode::Player;
+        app.edit_windows(|w| w.mode = WindowMode::Player);
         app.output.handle(&signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Verified, None));
     }
     s.shoot(h, "player-verified");
@@ -1171,7 +1171,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     let check = |h: &mut Harness<'_, Option<ListenerApp>>, what: &str| {
-        let right = app_mut(h).columns.right;
+        let right = app_mut(h).columns().right;
         let column = egui::Rect::from_x_y_ranges(FULL.x - right..=FULL.x, 0.0..=FULL.y);
         for label in ["Up Next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
             for n in h.query_all_by_label_contains(label) {
@@ -1185,9 +1185,9 @@ fn info_stays_inside_its_column_after_a_long_song() {
     };
     for right in [super::layout::RIGHT_DEFAULT, super::layout::RIGHT_MIN] {
         reset(&mut h, FULL, Route::Album(album_id(0)));
-        app_mut(&mut h).columns.right = right;
+        { let mut c = app_mut(&mut h).columns(); c.right = right; app_mut(&mut h).set_columns(c); }
         let saved = long_info(app_mut(&mut h));
-        app_mut(&mut h).queue_ui.tab = QueueTab::Info;
+        app_mut(&mut h).ui.queue_ui.tab = QueueTab::Info;
         h.run_steps(4);
         check(&mut h, "long song");
         app_mut(&mut h).player.queue.current = saved;
@@ -1228,7 +1228,7 @@ fn column_edges_drag_and_persist() {
     h.run_steps(1);
     h.drop_at(edge + vec2(60.0, 0.0));
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).columns.left, super::layout::LEFT_DEFAULT + 60.0);
+    assert_eq!(app_mut(&mut h).columns().left, super::layout::LEFT_DEFAULT + 60.0);
     // The queue's edge, dragged far out, stops at its limit.
     let q = pos2(FULL.x - 8.0 - super::layout::RIGHT_DEFAULT, 400.0);
     h.drag_at(q);
@@ -1237,7 +1237,7 @@ fn column_edges_drag_and_persist() {
     h.run_steps(1);
     h.drop_at(q - vec2(600.0, 0.0));
     h.run_steps(2);
-    let c = app_mut(&mut h).columns;
+    let c = app_mut(&mut h).columns();
     assert_eq!(c.right, c.right_limit(FULL.x));
     // Saved when let go, and restored from there.
     app_mut(&mut h).prefs.flush();
@@ -1304,21 +1304,21 @@ fn list_keys_stay_with_an_open_sheet() {
     reset(&mut h, FULL, Route::Songs);
     let playing = |h: &mut Harness<'_, Option<ListenerApp>>| app_mut(h).player.queue.current.as_ref().map(|c| c.track.id.clone());
     let before = playing(&mut h);
-    app_mut(&mut h).songs.selected = Some(0);
-    app_mut(&mut h).overlay = Some(Overlay::Settings);
+    app_mut(&mut h).ui.songs.selected = Some(0);
+    app_mut(&mut h).ui.overlay = Some(Overlay::Settings);
     h.run_steps(1);
     h.key_press(egui::Key::ArrowDown);
     h.key_press(egui::Key::Enter);
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).songs.selected, Some(0), "↓ moved the list under the sheet");
+    assert_eq!(app_mut(&mut h).ui.songs.selected, Some(0), "↓ moved the list under the sheet");
     assert_eq!(playing(&mut h), before, "⏎ played from the list under the sheet");
 
     // The queue with a selected item: ⌫ must not remove it.
     let app = app_mut(&mut h);
     let uid = app.player.queue.upcoming[0].uid;
     let len = app.player.queue.upcoming.len();
-    app.focus = Focus::Queue;
-    app.queue_ui.selected = Some(uid);
+    app.ui.focus = Focus::Queue;
+    app.ui.queue_ui.selected = Some(uid);
     h.run_steps(1);
     h.key_press(egui::Key::Backspace);
     h.key_press(egui::Key::Delete);
@@ -1326,7 +1326,7 @@ fn list_keys_stay_with_an_open_sheet() {
     assert_eq!(app_mut(&mut h).player.queue.upcoming.len(), len, "⌫ edited the queue under the sheet");
 
     // Closed again: the same keys reach the queue.
-    app_mut(&mut h).overlay = None;
+    app_mut(&mut h).ui.overlay = None;
     h.run_steps(1);
     h.key_press(egui::Key::Backspace);
     h.run_steps(2);

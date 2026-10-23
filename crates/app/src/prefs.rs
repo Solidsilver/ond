@@ -90,10 +90,15 @@ impl Prefs {
     }
 
     /// Changes preferences now and saves them shortly. Changes from any thread
-    /// apply one at a time, so none is lost.
+    /// apply one at a time, so none is lost. An edit that changes nothing
+    /// (asked for every frame, say) doesn't cause a save.
     pub fn edit(&self, change: impl FnOnce(&mut Settings)) {
         let mut state = self.lock();
+        let before = state.settings.clone();
         change(&mut state.settings);
+        if state.settings == before {
+            return;
+        }
         state.revision += 1;
         drop(state);
         self.handle.shared.wake.notify_all();
@@ -290,6 +295,17 @@ mod tests {
         assert!(!path.exists(), "nothing written while changes keep coming");
         std::thread::sleep(DEBOUNCE * 3);
         assert_eq!(read(&path).volume, 49.0 / 50.0, "the last value, once things settle");
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let (prefs, _) = Prefs::open(&path);
+        let volume = prefs.get(|s| s.volume);
+        prefs.edit(|s| s.volume = volume);
+        std::thread::sleep(DEBOUNCE * 3);
+        assert!(!path.exists(), "no change, no write");
     }
 
     #[test]

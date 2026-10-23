@@ -4,7 +4,7 @@
 //! shows is removed from anywhere else. Values refresh at most twice a second
 //! and the bar asks for no repaints of its own.
 
-use super::ListenerApp;
+use super::view_ctx::ViewCtx;
 use crate::theme::Tokens;
 use audio::{BitPerfectStatus, PlayState, PlaybackMode};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
@@ -90,7 +90,7 @@ impl Diagnostics {
     }
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// The readings, recomputed at most every [`REFRESH`].
     fn diagnostics_segments(&mut self) -> Arc<Vec<Segment>> {
         let now = Instant::now();
@@ -133,15 +133,14 @@ impl ListenerApp {
                 detail: format!("Engine: {label}\nDecoded audio queued ahead of the output: {ahead:.2} s"),
                 tone: if state == PlayState::Buffering { Tone::Warn } else { Tone::Normal },
             });
-            let underruns = status.underruns.load(std::sync::atomic::Ordering::Relaxed);
+            let underruns = status.underruns();
             if underruns > 0 {
                 out.push(Segment { text: crate::fmt::plural(underruns as usize, "underrun"), detail: "Times the output ran out of audio this session".into(), tone: Tone::Warn });
             }
         }
 
         // Download.
-        let fetched = status.fetched_bytes.load(std::sync::atomic::Ordering::Relaxed);
-        let total = status.total_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let (fetched, total) = status.fetched_bytes();
         self.diagnostics.sample_download(fetched, now);
         if state != PlayState::Stopped && (total > 0 || fetched > 0) {
             let text = if total > 0 && fetched >= total {
@@ -205,7 +204,7 @@ impl ListenerApp {
 
     /// Draws the bar: segments left to right, divided by hairlines, dropping
     /// whatever doesn't fit.
-    pub(super) fn diagnostics_bar(&mut self, ui: &mut Ui) {
+    pub fn diagnostics_bar(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let segs = self.diagnostics_segments();
         let rect = ui.available_rect_before_wrap();

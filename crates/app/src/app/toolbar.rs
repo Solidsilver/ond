@@ -168,12 +168,13 @@ impl ListenerApp {
             knob: t.text,
             knob_r: 3.5,
         };
-        let (shown, strip_resp) = self.seek_line(ui, bar, strip, "lcd-seek", &style);
-        let (elapsed, remaining) = self.seek_times(shown);
+        let mut v = self.view();
+        let (shown, strip_resp) = v.seek_line(ui, bar, strip, "lcd-seek", &style);
+        let (elapsed, remaining) = v.seek_times(shown);
         painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, elapsed, time_font.clone(), t.muted);
         painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
 
-        let hovering = body.hovered() || strip_resp.hovered() || self.seek_preview.is_some();
+        let hovering = body.hovered() || strip_resp.hovered() || self.ui.seek_preview.is_some();
         // Love: the heart at the right end, shown when loved or on hover.
         let loved = self.favorites.is_on(StarKind::Song, &item.track.id);
         // The signal path in a few characters; hover for all of it, click for the picker.
@@ -222,7 +223,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = 10.0;
         // In narrow windows the queue is a sheet: the button shows whether it's open.
-        let shown = if self.queue_narrow { self.queue_sheet } else { self.show_queue() };
+        let shown = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.show_queue() };
         let queue_icon = icons::sized_button(ui, Icon::Queue, if shown { "Hide queue (⌥⌘U)" } else { "Show queue (⌥⌘U)" }, vec2(28.0, 28.0), 14.0, Some(if shown { t.accent } else { t.muted }));
         if shown {
             ui.painter().rect_filled(queue_icon.rect, 6.0, t.accent.gamma_multiply(0.12));

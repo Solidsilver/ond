@@ -128,6 +128,7 @@ impl Pins {
     }
 
     /// How many pins include track `id`.
+    #[cfg(test)]
     pub fn refs(&self, id: &str) -> usize {
         self.pins.iter().filter(|p| p.tracks.iter().any(|t| t == id)).count()
     }

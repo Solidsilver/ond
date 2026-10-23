@@ -23,6 +23,7 @@ mod sidebar;
 mod songs;
 mod toasts;
 mod toolbar;
+mod view_ctx;
 mod widgets;
 
 #[cfg(test)]
@@ -37,7 +38,7 @@ use crate::nav::{Nav, Route};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
-use crate::player::{self, Note, Player};
+use crate::player::{self, Note, Player, QueueEdit};
 use crate::prefs::{Loaded, Prefs};
 use crate::queue::{EndAction, Source};
 use crate::search::SearchIndex;
@@ -49,6 +50,7 @@ use audio::{Command, EngineHandle, PlayState, PlaybackMode, TrackSource};
 use library::{Album, Library, Track};
 use offline::{OfflineStore, Pin, TrackRef};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
@@ -110,6 +112,13 @@ impl Data {
         self.tracks_version += 1;
     }
 
+    /// Empties it for another account's library. Versions only move forward,
+    /// so derived lists never mistake the empty library for one they've seen.
+    fn clear(&mut self) {
+        let (version, tracks_version) = (self.version + 1, self.tracks_version + 1);
+        *self = Data { version, tracks_version, ..Data::default() };
+    }
+
     #[cfg(test)]
     fn set_all_tracks(&mut self, tracks: Vec<Track>) {
         self.set_tracks(TrackSet::new(tracks));
@@ -142,6 +151,10 @@ pub use crate::player::QueueAction;
 /// A state change requested by a view; applied after the frame is drawn.
 pub enum Action {
     Go(Route),
+    /// The Info tab wants a song's play count (asked once per song).
+    NeedSongStats(String),
+    /// A lyrics view wants a song's lyrics (asked once per song).
+    NeedLyrics(Box<Track>),
     Back,
     Forward,
     BackBy(usize),
@@ -327,58 +340,23 @@ pub struct ListenerApp {
     sync: SyncState,
 
     data: Data,
-    nav: Nav,
-    sort: AlbumSort,
-    /// The album list for the current view, cached by (route, sort, data version).
-    grid: crate::memo::Memo<(Route, AlbumSort, u64), Vec<usize>>,
     actions: Vec<Action>,
     pending: Vec<Pending>,
     art: Art,
+    /// Played audio, kept for replay and seeking (also the engine's).
+    cache: streamcache::StreamCache,
 
     /// The queue and what the engine is told about it.
     player: Player,
-    /// Sidebar and queue column widths (dragged by their inner edges).
-    columns: layout::Columns,
-    /// The album page's "Album details" is unfolded (for this session).
-    album_details_open: bool,
-    /// Narrow windows: the queue opens as a sheet over the content instead.
-    queue_sheet: bool,
-    /// The window is too narrow to dock the queue column (set each frame).
-    queue_narrow: bool,
-    queue_ui: QueueUi,
-    focus: Focus,
-    /// Keyboard selection in the album/playlist track list.
-    track_sel: Option<usize>,
 
     /// Output devices and what reaches the one in use.
     output: Outputs,
     bit_perfect: bool,
-    /// Where the seek bar is being dragged to, in seconds.
-    seek_preview: Option<f64>,
 
     /// The palette's search index.
     search: SearchState,
-    songs: songs::SongsView,
-    /// Errors and notices, shown as toasts.
-    toasts: toasts::Toasts,
-    palette: Option<Palette>,
-
-    /// Full / Player / Mini and where each was.
-    windows: Windows,
-    /// Mini is held square: what was last asked of the platform, and whether it
-    /// could (if not, the size is snapped back each frame instead).
-    square_wanted: Option<bool>,
-    square_native: bool,
-    /// The window as last seen, saved on quit.
-    seen: Option<Geometry>,
-    /// After a mode switch: the size asked for, and frames left to wait for it.
-    /// The window reports its old size for a frame or two meanwhile.
-    settling: Option<([f32; 2], u32)>,
-    /// When the current mode switch was asked for (for the debug log).
-    switch_started: Option<std::time::Instant>,
-    /// When the last scroll happened (frame clock), for showing scroll bars.
-    last_scroll: f64,
-    bars_shown: bool,
+    /// What the window shows and how: places, selections, sheets, toasts.
+    ui: UiState,
     /// OS Now Playing and server scrobbles.
     now_playing: now_playing::Session,
 
@@ -390,28 +368,108 @@ pub struct ListenerApp {
     analysis: Analysis,
     /// Hearts and ratings, mirrored from the server.
     favorites: Favorites,
-    /// A sheet over the window, if one is open.
-    overlay: Option<Overlay>,
     /// The native menu bar (macOS); kept alive here.
     menu: Option<crate::menu::MenuBar>,
-    /// ⌘L: select (and scroll to) this track once its album is shown.
-    reveal: Option<String>,
-    /// Playlists added to lately, first in "Add to Playlist".
-    recent_playlists: Vec<String>,
-    fav_tab: favorites_page::FavTab,
-    /// The Settings window's section.
-    settings_section: settings_page::Section,
     /// Lyrics by track id, fetched when a lyrics view first needs them.
     lyrics: HashMap<String, crate::lyrics::Fetch>,
     /// Play counts by track id for the Info tab: absent until asked for,
     /// `None` while loading or when the server couldn't say.
     song_stats: HashMap<String, Option<SongStats>>,
-    /// Whether the lyrics column follows the sung line.
-    lyrics_follow: crate::lyrics::Follow,
-    /// The Player's details strip is open.
-    np_details: bool,
     /// The diagnostics bar: whether it's on, and what it measures.
     diagnostics: diagnostics::Diagnostics,
+}
+
+/// What the window shows and how: the place and its selections, open sheets
+/// and panels, toasts, and the window's own bookkeeping. Nothing here is
+/// library data or playback state.
+pub struct UiState {
+    pub nav: Nav,
+    pub sort: AlbumSort,
+    /// The album list for the current view, cached by (route, sort, data version).
+    pub grid: crate::memo::Memo<(Route, AlbumSort, u64), Vec<usize>>,
+    /// The album page's "Album details" is unfolded (for this session).
+    pub album_details_open: bool,
+    /// Narrow windows: the queue opens as a sheet over the content instead.
+    pub queue_sheet: bool,
+    /// The window is too narrow to dock the queue column (set each frame).
+    pub queue_narrow: bool,
+    pub queue_ui: QueueUi,
+    pub focus: Focus,
+    /// Keyboard selection in the album/playlist track list.
+    pub track_sel: Option<usize>,
+    /// Where the seek bar is being dragged to, in seconds.
+    pub seek_preview: Option<f64>,
+    pub songs: songs::SongsView,
+    /// Errors and notices, shown as toasts.
+    pub toasts: toasts::Toasts,
+    pub palette: Option<Palette>,
+    /// A sheet over the window, if one is open.
+    pub overlay: Option<Overlay>,
+    /// ⌘L: select (and scroll to) this track once its album is shown.
+    pub reveal: Option<String>,
+    /// Playlists added to lately, first in "Add to Playlist".
+    pub recent_playlists: Vec<String>,
+    pub fav_tab: favorites_page::FavTab,
+    /// The Settings window's section.
+    pub settings_section: settings_page::Section,
+    /// Whether the lyrics column follows the sung line.
+    pub lyrics_follow: crate::lyrics::Follow,
+    /// The Player's details strip is open.
+    pub np_details: bool,
+    /// Mini is held square: what was last asked of the platform, and whether it
+    /// could (if not, the size is snapped back each frame instead).
+    pub square_wanted: Option<bool>,
+    pub square_native: bool,
+    /// The window as last seen, saved on quit.
+    pub seen: Option<Geometry>,
+    /// After a mode switch: the size asked for, and frames left to wait for it.
+    /// The window reports its old size for a frame or two meanwhile.
+    pub settling: Option<([f32; 2], u32)>,
+    /// When the current mode switch was asked for (for the debug log).
+    pub switch_started: Option<std::time::Instant>,
+    /// When the last scroll happened (frame clock), for showing scroll bars.
+    pub last_scroll: f64,
+    pub bars_shown: bool,
+}
+
+impl UiState {
+    fn new(notices: Vec<String>) -> Self {
+        Self {
+            nav: Nav::default(),
+            sort: AlbumSort::default(),
+            grid: Default::default(),
+            album_details_open: false,
+            queue_sheet: false,
+            queue_narrow: false,
+            queue_ui: QueueUi::default(),
+            focus: Focus::default(),
+            track_sel: None,
+            seek_preview: None,
+            songs: songs::SongsView::default(),
+            // Something worth knowing at start-up (e.g. the library was rebuilt).
+            toasts: toasts::Toasts::with_notices(notices),
+            palette: None,
+            overlay: None,
+            reveal: None,
+            recent_playlists: Vec::new(),
+            fav_tab: favorites_page::FavTab::default(),
+            settings_section: settings_page::Section::default(),
+            lyrics_follow: crate::lyrics::Follow::default(),
+            np_details: false,
+            square_wanted: None,
+            square_native: false,
+            seen: None,
+            settling: None,
+            switch_started: None,
+            last_scroll: f64::NEG_INFINITY,
+            bars_shown: false,
+        }
+    }
+}
+
+/// Whether `track` can play right now: downloaded, or the server is there.
+fn playable(session: &Session, downloads: &Downloads, track: &Track) -> bool {
+    session.online || downloads.snap.is_done(&track.id)
 }
 
 /// The server connection and who's signed in.
@@ -453,6 +511,19 @@ pub struct SyncState {
     pub last: Option<chrono::DateTime<chrono::Local>>,
 }
 
+impl SyncState {
+    /// Marks an album sync as started, if none is running; returns whether to
+    /// start one.
+    fn begin(&mut self) -> bool {
+        if self.albums || self.tracks {
+            return false;
+        }
+        self.label = "syncing…".into();
+        self.albums = true;
+        true
+    }
+}
+
 /// The palette's search index.
 #[derive(Default)]
 pub struct SearchState {
@@ -471,16 +542,47 @@ pub struct Downloads {
     pub snap: Arc<offline::Snapshot>,
     /// Pins waiting for their track lists to load, by the same keys as `pending`.
     pub pending_pins: Vec<(ListKey, Pin)>,
+    /// The downloads folder; each account's store is a folder inside it.
+    pub base: PathBuf,
+    /// Whose store is open (`None` before anyone has signed in).
+    account: Option<u32>,
+    open: OpenStore,
 }
 
+/// Opens the offline store kept in a folder, with an optional size limit.
+type OpenStore = Arc<dyn Fn(PathBuf, Option<u64>) -> anyhow::Result<OfflineStore>>;
+
 impl Downloads {
+    /// The store folder for `account` under `base`. Before any sign-in there is
+    /// no account; an empty store stands in until one connects.
+    fn dir_for(base: &Path, account: Option<u32>) -> std::io::Result<PathBuf> {
+        match account {
+            Some(a) => offline::account_store(base, a),
+            None => Ok(base.join("signed-out")),
+        }
+    }
+
+    /// Opens `account`'s store in place of the current one (another server or
+    /// user signed in). Its pins and files stay apart from everyone else's.
+    fn switch_account(&mut self, account: Option<u32>, limit: Option<u64>) -> anyhow::Result<()> {
+        if account == self.account {
+            return Ok(());
+        }
+        let dir = Self::dir_for(&self.base, account)?;
+        self.store = (self.open)(dir, limit)?;
+        self.account = account;
+        self.pending_pins.clear();
+        self.refresh();
+        Ok(())
+    }
+
     /// Takes in what changed since the last frame.
     pub fn refresh(&mut self) {
         self.snap = self.store.snapshot();
     }
 
-    /// Applies the download actions that need nothing but the store.
-    fn apply(&mut self, action: Action) {
+    /// Applies a download action. Returns a notice to show, or an error.
+    fn apply(&mut self, action: Action, prefs: &Prefs) -> Result<Option<String>, String> {
         match action {
             Action::Unpin(pin) => {
                 self.store.unpin(&pin);
@@ -488,8 +590,32 @@ impl Downloads {
             }
             Action::PauseDownloads(paused) => self.store.set_paused(paused),
             Action::RetryDownloads => self.store.retry_failed(),
+            Action::SetOfflineLimit(bytes) => {
+                self.store.set_limit(bytes);
+                prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
+            }
+            Action::RevealOffline => {
+                std::process::Command::new("open").arg(&self.base).spawn().map_err(|e| format!("open {}: {e}", self.base.display()))?;
+            }
+            Action::MoveOffline => {
+                let current = self.base.clone();
+                let start = current.parent().unwrap_or(&current).to_owned();
+                if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
+                    // Always a folder of our own inside the chosen one: the store
+                    // tidies files it doesn't know, which must never be the user's.
+                    let dir = if chosen.file_name().is_some_and(|n| n == "Listener Offline") { chosen } else { chosen.join("Listener Offline") };
+                    if dir != current {
+                        prefs.edit(|s| {
+                            s.offline_dir = Some(dir.clone());
+                            s.offline_move_from = Some(current.clone());
+                        });
+                        return Ok(Some(format!("Downloads will move to {} when Listener restarts", dir.display())));
+                    }
+                }
+            }
             _ => unreachable!("not a download action"),
         }
+        Ok(None)
     }
 }
 
@@ -507,6 +633,21 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// Applies the analysis actions that need only the runner and preferences.
+    fn apply(&mut self, action: Action, prefs: &Prefs) {
+        match action {
+            Action::PauseAnalysis(paused) => self.runner.set_paused(paused),
+            Action::StopAnalysis => {
+                self.runner.clear();
+                self.runner.set_paused(false);
+                // A library-wide run isn't resumed at the next launch either.
+                prefs.edit(|s| s.analysis_resume = false);
+            }
+            Action::SetAnalyzePlaying(on) => prefs.edit(|s| s.analyze_playing = on),
+            _ => unreachable!("not an analysis action"),
+        }
+    }
+
     /// A track's analysis, if there is one for the file as it is now.
     pub fn of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
         self.records.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
@@ -530,10 +671,11 @@ impl ListenerApp {
         // The db is only a mirror of the server, so an unreadable one is set aside
         // and rebuilt by the sync that runs on connect.
         let (library, moved_aside) = Library::open_or_recover(&paths.library_db)?;
-        let notice = moved_aside.map(|aside| {
+        let mut notices: Vec<String> = Vec::new();
+        if let Some(aside) = moved_aside {
             tracing::warn!("library database was unreadable; moved to {} and starting fresh", aside.display());
-            format!("Library database was unreadable and is being rebuilt (old copy: {})", aside.display())
-        });
+            notices.push(format!("Library database was unreadable and is being rebuilt (old copy: {})", aside.display()));
+        }
         // Analysis results live apart from the (disposable) library mirror.
         let analyses = Arc::new(library::AnalysisStore::open(paths.library_db.with_file_name("analysis.redb"))?);
         match analyses.adopt(&library) {
@@ -547,40 +689,48 @@ impl ListenerApp {
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), library.clone());
 
         let (prefs, loaded) = Prefs::open(&paths.config_file);
-        let notice = match loaded {
-            Loaded::Unreadable { aside } => Some(format!("Settings couldn't be read and were reset; please sign in again (old copy: {})", aside.display())),
-            _ => notice,
-        };
+        if let Loaded::Unreadable { aside } = loaded {
+            notices.push(format!("Settings couldn't be read and were reset; please sign in again (old copy: {})", aside.display()));
+        }
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
-        let mut cache_cfg = audio::CacheConfig::new(&paths.stream_cache);
+        let mut cache_cfg = streamcache::CacheConfig::new(&paths.stream_cache);
         if let Some(mb) = saved.stream_cache_mb {
             cache_cfg.max_bytes = mb * 1024 * 1024;
         }
-        let cache = audio::StreamCache::new(cache_cfg, rt.handle().clone())?;
-        let offline = {
-            let dir = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
+        let cache = streamcache::StreamCache::new(cache_cfg, rt.handle().clone())?;
+        let downloads = {
+            let base = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
             // A new location chosen last time: bring the downloads along first.
             if let Some(from) = saved.offline_move_from.clone() {
-                match offline::move_store(&from, &dir) {
+                match offline::move_store(&from, &base) {
                     Ok(()) => prefs.edit(|s| s.offline_move_from = None),
                     Err(e) => tracing::warn!("moving downloads from {}: {e}", from.display()),
                 }
             }
+            let open: OpenStore = {
+                let (rt, ctx, cache) = (rt.handle().clone(), ctx.clone(), cache.clone());
+                Arc::new(move |dir, limit| {
+                    let repaint = ctx.clone();
+                    let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.clone(), Arc::new(move || repaint.request_repaint()))?;
+                    // A track that finished streaming is linked in rather than downloaded again.
+                    let cached = cache.clone();
+                    store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&streamcache::CacheKey::original(r.id.clone(), r.suffix.clone()))));
+                    Ok(store)
+                })
+            };
+            let account = if prefs.has_login() { saved.account_id() } else { None };
             let limit = saved.offline_limit_gb.map(|gb| gb * 1_000_000_000);
-            let repaint = ctx.clone();
-            let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.handle().clone(), Arc::new(move || repaint.request_repaint()))?;
-            // A track that finished streaming is linked in rather than downloaded again.
-            let cached = cache.clone();
-            store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&audio::CacheKey::original(r.id.clone(), r.suffix.clone()))));
-            store
+            let store = open(Downloads::dir_for(&base, account)?, limit)?;
+            Downloads { snap: store.snapshot(), store, pending_pins: Vec::new(), base, account, open }
         };
         let playback_cache = cache.clone();
+        let app_cache = cache.clone();
         // Analysis fetches uncached files here, so a library-wide run doesn't
         // evict what was just played.
-        let mut scratch_cfg = audio::CacheConfig::new(paths.stream_cache.with_file_name("analysis"));
+        let mut scratch_cfg = streamcache::CacheConfig::new(paths.stream_cache.with_file_name("analysis"));
         scratch_cfg.max_bytes = 64 * 1024 * 1024;
-        let scratch_cache = audio::StreamCache::new(scratch_cfg, rt.handle().clone())?;
+        let scratch_cache = streamcache::StreamCache::new(scratch_cfg, rt.handle().clone())?;
         let engine = audio::spawn(audio::EngineConfig::default(), backend, Some(cache));
         let output = Outputs::restore(&engine, prefs.clone());
         engine.send(Command::SetVolume(saved.volume));
@@ -623,8 +773,6 @@ impl ListenerApp {
         Ok(Self {
             _rt: rt,
             ctx: ctx.clone(),
-            album_details_open: false,
-            columns: layout::Columns::restore(saved.sidebar_width, saved.queue_width),
             bridge,
             inbox,
             engine,
@@ -632,50 +780,24 @@ impl ListenerApp {
             session: Session { settings: prefs.has_login().then(|| saved.clone()), ..Default::default() },
             sync: SyncState::default(),
             data: Data::default(),
-            nav: Nav::default(),
-            sort: AlbumSort::default(),
-            grid: Default::default(),
             actions: Vec::new(),
             pending: Vec::new(),
             art,
+            cache: app_cache,
             player: Player::default(),
-            queue_ui: QueueUi::default(),
-            queue_sheet: false,
-            queue_narrow: false,
-            focus: Focus::default(),
-            track_sel: None,
             output,
+            ui: UiState::new(notices),
             bit_perfect: false,
-            seek_preview: None,
             search: SearchState::default(),
-            songs: songs::SongsView::default(),
-            // Something worth knowing at start-up (e.g. the library was rebuilt).
-            toasts: toasts::Toasts::with_notice(notice),
-            palette: None,
-            windows: saved.window.clone(),
-            seen: None,
-            settling: None,
-            switch_started: None,
-            square_wanted: None,
-            square_native: false,
-            last_scroll: f64::NEG_INFINITY,
-            bars_shown: false,
             now_playing,
-            downloads: Downloads { snap: offline.snapshot(), store: offline, pending_pins: Vec::new() },
+            downloads,
             diagnostics: diagnostics::Diagnostics::default(),
             prefs,
             analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
             favorites: Favorites::default(),
-            overlay: None,
             menu: None,
-            reveal: None,
-            recent_playlists: Vec::new(),
-            fav_tab: favorites_page::FavTab::default(),
-            settings_section: settings_page::Section::default(),
             lyrics: HashMap::new(),
             song_stats: HashMap::new(),
-            lyrics_follow: crate::lyrics::Follow::default(),
-            np_details: false,
         })
     }
 
@@ -683,7 +805,14 @@ impl ListenerApp {
         match msg {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
-            Msg::Connected { client, settings, server, .. } => {
+            Msg::Connected { client, settings, server, new_account, .. } => {
+                if new_account {
+                    self.forget_library();
+                }
+                let limit = self.prefs.snapshot().offline_limit_gb.map(|gb| gb * 1_000_000_000);
+                if let Err(e) = self.downloads.switch_account(settings.account_id(), limit) {
+                    self.show_error(format!("downloads: {e}"));
+                }
                 self.session.server_label = format!("{} · {}", settings.username, server);
                 self.session.server_info = server.clone();
                 self.login = None;
@@ -864,8 +993,8 @@ impl ListenerApp {
             Msg::StarDone { kind, id, on, seq, error } => self.star_done(kind, id, on, seq, error),
             Msg::RatingDone { id, previous, seq, error } => self.rating_done(id, previous, seq, error),
             Msg::PlaylistCreated { id, name } => {
-                self.recent_playlists.insert(0, id.clone());
-                self.recent_playlists.truncate(3);
+                self.ui.recent_playlists.insert(0, id.clone());
+                self.ui.recent_playlists.truncate(3);
                 self.go(Route::Playlist { id, name });
             }
             Msg::Menu(cmd) => self.command(cmd),
@@ -882,12 +1011,12 @@ impl ListenerApp {
     /// Shows an error. Every message gets its own toast, so two failures in
     /// one batch of messages are both seen.
     pub(crate) fn show_error(&mut self, text: impl Into<String>) {
-        self.toasts.push(text.into(), true);
+        self.ui.toasts.push(text.into(), true);
     }
 
     /// Shows something worth knowing that isn't an error.
     pub(crate) fn show_notice(&mut self, text: impl Into<String>) {
-        self.toasts.push(text.into(), false);
+        self.ui.toasts.push(text.into(), false);
     }
 
     /// Something failed; if it was the network, find out whether the server is gone.
@@ -900,6 +1029,19 @@ impl ListenerApp {
     }
 
     /// The server's gone: browse what's stored, play what's downloaded.
+    /// Another server or user signed in: what was shown came from the old one.
+    /// The library database was cleared already; this drops the in-memory copy,
+    /// the queue and the cached audio, which a sync then refills.
+    fn forget_library(&mut self) {
+        self.with_player(|p, cx| p.reset(cx));
+        self.data.clear();
+        self.search.stale = true;
+        self.pending.clear();
+        self.favorites = Favorites::default();
+        self.ui.nav = Nav::default();
+        self.cache.clear();
+    }
+
     fn set_offline(&mut self) {
         self.session.online = false;
         self.session.client = None;
@@ -937,21 +1079,16 @@ impl ListenerApp {
         }
     }
 
-    /// Whether `track` can play right now: downloaded, or the server is there.
-    pub fn playable(&self, track: &Track) -> bool {
-        self.session.online || self.downloads.snap.is_done(&track.id)
-    }
-
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
     /// it's already showing that tab.
     fn toggle_side_tab(&mut self, tab: QueueTab) {
-        if self.queue_ui.tab == tab && (self.show_queue() || self.queue_sheet) {
-            self.queue_ui.tab = QueueTab::UpNext;
+        if self.ui.queue_ui.tab == tab && (self.show_queue() || self.ui.queue_sheet) {
+            self.ui.queue_ui.tab = QueueTab::UpNext;
             return;
         }
-        self.queue_ui.tab = tab;
-        if self.queue_narrow {
-            self.queue_sheet = true;
+        self.ui.queue_ui.tab = tab;
+        if self.ui.queue_narrow {
+            self.ui.queue_sheet = true;
         } else if !self.show_queue() {
             self.actions.push(Action::ToggleQueue);
         }
@@ -1016,7 +1153,7 @@ impl ListenerApp {
 
     /// Swaps in a freshly built index; an open palette re-runs its query on it.
     fn install_search(&mut self, mut index: SearchIndex) {
-        if let Some(p) = self.palette.as_mut() {
+        if let Some(p) = self.ui.palette.as_mut() {
             p.refresh(&mut index);
         }
         self.search.index = Some(index);
@@ -1057,8 +1194,15 @@ impl ListenerApp {
         result
     }
 
+    #[cfg(test)]
     fn start_current(&mut self) {
         self.with_player(|p, cx| p.start_current(cx));
+    }
+
+    fn queue_edit(&mut self, edit: QueueEdit) {
+        let mut selected = self.ui.queue_ui.selected;
+        self.with_player(|p, cx| p.edit(edit, &mut selected, cx));
+        self.ui.queue_ui.selected = selected;
     }
 
     /// Where `track` would play from now (tests).
@@ -1142,16 +1286,28 @@ impl ListenerApp {
         }
         match action {
             Action::Go(route) => self.go(route),
+            Action::NeedLyrics(track) => {
+                if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
+                    self.lyrics.insert(track.id.clone(), crate::lyrics::Fetch::Loading);
+                    self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
+                }
+            }
+            Action::NeedSongStats(id) => {
+                if !self.song_stats.contains_key(&id) && self.session.client.is_some() {
+                    self.song_stats.insert(id.clone(), None);
+                    self.bridge.fetch_song_stats(self.session.client.clone(), id);
+                }
+            }
             Action::Back => {
-                self.nav.back();
+                self.ui.nav.back();
                 self.on_arrive();
             }
             Action::Forward => {
-                self.nav.forward();
+                self.ui.nav.forward();
                 self.on_arrive();
             }
             Action::BackBy(n) => {
-                self.nav.back_by(n);
+                self.ui.nav.back_by(n);
                 self.on_arrive();
             }
             Action::Album(id, action) => {
@@ -1189,101 +1345,68 @@ impl ListenerApp {
                 }
             }
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
-            Action::JumpTo(uid) => {
-                if self.player.queue.jump_to(uid) {
-                    self.start_current();
-                }
-            }
-            Action::Replay(uid) => {
-                if self.player.queue.replay(uid) {
-                    self.start_current();
-                }
-            }
-            Action::Remove(uid) => {
-                if self.queue_ui.selected == Some(uid) {
-                    // Keep a selection for repeated ⌫.
-                    let at = self.player.queue.position(uid).unwrap_or(0);
-                    self.player.queue.remove(uid);
-                    self.queue_ui.selected = self.player.queue.upcoming.get(at).or(self.player.queue.upcoming.last()).map(|i| i.uid);
-                } else {
-                    self.player.queue.remove(uid);
-                }
-                self.sync_next();
-            }
-            Action::Move(uid, to) => {
-                self.player.queue.move_to(uid, to);
-                self.sync_next();
-            }
-            Action::MoveBy(uid, delta) => {
-                self.player.queue.move_by(uid, delta);
-                self.sync_next();
-            }
-            Action::ClearQueue => {
-                self.player.queue.clear();
-                self.sync_next();
-            }
-            Action::SetEnd(end) => {
-                self.player.queue.end = end;
-                self.sync_next();
-            }
+            Action::JumpTo(uid) => self.queue_edit(QueueEdit::JumpTo(uid)),
+            Action::Replay(uid) => self.queue_edit(QueueEdit::Replay(uid)),
+            Action::Remove(uid) => self.queue_edit(QueueEdit::Remove(uid)),
+            Action::Move(uid, to) => self.queue_edit(QueueEdit::Move(uid, to)),
+            Action::MoveBy(uid, delta) => self.queue_edit(QueueEdit::MoveBy(uid, delta)),
+            Action::ClearQueue => self.queue_edit(QueueEdit::Clear),
+            Action::SetEnd(end) => self.queue_edit(QueueEdit::SetEnd(end)),
             Action::PlayPause => self.play_pause(),
             Action::Next => self.next(),
             Action::Previous => self.previous(),
             Action::Seek(to) => self.seek(to),
             Action::OpenPalette => {
-                if self.palette.is_none() && self.search.index.is_some() {
-                    self.palette = Some(Palette::default());
+                if self.ui.palette.is_none() && self.search.index.is_some() {
+                    self.ui.palette = Some(Palette::default());
                 }
             }
             Action::SetTheme(pref) => {
                 theme::set_pref(&self.ctx, pref);
                 self.prefs.edit(|s| s.theme = pref);
             }
-            Action::ToggleQueue if self.queue_narrow => self.queue_sheet = !self.queue_sheet,
+            Action::ToggleQueue if self.ui.queue_narrow => self.ui.queue_sheet = !self.ui.queue_sheet,
             Action::ToggleQueue => self.prefs.edit(|s| s.show_queue = !s.show_queue),
             Action::SignOut => self.sign_out(),
             Action::SetMode(mode) => self.set_mode(Some(mode)),
             Action::ToggleMini => self.set_mode(None),
             Action::TogglePlayer => {
-                let plan = self.windows.toggle_player(self.seen);
+                let seen = self.ui.seen;
+                let plan = self.edit_windows(|w| w.toggle_player(seen));
                 self.follow_plan(plan);
             }
-            Action::Lyrics => match self.windows.mode {
+            Action::Lyrics => match self.window_mode() {
                 WindowMode::Full => self.toggle_side_tab(QueueTab::Lyrics),
-                WindowMode::Player => self.actions.push(Action::SetLyricsDrawer(!self.windows.lyrics_open)),
+                WindowMode::Player => self.actions.push(Action::SetLyricsDrawer(!self.lyrics_drawer())),
                 WindowMode::Mini => {
-                    self.windows.lyrics_open = true;
+                    self.edit_windows(|w| w.lyrics_open = true);
                     self.set_mode(Some(WindowMode::Player));
                 }
             },
-            Action::Info => match self.windows.mode {
+            Action::Info => match self.window_mode() {
                 WindowMode::Full => self.toggle_side_tab(QueueTab::Info),
                 WindowMode::Player => {
-                    self.queue_ui.tab = if self.queue_ui.tab == QueueTab::Info { QueueTab::UpNext } else { QueueTab::Info };
+                    self.ui.queue_ui.tab = if self.ui.queue_ui.tab == QueueTab::Info { QueueTab::UpNext } else { QueueTab::Info };
                 }
                 WindowMode::Mini => {
-                    self.queue_ui.tab = QueueTab::Info;
+                    self.ui.queue_ui.tab = QueueTab::Info;
                     self.set_mode(Some(WindowMode::Player));
                 }
             },
             Action::SetLyricsDrawer(open) => {
-                let plan = self.windows.set_lyrics(open, self.seen);
+                let seen = self.ui.seen;
+                let plan = self.edit_windows(|w| w.set_lyrics(open, seen));
                 self.follow_plan(plan);
-                self.save_windows();
             }
             Action::OpenSettings(section) => {
-                self.settings_section = section;
+                self.ui.settings_section = section;
                 self.set_mode(Some(WindowMode::Full));
-                self.overlay = Some(Overlay::Settings);
+                self.ui.overlay = Some(Overlay::Settings);
             }
             Action::SyncNow => {
-                if let Some(client) = self.session.client.clone()
-                    && self.session.online
-                    && !self.sync.albums
-                    && !self.sync.tracks
+                if let Some(client) = self.session.live().cloned()
+                    && self.sync.begin()
                 {
-                    self.sync.label = "syncing…".into();
-                    self.sync.albums = true;
                     self.bridge.sync_albums(client);
                 }
             }
@@ -1299,33 +1422,16 @@ impl ListenerApp {
             }
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
-            a @ (Action::Unpin(_) | Action::PauseDownloads(_) | Action::RetryDownloads) => self.downloads.apply(a),
-            Action::SetOfflineLimit(bytes) => {
-                self.downloads.store.set_limit(bytes);
-                self.prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
-            }
-            Action::RevealOffline => {
-                let dir = self.downloads.store.dir().to_owned();
-                if let Err(e) = std::process::Command::new("open").arg(&dir).spawn() {
-                    self.show_error(format!("open {}: {e}", dir.display()));
-                }
-            }
-            Action::MoveOffline => {
-                let current = self.downloads.store.dir().to_owned();
-                let start = current.parent().unwrap_or(&current).to_owned();
-                if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
-                    // Always a folder of our own inside the chosen one: the store
-                    // tidies files it doesn't know, which must never be the user's.
-                    let dir = if chosen.file_name().is_some_and(|n| n == "Listener Offline") { chosen } else { chosen.join("Listener Offline") };
-                    if dir != current {
-                        self.prefs.edit(|s| {
-                            s.offline_dir = Some(dir.clone());
-                            s.offline_move_from = Some(current.clone());
-                        });
-                        self.show_notice(format!("Downloads will move to {} when Listener restarts", dir.display()));
-                    }
-                }
-            }
+            a @ (Action::Unpin(_)
+            | Action::PauseDownloads(_)
+            | Action::RetryDownloads
+            | Action::SetOfflineLimit(_)
+            | Action::RevealOffline
+            | Action::MoveOffline) => match self.downloads.apply(a, &self.prefs) {
+                Ok(Some(notice)) => self.show_notice(notice),
+                Ok(None) => {}
+                Err(e) => self.show_error(e),
+            },
             Action::Analyze(tracks) => {
                 self.analysis.runner.set_paused(false);
                 self.enqueue_analysis(&tracks);
@@ -1335,17 +1441,11 @@ impl ListenerApp {
                 self.analysis.runner.set_paused(false);
                 self.resume_library_analysis();
             }
-            Action::PauseAnalysis(paused) => self.analysis.runner.set_paused(paused),
-            Action::StopAnalysis => {
-                self.analysis.runner.clear();
-                self.analysis.runner.set_paused(false);
-                self.finish_library_analysis();
-            }
-            Action::SetAnalyzePlaying(on) => self.prefs.edit(|s| s.analyze_playing = on),
+            a @ (Action::PauseAnalysis(_) | Action::StopAnalysis | Action::SetAnalyzePlaying(_)) => self.analysis.apply(a, &self.prefs),
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),
-            Action::Overlay(o) => self.overlay = Some(o),
+            Action::Overlay(o) => self.ui.overlay = Some(o),
             Action::PlaylistEdit(edit) => self.playlist_action(edit),
         }
     }
@@ -1402,6 +1502,36 @@ impl ListenerApp {
         self.prefs.get(|s| s.analyze_playing)
     }
 
+    /// Sidebar and queue column widths, as saved (dragged by their inner edges).
+    pub fn columns(&self) -> layout::Columns {
+        self.prefs.get(|s| layout::Columns::restore(s.sidebar_width, s.queue_width))
+    }
+
+    /// Saves new column widths; defaults are stored as "not set".
+    fn set_columns(&self, c: layout::Columns) {
+        self.prefs.edit(|s| {
+            s.sidebar_width = (c.left != layout::LEFT_DEFAULT).then_some(c.left);
+            s.queue_width = (c.right != layout::RIGHT_DEFAULT).then_some(c.right);
+        });
+    }
+
+    /// Full, Player or Mini.
+    pub fn window_mode(&self) -> WindowMode {
+        self.prefs.get(|s| s.window.mode)
+    }
+
+    /// The Player's lyrics drawer is open.
+    pub fn lyrics_drawer(&self) -> bool {
+        self.prefs.get(|s| s.window.lyrics_open)
+    }
+
+    /// Changes the window modes and geometry kept in the preferences.
+    fn edit_windows<R>(&self, change: impl FnOnce(&mut Windows) -> R) -> R {
+        let mut out = None;
+        self.prefs.edit(|s| out = Some(change(&mut s.window)));
+        out.expect("edit runs its closure")
+    }
+
     /// Whether the queue column is open (in windows wide enough to dock it).
     pub fn show_queue(&self) -> bool {
         self.prefs.get(|s| s.show_queue)
@@ -1431,12 +1561,6 @@ impl ListenerApp {
         self.prefs.edit(|s| s.volume = volume);
     }
 
-    /// Saves the window modes and where each was.
-    fn save_windows(&self) {
-        let w = self.windows.clone();
-        self.prefs.edit(|s| s.window = w);
-    }
-
     /// Tracks in the library without a current analysis, and their total length.
     /// Counted once per change to either, not every frame Settings is open.
     pub fn unanalysed(&mut self) -> (usize, f64) {
@@ -1452,37 +1576,38 @@ impl ListenerApp {
 
     /// Switches window mode (`None` toggles Mini) and saves the choice.
     fn set_mode(&mut self, to: Option<WindowMode>) {
-        let plan = match to {
-            Some(m) => self.windows.switch(m, self.seen),
-            None => self.windows.toggle_mini(self.seen),
-        };
+        let seen = self.ui.seen;
+        let plan = self.edit_windows(|w| match to {
+            Some(m) => w.switch(m, seen),
+            None => w.toggle_mini(seen),
+        });
         self.follow_plan(plan);
     }
 
-    /// Resizes the window to `plan` (if any) and saves the window state.
+    /// Resizes the window to `plan` (if any). The window state itself is in the
+    /// preferences already (they save in the background).
     fn follow_plan(&mut self, plan: Option<crate::window::Plan>) {
         let ctx = self.ctx.clone();
         if let Some(plan) = plan {
             plan.apply(&ctx);
             // Until the window reports its new size, don't mistake the old one for it.
-            self.seen = None;
-            self.settling = Some((plan.size, 30));
-            self.switch_started = Some(std::time::Instant::now());
+            self.ui.seen = None;
+            self.ui.settling = Some((plan.size, 30));
+            self.ui.switch_started = Some(std::time::Instant::now());
             tracing::debug!(target: "listener::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
-            self.save_windows();
         }
     }
 
     fn go(&mut self, route: Route) {
-        self.nav.go(route);
+        self.ui.nav.go(route);
         self.on_arrive();
     }
 
     /// Loads what the place we just arrived at needs.
     fn on_arrive(&mut self) {
-        self.track_sel = None;
-        self.focus = Focus::Main;
-        match self.nav.current().clone() {
+        self.ui.track_sel = None;
+        self.ui.focus = Focus::Main;
+        match self.ui.nav.current().clone() {
             Route::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
             Route::Artist { name, .. } => self.bridge.find_credited(name),
             Route::Playlist { id, .. } => {
@@ -1506,8 +1631,8 @@ impl ListenerApp {
     /// with the server and username filled in.
     fn sign_out(&mut self) {
         self.with_player(|p, cx| p.reset(cx));
-        self.palette = None;
-        self.overlay = None;
+        self.ui.palette = None;
+        self.ui.overlay = None;
         self.favorites = Favorites::default();
         self.bridge.cancel_sync();
         // Reconnect loops and connects in flight stop; anything they still
@@ -1611,7 +1736,7 @@ impl ListenerApp {
     /// own (track list, queue, palette); a sheet takes the keyboard while open
     /// except to close the shortcut list with ⌘/.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.palette.is_some() {
+        if self.ui.palette.is_some() {
             return;
         }
         use egui::{Key, Modifiers};
@@ -1626,7 +1751,7 @@ impl ListenerApp {
             cmds
         });
         for cmd in cmds {
-            if self.overlay.is_none() || cmd == Cmd::Shortcuts {
+            if self.ui.overlay.is_none() || cmd == Cmd::Shortcuts {
                 self.actions.push(Action::Command(cmd));
             }
         }
@@ -1634,7 +1759,7 @@ impl ListenerApp {
 
     /// The height our bar gives the traffic lights to centre in; `None` hides them.
     fn title_bar_h(&self) -> Option<f32> {
-        match self.windows.mode {
+        match self.window_mode() {
             WindowMode::Full => Some(toolbar::TOOLBAR_H),
             WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
             WindowMode::Mini => None,
@@ -1646,10 +1771,10 @@ impl ListenerApp {
         self.art.poll();
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
-        match self.windows.mode {
+        match self.window_mode() {
             WindowMode::Full => {
                 self.full_ui(ui);
-                self.palette_ui(&ctx);
+                self.view().palette_ui(&ctx);
                 self.overlay_ui(&ctx);
                 self.drag_ghost(&ctx);
             }
@@ -1657,8 +1782,8 @@ impl ListenerApp {
             WindowMode::Mini => self.mini_ui(ui),
         }
         // Mini is all artwork; messages wait for a bigger window.
-        if self.windows.mode != WindowMode::Mini {
-            self.toasts.ui(&ctx, ctx.content_rect());
+        if self.window_mode() != WindowMode::Mini {
+            self.ui.toasts.ui(&ctx, ctx.content_rect());
         }
         // Commands become actions; apply those in the same frame too (bounded,
         // in case something keeps asking).
@@ -1693,12 +1818,12 @@ impl ListenerApp {
     fn scroll_bars(&mut self, ctx: &egui::Context) {
         let (now, scrolling) = ctx.input(|i| (i.time, i.smooth_scroll_delta != egui::Vec2::ZERO || i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. }))));
         if scrolling {
-            self.last_scroll = now;
+            self.ui.last_scroll = now;
         }
-        let since = now - self.last_scroll;
+        let since = now - self.ui.last_scroll;
         let show = since < 1.0;
-        if show != self.bars_shown {
-            self.bars_shown = show;
+        if show != self.ui.bars_shown {
+            self.ui.bars_shown = show;
             theme::scroll_bars(ctx, show);
         }
         if show {
@@ -1712,10 +1837,11 @@ impl ListenerApp {
         // Narrow windows give the content the room: the queue becomes a sheet
         // over it, and below that the sidebar becomes a rail of icons. The
         // columns are as wide as the user dragged them.
-        let plan = self.columns.plan(width);
-        self.queue_narrow = !plan.queue_docked;
-        if !self.queue_narrow {
-            self.queue_sheet = false;
+        let mut columns = self.columns();
+        let plan = columns.plan(width);
+        self.ui.queue_narrow = !plan.queue_docked;
+        if !self.ui.queue_narrow {
+            self.ui.queue_sheet = false;
         }
 
         egui::Panel::top("toolbar")
@@ -1728,7 +1854,7 @@ impl ListenerApp {
                 .exact_size(diagnostics::BAR_H)
                 .resizable(false)
                 .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin::symmetric(12, 0)))
-                .show(ui, |ui| self.diagnostics_bar(ui));
+                .show(ui, |ui| self.view().diagnostics_bar(ui));
         }
         let left_panel = match plan.left {
             None => {
@@ -1752,14 +1878,14 @@ impl ListenerApp {
                     .rect,
             ),
         };
-        let right_panel = (self.show_queue() && !self.queue_narrow).then(|| {
+        let right_panel = (self.show_queue() && !self.ui.queue_narrow).then(|| {
             egui::Panel::right("queue")
-                .exact_size(self.columns.right)
+                .exact_size(columns.right)
                 .resizable(false)
                 .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 8, right: 8, top: 12, bottom: 8 }))
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
-                    self.queue_panel(ui, true)
+                    self.view().queue_panel(ui, true)
                 })
                 .response
                 .rect
@@ -1768,38 +1894,31 @@ impl ListenerApp {
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
             .show(ui, |ui| self.main_view(ui));
 
-        // The column edges, after the content so they win the pointer.
-        let mut save = false;
+        // The column edges, after the content so they win the pointer. Widths
+        // go straight into the preferences (saved once a drag settles).
+        let before = columns;
         if let Some(r) = left_panel {
             let d = layout::edge_handle(ui, egui::Id::unique("sidebar-edge"), r.right(), r.top(), r.bottom());
-            let limit = self.columns.left_limit(width, plan.queue_docked && self.show_queue());
+            let limit = columns.left_limit(width, plan.queue_docked && self.show_queue());
             if d.reset {
-                self.columns.left = layout::LEFT_DEFAULT.min(limit);
-                save = true;
+                columns.left = layout::LEFT_DEFAULT.min(limit);
             } else if d.dx != 0.0 {
-                self.columns.left = (self.columns.left + d.dx).clamp(layout::LEFT_MIN, limit);
+                columns.left = (columns.left + d.dx).clamp(layout::LEFT_MIN, limit);
             }
-            save |= d.released;
         }
         if let Some(r) = right_panel {
             let d = layout::edge_handle(ui, egui::Id::unique("queue-edge"), r.left(), r.top(), r.bottom());
-            let limit = self.columns.right_limit(width);
+            let limit = columns.right_limit(width);
             if d.reset {
-                self.columns.right = layout::RIGHT_DEFAULT.min(limit);
-                save = true;
+                columns.right = layout::RIGHT_DEFAULT.min(limit);
             } else if d.dx != 0.0 {
-                self.columns.right = (self.columns.right - d.dx).clamp(layout::RIGHT_MIN, limit);
+                columns.right = (columns.right - d.dx).clamp(layout::RIGHT_MIN, limit);
             }
-            save |= d.released;
         }
-        if save {
-            let c = self.columns;
-            self.prefs.edit(|s| {
-                s.sidebar_width = (c.left != layout::LEFT_DEFAULT).then_some(c.left);
-                s.queue_width = (c.right != layout::RIGHT_DEFAULT).then_some(c.right);
-            });
+        if columns != before {
+            self.set_columns(columns);
         }
-        if self.queue_sheet {
+        if self.ui.queue_sheet {
             self.queue_sheet_ui(ui.ctx(), content.response.rect);
         }
     }
@@ -1808,7 +1927,7 @@ impl ListenerApp {
     /// windows). Esc or a click outside closes it.
     fn queue_sheet_ui(&mut self, ctx: &egui::Context, content: egui::Rect) {
         let t = Tokens::of_ctx(ctx);
-        let w = self.columns.right.min(content.width() - 24.0);
+        let w = self.columns().right.min(content.width() - 24.0);
         let id = egui::Id::unique("queue-sheet");
         let area = egui::Modal::default_area(id).anchor(egui::Align2::RIGHT_TOP, egui::vec2(0.0, content.top()));
         let shadow = egui::Shadow { offset: [-6, 0], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 120 } else { 40 }) };
@@ -1819,10 +1938,10 @@ impl ListenerApp {
             .show(ctx, |ui| {
                 ui.set_width(w - 16.0);
                 ui.set_height(content.height() - 20.0);
-                self.queue_panel(ui, true);
+                self.view().queue_panel(ui, true);
             });
         if modal.should_close() {
-            self.queue_sheet = false;
+            self.ui.queue_sheet = false;
         }
     }
 }
@@ -1846,7 +1965,7 @@ impl eframe::App for ListenerApp {
         if self.analysis_library() && self.analysis.loaded && !self.data.tracks.all.is_empty() && !self.analysis.runner.progress().active() {
             self.finish_library_analysis();
         }
-        let queue = if self.queue_narrow { self.queue_sheet } else { self.show_queue() };
+        let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.show_queue() };
         let (theme, diagnostics) = self.prefs.get(|s| (s.theme, s.diagnostics_bar));
         if let Some(menu) = self.menu.as_mut() {
             menu.sync(queue, self.bit_perfect, theme);
@@ -1872,35 +1991,35 @@ impl eframe::App for ListenerApp {
             _ => {}
         }
         crate::chrome::sync(ctx, crate::chrome::Bar { height: self.title_bar_h() });
-        let square = self.windows.mode == WindowMode::Mini;
+        let square = self.window_mode() == WindowMode::Mini;
         // Until the window exists the platform can't lock it; keep asking.
-        if self.square_wanted != Some(square) || (square && !self.square_native) {
-            self.square_wanted = Some(square);
-            self.square_native = crate::window::lock_square(square) && square;
+        if self.ui.square_wanted != Some(square) || (square && !self.ui.square_native) {
+            self.ui.square_wanted = Some(square);
+            self.ui.square_native = crate::window::lock_square(square) && square;
         }
         if let Some(g) = Geometry::read(ctx) {
-            match self.settling {
+            match self.ui.settling {
                 Some((want, left)) if left > 0 && ((g.size[0] - want[0]).abs() > 2.0 || (g.size[1] - want[1]).abs() > 2.0) => {
-                    self.settling = Some((want, left - 1));
+                    self.ui.settling = Some((want, left - 1));
                     ctx.request_repaint();
                 }
                 _ => {
-                    if self.settling.take().is_some() {
+                    if self.ui.settling.take().is_some() {
                         // Our own resize has landed: put presentation back to normal
                         // (see `chrome::end_programmatic_resize`).
                         crate::chrome::end_programmatic_resize();
-                        if let Some(t) = self.switch_started.take() {
+                        if let Some(t) = self.ui.switch_started.take() {
                             tracing::debug!(target: "listener::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
                         }
                     }
                     // Mini is square; where the platform doesn't hold it so, snap back.
                     if square
-                        && !self.square_native
-                        && let Some(side) = crate::window::square(self.seen.map_or(g.size, |s| s.size), g.size)
+                        && !self.ui.square_native
+                        && let Some(side) = crate::window::square(self.ui.seen.map_or(g.size, |s| s.size), g.size)
                     {
                         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(side.into()));
                     }
-                    self.seen = Some(g);
+                    self.ui.seen = Some(g);
                 }
             }
         }
@@ -1919,10 +2038,9 @@ impl eframe::App for ListenerApp {
     }
 
     fn on_exit(&mut self) {
-        if let Some(g) = self.seen {
-            self.windows.remember(g);
+        if let Some(g) = self.ui.seen {
+            self.edit_windows(|w| w.remember(g));
         }
-        self.save_windows();
         self.prefs.flush();
     }
 }
@@ -2110,7 +2228,7 @@ mod tests {
         let pass = app.player.queue.pass_len();
         app.start_current();
         assert!(app.player.queue.history.len() <= 2 * pass, "history grew to {}", app.player.queue.history.len());
-        assert_eq!(app.toasts.texts().last().copied(), Some("Nothing in the queue is downloaded"));
+        assert_eq!(app.ui.toasts.texts().last().copied(), Some("Nothing in the queue is downloaded"));
     }
 
     #[test]
@@ -2133,21 +2251,21 @@ mod tests {
             Route::Songs,
         ];
         for (k, r) in routes.into_iter().enumerate() {
-            app.nav.go(r);
+            app.ui.nav.go(r);
             // Hover somewhere different each time so hover-only details draw too.
             let at = egui::pos2(300.0 + 37.0 * k as f32, 180.0 + 41.0 * k as f32);
             for _ in 0..2 {
                 frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
             }
         }
-        app.queue_ui.tab = QueueTab::History;
+        app.ui.queue_ui.tab = QueueTab::History;
         app.player.queue.advance();
         frame(&ctx, &mut app, Vec::new());
         app.prefs.edit(|s| s.show_queue = false);
         frame(&ctx, &mut app, Vec::new());
-        app.nav.go(Route::Album("al-0".into()));
+        app.ui.nav.go(Route::Album("al-0".into()));
         frame(&ctx, &mut app, Vec::new());
-        assert_eq!(app.nav.trail(), [&Route::Songs, &Route::Album("al-0".into())]);
+        assert_eq!(app.ui.nav.trail(), [&Route::Songs, &Route::Album("al-0".into())]);
     }
 
     #[test]
@@ -2157,16 +2275,16 @@ mod tests {
         let mut app = app(&ctx, dir.path());
         let cmd_k = egui::Event::Key { key: egui::Key::K, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
         frame(&ctx, &mut app, vec![cmd_k]);
-        assert!(app.palette.is_some());
+        assert!(app.ui.palette.is_some());
         // The field takes focus on the palette's first frame; type after that.
         frame(&ctx, &mut app, Vec::new());
         frame(&ctx, &mut app, vec![egui::Event::Text("album 12".into())]);
         frame(&ctx, &mut app, Vec::new());
-        assert_eq!(app.palette.as_ref().map(|p| p.query.as_str()), Some("album 12"));
+        assert_eq!(app.ui.palette.as_ref().map(|p| p.query.as_str()), Some("album 12"));
         let before = app.player.queue.upcoming.len();
         let alt_enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
         frame(&ctx, &mut app, vec![alt_enter]);
-        assert!(app.palette.is_none());
+        assert!(app.ui.palette.is_none());
         // Album 12's tracks aren't loaded, so the action waits for them...
         assert_eq!(app.player.queue.upcoming.len(), before);
         assert_eq!(app.pending.len(), 1);
@@ -2259,7 +2377,7 @@ mod tests {
         app.sync.albums = true;
         app.handle(Msg::AlbumSyncDone(Err("sync: timed out".into())));
         assert!(!app.sync.albums && !app.sync.tracks);
-        assert!(app.toasts.texts().contains(&"sync: timed out"));
+        assert!(app.ui.toasts.texts().contains(&"sync: timed out"));
         // While an album sync runs, Sync now doesn't start a second one.
         app.sync.albums = true;
         app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
@@ -2275,7 +2393,7 @@ mod tests {
         let mut app = app(&ctx, dir.path());
         let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
         frame(&ctx, &mut app, vec![key(egui::Key::M, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
-        assert_eq!(app.windows.mode, WindowMode::Mini);
+        assert_eq!(app.window_mode(), WindowMode::Mini);
         // Hovered (overlay drawn) and not.
         for at in [egui::pos2(100.0, 100.0), egui::pos2(-10.0, -10.0)] {
             for _ in 0..3 {
@@ -2283,19 +2401,19 @@ mod tests {
             }
         }
         frame(&ctx, &mut app, vec![key(egui::Key::Num2, egui::Modifiers::COMMAND | egui::Modifiers::ALT)]);
-        assert_eq!(app.windows.mode, WindowMode::Player);
+        assert_eq!(app.window_mode(), WindowMode::Player);
         for _ in 0..2 {
             frame(&ctx, &mut app, vec![egui::Event::PointerMoved(egui::pos2(120.0, 60.0))]);
         }
         // Browsing goes back to the full window.
         app.actions.push(Action::Go(Route::Album("al-0".into())));
         frame(&ctx, &mut app, Vec::new());
-        assert_eq!(app.windows.mode, WindowMode::Full);
+        assert_eq!(app.window_mode(), WindowMode::Full);
         // ⌘K from a small mode does too.
-        app.windows.mode = WindowMode::Player;
+        app.edit_windows(|w| w.mode = WindowMode::Player);
         frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
-        assert_eq!(app.windows.mode, WindowMode::Full);
-        assert!(app.palette.is_some());
+        assert_eq!(app.window_mode(), WindowMode::Full);
+        assert!(app.ui.palette.is_some());
     }
 
     #[test]
@@ -2306,25 +2424,25 @@ mod tests {
         frame(&ctx, &mut app, Vec::new());
         // Full window: the sidebar switches to its Lyrics tab, and back.
         app.apply(Action::Lyrics);
-        assert_eq!(app.queue_ui.tab, QueueTab::Lyrics);
+        assert_eq!(app.ui.queue_ui.tab, QueueTab::Lyrics);
         app.apply(Action::Lyrics);
-        assert_eq!(app.queue_ui.tab, QueueTab::UpNext);
+        assert_eq!(app.ui.queue_ui.tab, QueueTab::UpNext);
         // The artwork toggles to the Player (nothing used yet), where ⌥⌘L opens the drawer.
         app.apply(Action::TogglePlayer);
-        assert_eq!(app.windows.mode, WindowMode::Player);
+        assert_eq!(app.window_mode(), WindowMode::Player);
         app.apply(Action::Lyrics);
         frame(&ctx, &mut app, Vec::new());
-        assert!(app.windows.lyrics_open);
+        assert!(app.lyrics_drawer());
         // Mini, then back to full: the artwork now toggles to Mini.
         app.apply(Action::ToggleMini);
         app.apply(Action::SetMode(WindowMode::Full));
         app.apply(Action::TogglePlayer);
-        assert_eq!(app.windows.mode, WindowMode::Mini);
+        assert_eq!(app.window_mode(), WindowMode::Mini);
         // Lyrics from Mini open the Player with its drawer.
-        app.windows.lyrics_open = false;
+        app.edit_windows(|w| w.lyrics_open = false);
         app.apply(Action::Lyrics);
-        assert_eq!(app.windows.mode, WindowMode::Player);
-        assert!(app.windows.lyrics_open);
+        assert_eq!(app.window_mode(), WindowMode::Player);
+        assert!(app.lyrics_drawer());
         for _ in 0..2 {
             frame(&ctx, &mut app, Vec::new());
         }
@@ -2348,6 +2466,49 @@ mod tests {
     }
 
     #[test]
+    fn every_startup_notice_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("library.redb"), b"not a database").unwrap();
+        std::fs::write(dir.path().join("settings.json"), b"{ not json").unwrap();
+        let ctx = egui::Context::default();
+        let app = app(&ctx, dir.path());
+        let shown = app.ui.toasts.texts();
+        assert!(shown.iter().any(|t| t.starts_with("Library database was unreadable")), "{shown:?}");
+        assert!(shown.iter().any(|t| t.starts_with("Settings couldn't be read")), "{shown:?}");
+    }
+
+    #[test]
+    fn another_account_gets_its_own_library_and_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+        let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
+        let connect = |app: &mut ListenerApp, user: &str, new_account: bool| {
+            let session = app.bridge.session();
+            app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account });
+        };
+        connect(&mut app, "luke", false);
+        download(&mut app, dir.path(), "t-2");
+        assert!(app.downloads.snap.is_done("t-2"));
+
+        // Someone else signs in: the shown library goes, and so do the queue
+        // and the old account's downloads (not deleted, just not theirs).
+        app.player.queue = crate::queue::Queue::default();
+        let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..2].to_vec();
+        app.queue_tracks(tracks, Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
+        connect(&mut app, "sam", true);
+        assert!(app.data.albums.is_empty() && app.data.tracks.all.is_empty());
+        assert!(app.player.queue.current.is_none());
+        assert!(app.downloads.snap.pins.is_empty(), "sam's store starts empty");
+        assert!(!app.downloads.store.snapshot().is_done("t-2"));
+
+        // Back to the first account: its downloads are where they were.
+        connect(&mut app, "luke", true);
+        assert!(app.downloads.store.snapshot().is_done("t-2"));
+    }
+
+    #[test]
     fn offline_the_queue_plays_only_what_is_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
@@ -2363,7 +2524,7 @@ mod tests {
         app.player.queue = crate::queue::Queue::default();
         app.queue_tracks(tracks.clone(), Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
         assert_eq!(app.player.queue.current.as_ref().unwrap().track.id, "t-2");
-        assert_eq!(app.toasts.texts().last().copied(), Some("Skipped 1 song that isn't downloaded"));
+        assert_eq!(app.ui.toasts.texts().last().copied(), Some("Skipped 1 song that isn't downloaded"));
         // Nothing after it can play, so the engine isn't told about a next track.
         assert_eq!(app.player.sent_next(), None);
         // When it ends, the rest is skipped and playback stops cleanly.
@@ -2372,7 +2533,7 @@ mod tests {
 
         // Back online: everything plays again, downloaded songs still from disk.
         let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
-        app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into(), new_account: false });
         assert!(app.session.online);
         assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
         assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
@@ -2387,7 +2548,7 @@ mod tests {
         // Two failures handled before the next frame: both get a toast.
         app.handle(Msg::Error("playlists: timed out".into()));
         app.handle(Msg::Error("favorites: timed out".into()));
-        let shown = app.toasts.texts();
+        let shown = app.ui.toasts.texts();
         assert!(shown.contains(&"playlists: timed out") && shown.contains(&"favorites: timed out"), "{shown:?}");
     }
 
@@ -2399,7 +2560,7 @@ mod tests {
         let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
         // Signed in, then the server went away: a reconnect loop is running.
         let before = app.bridge.session();
-        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         assert!(app.session.online && app.session.client.is_some());
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
         assert!(app.session.unreachable);
@@ -2410,13 +2571,13 @@ mod tests {
         assert_ne!(app.bridge.session(), before, "sign-out ends the session");
 
         // The old loop reaches the server after all: stale, ignored.
-        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
         assert!(app.login.is_some(), "still on the login screen");
         assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
 
         // A fresh sign-in in the new session works.
-        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into() });
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         assert!(app.login.is_none() && app.session.online);
     }
 
@@ -2445,13 +2606,13 @@ mod tests {
         download(&mut app, dir.path(), "t-3");
 
         for route in [Route::Offline, Route::Album("al-5".into()), Route::Album("al-0".into()), Route::Recent, Route::Songs] {
-            app.nav.go(route);
+            app.ui.nav.go(route);
             for _ in 0..2 {
                 frame(&ctx, &mut app, vec![egui::Event::PointerMoved(egui::pos2(500.0, 300.0))]);
             }
         }
         // ⇧⌘D on the album page toggles it.
-        app.nav.go(Route::Album("al-5".into()));
+        app.ui.nav.go(Route::Album("al-5".into()));
         let key = egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT };
         frame(&ctx, &mut app, vec![key]);
         assert!(!app.downloads.store.is_pinned(&Pin::Album("al-5".into())));

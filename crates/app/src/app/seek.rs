@@ -2,7 +2,8 @@
 //! or drag to seek, the downloaded part shaded, a pulse ahead of the position
 //! while buffering, and a knob while it's held or hovered.
 
-use super::{Action, ListenerApp};
+use super::Action;
+use super::view_ctx::ViewCtx;
 use audio::PlayState;
 use egui::{Color32, Rect, Response, Sense, Ui, pos2, vec2};
 
@@ -24,11 +25,11 @@ pub(super) struct SeekStyle {
     pub knob_r: f32,
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// Draws `bar` and handles seeking from `strip` (a taller area around it,
     /// easier to grab). Returns the position it shows (the drag preview while
     /// dragging) and the strip's response.
-    pub(super) fn seek_line(&mut self, ui: &mut Ui, bar: Rect, strip: Rect, id: &str, s: &SeekStyle) -> (f64, Response) {
+    pub fn seek_line(&mut self, ui: &mut Ui, bar: Rect, strip: Rect, id: &str, s: &SeekStyle) -> (f64, Response) {
         let state = self.engine.status.state();
         let dur = self.duration_secs().filter(|d| *d > 0.0);
         let seekable = dur.is_some() && matches!(state, PlayState::Playing | PlayState::Paused | PlayState::Buffering);
@@ -38,23 +39,23 @@ impl ListenerApp {
             if (resp.dragged() || resp.drag_started())
                 && let Some(p) = resp.interact_pointer_pos()
             {
-                self.seek_preview = Some(frac_at(p.x) * d);
+                self.ui.seek_preview = Some(frac_at(p.x) * d);
             }
             if resp.drag_stopped() || resp.clicked() {
-                if let Some(to) = resp.interact_pointer_pos().map(|p| frac_at(p.x) * d).or(self.seek_preview) {
+                if let Some(to) = resp.interact_pointer_pos().map(|p| frac_at(p.x) * d).or(self.ui.seek_preview) {
                     self.actions.push(Action::Seek(to));
                 }
-                self.seek_preview = None;
+                self.ui.seek_preview = None;
             }
         }
         let painter = ui.painter();
-        let grabbed = resp.hovered() || self.seek_preview.is_some();
+        let grabbed = resp.hovered() || self.ui.seek_preview.is_some();
         let line = if grabbed { bar.expand2(vec2(0.0, s.grow)) } else { bar };
         painter.rect_filled(line, s.radius, s.track);
         if let Some(f) = self.engine.status.fetched_fraction() {
             painter.rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * f.clamp(0.0, 1.0), line.bottom())), s.radius, s.fetched);
         }
-        let shown = self.seek_preview.unwrap_or_else(|| self.position_secs());
+        let shown = self.ui.seek_preview.unwrap_or_else(|| self.position_secs());
         let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
         painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), s.radius, s.fill);
         if state == PlayState::Buffering || self.player.pending_seek.is_some() {
@@ -71,7 +72,7 @@ impl ListenerApp {
 
     /// The elapsed and remaining times for a line showing `shown`: "2:21",
     /// "−4:02" (empty while the length isn't known).
-    pub(super) fn seek_times(&self, shown: f64) -> (String, String) {
+    pub fn seek_times(&self, shown: f64) -> (String, String) {
         let remaining = self.duration_secs().filter(|d| *d > 0.0).map(|d| format!("−{}", crate::fmt::clock((d - shown).max(0.0)))).unwrap_or_default();
         (crate::fmt::clock(shown), remaining)
     }

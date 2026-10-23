@@ -1,9 +1,10 @@
 //! Favorites: loved songs, albums and artists, one kind at a time.
 
+use super::view_ctx::ViewCtx;
 use super::album_page::ListOpts;
 use super::browse::grid_metrics;
 use super::widgets::{choice, elide};
-use super::{Action, ListenerApp};
+use super::{Action};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::queue::Source;
@@ -23,7 +24,7 @@ pub fn favorites_source() -> Source {
     Source::Playlist { id: "favorites".into(), name: "Favorites".into() }
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     pub(super) fn favorites_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let v = self.favorites.view.clone();
@@ -37,7 +38,7 @@ impl ListenerApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Right-to-left layout: the pill itself still reads left to right.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    choice(ui, &[FavTab::Songs, FavTab::Albums, FavTab::Artists], &mut self.fav_tab, None, label);
+                    choice(ui, &[FavTab::Songs, FavTab::Albums, FavTab::Artists], &mut self.ui.fav_tab, None, label);
                 });
             });
         });
@@ -46,7 +47,7 @@ impl ListenerApp {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
         }
-        match self.fav_tab {
+        match self.ui.fav_tab {
             FavTab::Songs => {
                 if v.songs.is_empty() {
                     return empty(ui, "Songs you love show up here. Click the heart on a track, or press ⇧⌘L while one plays.");

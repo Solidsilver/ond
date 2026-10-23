@@ -4,8 +4,9 @@
 //! The same column can show the playing track's lyrics (in the full window)
 //! or its details instead (Up Next · History · Lyrics · Info).
 
+use super::view_ctx::ViewCtx;
 use super::widgets::{choice, elide};
-use super::{Action, Focus, ListenerApp, QueueTab};
+use super::{Action, Focus, QueueTab};
 use crate::icons::{self, Icon};
 use crate::queue::{EndAction, Item, Source, clock_label, end_offset, start_offsets};
 use crate::theme::{Tokens, semibold};
@@ -26,13 +27,13 @@ fn group_icon(s: &Source) -> Icon {
     }
 }
 
-impl ListenerApp {
+impl ViewCtx<'_> {
     /// The column: Up Next or History, plus a Lyrics tab when `lyrics_tab`
     /// (the full window; the Player has its lyrics drawer instead).
     pub(super) fn queue_panel(&mut self, ui: &mut Ui, lyrics_tab: bool) {
         let t = Tokens::of(ui);
-        if !lyrics_tab && self.queue_ui.tab == QueueTab::Lyrics {
-            self.queue_ui.tab = QueueTab::UpNext;
+        if !lyrics_tab && self.ui.queue_ui.tab == QueueTab::Lyrics {
+            self.ui.queue_ui.tab = QueueTab::UpNext;
         }
         let now = chrono::Local::now().time();
         let remaining = match (self.player.queue.current.as_ref(), self.duration_secs()) {
@@ -46,11 +47,11 @@ impl ListenerApp {
             tabs.push(QueueTab::Lyrics);
         }
         tabs.push(QueueTab::Info);
-        let until = (self.player.queue.current.is_some() && !self.player.queue.upcoming.is_empty() && self.queue_ui.tab == QueueTab::UpNext)
+        let until = (self.player.queue.current.is_some() && !self.player.queue.upcoming.is_empty() && self.ui.queue_ui.tab == QueueTab::UpNext)
             .then(|| format!("until {}", clock_label(now, end_offset(remaining, &self.player.queue.upcoming))));
         let mut until_below = false;
         ui.horizontal(|ui| {
-            choice(ui, &tabs, &mut self.queue_ui.tab, None, |t| t.label().into());
+            choice(ui, &tabs, &mut self.ui.queue_ui.tab, None, |t| t.label().into());
             if let Some(until) = &until {
                 // Beside the switch when there's room, else on its own line.
                 let w = ui.painter().layout_no_wrap(until.clone(), FontId::proportional(11.0), t.muted).size().x;
@@ -71,7 +72,7 @@ impl ListenerApp {
             });
         }
         ui.add_space(6.0);
-        match self.queue_ui.tab {
+        match self.ui.queue_ui.tab {
             QueueTab::Lyrics => return self.sidebar_lyrics(ui),
             // The Player already shows the song large right above.
             QueueTab::Info => return self.sidebar_info(ui, lyrics_tab),
@@ -82,7 +83,7 @@ impl ListenerApp {
         let list_h = (ui.available_height() - footer_h).max(60.0);
         egui::ScrollArea::vertical().id_salt("queue").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            match self.queue_ui.tab {
+            match self.ui.queue_ui.tab {
                 QueueTab::UpNext => self.up_next(ui, now, remaining),
                 QueueTab::History | QueueTab::Lyrics | QueueTab::Info => self.history(ui),
             }
@@ -96,7 +97,6 @@ impl ListenerApp {
                 let label = |e: EndAction| match e {
                     EndAction::Stop => "Stop",
                     EndAction::RepeatQueue => "Repeat queue",
-                    EndAction::Similar => "Continue with similar",
                 };
                 let mut end = self.player.queue.end;
                 let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text)
@@ -104,9 +104,6 @@ impl ListenerApp {
                 egui::Popup::menu(&button).show(|ui| {
                     ui.selectable_value(&mut end, EndAction::Stop, label(EndAction::Stop));
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
-                    ui.add_enabled_ui(false, |ui| ui.selectable_value(&mut end, EndAction::Similar, label(EndAction::Similar)))
-                        .response
-                        .on_disabled_hover_text("Not available yet");
                 });
                 if end != self.player.queue.end {
                     self.actions.push(Action::SetEnd(end));
@@ -125,7 +122,7 @@ impl ListenerApp {
         });
     }
 
-    fn up_next(&mut self, ui: &mut Ui, now: chrono::NaiveTime, remaining: f64) {
+    pub(super) fn up_next(&mut self, ui: &mut Ui, now: chrono::NaiveTime, remaining: f64) {
         let t = Tokens::of(ui);
         if self.player.queue.upcoming.is_empty() {
             ui.add_space(24.0);
@@ -141,7 +138,7 @@ impl ListenerApp {
         for (gi, g) in groups.iter().enumerate() {
             let key = g.source.key();
             let foldable = g.len > FOLD_OVER && gi > 0;
-            let open = *self.queue_ui.open.get(&key).unwrap_or(&!foldable);
+            let open = *self.ui.queue_ui.open.get(&key).unwrap_or(&!foldable);
             // Group header: icon + name, and a count with a chevron when it folds.
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
             if ui.is_rect_visible(rect) {
@@ -158,7 +155,7 @@ impl ListenerApp {
             let label = format!("{}, {} tracks, {}", g.source.label(), g.len, if open { "expanded" } else { "collapsed" });
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, &label));
             if resp.clicked() {
-                self.queue_ui.open.insert(key, !open);
+                self.ui.queue_ui.open.insert(key, !open);
             }
             if !open {
                 continue;
@@ -177,7 +174,7 @@ impl ListenerApp {
         }
     }
 
-    fn history(&mut self, ui: &mut Ui) {
+    pub(super) fn history(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         if self.player.queue.history.is_empty() {
             ui.add_space(24.0);
@@ -192,14 +189,14 @@ impl ListenerApp {
 
     /// One queue item. `index` is its place in `upcoming` (None in history).
     /// Drag to reorder; double-click plays; right-click has the actions.
-    fn queue_row(&mut self, ui: &mut Ui, item: &Item, index: Option<usize>, starts_at: Option<String>) {
+    pub(super) fn queue_row(&mut self, ui: &mut Ui, item: &Item, index: Option<usize>, starts_at: Option<String>) {
         let t = Tokens::of(ui);
         let sense = if index.is_some() { Sense::click_and_drag() } else { Sense::click() };
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
-        let selected = self.queue_ui.selected == Some(item.uid);
+        let selected = self.ui.queue_ui.selected == Some(item.uid);
         if ui.is_rect_visible(rect) {
             // A selection the keyboard isn't on reads as a hover.
-            let focused = selected && self.focus == Focus::Queue;
+            let focused = selected && self.ui.focus == Focus::Queue;
             ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, focused, resp.hovered() || selected));
             let art = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 16.0), vec2(32.0, 32.0));
             let cover = self.data.cover_for(&item.track).map(str::to_owned);
@@ -245,8 +242,8 @@ impl ListenerApp {
             }
         }
         if resp.clicked() {
-            self.queue_ui.selected = Some(item.uid);
-            self.focus = Focus::Queue;
+            self.ui.queue_ui.selected = Some(item.uid);
+            self.ui.focus = Focus::Queue;
         }
         if resp.double_clicked() {
             self.actions.push(if index.is_some() { Action::JumpTo(item.uid) } else { Action::Replay(item.uid) });
@@ -273,12 +270,12 @@ impl ListenerApp {
     }
 
     /// With a queue item selected: ↑/↓ select, ⌥↑/⌥↓ move it, ⌫ remove, ⏎ play.
-    fn queue_keys(&mut self, ui: &Ui) {
-        let Some(uid) = self.queue_ui.selected else { return };
+    pub(super) fn queue_keys(&mut self, ui: &Ui) {
+        let Some(uid) = self.ui.queue_ui.selected else { return };
         let Some(at) = self.player.queue.position(uid) else { return };
         let Some(k) = self.list_keys(ui, Focus::Queue, true, true) else { return };
         if let Some(to) = k.step(Some(at), self.player.queue.upcoming.len()) {
-            self.queue_ui.selected = Some(self.player.queue.upcoming[to].uid);
+            self.ui.queue_ui.selected = Some(self.player.queue.upcoming[to].uid);
         }
         if k.move_up {
             self.actions.push(Action::MoveBy(uid, -1));
@@ -293,8 +290,8 @@ impl ListenerApp {
             self.actions.push(Action::JumpTo(uid));
         }
         if k.escape {
-            self.queue_ui.selected = None;
-            self.focus = Focus::Main;
+            self.ui.queue_ui.selected = None;
+            self.ui.focus = Focus::Main;
         }
     }
 }

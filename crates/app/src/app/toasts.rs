@@ -26,10 +26,10 @@ pub struct Toasts {
 }
 
 impl Toasts {
-    /// Starts with `notice` showing, if there is one.
-    pub fn with_notice(notice: Option<String>) -> Self {
+    /// Starts with every startup notice showing.
+    pub fn with_notices(notices: Vec<String>) -> Self {
         let mut t = Self::default();
-        if let Some(n) = notice {
+        for n in notices {
             t.push(n, false);
         }
         t

@@ -381,3 +381,44 @@ fn a_resume_answered_from_the_wrong_offset_starts_over() {
     assert_eq!(server.requests(), [Some(1000), None]);
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
+
+#[test]
+fn each_account_keeps_its_own_downloads_and_old_stores_are_adopted() {
+    let base = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(20_000);
+    let server = Server::start(body.clone(), OPTS);
+    // A store kept straight in the downloads folder, as older versions did.
+    let s = store(base.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    s.set_source(None);
+    drop(s);
+
+    // The account signed in at the time takes it over, files and all.
+    let mine = account_store(base.path(), 1).unwrap();
+    let s = store(&mine, &rt);
+    assert!(s.snapshot().is_done("t"));
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+    drop(s);
+
+    // Another account starts empty and never sees those pins.
+    let theirs = account_store(base.path(), 2).unwrap();
+    assert_ne!(mine, theirs);
+    let s = store(&theirs, &rt);
+    assert!(s.snapshot().pins.is_empty());
+    drop(s);
+
+    // Back to the first account: everything is still there.
+    let s = store(&account_store(base.path(), 1).unwrap(), &rt);
+    assert!(s.snapshot().is_done("t"));
+    // Moving the whole downloads folder brings every account along.
+    drop(s);
+    let to = tempfile::tempdir().unwrap();
+    let moved = to.path().join("Offline");
+    move_store(base.path(), &moved).unwrap();
+    let s = store(&account_store(&moved, 1).unwrap(), &rt);
+    assert!(s.snapshot().is_done("t"));
+    assert_eq!(server.requests().len(), 1);
+}

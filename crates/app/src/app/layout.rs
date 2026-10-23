@@ -78,8 +78,6 @@ pub fn clamp_right(w: f32) -> f32 {
 pub struct Drag {
     /// Horizontal pointer movement while dragging.
     pub dx: f32,
-    /// Let go after dragging: time to save the width.
-    pub released: bool,
     /// Double-clicked: back to the default width.
     pub reset: bool,
 }
@@ -97,7 +95,7 @@ pub fn edge_handle(ui: &Ui, id: Id, x: f32, top: f32, bottom: f32) -> Drag {
         // Painted after the columns, so it lies over their edge.
         ui.painter().line_segment([pos2(x, top), pos2(x, bottom)], Stroke::new(2.0, color));
     }
-    Drag { dx: if resp.dragged() { resp.drag_delta().x } else { 0.0 }, released: resp.drag_stopped(), reset: resp.double_clicked() }
+    Drag { dx: if resp.dragged() { resp.drag_delta().x } else { 0.0 }, reset: resp.double_clicked() }
 }
 
 #[cfg(test)]

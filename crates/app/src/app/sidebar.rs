@@ -76,7 +76,7 @@ impl ListenerApp {
             for p in self.data.playlists.clone() {
                 let route = Route::Playlist { id: p.id.clone(), name: p.name.clone() };
                 let on = active.as_ref() == Some(&route);
-                let mine = self.owns(&p);
+                let mine = self.view().owns(&p);
                 let resp = self.place(ui, &p.name, on);
                 // A drop target for songs dragged from any list.
                 if mine && dragging {
@@ -98,7 +98,7 @@ impl ListenerApp {
                     super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, &mut self.actions);
                     if mine {
                         ui.separator();
-                        self.playlist_edit_items(ui, &p.id, &p.name);
+                        self.view().playlist_edit_items(ui, &p.id, &p.name);
                     }
                 });
             }
@@ -316,7 +316,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let button = icons::sized_button(ui, Icon::Gear, "Settings (⌘,)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
         if button.clicked() {
-            self.actions.push(Action::OpenSettings(self.settings_section));
+            self.actions.push(Action::OpenSettings(self.ui.settings_section));
         }
     }
 
@@ -341,11 +341,11 @@ impl ListenerApp {
 
     /// The sidebar entry the current place belongs to.
     fn sidebar_active(&self) -> Option<Route> {
-        let current = self.nav.current();
+        let current = self.ui.nav.current();
         if current.is_root() {
             return Some(current.clone());
         }
-        self.nav.trail().first().filter(|r| r.is_root()).map(|r| (*r).clone())
+        self.ui.nav.trail().first().filter(|r| r.is_root()).map(|r| (*r).clone())
     }
 
     fn section(&self, ui: &mut Ui, text: &str) {

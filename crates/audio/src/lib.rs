@@ -29,7 +29,6 @@ pub mod coreaudio;
 mod decode;
 mod device;
 mod dither;
-mod dsp;
 pub mod output;
 pub mod replaygain;
 mod resample;
@@ -37,13 +36,12 @@ mod signal;
 
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
-pub use dsp::Dsp;
 pub use output::{CpalBackend, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
 pub use dither::Tpdf;
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
 pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, adjust, assess, choose_rate, describe, khz};
-pub use streamcache::{CacheConfig, CacheKey, StreamCache};
+use streamcache::{CacheKey, StreamCache};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use decode::{DecoderMsg, Session};
@@ -197,27 +195,27 @@ pub enum PlayState {
 pub struct Status {
     state: AtomicU8,
     /// Frames the device has actually consumed for the current track.
-    pub frames_played: AtomicU64,
+    pub(crate) frames_played: AtomicU64,
     /// 0 when unknown (e.g. unseekable stream without a duration header).
-    pub total_frames: AtomicU64,
-    pub sample_rate: AtomicU32,
-    pub underruns: AtomicU64,
+    pub(crate) total_frames: AtomicU64,
+    pub(crate) sample_rate: AtomicU32,
+    pub(crate) underruns: AtomicU64,
     /// Decoded frames queued ahead of the output (the ring's fill), as of the
     /// last callback.
-    pub buffered_frames: AtomicU64,
+    pub(crate) buffered_frames: AtomicU64,
     /// Bytes of the current track on disk, and its size (0 when unknown or local).
-    pub fetched_bytes: AtomicU64,
-    pub total_bytes: AtomicU64,
+    pub(crate) fetched_bytes: AtomicU64,
+    pub(crate) total_bytes: AtomicU64,
     /// Playback is downloading: the current track (whatever its size, known or
     /// not, as with a transcode) or the next one's prefetch isn't complete.
     pub(crate) downloading: AtomicBool,
     /// Track boundaries the output has crossed in this session (bumped by the callback).
-    pub track_seq: AtomicU64,
+    pub(crate) track_seq: AtomicU64,
     volume_bits: AtomicU32,
     pub(crate) paused: AtomicBool,
     /// The callback is holding or prebuffering.
     pub(crate) buffering: AtomicBool,
-    /// The current mode: read by the callback (gain bypass) and the DSP stage.
+    /// The current mode: read by the output callback (gain bypass).
     pub(crate) bit_perfect: AtomicBool,
     /// ReplayGain per session track, read by the callback at each boundary.
     pub(crate) gains: TrackGains,
@@ -277,6 +275,16 @@ impl Status {
         self.downloading.load(Ordering::Relaxed)
     }
 
+    /// Times the output ran dry since the engine started.
+    pub fn underruns(&self) -> u64 {
+        self.underruns.load(Ordering::Relaxed)
+    }
+
+    /// Bytes of the current file on disk and its size (0 when unknown or local).
+    pub fn fetched_bytes(&self) -> (u64, u64) {
+        (self.fetched_bytes.load(Ordering::Relaxed), self.total_bytes.load(Ordering::Relaxed))
+    }
+
     pub fn duration_secs(&self) -> Option<f64> {
         let total = self.total_frames.load(Ordering::Relaxed);
         (total > 0).then(|| secs(total, self.sample_rate.load(Ordering::Relaxed)))
@@ -298,6 +306,21 @@ impl Status {
         self.fetched_bytes.store((fetched.clamp(0.0, 1.0) * 1_000_000.0) as u64, Ordering::Relaxed);
         self.buffered_frames.store((1.6 * RATE as f64) as u64, Ordering::Relaxed);
         self.downloading.store(fetched < 1.0, Ordering::Relaxed);
+    }
+}
+
+/// How often the engine checks on playback while something is happening.
+const TICK: Duration = Duration::from_millis(10);
+/// The longest it sleeps while stopped or paused (it still notices devices
+/// coming and going). A command always wakes it at once.
+const IDLE_TICK: Duration = Duration::from_millis(250);
+
+/// The next wait after a quiet one: back to `TICK` while playing or loading,
+/// otherwise doubling up to `IDLE_TICK`, so a stopped engine barely wakes.
+fn next_wait(wait: Duration, state: PlayState) -> Duration {
+    match state {
+        PlayState::Stopped | PlayState::Paused => (wait * 2).min(IDLE_TICK),
+        _ => TICK,
     }
 }
 
@@ -356,6 +379,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 ring: None,
                 next: None,
                 prefetched: None,
+                held_seek: None,
                 device_modes: HashMap::new(),
                 current_device: None,
                 known: Vec::new(),
@@ -412,6 +436,8 @@ struct Engine {
     next: Option<TrackSource>,
     /// Id of the track already handed to the cache's prefetch slot.
     prefetched: Option<String>,
+    /// A seek the output is holding for, until the decoder reports it done.
+    held_seek: Option<Duration>,
     device_modes: HashMap<String, PlaybackMode>,
     /// UID of the device in use, when the backend can tell.
     current_device: Option<String>,
@@ -426,11 +452,15 @@ struct Engine {
 
 impl Engine {
     fn run(mut self, commands: Receiver<Command>) {
+        let mut wait = TICK;
         loop {
-            match commands.recv_timeout(Duration::from_millis(10)) {
+            match commands.recv_timeout(wait) {
                 Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-                Ok(cmd) => self.handle(cmd),
-                Err(RecvTimeoutError::Timeout) => {}
+                Ok(cmd) => {
+                    self.handle(cmd);
+                    wait = TICK;
+                }
+                Err(RecvTimeoutError::Timeout) => wait = next_wait(wait, self.status.state()),
             }
             self.poll_session();
             self.poll_fetch();
@@ -460,7 +490,14 @@ impl Engine {
                 }
             }
             Command::Stop => self.stop(),
-            Command::SetVolume(v) => self.status.set_volume(v),
+            Command::SetVolume(v) => {
+                let was_full = self.status.volume() >= 1.0;
+                self.status.set_volume(v);
+                // Leaving or reaching full volume changes whether samples are requantized.
+                if was_full != (self.status.volume() >= 1.0) {
+                    self.report_signal_path();
+                }
+            }
             Command::SetGain(cfg) => {
                 *self.gain.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
                 for seq in self.out_seq..self.tracks.len() as u64 {
@@ -522,6 +559,7 @@ impl Engine {
     }
 
     fn stop(&mut self) {
+        self.held_seek = None;
         if let Some(s) = self.session.take() {
             s.cancel();
         }
@@ -568,6 +606,7 @@ impl Engine {
         let hold = self.ring.as_ref().map_or(0, |r| r.ctl.hold());
         if hold > 0 {
             self.status.buffering.store(true, Ordering::Relaxed);
+            self.held_seek = Some(to);
         }
         session.seek(self.out_seq, to, hold);
     }
@@ -705,8 +744,11 @@ impl Engine {
         // The integer format actually in use: what the callback dithers to.
         let device_bits = caps.as_ref().and_then(|c| c.active_bits);
         let resampled = device_rate != source.sample_rate;
+        // Software volume changes samples too, outside bit-perfect mode.
+        let volume = self.config.mode == PlaybackMode::Normal && self.status.volume() < 1.0;
         let recomputed = matches!(channels, ChannelChange::Downmix { .. })
-            || matches!(gain, GainState::Applied(g) if g.linear != 1.0);
+            || matches!(gain, GainState::Applied(g) if g.linear != 1.0)
+            || volume;
         let dithered = device_bits
             .is_some_and(|b| b < 32 && (resampled || recomputed || source.bits_per_sample.is_none_or(|s| s > b)));
         let path = SignalPath {
@@ -777,6 +819,7 @@ impl Engine {
                     }
                 }
                 DecoderMsg::Seeked { seq, position_secs } => {
+                    self.held_seek = None;
                     if let Some(t) = self.tracks.get(seq as usize) {
                         let track_id = t.src.id.clone();
                         let _ = self.events.send(Event::Seeked { track_id, position_secs });
@@ -799,6 +842,17 @@ impl Engine {
                     }
                 }
             }
+        }
+
+        // The decoder exited just as a seek went in (it had finished the last
+        // track), so nothing will release the output: start over at the target.
+        if finished
+            && let Some(to) = self.held_seek.take()
+        {
+            if let Some(src) = self.current().map(|t| t.src.clone()) {
+                self.restart_at(src, to);
+            }
+            return;
         }
 
         // Track boundaries the callback has played past.

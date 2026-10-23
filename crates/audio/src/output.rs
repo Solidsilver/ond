@@ -531,11 +531,13 @@ fn start_stream(
     let sample_format = range.sample_format();
     let config: StreamConfig = range.with_sample_rate(format.sample_rate).into();
 
+    // 16- and 24-bit integer formats get TPDF dither when samples are off their
+    // grid; 32-bit integers are finer than the f32 samples themselves.
     let stream = match sample_format {
-        SampleFormat::F32 => build::<f32>(&device, config, input, status, drained),
-        SampleFormat::I32 => build::<i32>(&device, config, input, status, drained),
-        SampleFormat::I24 => build::<cpal::I24>(&device, config, input, status, drained),
-        SampleFormat::I16 => build::<i16>(&device, config, input, status, drained),
+        SampleFormat::F32 => build::<f32>(&device, config, input, status, drained, None),
+        SampleFormat::I32 => build::<i32>(&device, config, input, status, drained, None),
+        SampleFormat::I24 => build::<cpal::I24>(&device, config, input, status, drained, Some(24)),
+        SampleFormat::I16 => build::<i16>(&device, config, input, status, drained, Some(16)),
         other => return Err(OutputError::Device(format!("unsupported sample format {other}"))),
     }
     .map_err(dev_err)?;
@@ -549,19 +551,57 @@ fn build<T>(
     mut input: RingInput,
     status: Arc<Status>,
     drained: Arc<AtomicBool>,
+    device_bits: Option<u32>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
 {
     let channels = config.channels as usize;
     let rate = config.sample_rate;
+    // Allocated here, never in the callback.
+    let mut scratch = vec![0.0f32; SCRATCH_FRAMES * channels];
+    let mut dither = Tpdf::default();
     let callback = move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
-        if input.fill(out, channels, rate, &status) {
+        if fill_converted(&mut input, out, &mut scratch, channels, rate, &status, device_bits, &mut dither) {
             drained.store(true, Ordering::Release);
         }
     };
     let on_error = |e: cpal::Error| tracing::warn!("output stream: {e}");
     device.build_output_stream(config, callback, on_error, None)
+}
+
+/// Frames the cpal callback converts at a time (larger than any buffer it asks for).
+const SCRATCH_FRAMES: usize = 16_384;
+
+/// Fills `out` from the ring. For an integer device (`device_bits`) the samples
+/// go through `scratch` first so they're dithered to its grid where needed,
+/// rather than truncated by the conversion.
+#[allow(clippy::too_many_arguments)]
+fn fill_converted<T>(
+    input: &mut RingInput,
+    out: &mut [T],
+    scratch: &mut [f32],
+    channels: usize,
+    rate: u32,
+    status: &Status,
+    device_bits: Option<u32>,
+    dither: &mut Tpdf,
+) -> bool
+where
+    T: SizedSample + FromSample<f32>,
+{
+    if device_bits.is_none() || scratch.is_empty() {
+        return input.fill(out, channels, rate, status);
+    }
+    let mut drained = false;
+    for chunk in out.chunks_mut(scratch.len()) {
+        let buf = &mut scratch[..chunk.len()];
+        drained = input.fill_for_device(buf, channels, rate, status, device_bits, dither);
+        for (o, s) in chunk.iter_mut().zip(buf.iter()) {
+            *o = T::from_sample(*s);
+        }
+    }
+    drained
 }
 
 #[cfg(test)]
@@ -835,5 +875,31 @@ mod tests {
         assert!(input.needs_dither(16) && !input.needs_dither(24));
         input.fill_for_device(&mut out, 2, RATE, &status, None, &mut dither);
         assert_eq!(out.map(f32::to_bits).to_vec(), off.iter().map(|s| s.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_16_bit_cpal_device_gets_dither_not_truncation() {
+        // A quarter of a 16-bit step, from a 24-bit source: truncation would
+        // turn all of it into silence; dither keeps it, on average.
+        let quarter = 0.25 / 32_768.0;
+        let samples = vec![quarter as f32; 64];
+        let (_p, _m, input) = ring(&samples, true);
+        let mut input = input.with_source(Some(24), false);
+        let status = Status::default();
+        status.set_volume(1.0);
+        let mut out = [0i16; 64];
+        let mut scratch = vec![0.0f32; 128];
+        fill_converted(&mut input, &mut out, &mut scratch, 2, RATE, &status, Some(16), &mut Tpdf::default());
+        assert!(out.iter().any(|&s| s != 0), "dither keeps sub-step detail");
+        assert!(out.iter().all(|&s| (-2..=2).contains(&s)), "{out:?}");
+
+        // Bit-perfect content already on the grid passes through exactly.
+        let exact: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) / 32_768.0).collect();
+        let (_p, _m, input) = ring(&exact, true);
+        let mut input = input.with_source(Some(16), false);
+        let status = bit_perfect_status();
+        let mut out = [0i16; 64];
+        fill_converted(&mut input, &mut out, &mut scratch, 2, RATE, &status, Some(16), &mut Tpdf::default());
+        assert_eq!(out.to_vec(), (0..64).map(|i| i as i16 - 32).collect::<Vec<_>>());
     }
 }

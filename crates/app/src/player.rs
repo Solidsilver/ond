@@ -308,6 +308,59 @@ impl Player {
 }
 
 /// Fisher–Yates with a clock-seeded xorshift (no need for a crypto RNG here).
+/// A change to the queue itself, from the queue column or its keys.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QueueEdit {
+    JumpTo(u64),
+    Replay(u64),
+    Remove(u64),
+    Move(u64, usize),
+    /// One step earlier (-1) or later (+1).
+    MoveBy(u64, isize),
+    Clear,
+    SetEnd(crate::queue::EndAction),
+}
+
+impl Player {
+    /// Applies `edit` and tells the engine what changed. `selected` is the
+    /// queue column's selection: when the selected item is removed it moves to
+    /// a neighbour, so ⌫ can be pressed again.
+    pub fn edit(&mut self, edit: QueueEdit, selected: &mut Option<u64>, cx: &mut Ctx<'_>) {
+        let q = &mut self.queue;
+        match edit {
+            QueueEdit::JumpTo(uid) => {
+                if q.jump_to(uid) {
+                    self.start_current(cx);
+                }
+                return;
+            }
+            QueueEdit::Replay(uid) => {
+                if q.replay(uid) {
+                    self.start_current(cx);
+                }
+                return;
+            }
+            QueueEdit::Remove(uid) if *selected == Some(uid) => {
+                let at = q.position(uid).unwrap_or(0);
+                q.remove(uid);
+                *selected = q.upcoming.get(at).or(q.upcoming.last()).map(|i| i.uid);
+            }
+            QueueEdit::Remove(uid) => {
+                q.remove(uid);
+            }
+            QueueEdit::Move(uid, to) => {
+                q.move_to(uid, to);
+            }
+            QueueEdit::MoveBy(uid, delta) => {
+                q.move_by(uid, delta);
+            }
+            QueueEdit::Clear => q.clear(),
+            QueueEdit::SetEnd(end) => q.end = end,
+        }
+        self.sync_next(cx);
+    }
+}
+
 pub fn shuffle<T>(v: &mut [T]) {
     let mut s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.as_nanos() as u64) | 1;
     for i in (1..v.len()).rev() {

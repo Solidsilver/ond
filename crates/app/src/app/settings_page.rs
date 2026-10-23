@@ -63,15 +63,15 @@ impl ListenerApp {
             });
             nav.add_space(12.0);
             for s in Section::ALL {
-                if self.place(&mut nav, s.label(), self.settings_section == s).clicked() {
-                    self.settings_section = s;
+                if self.place(&mut nav, s.label(), self.ui.settings_section == s).clicked() {
+                    self.ui.settings_section = s;
                 }
             }
 
             // The pane.
             let pane = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
             let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(pane).layout(egui::Layout::top_down(egui::Align::Min)));
-            egui::ScrollArea::vertical().id_salt(("settings-pane", self.settings_section)).auto_shrink(false).show(&mut ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("settings-pane", self.ui.settings_section)).auto_shrink(false).show(&mut ui, |ui| {
                 ui.add_space(20.0);
                 ui.horizontal(|ui| {
                     ui.add_space(PANE_PAD);
@@ -79,9 +79,9 @@ impl ListenerApp {
                         let width = pane.width() - PANE_PAD * 2.0;
                         ui.set_width(width);
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(egui::RichText::new(self.settings_section.label()).font(FontId::new(20.0, semibold())).color(t.text));
+                        ui.label(egui::RichText::new(self.ui.settings_section.label()).font(FontId::new(20.0, semibold())).color(t.text));
                         ui.add_space(16.0);
-                        match self.settings_section {
+                        match self.ui.settings_section {
                             Section::General => self.general_settings(ui),
                             Section::Playback => self.playback_settings(ui, width),
                             Section::Output => self.output_settings(ui),
@@ -95,7 +95,7 @@ impl ListenerApp {
             });
         });
         if modal.should_close() {
-            self.overlay = None;
+            self.ui.overlay = None;
         }
     }
 
@@ -232,7 +232,7 @@ impl ListenerApp {
             }
         });
         group(ui, "Location", |ui| {
-            let dir = self.downloads.store.dir().display().to_string();
+            let dir = self.downloads.base.display().to_string();
             let g = super::widgets::elide(ui, &dir, FontId::proportional(12.0), t.muted, ui.available_width());
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
             ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, t.muted);
@@ -365,7 +365,7 @@ impl ListenerApp {
             ui.add_space(14.0);
             if danger(ui, "Sign out").clicked() {
                 self.actions.push(Action::SignOut);
-                self.overlay = None;
+                self.ui.overlay = None;
             }
             ui.add_space(6.0);
             hint(ui, "Forgets the saved password. Downloads stay on this computer.");

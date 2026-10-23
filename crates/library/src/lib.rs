@@ -46,6 +46,8 @@ const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_sta
 const ANALYSIS: TableDefinition<&str, &[u8]> = TableDefinition::new("analysis");
 
 const SCHEMA_KEY: &str = "schema_version";
+/// Which server account the mirror belongs to (a hash of server and user).
+const ACCOUNT_KEY: &str = "account";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -118,19 +120,10 @@ impl AnalysisStore {
     /// aside (`<name>.bad-<unix secs>`) and a fresh store started.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let open = |p: &Path| -> Result<Self> {
-            let db = Database::create(p)?;
-            let wt = db.begin_write()?;
-            wt.open_table(ANALYSIS)?;
-            wt.commit()?;
-            Ok(Self { db })
-        };
+        let open = |p: &Path| Self::init(Database::create(p)?);
         match open(path) {
             Err(e) if e.is_damage() => {
-                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                let mut aside = path.as_os_str().to_owned();
-                aside.push(format!(".bad-{stamp}"));
-                std::fs::rename(path, PathBuf::from(aside)).map_err(|io| Error::Db(Box::new(redb::StorageError::Io(io).into())))?;
+                set_aside(path)?;
                 open(path)
             }
             other => other,
@@ -138,7 +131,10 @@ impl AnalysisStore {
     }
 
     pub fn in_memory() -> Result<Self> {
-        let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
+        Self::init(Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?)
+    }
+
+    fn init(db: Database) -> Result<Self> {
         let wt = db.begin_write()?;
         wt.open_table(ANALYSIS)?;
         wt.commit()?;
@@ -169,13 +165,7 @@ impl AnalysisStore {
 
     /// Every stored record, by track id.
     pub fn records(&self) -> Result<Vec<(String, Vec<u8>)>> {
-        let rt = self.db.begin_read()?;
-        let mut out = Vec::new();
-        for entry in rt.open_table(ANALYSIS)?.iter()? {
-            let (id, bytes) = entry?;
-            out.push((id.value().to_owned(), bytes.value().to_vec()));
-        }
-        Ok(out)
+        analysis_rows(&self.db)
     }
 
     pub fn put(&self, track_id: &str, record: &[u8]) -> Result<()> {
@@ -202,11 +192,7 @@ impl Library {
         match Self::open(path) {
             Ok(lib) => Ok((lib, None)),
             Err(e) if e.is_damage() => {
-                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                let mut aside = path.as_os_str().to_owned();
-                aside.push(format!(".bad-{stamp}"));
-                let aside = PathBuf::from(aside);
-                std::fs::rename(path, &aside).map_err(|io| Error::Db(Box::new(redb::StorageError::Io(io).into())))?;
+                let aside = set_aside(path)?;
                 Ok((Self::open(path)?, Some(aside)))
             }
             Err(e) => Err(e),
@@ -244,6 +230,7 @@ impl Library {
         Ok(Self { db })
     }
 
+    #[cfg(test)]
     pub fn schema_version(&self) -> Result<u32> {
         let rt = self.db.begin_read()?;
         Ok(rt.open_table(META)?.get(SCHEMA_KEY)?.map_or(0, |v| v.value()))
@@ -268,6 +255,38 @@ impl Library {
         Ok(wt.commit()?)
     }
 
+    /// Records that the mirror belongs to `account` (a stable hash of server
+    /// and user). When it held another account's library, everything that came
+    /// from that server is cleared first and `true` is returned. A database
+    /// from before accounts were recorded is taken to be this account's.
+    pub fn claim_account(&self, account: u32) -> Result<bool> {
+        let wt = self.db.begin_write()?;
+        let cleared = {
+            let mut meta = wt.open_table(META)?;
+            let previous = meta.get(ACCOUNT_KEY)?.map(|v| v.value());
+            let other = previous.is_some_and(|p| p != account);
+            if other {
+                wt.open_table(ARTISTS)?.retain(|_, _| false)?;
+                wt.open_table(ALBUMS)?.retain(|_, _| false)?;
+                wt.open_table(TRACKS)?.retain(|_, _| false)?;
+                wt.open_table(ARTISTS_BY_NAME)?.retain(|_, _| false)?;
+                wt.open_table(ALBUMS_BY_SORT)?.retain(|_, _| false)?;
+                wt.open_table(TRACKS_BY_ALBUM)?.retain(|_, _| false)?;
+                wt.open_table(CREDITS)?.retain(|_, _| false)?;
+                wt.open_table(ALBUM_STAMPS)?.retain(|_, _| false)?;
+                wt.open_table(ANALYSIS)?.retain(|_, _| false)?;
+                // Sync progress and similar flags were about the old library.
+                meta.retain(|k, _| k == SCHEMA_KEY)?;
+            }
+            if previous != Some(account) {
+                meta.insert(ACCOUNT_KEY, account)?;
+            }
+            other
+        };
+        wt.commit()?;
+        Ok(cleared)
+    }
+
     /// Replaces the whole artist list with what the server returned.
     pub fn replace_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
         let wt = self.db.begin_write()?;
@@ -285,6 +304,7 @@ impl Library {
         Ok(wt.commit()?)
     }
 
+    #[cfg(test)]
     pub fn upsert_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
         let wt = self.db.begin_write()?;
         {
@@ -358,17 +378,10 @@ impl Library {
         Ok(wt.commit()?)
     }
 
-    /// Stamps of albums whose tracks are stored and current as of that stamp.
     /// Analysis records stored here by older builds; they now live in an
     /// [`AnalysisStore`], which takes them over with [`AnalysisStore::adopt`].
     fn legacy_analysis_records(&self) -> Result<Vec<(String, Vec<u8>)>> {
-        let rt = self.db.begin_read()?;
-        let mut out = Vec::new();
-        for entry in rt.open_table(ANALYSIS)?.iter()? {
-            let (id, bytes) = entry?;
-            out.push((id.value().to_owned(), bytes.value().to_vec()));
-        }
-        Ok(out)
+        analysis_rows(&self.db)
     }
 
     fn clear_legacy_analysis(&self) -> Result<()> {
@@ -377,6 +390,7 @@ impl Library {
         Ok(wt.commit()?)
     }
 
+    /// Stamps of albums whose tracks are stored and current as of that stamp.
     pub fn album_stamps(&self) -> Result<HashMap<String, u64>> {
         let rt = self.db.begin_read()?;
         let mut out = HashMap::new();
@@ -409,6 +423,7 @@ impl Library {
         Ok(out)
     }
 
+    /// Number of stored tracks. Public for the app's sync tests.
     pub fn track_count(&self) -> Result<u64> {
         Ok(self.db.begin_read()?.open_table(TRACKS)?.len()?)
     }
@@ -440,9 +455,29 @@ impl Library {
             }
             ids
         };
+        let wt = self.db.begin_write()?;
         for id in &gone {
-            self.remove_album(id)?;
+            remove_album_in(&wt, id)?;
         }
+        // Tracks stored by a bulk sync for an album the library never had.
+        let orphans: Vec<String> = {
+            let albums = wt.open_table(ALBUMS)?;
+            let by_album = wt.open_table(TRACKS_BY_ALBUM)?;
+            let mut ids: Vec<String> = Vec::new();
+            for entry in by_album.iter()? {
+                let (key, _) = entry?;
+                let album = key.value().0;
+                if ids.last().map(String::as_str) != Some(album) && albums.get(album)?.is_none() {
+                    ids.push(album.to_owned());
+                }
+            }
+            ids
+        };
+        for id in &orphans {
+            TrackTables::open(&wt)?.remove_album(id)?;
+            wt.open_table(ALBUM_STAMPS)?.remove(id.as_str())?;
+        }
+        wt.commit()?;
         Ok(gone.len())
     }
 
@@ -450,18 +485,7 @@ impl Library {
     /// the album existed.
     pub fn remove_album(&self, id: &str) -> Result<bool> {
         let wt = self.db.begin_write()?;
-        let existed = {
-            TrackTables::open(&wt)?.remove_album(id)?;
-            wt.open_table(ALBUM_STAMPS)?.remove(id)?;
-            let mut rows = wt.open_table(ALBUMS)?;
-            let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
-            let old = rows.remove(id)?.map(|g| decode::<Album>(g.value())).transpose()?;
-            if let Some(old) = &old {
-                let (artist, year, title) = old.sort_parts();
-                idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
-            }
-            old.is_some()
-        };
+        let existed = remove_album_in(&wt, id)?;
         wt.commit()?;
         Ok(existed)
     }
@@ -521,12 +545,13 @@ impl Library {
         Ok(ids.into_iter().collect())
     }
 
+    #[cfg(test)]
     pub fn album_count(&self) -> Result<u64> {
         Ok(self.db.begin_read()?.open_table(ALBUMS)?.len()?)
     }
 
     /// Checks that every index entry points at a row and every row has exactly
-    /// its expected index entry. For tests and a future "verify library" command.
+    /// its expected index entry. Public for the app's sync tests.
     pub fn check_indexes(&self) -> Result<Vec<String>> {
         let rt = self.db.begin_read()?;
         let mut problems = Vec::new();
@@ -580,6 +605,41 @@ impl Library {
 
 /// Schema upgrades, run inside the opening write transaction. Each step takes
 /// the db from `from` to `from + 1`.
+/// Moves an unreadable database file out of the way as `<name>.bad-<unix secs>`.
+fn set_aside(path: &Path) -> Result<PathBuf> {
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".bad-{stamp}"));
+    let aside = PathBuf::from(aside);
+    std::fs::rename(path, &aside).map_err(|io| Error::Db(Box::new(redb::StorageError::Io(io).into())))?;
+    Ok(aside)
+}
+
+/// Every row of the analysis table in `db` (either database keeps one).
+fn analysis_rows(db: &Database) -> Result<Vec<(String, Vec<u8>)>> {
+    let rt = db.begin_read()?;
+    let mut out = Vec::new();
+    for entry in rt.open_table(ANALYSIS)?.iter()? {
+        let (id, bytes) = entry?;
+        out.push((id.value().to_owned(), bytes.value().to_vec()));
+    }
+    Ok(out)
+}
+
+/// Removes an album, its tracks and their index entries within `wt`.
+fn remove_album_in(wt: &WriteTransaction, id: &str) -> Result<bool> {
+    TrackTables::open(wt)?.remove_album(id)?;
+    wt.open_table(ALBUM_STAMPS)?.remove(id)?;
+    let mut rows = wt.open_table(ALBUMS)?;
+    let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
+    let old = rows.remove(id)?.map(|g| decode::<Album>(g.value())).transpose()?;
+    if let Some(old) = &old {
+        let (artist, year, title) = old.sort_parts();
+        idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
+    }
+    Ok(old.is_some())
+}
+
 fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
     for v in from..SCHEMA_VERSION {
         match v {
