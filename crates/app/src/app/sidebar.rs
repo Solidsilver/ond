@@ -102,8 +102,15 @@ impl ListenerApp {
             }
         });
 
-        // Settings, pinned to the bottom.
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| self.settings_button(ui));
+        // Settings, pinned to the bottom, with sync or offline state beside it
+        // while there is any.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.horizontal(|ui| {
+                self.settings_button(ui);
+                ui.add_space(2.0);
+                self.sidebar_status(ui);
+            });
+        });
     }
 
     /// The narrow-window sidebar: one icon per place, playlists behind a
@@ -143,7 +150,95 @@ impl ListenerApp {
                 }
             });
         });
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| self.settings_button(ui));
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            self.settings_button(ui);
+            self.rail_status(ui);
+        });
+    }
+
+    /// What the app is doing in the background, if anything: syncing (a ring
+    /// with progress, Stop on hover) or offline (a quiet pill). Nothing when idle.
+    fn sidebar_status(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let w = ui.available_width();
+        if let Some(state) = self.background_state() {
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
+            let painter = ui.painter();
+            let ring = egui::pos2(rect.left() + 8.0, rect.center().y);
+            let font = egui::FontId::proportional(11.5);
+            match &state {
+                Background::Syncing { label, fraction, .. } => {
+                    match fraction {
+                        Some(f) => icons::progress_ring(painter, ring, 5.5, *f, t.accent, t.hairline),
+                        None => {
+                            icons::paint(painter, Rect::from_center_size(ring, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                        }
+                    }
+                    let stop_w = if resp.hovered() && self.track_syncing { 34.0 } else { 0.0 };
+                    let g = crate::app::elide_text(ui, label, font, t.muted, rect.width() - 22.0 - stop_w);
+                    painter.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, t.muted);
+                    if stop_w > 0.0 {
+                        let stop = Rect::from_min_max(egui::pos2(rect.right() - stop_w, rect.top()), rect.max);
+                        let hot = ui.rect_contains_pointer(stop);
+                        painter.text(stop.right_center(), egui::Align2::RIGHT_CENTER, "Stop", egui::FontId::proportional(11.5), if hot { t.text } else { t.accent });
+                        if resp.clicked() && hot {
+                            self.bridge.cancel_sync();
+                        }
+                    }
+                }
+                Background::Offline => {
+                    let label = "Offline";
+                    let g = painter.layout_no_wrap(label.into(), font, t.muted);
+                    let pill = Rect::from_min_size(egui::pos2(rect.left(), rect.center().y - 10.0), vec2(g.size().x + 30.0, 20.0));
+                    painter.rect_filled(pill, 10.0, t.field);
+                    icons::paint(painter, Rect::from_center_size(egui::pos2(pill.left() + 12.0, pill.center().y), vec2(11.0, 11.0)), Icon::Offline, t.muted);
+                    painter.galley(egui::pos2(pill.left() + 22.0, pill.center().y - g.size().y / 2.0), g, t.muted);
+                }
+            }
+            let tip = state.tooltip();
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, &tip));
+            resp.on_hover_text(tip);
+        }
+    }
+
+    /// The rail's version of [`Self::sidebar_status`]: just the ring or the
+    /// offline glyph, with the words in a tooltip.
+    fn rail_status(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let Some(state) = self.background_state() else { return };
+        let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::hover());
+        let c = rect.center();
+        match &state {
+            Background::Syncing { fraction: Some(f), .. } => icons::progress_ring(ui.painter(), c, 5.5, *f, t.accent, t.hairline),
+            Background::Syncing { fraction: None, .. } => {
+                icons::paint(ui.painter(), Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            Background::Offline => icons::paint(ui.painter(), Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
+        }
+        let tip = state.tooltip();
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, &tip));
+        resp.on_hover_text(tip);
+    }
+
+    fn background_state(&self) -> Option<Background> {
+        if let Some(p) = self.sync_progress {
+            let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
+            let (done, total) = (thousands(p.done), thousands(p.total));
+            let label = match p.unit {
+                crate::sync::Unit::Tracks => format!("Syncing {done} of {total}"),
+                crate::sync::Unit::Albums => format!("Syncing album {done} of {total}"),
+            };
+            return Some(Background::Syncing { label, detail: p.label(), fraction });
+        }
+        if self.album_syncing || (self.track_syncing && self.online) {
+            return Some(Background::Syncing { label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None });
+        }
+        if !self.online && self.settings.is_some() {
+            return Some(Background::Offline);
+        }
+        None
     }
 
     fn playlist_menu(&mut self, ui: &mut Ui, id: &str) {
@@ -254,4 +349,32 @@ fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Background work worth a glance in the sidebar footer.
+enum Background {
+    Syncing { label: String, detail: String, fraction: Option<f32> },
+    Offline,
+}
+
+impl Background {
+    fn tooltip(&self) -> String {
+        match self {
+            Background::Syncing { detail, .. } => format!("{detail}\nBrowsing works meanwhile; new albums and tracks appear as they arrive."),
+            Background::Offline => "Can't reach the server. Downloaded music still plays; reconnecting in the background.".into(),
+        }
+    }
+}
+
+/// 1866 → "1,866".
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

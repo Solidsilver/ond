@@ -116,14 +116,24 @@ impl ListenerApp {
                     if self.output.picker_ui(ui, &self.engine, &self.paths, &mut self.bit_perfect) {
                         self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
                     }
-                    if let Some(e) = self.error.clone() {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if icons::sized_button(ui, Icon::Close, "Dismiss", vec2(18.0, 18.0), 8.0, Some(t.muted)).clicked() {
-                                self.error = None;
+                    // The same few characters of signal path as the full window's display.
+                    let readout = self.output.readout(&self.engine.status);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(r) = readout {
+                            let size = crate::output::paint_readout(ui, egui::Pos2::ZERO, &r, 10.5, false).size();
+                            let (rect, resp) = ui.allocate_exact_size(size + vec2(4.0, 6.0), Sense::click());
+                            crate::output::paint_readout(ui, rect.right_center() - vec2(2.0, 0.0), &r, 10.5, true);
+                            if resp.clicked() {
+                                self.output.request_open();
                             }
-                            ui.add(egui::Label::new(egui::RichText::new(e).small().color(t.warn)).truncate());
-                        });
-                    }
+                            resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        }
+                        if !self.online && self.settings.is_some() {
+                            let (g, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                            icons::paint(ui.painter(), g, Icon::Offline, t.muted);
+                            resp.on_hover_text("Can't reach the server. Downloaded music still plays.");
+                        }
+                    });
                 });
             });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.panel)).show(ui, |ui| {

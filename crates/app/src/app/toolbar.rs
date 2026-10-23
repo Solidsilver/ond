@@ -76,14 +76,22 @@ impl ListenerApp {
         self.art.paint(ui, art.shrink(1.0), cover.as_deref(), 6.0);
 
         let text_rect = Rect::from_min_max(pos2(art.right() + 8.0, rect.top()), pos2(rect.right() - 8.0, rect.bottom()));
-        let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_rect.width() - 80.0);
+        // The heart's slot at the right end; the signal readout sits just left of it.
+        let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y - 1.0), vec2(22.0, 22.0));
+        let readout = self.output.readout(&self.engine.status);
+        let readout_anchor = pos2(heart.left() - 2.0, rect.bottom() - 11.0);
+        let readout_rect = readout.as_ref().map(|r| crate::output::paint_readout(ui, readout_anchor, r, 10.0, false));
+        // The title is centred, so keep the same margin on both sides of it.
+        let reserve = readout_rect.map_or(40.0, |r| (rect.right() - r.left() + 6.0).max(40.0));
+        let text_w = (text_rect.width() - 2.0 * reserve).max(40.0);
+        let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_w);
         let sub_text = match (&item.track.artist, &album) {
             (Some(a), Some(al)) => format!("{a} — {}", al.name),
             (Some(a), None) => a.clone(),
             (None, Some(al)) => al.name.clone(),
             _ => String::new(),
         };
-        let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_rect.width() - 80.0);
+        let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
         let block_h = title.size().y + sub.size().y;
         let y0 = text_rect.center().y - block_h / 2.0 - 1.0;
         painter.galley(pos2(text_rect.center().x - title.size().x / 2.0, y0), title, t.text);
@@ -127,7 +135,17 @@ impl ListenerApp {
         let hovering = body.hovered() || strip_resp.hovered() || self.seek_preview.is_some();
         // Love: the heart at the right end, shown when loved or on hover.
         let loved = self.favorites.is_on(StarKind::Song, &item.track.id);
-        let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y - 1.0), vec2(22.0, 22.0));
+        // The signal path in a few characters; hover for all of it, click for the picker.
+        let readout_resp = readout.as_ref().zip(readout_rect).map(|(r, area)| {
+            crate::output::paint_readout(ui, readout_anchor, r, 10.0, true);
+            let resp = ui.interact(area.expand2(vec2(3.0, 3.0)), ui.scope_id().with("lcd-readout"), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
+            resp
+        });
+        let on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
+        if readout_resp.as_ref().is_some_and(|r| r.clicked()) {
+            self.output.request_open();
+        }
         let heart_resp = ui.interact(heart, ui.scope_id().with("lcd-heart"), if loved || hovering { Sense::click() } else { Sense::hover() });
         if loved || hovering || heart_resp.hovered() {
             let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if heart_resp.hovered() { t.text } else { t.muted }) };
@@ -152,17 +170,20 @@ impl ListenerApp {
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         // The artwork opens Now Playing; the rest of the display, the album.
         let on_art = body.interact_pointer_pos().or(body.hover_pos()).is_some_and(|p| art.contains(p));
-        if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() {
+        if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() && !on_readout {
             let to = if on_art { Route::NowPlaying } else { Route::Album(item.track.album_id.clone()) };
             self.actions.push(Action::Go(to));
         }
         if on_art && body.hovered() {
             painter.rect_stroke(art.shrink(1.0), 6.0, egui::Stroke::new(1.5, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
         }
-        if !heart_resp.hovered() {
+        if !heart_resp.hovered() && !on_readout {
             body.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
         heart_resp.on_hover_text(love_label);
+        if let (Some(resp), Some(r)) = (readout_resp, readout) {
+            resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
     }
 
     /// Queue toggle · volume · output chip (laid out right to left).
