@@ -30,8 +30,7 @@ const DIALOG_W: f32 = 340.0;
 impl ListenerApp {
     pub(super) fn overlay_ui(&mut self, ctx: &egui::Context) {
         if matches!(self.overlay, Some(Overlay::Settings)) {
-            // The gear popover's contents, as a sheet; `settings_ui` needs `self`.
-            self.settings_sheet(ctx);
+            self.settings_window(ctx);
             return;
         }
         let Some(overlay) = self.overlay.as_mut() else { return };
@@ -86,22 +85,6 @@ impl ListenerApp {
             if let Some(a) = action {
                 self.actions.push(a);
             }
-        }
-    }
-
-    fn settings_sheet(&mut self, ctx: &egui::Context) {
-        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::symmetric(12, 14)).corner_radius(12);
-        let modal = egui::Modal::new(egui::Id::unique("settings-sheet")).frame(frame).show(ctx, |ui| {
-            let t = Tokens::of(ui);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Settings").font(FontId::new(15.0, semibold())).color(t.text));
-            });
-            ui.add_space(8.0);
-            self.settings_ui(ui);
-        });
-        if modal.should_close() {
-            self.overlay = None;
         }
     }
 }

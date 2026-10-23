@@ -1,0 +1,461 @@
+//! The Settings window (⌘,): a list of sections on the left, one calm pane
+//! on the right. Everything that used to hide in popovers (appearance,
+//! ReplayGain, streaming, per-device modes, downloads, sync, analysis, the
+//! account) lives here; the popovers keep only what's needed in the moment.
+
+use super::widgets::{danger, menu_label, secondary, section, segmented, segmented_wide, thin_slider, toggle};
+use super::{Action, ListenerApp};
+use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
+use crate::theme::{ThemePref, Tokens, semibold};
+use audio::PlaybackMode;
+use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use offline::human_bytes;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Section {
+    #[default]
+    General,
+    Playback,
+    Output,
+    Offline,
+    Library,
+    Account,
+}
+
+impl Section {
+    pub const ALL: [Section; 6] = [Section::General, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::General => "General",
+            Section::Playback => "Playback",
+            Section::Output => "Output",
+            Section::Offline => "Offline",
+            Section::Library => "Library",
+            Section::Account => "Account",
+        }
+    }
+}
+
+const NAV_W: f32 = 176.0;
+/// The right pane's content width (it scrolls when taller than the window).
+const PANE_PAD: f32 = 28.0;
+
+impl ListenerApp {
+    pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
+        let screen = ctx.content_rect();
+        let w = (screen.width() - 64.0).clamp(480.0, 760.0);
+        let h = (screen.height() - 96.0).clamp(340.0, 540.0);
+        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::ZERO).corner_radius(12);
+        let modal = egui::Modal::new(egui::Id::unique("settings-window")).frame(frame).show(ctx, |ui| {
+            let t = Tokens::of(ui);
+            let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+            let side = Rect::from_min_size(rect.min, vec2(NAV_W, h));
+            ui.painter().rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ..Default::default() }, t.sidebar);
+            ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
+
+            // Section list.
+            let mut nav = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(vec2(10.0, 16.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+            nav.spacing_mut().item_spacing.y = 2.0;
+            nav.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Settings").font(FontId::new(15.0, semibold())).color(t.text));
+            });
+            nav.add_space(12.0);
+            for s in Section::ALL {
+                if self.place(&mut nav, s.label(), self.settings_section == s).clicked() {
+                    self.settings_section = s;
+                }
+            }
+
+            // The pane.
+            let pane = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
+            let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(pane).layout(egui::Layout::top_down(egui::Align::Min)));
+            egui::ScrollArea::vertical().id_salt(("settings-pane", self.settings_section)).auto_shrink(false).show(&mut ui, |ui| {
+                ui.add_space(20.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(PANE_PAD);
+                    ui.vertical(|ui| {
+                        let width = pane.width() - PANE_PAD * 2.0;
+                        ui.set_width(width);
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(egui::RichText::new(self.settings_section.label()).font(FontId::new(20.0, semibold())).color(t.text));
+                        ui.add_space(16.0);
+                        match self.settings_section {
+                            Section::General => self.general_settings(ui),
+                            Section::Playback => self.playback_settings(ui, width),
+                            Section::Output => self.output_settings(ui),
+                            Section::Offline => self.offline_settings(ui),
+                            Section::Library => self.library_settings(ui),
+                            Section::Account => self.account_settings(ui),
+                        }
+                        ui.add_space(24.0);
+                    });
+                });
+            });
+        });
+        if modal.should_close() {
+            self.overlay = None;
+        }
+    }
+
+    fn general_settings(&mut self, ui: &mut Ui) {
+        group(ui, "Appearance", |ui| {
+            let prefs = [ThemePref::System, ThemePref::Light, ThemePref::Dark];
+            let at = prefs.iter().position(|p| *p == self.theme).unwrap_or(0);
+            if let Some(i) = segmented_wide(ui, &["System", "Light", "Dark"], at, 240.0) {
+                self.actions.push(Action::SetTheme(prefs[i]));
+            }
+        });
+        group(ui, "Listening", |ui| {
+            let mut scrobble = self.scrobble;
+            if narrow_toggle(ui, &mut scrobble, "Scrobble plays").changed() {
+                self.actions.push(Action::SetScrobble(scrobble));
+            }
+            hint(ui, "Plays are reported to your server, which passes them on to Last.fm or ListenBrainz if set up.");
+            ui.add_space(10.0);
+            let mut playing = self.analyze_playing;
+            if narrow_toggle(ui, &mut playing, "Analyze tracks as they play").changed() {
+                self.actions.push(Action::SetAnalyzePlaying(playing));
+            }
+            hint(ui, "Measures loudness and dynamic range once a track has downloaded for playback.");
+        });
+    }
+
+    fn playback_settings(&mut self, ui: &mut Ui, width: f32) {
+        let mut p: PlaybackPrefs = self.output.prefs().clone();
+        let before = p.clone();
+        group(ui, "ReplayGain", |ui| {
+            let at = RgMode::ALL.iter().position(|m| *m == p.replay_gain).unwrap_or(0);
+            let labels: Vec<&str> = RgMode::ALL.iter().map(|m| m.label()).collect();
+            if let Some(i) = segmented_wide(ui, &labels, at, width.min(360.0)) {
+                p.replay_gain = RgMode::ALL[i];
+            }
+            hint(ui, p.replay_gain.hint());
+            if p.replay_gain != RgMode::Off {
+                ui.add_space(12.0);
+                db_row(ui, "Pre-amp", &mut p.preamp_db, -12.0..=12.0, width);
+                db_row(ui, "Untagged tracks", &mut p.untagged_db, -12.0..=0.0, width);
+                hint(ui, "Gain for tracks without ReplayGain tags. Peaks are always kept below −1 dBFS.");
+            }
+            if self.bit_perfect {
+                ui.add_space(6.0);
+                hint(ui, "Bypassed while bit-perfect is on.");
+            }
+        });
+        group(ui, "Streaming", |ui| {
+            let at = QualityMode::ALL.iter().position(|q| *q == p.quality).unwrap_or(0);
+            if let Some(i) = segmented_wide(ui, &["Original", "Auto", "Transcoded"], at, width.min(360.0)) {
+                p.quality = QualityMode::ALL[i];
+            }
+            hint(ui, p.quality.label());
+            if p.quality != QualityMode::Original {
+                ui.add_space(12.0);
+                row(ui, "Format", |ui| {
+                    let at = TranscodeFormat::ALL.iter().position(|f| *f == p.format).unwrap_or(0);
+                    if let Some(i) = segmented(ui, &["AAC", "MP3"], at) {
+                        p.format = TranscodeFormat::ALL[i];
+                    }
+                });
+                row(ui, "Bitrate", |ui| {
+                    let at = BITRATES.iter().position(|k| *k == p.kbps).unwrap_or(2);
+                    let labels: Vec<String> = BITRATES.iter().map(|k| k.to_string()).collect();
+                    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                    if let Some(i) = segmented(ui, &labels, at) {
+                        p.kbps = BITRATES[i];
+                    }
+                });
+                let network = capitalize(self.output.network().label());
+                let now = match p.transcode(self.output.network()) {
+                    Some(t) => format!("{network} · new tracks stream as {}", t.label()),
+                    None => format!("{network} · new tracks stream as original files"),
+                };
+                hint(ui, &now);
+            }
+        });
+        if p != before {
+            self.actions.push(Action::SetPlaybackPrefs(p));
+        }
+    }
+
+    fn output_settings(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let (devices, current) = self.output.devices();
+        let rows: Vec<(String, String, String, PlaybackMode, bool)> = devices
+            .iter()
+            .map(|d| (d.uid.clone(), d.name.clone(), d.capability_line(), self.output.device_mode(d), current == Some(d.uid.as_str())))
+            .collect();
+        group(ui, "Devices", |ui| {
+            if rows.is_empty() {
+                hint(ui, "No output devices found.");
+            }
+            for (k, (uid, name, caps, mode, in_use)) in rows.iter().enumerate() {
+                if k > 0 {
+                    ui.add_space(6.0);
+                    ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(1.0, t.hairline));
+                    ui.add_space(6.0);
+                }
+                ui.horizontal(|ui| {
+                    ui.set_min_height(36.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(name).size(13.0).color(t.text));
+                            if *in_use {
+                                ui.label(egui::RichText::new("in use").size(11.0).color(t.accent));
+                            }
+                        });
+                        if !caps.is_empty() {
+                            ui.label(egui::RichText::new(caps).size(11.0).color(t.muted));
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let at = usize::from(*mode == PlaybackMode::BitPerfect);
+                        if let Some(i) = segmented(ui, &["Normal", "Bit-perfect"], at)
+                            && i != at
+                        {
+                            let m = if i == 1 { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                            self.actions.push(Action::SetDeviceMode(uid.clone(), m));
+                        }
+                    });
+                });
+            }
+            ui.add_space(10.0);
+            hint(ui, "New devices start in Normal for speakers, Bluetooth and AirPlay, and in Bit-perfect for DACs and headphones. Bit-perfect sends samples untouched: use the device's own volume.");
+        });
+    }
+
+    fn offline_settings(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let snap = self.offline_snap.clone();
+        group(ui, "Storage", |ui| {
+            let mut used = format!("{} on this computer", human_bytes(snap.used_bytes));
+            if let Some(free) = snap.free_bytes {
+                used.push_str(&format!(" · {} free", human_bytes(free)));
+            }
+            ui.label(egui::RichText::new(used).size(13.0).color(t.text));
+            ui.add_space(10.0);
+            row(ui, "Limit", |ui| {
+                let label = match snap.limit {
+                    Some(b) => human_bytes(b),
+                    None => "No limit".to_owned(),
+                };
+                let resp = menu_label(ui, &label, t.text);
+                egui::Popup::menu(&resp).show(|ui| {
+                    if ui.radio(snap.limit.is_none(), "No limit").clicked() {
+                        self.actions.push(Action::SetOfflineLimit(None));
+                    }
+                    for gb in super::offline_page::LIMITS {
+                        let bytes = gb * 1_000_000_000;
+                        if ui.radio(snap.limit == Some(bytes), format!("{gb} GB")).clicked() {
+                            self.actions.push(Action::SetOfflineLimit(Some(bytes)));
+                        }
+                    }
+                });
+            });
+            let mut paused = snap.paused;
+            if narrow_toggle(ui, &mut paused, "Pause downloads").changed() {
+                self.actions.push(Action::PauseDownloads(paused));
+            }
+        });
+        group(ui, "Location", |ui| {
+            let dir = self.offline.dir().display().to_string();
+            let g = super::widgets::elide(ui, &dir, FontId::proportional(12.0), t.muted, ui.available_width());
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+            ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, t.muted);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if secondary(ui, "Show in Finder").clicked() {
+                    self.actions.push(Action::RevealOffline);
+                }
+                ui.add_space(4.0);
+                if secondary(ui, "Change…").clicked() {
+                    self.actions.push(Action::MoveOffline);
+                }
+            });
+            ui.add_space(6.0);
+            hint(ui, "Downloads move to a new location the next time Listener starts.");
+        });
+    }
+
+    fn library_settings(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        group(ui, "Sync", |ui| {
+            let albums = self.data.albums.len();
+            let tracks = self.data.all_tracks.len();
+            ui.label(egui::RichText::new(format!("{albums} albums · {tracks} tracks")).size(13.0).color(t.text));
+            let when = if self.track_syncing {
+                self.sync_label.clone()
+            } else {
+                match self.last_synced {
+                    Some(at) => format!("Last synced at {}", at.format("%-I:%M %p")),
+                    None if self.client.is_some() => "Synced at launch".to_owned(),
+                    None => "Not connected".to_owned(),
+                }
+            };
+            hint(ui, &when);
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if self.track_syncing {
+                    if secondary(ui, "Stop").clicked() {
+                        self.bridge.cancel_sync();
+                    }
+                } else {
+                    let can = self.client.is_some() && self.online;
+                    if ui.add_enabled_ui(can, |ui| secondary(ui, "Sync now")).inner.clicked() {
+                        self.actions.push(Action::SyncNow);
+                    }
+                }
+            });
+        });
+        group(ui, "Analysis", |ui| self.analysis_settings(ui));
+    }
+
+    /// Library analysis: start it, follow it, pause or stop it.
+    fn analysis_settings(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let p = self.analyzer.progress();
+        if p.active() {
+            let status = if p.paused {
+                format!("Paused at {} of {}", p.done.min(p.total), p.total)
+            } else if p.waiting {
+                format!("{} of {} · waiting for playback", p.done.min(p.total), p.total)
+            } else {
+                format!("Analysing {} of {} · {} left", p.done.min(p.total), p.total, crate::analyze::about(p.eta_secs))
+            };
+            ui.label(egui::RichText::new(status).size(13.0).color(t.text));
+            ui.add_space(6.0);
+            let frac = if p.total > 0 { p.done.min(p.total) as f32 / p.total as f32 } else { 0.0 };
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(360.0), 4.0), Sense::hover());
+            ui.painter().rect_filled(r, 2.0, t.hairline);
+            ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * frac, r.height())), 2.0, t.accent);
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let (label, paused) = if p.paused { ("Resume", false) } else { ("Pause", true) };
+                if secondary(ui, label).clicked() {
+                    self.actions.push(Action::PauseAnalysis(paused));
+                }
+                ui.add_space(4.0);
+                if secondary(ui, "Stop").clicked() {
+                    self.actions.push(Action::StopAnalysis);
+                }
+            });
+        } else if self.client.is_some() && !self.data.all_tracks.is_empty() {
+            let (n, secs) = self.unanalysed();
+            if n == 0 {
+                ui.label(egui::RichText::new("Every track is analysed.").size(13.0).color(t.text));
+            } else {
+                let tracks = if n == 1 { "1 track".to_owned() } else { format!("{n} tracks") };
+                ui.label(egui::RichText::new(format!("{tracks} not analysed yet · about {}", crate::analyze::about(crate::analyze::assumed_eta(secs)))).size(13.0).color(t.text));
+                ui.add_space(10.0);
+                if secondary(ui, "Analyze library").clicked() {
+                    self.actions.push(Action::AnalyzeLibrary);
+                }
+            }
+        } else {
+            hint(ui, "Available once the library has synced.");
+        }
+        if p.failed > 0 {
+            ui.add_space(6.0);
+            hint(ui, &format!("{} couldn't be read", p.failed));
+        }
+        ui.add_space(8.0);
+        hint(ui, "Loudness, dynamic range, and a check for upsampled or lossy-sourced files. Runs in the background and waits while playback needs the network.");
+    }
+
+    fn account_settings(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let (server, user) = match &self.settings {
+            Some(s) => (s.server.clone(), s.username.clone()),
+            None => (String::new(), String::new()),
+        };
+        group(ui, "Server", |ui| {
+            if server.is_empty() {
+                hint(ui, "Not connected.");
+                return;
+            }
+            row(ui, "Address", |ui| {
+                ui.label(egui::RichText::new(&server).size(13.0).color(t.text));
+            });
+            row(ui, "User", |ui| {
+                ui.label(egui::RichText::new(&user).size(13.0).color(t.text));
+            });
+            if !self.server_info.is_empty() {
+                row(ui, "Server", |ui| {
+                    ui.label(egui::RichText::new(&self.server_info).size(13.0).color(t.text));
+                });
+            }
+            row(ui, "Status", |ui| {
+                let (text, color) = if self.online { ("Connected", t.ok) } else { ("Can't reach the server", t.warn) };
+                ui.label(egui::RichText::new(text).size(13.0).color(color));
+            });
+            ui.add_space(14.0);
+            if danger(ui, "Sign out").clicked() {
+                self.actions.push(Action::SignOut);
+                self.overlay = None;
+            }
+            ui.add_space(6.0);
+            hint(ui, "Forgets the saved password. Downloads stay on this computer.");
+        });
+    }
+}
+
+/// A titled block with an 8pt rhythm: label, 8, content, 28 to the next.
+fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+    section(ui, title);
+    ui.add_space(8.0);
+    body(ui);
+    ui.add_space(28.0);
+}
+
+/// Width of the label column in [`row`]s, so controls line up down a section.
+const LABEL_W: f32 = 136.0;
+
+/// A label in a fixed column, then its control, 32 high.
+fn row(ui: &mut Ui, label: &str, control: impl FnOnce(&mut Ui)) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.set_min_height(32.0);
+        let (r, _) = ui.allocate_exact_size(vec2(LABEL_W, 20.0), Sense::hover());
+        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
+        control(ui);
+    });
+}
+
+/// Muted explanation text under a control.
+fn hint(ui: &mut Ui, text: &str) {
+    let t = Tokens::of(ui);
+    ui.add_space(4.0);
+    ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(t.muted)).wrap());
+}
+
+/// A dB value on a thin slider with a readout, snapped to 0.5 dB.
+fn db_row(ui: &mut Ui, label: &str, db: &mut f32, range: std::ops::RangeInclusive<f32>, width: f32) {
+    let t = Tokens::of(ui);
+    let (lo, hi) = (*range.start(), *range.end());
+    row(ui, label, |ui| {
+        let mut v = (*db - lo) / (hi - lo);
+        if thin_slider(ui, &mut v, (width - LABEL_W - 80.0).clamp(140.0, 240.0), label).changed() {
+            *db = ((lo + v * (hi - lo)) * 2.0).round() / 2.0;
+        }
+        let readout = if db.abs() < 0.05 { "0 dB".to_owned() } else { format!("{:+.1} dB", *db).replace('-', "−") };
+        let (r, _) = ui.allocate_exact_size(vec2(56.0, 18.0), Sense::hover());
+        ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, readout, FontId::proportional(12.0), t.muted);
+    });
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// A switch row kept to a readable width, so the switch sits near its label.
+fn narrow_toggle(ui: &mut Ui, on: &mut bool, label: &str) -> egui::Response {
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(420.0));
+        toggle(ui, on, label)
+    })
+    .inner
+}

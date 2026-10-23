@@ -297,6 +297,8 @@ fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     }
     // A connected session: nothing is dimmed as "not downloaded".
     app.online = true;
+    app.settings = Some(Settings { server: "https://music.example.com".into(), username: "solidsilver".into(), ..Default::default() });
+    app.server_info = "navidrome 0.64.2".into();
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
         .enumerate()
@@ -584,7 +586,25 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
     if !click_label(h, "Settings", sidebar) {
         eprintln!("  (settings button not found by label)");
     }
-    s.shoot(h, "settings");
+    s.shoot(h, "gear-menu");
+
+    for section in settings_page::Section::ALL {
+        reset(h, FULL, Route::Recent);
+        app_mut(h).actions.push(Action::OpenSettings(section));
+        s.shoot(h, &format!("settings-{}", section.label().to_lowercase()));
+    }
+
+    // Playback with ReplayGain and a transcode on, so every control shows.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        let mut p = app.output.prefs().clone();
+        p.replay_gain = crate::playback::RgMode::Auto;
+        p.quality = crate::playback::QualityMode::Auto;
+        app.actions.push(Action::SetPlaybackPrefs(p));
+        app.actions.push(Action::OpenSettings(settings_page::Section::Playback));
+    }
+    s.shoot(h, "settings-playback-on");
 
     // A library run waiting on playback (the preview status is mid-download).
     reset(h, FULL, Route::Recent);
@@ -592,11 +612,13 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
         let app = app_mut(h);
         let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), url: String::new(), suffix: None, stamp: "s".into(), secs: 240.0 }).collect();
         app.analyzer.enqueue(jobs);
-    }
-    if !click_label(h, "Settings", sidebar) {
-        eprintln!("  (settings button not found by label)");
+        app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
     s.shoot(h, "settings-analysing");
+
+    reset(h, vec2(900.0, 640.0), Route::Recent);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
+    s.shoot(h, "narrow-settings");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
     s.shoot(h, "narrow-recent");

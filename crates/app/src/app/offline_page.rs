@@ -12,7 +12,7 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use offline::{Pin, PinSummary, Snapshot, human_bytes};
 
 /// Storage caps offered in the limit menu, in GB.
-const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
+pub(super) const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
 
 /// Why a pin isn't finished, in a few words.
 pub fn pin_text(snap: &Snapshot, s: &PinSummary) -> String {

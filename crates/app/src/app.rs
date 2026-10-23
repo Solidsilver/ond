@@ -12,6 +12,7 @@ mod offline_page;
 mod dialogs;
 mod favorites_page;
 mod palette;
+mod settings_page;
 mod queue_panel;
 mod sidebar;
 mod songs;
@@ -47,7 +48,7 @@ use subsonic::Client;
 pub use commands::PlaylistAction;
 pub use dialogs::Overlay;
 pub use palette::Palette;
-pub(crate) use widgets::{elide as elide_text, segmented_wide};
+pub(crate) use widgets::{elide as elide_text, link as link_text, segmented_wide};
 
 /// Narrower windows show the queue as a sheet instead of a column.
 const QUEUE_DOCK_MIN_W: f32 = 1100.0;
@@ -160,6 +161,14 @@ pub enum Action {
     /// Into Mini, or back to where Mini was entered from.
     ToggleMini,
     SetScrobble(bool),
+    /// Open the Settings window at a section.
+    OpenSettings(settings_page::Section),
+    /// Re-read the library from the server (albums, then tracks).
+    SyncNow,
+    /// ReplayGain and streaming preferences.
+    SetPlaybackPrefs(playback::PlaybackPrefs),
+    /// Remember a device's mode (by UID); the device in use switches now.
+    SetDeviceMode(String, PlaybackMode),
     /// Analyse these tracks (those without a current result) in the background.
     Analyze(Vec<Track>),
     AnalyzeLibrary,
@@ -351,6 +360,12 @@ pub struct ListenerApp {
     /// Playlists added to lately, first in "Add to Playlist".
     recent_playlists: Vec<String>,
     fav_tab: favorites_page::FavTab,
+    /// The Settings window's section.
+    settings_section: settings_page::Section,
+    /// When the last full sync finished (this session).
+    last_synced: Option<chrono::DateTime<chrono::Local>>,
+    /// "navidrome 0.64.2", as the server reported it.
+    server_info: String,
 }
 
 impl ListenerApp {
@@ -508,6 +523,9 @@ impl ListenerApp {
             reveal: None,
             recent_playlists: Vec::new(),
             fav_tab: favorites_page::FavTab::default(),
+            settings_section: settings_page::Section::default(),
+            last_synced: None,
+            server_info: String::new(),
         })
     }
 
@@ -515,6 +533,7 @@ impl ListenerApp {
         match msg {
             Msg::Connected { client, settings, server } => {
                 self.server_label = format!("{} · {}", settings.username, server);
+                self.server_info = server.clone();
                 self.login = None;
                 self.sync_label = "syncing…".into();
                 self.bridge.sync_albums(client.clone());
@@ -594,7 +613,10 @@ impl ListenerApp {
                 let albums = self.data.albums.len();
                 let tracks = self.data.all_tracks.len();
                 self.sync_label = match outcome {
-                    crate::sync::Outcome::Done { .. } => format!("{albums} albums · {tracks} tracks"),
+                    crate::sync::Outcome::Done { .. } => {
+                        self.last_synced = Some(chrono::Local::now());
+                        format!("{albums} albums · {tracks} tracks")
+                    }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
                     crate::sync::Outcome::Failed(e) => {
                         self.error = Some(e);
@@ -1104,6 +1126,26 @@ impl ListenerApp {
             Action::SignOut => self.sign_out(),
             Action::SetMode(mode) => self.set_mode(Some(mode)),
             Action::ToggleMini => self.set_mode(None),
+            Action::OpenSettings(section) => {
+                self.settings_section = section;
+                self.set_mode(Some(WindowMode::Full));
+                self.overlay = Some(Overlay::Settings);
+            }
+            Action::SyncNow => {
+                if let Some(client) = self.client.clone()
+                    && self.online
+                    && !self.track_syncing
+                {
+                    self.sync_label = "syncing…".into();
+                    self.bridge.sync_albums(client);
+                }
+            }
+            Action::SetPlaybackPrefs(prefs) => self.output.set_prefs(prefs, &self.engine, &self.paths),
+            Action::SetDeviceMode(uid, mode) => {
+                if self.output.set_device_mode(&uid, mode, &self.engine, &self.paths) {
+                    self.bit_perfect = mode == PlaybackMode::BitPerfect;
+                }
+            }
             Action::SetScrobble(on) => {
                 self.scrobble = on;
                 self.now_playing.set_scrobbling(on);

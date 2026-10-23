@@ -195,6 +195,8 @@ impl ListenerApp {
                 icons::paint(ui.painter(), r, Icon::Volume, t.muted);
             });
         }
-        self.output.picker_ui(ui, &self.engine, &self.paths, &mut self.bit_perfect);
+        if self.output.picker_ui(ui, &self.engine, &self.paths, &mut self.bit_perfect) {
+            self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
+        }
     }
 }
