@@ -132,7 +132,7 @@ impl ListenerApp {
             ui.add_space(12.0);
             let lists = icons::sized_button(ui, Icon::List, "Playlists", size, 14.0, Some(t.muted));
             egui::Popup::menu(&lists).show(|ui| {
-                ui.set_min_width(200.0);
+                ui.set_width(220.0);
                 if self.data.playlists.is_empty() {
                     ui.weak("No playlists yet");
                 }
@@ -166,7 +166,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let button = icons::sized_button(ui, Icon::Gear, "Settings", vec2(28.0, 28.0), 15.0, Some(t.muted));
         egui::Popup::menu(&button).show(|ui| {
-            ui.set_min_width(200.0);
+            ui.set_width(220.0);
             if menu_item(ui, "Settings…", "⌘,") {
                 self.actions.push(Action::OpenSettings(self.settings_section));
             }
