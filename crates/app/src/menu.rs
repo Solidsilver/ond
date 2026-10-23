@@ -44,6 +44,7 @@ fn cmd_of(id: &str) -> Option<Cmd> {
         Cmd::Back,
         Cmd::Forward,
         Cmd::ToggleQueue,
+        Cmd::NowPlaying,
         Cmd::Full,
         Cmd::Compact,
         Cmd::Mini,
@@ -206,6 +207,7 @@ mod imp {
                 "View",
                 true,
                 &[
+                    &item("Now Playing", Cmd::NowPlaying),
                     &queue,
                     &sep(),
                     &item("Full Window", Cmd::Full),

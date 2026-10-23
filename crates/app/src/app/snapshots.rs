@@ -263,6 +263,23 @@ fn signal() -> audio::Event {
     })
 }
 
+/// A signal path for the readout scenes: `source` bits/rate into `device`
+/// bits/rate, with the given verdict and an optional transcode.
+fn signal_with(source: (u32, u32), device: (u32, u32), verdict: audio::BitPerfectStatus, transcoded: Option<&str>) -> audio::Event {
+    audio::Event::SignalPath(SignalPath {
+        output: "CoreAudio · External Headphones".into(),
+        source: StreamFormat { sample_rate: source.1, channels: 2, bits_per_sample: Some(source.0) },
+        device_rate: device.1,
+        device_bits: Some(device.0),
+        resampled: source.1 != device.1,
+        dithered: source.0 > device.0,
+        bit_perfect: verdict,
+        channels: Default::default(),
+        gain: Default::default(),
+        transcoded: transcoded.map(Into::into),
+    })
+}
+
 /// The app with the fixture library, queue and devices.
 fn populated(ctx: &egui::Context, dir: &Path) -> ListenerApp {
     let paths = Paths {
@@ -421,7 +438,15 @@ fn reset(h: &mut Harness<'_, Option<ListenerApp>>, size: Vec2, route: Route) {
     app.analysis_open = false;
     app.analyzer.clear();
     app.queue_ui = QueueUi::default();
+    app.np_details = false;
+    app.lyrics_follow = crate::lyrics::Follow::default();
     app.login = None;
+    app.online = true;
+    app.album_syncing = false;
+    app.track_syncing = false;
+    app.sync_progress = None;
+    app.toasts = super::toasts::Toasts::default();
+    app.output.handle(&signal());
     app.nav = Nav::default();
     app.nav.go(route);
     app.on_arrive();
@@ -457,7 +482,86 @@ fn click_label(h: &mut Harness<'_, Option<ListenerApp>>, label: &str, area: egui
     }
 }
 
+/// Made-up words for the lyrics scenes (no real song's).
+const VERSES: [&str; 26] = [
+    "Lamps come on along the water",
+    "Somebody's radio two floors down",
+    "",
+    "I kept the window open for the rain",
+    "It never came, the evening did",
+    "Coffee cold beside the record sleeve",
+    "Needle drifting in the run-out groove",
+    "",
+    "Hold the note a little longer",
+    "Let the room decide when it is done",
+    "The bass walks home without us",
+    "We follow at a quarter time",
+    "",
+    "Every chair is facing somewhere else",
+    "Every clock is running slow tonight",
+    "Turn it down, the neighbours listen too",
+    "They'd never say they like it",
+    "",
+    "Lamps go out along the water",
+    "Somebody's radio signs off",
+    "I leave the window open anyway",
+    "In case the rain remembers",
+    "",
+    "Hold the note",
+    "Let the room decide",
+    "When it is done",
+];
+
+/// The current track's lyrics, as the server would give them: one line every
+/// eight seconds from 0:20, so 2:21 into the fixture lands mid-song.
+fn fixture_lyrics(app: &mut ListenerApp, synced: bool) {
+    let Some(id) = app.queue.current.as_ref().map(|c| c.track.id.clone()) else { return };
+    let lyrics = if synced {
+        crate::lyrics::Lyrics::Synced(
+            VERSES.iter().enumerate().map(|(i, v)| crate::lyrics::Line { start_ms: 20_000 + 8_000 * i as i64, text: (*v).into() }).collect(),
+        )
+    } else {
+        crate::lyrics::Lyrics::Plain(VERSES.iter().map(|v| (*v).to_owned()).collect())
+    };
+    app.lyrics.insert(id, crate::lyrics::Fetch::Done(Some(lyrics)));
+}
+
 fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
+    reset(h, FULL, Route::NowPlaying);
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(20);
+    s.shoot(h, "now-playing");
+
+    reset(h, FULL, Route::NowPlaying);
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(20);
+    let lyrics_col = egui::Rect::from_min_max(pos2(700.0, 120.0), pos2(1120.0, 800.0));
+    if !hover_label(h, "Every clock is running slow", lyrics_col) {
+        h.hover_at(pos2(860.0, 600.0));
+    }
+    s.shoot(h, "now-playing-line-hover");
+
+    reset(h, FULL, Route::NowPlaying);
+    fixture_lyrics(app_mut(h), false);
+    s.shoot(h, "now-playing-plain");
+
+    reset(h, FULL, Route::NowPlaying);
+    if let Some(id) = app_mut(h).queue.current.as_ref().map(|c| c.track.id.clone()) {
+        app_mut(h).lyrics.insert(id, crate::lyrics::Fetch::Done(None));
+    }
+    app_mut(h).np_details = true;
+    s.shoot(h, "now-playing-no-lyrics");
+
+    reset(h, vec2(900.0, 700.0), Route::NowPlaying);
+    fixture_lyrics(app_mut(h), true);
+    h.run_steps(20);
+    s.shoot(h, "narrow-now-playing");
+
+    reset(h, FULL, Route::Recent);
+    // The LCD's artwork (left end of the centered display).
+    h.hover_at(pos2(354.0, 26.0));
+    s.shoot(h, "lcd-art-hover");
+
     reset(h, FULL, Route::Recent);
     s.shoot(h, "recent");
 
@@ -674,6 +778,73 @@ fn scenes(h: &mut Harness<'_, Option<ListenerApp>>, s: &Shooter) {
         app.engine.status.preview(PlayState::Stopped, 0.0, 0.0, 0.0);
     }
     s.shoot(h, "empty-queue");
+
+
+    // No status bar: the signal path lives in the now-playing display.
+    let lcd = egui::Rect::from_min_max(pos2(400.0, 0.0), pos2(1000.0, 52.0));
+    for (scene, ev) in [
+        ("lcd-limit", signal()),
+        ("lcd-verified", signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Verified, None)),
+        ("lcd-normal", signal_with((24, 96_000), (24, 96_000), audio::BitPerfectStatus::Off, None)),
+        ("lcd-requested", signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Requested { reason: "shared mode".into() }, None)),
+        ("lcd-transcoded", signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Off, Some("AAC 256"))),
+    ] {
+        reset(h, FULL, Route::Recent);
+        app_mut(h).output.handle(&ev);
+        s.shoot(h, scene);
+    }
+    reset(h, FULL, Route::Recent);
+    if !hover_label(h, "Signal path", lcd) {
+        eprintln!("  (readout not found by label)");
+    }
+    h.run_steps(30);
+    s.shoot(h, "lcd-readout-hover");
+
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        app.track_syncing = true;
+        app.sync_progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+    }
+    s.shoot(h, "sidebar-syncing");
+    let side = egui::Rect::from_min_max(pos2(0.0, 700.0), pos2(216.0, 900.0));
+    if !hover_label(h, "Syncing tracks", side) {
+        eprintln!("  (sync status not found by label)");
+    }
+    h.run_steps(30);
+    s.shoot(h, "sidebar-syncing-hover");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).album_syncing = true;
+    s.shoot(h, "sidebar-syncing-albums");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).online = false;
+    s.shoot(h, "offline-pill");
+
+    reset(h, vec2(760.0, 640.0), Route::Albums);
+    {
+        let app = app_mut(h);
+        app.track_syncing = true;
+        app.sync_progress = Some(crate::sync::Progress { done: 1200, total: 1866, unit: crate::sync::Unit::Tracks });
+    }
+    s.shoot(h, "narrow-rail-syncing");
+
+    reset(h, FULL, Route::Album(album_id(0)));
+    app_mut(h).error = Some("Couldn't load Sunday at the Village Vanguard: the server didn't answer.".into());
+    h.run_steps(1);
+    app_mut(h).notice = Some("Skipped 1 song that isn't downloaded".into());
+    h.run_steps(1);
+    app_mut(h).notice = Some("Added 6 songs to Late night, low volume".into());
+    s.shoot(h, "toasts");
+
+    reset(h, vec2(340.0, 660.0), Route::Recent);
+    {
+        let app = app_mut(h);
+        app.windows.mode = WindowMode::Compact;
+        app.output.handle(&signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Verified, None));
+    }
+    s.shoot(h, "compact-verified");
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });

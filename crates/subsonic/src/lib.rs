@@ -140,6 +140,19 @@ impl Client {
         Ok(bytes.to_vec())
     }
 
+    /// OpenSubsonic `getLyricsBySongId`: every lyrics version the server has
+    /// for the song (embedded or sidecar `.lrc`), synced where available.
+    pub async fn lyrics_by_song(&self, id: &str) -> Result<Vec<StructuredLyrics>> {
+        let (_, p): (_, LyricsListPayload) = self.call("getLyricsBySongId", &[("id", id)]).await?;
+        Ok(p.lyrics_list.structured_lyrics)
+    }
+
+    /// Plain `getLyrics`, matched by artist and title; `None` when there are none.
+    pub async fn lyrics(&self, artist: &str, title: &str) -> Result<Option<String>> {
+        let (_, p): (_, LyricsPayload) = self.call("getLyrics", &[("artist", artist), ("title", title)]).await?;
+        Ok(p.lyrics.and_then(|l| l.value).filter(|v| !v.trim().is_empty()))
+    }
+
     pub async fn playlists(&self) -> Result<Vec<Playlist>> {
         let (_, p): (_, PlaylistsPayload) = self.call("getPlaylists", &[]).await?;
         Ok(p.playlists.playlist)
