@@ -102,9 +102,24 @@ pub fn install(ctx: &Context, pref: ThemePref) {
             s.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
             s.text_styles.insert(TextStyle::Heading, FontId::new(22.0, semibold()));
             s.text_styles.insert(TextStyle::Monospace, FontId::monospace(12.0));
+            // Overlay scroll bars, invisible until scrolling (see `scroll_bars`).
+            s.spacing.scroll = egui::style::ScrollStyle {
+                active_handle_opacity: 0.0,
+                active_background_opacity: 0.0,
+                interact_background_opacity: 0.0,
+                ..egui::style::ScrollStyle::floating()
+            };
         });
     }
     set_pref(ctx, pref);
+}
+
+/// macOS-style scroll bars: shown while a scroll is in progress, hidden
+/// otherwise. Hovering the bar itself still shows it, so it can be dragged.
+pub fn scroll_bars(ctx: &Context, visible: bool) {
+    for theme in [Theme::Light, Theme::Dark] {
+        ctx.style_mut_of(theme, |s| s.spacing.scroll.active_handle_opacity = if visible { 0.6 } else { 0.0 });
+    }
 }
 
 pub fn set_pref(ctx: &Context, pref: ThemePref) {

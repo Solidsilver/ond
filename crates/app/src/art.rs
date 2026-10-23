@@ -197,13 +197,14 @@ impl Art {
         });
     }
 
-    /// Paints `cover` into `rect` (or the placeholder tile).
+    /// Paints `cover` into `rect` (or the placeholder tile). A rect that isn't
+    /// square is filled edge to edge, cropping the art's middle.
     pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: f32) {
         let painter = ui.painter();
-        let tex = cover.and_then(|c| self.texture(c, rect.width()));
+        let tex = cover.and_then(|c| self.texture(c, rect.width().max(rect.height())));
         match tex {
             Some(t) => {
-                let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                let uv = crop_uv(rect.width() / rect.height().max(1.0));
                 painter.add(egui::epaint::RectShape::filled(rect, CornerRadius::same(radius as u8), Color32::WHITE).with_texture(t.id(), uv));
             }
             None => {
@@ -211,6 +212,17 @@ impl Art {
                 painter.rect_filled(rect, radius, t.placeholder);
             }
         }
+    }
+}
+
+/// The part of a square image that fills a rect of this aspect (width / height), centred.
+fn crop_uv(aspect: f32) -> Rect {
+    if aspect >= 1.0 {
+        let h = 1.0 / aspect;
+        Rect::from_min_max(egui::pos2(0.0, (1.0 - h) / 2.0), egui::pos2(1.0, (1.0 + h) / 2.0))
+    } else {
+        let w = aspect;
+        Rect::from_min_max(egui::pos2((1.0 - w) / 2.0, 0.0), egui::pos2((1.0 + w) / 2.0, 1.0))
     }
 }
 
@@ -324,5 +336,13 @@ mod tests {
         let img = decode(&png, 128).unwrap();
         assert_eq!(img.size, [128, 128]);
         assert!(decode(b"not an image", 64).is_none());
+    }
+
+    #[test]
+    fn crops_to_fill() {
+        assert_eq!(crop_uv(1.0), Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
+        // Wider than tall: a band across the middle.
+        assert_eq!(crop_uv(2.0), Rect::from_min_max(egui::pos2(0.0, 0.25), egui::pos2(1.0, 0.75)));
+        assert_eq!(crop_uv(0.5), Rect::from_min_max(egui::pos2(0.25, 0.0), egui::pos2(0.75, 1.0)));
     }
 }

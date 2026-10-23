@@ -13,6 +13,7 @@ mod queue;
 mod search;
 mod settings;
 mod theme;
+mod window;
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt()
@@ -21,8 +22,10 @@ fn main() -> eframe::Result {
         )
         .init();
 
+    // Reopen in the mode (and place) the app was left in.
+    let windows = settings::Paths::resolve().ok().and_then(|p| settings::Settings::load(&p)).map(|s| s.window).unwrap_or_default();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1360.0, 860.0]).with_min_inner_size([900.0, 560.0]),
+        viewport: windows.plan().builder(egui::ViewportBuilder::default()),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

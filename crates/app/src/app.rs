@@ -6,6 +6,7 @@
 
 mod album_page;
 mod browse;
+mod compact;
 mod palette;
 mod queue_panel;
 mod sidebar;
@@ -20,6 +21,7 @@ use crate::queue::{EndAction, Queue, Source};
 use crate::search::SearchIndex;
 use crate::settings::{Paths, Settings};
 use crate::theme::{self, ThemePref, Tokens};
+use crate::window::{Geometry, WindowMode, Windows};
 use audio::{Command, EngineHandle, PlayState, PlaybackMode, TrackSource};
 use library::{Album, Library, Track};
 use std::collections::HashMap;
@@ -114,6 +116,9 @@ pub enum Action {
     OpenPalette,
     SetTheme(ThemePref),
     ToggleQueue,
+    SetMode(WindowMode),
+    /// Into Mini, or back to where Mini was entered from.
+    ToggleMini,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -203,6 +208,17 @@ pub struct ListenerApp {
     search: Option<SearchIndex>,
     palette: Option<Palette>,
     theme: ThemePref,
+
+    /// Full / Compact / Mini and where each was.
+    windows: Windows,
+    /// The window as last seen, saved on quit.
+    seen: Option<Geometry>,
+    /// After a mode switch: the size asked for, and frames left to wait for it.
+    /// The window reports its old size for a frame or two meanwhile.
+    settling: Option<([f32; 2], u32)>,
+    /// When the last scroll happened (frame clock), for showing scroll bars.
+    last_scroll: f64,
+    bars_shown: bool,
 }
 
 impl ListenerApp {
@@ -280,6 +296,11 @@ impl ListenerApp {
             search: None,
             palette: None,
             theme: theme_pref,
+            windows: saved.as_ref().map(|s| s.window.clone()).unwrap_or_default(),
+            seen: None,
+            settling: None,
+            last_scroll: f64::NEG_INFINITY,
+            bars_shown: false,
         })
     }
 
@@ -501,6 +522,10 @@ impl ListenerApp {
     }
 
     fn apply(&mut self, action: Action) {
+        // Browsing and the palette live in the full window.
+        if matches!(action, Action::Go(_) | Action::OpenPalette) {
+            self.set_mode(Some(WindowMode::Full));
+        }
         match action {
             Action::Go(route) => self.go(route),
             Action::Back => {
@@ -606,6 +631,25 @@ impl ListenerApp {
                 let show = self.show_queue;
                 Settings::update(&self.paths, |s| s.show_queue = show);
             }
+            Action::SetMode(mode) => self.set_mode(Some(mode)),
+            Action::ToggleMini => self.set_mode(None),
+        }
+    }
+
+    /// Switches window mode (`None` toggles Mini) and saves the choice.
+    fn set_mode(&mut self, to: Option<WindowMode>) {
+        let ctx = self.bridge.ctx().clone();
+        let plan = match to {
+            Some(m) => self.windows.switch(m, self.seen),
+            None => self.windows.toggle_mini(self.seen),
+        };
+        if let Some(plan) = plan {
+            plan.apply(&ctx);
+            // Until the window reports its new size, don't mistake the old one for it.
+            self.seen = None;
+            self.settling = Some((plan.size, 30));
+            let w = self.windows.clone();
+            Settings::update(&self.paths, |s| s.window = w);
         }
     }
 
@@ -699,6 +743,15 @@ impl ListenerApp {
             if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, Key::U)) {
                 out.push(Action::ToggleQueue);
             }
+            // Window modes. ⇧⌘3 would be nicer but it's the system screenshot key.
+            for (key, mode) in [(Key::Num1, WindowMode::Full), (Key::Num2, WindowMode::Compact), (Key::Num3, WindowMode::Mini)] {
+                if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, key)) {
+                    out.push(Action::SetMode(mode));
+                }
+            }
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::M)) {
+                out.push(Action::ToggleMini);
+            }
         });
         self.actions.extend(out);
     }
@@ -707,6 +760,38 @@ impl ListenerApp {
         let ctx = ui.ctx().clone();
         self.art.poll();
         self.shortcuts(&ctx);
+        self.scroll_bars(&ctx);
+        match self.windows.mode {
+            WindowMode::Full => {
+                self.full_ui(ui);
+                self.palette_ui(&ctx);
+            }
+            WindowMode::Compact => self.compact_ui(ui),
+            WindowMode::Mini => self.mini_ui(ui),
+        }
+        for a in std::mem::take(&mut self.actions) {
+            self.apply(a);
+        }
+    }
+
+    /// Scroll bars show while scrolling and fade a second after.
+    fn scroll_bars(&mut self, ctx: &egui::Context) {
+        let (now, scrolling) = ctx.input(|i| (i.time, i.smooth_scroll_delta != egui::Vec2::ZERO || i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. }))));
+        if scrolling {
+            self.last_scroll = now;
+        }
+        let since = now - self.last_scroll;
+        let show = since < 1.0;
+        if show != self.bars_shown {
+            self.bars_shown = show;
+            theme::scroll_bars(ctx, show);
+        }
+        if show {
+            ctx.request_repaint_after(Duration::from_secs_f64(1.0 - since + 0.02));
+        }
+    }
+
+    fn full_ui(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::of(ui);
 
         egui::Panel::top("toolbar")
@@ -734,11 +819,6 @@ impl ListenerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
             .show(ui, |ui| self.main_view(ui));
-
-        self.palette_ui(&ctx);
-        for a in std::mem::take(&mut self.actions) {
-            self.apply(a);
-        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -783,14 +863,36 @@ impl eframe::App for ListenerApp {
             _ if self.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
             _ => {}
         }
+        if let Some(g) = Geometry::read(ctx) {
+            match self.settling {
+                Some((want, left)) if left > 0 && ((g.size[0] - want[0]).abs() > 2.0 || (g.size[1] - want[1]).abs() > 2.0) => {
+                    self.settling = Some((want, left - 1));
+                    ctx.request_repaint();
+                }
+                _ => {
+                    self.settling = None;
+                    self.seen = Some(g);
+                }
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.login.is_some() {
+            // Logging in needs the full window.
+            self.set_mode(Some(WindowMode::Full));
             self.login_ui(ui);
         } else {
             self.main_ui(ui);
         }
+    }
+
+    fn on_exit(&mut self) {
+        if let Some(g) = self.seen {
+            self.windows.remember(g);
+        }
+        let w = self.windows.clone();
+        Settings::update(&self.paths, |s| s.window = w);
     }
 }
 
@@ -984,6 +1086,36 @@ mod tests {
         assert!(app.pending.is_empty());
         // Played next: right after what the user already chose to play next.
         assert_eq!(app.queue.upcoming[2].track.id, "x-1");
+    }
+
+    #[test]
+    fn window_modes_draw_and_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        frame(&ctx, &mut app, vec![key(egui::Key::M, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+        assert_eq!(app.windows.mode, WindowMode::Mini);
+        // Hovered (overlay drawn) and not.
+        for at in [egui::pos2(100.0, 100.0), egui::pos2(-10.0, -10.0)] {
+            for _ in 0..3 {
+                frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+            }
+        }
+        frame(&ctx, &mut app, vec![key(egui::Key::Num2, egui::Modifiers::COMMAND | egui::Modifiers::ALT)]);
+        assert_eq!(app.windows.mode, WindowMode::Compact);
+        for _ in 0..2 {
+            frame(&ctx, &mut app, vec![egui::Event::PointerMoved(egui::pos2(120.0, 60.0))]);
+        }
+        // Browsing goes back to the full window.
+        app.actions.push(Action::Go(Route::Album("al-0".into())));
+        frame(&ctx, &mut app, Vec::new());
+        assert_eq!(app.windows.mode, WindowMode::Full);
+        // ⌘K from a small mode does too.
+        app.windows.mode = WindowMode::Compact;
+        frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.windows.mode, WindowMode::Full);
+        assert!(app.palette.is_some());
     }
 
     #[test]
