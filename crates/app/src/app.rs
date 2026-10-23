@@ -1223,12 +1223,20 @@ impl ListenerApp {
     }
 
     /// Queues the tracks that have no current analysis; returns how many.
+    /// Downloaded copies are read straight from disk (and need no server).
     fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
-        let Some(client) = &self.client else { return 0 };
         let jobs: Vec<analyze::Job> = tracks
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
-            .map(|t| analyze::job_for(t, client.stream_url(&t.id).to_string()))
+            .filter_map(|t| {
+                let local = self.offline.local_path(&t.id);
+                let url = match &self.client {
+                    Some(c) => c.stream_url(&t.id).to_string(),
+                    None if local.is_some() => String::new(),
+                    None => return None,
+                };
+                Some(analyze::job_for(t, url, local))
+            })
             .collect();
         self.analyzer.enqueue(jobs)
     }
