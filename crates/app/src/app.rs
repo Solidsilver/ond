@@ -13,6 +13,7 @@ mod offline_page;
 mod dialogs;
 mod favorites_page;
 mod info_panel;
+mod layout;
 mod now_playing_view;
 mod palette;
 mod settings_page;
@@ -54,10 +55,6 @@ pub use dialogs::Overlay;
 pub use palette::Palette;
 pub(crate) use widgets::{elide as elide_text, link as link_text, segmented_wide};
 
-/// Narrower windows show the queue as a sheet instead of a column.
-const QUEUE_DOCK_MIN_W: f32 = 1100.0;
-/// Narrower windows show the sidebar as a rail of icons.
-const SIDEBAR_FULL_MIN_W: f32 = 820.0;
 
 #[derive(Default)]
 struct LoginForm {
@@ -313,6 +310,10 @@ pub struct ListenerApp {
     /// The queue item last sent as `SetNext`, so the engine isn't told twice.
     sent_next: Option<u64>,
     show_queue: bool,
+    /// Sidebar and queue column widths (dragged by their inner edges).
+    columns: layout::Columns,
+    /// The album page's "Album details" is unfolded (for this session).
+    album_details_open: bool,
     /// Narrow windows: the queue opens as a sheet over the content instead.
     queue_sheet: bool,
     /// The window is too narrow to dock the queue column (set each frame).
@@ -521,6 +522,8 @@ impl ListenerApp {
         Ok(Self {
             _rt: rt,
             show_queue: saved.as_ref().is_none_or(|s| s.show_queue),
+            album_details_open: false,
+            columns: layout::Columns::restore(saved.as_ref().and_then(|s| s.sidebar_width), saved.as_ref().and_then(|s| s.queue_width)),
             paths,
             bridge,
             inbox,
@@ -1706,12 +1709,13 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let width = ui.available_width();
         // Narrow windows give the content the room: the queue becomes a sheet
-        // over it, and below that the sidebar becomes a rail of icons.
-        self.queue_narrow = width < QUEUE_DOCK_MIN_W;
+        // over it, and below that the sidebar becomes a rail of icons. The
+        // columns are as wide as the user dragged them.
+        let plan = self.columns.plan(width);
+        self.queue_narrow = !plan.queue_docked;
         if !self.queue_narrow {
             self.queue_sheet = false;
         }
-        let rail = width < SIDEBAR_FULL_MIN_W;
 
         egui::Panel::top("toolbar")
             .exact_size(toolbar::TOOLBAR_H)
@@ -1725,29 +1729,75 @@ impl ListenerApp {
                 .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin::symmetric(12, 0)))
                 .show(ui, |ui| self.diagnostics_bar(ui));
         }
-        if rail {
-            egui::Panel::left("sidebar-rail")
-                .exact_size(sidebar::RAIL_W)
-                .resizable(false)
-                .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 4, right: 4, top: 14, bottom: 10 }))
-                .show(ui, |ui| self.sidebar_rail(ui));
-        } else {
-            egui::Panel::left("sidebar")
-                .exact_size(sidebar::SIDEBAR_W)
-                .resizable(false)
-                .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 10, right: 10, top: 14, bottom: 10 }))
-                .show(ui, |ui| self.sidebar(ui));
-        }
-        if self.show_queue && !self.queue_narrow {
+        let left_panel = match plan.left {
+            None => {
+                egui::Panel::left("sidebar-rail")
+                    .exact_size(sidebar::RAIL_W)
+                    .resizable(false)
+                    .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 4, right: 4, top: 14, bottom: 10 }))
+                    .show(ui, |ui| self.sidebar_rail(ui));
+                None
+            }
+            Some(w) => Some(
+                egui::Panel::left("sidebar")
+                    .exact_size(w)
+                    .resizable(false)
+                    .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 10, right: 10, top: 14, bottom: 10 }))
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width());
+                        self.sidebar(ui)
+                    })
+                    .response
+                    .rect,
+            ),
+        };
+        let right_panel = (self.show_queue && !self.queue_narrow).then(|| {
             egui::Panel::right("queue")
-                .exact_size(320.0)
+                .exact_size(self.columns.right)
                 .resizable(false)
                 .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 8, right: 8, top: 12, bottom: 8 }))
-                .show(ui, |ui| self.queue_panel(ui, true));
-        }
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    self.queue_panel(ui, true)
+                })
+                .response
+                .rect
+        });
         let content = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
             .show(ui, |ui| self.main_view(ui));
+
+        // The column edges, after the content so they win the pointer.
+        let mut save = false;
+        if let Some(r) = left_panel {
+            let d = layout::edge_handle(ui, egui::Id::unique("sidebar-edge"), r.right(), r.top(), r.bottom());
+            let limit = self.columns.left_limit(width, plan.queue_docked && self.show_queue);
+            if d.reset {
+                self.columns.left = layout::LEFT_DEFAULT.min(limit);
+                save = true;
+            } else if d.dx != 0.0 {
+                self.columns.left = (self.columns.left + d.dx).clamp(layout::LEFT_MIN, limit);
+            }
+            save |= d.released;
+        }
+        if let Some(r) = right_panel {
+            let d = layout::edge_handle(ui, egui::Id::unique("queue-edge"), r.left(), r.top(), r.bottom());
+            let limit = self.columns.right_limit(width);
+            if d.reset {
+                self.columns.right = layout::RIGHT_DEFAULT.min(limit);
+                save = true;
+            } else if d.dx != 0.0 {
+                self.columns.right = (self.columns.right - d.dx).clamp(layout::RIGHT_MIN, limit);
+            }
+            save |= d.released;
+        }
+        if save {
+            let c = self.columns;
+            Settings::update(&self.paths, |s| {
+                s.sidebar_width = (c.left != layout::LEFT_DEFAULT).then_some(c.left);
+                s.queue_width = (c.right != layout::RIGHT_DEFAULT).then_some(c.right);
+            });
+        }
         if self.queue_sheet {
             self.queue_sheet_ui(ui.ctx(), content.response.rect);
         }
@@ -1757,7 +1807,7 @@ impl ListenerApp {
     /// windows). Esc or a click outside closes it.
     fn queue_sheet_ui(&mut self, ctx: &egui::Context, content: egui::Rect) {
         let t = Tokens::of_ctx(ctx);
-        let w = 320.0_f32.min(content.width() - 24.0);
+        let w = self.columns.right.min(content.width() - 24.0);
         let id = egui::Id::unique("queue-sheet");
         let area = egui::Modal::default_area(id).anchor(egui::Align2::RIGHT_TOP, egui::vec2(0.0, content.top()));
         let shadow = egui::Shadow { offset: [-6, 0], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 120 } else { 40 }) };

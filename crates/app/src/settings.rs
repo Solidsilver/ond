@@ -57,6 +57,12 @@ pub struct Settings {
     /// The diagnostics bar along the bottom (for the technically curious).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub diagnostics_bar: bool,
+    /// The sidebar's width as last dragged; `None` is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<f32>,
+    /// The queue column's width as last dragged; `None` is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_width: Option<f32>,
 }
 
 fn yes() -> bool {
@@ -83,6 +89,8 @@ impl Default for Settings {
             analyze_playing: false,
             analysis_resume: false,
             diagnostics_bar: false,
+            sidebar_width: None,
+            queue_width: None,
         }
     }
 }
