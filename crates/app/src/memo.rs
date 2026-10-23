@@ -26,11 +26,6 @@ impl<K: PartialEq, V> Memo<K, V> {
             }
         }
     }
-
-    /// Forgets the value, so the next [`get`](Self::get) rebuilds.
-    pub fn clear(&mut self) {
-        self.cached = None;
-    }
 }
 
 #[cfg(test)]
@@ -56,11 +51,5 @@ mod tests {
         });
         assert_eq!(*c, [3]);
         assert_eq!(built, 2);
-        m.clear();
-        m.get(2, || {
-            built += 1;
-            vec![]
-        });
-        assert_eq!(built, 3);
     }
 }

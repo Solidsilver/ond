@@ -154,7 +154,7 @@ impl ListenerApp {
     fn player_block(&mut self, ui: &mut Ui, track: &Track, side: Option<f32>, window: bool) {
         let width = ui.available_width();
         let album = self.data.album(&track.album_id).cloned();
-        let cover = track.cover_art.clone().or_else(|| album.as_ref().and_then(|a| a.cover_art.clone()));
+        let cover = self.data.cover_for(track).map(str::to_owned);
         let art = |this: &mut Self, ui: &mut Ui, side: f32| {
             let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
             let dark = ui.visuals().dark_mode;
@@ -206,9 +206,9 @@ impl ListenerApp {
             let font = FontId::proportional(14.0);
             if let Some(artist) = &track.artist
                 && link(ui, artist, font.clone(), t.accent).clicked()
+                && let Some(route) = Route::artist_of(track)
             {
-                let id = track.artists.first().and_then(|a| a.id.clone()).or_else(|| track.artist_ref.clone());
-                self.actions.push(Action::Go(Route::Artist { name: track.artists.first().map_or_else(|| artist.clone(), |a| a.name.clone()), id }));
+                self.actions.push(Action::Go(route));
             }
             if let Some(al) = album {
                 if track.artist.is_some() {

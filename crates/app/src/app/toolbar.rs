@@ -118,7 +118,7 @@ impl ListenerApp {
         };
         let art = Rect::from_min_size(rect.min, vec2(rect.height(), rect.height()));
         let album = self.data.album(&item.track.album_id).cloned();
-        let cover = item.track.cover_art.clone().or_else(|| album.as_ref().and_then(|a| a.cover_art.clone()));
+        let cover = self.data.cover_for(&item.track).map(str::to_owned);
         self.art.paint(ui, art.shrink(1.0), cover.as_deref(), 6.0);
 
         // The right column: the heart at the end, the format pill just left of

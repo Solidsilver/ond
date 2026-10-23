@@ -12,6 +12,7 @@ use library::{Album, Artist, Track, fold};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32String};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Results shown per group.
 pub const MAX_ARTISTS: usize = 4;
@@ -69,7 +70,8 @@ fn plain(s: &str) -> String {
 }
 
 pub struct SearchIndex {
-    pub artists: Vec<ArtistEntry>,
+    /// Shared, so the Artists view lists them without a copy per frame.
+    pub artists: Arc<Vec<ArtistEntry>>,
     pub albums: Vec<AlbumEntry>,
     pub tracks: Vec<TrackEntry>,
     artist_hay: Vec<Hay>,
@@ -187,7 +189,7 @@ impl SearchIndex {
         let album_hay = albums.iter().map(|a| Hay::new(&format!("{} — {}", a.artist, a.title))).collect();
         // Title first: track searches are mostly by title.
         let track_hay = tracks.iter().map(|t| Hay::new(&format!("{} — {} — {}", t.title, t.artist, t.album))).collect();
-        Self { artists, albums, tracks, artist_hay, album_hay, track_hay, matcher: Matcher::new(Config::DEFAULT) }
+        Self { artists: Arc::new(artists), albums, tracks, artist_hay, album_hay, track_hay, matcher: Matcher::new(Config::DEFAULT) }
     }
 
     pub fn search(&mut self, query: &str) -> Results {

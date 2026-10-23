@@ -10,7 +10,11 @@ use crate::icons::{self, Icon};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use crate::memo::Memo;
 use library::{Track, fold};
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 const ROW_H: f32 = 32.0;
 const TIME_W: f32 = 56.0;
@@ -30,23 +34,60 @@ pub enum Column {
 pub struct SongsView {
     pub sort: Column,
     pub descending: bool,
-    /// Indices into `Data::all_tracks`, sorted; with the version and sort they're for.
-    order: Option<(u64, Column, bool, Vec<usize>)>,
+    /// Folded sort keys, per (tracks, albums) version: built once, reused by
+    /// every column.
+    keys: Memo<(u64, u64), SortKeys>,
+    /// Indices into `Data::tracks.all`, sorted; per versions and sort.
+    order: Memo<(u64, u64, Column, bool), Vec<usize>>,
     pub selected: Option<usize>,
+}
+
+/// Each track's text folded for sorting (case and accents ignored), computed
+/// once so changing the sort column only compares.
+pub struct SortKeys {
+    title: Vec<String>,
+    artist: Vec<String>,
+    album: Vec<String>,
+}
+
+impl SortKeys {
+    pub fn new(tracks: &[Track], album_names: &dyn Fn(&str) -> String) -> Self {
+        let mut names: HashMap<&str, String> = HashMap::new();
+        let album = tracks.iter().map(|t| names.entry(t.album_id.as_str()).or_insert_with(|| fold(&album_names(&t.album_id))).clone()).collect();
+        Self {
+            title: tracks.iter().map(|t| fold(&t.title)).collect(),
+            artist: tracks.iter().map(|t| fold(t.artist.as_deref().unwrap_or(""))).collect(),
+            album,
+        }
+    }
+}
+
+/// Sorted indices into `tracks` (folding the keys first).
+#[cfg(test)]
+pub fn sort_order(tracks: &[Track], album_names: &dyn Fn(&str) -> String, by: Column, descending: bool) -> Vec<usize> {
+    sort_with(tracks, &SortKeys::new(tracks, album_names), by, descending)
 }
 
 /// Sorted indices into `tracks`. Ties fall back to album order (album, disc,
 /// track), so sorting by artist lists each album intact.
-pub fn sort_order(tracks: &[Track], album_names: &dyn Fn(&str) -> String, by: Column, descending: bool) -> Vec<usize> {
+pub fn sort_with(tracks: &[Track], keys: &SortKeys, by: Column, descending: bool) -> Vec<usize> {
+    let album_order = |a: usize, b: usize| -> Ordering {
+        let (x, y) = (&tracks[a], &tracks[b]);
+        keys.album[a]
+            .cmp(&keys.album[b])
+            .then_with(|| x.album_id.cmp(&y.album_id))
+            .then_with(|| x.disc.unwrap_or(1).cmp(&y.disc.unwrap_or(1)))
+            .then_with(|| x.track.unwrap_or(0).cmp(&y.track.unwrap_or(0)))
+    };
+    let quality = |t: &Track| (t.bit_depth.unwrap_or(0), t.sample_rate.unwrap_or(0));
     let mut idx: Vec<usize> = (0..tracks.len()).collect();
-    let album_key = |t: &Track| (fold(&album_names(&t.album_id)), t.album_id.clone(), t.disc.unwrap_or(1), t.track.unwrap_or(0));
     match by {
-        Column::Title => idx.sort_by_cached_key(|&i| (fold(&tracks[i].title), album_key(&tracks[i]))),
-        Column::Artist => idx.sort_by_cached_key(|&i| (fold(tracks[i].artist.as_deref().unwrap_or("")), album_key(&tracks[i]))),
-        Column::Album => idx.sort_by_cached_key(|&i| album_key(&tracks[i])),
-        Column::Time => idx.sort_by_cached_key(|&i| (tracks[i].duration_secs.unwrap_or(0), album_key(&tracks[i]))),
+        Column::Title => idx.sort_by(|&a, &b| keys.title[a].cmp(&keys.title[b]).then_with(|| album_order(a, b))),
+        Column::Artist => idx.sort_by(|&a, &b| keys.artist[a].cmp(&keys.artist[b]).then_with(|| album_order(a, b))),
+        Column::Album => idx.sort_by(|&a, &b| album_order(a, b)),
+        Column::Time => idx.sort_by(|&a, &b| tracks[a].duration_secs.unwrap_or(0).cmp(&tracks[b].duration_secs.unwrap_or(0)).then_with(|| album_order(a, b))),
         // Best quality first when descending: depth, then rate.
-        Column::Format => idx.sort_by_cached_key(|&i| (tracks[i].bit_depth.unwrap_or(0), tracks[i].sample_rate.unwrap_or(0), album_key(&tracks[i]))),
+        Column::Format => idx.sort_by(|&a, &b| quality(&tracks[a]).cmp(&quality(&tracks[b])).then_with(|| album_order(a, b))),
     }
     if descending {
         idx.reverse();
@@ -55,16 +96,15 @@ pub fn sort_order(tracks: &[Track], album_names: &dyn Fn(&str) -> String, by: Co
 }
 
 impl ListenerApp {
-    fn songs_order(&mut self) -> Vec<usize> {
-        let v = &self.songs;
-        let fresh = matches!(&v.order, Some((ver, s, d, _)) if *ver == self.data.tracks_version && *s == v.sort && *d == v.descending);
-        if !fresh {
-            let data = &self.data;
+    fn songs_order(&mut self) -> Arc<Vec<usize>> {
+        let data = &self.data;
+        let versions = (data.tracks_version, data.version);
+        let keys = self.songs.keys.get(versions, || {
             let names = |id: &str| data.album(id).map(|a| a.name.clone()).unwrap_or_default();
-            let order = sort_order(&data.tracks.all, &names, v.sort, v.descending);
-            self.songs.order = Some((self.data.tracks_version, self.songs.sort, self.songs.descending, order));
-        }
-        self.songs.order.as_ref().map(|o| o.3.clone()).unwrap_or_default()
+            SortKeys::new(&data.tracks.all, &names)
+        });
+        let (sort, descending) = (self.songs.sort, self.songs.descending);
+        self.songs.order.get((versions.0, versions.1, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
     }
 
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {

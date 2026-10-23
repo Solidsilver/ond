@@ -31,6 +31,15 @@ impl Route {
     pub fn is_root(&self) -> bool {
         matches!(self, Route::Recent | Route::Albums | Route::Artists | Route::Songs | Route::Favorites | Route::Offline | Route::Playlist { .. })
     }
+
+    /// A track's artist page: its first credited artist (name and id) when the
+    /// server split them out, else the artist tag with the track's artist id.
+    pub fn artist_of(track: &library::Track) -> Option<Route> {
+        let first = track.artists.first();
+        let name = first.map(|a| a.name.clone()).or_else(|| track.artist.clone())?;
+        let id = first.and_then(|a| a.id.clone()).or_else(|| track.artist_ref.clone());
+        Some(Route::Artist { name, id })
+    }
 }
 
 #[derive(Debug)]

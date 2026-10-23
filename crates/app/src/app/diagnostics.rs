@@ -8,6 +8,7 @@ use super::ListenerApp;
 use crate::theme::Tokens;
 use audio::{BitPerfectStatus, PlayState, PlaybackMode};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const BAR_H: f32 = 22.0;
@@ -27,7 +28,7 @@ pub struct Diagnostics {
     rate: Option<f64>,
     /// Smoothed time spent building a frame, in ms.
     frame_ms: Option<f32>,
-    cached: Option<(Instant, Vec<Segment>)>,
+    cached: Option<(Instant, Arc<Vec<Segment>>)>,
 }
 
 /// One labelled reading in the bar.
@@ -96,12 +97,12 @@ impl Diagnostics {
 
 impl ListenerApp {
     /// The readings, recomputed at most every [`REFRESH`].
-    fn diagnostics_segments(&mut self) -> Vec<Segment> {
+    fn diagnostics_segments(&mut self) -> Arc<Vec<Segment>> {
         let now = Instant::now();
         if let Some((at, segs)) = &self.diagnostics.cached
             && now.duration_since(*at) < REFRESH
         {
-            return segs.clone();
+            return Arc::clone(segs);
         }
         let status = &self.engine.status;
         let state = status.state();
@@ -202,7 +203,8 @@ impl ListenerApp {
         if let Some(ms) = self.diagnostics.frame_ms {
             out.push(Segment { text: format!("ui {ms:.1} ms"), detail: "Time to build the last frames (smoothed)".into(), tone: Tone::Normal });
         }
-        self.diagnostics.cached = Some((now, out.clone()));
+        let out = Arc::new(out);
+        self.diagnostics.cached = Some((now, Arc::clone(&out)));
         out
     }
 
