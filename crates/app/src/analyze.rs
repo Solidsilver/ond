@@ -271,7 +271,9 @@ fn run(shared: &Shared, cfg: &Config) {
                 st.paused || st.current.as_ref().is_none_or(|c| c.stamp.is_empty())
             }
         };
-        let result = analyze_job(&job, cfg, &stop);
+        // A panic on one odd file fails that job; the worker carries on.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_job(&job, cfg, &stop)))
+            .unwrap_or_else(|p| Err(analysis::AnalyzeError::Failed(format!("crashed: {}", panic_text(&*p)))));
 
         let mut st = shared.lock();
         let cleared = st.current.take().is_none_or(|c| c.stamp.is_empty());
@@ -303,6 +305,15 @@ fn run(shared: &Shared, cfg: &Config) {
     }
 }
 
+/// The message a panic carried.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_owned())
+}
+
 /// Reads the job's downloaded copy, if it has one that opens.
 fn analyze_local(job: &Job, stop: &(dyn Fn() -> bool + Sync)) -> Option<Result<TrackAnalysis, analysis::AnalyzeError>> {
     let file = std::fs::File::open(job.local.as_ref()?).ok()?;
@@ -311,6 +322,10 @@ fn analyze_local(job: &Job, stop: &(dyn Fn() -> bool + Sync)) -> Option<Result<T
 }
 
 fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Result<TrackAnalysis, analysis::AnalyzeError> {
+    #[cfg(test)]
+    if job.track_id == "test-panic" {
+        panic!("odd file");
+    }
     // A downloaded copy first: no network, no cache churn.
     if let Some(out) = analyze_local(job, stop) {
         return out;
@@ -477,5 +492,29 @@ mod tests {
         let out = analyze_job(&j, &cfg, &|| false);
         assert!(matches!(out, Err(analysis::AnalyzeError::Cancelled)), "{out:?}");
         assert!(t.elapsed() < Duration::from_secs(2), "gave way after {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_panicking_job_fails_and_the_worker_carries_on() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = |name: &str| StreamCache::new(streamcache::CacheConfig::new(dir.path().join(name)), rt.handle().clone()).unwrap();
+        let runner = Runner::start(Config {
+            store: Arc::new(AnalysisStore::in_memory().unwrap()),
+            playback: cache("play"),
+            scratch: cache("scratch"),
+            status: Arc::new(Status::default()),
+            on_result: Arc::new(|_, _| {}),
+            on_progress: Arc::new(|| {}),
+        });
+        // The second job has nothing to read: it fails normally, which only
+        // happens if the worker survived the first.
+        runner.enqueue([job("test-panic", 1.0), job("after", 1.0)]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runner.progress().done < 2 {
+            assert!(Instant::now() < deadline, "worker stalled: {:?}", runner.progress());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(runner.progress().failed, 2);
     }
 }

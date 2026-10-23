@@ -124,6 +124,24 @@ fn events_until(engine: &EngineHandle, mut stop: impl FnMut(&Event) -> bool) -> 
 }
 
 #[test]
+fn a_decoder_panic_is_an_error_not_a_hang() {
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(FakeBackend::new(caps(Some(24), 96_000))), None);
+    let src = TrackSource { id: "boom".into(), url: "test://panic".into(), ..Default::default() };
+    engine.send(Command::Play(src));
+    let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
+    let Some(Event::Error { message, .. }) = seen.last() else { unreachable!() };
+    assert!(message.contains("a decoder blew up"), "{message}");
+    // Stopped, not stuck loading or buffering.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while engine.status.state() != PlayState::Stopped {
+        assert!(Instant::now() < deadline, "still {:?}", engine.status.state());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    engine.send(Command::Shutdown);
+}
+
+#[test]
 fn gapless_queue_reports_each_track_as_it_plays() {
     let dir = tempfile::tempdir().unwrap();
     let (a, b) = (pcm(2 * 20_001, 1), pcm(2 * 9_999, 2));
