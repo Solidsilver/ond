@@ -32,6 +32,18 @@ use std::time::{Duration, SystemTime};
 
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// Give up connecting after this long.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A response that sends nothing for this long counts as broken: the download
+/// retries and, where the server supports Range, resumes where it stopped.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// An HTTP client for downloads, with a connect timeout and a read timeout
+/// (time allowed between received bytes, not for the whole body).
+pub fn http_client(read_timeout: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).read_timeout(read_timeout).build()
+}
+
 /// How often a blocked reader re-checks its abort flag.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -40,11 +52,14 @@ pub struct CacheConfig {
     pub dir: PathBuf,
     /// Size cap for completed files. Downloads in progress aren't counted.
     pub max_bytes: u64,
+    /// How long a download may go without receiving a byte before it counts
+    /// as stalled and retries ([`READ_TIMEOUT`] by default).
+    pub read_timeout: Duration,
 }
 
 impl CacheConfig {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES }
+        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES, read_timeout: READ_TIMEOUT }
     }
 }
 
@@ -157,10 +172,7 @@ impl StreamCache {
             );
         }
         let inner = Inner {
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .map_err(io::Error::other)?,
+            client: http_client(cfg.read_timeout).map_err(io::Error::other)?,
             cfg,
             rt,
             index: Mutex::new(index),

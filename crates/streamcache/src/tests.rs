@@ -221,7 +221,7 @@ fn blocked_read_aborts_and_dropping_cancels() {
 fn lru_eviction_keeps_recent_files() {
     let rt = runtime();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = CacheConfig { dir: dir.path().to_owned(), max_bytes: 3_000 };
+    let cfg = CacheConfig { max_bytes: 3_000, ..CacheConfig::new(dir.path()) };
     let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
     let server = Server::start(data(1_200), FAST);
     let fetch = |id: &str| {
@@ -323,4 +323,65 @@ fn a_subsonic_error_reply_is_not_cached_as_audio() {
     thread::sleep(Duration::from_millis(100));
     assert!(!dir.path().join("bad.flac").exists());
     assert!(!cache.progress(&key).is_some_and(|p| p.complete));
+}
+
+/// A connection that goes quiet mid-body (half-open TCP, a stuck proxy) must
+/// not hang the download: the read timeout fires and a ranged request resumes.
+#[test]
+fn a_stalled_response_times_out_and_resumes() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = CacheConfig { read_timeout: Duration::from_millis(300), ..CacheConfig::new(dir.path()) };
+    let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
+    let body = Arc::new(data(200_000));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/rest/stream?id=s", listener.local_addr().unwrap());
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let (served, log) = (body.clone(), starts.clone());
+    thread::spawn(move || {
+        for (n, conn) in listener.incoming().enumerate() {
+            let Ok(conn) = conn else { break };
+            let (data, log) = (served.clone(), log.clone());
+            thread::spawn(move || {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut start = 0u64;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        start = v.trim().trim_end_matches('-').parse().unwrap_or(0);
+                    }
+                }
+                log.lock().unwrap().push(start);
+                let len = data.len() as u64;
+                let rest = &data[start as usize..];
+                let mut out = conn;
+                let _ = write!(
+                    out,
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{len}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    len - 1,
+                    rest.len()
+                );
+                if n == 0 {
+                    // Half the body, then silence with the socket held open.
+                    let _ = out.write_all(&rest[..rest.len() / 2]);
+                    let _ = out.flush();
+                    thread::sleep(Duration::from_secs(10));
+                } else {
+                    let _ = out.write_all(rest);
+                }
+            });
+        }
+    });
+    let key = CacheKey::new("stall", None);
+    let mut src = cache.open(&key, &url, never()).unwrap();
+    let t = Instant::now();
+    let mut all = Vec::new();
+    src.read_to_end(&mut all).unwrap();
+    assert_eq!(all, *body);
+    assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+    let starts = starts.lock().unwrap().clone();
+    assert!(starts.len() >= 2 && starts[1] > 0, "resumed with a Range request: {starts:?}");
 }
