@@ -1,5 +1,5 @@
-//! The toolbar: transport on the left, the now-playing display in the middle,
-//! output / volume / queue on the right.
+//! The toolbar: transport on the left, the now-playing display centred on the
+//! window, output / volume / queue on the right.
 
 use super::widgets::elide;
 use super::{Action, ListenerApp, mmss};
@@ -11,35 +11,60 @@ use audio::{Command, PlayState};
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
 const LEFT_W: f32 = 120.0;
+/// The transport's inset from the window edge, so prev/play/next don't hug it.
+const TRANSPORT_INSET: f32 = 14.0;
 const RIGHT_W: f32 = 370.0;
-const LCD_MAX_W: f32 = 520.0;
-const LCD_H: f32 = 38.0;
+const LCD_MAX_W: f32 = 540.0;
+const LCD_MIN_W: f32 = 200.0;
+const LCD_H: f32 = 44.0;
 /// Below this window width the toolbar tightens up.
 const NARROW_W: f32 = 900.0;
+
+/// Where the now-playing display goes: centred on the window (`full`'s
+/// centre), as wide as the room on its tighter side allows; when even that is
+/// too little, centred in whatever room there is between the two sides.
+pub(super) fn lcd_rect(full: Rect, left_end: f32, right_start: f32) -> Rect {
+    const GAP: f32 = 12.0;
+    let cx = full.center().x;
+    let half = (cx - left_end).min(right_start - cx) - GAP;
+    let y = full.center().y;
+    if half * 2.0 >= LCD_MIN_W {
+        return Rect::from_center_size(pos2(cx, y), vec2((half * 2.0).min(LCD_MAX_W), LCD_H));
+    }
+    let room = Rect::from_min_max(pos2(left_end + GAP, full.top()), pos2(right_start - GAP, full.bottom()));
+    Rect::from_center_size(pos2(room.center().x, y), vec2(room.width().clamp(140.0, LCD_MAX_W), LCD_H))
+}
 
 impl ListenerApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         let full = ui.available_rect_before_wrap();
-        let left = Rect::from_min_max(full.min, pos2(full.left() + LEFT_W, full.bottom()));
+        let left = Rect::from_min_max(pos2(full.left() + TRANSPORT_INSET, full.top()), pos2(full.left() + TRANSPORT_INSET + LEFT_W, full.bottom()));
         // Narrow windows fold the volume slider behind its icon so the
         // now-playing display keeps room for the title.
         let narrow = full.width() < NARROW_W;
         let right_w = if narrow { RIGHT_W - 90.0 } else { RIGHT_W };
         let right = Rect::from_min_max(pos2(full.right() - right_w, full.top()), full.max);
-        let middle = Rect::from_min_max(pos2(left.right() + 12.0, full.top()), pos2(right.left() - 12.0, full.bottom()));
 
-        ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, None));
-        let lcd_w = middle.width().clamp(160.0, LCD_MAX_W);
-        let lcd = Rect::from_center_size(middle.center(), vec2(lcd_w, LCD_H));
-        self.lcd(ui, lcd);
-        ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| self.toolbar_right(ui, narrow));
+        let left_end = ui
+            .scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
+                self.transport(ui, None);
+                ui.min_rect().right()
+            })
+            .inner;
+        let right_start = ui
+            .scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
+                self.toolbar_right(ui, narrow);
+                ui.min_rect().left()
+            })
+            .inner;
+        self.lcd(ui, lcd_rect(full, left_end, right_start));
     }
 
     /// Previous · play/pause (a spinner while buffering) · next. `color`
     /// overrides the icons' color (e.g. over artwork).
     pub(super) fn transport(&mut self, ui: &mut Ui, color: Option<egui::Color32>) {
         let t = Tokens::of(ui);
-        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing.x = 4.0;
         let state = self.engine.status.state();
         if icons::sized_button(ui, Icon::Previous, "Previous", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Previous);
@@ -58,9 +83,9 @@ impl ListenerApp {
         }
     }
 
-    /// The now-playing display: art, title, "artist — album", and a thin
-    /// progress line along the bottom that you can click or drag to seek.
-    /// Hovering shows the times; clicking elsewhere opens the album.
+    /// The now-playing display. Art on the left; title and "artist — album"
+    /// centred; along the bottom a thin seek line with the elapsed and
+    /// remaining times at its ends; the format pill and the heart on the right.
     pub(super) fn lcd(&mut self, ui: &mut Ui, rect: Rect) {
         let t = Tokens::of(ui);
         let painter = ui.painter().clone();
@@ -75,15 +100,20 @@ impl ListenerApp {
         let cover = item.track.cover_art.clone().or_else(|| album.as_ref().and_then(|a| a.cover_art.clone()));
         self.art.paint(ui, art.shrink(1.0), cover.as_deref(), 6.0);
 
-        let text_rect = Rect::from_min_max(pos2(art.right() + 8.0, rect.top()), pos2(rect.right() - 8.0, rect.bottom()));
-        // The heart's slot at the right end; the signal readout sits just left of it.
-        let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y - 1.0), vec2(22.0, 22.0));
+        // The right column: the heart at the end, the format pill just left of
+        // it, both centred vertically.
+        let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(22.0, 22.0));
         let readout = self.output.readout(&self.engine.status);
-        let readout_anchor = pos2(heart.left() - 2.0, rect.bottom() - 11.0);
+        let readout_anchor = pos2(heart.left() - 2.0, rect.center().y);
         let readout_rect = readout.as_ref().map(|r| crate::output::paint_readout(ui, readout_anchor, r, 10.0, false));
-        // The title is centred, so keep the same margin on both sides of it.
-        let reserve = readout_rect.map_or(40.0, |r| (rect.right() - r.left() + 6.0).max(40.0));
-        let text_w = (text_rect.width() - 2.0 * reserve).max(40.0);
+        let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
+        let col_left = art.right() + 10.0;
+
+        // Title and subtitle: centred on the display when the same margin fits
+        // on both sides, else centred in the column between art and pill.
+        let reserve = (col_left - rect.left()).max(rect.right() - col_right);
+        let symmetric = rect.width() - 2.0 * reserve;
+        let (center_x, text_w) = if symmetric >= 140.0 { (rect.center().x, symmetric) } else { ((col_left + col_right) / 2.0, (col_right - col_left).max(40.0)) };
         let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_w);
         let sub_text = match (&item.track.artist, &album) {
             (Some(a), Some(al)) => format!("{a} — {}", al.name),
@@ -92,17 +122,22 @@ impl ListenerApp {
             _ => String::new(),
         };
         let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
-        let block_h = title.size().y + sub.size().y;
-        let y0 = text_rect.center().y - block_h / 2.0 - 1.0;
-        painter.galley(pos2(text_rect.center().x - title.size().x / 2.0, y0), title, t.text);
-        painter.galley(pos2(text_rect.center().x - sub.size().x / 2.0, y0 + block_h - sub.size().y), sub, t.muted);
+        let y0 = rect.top() + 4.0;
+        let title_h = title.size().y;
+        painter.galley(pos2(center_x - title.size().x / 2.0, y0), title, t.text);
+        painter.galley(pos2(center_x - sub.size().x / 2.0, y0 + title_h), sub, t.muted);
 
-        // Progress along the bottom edge of the text area.
+        // The seek line along the bottom of the column, the times at its ends.
         let state = self.engine.status.state();
         let dur = self.duration_secs().filter(|d| *d > 0.0);
-        let pos = self.position_secs();
-        let bar = Rect::from_min_max(pos2(text_rect.left() - 8.0, rect.bottom() - 3.0), pos2(rect.right() - 1.0, rect.bottom() - 1.0));
-        let strip = Rect::from_min_max(pos2(bar.left(), rect.bottom() - 10.0), rect.max);
+        let shown = self.seek_preview.unwrap_or_else(|| self.position_secs());
+        let time_font = FontId::proportional(9.5);
+        // Sized for the widest time, so the line doesn't shift as digits change.
+        let time_w = painter.layout_no_wrap("−88:88".into(), time_font.clone(), t.muted).size().x;
+        let line_y = rect.bottom() - 7.5;
+        let bar_left = col_left + time_w + 6.0;
+        let bar = Rect::from_min_max(pos2(bar_left, line_y - 1.0), pos2((col_right - time_w - 6.0).max(bar_left + 20.0), line_y + 1.0));
+        let strip = Rect::from_min_max(pos2(bar.left() - 4.0, line_y - 6.0), pos2(bar.right() + 4.0, rect.bottom()));
         let seekable = dur.is_some() && matches!(state, PlayState::Playing | PlayState::Paused | PlayState::Buffering);
         let strip_resp = ui.interact(strip, ui.scope_id().with("lcd-seek"), if seekable { Sense::click_and_drag() } else { Sense::hover() });
         let frac_at = |x: f32| f64::from(((x - bar.left()) / bar.width()).clamp(0.0, 1.0));
@@ -119,26 +154,36 @@ impl ListenerApp {
                 self.seek_preview = None;
             }
         }
-        painter.rect_filled(bar, 0.0, t.hairline);
+        let seeking = strip_resp.hovered() || self.seek_preview.is_some();
+        let line = if seeking { bar.expand2(vec2(0.0, 0.5)) } else { bar };
+        painter.rect_filled(line, 1.0, t.hairline);
         if let Some(f) = self.engine.status.fetched_fraction() {
-            painter.rect_filled(Rect::from_min_max(bar.min, pos2(bar.left() + bar.width() * f.clamp(0.0, 1.0), bar.bottom())), 0.0, t.selected);
+            painter.rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * f.clamp(0.0, 1.0), line.bottom())), 1.0, t.selected);
         }
-        let shown = self.seek_preview.unwrap_or(pos);
-        let x = bar.left() + bar.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
-        painter.rect_filled(Rect::from_min_max(bar.min, pos2(x, bar.bottom())), 0.0, t.muted);
-        let buffering = state == PlayState::Buffering || self.pending_seek.is_some();
-        if buffering {
+        let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
+        painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), 1.0, t.muted);
+        if state == PlayState::Buffering || self.pending_seek.is_some() {
             let tm = ui.input(|i| i.time) as f32;
             let alpha = 0.35 + 0.35 * (tm * std::f32::consts::TAU / 1.2).sin();
-            painter.rect_filled(Rect::from_min_max(pos2(x, bar.top()), pos2((x + 40.0).min(bar.right()), bar.bottom())), 0.0, t.accent.gamma_multiply(alpha));
+            painter.rect_filled(Rect::from_min_max(pos2(x, line.top()), pos2((x + 40.0).min(line.right()), line.bottom())), 1.0, t.accent.gamma_multiply(alpha));
         }
+        if seeking {
+            painter.circle_filled(pos2(x, line.center().y), 3.5, t.text);
+        }
+        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, mmss(shown), time_font.clone(), t.muted);
+        let remaining = dur.map(|d| format!("−{}", mmss((d - shown).max(0.0)))).unwrap_or_default();
+        painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
+
         let hovering = body.hovered() || strip_resp.hovered() || self.seek_preview.is_some();
         // Love: the heart at the right end, shown when loved or on hover.
         let loved = self.favorites.is_on(StarKind::Song, &item.track.id);
         // The signal path in a few characters; hover for all of it, click for the picker.
         let readout_resp = readout.as_ref().zip(readout_rect).map(|(r, area)| {
             crate::output::paint_readout(ui, readout_anchor, r, 10.0, true);
-            let resp = ui.interact(area.expand2(vec2(3.0, 3.0)), ui.scope_id().with("lcd-readout"), Sense::click());
+            let resp = ui.interact(area, ui.scope_id().with("lcd-readout"), Sense::click());
+            if resp.hovered() {
+                painter.rect_stroke(area, area.height() / 2.0, egui::Stroke::new(1.0, t.muted.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+            }
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
             resp
         });
@@ -156,16 +201,6 @@ impl ListenerApp {
         if heart_resp.clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }
-        if hovering {
-            let small = FontId::proportional(10.5);
-            let y = rect.top() + 5.0;
-            painter.text(pos2(text_rect.left(), y), egui::Align2::LEFT_TOP, mmss(shown), small.clone(), t.muted);
-            let right = dur.map(|d| format!("−{}", mmss(d - shown))).unwrap_or_default();
-            painter.text(pos2(heart.left() - 2.0, y), egui::Align2::RIGHT_TOP, right, small, t.muted);
-            if strip_resp.hovered() || self.seek_preview.is_some() {
-                painter.circle_filled(pos2(x, bar.center().y), 4.0, t.text);
-            }
-        }
         let label = format!("Now playing: {} — {sub_text}", item.track.title);
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         // The artwork switches to the player last used (Player or Mini); the
@@ -177,7 +212,7 @@ impl ListenerApp {
         if on_art && body.hovered() {
             painter.rect_stroke(art.shrink(1.0), 6.0, egui::Stroke::new(1.5, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
         }
-        if !heart_resp.hovered() && !on_readout {
+        if !heart_resp.hovered() && !on_readout && !strip_resp.hovered() {
             body.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
         heart_resp.on_hover_text(love_label);
@@ -225,5 +260,40 @@ impl ListenerApp {
         if self.output.picker_ui(ui, &self.engine, &self.paths, &mut self.bit_perfect) {
             self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn full(w: f32) -> Rect {
+        Rect::from_min_size(pos2(12.0, 0.0), vec2(w - 24.0, 52.0))
+    }
+
+    #[test]
+    fn the_display_is_centred_on_the_window() {
+        let f = full(1440.0);
+        let r = lcd_rect(f, 26.0 + 112.0, f.right() - 330.0);
+        assert!((r.center().x - 720.0).abs() < 0.5, "{r:?}");
+        assert_eq!(r.width(), LCD_MAX_W);
+    }
+
+    #[test]
+    fn a_tight_side_shrinks_it_but_keeps_it_centred() {
+        let f = full(1000.0);
+        let right_start = f.right() - 330.0;
+        let r = lcd_rect(f, 138.0, right_start);
+        assert!((r.center().x - 500.0).abs() < 0.5);
+        assert!(r.right() <= right_start - 11.9, "{r:?} overlaps the right controls");
+        assert!(r.width() < LCD_MAX_W);
+    }
+
+    #[test]
+    fn with_no_room_at_the_centre_it_fits_between_the_sides() {
+        let f = full(640.0);
+        let (left_end, right_start) = (138.0, f.right() - 300.0);
+        let r = lcd_rect(f, left_end, right_start);
+        assert!(r.left() >= left_end && r.right() <= right_start + 1.0 || r.width() == 140.0, "{r:?}");
     }
 }

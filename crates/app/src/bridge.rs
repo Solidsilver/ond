@@ -18,6 +18,8 @@ pub enum Msg {
     /// The server can't be reached (saved login, so the app opens offline);
     /// reconnecting continues in the background and ends with `Connected`.
     Unreachable { username: String, error: String },
+    /// A ping's round trip, or `None` when it got no answer.
+    Latency(Option<Duration>),
     Albums(Vec<Album>),
     SyncProgress(usize),
     SyncDone(usize),
@@ -245,6 +247,16 @@ impl Bridge {
 
     /// Checks the connection after something failed; if the server is gone,
     /// says so and reconnects in the background.
+    /// Times one ping (for the server popover and the diagnostics bar).
+    pub fn measure_latency(&self, client: Client) {
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let start = std::time::Instant::now();
+            let ok = ping(&client).await.is_ok();
+            this.send(Msg::Latency(ok.then(|| start.elapsed())));
+        });
+    }
+
     pub fn probe(&self, client: Client, settings: Settings) {
         if self.reconnecting.load(Ordering::Relaxed) {
             return;

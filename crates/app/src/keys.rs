@@ -39,6 +39,8 @@ pub enum Cmd {
     Shortcuts,
     NewPlaylist,
     ToggleBitPerfect,
+    /// The diagnostics bar along the bottom.
+    ToggleDiagnostics,
     /// System / Light / Dark (menu only).
     Appearance(u8),
 }
@@ -109,6 +111,7 @@ pub static BINDINGS: &[Binding] = &[
     b("Window", "Player", "⌥⌘2", CMD_ALT, Key::Num2, false, Cmd::Player),
     b("Window", "Mini player", "⌥⌘3", CMD_ALT, Key::Num3, false, Cmd::Mini),
     b("Window", "Mini player on / off", "⇧⌘M", CMD_SHIFT, Key::M, false, Cmd::ToggleMini),
+    b("Window", "Diagnostics bar on / off", "⌥⌘I", CMD_ALT, Key::I, false, Cmd::ToggleDiagnostics),
     b("Window", "Settings", "⌘,", CMD, Key::Comma, false, Cmd::Settings),
     b("Window", "Keyboard shortcuts", "⌘/", CMD, Key::Slash, false, Cmd::Shortcuts),
     b("Window", "Keyboard shortcuts", "?", SHIFT, Key::Questionmark, true, Cmd::Shortcuts),
@@ -180,6 +183,7 @@ mod tests {
         assert_eq!(press(Key::N, CMD_SHIFT, false), [Cmd::TogglePlayer]);
         assert_eq!(press(Key::L, CMD_ALT, false), [Cmd::Lyrics]);
         assert_eq!(press(Key::Questionmark, SHIFT, false), [Cmd::Shortcuts]);
+        assert_eq!(press(Key::I, CMD_ALT, false), [Cmd::ToggleDiagnostics]);
         // Space and ⌘-arrows belong to a focused text field.
         assert!(press(Key::Space, NONE, true).is_empty());
         assert!(press(Key::ArrowRight, CMD, true).is_empty());

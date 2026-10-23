@@ -104,6 +104,7 @@ impl ListenerApp {
                 self.engine.send(Command::SetMode(mode));
                 self.output.remember_mode(mode, &self.engine, &self.paths);
             }
+            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics.shown)),
             Cmd::Appearance(i) => {
                 let pref = [ThemePref::System, ThemePref::Light, ThemePref::Dark][usize::from(i.min(2))];
                 self.actions.push(Action::SetTheme(pref));

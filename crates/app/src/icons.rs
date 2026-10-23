@@ -54,6 +54,8 @@ pub enum Icon {
     HeartFilled,
     /// New playlist.
     Plus,
+    /// A question mark in a circle: help, the keyboard shortcuts.
+    Help,
 }
 
 /// The heart's outline, top notch first, clockwise, in icon units (−1..1).
@@ -170,6 +172,20 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.8, -0.8), p(0.2, -0.2)], line);
             painter.add(Shape::line(vec![p(-0.15, 0.8), p(-0.8, 0.8), p(-0.8, 0.15)], line));
             painter.line_segment([p(-0.8, 0.8), p(-0.2, 0.2)], line);
+        }
+        Icon::Help => {
+            let thin = Stroke::new((r * 0.16).max(1.1), color);
+            painter.circle_stroke(c, r * 0.85, thin);
+            // The hook: an arc over the top, then down to the stem.
+            let hook: Vec<Pos2> = (0..=10)
+                .map(|k| {
+                    let a = std::f32::consts::PI * (1.05 + 1.1 * k as f32 / 10.0);
+                    p(0.28 * a.cos(), -0.2 + 0.26 * a.sin())
+                })
+                .chain([p(0.0, 0.1), p(0.0, 0.22)])
+                .collect();
+            painter.add(Shape::line(hook, thin));
+            painter.circle_filled(p(0.0, 0.45), r * 0.09, color);
         }
         Icon::Gear => {
             for k in 0..8 {

@@ -10,6 +10,8 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 /// Width of the full sidebar and of the icon rail.
 pub const SIDEBAR_W: f32 = 216.0;
 pub const RAIL_W: f32 = 52.0;
+/// The footer's buttons (and the server status row's height).
+const FOOTER_BUTTON: f32 = 28.0;
 
 /// In ⌘1…⌘6 order.
 pub(super) const PLACES: [(&str, Route, Icon); 6] = [
@@ -102,13 +104,17 @@ impl ListenerApp {
             }
         });
 
-        // Settings, pinned to the bottom, with sync or offline state beside it
-        // while there is any.
+        // The footer: the server's state on the left (click for details and
+        // Sign out), keyboard shortcuts and Settings on the right.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
-                self.settings_button(ui);
-                ui.add_space(2.0);
-                self.sidebar_status(ui);
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let status_w = (ui.available_width() - 2.0 * (FOOTER_BUTTON + 2.0) - 4.0).max(40.0);
+                self.server_status(ui, status_w);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.settings_button(ui);
+                    self.help_button(ui);
+                });
             });
         });
     }
@@ -152,93 +158,157 @@ impl ListenerApp {
         });
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             self.settings_button(ui);
-            self.rail_status(ui);
+            self.help_button(ui);
+            self.rail_server_status(ui);
         });
     }
 
-    /// What the app is doing in the background, if anything: syncing (a ring
-    /// with progress, Stop on hover) or offline (a quiet pill). Nothing when idle.
-    fn sidebar_status(&mut self, ui: &mut Ui) {
+    /// The server's state in the footer: a dot and the host while connected,
+    /// a ring and progress while syncing, a cloud while offline. Click for the
+    /// details popover (latency, last sync, Sync now, Sign out).
+    fn server_status(&mut self, ui: &mut Ui, width: f32) {
         let t = Tokens::of(ui);
-        let w = ui.available_width();
-        if let Some(state) = self.background_state() {
-            let (rect, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
-            let painter = ui.painter();
-            let ring = egui::pos2(rect.left() + 8.0, rect.center().y);
-            let font = egui::FontId::proportional(11.5);
-            match &state {
-                Background::Syncing { label, fraction, .. } => {
-                    match fraction {
-                        Some(f) => icons::progress_ring(painter, ring, 5.5, *f, t.accent, t.hairline),
-                        None => {
-                            icons::paint(painter, Rect::from_center_size(ring, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-                        }
-                    }
-                    let stop_w = if resp.hovered() && self.track_syncing { 34.0 } else { 0.0 };
-                    let g = crate::app::elide_text(ui, label, font, t.muted, rect.width() - 22.0 - stop_w);
-                    painter.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, t.muted);
-                    if stop_w > 0.0 {
-                        let stop = Rect::from_min_max(egui::pos2(rect.right() - stop_w, rect.top()), rect.max);
-                        let hot = ui.rect_contains_pointer(stop);
-                        painter.text(stop.right_center(), egui::Align2::RIGHT_CENTER, "Stop", egui::FontId::proportional(11.5), if hot { t.text } else { t.accent });
-                        if resp.clicked() && hot {
-                            self.bridge.cancel_sync();
-                        }
-                    }
-                }
-                Background::Offline => {
-                    let label = "Offline";
-                    let g = painter.layout_no_wrap(label.into(), font, t.muted);
-                    let pill = Rect::from_min_size(egui::pos2(rect.left(), rect.center().y - 10.0), vec2(g.size().x + 30.0, 20.0));
-                    painter.rect_filled(pill, 10.0, t.field);
-                    icons::paint(painter, Rect::from_center_size(egui::pos2(pill.left() + 12.0, pill.center().y), vec2(11.0, 11.0)), Icon::Offline, t.muted);
-                    painter.galley(egui::pos2(pill.left() + 22.0, pill.center().y - g.size().y / 2.0), g, t.muted);
-                }
-            }
-            let tip = state.tooltip();
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, &tip));
-            resp.on_hover_text(tip);
+        let state = self.server_state();
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, FOOTER_BUTTON), Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 6.0, t.hover);
         }
-    }
-
-    /// The rail's version of [`Self::sidebar_status`]: just the ring or the
-    /// offline glyph, with the words in a tooltip.
-    fn rail_status(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
-        let Some(state) = self.background_state() else { return };
-        let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::hover());
-        let c = rect.center();
-        match &state {
-            Background::Syncing { fraction: Some(f), .. } => icons::progress_ring(ui.painter(), c, 5.5, *f, t.accent, t.hairline),
-            Background::Syncing { fraction: None, .. } => {
-                icons::paint(ui.painter(), Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-            }
-            Background::Offline => icons::paint(ui.painter(), Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
-        }
+        let glyph = egui::pos2(rect.left() + 12.0, rect.center().y);
+        state.paint_glyph(ui, glyph);
+        let g = crate::app::elide_text(ui, &state.label(), FontId::proportional(11.5), t.muted, rect.width() - 30.0);
+        ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, t.muted);
+        self.server_popover(&resp, &state);
         let tip = state.tooltip();
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, &tip));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &tip));
         resp.on_hover_text(tip);
     }
 
-    fn background_state(&self) -> Option<Background> {
+    /// The rail's version: just the glyph, the words in a tooltip; same popover.
+    fn rail_server_status(&mut self, ui: &mut Ui) {
+        let state = self.server_state();
+        let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 28.0), Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 6.0, Tokens::of(ui).hover);
+        }
+        state.paint_glyph(ui, rect.center());
+        self.server_popover(&resp, &state);
+        let tip = format!("{}\n{}", state.label(), state.tooltip());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &tip));
+        resp.on_hover_text(tip);
+    }
+
+    fn server_state(&self) -> ServerState {
+        let host = self.settings.as_ref().map(|s| super::diagnostics::server_host(&s.server)).unwrap_or_default();
         if let Some(p) = self.sync_progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
-            let (done, total) = (thousands(p.done), thousands(p.total));
-            let label = match p.unit {
-                crate::sync::Unit::Tracks => format!("Syncing {done} of {total}"),
-                crate::sync::Unit::Albums => format!("Syncing album {done} of {total}"),
+            // Short enough for the footer; the counts are in the tooltip and popover.
+            let label = match fraction {
+                Some(f) => format!("Syncing · {:.0}%", 100.0 * f),
+                None => "Syncing…".to_owned(),
             };
-            return Some(Background::Syncing { label, detail: p.label(), fraction });
+            let (done, total) = (thousands(p.done), thousands(p.total));
+            let what = match p.unit {
+                crate::sync::Unit::Tracks => "tracks",
+                crate::sync::Unit::Albums => "albums",
+            };
+            let detail = format!("{}\n{done} of {total} {what}", p.label());
+            return ServerState::Syncing { host, label, detail, fraction };
         }
-        if self.album_syncing || (self.track_syncing && self.online) {
-            return Some(Background::Syncing { label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None });
+        if self.online && (self.album_syncing || self.track_syncing) {
+            return ServerState::Syncing { host, label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None };
         }
-        if !self.online && self.settings.is_some() {
-            return Some(Background::Offline);
+        if self.online {
+            return ServerState::Connected { host };
         }
-        None
+        if self.unreachable {
+            return ServerState::Offline { host };
+        }
+        ServerState::Connecting { host }
+    }
+
+    /// Details about the server, Sync now and Sign out, under `resp`.
+    fn server_popover(&mut self, resp: &egui::Response, state: &ServerState) {
+        egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            let t = Tokens::of(ui);
+            ui.set_width(250.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // Opening the popover refreshes the round trip if it's old.
+            if self.online
+                && self.diagnostics.latency_stale()
+                && let Some(c) = self.client.clone()
+            {
+                self.diagnostics.latency_asked();
+                self.bridge.measure_latency(c);
+            }
+            let (server, user) = self.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(state.host()).font(FontId::new(13.0, semibold())).color(t.text));
+            });
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(egui::RichText::new(&server).size(11.0).color(t.muted)).truncate());
+            });
+            ui.add_space(10.0);
+            let status = match state {
+                ServerState::Connected { .. } | ServerState::Syncing { .. } => match self.diagnostics.latency() {
+                    Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
+                    None => "Connected".to_owned(),
+                },
+                ServerState::Offline { .. } => "Offline · reconnecting".to_owned(),
+                ServerState::Connecting { .. } => "Connecting…".to_owned(),
+            };
+            let status_color = match state {
+                ServerState::Offline { .. } => t.warn,
+                _ => t.text,
+            };
+            info_row(ui, "Status", &status, status_color);
+            if !user.is_empty() {
+                info_row(ui, "User", &user, t.text);
+            }
+            if !self.server_info.is_empty() {
+                info_row(ui, "Server", &self.server_info, t.text);
+            }
+            let synced = match state {
+                ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
+                _ => match self.last_synced {
+                    Some(at) => at.format("%-I:%M %p").to_string(),
+                    None if self.client.is_some() => "At launch".to_owned(),
+                    None => "Not yet".to_owned(),
+                },
+            };
+            info_row(ui, "Last sync", &synced, t.text);
+            let action = if self.track_syncing {
+                Some("Stop sync")
+            } else if self.client.is_some() && self.online {
+                Some("Sync now")
+            } else {
+                None
+            };
+            if let Some(label) = action {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    if super::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
+                        if self.track_syncing {
+                            self.bridge.cancel_sync();
+                        } else {
+                            self.actions.push(Action::SyncNow);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            if menu_item(ui, "Sign Out", "") {
+                self.actions.push(Action::SignOut);
+            }
+            ui.add_space(2.0);
+        });
     }
 
     fn playlist_menu(&mut self, ui: &mut Ui, id: &str) {
@@ -256,25 +326,22 @@ impl ListenerApp {
         }
     }
 
-    /// The gear: a small menu for Settings, the shortcut list and signing out.
+    /// The gear: opens Settings.
     fn settings_button(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let button = icons::sized_button(ui, Icon::Gear, "Settings", vec2(28.0, 28.0), 15.0, Some(t.muted));
-        egui::Popup::menu(&button).show(|ui| {
-            ui.set_width(220.0);
-            if menu_item(ui, "Settings…", "⌘,") {
-                self.actions.push(Action::OpenSettings(self.settings_section));
-            }
-            if menu_item(ui, "Keyboard Shortcuts", "⌘/") {
-                self.actions.push(Action::Command(crate::keys::Cmd::Shortcuts));
-            }
-            if !self.server_label.is_empty() {
-                ui.separator();
-                if menu_item(ui, "Sign Out", "") {
-                    self.actions.push(Action::SignOut);
-                }
-            }
-        });
+        let button = icons::sized_button(ui, Icon::Gear, "Settings (⌘,)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
+        if button.clicked() {
+            self.actions.push(Action::OpenSettings(self.settings_section));
+        }
+    }
+
+    /// A question mark in a circle: the keyboard shortcuts.
+    fn help_button(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let button = icons::sized_button(ui, Icon::Help, "Keyboard shortcuts (⌘/)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
+        if button.clicked() {
+            self.actions.push(Action::Command(crate::keys::Cmd::Shortcuts));
+        }
     }
 
     /// Overall progress of unfinished downloads, while any are moving.
@@ -351,17 +418,68 @@ fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
     false
 }
 
-/// Background work worth a glance in the sidebar footer.
-enum Background {
-    Syncing { label: String, detail: String, fraction: Option<f32> },
-    Offline,
+/// A label and value in the server popover.
+fn info_row(ui: &mut Ui, label: &str, value: &str, color: egui::Color32) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let (r, _) = ui.allocate_exact_size(vec2(64.0, 20.0), Sense::hover());
+        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), t.muted);
+        ui.add(egui::Label::new(egui::RichText::new(value).size(12.0).color(color)).truncate());
+    });
 }
 
-impl Background {
+/// The server's state as the footer shows it.
+#[derive(Debug, Clone, PartialEq)]
+enum ServerState {
+    Connected { host: String },
+    Syncing { host: String, label: String, detail: String, fraction: Option<f32> },
+    /// Not answering; reconnecting in the background.
+    Offline { host: String },
+    /// The first connect is still under way.
+    Connecting { host: String },
+}
+
+impl ServerState {
+    fn host(&self) -> &str {
+        match self {
+            ServerState::Connected { host } | ServerState::Syncing { host, .. } | ServerState::Offline { host } | ServerState::Connecting { host } => host,
+        }
+    }
+
+    /// What the footer says.
+    fn label(&self) -> String {
+        match self {
+            ServerState::Connected { host } => host.clone(),
+            ServerState::Syncing { label, .. } => label.clone(),
+            ServerState::Offline { .. } => "Offline".into(),
+            ServerState::Connecting { .. } => "Connecting…".into(),
+        }
+    }
+
     fn tooltip(&self) -> String {
         match self {
-            Background::Syncing { detail, .. } => format!("{detail}\nBrowsing works meanwhile; new albums and tracks appear as they arrive."),
-            Background::Offline => "Can't reach the server. Downloaded music still plays; reconnecting in the background.".into(),
+            ServerState::Connected { host } => format!("Connected to {host}. Click for details."),
+            ServerState::Syncing { detail, .. } => format!("{detail}\nBrowsing works meanwhile; new albums and tracks appear as they arrive."),
+            ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays; reconnecting in the background.".into(),
+            ServerState::Connecting { host } => format!("Connecting to {host}…"),
+        }
+    }
+
+    /// The small glyph at `c`: a dot, a progress ring or spinner, or a cloud.
+    fn paint_glyph(&self, ui: &Ui, c: egui::Pos2) {
+        let t = Tokens::of(ui);
+        let painter = ui.painter();
+        match self {
+            ServerState::Connected { .. } => {
+                painter.circle_filled(c, 3.2, t.ok);
+            }
+            ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
+            ServerState::Syncing { fraction: None, .. } | ServerState::Connecting { .. } => {
+                icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            ServerState::Offline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
         }
     }
 }
