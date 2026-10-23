@@ -78,7 +78,7 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, data: &Data) -> Vec<usize> {
 impl ListenerApp {
     pub(super) fn main_view(&mut self, ui: &mut Ui) {
         self.trail_bar(ui);
-        let route = self.nav.current().clone();
+        let route = self.ui.nav.current().clone();
         match &route {
             Route::Recent => {
                 self.heading(ui, "Recently Added", None);
@@ -91,7 +91,7 @@ impl ListenerApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Right-to-left layout: the pill itself still reads left to right.
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            choice(ui, &AlbumSort::ALL, &mut self.sort, None, |s| s.label().into());
+                            choice(ui, &AlbumSort::ALL, &mut self.ui.sort, None, |s| s.label().into());
                         });
                     });
                 });
@@ -121,17 +121,17 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let back = ui.add_enabled_ui(self.nav.can_back(), |ui| icons::sized_button(ui, Icon::ChevronLeft, "Back (⌘[)", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
+            let back = ui.add_enabled_ui(self.ui.nav.can_back(), |ui| icons::sized_button(ui, Icon::ChevronLeft, "Back (⌘[)", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
             if back.clicked() {
                 self.actions.push(Action::Back);
             }
-            let fwd = ui.add_enabled_ui(self.nav.can_forward(), |ui| icons::sized_button(ui, Icon::ChevronRight, "Forward (⌘])", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
+            let fwd = ui.add_enabled_ui(self.ui.nav.can_forward(), |ui| icons::sized_button(ui, Icon::ChevronRight, "Forward (⌘])", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
             if fwd.clicked() {
                 self.actions.push(Action::Forward);
             }
             ui.add_space(8.0);
             ui.spacing_mut().item_spacing.x = 6.0;
-            let trail = self.nav.trail();
+            let trail = self.ui.nav.trail();
             let n = trail.len();
             let labels: Vec<String> = trail.iter().map(|r| route_label(r, &self.data)).collect();
             for (i, label) in labels.iter().enumerate() {
@@ -161,8 +161,8 @@ impl ListenerApp {
     }
 
     fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
-        let (sort, data) = (self.sort, &self.data);
-        self.grid.get((route.clone(), sort, data.version), || grid_ids(route, sort, data))
+        let (sort, data) = (self.ui.sort, &self.data);
+        self.ui.grid.get((route.clone(), sort, data.version), || grid_ids(route, sort, data))
     }
 
     /// A full-height, virtualized grid: only visible rows are laid out, so only

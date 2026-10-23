@@ -316,7 +316,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let button = icons::sized_button(ui, Icon::Gear, "Settings (⌘,)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
         if button.clicked() {
-            self.actions.push(Action::OpenSettings(self.settings_section));
+            self.actions.push(Action::OpenSettings(self.ui.settings_section));
         }
     }
 
@@ -341,11 +341,11 @@ impl ListenerApp {
 
     /// The sidebar entry the current place belongs to.
     fn sidebar_active(&self) -> Option<Route> {
-        let current = self.nav.current();
+        let current = self.ui.nav.current();
         if current.is_root() {
             return Some(current.clone());
         }
-        self.nav.trail().first().filter(|r| r.is_root()).map(|r| (*r).clone())
+        self.ui.nav.trail().first().filter(|r| r.is_root()).map(|r| (*r).clone())
     }
 
     fn section(&self, ui: &mut Ui, text: &str) {

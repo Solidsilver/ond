@@ -66,7 +66,7 @@ impl ListenerApp {
             }
             Cmd::Reveal => {
                 if let Some(t) = self.player.queue.current.as_ref().map(|c| c.track.clone()) {
-                    self.reveal = Some(t.id.clone());
+                    self.ui.reveal = Some(t.id.clone());
                     self.actions.push(Action::Go(Route::Album(t.album_id)));
                 }
             }
@@ -86,17 +86,17 @@ impl ListenerApp {
             Cmd::Player => self.actions.push(Action::SetMode(WindowMode::Player)),
             Cmd::Mini => self.actions.push(Action::SetMode(WindowMode::Mini)),
             Cmd::ToggleMini => self.actions.push(Action::ToggleMini),
-            Cmd::Settings => self.actions.push(Action::OpenSettings(self.settings_section)),
+            Cmd::Settings => self.actions.push(Action::OpenSettings(self.ui.settings_section)),
             Cmd::Shortcuts => {
                 self.set_mode(Some(WindowMode::Full));
-                self.overlay = match self.overlay {
+                self.ui.overlay = match self.ui.overlay {
                     Some(super::dialogs::Overlay::Shortcuts) => None,
                     _ => Some(super::dialogs::Overlay::Shortcuts),
                 };
             }
             Cmd::NewPlaylist => {
                 self.set_mode(Some(WindowMode::Full));
-                self.overlay = Some(super::dialogs::Overlay::new_playlist(Vec::new()));
+                self.ui.overlay = Some(super::dialogs::Overlay::new_playlist(Vec::new()));
             }
             Cmd::ToggleBitPerfect => {
                 self.bit_perfect = !self.bit_perfect;
@@ -180,13 +180,13 @@ impl ListenerApp {
                 if let Some(p) = self.data.playlists.iter_mut().find(|p| p.id == id) {
                     p.name = name.clone();
                 }
-                self.nav.rename_playlist(&id, &name);
+                self.ui.nav.rename_playlist(&id, &name);
                 self.bridge.edit_playlist(client, id, PlaylistEdit::Rename(name));
             }
             PlaylistAction::Delete { id } => {
                 self.data.playlists.retain(|p| p.id != id);
                 self.data.playlist_tracks.remove(&id);
-                if matches!(self.nav.current(), Route::Playlist { id: cur, .. } if *cur == id) {
+                if matches!(self.ui.nav.current(), Route::Playlist { id: cur, .. } if *cur == id) {
                     self.go(Route::Recent);
                 }
                 self.bridge.edit_playlist(client, id, PlaylistEdit::Delete);
@@ -201,7 +201,7 @@ impl ListenerApp {
                     p.song_count = p.song_count.saturating_sub(1);
                     p.duration = p.duration.saturating_sub(gone.duration_secs.unwrap_or(0));
                 }
-                self.track_sel = self.track_sel.map(|s| s.min(list.len().saturating_sub(1))).filter(|_| !list.is_empty());
+                self.ui.track_sel = self.ui.track_sel.map(|s| s.min(list.len().saturating_sub(1))).filter(|_| !list.is_empty());
                 self.bridge.edit_playlist(client, id, PlaylistEdit::Remove(vec![index]));
             }
             PlaylistAction::Move { id, from, to } => {
@@ -209,8 +209,8 @@ impl ListenerApp {
                 if !move_item(Arc::make_mut(list), from, to) {
                     return;
                 }
-                if self.track_sel == Some(from) {
-                    self.track_sel = Some(to.min(list.len() - 1));
+                if self.ui.track_sel == Some(from) {
+                    self.ui.track_sel = Some(to.min(list.len() - 1));
                 }
                 let ids = list.iter().map(|t| t.id.clone()).collect();
                 self.bridge.edit_playlist(client, id, PlaylistEdit::Replace(ids));
@@ -220,9 +220,9 @@ impl ListenerApp {
 
     /// Playlists added to lately come first in "Add to Playlist".
     fn note_recent_playlist(&mut self, id: &str) {
-        self.recent_playlists.retain(|p| p != id);
-        self.recent_playlists.insert(0, id.to_owned());
-        self.recent_playlists.truncate(3);
+        self.ui.recent_playlists.retain(|p| p != id);
+        self.ui.recent_playlists.insert(0, id.to_owned());
+        self.ui.recent_playlists.truncate(3);
     }
 }
 

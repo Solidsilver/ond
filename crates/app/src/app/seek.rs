@@ -38,23 +38,23 @@ impl ListenerApp {
             if (resp.dragged() || resp.drag_started())
                 && let Some(p) = resp.interact_pointer_pos()
             {
-                self.seek_preview = Some(frac_at(p.x) * d);
+                self.ui.seek_preview = Some(frac_at(p.x) * d);
             }
             if resp.drag_stopped() || resp.clicked() {
-                if let Some(to) = resp.interact_pointer_pos().map(|p| frac_at(p.x) * d).or(self.seek_preview) {
+                if let Some(to) = resp.interact_pointer_pos().map(|p| frac_at(p.x) * d).or(self.ui.seek_preview) {
                     self.actions.push(Action::Seek(to));
                 }
-                self.seek_preview = None;
+                self.ui.seek_preview = None;
             }
         }
         let painter = ui.painter();
-        let grabbed = resp.hovered() || self.seek_preview.is_some();
+        let grabbed = resp.hovered() || self.ui.seek_preview.is_some();
         let line = if grabbed { bar.expand2(vec2(0.0, s.grow)) } else { bar };
         painter.rect_filled(line, s.radius, s.track);
         if let Some(f) = self.engine.status.fetched_fraction() {
             painter.rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * f.clamp(0.0, 1.0), line.bottom())), s.radius, s.fetched);
         }
-        let shown = self.seek_preview.unwrap_or_else(|| self.position_secs());
+        let shown = self.ui.seek_preview.unwrap_or_else(|| self.position_secs());
         let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
         painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), s.radius, s.fill);
         if state == PlayState::Buffering || self.player.pending_seek.is_some() {

@@ -45,11 +45,11 @@ const GROUP_H: f32 = 24.0;
 
 impl ListenerApp {
     pub(super) fn palette_ui(&mut self, ctx: &egui::Context) {
-        if self.palette.is_none() {
+        if self.ui.palette.is_none() {
             return;
         }
         if self.search.index.is_none() {
-            self.palette = None;
+            self.ui.palette = None;
             return;
         }
         use egui::{Key, Modifiers};
@@ -73,7 +73,7 @@ impl ListenerApp {
             _ if download => Some(Verb::Download),
             _ => None,
         };
-        let Some(palette) = self.palette.as_mut() else { return };
+        let Some(palette) = self.ui.palette.as_mut() else { return };
         let n = palette.results.len();
         if n > 0 {
             if down {
@@ -97,7 +97,7 @@ impl ListenerApp {
             let t = Tokens::of(ui);
             ui.set_width(WIDTH);
             ui.spacing_mut().item_spacing.y = 0.0;
-            let palette = self.palette.as_mut()?;
+            let palette = self.ui.palette.as_mut()?;
             let index = self.search.index.as_mut()?;
 
             // Query field.
@@ -242,20 +242,20 @@ impl ListenerApp {
         });
         if let Some(c) = modal.inner {
             verb = Some(c.1);
-            if let Some(p) = self.palette.as_mut() {
+            if let Some(p) = self.ui.palette.as_mut() {
                 // A click acts on what was clicked, not on the keyboard selection.
                 let at = (0..p.results.len()).find(|&k| p.results.hit(k) == Some(c.0));
                 p.selected = at.unwrap_or(p.selected);
             }
         }
         let close = modal.should_close();
-        let Some(palette) = self.palette.as_ref() else { return };
+        let Some(palette) = self.ui.palette.as_ref() else { return };
         match (verb, palette.results.hit(palette.selected)) {
             (Some(v), Some(hit)) => {
-                self.palette = None;
+                self.ui.palette = None;
                 self.run_hit(hit, v);
             }
-            _ if close => self.palette = None,
+            _ if close => self.ui.palette = None,
             _ => {}
         }
     }

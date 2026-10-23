@@ -37,7 +37,7 @@ impl ListenerApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Right-to-left layout: the pill itself still reads left to right.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    choice(ui, &[FavTab::Songs, FavTab::Albums, FavTab::Artists], &mut self.fav_tab, None, label);
+                    choice(ui, &[FavTab::Songs, FavTab::Albums, FavTab::Artists], &mut self.ui.fav_tab, None, label);
                 });
             });
         });
@@ -46,7 +46,7 @@ impl ListenerApp {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
         }
-        match self.fav_tab {
+        match self.ui.fav_tab {
             FavTab::Songs => {
                 if v.songs.is_empty() {
                     return empty(ui, "Songs you love show up here. Click the heart on a track, or press ⇧⌘L while one plays.");

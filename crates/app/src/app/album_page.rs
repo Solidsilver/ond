@@ -279,7 +279,7 @@ impl ListenerApp {
     /// folded away until asked for (open stays open for the session).
     fn album_details(&mut self, ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>, analysing: bool) {
         let t = Tokens::of(ui);
-        let open = self.album_details_open;
+        let open = self.ui.album_details_open;
         let toggle = ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let l = link(ui, "Album details", FontId::proportional(12.0), t.accent);
@@ -288,7 +288,7 @@ impl ListenerApp {
             l
         });
         if toggle.inner.clicked() {
-            self.album_details_open = !open;
+            self.ui.album_details_open = !open;
         }
         if !open {
             return;
@@ -462,8 +462,8 @@ impl ListenerApp {
                 self.actions.push(Action::Overlay(Overlay::new_playlist(tracks.to_vec())));
             }
             let mine: Vec<subsonic::Playlist> = self.data.playlists.iter().filter(|p| self.owns(p)).cloned().collect();
-            let recent: Vec<&subsonic::Playlist> = self.recent_playlists.iter().filter_map(|id| mine.iter().find(|p| &p.id == id)).collect();
-            let mut rest: Vec<&subsonic::Playlist> = mine.iter().filter(|p| !self.recent_playlists.contains(&p.id)).collect();
+            let recent: Vec<&subsonic::Playlist> = self.ui.recent_playlists.iter().filter_map(|id| mine.iter().find(|p| &p.id == id)).collect();
+            let mut rest: Vec<&subsonic::Playlist> = mine.iter().filter(|p| !self.ui.recent_playlists.contains(&p.id)).collect();
             rest.sort_by_cached_key(|p| p.name.to_lowercase());
             for group in [recent, rest] {
                 if group.is_empty() {
@@ -502,17 +502,17 @@ impl ListenerApp {
             let h = if opts.artist { 44.0 } else { 38.0 };
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
             let playing = current.as_deref() == Some(tr.id.as_str());
-            if self.reveal.as_deref() == Some(tr.id.as_str()) {
-                self.reveal = None;
-                self.track_sel = Some(i);
-                self.focus = Focus::Main;
+            if self.ui.reveal.as_deref() == Some(tr.id.as_str()) {
+                self.ui.reveal = None;
+                self.ui.track_sel = Some(i);
+                self.ui.focus = Focus::Main;
                 ui.scroll_to_rect(rect, Some(egui::Align::Center));
             }
             // Off screen: the space is kept, nothing else to do (long lists).
             if !ui.is_rect_visible(rect) {
                 continue;
             }
-            let selected = self.focus == Focus::Main && self.track_sel == Some(i);
+            let selected = self.ui.focus == Focus::Main && self.ui.track_sel == Some(i);
             let hovered = resp.hovered() || resp.contains_pointer();
             let loved = self.favorites.is_on(StarKind::Song, &tr.id);
             // Drag: the selection's track (or this one) to a playlist; within
@@ -624,8 +624,8 @@ impl ListenerApp {
             if resp.double_clicked() {
                 self.actions.push(Action::Tracks { tracks: tracks.to_vec(), source: source.clone(), action: QueueAction::Play { start: i } });
             } else if resp.clicked() {
-                self.track_sel = Some(i);
-                self.focus = Focus::Main;
+                self.ui.track_sel = Some(i);
+                self.ui.focus = Focus::Main;
             }
             resp.context_menu(|ui| self.track_row_menu(ui, tr, i, source, opts.playlist.as_deref()));
         }
@@ -695,7 +695,7 @@ impl ListenerApp {
     /// Whether a list may take keys this frame: no palette or sheet is open
     /// over it and no text field is being typed into.
     pub(super) fn list_keys_free(&self, ui: &Ui) -> bool {
-        self.palette.is_none() && self.overlay.is_none() && !ui.ctx().memory(|m| m.focused().is_some())
+        self.ui.palette.is_none() && self.ui.overlay.is_none() && !ui.ctx().memory(|m| m.focused().is_some())
     }
 
     /// ⇧⌘D, when nothing else has the keyboard.
@@ -711,7 +711,7 @@ impl ListenerApp {
     /// otherwise. `edit` also takes ⌥↑/⌥↓ and ⌫ (lists the user can change);
     /// `escape` takes Esc.
     pub(super) fn list_keys(&self, ui: &Ui, focus: Focus, edit: bool, escape: bool) -> Option<ListKeys> {
-        if self.focus != focus || !self.list_keys_free(ui) {
+        if self.ui.focus != focus || !self.list_keys_free(ui) {
             return None;
         }
         use egui::{Key, Modifiers};
@@ -744,8 +744,8 @@ impl ListenerApp {
         }
         let Some(k) = self.list_keys(ui, Focus::Main, playlist.is_some(), false) else { return };
         let last = tracks.len() - 1;
-        self.track_sel = k.step(self.track_sel, tracks.len());
-        let Some(sel) = self.track_sel.filter(|s| *s <= last) else { return };
+        self.ui.track_sel = k.step(self.ui.track_sel, tracks.len());
+        let Some(sel) = self.ui.track_sel.filter(|s| *s <= last) else { return };
         if let Some(pid) = playlist {
             if k.move_up && sel > 0 {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel - 1 }));

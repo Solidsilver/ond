@@ -29,11 +29,11 @@ const DIALOG_W: f32 = 340.0;
 
 impl ListenerApp {
     pub(super) fn overlay_ui(&mut self, ctx: &egui::Context) {
-        if matches!(self.overlay, Some(Overlay::Settings)) {
+        if matches!(self.ui.overlay, Some(Overlay::Settings)) {
             self.settings_window(ctx);
             return;
         }
-        let Some(overlay) = self.overlay.as_mut() else { return };
+        let Some(overlay) = self.ui.overlay.as_mut() else { return };
         let id = egui::Id::unique("overlay");
         let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(20)).corner_radius(12);
         let mut done: Option<Option<Action>> = None;
@@ -81,7 +81,7 @@ impl ListenerApp {
             done = Some(None);
         }
         if let Some(action) = done {
-            self.overlay = None;
+            self.ui.overlay = None;
             if let Some(a) = action {
                 self.actions.push(a);
             }

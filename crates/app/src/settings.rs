@@ -33,7 +33,7 @@ impl From<DeviceMode> for audio::PlaybackMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub server: String,
     pub username: String,

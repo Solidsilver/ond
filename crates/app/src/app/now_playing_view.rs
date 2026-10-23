@@ -40,7 +40,7 @@ impl ListenerApp {
             .frame(egui::Frame::new().fill(t.bg))
             .show(ui, |ui| self.player_bar(ui));
         self.player_status_bar(ui);
-        if self.windows.lyrics_open {
+        if self.lyrics_drawer() {
             egui::Panel::right("lyrics-drawer")
                 .exact_size(crate::window::DRAWER_W)
                 .resizable(false)
@@ -62,7 +62,7 @@ impl ListenerApp {
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
             .show(ui, |ui| {
                 let full = ui.available_rect_before_wrap();
-                let below = BELOW_ART_H + if self.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
+                let below = BELOW_ART_H + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
                 let side = full.width().min(full.height() - below).max(120.0).floor();
                 match self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     Some(track) => {
@@ -216,7 +216,7 @@ impl ListenerApp {
                     ui.label(egui::RichText::new("  —  ").font(font.clone()).color(t.muted));
                 }
                 if link(ui, &al.name, font, t.muted).clicked() {
-                    self.reveal = Some(track.id.clone());
+                    self.ui.reveal = Some(track.id.clone());
                     self.actions.push(Action::Go(Route::Album(al.id.clone())));
                 }
             }
@@ -293,13 +293,13 @@ impl ListenerApp {
             ui.spacing_mut().item_spacing.x = 4.0;
             let resp = link(ui, "Details", FontId::proportional(12.0), t.muted);
             let (r, _) = ui.allocate_exact_size(vec2(10.0, 12.0), Sense::hover());
-            icons::paint(ui.painter(), r.shrink(1.5), if self.np_details { Icon::ChevronDown } else { Icon::ChevronRight }, t.muted);
+            icons::paint(ui.painter(), r.shrink(1.5), if self.ui.np_details { Icon::ChevronDown } else { Icon::ChevronRight }, t.muted);
             if resp.clicked() {
-                self.np_details = !self.np_details;
+                self.ui.np_details = !self.ui.np_details;
             }
             if lyrics_toggle {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let open = self.windows.lyrics_open;
+                    let open = self.lyrics_drawer();
                     let color = if open { t.accent } else { t.muted };
                     let label = if open { "Hide lyrics (⌥⌘L)" } else { "Show lyrics (⌥⌘L)" };
                     let b = icons::sized_button(ui, Icon::Lyrics, label, vec2(28.0, 24.0), 14.0, Some(color));
@@ -312,7 +312,7 @@ impl ListenerApp {
                 });
             }
         });
-        if !self.np_details {
+        if !self.ui.np_details {
             return;
         }
         ui.add_space(8.0);
@@ -339,9 +339,9 @@ impl ListenerApp {
         // Hand-scrolling over the lyrics pauses following.
         let wheel = ui.input(|i| i.smooth_scroll_delta.y != 0.0);
         if wheel && ui.rect_contains_pointer(rect) {
-            self.lyrics_follow.scrolled_by_hand(now);
+            self.ui.lyrics_follow.scrolled_by_hand(now);
         }
-        let following = self.lyrics_follow.following(now);
+        let following = self.ui.lyrics_follow.following(now);
         let id = egui::Id::unique("np-lyrics").with(&track.id);
 
         match l {
@@ -408,7 +408,7 @@ impl ListenerApp {
                     ui.data_mut(|d| d.insert_temp(id, (cur, pass)));
                 }
                 if let Some(s) = seek_to {
-                    self.lyrics_follow.resume();
+                    self.ui.lyrics_follow.resume();
                     // Re-place the clicked line once playback gets there.
                     ui.data_mut(|d| d.remove::<(Option<usize>, u64)>(id));
                     self.actions.push(Action::Seek(s));
@@ -423,7 +423,7 @@ impl ListenerApp {
                 {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(ms.clamp(16, 60_000) as u64));
                 }
-                if let Some(s) = self.lyrics_follow.resumes_in(now) {
+                if let Some(s) = self.ui.lyrics_follow.resumes_in(now) {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(s));
                 }
             }
@@ -468,7 +468,7 @@ impl ListenerApp {
         ui.painter().galley(r.center() - galley.size() / 2.0, galley, t.text);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Follow lyrics"));
         if resp.clicked() {
-            self.lyrics_follow.resume();
+            self.ui.lyrics_follow.resume();
             ui.data_mut(|d| d.remove::<(Option<usize>, u64)>(id));
         }
     }

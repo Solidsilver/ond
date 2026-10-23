@@ -99,12 +99,12 @@ impl ListenerApp {
     fn songs_order(&mut self) -> Arc<Vec<usize>> {
         let data = &self.data;
         let versions = (data.tracks_version, data.version);
-        let keys = self.songs.keys.get(versions, || {
+        let keys = self.ui.songs.keys.get(versions, || {
             let names = |id: &str| data.album(id).map(|a| a.name.clone()).unwrap_or_default();
             SortKeys::new(&data.tracks.all, &names)
         });
-        let (sort, descending) = (self.songs.sort, self.songs.descending);
-        self.songs.order.get((versions.0, versions.1, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
+        let (sort, descending) = (self.ui.songs.sort, self.ui.songs.descending);
+        self.ui.songs.order.get((versions.0, versions.1, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
     }
 
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {
@@ -134,22 +134,22 @@ impl ListenerApp {
             (Column::Format, "Format", cols.format, false),
         ] {
             let resp = ui.interact(rect, ui.scope_id().with(("songs-col", label)), Sense::click());
-            let on = self.songs.sort == col;
+            let on = self.ui.songs.sort == col;
             let color = if on || resp.hovered() { t.text } else { t.muted };
             let font = FontId::new(11.0, semibold());
             let (anchor, x) = if right { (egui::Align2::RIGHT_CENTER, rect.right() - 10.0) } else { (egui::Align2::LEFT_CENTER, rect.left() + 10.0) };
             let text_rect = ui.painter().text(pos2(x, rect.center().y), anchor, label, font, color);
             if on {
                 let cx = if right { text_rect.left() - 8.0 } else { text_rect.right() + 8.0 };
-                sort_arrow(ui, pos2(cx, rect.center().y), self.songs.descending, color);
+                sort_arrow(ui, pos2(cx, rect.center().y), self.ui.songs.descending, color);
             }
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, format!("Sort by {label}")));
             if resp.clicked() {
                 if on {
-                    self.songs.descending = !self.songs.descending;
+                    self.ui.songs.descending = !self.ui.songs.descending;
                 } else {
-                    self.songs.sort = col;
-                    self.songs.descending = false;
+                    self.ui.songs.sort = col;
+                    self.ui.songs.descending = false;
                 }
             }
         }
@@ -162,7 +162,7 @@ impl ListenerApp {
             for row in range {
                 let tr = &tracks[order[row]];
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width() - 12.0, ROW_H), Sense::click());
-                let selected = self.focus == Focus::Main && self.songs.selected == Some(row);
+                let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(row);
                 if selected {
                     resp.scroll_to_me(None);
                 }
@@ -198,8 +198,8 @@ impl ListenerApp {
                 if resp.double_clicked() {
                     self.play_from_album(tr, QueueAction::Play { start: 0 });
                 } else if resp.clicked() {
-                    self.songs.selected = Some(row);
-                    self.focus = Focus::Main;
+                    self.ui.songs.selected = Some(row);
+                    self.ui.focus = Focus::Main;
                 }
                 let source = self.album_source(&tr.album_id);
                 resp.context_menu(|ui| {
@@ -238,8 +238,8 @@ impl ListenerApp {
             return;
         }
         let Some(k) = self.list_keys(ui, Focus::Main, false, false) else { return };
-        self.songs.selected = k.step(self.songs.selected, order.len());
-        let Some(sel) = self.songs.selected.filter(|s| *s < order.len()) else { return };
+        self.ui.songs.selected = k.step(self.ui.songs.selected, order.len());
+        let Some(sel) = self.ui.songs.selected.filter(|s| *s < order.len()) else { return };
         let tr = self.data.tracks.all[order[sel]].clone();
         if k.enter {
             self.play_from_album(&tr, QueueAction::Play { start: 0 });

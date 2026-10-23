@@ -138,7 +138,7 @@ impl ListenerApp {
                 if let Some(al) = album {
                     let shown = elide(ui, &al.name, FontId::proportional(VALUE), t.muted, text_w).text().to_owned();
                     if link(ui, &shown, FontId::proportional(VALUE), t.muted).clicked() {
-                        self.reveal = Some(track.id.clone());
+                        self.ui.reveal = Some(track.id.clone());
                         self.actions.push(Action::Go(Route::Album(al.id.clone())));
                     }
                 }
