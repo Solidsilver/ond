@@ -309,15 +309,15 @@ impl ListenerApp {
             ui.spacing_mut().item_spacing.y = 0.0;
             let people = credits(tracks);
             if !people.is_empty() {
-                super::info_panel::info_section(ui, "Credits");
+                super::widgets::kv_section(ui, "Credits");
                 for c in &people {
                     let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
                     self.links_row(ui, &c.role, items);
                 }
             }
-            super::info_panel::info_section(ui, "Analysis");
+            super::widgets::kv_section(ui, "Analysis");
             if found.iter().all(Option::is_none) {
-                super::info_panel::row(ui, "Loudness", |ui| {
+                super::widgets::kv_row(ui, "Loudness", |ui| {
                     if analysing {
                         ui.label(egui::RichText::new("Analysing…").size(12.5).color(t.muted));
                     } else if link(ui, "Analyze album", FontId::proportional(12.5), t.accent)
@@ -603,11 +603,8 @@ impl ListenerApp {
                 // on hover otherwise.
                 let heart = Rect::from_center_size(pos2(rect.right() - 70.0, cy), vec2(24.0, 24.0));
                 if loved || hovered {
-                    let hr = ui.interact(heart, ui.scope_id().with(("heart", &tr.id, i)), Sense::click());
-                    let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if hr.hovered() { t.text } else { t.muted }) };
-                    icons::paint(ui.painter(), Rect::from_center_size(heart.center(), vec2(12.0, 12.0)), icon, color);
                     let label = if loved { "Unlove" } else { "Love" };
-                    hr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+                    let hr = super::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
                     if hr.on_hover_text(label).clicked() {
                         self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
                     }

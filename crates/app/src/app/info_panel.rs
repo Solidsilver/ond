@@ -4,17 +4,14 @@
 //! when there is one, and the user's plays. It follows playback.
 
 use super::album_page::{Credit, credits};
-use super::widgets::{chip, elide, link};
+use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link};
 use super::{Action, ListenerApp, SongStats};
 use crate::icons::Icon;
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
-use egui::{Align, FontId, Layout, Sense, Ui, vec2};
+use egui::{FontId, Sense, Ui, vec2};
 use library::Track;
 
-/// The label column's width, so values line up.
-const LABEL_W: f32 = 96.0;
-const VALUE: f32 = 12.5;
 
 impl ListenerApp {
     /// `header`: lead with the song's artwork and title (not in the Player,
@@ -51,7 +48,7 @@ impl ListenerApp {
 
             let people = song_credits(&track);
             if !people.is_empty() {
-                info_section(ui, "Credits");
+                kv_section(ui, "Credits");
                 for c in &people {
                     let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
                     self.links_row(ui, &c.role, items);
@@ -59,13 +56,13 @@ impl ListenerApp {
             }
 
             if let Some(al) = &album {
-                info_section(ui, "Album");
+                kv_section(ui, "Album");
                 self.links_row(ui, "Album", vec![(al.name.clone(), Action::Go(Route::Album(al.id.clone())))]);
                 if let Some(artist) = &al.artist {
                     self.links_row(ui, "Album artist", vec![(artist.clone(), Action::Go(Route::Artist { name: artist.clone(), id: al.artist_ref.clone() }))]);
                 }
                 if let Some(place) = track_place(&track) {
-                    text_row(ui, "Track", &place);
+                    kv_text(ui, "Track", &place);
                 }
                 if let Some(y) = al.year {
                     self.links_row(ui, "Year", vec![(y.to_string(), Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }))]);
@@ -84,21 +81,21 @@ impl ListenerApp {
 
             let file = crate::fmt::track_facts(&track, self.output.signal().map(|s| s.summary()));
             if !file.is_empty() {
-                info_section(ui, "File");
+                kv_section(ui, "File");
                 for (k, v) in &file {
-                    text_row(ui, k, v);
+                    kv_text(ui, k, v);
                 }
             }
 
-            info_section(ui, "Analysis");
+            kv_section(ui, "Analysis");
             self.analysis_rows(ui, &track);
 
             let rating = self.favorites.rating(&track.id);
             let plays = play_rows(self.song_stats.get(&track.id).and_then(Option::as_ref), rating);
             if !plays.is_empty() {
-                info_section(ui, "Plays");
+                kv_section(ui, "Plays");
                 for (k, v) in &plays {
-                    text_row(ui, k, v);
+                    kv_text(ui, k, v);
                 }
             }
             ui.add_space(24.0);
@@ -152,7 +149,7 @@ impl ListenerApp {
     /// A label and one or more links ("Matthew West, Mark Hall"), wrapping.
     pub(super) fn links_row(&mut self, ui: &mut Ui, label: &str, items: Vec<(String, Action)>) {
         let t = Tokens::of(ui);
-        row(ui, label, |ui| {
+        kv_row(ui, label, |ui| {
             // Rows as tall as the text, so links sit level with their label
             // (a wrapped row takes its height from this when it's created).
             ui.spacing_mut().interact_size.y = 0.0;
@@ -176,7 +173,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let Some(a) = self.analysis_of(track).cloned() else {
             let busy = self.analyzer.pending([track.id.as_str()]) > 0;
-            row(ui, "Loudness", |ui| {
+            kv_row(ui, "Loudness", |ui| {
                 if busy {
                     ui.label(egui::RichText::new("Analysing…").size(VALUE).color(t.muted));
                 } else if link(ui, "Analyze this song", FontId::proportional(VALUE), t.accent)
@@ -189,10 +186,10 @@ impl ListenerApp {
             return;
         };
         for (k, v) in crate::fmt::measurements(&a) {
-            text_row(ui, k, &v);
+            kv_text(ui, k, &v);
         }
         if !a.verdicts.is_empty() {
-            row(ui, "Finding", |ui| {
+            kv_row(ui, "Finding", |ui| {
                 ui.spacing_mut().interact_size.y = 0.0;
                 ui.horizontal_wrapped(|ui| {
                     for v in &a.verdicts {
@@ -244,34 +241,6 @@ fn play_rows(stats: Option<&SongStats>, rating: u8) -> Vec<(&'static str, String
     rows
 }
 
-/// A section heading with room above it.
-pub(super) fn info_section(ui: &mut Ui, title: &str) {
-    let t = Tokens::of(ui);
-    ui.add_space(18.0);
-    ui.label(egui::RichText::new(title).font(FontId::new(11.0, semibold())).color(t.muted));
-    ui.add_space(6.0);
-}
-
-/// A muted label in the label column, then the value laid out by `value`.
-pub(super) fn row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
-    let t = Tokens::of(ui);
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (r, _) = ui.allocate_exact_size(vec2(LABEL_W, VALUE + 4.0), Sense::hover());
-        let g = elide(ui, label, FontId::proportional(12.0), t.muted, LABEL_W - 4.0);
-        ui.painter().galley(r.min + vec2(0.0, 1.0), g, t.muted);
-        let rest = ui.available_width();
-        ui.allocate_ui_with_layout(vec2(rest, 0.0), Layout::top_down(Align::Min), value);
-    });
-    ui.add_space(6.0);
-}
-
-fn text_row(ui: &mut Ui, label: &str, value: &str) {
-    let t = Tokens::of(ui);
-    row(ui, label, |ui| {
-        ui.add(egui::Label::new(egui::RichText::new(value).size(VALUE).color(t.text)).wrap());
-    });
-}
 
 #[cfg(test)]
 mod tests {

@@ -12,7 +12,29 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use offline::{Pin, PinSummary, Snapshot};
 
 /// Storage caps offered in the limit menu, in GB.
-pub(super) const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
+const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
+
+/// "4.2 GB on this computer · 180 GB free".
+pub(super) fn storage_used(snap: &Snapshot) -> String {
+    let mut text = format!("{} on this computer", crate::fmt::bytes(snap.used_bytes));
+    if let Some(free) = snap.free_bytes {
+        text.push_str(&format!(" · {} free", crate::fmt::bytes(free)));
+    }
+    text
+}
+
+/// The storage limit's choices, as radio items in a menu.
+pub(super) fn limit_choices(ui: &mut Ui, current: Option<u64>, actions: &mut Vec<Action>) {
+    if ui.radio(current.is_none(), "No limit").clicked() {
+        actions.push(Action::SetOfflineLimit(None));
+    }
+    for gb in LIMITS {
+        let bytes = gb * 1_000_000_000;
+        if ui.radio(current == Some(bytes), format!("{gb} GB")).clicked() {
+            actions.push(Action::SetOfflineLimit(Some(bytes)));
+        }
+    }
+}
 
 /// Why a pin isn't finished, in a few words.
 pub fn pin_text(snap: &Snapshot, s: &PinSummary) -> String {
@@ -117,16 +139,12 @@ impl ListenerApp {
         });
     }
 
-    /// "4.2 GB on this computer · 180 GB free", then the limit and Finder.
+    /// The storage summary, then the limit and Finder.
     fn storage_line(&mut self, ui: &mut Ui, snap: &Snapshot) {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            let mut text = format!("{} on this computer", crate::fmt::bytes(snap.used_bytes));
-            if let Some(free) = snap.free_bytes {
-                text.push_str(&format!(" · {} free", crate::fmt::bytes(free)));
-            }
-            ui.label(egui::RichText::new(text).size(12.0).color(t.muted));
+            ui.label(egui::RichText::new(storage_used(snap)).size(12.0).color(t.muted));
             ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
             let limit = match snap.limit {
                 Some(b) => format!("Limit {}", crate::fmt::bytes(b)),
@@ -135,15 +153,7 @@ impl ListenerApp {
             let resp = link(ui, &limit, FontId::proportional(12.0), t.muted);
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new("Storage limit").font(FontId::new(12.0, semibold())));
-                if ui.radio(snap.limit.is_none(), "No limit").clicked() {
-                    self.actions.push(Action::SetOfflineLimit(None));
-                }
-                for gb in LIMITS {
-                    let bytes = gb * 1_000_000_000;
-                    if ui.radio(snap.limit == Some(bytes), format!("{gb} GB")).clicked() {
-                        self.actions.push(Action::SetOfflineLimit(Some(bytes)));
-                    }
-                }
+                limit_choices(ui, snap.limit, &mut self.actions);
             });
             ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
             let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.offline.dir().display().to_string());

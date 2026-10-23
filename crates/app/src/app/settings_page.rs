@@ -216,11 +216,7 @@ impl ListenerApp {
         let t = Tokens::of(ui);
         let snap = self.offline_snap.clone();
         group(ui, "Storage", |ui| {
-            let mut used = format!("{} on this computer", crate::fmt::bytes(snap.used_bytes));
-            if let Some(free) = snap.free_bytes {
-                used.push_str(&format!(" · {} free", crate::fmt::bytes(free)));
-            }
-            ui.label(egui::RichText::new(used).size(13.0).color(t.text));
+            ui.label(egui::RichText::new(super::offline_page::storage_used(&snap)).size(13.0).color(t.text));
             ui.add_space(10.0);
             row(ui, "Limit", |ui| {
                 let label = match snap.limit {
@@ -228,17 +224,7 @@ impl ListenerApp {
                     None => "No limit".to_owned(),
                 };
                 let resp = menu_label(ui, &label, t.text);
-                egui::Popup::menu(&resp).show(|ui| {
-                    if ui.radio(snap.limit.is_none(), "No limit").clicked() {
-                        self.actions.push(Action::SetOfflineLimit(None));
-                    }
-                    for gb in super::offline_page::LIMITS {
-                        let bytes = gb * 1_000_000_000;
-                        if ui.radio(snap.limit == Some(bytes), format!("{gb} GB")).clicked() {
-                            self.actions.push(Action::SetOfflineLimit(Some(bytes)));
-                        }
-                    }
-                });
+                egui::Popup::menu(&resp).show(|ui| super::offline_page::limit_choices(ui, snap.limit, &mut self.actions));
             });
             let mut paused = snap.paused;
             if narrow_toggle(ui, &mut paused, "Pause downloads").changed() {

@@ -338,11 +338,10 @@ impl ListenerApp {
         }
         ui.add_space(8.0);
         let rows = details_rows(track, self.output.signal().map(|s| s.summary()), self.analysis_of(track));
-        egui::Grid::new("np-details").num_columns(2).spacing(vec2(16.0, 6.0)).show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for (k, v) in rows {
-                ui.label(egui::RichText::new(k).size(12.0).color(t.muted));
-                ui.add(egui::Label::new(egui::RichText::new(v).size(12.0).color(t.text)).wrap());
-                ui.end_row();
+                super::widgets::kv_text(ui, k, &v);
             }
         });
     }

@@ -363,11 +363,10 @@ impl ListenerApp {
     }
 
     fn section(&self, ui: &mut Ui, text: &str) {
-        let t = Tokens::of(ui);
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(text).font(FontId::new(11.0, semibold())).color(t.muted));
+            super::widgets::section(ui, text);
         });
         ui.add_space(4.0);
     }

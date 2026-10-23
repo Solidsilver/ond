@@ -214,13 +214,8 @@ impl ListenerApp {
         }
         // Always clickable: the heart sits over the display, so while the pointer
         // is on it the display itself doesn't count as hovered.
-        let heart_resp = ui.interact(heart, ui.scope_id().with("lcd-heart"), Sense::click());
-        if loved || hovering || heart_resp.hovered() {
-            let (icon, color) = if loved { (Icon::HeartFilled, t.accent) } else { (Icon::Heart, if heart_resp.hovered() { t.text } else { t.muted }) };
-            icons::paint(&painter, Rect::from_center_size(heart.center(), vec2(11.0, 11.0)), icon, color);
-        }
         let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
-        heart_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, love_label));
+        let heart_resp = super::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
         if heart_resp.clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }
