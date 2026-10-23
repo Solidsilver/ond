@@ -477,9 +477,29 @@ impl Library {
             }
             ids
         };
+        let wt = self.db.begin_write()?;
         for id in &gone {
-            self.remove_album(id)?;
+            remove_album_in(&wt, id)?;
         }
+        // Tracks stored by a bulk sync for an album the library never had.
+        let orphans: Vec<String> = {
+            let albums = wt.open_table(ALBUMS)?;
+            let by_album = wt.open_table(TRACKS_BY_ALBUM)?;
+            let mut ids: Vec<String> = Vec::new();
+            for entry in by_album.iter()? {
+                let (key, _) = entry?;
+                let album = key.value().0;
+                if ids.last().map(String::as_str) != Some(album) && albums.get(album)?.is_none() {
+                    ids.push(album.to_owned());
+                }
+            }
+            ids
+        };
+        for id in &orphans {
+            TrackTables::open(&wt)?.remove_album(id)?;
+            wt.open_table(ALBUM_STAMPS)?.remove(id.as_str())?;
+        }
+        wt.commit()?;
         Ok(gone.len())
     }
 
@@ -487,18 +507,7 @@ impl Library {
     /// the album existed.
     pub fn remove_album(&self, id: &str) -> Result<bool> {
         let wt = self.db.begin_write()?;
-        let existed = {
-            TrackTables::open(&wt)?.remove_album(id)?;
-            wt.open_table(ALBUM_STAMPS)?.remove(id)?;
-            let mut rows = wt.open_table(ALBUMS)?;
-            let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
-            let old = rows.remove(id)?.map(|g| decode::<Album>(g.value())).transpose()?;
-            if let Some(old) = &old {
-                let (artist, year, title) = old.sort_parts();
-                idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
-            }
-            old.is_some()
-        };
+        let existed = remove_album_in(&wt, id)?;
         wt.commit()?;
         Ok(existed)
     }
@@ -618,6 +627,20 @@ impl Library {
 
 /// Schema upgrades, run inside the opening write transaction. Each step takes
 /// the db from `from` to `from + 1`.
+/// Removes an album, its tracks and their index entries within `wt`.
+fn remove_album_in(wt: &WriteTransaction, id: &str) -> Result<bool> {
+    TrackTables::open(wt)?.remove_album(id)?;
+    wt.open_table(ALBUM_STAMPS)?.remove(id)?;
+    let mut rows = wt.open_table(ALBUMS)?;
+    let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
+    let old = rows.remove(id)?.map(|g| decode::<Album>(g.value())).transpose()?;
+    if let Some(old) = &old {
+        let (artist, year, title) = old.sort_parts();
+        idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
+    }
+    Ok(old.is_some())
+}
+
 fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
     for v in from..SCHEMA_VERSION {
         match v {

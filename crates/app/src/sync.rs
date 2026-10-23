@@ -161,11 +161,13 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, progress: impl Fn(u
         seen.extend(page.iter().map(|a| a.id.clone()));
         let n = page.len() as u32;
         blocking(lib, move |l| l.upsert_albums(page)).await.map_err(|e| format!("store albums: {e}"))?;
-        offset += n;
-        progress(offset as usize);
-        if n < ALBUM_PAGE {
+        // Only an empty page ends the list: a server may cap pages below what
+        // was asked for, and stopping early would prune everything after it.
+        if n == 0 {
             break;
         }
+        offset += n;
+        progress(offset as usize);
     }
     blocking(lib, move |l| {
         let removed = l.retain_albums(&seen)?;
@@ -410,6 +412,8 @@ mod tests {
         cancel_after_pages: Option<(usize, Arc<AtomicBool>)>,
         /// The album list fails from this offset on.
         list_fails_at: Option<u32>,
+        /// The server hands out at most this many albums per page.
+        page_cap: Option<u32>,
     }
 
     impl Fake {
@@ -422,6 +426,7 @@ mod tests {
                 page_calls: Arc::default(),
                 cancel_after_pages: None,
                 list_fails_at: None,
+                page_cap: None,
             }
         }
 
@@ -435,6 +440,7 @@ mod tests {
             if self.list_fails_at.is_some_and(|at| offset >= at) {
                 return Err("server went away".into());
             }
+            let size = self.page_cap.map_or(size, |cap| size.min(cap));
             Ok(self.albums.lock().unwrap().iter().skip(offset as usize).take(size as usize).cloned().collect())
         }
 
@@ -623,6 +629,16 @@ mod tests {
         let mut want: Vec<String> = server.iter().map(|a| a.id.clone()).collect();
         want.sort();
         assert_eq!(stored_ids(&lib), want, "zz-gone is pruned");
+    }
+
+    #[test]
+    fn a_server_with_small_pages_is_read_to_the_end() {
+        let server = many(250, 1);
+        let lib = library(&[]);
+        let mut fake = Fake::new(server, false);
+        fake.page_cap = Some(100);
+        let stored = rt().block_on(albums(&lib, &fake, |_| {})).unwrap();
+        assert_eq!(stored.len(), 250, "every page is read, not just the first short one");
     }
 
     #[test]

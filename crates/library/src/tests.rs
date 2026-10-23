@@ -610,3 +610,22 @@ fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
     assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
     assert!(!lib.claim_account(8).unwrap());
 }
+
+#[test]
+fn retaining_albums_also_drops_tracks_whose_album_is_not_stored() {
+    let lib = Library::in_memory().unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("keep", "K", "X", 2000), song: vec![song("k1", "keep", 1, 1)] })
+        .unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("gone", "G", "X", 2001), song: vec![song("g1", "gone", 1, 1)] })
+        .unwrap();
+    // A bulk sync stored songs of an album the album list never had.
+    lib.store_songs(vec![song("o1", "orphan", 1, 1), song("o2", "orphan", 1, 2)]).unwrap();
+    assert_eq!(lib.track_count().unwrap(), 4);
+
+    let keep: HashSet<String> = ["keep".to_owned()].into();
+    assert_eq!(lib.retain_albums(&keep).unwrap(), 1);
+    let ids: Vec<_> = lib.album_tracks("keep").unwrap().into_iter().map(|t| t.id).collect();
+    assert_eq!(ids, ["k1"]);
+    assert_eq!(lib.track_count().unwrap(), 1, "gone's and the orphan's tracks are removed");
+    assert!(lib.check_indexes().unwrap().is_empty());
+}
