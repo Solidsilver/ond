@@ -3,7 +3,10 @@
 use crate::icons::{self, Icon};
 use crate::settings::{Paths, Settings};
 use audio::{BitPerfectStatus, Command, DeviceInfo, EngineHandle, PlayState, PlaybackMode, SignalPath};
+use crate::theme::Tokens;
 use std::collections::HashMap;
+
+const POPUP_W: f32 = 300.0;
 
 #[derive(Default)]
 pub struct Outputs {
@@ -90,7 +93,7 @@ impl Outputs {
         let current = self.devices.iter().find(|d| Some(&d.uid) == self.current.as_ref());
         let label = current.map_or("Output", |d| d.name.as_str()).to_owned();
         let dot = self.dot_color(ui);
-        let t = crate::theme::Tokens::of(ui);
+        let t = Tokens::of(ui);
         let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.0), t.text);
         let size = egui::vec2(galley.size().x + 30.0, 24.0);
         let (rect, chip) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -105,31 +108,73 @@ impl Outputs {
             Some(p) => chip.on_hover_text(hover_text(p)),
             None => chip,
         };
-        egui::Popup::menu(&chip).show(|ui| {
-            ui.set_min_width(280.0);
-            if ui.checkbox(bit_perfect, "Bit-perfect").changed() {
-                let mode = if *bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                engine.send(Command::SetMode(mode));
-                self.remember_mode(mode, engine, paths);
-            }
-            ui.weak(if *bit_perfect { "Volume is your DAC's or the system's in this mode" } else { "Volume, resampling and dither allowed" });
+        egui::Popup::menu(&chip)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(POPUP_W)
+            .show(|ui| self.popup_ui(ui, engine, paths, bit_perfect));
+    }
+
+    /// What's playing through what, the devices, and the mode for the one in use.
+    fn popup_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, paths: &Paths, bit_perfect: &mut bool) {
+        let t = Tokens::of(ui);
+        ui.set_width(POPUP_W);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        if let Some(path) = self.signal.clone() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                summary_ui(ui, &path, 12.0, true);
+            });
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(&path.output).size(11.0).color(t.muted));
+            });
+            ui.add_space(8.0);
             ui.separator();
-            let follows_default = self.devices.iter().find(|d| d.is_default).map(|d| d.name.as_str()).unwrap_or("default");
-            if ui.selectable_label(self.current.is_none(), format!("System default ({follows_default})")).clicked() {
-                self.choose(None, engine, paths);
+            ui.add_space(4.0);
+        }
+        let follows_default = self.devices.iter().find(|d| d.is_default).map(|d| d.name.clone()).unwrap_or_else(|| "default".into());
+        if device_row(ui, &format!("System default ({follows_default})"), None, self.current.is_none()).clicked() {
+            self.choose(None, engine, paths);
+            ui.close();
+        }
+        for d in self.devices.clone() {
+            let mode = self.saved_modes.get(&d.uid).map(String::as_str).unwrap_or_else(|| mode_name(d.default_mode()));
+            let selected = Some(&d.uid) == self.current.as_ref();
+            let caps = d.capability_line();
+            let sub = if caps.is_empty() { mode.to_owned() } else { format!("{caps} · {mode}") };
+            if device_row(ui, &d.name, Some(&sub), selected).clicked() {
+                self.choose(Some(d.uid.clone()), engine, paths);
                 ui.close();
             }
-            for d in self.devices.clone() {
-                let mode = self.saved_modes.get(&d.uid).map(String::as_str).unwrap_or_else(|| mode_name(d.default_mode()));
-                let selected = Some(&d.uid) == self.current.as_ref();
-                let resp = ui.selectable_label(selected, &d.name);
-                ui.weak(format!("{} · {mode}", d.capability_line()));
-                if resp.clicked() {
-                    self.choose(Some(d.uid.clone()), engine, paths);
-                    ui.close();
+        }
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if let Some(i) = crate::app::segmented_wide(ui, &["Normal", "Bit-perfect"], usize::from(*bit_perfect), POPUP_W - 16.0) {
+                let want = i == 1;
+                if want != *bit_perfect {
+                    *bit_perfect = want;
+                    let mode = if want { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                    engine.send(Command::SetMode(mode));
+                    self.remember_mode(mode, engine, paths);
                 }
             }
         });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let why = if *bit_perfect {
+                "Samples reach the device untouched. Use your DAC's or the system's volume."
+            } else {
+                "Volume, ReplayGain and resampling allowed."
+            };
+            ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
+        });
+        ui.add_space(4.0);
     }
 
     fn dot_color(&self, ui: &egui::Ui) -> egui::Color32 {
@@ -142,37 +187,98 @@ impl Outputs {
         }
     }
 
-    /// `FLAC · 24/96 → 16/48 · resampled, dithered · device limit`.
+    /// `FLAC  24/96 → 16/48 · resampled, dithered · device limit`, quiet: muted
+    /// text with only the verdict coloured.
     pub fn signal_ui(&self, ui: &mut egui::Ui, status: &audio::Status, codec: Option<&str>) {
         let Some(path) = &self.signal else { return };
         if status.state() == PlayState::Stopped {
             return;
         }
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 5.0;
         if let Some(codec) = codec {
             ui.weak(codec);
         }
-        let color = match &path.bit_perfect {
-            BitPerfectStatus::Verified => {
-                icons::inline(ui, Icon::Check, ui.visuals().strong_text_color());
-                ui.visuals().text_color()
-            }
-            BitPerfectStatus::Unavailable { .. } => ui.visuals().warn_fg_color,
-            _ => ui.visuals().weak_text_color(),
-        };
-        // The default font has no arrow glyph: draw it between the parts instead.
-        let summary = path.summary();
-        for (i, part) in summary.split(" → ").enumerate() {
-            if i > 0 {
-                icons::inline(ui, Icon::ArrowRight, color);
-            }
-            ui.colored_label(color, part).on_hover_text(hover_text(path));
-        }
+        summary_ui(ui, path, 11.0, false).on_hover_text(hover_text(path));
         let underruns = status.underruns.load(std::sync::atomic::Ordering::Relaxed);
         if underruns > 0 {
             ui.weak(format!("· {underruns} underruns"));
         }
     }
+}
+
+/// The signal path summary: formats and processing in muted text, the verdict
+/// (the last part) coloured: green with a check when verified, the warning
+/// colour when bit-perfect isn't possible. `strong` uses the text colour for
+/// the formats (the picker's header).
+fn summary_ui(ui: &mut egui::Ui, path: &SignalPath, size: f32, strong: bool) -> egui::Response {
+    let t = Tokens::of(ui);
+    let base = if strong { t.text } else { t.muted };
+    let summary = path.summary();
+    let mut parts: Vec<&str> = summary.split(" · ").collect();
+    let verdict = match &path.bit_perfect {
+        BitPerfectStatus::Off => None,
+        _ if parts.len() > 1 => parts.pop(),
+        _ => None,
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (k, part) in parts.iter().enumerate() {
+            if k > 0 {
+                ui.label(egui::RichText::new("·").size(size).color(t.muted));
+            }
+            // The default font has no arrow glyph: draw it between the formats.
+            for (i, f) in part.split(" → ").enumerate() {
+                if i > 0 {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(size * 0.9, size), egui::Sense::hover());
+                    icons::paint(ui.painter(), r, Icon::ArrowRight, t.muted);
+                }
+                ui.label(egui::RichText::new(f).size(size).color(if k == 0 { base } else { t.muted }));
+            }
+        }
+        if let Some(v) = verdict {
+            ui.label(egui::RichText::new("·").size(size).color(t.muted));
+            let color = match &path.bit_perfect {
+                BitPerfectStatus::Verified => {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(size * 0.9, size), egui::Sense::hover());
+                    icons::paint(ui.painter(), r, Icon::Check, t.ok);
+                    t.ok
+                }
+                BitPerfectStatus::Unavailable { .. } => t.warn,
+                _ => t.muted,
+            };
+            ui.label(egui::RichText::new(v).size(size).color(color));
+        }
+    })
+    .response
+}
+
+/// One row of the device list: a check for the device in use, its name, and
+/// a muted capability line under it. The whole row is the target.
+fn device_row(ui: &mut egui::Ui, name: &str, sub: Option<&str>, selected: bool) -> egui::Response {
+    let t = Tokens::of(ui);
+    let h = if sub.is_some() { 40.0 } else { 30.0 };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 6.0, t.hover);
+        }
+        if selected {
+            let c = egui::Rect::from_center_size(egui::pos2(rect.left() + 15.0, rect.top() + 15.0), egui::vec2(10.0, 10.0));
+            icons::paint(ui.painter(), c, Icon::Check, t.accent);
+        }
+        let x = rect.left() + 30.0;
+        let w = rect.right() - x - 8.0;
+        let font = if selected { egui::FontId::new(13.0, crate::theme::semibold()) } else { egui::FontId::proportional(13.0) };
+        let g = crate::app::elide_text(ui, name, font, t.text, w);
+        ui.painter().galley(egui::pos2(x, rect.top() + 15.0 - g.size().y / 2.0), g, t.text);
+        if let Some(sub) = sub {
+            let g = crate::app::elide_text(ui, sub, egui::FontId::proportional(11.0), t.muted, w);
+            ui.painter().galley(egui::pos2(x, rect.top() + 23.0), g, t.muted);
+        }
+    }
+    let label = name.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, &label));
+    resp
 }
 
 fn hover_text(p: &SignalPath) -> String {
