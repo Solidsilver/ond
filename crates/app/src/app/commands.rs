@@ -105,6 +105,12 @@ impl OndApp {
             }
             Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics_shown())),
             Cmd::Appearance(pref) => self.actions.push(Action::SetTheme(pref)),
+            Cmd::Edit(e) => {
+                // Handed to egui as input next frame, so the focused field gets it.
+                let events = e.events(clipboard_text);
+                self.ui.edit_input.extend(events);
+                self.ctx.request_repaint();
+            }
         }
     }
 
@@ -224,6 +230,14 @@ impl OndApp {
         self.ui.recent_playlists.insert(0, id.to_owned());
         self.ui.recent_playlists.truncate(3);
     }
+}
+
+/// The clipboard's text, for the Edit menu's Paste (only the macOS menu sends it).
+fn clipboard_text() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok();
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 #[cfg(test)]

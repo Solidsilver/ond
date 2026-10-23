@@ -430,6 +430,8 @@ pub struct UiState {
     /// When the last scroll happened (frame clock), for showing scroll bars.
     pub last_scroll: f64,
     pub bars_shown: bool,
+    /// Edit menu commands (paste, undo…) waiting to reach egui as input.
+    pub edit_input: Vec<egui::Event>,
 }
 
 impl UiState {
@@ -463,6 +465,7 @@ impl UiState {
             switch_started: None,
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
+            edit_input: Vec::new(),
         }
     }
 }
@@ -1947,6 +1950,12 @@ impl OndApp {
 }
 
 impl eframe::App for OndApp {
+    /// Edit menu commands become ordinary input, so the focused field
+    /// pastes, copies or undoes as if the keys had reached it.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        raw_input.events.append(&mut self.ui.edit_input);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg);

@@ -45,6 +45,41 @@ pub enum Cmd {
     ToggleDiagnostics,
     /// System / Light / Dark (menu only).
     Appearance(crate::theme::ThemePref),
+    /// Edit menu: handed to egui as input, so text fields get it (menu only).
+    Edit(EditCmd),
+}
+
+/// The Edit menu's text commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditCmd {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+impl EditCmd {
+    pub const ALL: [EditCmd; 6] = [EditCmd::Undo, EditCmd::Redo, EditCmd::Cut, EditCmd::Copy, EditCmd::Paste, EditCmd::SelectAll];
+
+    /// The egui input this command stands for. Paste carries the clipboard's
+    /// text (`None` when there's nothing to paste).
+    pub fn events(self, clipboard: impl FnOnce() -> Option<String>) -> Vec<egui::Event> {
+        // As egui-winit reports ⌘ on macOS: both the physical and the logical flag.
+        let cmd = Modifiers::MAC_CMD | Modifiers::COMMAND;
+        let key = |key: Key, modifiers: Modifiers| {
+            [true, false].map(|pressed| egui::Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers }).to_vec()
+        };
+        match self {
+            EditCmd::Undo => key(Key::Z, cmd),
+            EditCmd::Redo => key(Key::Z, cmd | Modifiers::SHIFT),
+            EditCmd::SelectAll => key(Key::A, cmd),
+            EditCmd::Cut => vec![egui::Event::Cut],
+            EditCmd::Copy => vec![egui::Event::Copy],
+            EditCmd::Paste => clipboard().filter(|t| !t.is_empty()).map(egui::Event::Paste).into_iter().collect(),
+        }
+    }
 }
 
 /// A key and what it does. `idle` keys only fire when no text field has focus
@@ -154,6 +189,37 @@ pub fn take(input: &mut egui::InputState, typing: bool) -> Vec<Cmd> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn edit_commands_become_the_input_a_text_field_expects() {
+        assert_eq!(EditCmd::Paste.events(|| Some("hunter2".into())), vec![egui::Event::Paste("hunter2".into())]);
+        assert!(EditCmd::Paste.events(|| None).is_empty(), "nothing to paste, nothing sent");
+        assert!(EditCmd::Paste.events(|| Some(String::new())).is_empty());
+        assert_eq!(EditCmd::Copy.events(|| None), vec![egui::Event::Copy]);
+        assert_eq!(EditCmd::Cut.events(|| None), vec![egui::Event::Cut]);
+        // Undo is ⌘Z pressed and released; Redo adds ⇧.
+        let undo = EditCmd::Undo.events(|| None);
+        assert!(matches!(undo[0], egui::Event::Key { key: Key::Z, pressed: true, modifiers, .. } if modifiers.command && !modifiers.shift));
+        let redo = EditCmd::Redo.events(|| None);
+        assert!(matches!(redo[0], egui::Event::Key { key: Key::Z, pressed: true, modifiers, .. } if modifiers.command && modifiers.shift));
+    }
+
+    #[test]
+    fn a_paste_reaches_a_focused_password_field() {
+        let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).build_ui_state(
+            |ui, text: &mut String| {
+                ui.add(egui::TextEdit::singleline(text).password(true)).request_focus();
+            },
+            String::new(),
+        );
+        // The cursor blinks, so step rather than run to a standstill.
+        h.run_steps(2);
+        for e in EditCmd::Paste.events(|| Some("hunter2".into())) {
+            h.event(e);
+        }
+        h.run_steps(2);
+        assert_eq!(h.state(), "hunter2");
+    }
 
     #[test]
     fn no_key_is_bound_twice() {

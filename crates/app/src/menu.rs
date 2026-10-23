@@ -4,11 +4,15 @@
 //! Keys that a text field also uses (Space, ⌘-arrows) get no menu
 //! accelerator: AppKit offers key equivalents to the menu before the view, so
 //! the palette's field would lose ⌘← and friends. Those items show without a
-//! key, and the keys stay with egui. Edit's items are AppKit's own; with no
-//! responder for them in a winit view they disable themselves and let ⌘C/⌘V
-//! through to egui.
+//! key, and the keys stay with egui.
+//!
+//! Edit's items are our own, not AppKit's. AppKit's Paste sends `paste:` to
+//! the first responder, which winit's view doesn't implement; and muda turns
+//! off menu auto-enabling, so the item stays enabled, claims ⌘V and the paste
+//! goes nowhere. Ours carry the usual keys and hand egui the matching input
+//! instead (see [`EditCmd::events`]).
 
-use crate::keys::Cmd;
+use crate::keys::{Cmd, EditCmd};
 use crate::theme::ThemePref;
 
 #[cfg(target_os = "macos")]
@@ -68,13 +72,13 @@ fn cmd_of(id: &str) -> Option<Cmd> {
         Cmd::Appearance(ThemePref::Light),
         Cmd::Appearance(ThemePref::Dark),
     ];
-    ALL.iter().copied().find(|c| id_of(*c) == id)
+    ALL.iter().copied().chain(EditCmd::ALL.map(Cmd::Edit)).find(|c| id_of(*c) == id)
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
     use super::{ThemePref, cmd_of, id_of};
-    use crate::keys::{Cmd, keys_for};
+    use crate::keys::{Cmd, EditCmd, keys_for};
     use muda::accelerator::Accelerator;
     use muda::{AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
@@ -120,6 +124,11 @@ mod imp {
         MenuItem::with_id(id_of(cmd), text, true, accel(cmd))
     }
 
+    /// An Edit item with its standard key ("Cmd+V").
+    fn edit(text: &str, cmd: EditCmd, key: &str) -> MenuItem {
+        MenuItem::with_id(id_of(Cmd::Edit(cmd)), text, true, key.parse::<Accelerator>().ok())
+    }
+
     fn check(text: &str, cmd: Cmd) -> CheckMenuItem {
         CheckMenuItem::with_id(id_of(cmd), text, true, false, accel(cmd))
     }
@@ -158,13 +167,13 @@ mod imp {
                 "Edit",
                 true,
                 &[
-                    &PredefinedMenuItem::undo(None),
-                    &PredefinedMenuItem::redo(None),
+                    &edit("Undo", EditCmd::Undo, "Cmd+Z"),
+                    &edit("Redo", EditCmd::Redo, "Shift+Cmd+Z"),
                     &sep(),
-                    &PredefinedMenuItem::cut(None),
-                    &PredefinedMenuItem::copy(None),
-                    &PredefinedMenuItem::paste(None),
-                    &PredefinedMenuItem::select_all(None),
+                    &edit("Cut", EditCmd::Cut, "Cmd+X"),
+                    &edit("Copy", EditCmd::Copy, "Cmd+C"),
+                    &edit("Paste", EditCmd::Paste, "Cmd+V"),
+                    &edit("Select All", EditCmd::SelectAll, "Cmd+A"),
                     &sep(),
                     &item("Search…", Cmd::Search),
                 ],
@@ -281,6 +290,10 @@ mod imp {
             assert!(accel(Cmd::Love).is_some());
             assert!(accel(Cmd::Settings).is_some());
             assert!(accel(Cmd::Back).is_some());
+            // The Edit items' own keys parse.
+            for key in ["Cmd+Z", "Shift+Cmd+Z", "Cmd+X", "Cmd+C", "Cmd+V", "Cmd+A"] {
+                assert!(key.parse::<Accelerator>().is_ok(), "{key}");
+            }
             // Keys a text field needs stay with the field.
             assert!(accel(Cmd::Next).is_none());
             assert!(accel(Cmd::VolumeUp).is_none());
@@ -295,7 +308,7 @@ mod tests {
 
     #[test]
     fn ids_round_trip() {
-        for cmd in [Cmd::Next, Cmd::Place(3), Cmd::Appearance(ThemePref::Dark), Cmd::ToggleBitPerfect] {
+        for cmd in [Cmd::Next, Cmd::Place(3), Cmd::Appearance(ThemePref::Dark), Cmd::ToggleBitPerfect, Cmd::Edit(EditCmd::Paste)] {
             assert_eq!(cmd_of(&id_of(cmd)), Some(cmd));
         }
         assert_eq!(cmd_of("nonsense"), None);
