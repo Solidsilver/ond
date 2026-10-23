@@ -143,7 +143,7 @@ fn gapless_queue_reports_each_track_as_it_plays() {
         })
         .collect();
     assert_eq!(started, [("a", false), ("b", true)]);
-    assert!(matches!(seen.last(), Some(Event::Ended { track_id }) if track_id == "b"));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "b"));
     assert_eq!(opens.load(Ordering::Relaxed), 1, "the device stayed open across the boundary");
 
     let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
@@ -320,5 +320,75 @@ fn remembered_modes_win_over_device_defaults() {
     engine.send(Command::SelectDevice(Some("dac".into())));
     let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
     assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::Normal, .. })));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_after_the_decoder_has_finished_still_lands_and_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    // 16 s, all of it fits the buffer: the decoder is done long before the output.
+    let a = pcm(2 * 44_100 * 16, 3);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
+    let engine = spawn(config, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while engine.status.state() == PlayState::Loading && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    thread::sleep(Duration::from_millis(150));
+    engine.send(Command::Seek(Duration::from_secs(12)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::Seeked { .. })), "the seek landed: {seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_after_the_decoder_moved_on_keeps_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 8, 4), pcm(2 * 44_100 * 8, 5));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
+    let engine = spawn(config, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    engine.send(Command::Pause);
+    // Give the decoder time to finish "a" and move on to "b".
+    thread::sleep(Duration::from_millis(200));
+    engine.send(Command::Seek(Duration::from_secs(2)));
+    events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn the_same_track_twice_is_told_apart_and_restarts_are_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 4, 6);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
+    let engine = spawn(config, Box::new(backend), None);
+    let first = TrackSource { token: 1, ..file_source(&dir, "a", &a) };
+    let again = TrackSource { token: 2, ..first.clone() };
+    engine.send(Command::Play(first));
+    engine.send(Command::SetNext(Some(again)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // The decoder is on the second copy by now: this seek restarts the first.
+    thread::sleep(Duration::from_millis(200));
+    engine.send(Command::Seek(Duration::from_secs(1)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let started: Vec<(u64, bool, bool)> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::TrackStarted { token, gapless, restart, .. } => Some((*token, *gapless, *restart)),
+            _ => None,
+        })
+        .collect();
+    // The restart is flagged; the second copy still follows gaplessly, as itself.
+    assert_eq!(started, [(1, false, true), (2, true, false)]);
+    assert!(matches!(seen.last(), Some(Event::Ended { token: 2, .. })), "{seen:?}");
     engine.send(Command::Shutdown);
 }

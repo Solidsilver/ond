@@ -8,8 +8,8 @@
 //! it goes back to the front of the queue.
 
 use analysis::{Record, TrackAnalysis};
-use audio::{PlayState, Status};
-use library::{Library, Track};
+use audio::Status;
+use library::{AnalysisStore, Track};
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -114,7 +114,8 @@ impl Shared {
 }
 
 pub struct Config {
-    pub library: Arc<Library>,
+    /// Where results are kept.
+    pub store: Arc<AnalysisStore>,
     /// The playback cache: complete files there are read without a download.
     pub playback: StreamCache,
     /// Where files that aren't cached are fetched to.
@@ -230,16 +231,10 @@ fn lower_priority() {
     }
 }
 
-/// Playback is fetching or filling its buffer: leave the network and disk to it.
+/// Playback is fetching (the current track, of known size or not, or the next
+/// one's prefetch) or filling its buffer: leave the network to it.
 fn playback_busy(status: &Status) -> bool {
-    match status.state() {
-        PlayState::Loading | PlayState::Buffering => true,
-        PlayState::Playing | PlayState::Paused => {
-            let total = status.total_bytes.load(Ordering::Relaxed);
-            total > 0 && status.fetched_bytes.load(Ordering::Relaxed) < total
-        }
-        PlayState::Stopped => false,
-    }
+    status.needs_network()
 }
 
 fn run(shared: &Shared, cfg: &Config) {
@@ -287,7 +282,7 @@ fn run(shared: &Shared, cfg: &Config) {
                 st.wall_secs += started.elapsed().as_secs_f64();
                 drop(st);
                 let record = Record { stamp: job.stamp.clone(), analysis };
-                if let Err(e) = cfg.library.put_analysis(&job.track_id, &record.encode()) {
+                if let Err(e) = cfg.store.put(&job.track_id, &record.encode()) {
                     tracing::warn!("storing analysis: {e}");
                 }
                 (cfg.on_result)(job.track_id, record);
@@ -323,6 +318,9 @@ fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Res
     let key = CacheKey::new(job.track_id.clone(), job.suffix.clone());
     let cached = cfg.playback.progress(&key).is_some_and(|p| p.complete);
     let cache = if cached { &cfg.playback } else { &cfg.scratch };
+    // A download of our own gives way as soon as playback wants the network;
+    // the job goes back to the front of the queue and resumes after.
+    let stop = || stop() || (!cached && playback_busy(&cfg.status));
     // The reader polls this while waiting on the download; `stop` borrows, so
     // hand it a flag that the loop below keeps current.
     let halt = Arc::new(AtomicBool::new(false));
@@ -424,5 +422,60 @@ mod tests {
         assert!((st.progress().eta_secs - 400.0 / 60.0).abs() < 1e-9);
         st.queue.clear();
         assert!(!st.progress().active());
+    }
+
+    #[test]
+    fn a_download_of_our_own_gives_way_to_playback() {
+        use std::io::{BufRead, BufReader, Write};
+        // A slow server: 2 MB at 16 KB every 20 ms, about 2.5 s.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/rest/stream?id=t", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(conn.try_clone().unwrap());
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                        line.clear();
+                    }
+                    let body = vec![1u8; 2_000_000];
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    if conn.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    for chunk in body.chunks(16 * 1024) {
+                        if conn.write_all(chunk).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                });
+            }
+        });
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = |name: &str| StreamCache::new(streamcache::CacheConfig::new(dir.path().join(name)), rt.handle().clone()).unwrap();
+        let status = Arc::new(Status::default());
+        let cfg = Config {
+            store: Arc::new(AnalysisStore::in_memory().unwrap()),
+            playback: cache("play"),
+            scratch: cache("scratch"),
+            status: status.clone(),
+            on_result: Arc::new(|_, _| {}),
+            on_progress: Arc::new(|| {}),
+        };
+        let mut j = job("t", 10.0);
+        j.url = url;
+        // Playback starts buffering while our download runs.
+        let flip = status.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flip.preview(audio::PlayState::Buffering, 0.0, 100.0, 0.0);
+        });
+        let t = Instant::now();
+        let out = analyze_job(&j, &cfg, &|| false);
+        assert!(matches!(out, Err(analysis::AnalyzeError::Cancelled)), "{out:?}");
+        assert!(t.elapsed() < Duration::from_secs(2), "gave way after {:?}", t.elapsed());
     }
 }

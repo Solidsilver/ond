@@ -26,10 +26,12 @@ pub struct UserMeta {
 pub struct Favorites {
     on: HashSet<(StarKind, String)>,
     ratings: HashMap<String, u8>,
-    /// Changes sent but not yet confirmed; a snapshot from the server taken
-    /// before them mustn't undo them.
-    pending: HashSet<(StarKind, String)>,
-    pending_ratings: HashSet<String>,
+    /// Changes sent but not yet confirmed, by the sequence number of the latest
+    /// one per item: a snapshot from the server taken before them mustn't undo
+    /// them, and only the latest change's reply settles or rolls back.
+    pending: HashMap<(StarKind, String), u64>,
+    pending_ratings: HashMap<String, u64>,
+    seq: u64,
     pub view: Starred,
     /// `getStarred2` has answered at least once.
     pub loaded: bool,
@@ -44,13 +46,15 @@ impl Favorites {
         self.ratings.get(id).copied().unwrap_or(0)
     }
 
-    /// Flips a heart locally and marks it in flight; returns the new state.
+    /// Flips a heart locally and marks it in flight; returns the new state and
+    /// the change's sequence number (for [`settled`](Self::settled) / [`failed`](Self::failed)).
     /// `track` keeps the Favorites view current when a song is loved.
-    pub fn toggle(&mut self, kind: StarKind, id: &str, track: Option<&Track>, name: Option<&str>) -> bool {
+    pub fn toggle(&mut self, kind: StarKind, id: &str, track: Option<&Track>, name: Option<&str>) -> (bool, u64) {
         let on = !self.is_on(kind, id);
         self.set(kind, id, on, track, name);
-        self.pending.insert((kind, id.to_owned()));
-        on
+        self.seq += 1;
+        self.pending.insert((kind, id.to_owned()), self.seq);
+        (on, self.seq)
     }
 
     fn set(&mut self, kind: StarKind, id: &str, on: bool, track: Option<&Track>, name: Option<&str>) {
@@ -87,30 +91,47 @@ impl Favorites {
         }
     }
 
-    /// The server confirmed a change.
-    pub fn settled(&mut self, kind: StarKind, id: &str) {
-        self.pending.remove(&(kind, id.to_owned()));
+    /// The server confirmed change `seq`. An earlier change's reply doesn't
+    /// settle a later one still in flight.
+    pub fn settled(&mut self, kind: StarKind, id: &str, seq: u64) {
+        let key = (kind, id.to_owned());
+        if self.pending.get(&key) == Some(&seq) {
+            self.pending.remove(&key);
+        }
     }
 
-    /// The server refused a change: put back what was there.
-    pub fn failed(&mut self, kind: StarKind, id: &str, wanted: bool, track: Option<&Track>, name: Option<&str>) {
-        self.pending.remove(&(kind, id.to_owned()));
+    /// The server refused change `seq`: put back what was there, unless a later
+    /// change is in flight (that one decides).
+    pub fn failed(&mut self, kind: StarKind, id: &str, wanted: bool, seq: u64, track: Option<&Track>, name: Option<&str>) {
+        let key = (kind, id.to_owned());
+        if self.pending.get(&key) != Some(&seq) {
+            return;
+        }
+        self.pending.remove(&key);
         self.set(kind, id, !wanted, track, name);
     }
 
-    /// Sets a rating locally; returns the previous one, for rolling back.
-    pub fn rate(&mut self, id: &str, rating: u8) -> u8 {
-        self.pending_ratings.insert(id.to_owned());
+    /// Sets a rating locally; returns the previous one (for rolling back) and
+    /// the change's sequence number.
+    pub fn rate(&mut self, id: &str, rating: u8) -> (u8, u64) {
+        self.seq += 1;
+        self.pending_ratings.insert(id.to_owned(), self.seq);
         let before = self.rating(id);
         self.put_rating(id, rating);
-        before
+        (before, self.seq)
     }
 
-    pub fn rating_settled(&mut self, id: &str) {
-        self.pending_ratings.remove(id);
+    pub fn rating_settled(&mut self, id: &str, seq: u64) {
+        if self.pending_ratings.get(id) == Some(&seq) {
+            self.pending_ratings.remove(id);
+        }
     }
 
-    pub fn rating_failed(&mut self, id: &str, previous: u8) {
+    /// Rolls back change `seq`, unless a later rating is in flight.
+    pub fn rating_failed(&mut self, id: &str, previous: u8, seq: u64) {
+        if self.pending_ratings.get(id) != Some(&seq) {
+            return;
+        }
         self.pending_ratings.remove(id);
         self.put_rating(id, previous);
     }
@@ -126,7 +147,7 @@ impl Favorites {
     /// Replaces everything with the server's `getStarred2`, except changes
     /// still in flight.
     pub fn load(&mut self, starred: Starred, ratings: Vec<(String, u8)>) {
-        let keep: Vec<((StarKind, String), bool)> = self.pending.iter().map(|k| (k.clone(), self.on.contains(k))).collect();
+        let keep: Vec<((StarKind, String), bool)> = self.pending.keys().map(|k| (k.clone(), self.on.contains(k))).collect();
         self.on.clear();
         self.on.extend(starred.songs.iter().map(|s| (StarKind::Song, s.id.clone())));
         self.on.extend(starred.albums.iter().map(|a| (StarKind::Album, a.clone())));
@@ -137,7 +158,7 @@ impl Favorites {
             self.set(kind, &id, on, track.as_ref(), None);
         }
         for (id, r) in ratings {
-            if !self.pending_ratings.contains(&id) {
+            if !self.pending_ratings.contains_key(&id) {
                 self.put_rating(&id, r);
             }
         }
@@ -147,14 +168,14 @@ impl Favorites {
     /// Folds in what an album or playlist load said about its songs.
     pub fn note(&mut self, meta: UserMeta, tracks: &[Track]) {
         for (kind, id, on) in meta.starred {
-            if self.pending.contains(&(kind, id.clone())) || self.is_on(kind, &id) == on {
+            if self.pending.contains_key(&(kind, id.clone())) || self.is_on(kind, &id) == on {
                 continue;
             }
             let track = tracks.iter().find(|t| t.id == id);
             self.set(kind, &id, on, track, None);
         }
         for (id, r) in meta.ratings {
-            if !self.pending_ratings.contains(&id) {
+            if !self.pending_ratings.contains_key(&id) {
                 self.put_rating(&id, r);
             }
         }
@@ -197,11 +218,12 @@ mod tests {
     fn toggle_is_optimistic_and_rolls_back() {
         let mut f = Favorites::default();
         let t = track("s1");
-        assert!(f.toggle(StarKind::Song, "s1", Some(&t), None));
+        let (on, seq) = f.toggle(StarKind::Song, "s1", Some(&t), None);
+        assert!(on);
         assert!(f.is_on(StarKind::Song, "s1"));
         assert_eq!(f.view.songs.len(), 1);
         // The server said no: back to how it was.
-        f.failed(StarKind::Song, "s1", true, Some(&t), None);
+        f.failed(StarKind::Song, "s1", true, seq, Some(&t), None);
         assert!(!f.is_on(StarKind::Song, "s1"));
         assert!(f.view.songs.is_empty());
     }
@@ -209,11 +231,11 @@ mod tests {
     #[test]
     fn a_stale_snapshot_does_not_undo_a_change_in_flight() {
         let mut f = Favorites::default();
-        f.toggle(StarKind::Album, "al1", None, None);
+        let (_, seq) = f.toggle(StarKind::Album, "al1", None, None);
         // getStarred2 answered from before the star landed.
         f.load(Starred::default(), Vec::new());
         assert!(f.is_on(StarKind::Album, "al1"));
-        f.settled(StarKind::Album, "al1");
+        f.settled(StarKind::Album, "al1", seq);
         // Once settled, the server's word goes.
         f.load(Starred::default(), Vec::new());
         assert!(!f.is_on(StarKind::Album, "al1"));
@@ -235,16 +257,42 @@ mod tests {
     #[test]
     fn ratings_roll_back_and_clear() {
         let mut f = Favorites::default();
-        assert_eq!(f.rate("s", 5), 0);
+        let (before, seq) = f.rate("s", 5);
+        assert_eq!(before, 0);
         assert_eq!(f.rating("s"), 5);
         // A server snapshot mid-flight keeps the new rating.
         f.load(Starred::default(), vec![("s".into(), 1)]);
         assert_eq!(f.rating("s"), 5);
-        f.rating_failed("s", 0);
+        f.rating_failed("s", 0, seq);
         assert_eq!(f.rating("s"), 0);
-        f.rate("s", 3);
-        f.rating_settled("s");
+        let (_, seq) = f.rate("s", 3);
+        f.rating_settled("s", seq);
         f.rate("s", 0);
         assert_eq!(f.rating("s"), 0);
+    }
+
+    #[test]
+    fn only_the_latest_change_settles_or_rolls_back() {
+        let mut f = Favorites::default();
+        // Rate 3, then 5, quickly. The 3 fails after the 5 went through.
+        let (p3, s3) = f.rate("s", 3);
+        let (_, s5) = f.rate("s", 5);
+        f.rating_settled("s", s5);
+        f.rating_failed("s", p3, s3);
+        assert_eq!(f.rating("s"), 5, "a stale failure doesn't roll back a newer rating");
+        // The 3's success arriving late doesn't clear protection for a newer one.
+        let (_, s4) = f.rate("s", 4);
+        let (_, s2) = f.rate("s", 2);
+        f.rating_settled("s", s4);
+        f.load(Starred::default(), vec![("s".into(), 4)]);
+        assert_eq!(f.rating("s"), 2, "still in flight");
+        f.rating_settled("s", s2);
+
+        // Hearts: love, unlove; the love's reply comes last and fails.
+        let (_, love) = f.toggle(StarKind::Song, "x", None, None);
+        let (_, unlove) = f.toggle(StarKind::Song, "x", None, None);
+        f.settled(StarKind::Song, "x", unlove);
+        f.failed(StarKind::Song, "x", true, love, None, None);
+        assert!(!f.is_on(StarKind::Song, "x"));
     }
 }

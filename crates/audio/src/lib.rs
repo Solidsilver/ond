@@ -94,6 +94,9 @@ pub struct TrackSource {
     pub album_context: bool,
     /// The server converts the file on the fly; `None` streams the original.
     pub transcode: Option<Transcode>,
+    /// Opaque to the engine and echoed in [`Event::TrackStarted`] / [`Event::Ended`]:
+    /// tells two plays of the same track apart (e.g. a queue item id). 0: none.
+    pub token: u64,
 }
 
 /// A server-side conversion, e.g. AAC at 256 kbps.
@@ -156,8 +159,10 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub enum Event {
     /// The output reached a track. `gapless` is true when it followed the previous
-    /// track on the next sample without reopening the device.
-    TrackStarted { track_id: String, format: StreamFormat, gapless: bool },
+    /// track on the next sample without reopening the device. `restart` is true
+    /// when the engine started the same track over by itself (device switch, a
+    /// seek it couldn't serve in place, the queue changing under it): not a new play.
+    TrackStarted { track_id: String, token: u64, format: StreamFormat, gapless: bool, restart: bool },
     /// The device stream changed, or the mode did; describes what reaches the device.
     SignalPath(SignalPath),
     /// The output devices, and which one playback uses.
@@ -169,7 +174,7 @@ pub enum Event {
     /// A device that went away is back; the UI may offer to switch to it.
     DeviceReturned { uid: String, name: String },
     /// Playback reached the end of the last queued track.
-    Ended { track_id: String },
+    Ended { track_id: String, token: u64 },
     /// A seek landed; playback continues from `position_secs` once buffered.
     Seeked { track_id: String, position_secs: f64 },
     Error { track_id: Option<String>, message: String },
@@ -200,6 +205,9 @@ pub struct Status {
     /// Bytes of the current track on disk, and its size (0 when unknown or local).
     pub fetched_bytes: AtomicU64,
     pub total_bytes: AtomicU64,
+    /// Playback is downloading: the current track (whatever its size, known or
+    /// not, as with a transcode) or the next one's prefetch isn't complete.
+    pub(crate) downloading: AtomicBool,
     /// Track boundaries the output has crossed in this session (bumped by the callback).
     pub track_seq: AtomicU64,
     volume_bits: AtomicU32,
@@ -241,6 +249,13 @@ impl Status {
 
     pub fn position_secs(&self) -> f64 {
         secs(self.frames_played.load(Ordering::Relaxed), self.sample_rate.load(Ordering::Relaxed))
+    }
+
+    /// Playback is using the network: loading, buffering, or still downloading
+    /// the current track or the next one's prefetch. Background work that wants
+    /// bandwidth should wait.
+    pub fn needs_network(&self) -> bool {
+        matches!(self.state(), PlayState::Loading | PlayState::Buffering) || self.downloading.load(Ordering::Relaxed)
     }
 
     /// Share of the current file downloaded, if the size is known.
@@ -330,6 +345,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 current_device: None,
                 known: Vec::new(),
                 lost: None,
+                restarting: false,
             }
             .run(cmd_rx)
         })
@@ -388,6 +404,9 @@ struct Engine {
     known: Vec<DeviceInfo>,
     /// A device that disappeared while in use: (uid, name).
     lost: Option<(String, String)>,
+    /// The session being started picks up a track that was already playing, so
+    /// its start is announced as a restart rather than a new play.
+    restarting: bool,
 }
 
 impl Engine {
@@ -468,6 +487,7 @@ impl Engine {
     /// Starts a new session at `src`, optionally from `start_at`.
     fn start(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.stop();
+        self.restarting = false;
         self.status.set_state(PlayState::Loading);
         self.status.paused.store(false, Ordering::Relaxed);
         let caps = self.backend.device_caps();
@@ -499,6 +519,7 @@ impl Engine {
         self.status.total_frames.store(0, Ordering::Relaxed);
         self.status.fetched_bytes.store(0, Ordering::Relaxed);
         self.status.total_bytes.store(0, Ordering::Relaxed);
+        self.status.downloading.store(false, Ordering::Relaxed);
         self.status.buffering.store(false, Ordering::Relaxed);
         self.status.gains.reset();
     }
@@ -516,6 +537,16 @@ impl Engine {
 
     fn seek(&mut self, to: Duration) {
         let Some(session) = &self.session else { return };
+        // The decoder can only reposition the track it's on. Once it has exited
+        // (the queue's last track is fully decoded, or the next one failed) or
+        // moved on to opening the next track, nothing would release a hold:
+        // start the output's track over at the target instead.
+        if session.finished() || session.decoding() != self.out_seq {
+            if let Some(src) = self.current().map(|t| t.src.clone()) {
+                self.restart_at(src, to);
+            }
+            return;
+        }
         // Silence the output now; the decoder releases it once it has repositioned.
         let hold = self.ring.as_ref().map_or(0, |r| r.ctl.hold());
         if hold > 0 {
@@ -534,7 +565,7 @@ impl Engine {
             // The decoder is still on the output's track: tell it what follows.
             None => session.set_next(self.out_seq, next),
             // It already moved on to the right track.
-            Some(t) if next.as_ref().is_some_and(|n| n.id == t.src.id) => {}
+            Some(t) if next.as_ref().is_some_and(|n| n.id == t.src.id && n.token == t.src.token) => {}
             // It moved on to a track that's no longer next (the queue changed in the
             // last few seconds of the track). Restart the current track where it is.
             Some(_) => {
@@ -555,9 +586,19 @@ impl Engine {
         Some((src, Duration::from_secs_f64(self.status.position_secs()), state == PlayState::Paused))
     }
 
+    /// Starts `src` over at `to`, staying paused if playback was paused.
+    fn restart_at(&mut self, src: TrackSource, to: Duration) {
+        let paused = self.status.state() == PlayState::Paused;
+        let track_id = src.id.clone();
+        self.resume((src, to, paused));
+        // The new session's own report would arrive before it knows its track.
+        let _ = self.events.send(Event::Seeked { track_id, position_secs: to.as_secs_f64() });
+    }
+
     /// Restarts at a position from [`take_position`](Self::take_position), keeping pause.
     fn resume(&mut self, (src, at, paused): (TrackSource, Duration, bool)) {
         self.start(src, Some(at));
+        self.restarting = true;
         if paused {
             self.status.paused.store(true, Ordering::Relaxed);
             self.status.set_state(PlayState::Paused);
@@ -668,6 +709,8 @@ impl Engine {
 
     /// Publishes download progress and starts the next track's prefetch when it's time.
     fn poll_fetch(&mut self) {
+        let downloading = self.network_in_use();
+        self.status.downloading.store(downloading, Ordering::Relaxed);
         let Some(cache) = &self.cache else { return };
         let Some(src) = self.tracks.get(self.out_seq as usize).map(|t| &t.src) else { return };
         if src.is_local() {
@@ -689,6 +732,15 @@ impl Engine {
             cache.prefetch(&next.cache_key(), &next.url);
             self.prefetched = Some(next.id.clone());
         }
+    }
+
+    /// The current track's stream or the next one's prefetch is still downloading.
+    fn network_in_use(&self) -> bool {
+        let Some(cache) = &self.cache else { return false };
+        let incomplete = |src: &TrackSource| !src.is_local() && cache.progress(&src.cache_key()).is_none_or(|p| !p.complete);
+        let current = self.session.is_some() && self.current().is_some_and(|t| incomplete(&t.src));
+        let prefetch = self.prefetched.is_some() && self.next.as_ref().is_some_and(incomplete);
+        current || prefetch
     }
 
     fn poll_session(&mut self) {
@@ -715,7 +767,7 @@ impl Engine {
                 }
                 DecoderMsg::SeekMiss { seq, to } => {
                     if let Some(src) = self.tracks.get(seq as usize).map(|t| t.src.clone()) {
-                        self.start(src, Some(to));
+                        self.restart_at(src, to);
                     }
                     return;
                 }
@@ -747,10 +799,10 @@ impl Engine {
         }
 
         if self.session.is_some() && finished && (self.ring.is_none() || self.backend.drained()) {
-            let track_id = self.current().map(|t| t.src.id.clone());
+            let ended = self.current().map(|t| (t.src.id.clone(), t.src.token));
             self.stop();
-            if let Some(track_id) = track_id {
-                let _ = self.events.send(Event::Ended { track_id });
+            if let Some((track_id, token)) = ended {
+                let _ = self.events.send(Event::Ended { track_id, token });
             }
         }
     }
@@ -789,10 +841,13 @@ impl Engine {
     /// Publishes the output's current track.
     fn announce(&mut self, gapless: bool) {
         let Some(t) = self.current() else { return };
-        let (track_id, format, total, rate) = (t.src.id.clone(), t.format, t.total_frames, t.output.sample_rate);
+        let (track_id, token, format, total, rate) =
+            (t.src.id.clone(), t.src.token, t.format, t.total_frames, t.output.sample_rate);
         self.status.total_frames.store(total.unwrap_or(0), Ordering::Relaxed);
         self.status.sample_rate.store(rate, Ordering::Relaxed);
-        let _ = self.events.send(Event::TrackStarted { track_id, format, gapless });
+        // Only the first announcement of a restarted session is a restart.
+        let restart = !gapless && std::mem::take(&mut self.restarting);
+        let _ = self.events.send(Event::TrackStarted { track_id, token, format, gapless, restart });
     }
 }
 
