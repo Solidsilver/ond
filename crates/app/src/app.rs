@@ -924,6 +924,14 @@ impl ListenerApp {
         });
     }
 
+    /// Work owed once per batch of messages: a sync delivers albums, artists
+    /// and tracks back to back, so derived data is rebuilt once, not per message.
+    fn after_messages(&mut self) {
+        if std::mem::take(&mut self.search_stale) {
+            self.rebuild_search();
+        }
+    }
+
     fn rebuild_search(&mut self) {
         let mut index = SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.all_tracks);
         if let Some(p) = self.palette.as_mut() {
@@ -1873,11 +1881,7 @@ impl eframe::App for ListenerApp {
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg);
         }
-        // Once per batch of messages: a sync delivers albums, artists and tracks
-        // back to back, and each rebuild is ~30 ms on a 20k-track library.
-        if std::mem::take(&mut self.search_stale) {
-            self.rebuild_search();
-        }
+        self.after_messages();
         let snap = self.offline.snapshot();
         if snap.version != self.offline_snap.version {
             // A download finished: what's next may now play from disk, or play at all.
