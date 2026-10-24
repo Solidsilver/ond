@@ -1297,12 +1297,12 @@ fn the_now_playing_heart_toggles_both_ways() {
     let id = app_mut(&mut h).player.queue.current.as_ref().unwrap().track.id.clone();
     let loved = |h: &mut Harness<'_, Option<OndApp>>| app_mut(h).favorites.is_on(StarKind::Song, &id);
     assert!(loved(&mut h), "the fixture's playing song starts loved");
-    h.get_by_label("Unlove (⇧⌘L)").click();
+    h.get_by_label(&crate::keys::shown("Unlove (⇧⌘L)")).click();
     h.run_steps(2);
     assert!(!loved(&mut h), "unloved from the now-playing display");
     // Clicking straight onto the heart again (the display under it reads as
     // not hovered while the pointer is on the heart) must love it again.
-    h.get_by_label("Love (⇧⌘L)").click();
+    h.get_by_label(&crate::keys::shown("Love (⇧⌘L)")).click();
     h.run_steps(2);
     assert!(loved(&mut h), "loved again from the now-playing display");
     *h.state_mut() = None;
