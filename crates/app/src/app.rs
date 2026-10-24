@@ -195,6 +195,8 @@ pub enum Action {
     SetDiagnostics(bool),
     /// The system's title bar instead of our own window buttons (Linux).
     SetSystemTitleBar(bool),
+    /// Turn experimental visuals on or off.
+    SetExperimental(crate::visuals::Experimental),
     /// Open the Settings window at a section.
     OpenSettings(settings_page::Section),
     /// Re-read the library from the server (albums, then tracks).
@@ -469,6 +471,8 @@ pub struct UiState {
     pub edit_input: Vec<egui::Event>,
     /// Trackpad coasting where the system doesn't do it (Wayland).
     pub momentum: crate::momentum::Momentum,
+    /// Frames asked for by visuals that move (experimental; see `visuals`).
+    pub live: crate::visuals::Live,
 }
 
 impl UiState {
@@ -505,6 +509,7 @@ impl UiState {
             bars_shown: false,
             edit_input: Vec::new(),
             momentum: Default::default(),
+            live: Default::default(),
         }
     }
 }
@@ -1477,6 +1482,7 @@ impl OndApp {
                 self.prefs.edit(|s| s.scrobble = on);
             }
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
+            Action::SetExperimental(x) => self.prefs.edit(|s| s.experimental = x),
             Action::SetSystemTitleBar(on) => {
                 let plan = self.edit_windows(|w| {
                     w.system_title_bar = on;
@@ -1619,6 +1625,11 @@ impl OndApp {
 
     pub fn diagnostics_shown(&self) -> bool {
         self.prefs.get(|s| s.diagnostics_bar)
+    }
+
+    /// Which experimental visuals are on.
+    pub fn experimental(&self) -> crate::visuals::Experimental {
+        self.prefs.get(|s| s.experimental)
     }
 
     pub fn system_title_bar(&self) -> bool {
@@ -1944,6 +1955,11 @@ impl OndApp {
             for a in std::mem::take(&mut self.actions) {
                 self.apply(a);
             }
+        }
+        // A visual that moves with the music was drawn: the next frame comes
+        // sooner than the usual clock, but only while something plays.
+        if let Some(every) = self.ui.live.next(self.engine.status.state() == PlayState::Playing) {
+            ctx.request_repaint_after(every);
         }
     }
 

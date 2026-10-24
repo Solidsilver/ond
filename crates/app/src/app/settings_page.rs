@@ -20,10 +20,11 @@ pub enum Section {
     Offline,
     Library,
     Account,
+    Experimental,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [Section::General, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account];
+    pub const ALL: [Section; 7] = [Section::General, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -33,6 +34,7 @@ impl Section {
             Section::Offline => "Offline",
             Section::Library => "Library",
             Section::Account => "Account",
+            Section::Experimental => "Experimental",
         }
     }
 }
@@ -88,6 +90,7 @@ impl OndApp {
                             Section::Offline => self.offline_settings(ui),
                             Section::Library => self.library_settings(ui),
                             Section::Account => self.account_settings(ui),
+                            Section::Experimental => self.experimental_settings(ui),
                         }
                         ui.add_space(24.0);
                     });
@@ -342,6 +345,40 @@ impl OndApp {
         }
         ui.add_space(8.0);
         hint(ui, "Measures loudness and dynamic range, and checks for upsampled or lossy-sourced files. Runs in the background and pauses while playback needs the network.");
+    }
+
+    /// Visuals still being tried out, one switch each.
+    fn experimental_settings(&mut self, ui: &mut Ui) {
+        let mut x = self.experimental();
+        let before = x;
+        hint(ui, "Visual features that are still being tried out. They may change or go away.");
+        ui.add_space(20.0);
+        group(ui, "Colors and artwork", |ui| {
+            narrow_toggle(ui, &mut x.art_colors, "Colors from the album art");
+            hint(ui, "Tints the accent color, the now-playing display and the Player with colors from the playing album's cover. Text keeps its contrast.");
+            ui.add_space(10.0);
+            narrow_toggle(ui, &mut x.backdrop, "Blurred artwork behind the Player and Mini");
+            hint(ui, "A soft, dimmed copy of the cover fills the background, and fades to the next one when the track changes.");
+        });
+        group(ui, "Seek bar", |ui| {
+            narrow_toggle(ui, &mut x.waveform, "Waveform seek bar");
+            hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
+        });
+        group(ui, "Live audio", |ui| {
+            narrow_toggle(ui, &mut x.spectrum, "Live spectrum");
+            hint(ui, "A small spectrum of what's playing, in the now-playing display and the Player. It redraws continuously while music plays, which uses more battery.");
+            ui.add_space(10.0);
+            narrow_toggle(ui, &mut x.spectrogram, "Spectrogram in Info");
+            hint(ui, "A scrolling picture of frequency over time in the Info tab. It redraws continuously while music plays, which uses more battery.");
+            ui.add_space(10.0);
+            narrow_toggle(ui, &mut x.visualizer, "Visualizer");
+            hint(ui, "A full-window light show in the album's colors, driven by the music. Open it with ⌘T and leave with Esc. It uses the graphics card continuously while open, which uses more battery.");
+            ui.add_space(6.0);
+            hint(ui, "None of these change the sound. Bit-perfect playback stays bit-perfect.");
+        });
+        if x != before {
+            self.actions.push(Action::SetExperimental(x));
+        }
     }
 
     fn account_settings(&mut self, ui: &mut Ui) {

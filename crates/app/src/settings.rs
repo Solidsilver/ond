@@ -92,6 +92,9 @@ pub struct Settings {
     /// Software volume, 0..=1 (unused in bit-perfect mode).
     #[serde(default = "full")]
     pub volume: f32,
+    /// Experimental visuals (Settings › Experimental), all off by default.
+    #[serde(default, skip_serializing_if = "crate::visuals::Experimental::all_off")]
+    pub experimental: crate::visuals::Experimental,
 }
 
 fn yes() -> bool {
@@ -125,6 +128,7 @@ impl Default for Settings {
             sidebar_width: None,
             queue_width: None,
             volume: 1.0,
+            experimental: Default::default(),
         }
     }
 }
