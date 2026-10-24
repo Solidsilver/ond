@@ -94,13 +94,33 @@ impl Tokens {
     };
 
     pub fn of(ui: &egui::Ui) -> Tokens {
-        if ui.visuals().dark_mode { Self::DARK } else { Self::LIGHT }
+        Self::themed(ui.ctx(), ui.visuals().dark_mode)
     }
 
     /// For code that has a context but no `Ui` (overlays).
     pub fn of_ctx(ctx: &Context) -> Tokens {
-        if ctx.global_style().visuals.dark_mode { Self::DARK } else { Self::LIGHT }
+        Self::themed(ctx, ctx.global_style().visuals.dark_mode)
     }
+
+    /// The theme's tokens, with the accent from the album art when that
+    /// experiment is on (see [`crate::visuals::colors`]).
+    fn themed(ctx: &Context, dark: bool) -> Tokens {
+        let base = if dark { Self::DARK } else { Self::LIGHT };
+        match tint(ctx, dark) {
+            Some(t) => t.apply(base),
+            None => base,
+        }
+    }
+}
+
+/// The album-art tint in use, if that experiment is on and has one.
+pub fn tint(ctx: &Context, dark: bool) -> Option<crate::visuals::colors::Tint> {
+    ctx.data(|d| d.get_temp::<crate::visuals::colors::Tints>(crate::visuals::colors::id())).map(|t| t.of(dark))
+}
+
+/// [`tint`] for the theme `ui` is drawn in.
+pub fn tint_of(ui: &egui::Ui) -> Option<crate::visuals::colors::Tint> {
+    tint(ui.ctx(), ui.visuals().dark_mode)
 }
 
 /// Semibold text in the UI font (the system font's weight axis when loaded).

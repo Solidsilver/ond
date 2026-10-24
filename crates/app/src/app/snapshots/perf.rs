@@ -221,6 +221,8 @@ fn perf() {
     println!("  unanalysed() per call: {:.2} ms", ms(unanalysed));
     println!("  sync messages + rebuild on the UI thread: median {:.2} ms", ms(sync_ui[2]));
 
+    experimental_costs(&mut h);
+
     // Idle: nothing playing, nothing hovered, nothing animating. After the
     // frames settle, nothing should ask for another one.
     reset(&mut h, FULL, Route::Albums);
@@ -241,6 +243,32 @@ fn perf() {
     assert!(!idle_repaint, "idle frames keep asking for repaints");
 }
 
+/// Each experimental visual's frame cost: the same scenes with it off, then on.
+fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
+    type Switch = fn(&mut crate::visuals::Experimental);
+    let features: [(&str, Switch); 1] = [("colors from the art", |x| x.art_colors = true)];
+    println!("experimental visuals, mean frame time off → on:");
+    for (name, on) in features {
+        for (scene, player) in [("full window", false), ("Player", true)] {
+            let setup = |h: &mut Harness<'_, Option<OndApp>>| {
+                reset(h, if player { vec2(380.0, 880.0) } else { FULL }, Route::Recent);
+                if player {
+                    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+                }
+            };
+            setup(h);
+            let off = time_frames(h, 60);
+            setup(h);
+            experiment(h, on);
+            settle_look(h);
+            let with = time_frames(h, 60);
+            println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off.mean), ms(with.mean));
+        }
+    }
+    reset(h, FULL, Route::Recent);
+}
+
 fn ms(d: Duration) -> f64 {
+
     d.as_secs_f64() * 1000.0
 }

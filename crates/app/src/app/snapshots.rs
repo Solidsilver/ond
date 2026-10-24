@@ -453,12 +453,44 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     app.output.handle(&signal());
     app.set_columns(super::layout::Columns::default());
     app.ui.album_details_open = false;
+    app.prefs.edit(|s| s.experimental = Default::default());
+    app.ui.tint = Default::default();
     app.ui.nav = Nav::default();
     app.ui.nav.go(route);
     app.on_arrive();
     fill_queue(app);
+    h.ctx.data_mut(|d| d.remove::<crate::visuals::colors::Tints>(crate::visuals::colors::id()));
     // Settle layout (measured header heights etc.) before anything is hovered.
     h.run_steps(3);
+}
+
+/// Turns on the experimental visuals `on` sets (the rest stay off).
+fn experiment(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::visuals::Experimental)) {
+    let mut x = crate::visuals::Experimental::default();
+    on(&mut x);
+    app_mut(h).prefs.edit(|s| s.experimental = x);
+}
+
+/// Waits for the playing cover's look (worked out in the background), then
+/// lets the colors finish easing in.
+fn settle_look(h: &mut Harness<'_, Option<OndApp>>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        h.step();
+        let app = app_mut(h);
+        let cover = app.player.queue.current.as_ref().and_then(|c| app.data.cover_for(&c.track).map(str::to_owned));
+        if cover.is_none_or(|c| app.art.look(&c).is_some()) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the cover's look never arrived");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.run_steps(6);
+}
+
+/// Plays Kind of Blue instead (another cover than the fixture's).
+fn play_blue(app: &mut OndApp) {
+    app.player.queue.play_now(kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
 }
 
 /// Hovers the first widget labelled `label` inside `area`, if any.
@@ -1051,6 +1083,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "empty-queue");
 
+    experimental_scenes(h, s);
+
 
     // No status bar: the signal path lives in the now-playing display.
     let lcd = egui::Rect::from_min_max(pos2(400.0, 0.0), pos2(1000.0, 52.0));
@@ -1135,6 +1169,30 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() });
     s.shoot(h, "login-busy");
+}
+
+/// The experimental visuals, each on its own.
+fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    let player = vec2(380.0, 880.0);
+    // Colors from the album art: the Player, the now-playing display and the
+    // accent (links, the selected tab), for a warm cover and a cool one.
+    for (blue, name) in [(false, "x-colors"), (true, "x-colors-alt")] {
+        reset(h, player, Route::Recent);
+        app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+        if blue {
+            play_blue(app_mut(h));
+        }
+        experiment(h, |x| x.art_colors = true);
+        settle_look(h);
+        s.shoot(h, &format!("{name}-player"));
+        reset(h, FULL, Route::Album(album_id(if blue { 1 } else { 0 })));
+        if blue {
+            play_blue(app_mut(h));
+        }
+        experiment(h, |x| x.art_colors = true);
+        settle_look(h);
+        s.shoot(h, &format!("{name}-full"));
+    }
 }
 
 #[test]

@@ -7,6 +7,8 @@
 //! the app keeps its usual pace (a few frames a second while playing, none
 //! when idle).
 
+pub mod colors;
+
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 

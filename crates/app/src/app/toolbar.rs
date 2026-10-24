@@ -119,7 +119,8 @@ impl OndApp {
     pub(super) fn lcd(&mut self, ui: &mut Ui, rect: Rect) {
         let t = Tokens::of(ui);
         let painter = ui.painter().clone();
-        painter.rect(rect, 7.0, t.sidebar, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+        let fill = crate::theme::tint_of(ui).map_or(t.sidebar, |x| x.display);
+        painter.rect(rect, 7.0, fill, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
         let body = ui.interact(rect, ui.scope_id().with("lcd"), Sense::click());
         let Some(item) = self.player.queue.current.clone() else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), t.muted);

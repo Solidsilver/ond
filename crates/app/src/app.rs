@@ -473,6 +473,8 @@ pub struct UiState {
     pub momentum: crate::momentum::Momentum,
     /// Frames asked for by visuals that move (experimental; see `visuals`).
     pub live: crate::visuals::Live,
+    /// The album-art tint, eased from cover to cover (experimental).
+    pub tint: crate::visuals::colors::Easing,
 }
 
 impl UiState {
@@ -510,6 +512,7 @@ impl UiState {
             edit_input: Vec::new(),
             momentum: Default::default(),
             live: Default::default(),
+            tint: Default::default(),
         }
     }
 }
@@ -1924,6 +1927,7 @@ impl OndApp {
     fn main_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.art.poll();
+        self.art_tint(&ctx);
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
         match self.window_mode() {
@@ -1960,6 +1964,40 @@ impl OndApp {
         // sooner than the usual clock, but only while something plays.
         if let Some(every) = self.ui.live.next(self.engine.status.state() == PlayState::Playing) {
             ctx.request_repaint_after(every);
+        }
+    }
+
+    /// Colors from the album art (experimental): heads for the playing
+    /// cover's tint and leaves it where `Tokens::of` finds it. While a new
+    /// cover's colors are still being worked out, the old ones stay.
+    fn art_tint(&mut self, ctx: &egui::Context) {
+        let target = if self.experimental().art_colors
+            && let Some(item) = &self.player.queue.current
+        {
+            match self.data.cover_for(&item.track).map(str::to_owned) {
+                Some(cover) => match self.art.look(&cover) {
+                    Some(look) => look.tints,
+                    None => self.ui.tint.target(),
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        let had = self.ui.tint.target().is_some() || self.ui.tint.showing();
+        if target.is_none() && !had {
+            return;
+        }
+        let (tints, moving) = self.ui.tint.step(target, ctx.input(|i| i.time));
+        let id = crate::visuals::colors::id();
+        match tints {
+            Some(t) => {
+                ctx.data_mut(|d| d.insert_temp(id, t));
+            }
+            None => ctx.data_mut(|d| d.remove::<crate::visuals::colors::Tints>(id)),
+        }
+        if moving {
+            ctx.request_repaint();
         }
     }
 

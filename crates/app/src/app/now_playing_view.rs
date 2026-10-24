@@ -486,11 +486,13 @@ fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysi
 impl OndApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
+        // The background, tinted from the album art when that's on.
+        let stage = crate::theme::tint_of(ui).map_or(t.bg, |x| x.stage);
         egui::Panel::top("player-bar")
             .exact_size(PLAYER_BAR_H)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(t.bg))
+            .frame(egui::Frame::new().fill(stage))
             .show(ui, |ui| self.view().player_bar(ui));
         self.player_status_bar(ui);
         if self.lyrics_drawer() {
@@ -512,7 +514,7 @@ impl OndApp {
                 });
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
+            .frame(egui::Frame::new().fill(stage).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
             .show(ui, |ui| {
                 let full = ui.available_rect_before_wrap();
                 let below = BELOW_ART_H + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;

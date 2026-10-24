@@ -107,6 +107,29 @@ pub fn eviction_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, budget: u64) ->
 
 type Loaded = (Key, Option<ColorImage>);
 
+/// Covers whose [`Look`] is kept.
+const LOOKS: usize = 16;
+/// The size a cover is read at for its look: plenty for a palette.
+const LOOK_SIZE: u32 = 128;
+
+/// What the experimental visuals take from a cover, worked out once per cover
+/// off the UI thread.
+#[derive(Debug, Default)]
+pub struct Look {
+    /// `None` for a cover with too little color (or none at all).
+    pub palette: Option<crate::visuals::colors::ArtPalette>,
+    /// The tints the palette gives each theme.
+    pub tints: Option<crate::visuals::colors::Tints>,
+}
+
+impl Look {
+    fn of(image: Option<&ColorImage>) -> Self {
+        let palette = image.and_then(crate::visuals::colors::extract);
+        let tints = palette.as_ref().map(crate::visuals::colors::Tints::new);
+        Self { palette, tints }
+    }
+}
+
 pub struct Art {
     rt: tokio::runtime::Handle,
     ctx: egui::Context,
@@ -120,11 +143,21 @@ pub struct Art {
     tx: Sender<Loaded>,
     rx: Receiver<Loaded>,
     permits: Arc<tokio::sync::Semaphore>,
+    /// Looks by cover id, for the few covers lately asked about.
+    looks: HashMap<String, Arc<Look>>,
+    looks_lru: Lru<String>,
+    looks_pending: HashSet<String>,
+    look_tx: Sender<(String, Look)>,
+    look_rx: Receiver<(String, Look)>,
+    /// Images given by [`Art::preload`], so looks work without a server.
+    #[cfg(test)]
+    preloaded: HashMap<String, ColorImage>,
 }
 
 impl Art {
     pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, dir: PathBuf) -> Self {
         let (tx, rx) = channel();
+        let (look_tx, look_rx) = channel();
         let dir = Arc::new(dir);
         let trim = dir.clone();
         rt.spawn_blocking(move || trim_disk_cache(&trim));
@@ -140,6 +173,13 @@ impl Art {
             tx,
             rx,
             permits: Arc::new(tokio::sync::Semaphore::new(FETCHES)),
+            looks: HashMap::new(),
+            looks_lru: Lru::new(LOOKS),
+            looks_pending: HashSet::new(),
+            look_tx,
+            look_rx,
+            #[cfg(test)]
+            preloaded: HashMap::new(),
         }
     }
 
@@ -147,6 +187,7 @@ impl Art {
         self.client = Some(client);
         // Failures may have been "not connected yet".
         self.missing.clear();
+        self.looks.retain(|_, l| l.palette.is_some());
     }
 
     /// Uploads finished loads. Call once per frame before drawing.
@@ -164,6 +205,43 @@ impl Art {
             }
             self.textures.insert(key, tex);
         }
+        while let Ok((cover, look)) = self.look_rx.try_recv() {
+            self.looks_pending.remove(&cover);
+            for gone in self.looks_lru.insert(cover.clone(), 1) {
+                self.looks.remove(&gone);
+            }
+            self.looks.insert(cover, Arc::new(look));
+        }
+    }
+
+    /// `cover`'s look, once worked out; the first ask starts that (in the
+    /// background) and returns `None` meanwhile.
+    pub fn look(&mut self, cover: &str) -> Option<Arc<Look>> {
+        if let Some(l) = self.looks.get(cover) {
+            self.looks_lru.touch(&cover.to_owned());
+            return Some(l.clone());
+        }
+        if self.looks_pending.insert(cover.to_owned()) {
+            let key = Key { cover: cover.to_owned(), size: LOOK_SIZE };
+            #[cfg(test)]
+            let given = self.preloaded.get(cover).cloned();
+            #[cfg(not(test))]
+            let given: Option<ColorImage> = None;
+            let (client, dir, tx, ctx, permits) = (self.client.clone(), self.dir.clone(), self.look_tx.clone(), self.ctx.clone(), self.permits.clone());
+            self.rt.spawn(async move {
+                let image = match given {
+                    Some(i) => Some(i),
+                    None => match permits.acquire().await {
+                        Ok(_permit) => load(client.as_ref(), &dir, &key).await,
+                        Err(_) => None,
+                    },
+                };
+                let look = tokio::task::spawn_blocking(move || Look::of(image.as_ref())).await.unwrap_or_default();
+                let _ = tx.send((key.cover, look));
+                ctx.request_repaint();
+            });
+        }
+        None
     }
 
     /// The best texture for `cover` drawn at `points` wide. Starts a load when
@@ -201,6 +279,7 @@ impl Art {
     /// Makes `image` the art for `cover` at every size, without a server.
     #[cfg(test)]
     pub fn preload(&mut self, cover: &str, image: ColorImage) {
+        self.preloaded.insert(cover.to_owned(), image.clone());
         let tex = self.ctx.load_texture(format!("art:{cover}"), image, TextureOptions::LINEAR);
         for size in SIZES {
             self.textures.insert(Key { cover: cover.to_owned(), size }, tex.clone());
