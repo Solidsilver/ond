@@ -244,18 +244,20 @@ fn unpinning_a_big_playlist_returns_at_once_and_cleans_up_behind() {
     let tracks: Vec<TrackRef> = (0..n).map(|i| track(&format!("t{i}"), 10)).collect();
     // No source: nothing downloads; the files stand in for finished ones.
     s.pin(Pin::Playlist("big".into()), "Big", tracks);
+    s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
     for i in 0..n {
         std::fs::write(dir.path().join(format!("t{i}.flac")), b"x").unwrap();
     }
+    std::fs::write(dir.path().join("keep.flac"), b"x").unwrap();
     let t = Instant::now();
     s.unpin(&Pin::Playlist("big".into()));
     assert!(t.elapsed() < slack(Duration::from_millis(200)), "unpin took {:?}", t.elapsed());
-    wait_for("the files to go", || std::fs::read_dir(dir.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".flac")));
-    // Re-pinning before the deleter gets to a track keeps its file.
-    s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
-    std::fs::write(dir.path().join("keep.flac"), b"x").unwrap();
+    // Re-pinning before the deleter gets to a track keeps its file. The
+    // deleter has the big playlist's files ahead of this one in its queue.
     s.unpin(&Pin::Track("keep".into()));
     s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
+    let gone = |e: &std::fs::DirEntry| e.file_name() != "keep.flac" && e.file_name().to_string_lossy().ends_with(".flac");
+    wait_for("the files to go", || !std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| gone(&e)));
     thread::sleep(Duration::from_millis(100));
     assert!(dir.path().join("keep.flac").exists());
 }
