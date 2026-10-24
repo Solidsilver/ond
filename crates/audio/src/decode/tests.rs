@@ -76,7 +76,7 @@ impl Device {
 
 /// Waits for the session's first ring; returns it with every other message seen.
 fn wait_ring(s: &Session) -> (RingInput, Vec<DecoderMsg>) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     let mut seen = Vec::new();
     loop {
         match s.try_msg() {
@@ -92,7 +92,7 @@ fn wait_ring(s: &Session) -> (RingInput, Vec<DecoderMsg>) {
 }
 
 fn wait_seeked(s: &Session, dev: &mut Device) -> f64 {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     loop {
         assert!(Instant::now() < deadline, "no Seeked message");
         dev.tick(64);
@@ -105,7 +105,7 @@ fn wait_seeked(s: &Session, dev: &mut Device) -> f64 {
 }
 
 fn play_to_end(s: &Session, dev: &mut Device) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         let (drained, _) = dev.tick(512);
@@ -145,7 +145,7 @@ fn gapless_two_tracks_share_one_ring_and_switch_on_the_exact_sample() {
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
 
     let mut boundary_at = None;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         let (drained, _) = dev.tick(333);
@@ -261,7 +261,7 @@ fn resampled(from: u32, to: u32, samples: &[i16]) -> Vec<f32> {
 fn play_f32(s: &Session, mut input: RingInput, status: &Status, rate: u32) -> (Vec<f32>, Option<u64>) {
     let (mut played, mut frames, mut boundary) = (Vec::new(), 0u64, None);
     let mut buf = vec![0.0f32; 2 * 401];
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         let seq = status.track_seq.load(Ordering::Relaxed);
@@ -316,7 +316,7 @@ fn seek_with_resampling_restarts_cleanly_at_the_target() {
     }
     let hold = input.ctl.hold();
     s.seek(0, Duration::from_millis(1_500), hold);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     loop {
         assert!(Instant::now() < deadline, "no Seeked");
         input.fill(&mut buf, 2, 48_000, &status);
@@ -395,7 +395,7 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     let target = ((crate::PREBUFFER_SECS * RATE as f32) as usize * 2).min(capacity / 2);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     // Play a little of the start (it buffers first, like any track start).
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
     while dev.played.len() < 4_000 {
         assert!(Instant::now() < deadline, "never started");
         dev.tick(256);
@@ -460,7 +460,7 @@ fn surround_is_downmixed_to_stereo() {
     assert_eq!(output.channels, 2);
     assert_eq!(*channels, ChannelChange::Downmix { from: 6, to: 2 });
     let mut played = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     while played.len() < frames * 2 {
         assert!(Instant::now() < deadline, "playback stalled");
         let mut buf = vec![0.0f32; 512];
