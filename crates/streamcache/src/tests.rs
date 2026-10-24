@@ -224,24 +224,27 @@ fn lru_eviction_keeps_recent_files() {
     let cfg = CacheConfig { max_bytes: 3_000, ..CacheConfig::new(dir.path()) };
     let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
     let server = Server::start(data(1_200), FAST);
-    let fetch = |id: &str| {
+    // Waits for the index, not the download's progress: a download reports
+    // complete just before it's indexed (and stamped as used).
+    let fetch = |id: &str, size_after: u64| {
         let key = CacheKey::new(id, None);
         let mut src = cache.open(&key, &server.url, never()).unwrap();
         let mut out = Vec::new();
         src.read_to_end(&mut out).unwrap();
-        wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+        wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == size_after);
     };
 
-    fetch("a");
+    fetch("a", 1_200);
     thread::sleep(Duration::from_millis(5));
-    fetch("b");
+    fetch("b", 2_400);
     thread::sleep(Duration::from_millis(5));
-    fetch("a"); // touches a, making b the least recently used
+    fetch("a", 2_400); // touches a, making b the least recently used
     thread::sleep(Duration::from_millis(5));
-    fetch("c"); // 3 600 bytes > 3 000: b goes
+    fetch("c", 2_400); // 3 600 bytes > 3 000: b goes
 
+    // The evicted file is deleted just after the index lets it go.
+    wait_until("eviction", slack(Duration::from_secs(5)), || !dir.path().join("b").exists());
     assert!(dir.path().join("a").exists());
-    assert!(!dir.path().join("b").exists());
     assert!(dir.path().join("c").exists());
     assert_eq!(cache.size(), 2_400);
 }

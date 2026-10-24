@@ -186,7 +186,7 @@ fn format_change_starts_a_new_ring() {
     s.set_next(0, Some(b));
     let (input, _) = wait_ring(&s);
     let mut dev = Device { input, status, played: Vec::new() };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     let second = loop {
         assert!(Instant::now() < deadline, "no second ring");
         dev.tick(512);
