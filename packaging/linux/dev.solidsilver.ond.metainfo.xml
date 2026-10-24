@@ -20,6 +20,14 @@
   <url type="homepage">https://github.com/Solidsilver/ond</url>
   <url type="bugtracker">https://github.com/Solidsilver/ond/issues</url>
   <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.2.0" date="2026-10-24">
+      <description>
+        <p>First release for Linux and Windows.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-10-23"/>
+  </releases>
   <provides>
     <binary>ond</binary>
   </provides>
