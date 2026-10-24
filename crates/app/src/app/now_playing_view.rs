@@ -444,6 +444,34 @@ fn edge_fades(ui: &Ui, rect: Rect, bg: Color32, h: f32, top_too: bool) {
     }
 }
 
+/// The blurred cover `layers` (oldest first) filling `rect`, under a wash of
+/// `wash`: light around the artwork (down to `art_bottom`), then by
+/// `text_top` just strong enough for `text` and `muted` to read over all of it.
+fn backdrop_shape(rect: Rect, layers: &[crate::visuals::backdrop::Layer], wash: Color32, text: Color32, muted: Color32, art_bottom: f32, text_top: f32) -> egui::Shape {
+    let uv = crate::art::crop_uv(rect.width() / rect.height().max(1.0));
+    let mut alpha: f32 = 0.0;
+    let mut shapes = Vec::new();
+    for (tex, opacity, extremes) in layers {
+        shapes.push(egui::epaint::RectShape::filled(rect, 0.0, Color32::WHITE.gamma_multiply(*opacity)).with_texture(tex.id(), uv).into());
+        alpha = alpha.max(crate::visuals::backdrop::wash_alpha(*extremes, wash, text, muted));
+    }
+    // Only the window buttons sit on the lighter part, and they're icons.
+    let light = alpha.min(0.4);
+    let mut mesh = egui::Mesh::default();
+    for (y, a) in [(rect.top(), light), (art_bottom.min(text_top), light), (text_top, alpha), (rect.bottom(), alpha)] {
+        let c = wash.gamma_multiply(a);
+        mesh.colored_vertex(pos2(rect.left(), y), c);
+        mesh.colored_vertex(pos2(rect.right(), y), c);
+    }
+    for k in 0..3 {
+        let i = 2 * k;
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i + 1, i + 3, i + 2);
+    }
+    shapes.push(egui::Shape::mesh(mesh));
+    egui::Shape::Vec(shapes)
+}
+
 /// A lyric line laid out at `width` with comfortable leading (1.45×), so
 /// wrapped lines read as one line continuing.
 fn lyric_galley(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
@@ -486,8 +514,18 @@ fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysi
 impl OndApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        // The background, tinted from the album art when that's on.
-        let stage = crate::theme::tint_of(ui).map_or(t.bg, |x| x.stage);
+        // The background, tinted from the album art when that's on, or the
+        // blurred cover under a wash of it.
+        let mut stage = crate::theme::tint_of(ui).map_or(t.bg, |x| x.stage);
+        let layers = self.backdrop_layers(ui.ctx());
+        let window = ui.max_rect();
+        // Drawn under everything, once the artwork's place is known.
+        let under = ui.painter().clone();
+        let backdrop = (!layers.is_empty()).then(|| under.add(egui::Shape::Noop));
+        let wash = stage;
+        if backdrop.is_some() {
+            stage = Color32::TRANSPARENT;
+        }
         egui::Panel::top("player-bar")
             .exact_size(PLAYER_BAR_H)
             .resizable(false)
@@ -519,6 +557,11 @@ impl OndApp {
                 let full = ui.available_rect_before_wrap();
                 let below = BELOW_ART_H + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
                 let side = full.width().min(full.height() - below).max(120.0).floor();
+                if let Some(slot) = backdrop {
+                    let art_bottom = full.top() + if self.player.queue.current.is_some() { side } else { 0.0 };
+                    under.set(slot, backdrop_shape(window, &layers, wash, t.text, t.muted, art_bottom - side * 0.2, art_bottom + 18.0));
+                }
+
                 match self.player.queue.current.as_ref().map(|c| c.track.clone()) {
                     Some(track) => {
                         self.view().ensure_lyrics(&track);

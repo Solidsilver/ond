@@ -407,6 +407,12 @@ struct Shooter {
 impl Shooter {
     fn shoot(&self, h: &mut Harness<'_, Option<OndApp>>, scene: &str) {
         h.run_steps(4);
+        self.shoot_now(h, scene);
+    }
+
+    /// Renders the frame as it is, without letting anything settle first
+    /// (for the middle of a fade).
+    fn shoot_now(&self, h: &mut Harness<'_, Option<OndApp>>, scene: &str) {
         match h.render() {
             Ok(img) => {
                 let path = self.out.join(format!("{scene}-{}.png", self.theme));
@@ -1193,7 +1199,45 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         settle_look(h);
         s.shoot(h, &format!("{name}-full"));
     }
+
+    // Blurred artwork: behind the Player (alone, and with the art's colors),
+    // under Mini's controls, and halfway through the fade to the next cover.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    experiment(h, |x| x.backdrop = true);
+    settle_look(h);
+    s.shoot(h, "x-backdrop-player");
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    play_blue(app_mut(h));
+    experiment(h, |x| {
+        x.backdrop = true;
+        x.art_colors = true;
+    });
+    settle_look(h);
+    s.shoot(h, "x-backdrop-colors-player");
+    // The next cover arrives: two steps (half a second) into the fade.
+    {
+        let app = app_mut(h);
+        app.player.queue.play_now(vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.art.look(&album_id(0)).is_none() {
+            assert!(std::time::Instant::now() < deadline, "the next cover's look never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+            app.art.poll();
+        }
+    }
+    h.run_steps(2);
+    s.shoot_now(h, "x-backdrop-crossfade");
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    experiment(h, |x| x.backdrop = true);
+    settle_look(h);
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "x-backdrop-mini-hover");
 }
+
 
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]

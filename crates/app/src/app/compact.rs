@@ -73,7 +73,22 @@ impl OndApp {
         ui.multiply_opacity(alpha);
         on_art(&mut ui);
         let panel = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 112.0), rect.max);
-        ui.painter().rect_filled(panel, 0.0, scrim());
+        let layers = self.backdrop_layers(ui.ctx());
+        if layers.is_empty() {
+            ui.painter().rect_filled(panel, 0.0, scrim());
+        } else {
+            // Frosted: the blurred cover under the panel, lined up with the
+            // artwork it covers, then only as much scrim as the text needs.
+            let uv = Rect::from_min_max(pos2(0.0, (panel.top() - rect.top()) / rect.height()), pos2(1.0, 1.0));
+            let wash = scrim().to_opaque();
+            let mut alpha: f32 = 0.0;
+            for (tex, opacity, extremes) in &layers {
+                ui.painter().add(egui::epaint::RectShape::filled(panel, 0.0, Color32::WHITE.gamma_multiply(*opacity)).with_texture(tex.id(), uv));
+                alpha = alpha.max(crate::visuals::backdrop::wash_alpha(*extremes, wash, ON_ART, ON_ART_MUTED));
+            }
+            ui.painter().rect_filled(panel, 0.0, wash.gamma_multiply(alpha));
+        }
+
         let inner = panel.shrink2(vec2(14.0, 10.0));
         if let Some(item) = &self.player.queue.current {
             let title = elide(&ui, &item.track.title, FontId::new(13.0, semibold()), ON_ART, inner.width());

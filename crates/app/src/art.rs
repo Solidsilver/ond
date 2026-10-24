@@ -114,19 +114,26 @@ const LOOK_SIZE: u32 = 128;
 
 /// What the experimental visuals take from a cover, worked out once per cover
 /// off the UI thread.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Look {
     /// `None` for a cover with too little color (or none at all).
     pub palette: Option<crate::visuals::colors::ArtPalette>,
     /// The tints the palette gives each theme.
     pub tints: Option<crate::visuals::colors::Tints>,
+    /// A small blurred copy of the cover, and its darkest and brightest colors.
+    pub backdrop: Option<(TextureHandle, [Color32; 2])>,
 }
 
-impl Look {
+/// A look as worked out off the UI thread, before its texture is made.
+#[derive(Default)]
+struct LookParts {
+    palette: Option<crate::visuals::colors::ArtPalette>,
+    blurred: Option<(ColorImage, [Color32; 2])>,
+}
+
+impl LookParts {
     fn of(image: Option<&ColorImage>) -> Self {
-        let palette = image.and_then(crate::visuals::colors::extract);
-        let tints = palette.as_ref().map(crate::visuals::colors::Tints::new);
-        Self { palette, tints }
+        Self { palette: image.and_then(crate::visuals::colors::extract), blurred: image.and_then(crate::visuals::backdrop::blurred) }
     }
 }
 
@@ -147,8 +154,8 @@ pub struct Art {
     looks: HashMap<String, Arc<Look>>,
     looks_lru: Lru<String>,
     looks_pending: HashSet<String>,
-    look_tx: Sender<(String, Look)>,
-    look_rx: Receiver<(String, Look)>,
+    look_tx: Sender<(String, LookParts)>,
+    look_rx: Receiver<(String, LookParts)>,
     /// Images given by [`Art::preload`], so looks work without a server.
     #[cfg(test)]
     preloaded: HashMap<String, ColorImage>,
@@ -205,8 +212,11 @@ impl Art {
             }
             self.textures.insert(key, tex);
         }
-        while let Ok((cover, look)) = self.look_rx.try_recv() {
+        while let Ok((cover, parts)) = self.look_rx.try_recv() {
             self.looks_pending.remove(&cover);
+            let tints = parts.palette.as_ref().map(crate::visuals::colors::Tints::new);
+            let backdrop = parts.blurred.map(|(image, extremes)| (self.ctx.load_texture(format!("backdrop:{cover}"), image, TextureOptions::LINEAR), extremes));
+            let look = Look { palette: parts.palette, tints, backdrop };
             for gone in self.looks_lru.insert(cover.clone(), 1) {
                 self.looks.remove(&gone);
             }
@@ -236,7 +246,7 @@ impl Art {
                         Err(_) => None,
                     },
                 };
-                let look = tokio::task::spawn_blocking(move || Look::of(image.as_ref())).await.unwrap_or_default();
+                let look = tokio::task::spawn_blocking(move || LookParts::of(image.as_ref())).await.unwrap_or_default();
                 let _ = tx.send((key.cover, look));
                 ctx.request_repaint();
             });
@@ -307,7 +317,7 @@ impl Art {
 }
 
 /// The part of a square image that fills a rect of this aspect (width / height), centred.
-fn crop_uv(aspect: f32) -> Rect {
+pub fn crop_uv(aspect: f32) -> Rect {
     if aspect >= 1.0 {
         let h = 1.0 / aspect;
         Rect::from_min_max(egui::pos2(0.0, (1.0 - h) / 2.0), egui::pos2(1.0, (1.0 + h) / 2.0))

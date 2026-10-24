@@ -475,6 +475,8 @@ pub struct UiState {
     pub live: crate::visuals::Live,
     /// The album-art tint, eased from cover to cover (experimental).
     pub tint: crate::visuals::colors::Easing,
+    /// The blurred cover behind the Player and Mini, fading between covers (experimental).
+    pub backdrop: crate::visuals::backdrop::Crossfade,
 }
 
 impl UiState {
@@ -513,6 +515,7 @@ impl UiState {
             momentum: Default::default(),
             live: Default::default(),
             tint: Default::default(),
+            backdrop: Default::default(),
         }
     }
 }
@@ -1999,6 +2002,23 @@ impl OndApp {
         if moving {
             ctx.request_repaint();
         }
+    }
+
+    /// The blurred cover to draw behind the Player or Mini (experimental),
+    /// oldest layer first; empty when that's off or nothing plays.
+    pub(crate) fn backdrop_layers(&mut self, ctx: &egui::Context) -> Vec<crate::visuals::backdrop::Layer> {
+        let cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track).map(str::to_owned));
+        let Some(cover) = cover.filter(|_| self.experimental().backdrop) else {
+            self.ui.backdrop.clear();
+            return Vec::new();
+        };
+        let look = self.art.look(&cover);
+        let next = look.as_ref().and_then(|l| l.backdrop.as_ref());
+        let (layers, fading) = self.ui.backdrop.step(next.map(|(t, e)| (cover.as_str(), t, *e)), ctx.input(|i| i.time));
+        if fading {
+            ctx.request_repaint();
+        }
+        layers
     }
 
     /// What's being dragged, following the pointer.
