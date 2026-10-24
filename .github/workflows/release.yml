@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Builds and uploads the bundles without publishing, to try the packaging.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -43,8 +45,9 @@ jobs:
   linux:
     strategy:
       matrix:
-        runner: [ubuntu-22.04, ubuntu-22.04-arm]
-    # The oldest supported Ubuntu, so the binary runs on older glibc too.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    # The oldest Ubuntu with libpipewire 0.3.53+, which the PipeWire output
+    # needs. The binary runs on glibc 2.39 and later.
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -97,6 +100,7 @@ jobs:
 
   publish:
     needs: [macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
