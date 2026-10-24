@@ -81,7 +81,17 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cp -R "$app" "$stage/"
 ln -s /Applications "$stage/Applications"
-hdiutil create -quiet -volname "Ond $version" -srcfolder "$stage" -ov -format UDZO "$out/$name.dmg"
+# hdiutil sometimes fails with "Resource busy" on CI machines; a retry clears it.
+for attempt in 1 2 3; do
+  if hdiutil create -volname "Ond $version" -srcfolder "$stage" -ov -format UDZO "$out/$name.dmg"; then
+    break
+  fi
+  if [[ $attempt == 3 ]]; then
+    echo "hdiutil failed three times" >&2
+    exit 1
+  fi
+  sleep 5
+done
 
 echo "built:"
 du -sh "$app" "$out/$name.zip" "$out/$name.dmg"
