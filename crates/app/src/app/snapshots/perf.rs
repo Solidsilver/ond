@@ -243,14 +243,15 @@ fn perf() {
     assert!(!idle_repaint, "idle frames keep asking for repaints");
 }
 
-/// Each experimental visual's frame cost: the same scenes with it off, then on.
+/// Each experimental visual's frame cost (and the album art's colors'): the
+/// same scenes with it off, then on.
 fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
-    type Switch = fn(&mut crate::visuals::Experimental);
+    type Switch = fn(&mut crate::settings::Settings);
     let features: [(&str, Switch); 4] = [
-        ("colors from the art", |x| x.art_colors = true),
-        ("blurred artwork", |x| x.backdrop = true),
-        ("waveform seek bar", |x| x.waveform = true),
-        ("live spectrum", |x| x.spectrum = true),
+        ("colors from the art", |s| s.adapt_colors = true),
+        ("blurred artwork", |s| s.experimental.backdrop = true),
+        ("waveform seek bar", |s| s.experimental.waveform = true),
+        ("live spectrum", |s| s.experimental.spectrum = true),
     ];
     println!("experimental visuals, mean frame time off → on:");
     for (name, on) in features {
@@ -264,7 +265,7 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
             setup(h);
             let off = time_with_audio(h, 60);
             setup(h);
-            experiment(h, on);
+            app_mut(h).prefs.edit(on);
             fixture_waveform(app_mut(h));
             settle_look(h);
             let with = time_with_audio(h, 60);

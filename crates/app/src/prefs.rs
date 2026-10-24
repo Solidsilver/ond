@@ -56,8 +56,11 @@ impl Prefs {
         let path = path.into();
         let (settings, loaded) = match std::fs::read(&path) {
             Err(_) => (Settings::default(), Loaded::Missing),
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(s) => (s, Loaded::Read),
+            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+                Ok(mut s) => {
+                    s.migrate();
+                    (s, Loaded::Read)
+                }
                 Err(e) => {
                     let aside = set_aside(&path);
                     tracing::warn!("settings file unreadable ({e}); moved to {} and starting from defaults", aside.display());

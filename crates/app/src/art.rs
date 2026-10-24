@@ -107,19 +107,18 @@ pub fn eviction_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, budget: u64) ->
 
 type Loaded = (Key, Option<ColorImage>);
 
-/// Covers whose [`Look`] is kept.
-const LOOKS: usize = 16;
+/// Covers whose [`Look`] is kept: enough that going back to a few album
+/// pages finds their colors at once.
+const LOOKS: usize = 64;
 /// The size a cover is read at for its look: plenty for a palette.
 const LOOK_SIZE: u32 = 128;
 
-/// What the experimental visuals take from a cover, worked out once per cover
+/// What the colors and visuals take from a cover, worked out once per cover
 /// off the UI thread.
 #[derive(Default)]
 pub struct Look {
     /// `None` for a cover with too little color (or none at all).
     pub palette: Option<crate::visuals::colors::ArtPalette>,
-    /// The tints the palette gives each theme.
-    pub tints: Option<crate::visuals::colors::Tints>,
     /// A small blurred copy of the cover, and its darkest and brightest colors.
     pub backdrop: Option<(TextureHandle, [Color32; 2])>,
 }
@@ -214,9 +213,8 @@ impl Art {
         }
         while let Ok((cover, parts)) = self.look_rx.try_recv() {
             self.looks_pending.remove(&cover);
-            let tints = parts.palette.as_ref().map(crate::visuals::colors::Tints::new);
             let backdrop = parts.blurred.map(|(image, extremes)| (self.ctx.load_texture(format!("backdrop:{cover}"), image, TextureOptions::LINEAR), extremes));
-            let look = Look { palette: parts.palette, tints, backdrop };
+            let look = Look { palette: parts.palette, backdrop };
             for gone in self.looks_lru.insert(cover.clone(), 1) {
                 self.looks.remove(&gone);
             }

@@ -177,6 +177,10 @@ pub enum Action {
     Seek(f64),
     OpenPalette,
     SetTheme(ThemePref),
+    /// The accent color used without (or instead of) the album art's.
+    SetAccent(theme::Accent),
+    /// Whether colors adapt to the album art.
+    SetAdaptColors(bool),
     ToggleQueue,
     SetMode(WindowMode),
     /// Into Mini, or back to where Mini was entered from.
@@ -479,8 +483,17 @@ pub struct UiState {
     pub momentum: crate::momentum::Momentum,
     /// Frames asked for by visuals that move (experimental; see `visuals`).
     pub live: crate::visuals::Live,
-    /// The album-art tint, eased from cover to cover (experimental).
+    /// The colors of the now-playing display, the Player, Mini and the
+    /// window around the page: the chosen accent, or the playing cover's.
     pub tint: crate::visuals::colors::Easing,
+    /// The page's colors: an album page's own cover's, else the same as [`Self::tint`].
+    pub page_tint: crate::visuals::colors::Easing,
+    /// [`Self::page_tint`] as drawn this frame.
+    pub page_tints: Option<crate::visuals::colors::Tints>,
+    /// Each cover's tints for the chosen accent.
+    pub tint_cache: crate::visuals::colors::TintCache,
+    /// The accent egui's own widgets were last given.
+    pub accent_applied: Option<theme::Accent>,
     /// The blurred cover behind the Player and Mini, fading between covers (experimental).
     pub backdrop: crate::visuals::backdrop::Crossfade,
     /// The playing audio's spectrum, for the live visuals (experimental).
@@ -527,6 +540,10 @@ impl UiState {
             momentum: Default::default(),
             live: Default::default(),
             tint: Default::default(),
+            page_tint: Default::default(),
+            page_tints: None,
+            tint_cache: Default::default(),
+            accent_applied: None,
             backdrop: Default::default(),
             listener: Default::default(),
             visualizer: None,
@@ -1453,6 +1470,8 @@ impl OndApp {
                 theme::set_pref(&self.ctx, pref);
                 self.prefs.edit(|s| s.theme = pref);
             }
+            Action::SetAccent(accent) => self.prefs.edit(|s| s.accent = accent),
+            Action::SetAdaptColors(on) => self.prefs.edit(|s| s.adapt_colors = on),
             Action::ToggleQueue if self.ui.queue_narrow => self.ui.queue_sheet = !self.ui.queue_sheet,
             Action::ToggleQueue => self.prefs.edit(|s| s.show_queue = !s.show_queue),
             Action::SignOut => self.sign_out(),
@@ -1652,6 +1671,16 @@ impl OndApp {
 
     pub fn diagnostics_shown(&self) -> bool {
         self.prefs.get(|s| s.diagnostics_bar)
+    }
+
+    /// The accent color the user chose.
+    pub fn accent(&self) -> theme::Accent {
+        self.prefs.get(|s| s.accent)
+    }
+
+    /// Whether colors adapt to the album art.
+    pub fn adapt_colors(&self) -> bool {
+        self.prefs.get(|s| s.adapt_colors)
     }
 
     /// Which experimental visuals are on.
@@ -2010,38 +2039,56 @@ impl OndApp {
         }
     }
 
-    /// Colors from the album art (experimental): heads for the playing
-    /// cover's tint and leaves it where `Tokens::of` finds it. While a new
-    /// cover's colors are still being worked out, the old ones stay.
+    /// The colors in use: the chosen accent, or the album art's when colors
+    /// adapt to it. Two tints ease on their own: the playing cover's, for the
+    /// now-playing display, the Player, Mini and the window around the page;
+    /// and the page's, which on an album page is that album's and elsewhere
+    /// the playing one's. The first goes where `Tokens::of` finds it;
+    /// `full_ui` swaps in the second around the page. A cover's colors are
+    /// worked out in the background: until they arrive the old ones stay.
     fn art_tint(&mut self, ctx: &egui::Context) {
-        let target = if self.experimental().art_colors
-            && let Some(item) = &self.player.queue.current
-        {
-            match self.data.cover_for(&item.track).map(str::to_owned) {
-                Some(cover) => match self.art.look(&cover) {
-                    Some(look) => look.tints,
-                    None => self.ui.tint.target(),
-                },
-                None => None,
-            }
-        } else {
-            None
+        let accent = self.accent();
+        if self.ui.accent_applied != Some(accent) {
+            theme::set_accent(ctx, accent);
+            self.ui.accent_applied = Some(accent);
+        }
+        let base = self.ui.tint_cache.base(accent);
+        let adapt = self.adapt_colors();
+        let playing_cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track).map(str::to_owned));
+        let playing = match playing_cover.filter(|_| adapt) {
+            Some(cover) => self.cover_tints(&cover).or(self.ui.tint.target()).unwrap_or(base),
+            None => base,
         };
-        let had = self.ui.tint.target().is_some() || self.ui.tint.showing();
-        if target.is_none() && !had {
-            return;
-        }
-        let (tints, moving) = self.ui.tint.step(target, ctx.input(|i| i.time));
-        let id = crate::visuals::colors::id();
-        match tints {
-            Some(t) => {
-                ctx.data_mut(|d| d.insert_temp(id, t));
-            }
-            None => ctx.data_mut(|d| d.remove::<crate::visuals::colors::Tints>(id)),
-        }
-        if moving {
+        let page = match self.page_cover() {
+            Some(Some(cover)) if adapt => self.cover_tints(&cover).or(self.ui.page_tint.target()).unwrap_or(playing),
+            Some(None) if adapt => base,
+            _ => playing,
+        };
+        let now = ctx.input(|i| i.time);
+        let (playing, moving) = self.ui.tint.step(playing, now);
+        let (page, page_moving) = self.ui.page_tint.step(page, now);
+        self.ui.page_tints = Some(page);
+        theme::set_tints(ctx, playing);
+        if moving || page_moving {
             ctx.request_repaint();
         }
+    }
+
+    /// The cover the page takes its colors from: `Some` on an album page in
+    /// the full window (`Some(None)` for an album without one), `None` on
+    /// any other page.
+    fn page_cover(&self) -> Option<Option<String>> {
+        match self.ui.nav.current() {
+            Route::Album(id) if self.window_mode() == WindowMode::Full => Some(self.data.album(id).and_then(|a| a.cover_art.clone())),
+            _ => None,
+        }
+    }
+
+    /// `cover`'s tints once its look is worked out (the chosen accent's for
+    /// a cover with no color to give); `None` meanwhile.
+    fn cover_tints(&mut self, cover: &str) -> Option<crate::visuals::colors::Tints> {
+        let look = self.art.look(cover)?;
+        Some(self.ui.tint_cache.cover(cover, look.palette.as_ref()))
     }
 
     /// Waveform seek bar (experimental): has the playing track's peaks read
@@ -2171,9 +2218,13 @@ impl OndApp {
                 .response
                 .rect
         });
-        let content = egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
-            .show(ui, |ui| self.main_view(ui));
+        // The page in its own colors (an album page, its album's).
+        let ctx = ui.ctx().clone();
+        let content = theme::with_tints(&ctx, self.ui.page_tints, || {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
+                .show(ui, |ui| self.main_view(ui))
+        });
 
         // The column edges, after the content so they win the pointer. Widths
         // go straight into the preferences (saved once a drag settles).
@@ -2486,6 +2537,83 @@ mod tests {
         let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
         // No renderer here to upload textures to.
         out.textures_delta.clear();
+    }
+
+    /// A frame at `time` seconds, so colors can be seen easing.
+    fn frame_at(ctx: &egui::Context, app: &mut OndApp, time: f64) {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), time: Some(time), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn an_album_page_takes_its_own_colors_and_everything_else_the_playing_ones() {
+        use crate::visuals::colors::Tints;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let solid = |c: egui::Color32| egui::ColorImage::new([32, 32], vec![c; 32 * 32]);
+        app.art.preload("al-0", solid(egui::Color32::from_rgb(170, 30, 40)));
+        app.art.preload("al-5", solid(egui::Color32::from_rgb(30, 60, 170)));
+        let playing: Vec<Track> = (1..=3).map(|n| track(&format!("t-{n}"), "al-0", n)).collect();
+        app.player.queue.play_now(playing, 0, Source::Added);
+        app.ui.nav.go(Route::Album("al-5".into()));
+        let time = std::cell::Cell::new(0.0);
+        let settle = |app: &mut OndApp| {
+            // The covers' looks are worked out in the background.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while ["al-0", "al-5"].iter().any(|c| app.art.look(c).is_none()) {
+                assert!(std::time::Instant::now() < deadline, "the looks never arrived");
+                std::thread::sleep(Duration::from_millis(5));
+                app.art.poll();
+            }
+            for _ in 0..4 {
+                time.set(time.get() + 0.5);
+                frame_at(&ctx, app, time.get());
+            }
+        };
+        let tints_of = |app: &mut OndApp, cover: &str| {
+            let look = app.art.look(cover).unwrap();
+            app.ui.tint_cache.cover(cover, look.palette.as_ref())
+        };
+        let shown = |ctx: &egui::Context| ctx.data(|d| d.get_temp::<Tints>(crate::visuals::colors::id())).unwrap();
+        let dark = ctx.global_style().visuals.dark_mode;
+
+        // Not adapting: the chosen accent everywhere, album page or not.
+        app.prefs.edit(|s| s.accent = theme::Accent::Teal);
+        settle(&mut app);
+        let teal = Tints::base(theme::Accent::Teal);
+        assert_eq!((shown(&ctx), app.ui.page_tints), (teal, Some(teal)));
+        assert_eq!(Tokens::of_ctx(&ctx).accent, teal.of(dark).accent);
+
+        // Adapting: the window in the playing album's colors, the page in its own.
+        app.prefs.edit(|s| s.adapt_colors = true);
+        settle(&mut app);
+        let (red, blue) = (tints_of(&mut app, "al-0"), tints_of(&mut app, "al-5"));
+        assert_ne!(red, blue);
+        assert_ne!(red.of(dark).accent, teal.of(dark).accent);
+        assert_eq!(shown(&ctx), red, "the now-playing display and the rest follow the playing track");
+        assert_eq!(app.ui.page_tints, Some(blue), "the album page follows its album");
+        // Drawing the page swaps its colors in, and puts the playing ones back after.
+        let inside = theme::with_tints(&ctx, app.ui.page_tints, || Tokens::of_ctx(&ctx).accent);
+        assert_eq!(inside, blue.of(dark).accent);
+        assert_eq!(Tokens::of_ctx(&ctx).accent, red.of(dark).accent);
+
+        // Leaving the page: its colors ease back to the playing album's.
+        app.ui.nav.go(Route::Recent);
+        for _ in 0..2 {
+            time.set(time.get() + 0.3);
+            frame_at(&ctx, &mut app, time.get());
+        }
+        let easing = app.ui.page_tints.unwrap();
+        assert!(easing != blue && easing != red, "on the way back");
+        settle(&mut app);
+        assert_eq!(app.ui.page_tints, Some(red));
+
+        // Back to the album: no wait, its colors are already known.
+        app.ui.nav.go(Route::Album("al-5".into()));
+        frame_at(&ctx, &mut app, time.get() + 0.01);
+        assert_eq!(app.ui.page_tint.target(), Some(blue), "heading for the album's colors at once");
     }
 
     #[test]

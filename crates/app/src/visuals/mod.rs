@@ -1,6 +1,8 @@
-//! Experimental visuals, each behind its own switch in Settings › Experimental
-//! and all off by default. With every switch off, nothing here runs: no
-//! decoding, no audio tap, no extra frames.
+//! Visuals. One is settled: the app's colors (the chosen accent, or the
+//! album art's when colors adapt to it; see [`colors`]). The rest are experiments,
+//! each behind its own switch in Settings › Experimental and all off by
+//! default. With every switch off, none of those runs: no audio tap, no
+//! extra frames.
 //!
 //! The ones that move (a live spectrum, the visualizer) ask for frames through
 //! [`Live`], and only while they're on screen and something plays; otherwise
@@ -23,7 +25,9 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Experimental {
-    /// Accent, now-playing display and Player tinted from the cover.
+    /// Read from older settings only: colors from the album art are a real
+    /// setting now (`Settings::adapt_colors`, see `Settings::migrate`).
+    #[serde(skip_serializing)]
     pub art_colors: bool,
     /// A blurred copy of the cover behind the Player and Mini.
     pub backdrop: bool,

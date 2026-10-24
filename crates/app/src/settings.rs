@@ -50,6 +50,13 @@ pub struct Settings {
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
+    /// The accent color, used whenever the album art doesn't give one.
+    #[serde(default, deserialize_with = "crate::theme::lenient_accent")]
+    pub accent: crate::theme::Accent,
+    /// Colors adapt to the album art: the accent, the now-playing display and
+    /// the Player take the playing cover's, and an album's page its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adapt_colors: bool,
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
@@ -114,6 +121,8 @@ impl Default for Settings {
             output_device: None,
             device_modes: Default::default(),
             theme: Default::default(),
+            accent: Default::default(),
+            adapt_colors: false,
             show_queue: true,
             window: Default::default(),
             scrobble: true,
@@ -163,6 +172,14 @@ impl Paths {
 }
 
 impl Settings {
+    /// Carries settings from older builds over to where they live now.
+    pub fn migrate(&mut self) {
+        // "Colors from the album art" grew out of Experimental into a setting.
+        if std::mem::take(&mut self.experimental.art_colors) {
+            self.adapt_colors = true;
+        }
+    }
+
     /// Reads the settings file without changing anything (the window's first
     /// size, before the app starts). `None` when missing or unreadable.
     pub fn read(path: &Path) -> Option<Self> {
@@ -223,6 +240,34 @@ mod tests {
         assert_eq!(login("", "luke").account_id(), None);
         // Fixed across builds: downloads live in a folder named after it.
         assert_eq!(login("http://localhost:4533", "admin").account_id(), Some(0x5cd1_2c42));
+    }
+
+    #[test]
+    fn colors_are_saved_and_read_back() {
+        use crate::theme::Accent;
+        let s = Settings::default();
+        assert_eq!((s.accent, s.adapt_colors), (Accent::Blue, false), "the design's own blue, not adapting");
+        for accent in [Accent::Teal, Accent::Custom([12, 200, 99])] {
+            let s = Settings { accent, adapt_colors: true, ..Default::default() };
+            let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+            assert_eq!((back.accent, back.adapt_colors), (accent, true));
+        }
+        // An older file has neither; a newer one may name a preset this build lacks.
+        let old: Settings = serde_json::from_str(r#"{"server": "", "username": ""}"#).unwrap();
+        assert_eq!((old.accent, old.adapt_colors), (Accent::Blue, false));
+        let newer: Settings = serde_json::from_str(r#"{"server": "", "username": "", "accent": "chartreuse", "theme": "dark"}"#).unwrap();
+        assert_eq!(newer.accent, Accent::Blue);
+        assert_eq!(newer.theme, crate::theme::ThemePref::Dark, "the rest still reads");
+    }
+
+    #[test]
+    fn the_experimental_art_colors_switch_becomes_the_setting() {
+        let mut s: Settings = serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"art_colors": true, "backdrop": true}}"#).unwrap();
+        s.migrate();
+        assert!(s.adapt_colors);
+        assert!(s.experimental.backdrop && !s.experimental.art_colors);
+        let saved = serde_json::to_string(&s).unwrap();
+        assert!(!saved.contains("art_colors"), "{saved}");
     }
 
     #[cfg(target_os = "macos")]

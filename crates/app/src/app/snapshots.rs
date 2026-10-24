@@ -229,6 +229,7 @@ fn cover(i: usize) -> ColorImage {
     ColorImage::new([N, N], pixels)
 }
 
+
 fn devices() -> audio::Event {
     let caps = |name: &str, bits, max, post: Option<&str>| DeviceCaps {
         name: name.into(),
@@ -459,8 +460,14 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     app.output.handle(&signal());
     app.set_columns(super::layout::Columns::default());
     app.ui.album_details_open = false;
-    app.prefs.edit(|s| s.experimental = Default::default());
+    app.prefs.edit(|s| {
+        s.experimental = Default::default();
+        s.adapt_colors = false;
+        s.accent = Default::default();
+    });
     app.ui.tint = Default::default();
+    app.ui.page_tint = Default::default();
+    app.ui.page_tints = None;
     app.ui.nav = Nav::default();
     app.ui.nav.go(route);
     app.on_arrive();
@@ -470,6 +477,11 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     h.run_steps(3);
 }
 
+/// Colors adapt to the album art.
+fn adapt(h: &mut Harness<'_, Option<OndApp>>) {
+    app_mut(h).prefs.edit(|s| s.adapt_colors = true);
+}
+
 /// Turns on the experimental visuals `on` sets (the rest stay off).
 fn experiment(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::visuals::Experimental)) {
     let mut x = crate::visuals::Experimental::default();
@@ -477,15 +489,16 @@ fn experiment(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::v
     app_mut(h).prefs.edit(|s| s.experimental = x);
 }
 
-/// Waits for the playing cover's look (worked out in the background), then
-/// lets the colors finish easing in.
+/// Waits for the playing cover's look and the album page's (worked out in
+/// the background), then lets the colors finish easing in.
 fn settle_look(h: &mut Harness<'_, Option<OndApp>>) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         h.step();
         let app = app_mut(h);
         let cover = app.player.queue.current.as_ref().and_then(|c| app.data.cover_for(&c.track).map(str::to_owned));
-        if cover.is_none_or(|c| app.art.look(&c).is_some()) {
+        let page = app.page_cover().flatten();
+        if [cover, page].into_iter().flatten().all(|c| app.art.look(&c).is_some()) {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "the cover's look never arrived");
@@ -1072,6 +1085,19 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
     s.shoot(h, "settings-general-diagnostics");
 
+    // Another accent color: everything accented takes it, in either theme.
+    reset(h, FULL, Route::Album(album_id(0)));
+    app_mut(h).prefs.edit(|s| s.accent = theme::Accent::Teal);
+    s.shoot(h, "accent-teal-album");
+    // The user's own (a bright yellow, darkened or lightened to read), and the picker.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).prefs.edit(|s| s.accent = theme::Accent::Custom([0xF5, 0xC5, 0x18]));
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
+    h.run_steps(2);
+    h.get_by_label("Custom color…").click();
+    s.shoot(h, "settings-accent-picker");
+    egui::Popup::close_all(&h.ctx);
+
     for section in settings_page::Section::ALL {
         reset(h, FULL, Route::Recent);
         app_mut(h).actions.push(Action::OpenSettings(section));
@@ -1251,17 +1277,24 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         if blue {
             play_blue(app_mut(h));
         }
-        experiment(h, |x| x.art_colors = true);
+        adapt(h);
         settle_look(h);
         s.shoot(h, &format!("{name}-player"));
         reset(h, FULL, Route::Album(album_id(if blue { 1 } else { 0 })));
         if blue {
             play_blue(app_mut(h));
         }
-        experiment(h, |x| x.art_colors = true);
+        adapt(h);
         settle_look(h);
         s.shoot(h, &format!("{name}-full"));
     }
+
+    // An album page in its own album's colors while another album plays:
+    // the now-playing display, the transport and the queue keep the playing one's.
+    reset(h, FULL, Route::Album(album_id(20)));
+    adapt(h);
+    settle_look(h);
+    s.shoot(h, "colors-album-page");
 
     // Blurred artwork: behind the Player (alone, and with the art's colors),
     // under Mini's controls, and halfway through the fade to the next cover.
@@ -1273,10 +1306,8 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     play_blue(app_mut(h));
-    experiment(h, |x| {
-        x.backdrop = true;
-        x.art_colors = true;
-    });
+    experiment(h, |x| x.backdrop = true);
+    adapt(h);
     settle_look(h);
     s.shoot(h, "x-backdrop-colors-player");
     // The next cover arrives: two steps (half a second) into the fade.
@@ -1320,10 +1351,10 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     experiment(h, |x| {
-        x.art_colors = true;
         x.backdrop = true;
         x.waveform = true;
     });
+    adapt(h);
     fixture_waveform(app_mut(h));
     settle_look(h);
     s.shoot(h, "x-together-player");
@@ -1342,9 +1373,9 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     experiment(h, |x| {
         x.spectrum = true;
-        x.art_colors = true;
         x.waveform = true;
     });
+    adapt(h);
     fixture_waveform(app_mut(h));
     settle_look(h);
     steps_with_audio(h, 4);
