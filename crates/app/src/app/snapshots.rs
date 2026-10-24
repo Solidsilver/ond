@@ -692,6 +692,16 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     s.shoot(h, "recent");
 
+    // Linux: our own window buttons in the toolbar (all three, as KDE has them).
+    crate::csd::preview(true);
+    reset(h, FULL, Route::Recent);
+    s.shoot(h, "linux-titlebar");
+    reset(h, vec2(380.0, 880.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    h.run_steps(4);
+    s.shoot(h, "linux-player-titlebar");
+    crate::csd::preview(false);
+
     reset(h, FULL, Route::Albums);
     app_mut(h).ui.sort = AlbumSort::Year;
     s.shoot(h, "albums-by-year");

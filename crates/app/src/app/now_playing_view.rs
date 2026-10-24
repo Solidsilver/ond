@@ -46,7 +46,10 @@ impl ViewCtx<'_> {
         if bg.double_clicked() {
             crate::chrome::title_double_click(ui.ctx());
         }
-        let right = rect.shrink2(vec2(10.0, 0.0));
+        crate::csd::set_bar(ui.ctx(), rect);
+        let mut right = rect.shrink2(vec2(10.0, 0.0));
+        // Our own window buttons (Linux) take the very end.
+        right.max.x -= crate::csd::reserved(ui.ctx(), crate::csd::Side::Right);
         ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⇧⌘M)", WindowMode::Mini)] {

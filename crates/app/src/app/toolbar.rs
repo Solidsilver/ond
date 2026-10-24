@@ -50,7 +50,8 @@ pub(super) fn lcd_rect(full: Rect, left_end: f32, right_start: f32) -> Rect {
 
 impl OndApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
-        let full = ui.available_rect_before_wrap();
+        let mut full = ui.available_rect_before_wrap();
+        crate::csd::set_bar(ui.ctx(), full);
         // The bar is the window's title bar too: its empty parts move the
         // window, and a double-click zooms it. Widgets drawn after this take
         // the pointer where they are.
@@ -62,8 +63,15 @@ impl OndApp {
         if bg.double_clicked() {
             crate::chrome::title_double_click(ui.ctx());
         }
-        // On macOS the traffic lights sit at the left of the bar.
-        let free_left = if crate::chrome::folded(ui.ctx()) { whole.left() + crate::chrome::LIGHTS_W } else { full.left() + TRANSPORT_INSET };
+        // On macOS the traffic lights sit at the left of the bar; on Linux our
+        // own window buttons at whichever end the desktop puts them.
+        use crate::csd::{Side, reserved};
+        full.max.x -= reserved(ui.ctx(), Side::Right);
+        let free_left = if crate::chrome::folded(ui.ctx()) {
+            whole.left() + crate::chrome::LIGHTS_W
+        } else {
+            (whole.left() + reserved(ui.ctx(), Side::Left)).max(full.left() + TRANSPORT_INSET)
+        };
         // Narrow windows fold the volume slider behind its icon so the
         // now-playing display keeps room for the title.
         let narrow = full.width() < NARROW_W;

@@ -125,6 +125,14 @@ impl OndApp {
                 self.actions.push(Action::SetDiagnostics(shown));
             }
             hint(ui, "Shows the signal path, buffer, downloads, sync and server timing in a thin bar along the bottom (⌥⌘I).");
+            if crate::csd::SUPPORTED {
+                ui.add_space(10.0);
+                let mut system = self.system_title_bar();
+                if narrow_toggle(ui, &mut system, "Use the system title bar").changed() {
+                    self.actions.push(Action::SetSystemTitleBar(system));
+                }
+                hint(ui, "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.");
+            }
         });
     }
 

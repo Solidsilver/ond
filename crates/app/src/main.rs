@@ -11,6 +11,7 @@ mod app;
 mod art;
 mod bridge;
 mod chrome;
+mod csd;
 mod folder;
 mod favorites;
 mod fmt;

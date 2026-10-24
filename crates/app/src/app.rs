@@ -193,6 +193,8 @@ pub enum Action {
     SetScrobble(bool),
     /// Show or hide the diagnostics bar.
     SetDiagnostics(bool),
+    /// The system's title bar instead of our own window buttons (Linux).
+    SetSystemTitleBar(bool),
     /// Open the Settings window at a section.
     OpenSettings(settings_page::Section),
     /// Re-read the library from the server (albums, then tracks).
@@ -1434,6 +1436,14 @@ impl OndApp {
                 self.prefs.edit(|s| s.scrobble = on);
             }
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
+            Action::SetSystemTitleBar(on) => {
+                let plan = self.edit_windows(|w| {
+                    w.system_title_bar = on;
+                    w.plan()
+                });
+                crate::csd::set_window(plan.controls, !plan.decorations);
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(plan.decorations));
+            }
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
             a @ (Action::Unpin(_)
             | Action::PauseDownloads(_)
@@ -1560,6 +1570,10 @@ impl OndApp {
 
     pub fn diagnostics_shown(&self) -> bool {
         self.prefs.get(|s| s.diagnostics_bar)
+    }
+
+    pub fn system_title_bar(&self) -> bool {
+        self.prefs.get(|s| s.window.system_title_bar)
     }
 
     /// Software volume, 0..=1.
@@ -1798,6 +1812,12 @@ impl OndApp {
         if self.window_mode() != WindowMode::Mini {
             self.ui.toasts.ui(&ctx, ctx.content_rect());
         }
+        // Window buttons and resize edges where the system draws none (Linux).
+        crate::csd::overlay(&ctx, match self.window_mode() {
+            WindowMode::Full => Some(toolbar::TOOLBAR_H),
+            WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
+            WindowMode::Mini => None,
+        });
         // Commands become actions; apply those in the same frame too (bounded,
         // in case something keeps asking).
         for _ in 0..4 {
@@ -2053,6 +2073,7 @@ impl eframe::App for OndApp {
             // Logging in needs the full window.
             self.set_mode(Some(WindowMode::Full));
             self.login_ui(ui);
+            crate::csd::overlay(ui.ctx(), Some(toolbar::TOOLBAR_H));
         } else {
             self.main_ui(ui);
         }

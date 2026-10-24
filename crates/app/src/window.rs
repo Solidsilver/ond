@@ -77,11 +77,14 @@ pub struct Plan {
     pub on_top: bool,
     /// Keep the window square while resizing (Mini).
     pub square: bool,
+    /// Our own window buttons in the bar instead of a system title bar (see `csd`).
+    pub controls: bool,
 }
 
 impl Plan {
     /// The window this plan describes, for startup.
     pub fn builder(&self, b: egui::ViewportBuilder) -> egui::ViewportBuilder {
+        crate::csd::set_window(self.controls, !self.decorations);
         let b = b.with_inner_size(self.size).with_min_inner_size(self.min_size).with_window_level(self.level());
         // macOS: the title bar folds into our toolbar (see `chrome`).
         let b = if cfg!(target_os = "macos") {
@@ -101,6 +104,7 @@ impl Plan {
         // larger minimum set first would resize the window once on its own,
         // and a smaller one set after would refuse the shrink.
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(egui::vec2(1.0, 1.0)));
+        crate::csd::set_window(self.controls, !self.decorations);
         if !cfg!(target_os = "macos") {
             ctx.send_viewport_cmd(ViewportCommand::Decorations(self.decorations));
         }
@@ -131,6 +135,9 @@ pub struct Windows {
     /// Keep the mini player above other windows.
     #[serde(default = "yes")]
     pub mini_on_top: bool,
+    /// The system's title bar and frame instead of our own buttons (Linux).
+    #[serde(default)]
+    pub system_title_bar: bool,
     /// The mode Mini returns to (Full or Player).
     #[serde(default)]
     pub before_mini: WindowMode,
@@ -190,6 +197,7 @@ impl Default for Windows {
             mode: WindowMode::Full,
             geometry: HashMap::new(),
             mini_on_top: true,
+            system_title_bar: false,
             before_mini: WindowMode::Full,
             last_player: WindowMode::Player,
             lyrics_open: false,
@@ -211,14 +219,17 @@ impl Windows {
         let drawer = self.drawer_w();
         size[0] += drawer;
         min[0] += drawer;
+        // Linux draws its own buttons in the bar unless asked for the system's.
+        let controls = crate::csd::SUPPORTED && mode != WindowMode::Mini && !self.system_title_bar;
         Plan {
             mode,
             size,
             min_size: min,
             pos: saved.and_then(|g| g.pos),
-            decorations: mode != WindowMode::Mini,
+            decorations: mode != WindowMode::Mini && !controls,
             on_top: mode == WindowMode::Mini && self.mini_on_top,
             square: mode == WindowMode::Mini,
+            controls,
         }
     }
 
@@ -306,7 +317,10 @@ mod tests {
     fn defaults_per_mode() {
         let mut w = Windows::default();
         let full = w.plan();
-        assert_eq!((full.size, full.decorations, full.on_top, full.pos), ([1360.0, 860.0], true, false, None));
+        // Linux draws its own title bar buttons; elsewhere the system's frame stays.
+        let framed = !crate::csd::SUPPORTED;
+        assert_eq!((full.size, full.decorations, full.on_top, full.pos), ([1360.0, 860.0], framed, false, None));
+        assert_eq!(full.controls, crate::csd::SUPPORTED);
         let mini = w.switch(WindowMode::Mini, at(100.0, 80.0, 1200.0, 800.0)).unwrap();
         assert_eq!((mini.size, mini.decorations, mini.on_top), ([280.0, 280.0], false, true));
         // No mini position yet: the OS places it.
@@ -331,7 +345,7 @@ mod tests {
         // The player was last somewhere else, but it opens where the mini player is.
         w.geometry.insert(WindowMode::Player, Geometry { pos: Some([5.0, 5.0]), size: [360.0, 700.0] });
         let player = w.switch(WindowMode::Player, at(1500.0, 40.0, 280.0, 280.0)).unwrap();
-        assert_eq!((player.pos, player.size, player.decorations), (Some([1500.0, 40.0]), [360.0, 700.0], true));
+        assert_eq!((player.pos, player.size, player.decorations), (Some([1500.0, 40.0]), [360.0, 700.0], !crate::csd::SUPPORTED));
         let mini = w.switch(WindowMode::Mini, at(1490.0, 30.0, 360.0, 700.0)).unwrap();
         assert_eq!(mini.pos, Some([1490.0, 30.0]));
     }
