@@ -1310,6 +1310,53 @@ fn the_now_playing_heart_toggles_both_ways() {
     *h.state_mut() = None;
 }
 
+/// Leaving a maximized full window: the compositor answers an un-maximize
+/// with the window's old size, so the new size must wait until it has let go,
+/// or the old size lands after it and wins (GNOME and KDE both do this).
+#[test]
+fn leaving_a_maximized_window_resizes_after_it_lets_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                    app.track_window(ui.ctx());
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    let set_max = |h: &mut Harness<'_, Option<OndApp>>, on: bool| {
+        h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().maximized = Some(on);
+    };
+    set_max(&mut h, true);
+    h.run_steps(2);
+    let commands = |h: &mut Harness<'_, Option<OndApp>>| {
+        h.step();
+        h.output().viewport_output.values().flat_map(|v| v.commands.clone()).collect::<Vec<_>>()
+    };
+    let resized = |c: &[egui::ViewportCommand]| c.iter().any(|c| matches!(c, egui::ViewportCommand::InnerSize(_)));
+
+    app_mut(&mut h).set_mode(Some(WindowMode::Mini));
+    let first = commands(&mut h);
+    assert!(first.contains(&egui::ViewportCommand::Maximized(false)), "un-maximizes: {first:?}");
+    assert!(!resized(&first), "but doesn't resize yet: {first:?}");
+    for _ in 0..3 {
+        let c = commands(&mut h);
+        assert!(!resized(&c), "still maximized, still waiting: {c:?}");
+    }
+    set_max(&mut h, false);
+    let after = commands(&mut h);
+    assert!(after.contains(&egui::ViewportCommand::InnerSize(vec2(280.0, 280.0))), "the mini size, once let go: {after:?}");
+    *h.state_mut() = None;
+}
+
 /// The play button over a hovered album cover plays the album. It covers
 /// part of the tile, so the pointer on it must not count as leaving the tile.
 #[test]
