@@ -31,4 +31,4 @@ jobs:
 
       # Hardware-dependent tests are #[ignore]d and stay skipped here.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast

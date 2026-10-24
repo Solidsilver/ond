@@ -394,7 +394,7 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     let target = ((crate::PREBUFFER_SECS * RATE as f32) as usize * 2).min(capacity / 2);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     // Play a little of the start (it buffers first, like any track start).
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while dev.played.len() < 4_000 {
         assert!(Instant::now() < deadline, "never started");
         dev.tick(256);
@@ -407,7 +407,7 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     let before = dev.played.len();
     // From here on, nothing from before the target may play: the stale ring is cut at once.
     let mut resumed_with = None;
-    let deadline = t + Duration::from_secs(5);
+    let deadline = t + Duration::from_secs(20);
     while !(s.finished() && dev.input.samples.is_empty() && dev.input.input_done.load(Ordering::Acquire)) {
         assert!(Instant::now() < deadline, "stalled after seek: {:?}", s.try_msg());
         let queued = dev.input.samples.slots();

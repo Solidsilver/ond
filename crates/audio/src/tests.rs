@@ -323,7 +323,13 @@ fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
 
     engine.send(Command::Play(file_source(&dir, "a", &a)));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    thread::sleep(Duration::from_millis(100));
+    // Well into the track before unplugging (wait on progress, not a fixed
+    // time: CI runners are slower than a desk Mac).
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while engine.status.position_secs() < 1.0 {
+        assert!(Instant::now() < deadline, "never got going");
+        thread::sleep(Duration::from_millis(10));
+    }
 
     // Unplugged mid-track: Normal mode on the default, same track, from about where it was.
     devices.lock().unwrap().retain(|d| d.uid != "dac");
