@@ -9,6 +9,8 @@
 
 pub mod backdrop;
 pub mod colors;
+pub mod gpu;
+pub mod visualizer;
 pub mod spectrum;
 pub mod waveform;
 
@@ -63,7 +65,6 @@ impl Live {
 }
 
 /// About 60 frames a second, for the visualizer.
-#[allow(dead_code)]
 pub const SMOOTH: Duration = Duration::from_millis(16);
 /// About 30 frames a second, for small meters.
 pub const METER: Duration = Duration::from_millis(33);

@@ -24,6 +24,7 @@ mod songs;
 mod toasts;
 mod toolbar;
 mod view_ctx;
+mod visualizer_view;
 mod widgets;
 
 #[cfg(test)]
@@ -383,6 +384,9 @@ pub struct OndApp {
     diagnostics: diagnostics::Diagnostics,
     /// Track waveforms for the seek bar (experimental).
     waveforms: crate::visuals::waveform::Waveforms,
+    /// The format the window renders to, for the visualizer's own GPU
+    /// drawing; `None` without a wgpu renderer (it then uses the painter).
+    gpu: Option<eframe::egui_wgpu::wgpu::TextureFormat>,
 }
 
 /// How long a mode switch waits for the window to leave maximized.
@@ -481,6 +485,8 @@ pub struct UiState {
     pub backdrop: crate::visuals::backdrop::Crossfade,
     /// The playing audio's spectrum, for the live visuals (experimental).
     pub listener: crate::visuals::spectrum::Listener,
+    /// The visualizer, while it's open (experimental).
+    pub visualizer: Option<visualizer_view::VisualizerView>,
 }
 
 impl UiState {
@@ -521,6 +527,7 @@ impl UiState {
             tint: Default::default(),
             backdrop: Default::default(),
             listener: Default::default(),
+            visualizer: None,
         }
     }
 }
@@ -717,6 +724,7 @@ impl OndApp {
         #[cfg(windows)]
         now_playing::set_window(hwnd(cc));
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
+        app.gpu = cc.wgpu_render_state.as_ref().map(|s| s.target_format);
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
@@ -855,6 +863,7 @@ impl OndApp {
             downloads,
             diagnostics: diagnostics::Diagnostics::default(),
             waveforms: crate::visuals::waveform::Waveforms::new(ctx.clone()),
+            gpu: None,
             prefs,
             analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
             favorites: Favorites::default(),
@@ -1353,6 +1362,9 @@ impl OndApp {
     }
 
     fn apply(&mut self, action: Action) {
+        if self.ui.visualizer.is_some() && Self::leaves_visualizer(&action) {
+            self.close_visualizer();
+        }
         // Browsing and the palette live in the full window.
         if matches!(action, Action::Go(_) | Action::OpenPalette) {
             self.set_mode(Some(WindowMode::Full));
@@ -1940,26 +1952,35 @@ impl OndApp {
         self.want_waveform();
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
-        match self.window_mode() {
-            WindowMode::Full => {
-                self.full_ui(ui);
-                self.view().palette_ui(&ctx);
-                self.overlay_ui(&ctx);
-                self.drag_ghost(&ctx);
+        if self.ui.visualizer.is_some() && !self.experimental().visualizer {
+            self.close_visualizer();
+        }
+        if self.ui.visualizer.is_some() {
+            // The whole window, whatever the mode.
+            self.visualizer_ui(ui);
+            crate::csd::overlay(&ctx, None);
+        } else {
+            match self.window_mode() {
+                WindowMode::Full => {
+                    self.full_ui(ui);
+                    self.view().palette_ui(&ctx);
+                    self.overlay_ui(&ctx);
+                    self.drag_ghost(&ctx);
+                }
+                WindowMode::Player => self.player_ui(ui),
+                WindowMode::Mini => self.mini_ui(ui),
             }
-            WindowMode::Player => self.player_ui(ui),
-            WindowMode::Mini => self.mini_ui(ui),
+            // Mini is all artwork; messages wait for a bigger window.
+            if self.window_mode() != WindowMode::Mini {
+                self.ui.toasts.ui(&ctx, ctx.content_rect());
+            }
+            // Window buttons and resize edges where the system draws none (Linux).
+            crate::csd::overlay(&ctx, match self.window_mode() {
+                WindowMode::Full => Some(toolbar::TOOLBAR_H),
+                WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
+                WindowMode::Mini => None,
+            });
         }
-        // Mini is all artwork; messages wait for a bigger window.
-        if self.window_mode() != WindowMode::Mini {
-            self.ui.toasts.ui(&ctx, ctx.content_rect());
-        }
-        // Window buttons and resize edges where the system draws none (Linux).
-        crate::csd::overlay(&ctx, match self.window_mode() {
-            WindowMode::Full => Some(toolbar::TOOLBAR_H),
-            WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
-            WindowMode::Mini => None,
-        });
         // Commands become actions; apply those in the same frame too (bounded,
         // in case something keeps asking).
         for _ in 0..4 {
@@ -2656,6 +2677,32 @@ mod tests {
         frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
         assert_eq!(app.window_mode(), WindowMode::Full);
         assert!(app.ui.palette.is_some());
+    }
+
+    #[test]
+    fn the_visualizer_opens_only_when_its_experiment_is_on_and_esc_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        frame(&ctx, &mut app, vec![key(egui::Key::T, egui::Modifiers::COMMAND)]);
+        assert!(app.ui.visualizer.is_none(), "off: ⌘T does nothing");
+        app.prefs.edit(|s| s.experimental.visualizer = true);
+        frame(&ctx, &mut app, vec![key(egui::Key::T, egui::Modifiers::COMMAND)]);
+        assert!(app.ui.visualizer.is_some());
+        for _ in 0..3 {
+            frame(&ctx, &mut app, Vec::new());
+        }
+        frame(&ctx, &mut app, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.ui.visualizer.is_none(), "Esc leaves");
+        // Going somewhere else leaves it too, and so does turning it off.
+        app.toggle_visualizer();
+        app.apply(Action::Go(Route::Albums));
+        assert!(app.ui.visualizer.is_none());
+        app.toggle_visualizer();
+        app.prefs.edit(|s| s.experimental.visualizer = false);
+        frame(&ctx, &mut app, Vec::new());
+        assert!(app.ui.visualizer.is_none());
     }
 
     #[test]

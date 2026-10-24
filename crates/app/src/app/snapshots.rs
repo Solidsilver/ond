@@ -1342,6 +1342,67 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     settle_look(h);
     steps_with_audio(h, 4);
     s.shoot_now(h, "x-spectrum-colors-full");
+
+    // The visualizer, on the GPU: two seconds in (the title still showing),
+    // then later with the trails built up; in the album's colors and in
+    // another album's; and the painter version used without wgpu.
+    let frames = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
+        for _ in 0..n {
+            // At 60 frames a second, as the app draws it.
+            let t = h.ctx.input(|i| i.time) + 1.0 / 60.0;
+            h.input_mut().time = Some(t);
+            feed_tap(app_mut(h), 4096);
+            h.step();
+            // Each render is one GPU frame: the feedback builds up across them.
+            let _ = h.render();
+        }
+    };
+    let wide = vec2(1280.0, 800.0);
+    reset(h, wide, Route::Recent);
+    experiment(h, |x| x.visualizer = true);
+    settle_look(h);
+    app_mut(h).toggle_visualizer();
+    frames(h, 90);
+    s.shoot_now(h, "x-visualizer-title");
+    frames(h, 240);
+    s.shoot_now(h, "x-visualizer");
+    reset(h, wide, Route::Recent);
+    play_blue(app_mut(h));
+    experiment(h, |x| x.visualizer = true);
+    settle_look(h);
+    app_mut(h).toggle_visualizer();
+    frames(h, 300);
+    s.shoot_now(h, "x-visualizer-alt");
+    app_mut(h).close_visualizer();
+    reset(h, wide, Route::Recent);
+    experiment(h, |x| x.visualizer = true);
+    settle_look(h);
+    let gpu = app_mut(h).gpu.take();
+    app_mut(h).toggle_visualizer();
+    frames(h, 300);
+    s.shoot_now(h, "x-visualizer-painter");
+    app_mut(h).close_visualizer();
+    app_mut(h).gpu = gpu;
+    // What a GPU frame costs with the visualizer against the ordinary window,
+    // rendered offscreen and read back (the read-back is in both).
+    let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {
+        frames(h, 5);
+        let t = std::time::Instant::now();
+        frames(h, 30);
+        t.elapsed().as_secs_f64() * 1000.0 / 30.0
+    };
+    reset(h, wide, Route::Recent);
+    let plain = render_ms(h);
+    experiment(h, |x| x.visualizer = true);
+    app_mut(h).toggle_visualizer();
+    let vis = render_ms(h);
+    app_mut(h).close_visualizer();
+    println!("  render + read-back per frame at {}x{} px: window {plain:.2} ms, visualizer {vis:.2} ms", wide.x * 2.0, wide.y * 2.0);
+    // The shortcut list shows the visualizer's key only while it's on.
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| x.visualizer = true);
+    app_mut(h).ui.overlay = Some(Overlay::Shortcuts);
+    s.shoot(h, "x-visualizer-shortcuts");
 }
 
 #[test]
@@ -1352,6 +1413,10 @@ fn snapshots() {
     let out = out.canonicalize().unwrap();
     for (theme, name) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
         let dir = tempfile::tempdir().unwrap();
+        // Our own render state (the harness's default one, made here), so the
+        // app knows the format it renders to, for the visualizer's pipelines.
+        let rs = egui_kittest::wgpu::create_render_state(egui_kittest::wgpu::default_wgpu_setup(), eframe::egui_wgpu::RendererOptions::PREDICTABLE);
+        let format = rs.target_format;
         let mut h = Harness::builder()
             .with_size(FULL)
             .with_pixels_per_point(2.0)
@@ -1359,7 +1424,7 @@ fn snapshots() {
             .with_accessibility_check(false)
             .allow_missing_glyphs()
             .with_os(egui::os::OperatingSystem::Mac)
-            .wgpu()
+            .renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(rs))
             .build_ui_state(
                 |ui, app: &mut Option<OndApp>| {
                     if let Some(app) = app {
@@ -1374,7 +1439,8 @@ fn snapshots() {
                 None,
             );
         let ctx = h.ctx.clone();
-        let app = populated(&ctx, dir.path());
+        let mut app = populated(&ctx, dir.path());
+        app.gpu = Some(format);
         // `build` installs the theme with the saved (system) preference.
         theme::set_pref(&ctx, if theme == egui::Theme::Dark { ThemePref::Dark } else { ThemePref::Light });
         *h.state_mut() = Some(app);

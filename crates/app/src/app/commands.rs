@@ -104,6 +104,7 @@ impl OndApp {
                 self.output.set_mode_in_use(mode, &self.engine);
             }
             Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics_shown())),
+            Cmd::Visualizer => self.toggle_visualizer(),
             Cmd::Appearance(pref) => self.actions.push(Action::SetTheme(pref)),
             Cmd::Edit(e) => {
                 // Handed to egui as input next frame, so the focused field gets it.

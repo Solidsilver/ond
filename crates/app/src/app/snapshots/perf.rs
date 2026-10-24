@@ -271,6 +271,21 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
             println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
         }
     }
+    // The visualizer, full window: its CPU side (the scene and the paint
+    // callback; the GPU work isn't timed here) and the painter version.
+    for (scene, gpu) in [("visualizer, GPU (CPU side)", Some(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8Unorm)), ("visualizer, painter", None)] {
+        reset(h, FULL, Route::Recent);
+        let off = time_with_audio(h, 60);
+        reset(h, FULL, Route::Recent);
+        experiment(h, |x| x.visualizer = true);
+        let app = app_mut(h);
+        app.gpu = gpu;
+        app.toggle_visualizer();
+        let with = time_with_audio(h, 60);
+        app_mut(h).close_visualizer();
+        app_mut(h).gpu = None;
+        println!("  {scene:<35} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
+    }
     reset(h, FULL, Route::Recent);
 }
 
