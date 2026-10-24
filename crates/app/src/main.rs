@@ -19,6 +19,7 @@ mod keys;
 mod lyrics;
 mod memo;
 mod menu;
+mod momentum;
 #[cfg(test)]
 mod no_emoji;
 mod nav;

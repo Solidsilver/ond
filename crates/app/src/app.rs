@@ -432,6 +432,8 @@ pub struct UiState {
     pub bars_shown: bool,
     /// Edit menu commands (paste, undo…) waiting to reach egui as input.
     pub edit_input: Vec<egui::Event>,
+    /// Trackpad coasting where the system doesn't do it (Wayland).
+    pub momentum: crate::momentum::Momentum,
 }
 
 impl UiState {
@@ -466,6 +468,7 @@ impl UiState {
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
             edit_input: Vec::new(),
+            momentum: Default::default(),
         }
     }
 }
@@ -1959,8 +1962,11 @@ impl OndApp {
 impl eframe::App for OndApp {
     /// Edit menu commands become ordinary input, so the focused field
     /// pastes, copies or undoes as if the keys had reached it.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         raw_input.events.append(&mut self.ui.edit_input);
+        if self.ui.momentum.process(&mut raw_input.events, std::time::Instant::now()) {
+            ctx.request_repaint();
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
