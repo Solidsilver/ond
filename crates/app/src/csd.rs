@@ -12,7 +12,6 @@
 //! of this off.
 
 use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 /// Whether this platform draws its own window controls.
@@ -29,10 +28,24 @@ const SEPARATION: f32 = 10.0;
 const BAND: f32 = 5.0;
 const CORNER: f32 = 16.0;
 
-/// Set from the window plan: the controls are ours in this window mode.
-static DRAWN: AtomicBool = AtomicBool::new(false);
-/// Set from the window plan: the window has no system frame (so no resize borders).
-static FRAMELESS: AtomicBool = AtomicBool::new(false);
+/// What the window plan said, kept with the egui context.
+#[derive(Debug, Clone, Copy, Default)]
+struct State {
+    /// The controls are ours in this window mode.
+    drawn: bool,
+    /// The window has no system frame (so no resize borders either).
+    frameless: bool,
+    /// The UI snapshots show the Linux controls on any platform.
+    preview: bool,
+}
+
+fn state(ctx: &Context) -> State {
+    ctx.data(|d| d.get_temp::<State>(Id::unique("csd-state"))).unwrap_or_default()
+}
+
+fn store(ctx: &Context, s: State) {
+    ctx.data_mut(|d| d.insert_temp(Id::unique("csd-state"), s));
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
@@ -82,32 +95,21 @@ impl Layout {
 
 /// Called whenever the window plan changes: whether we draw the buttons, and
 /// whether the window has a system frame at all.
-pub fn set_window(controls: bool, frameless: bool) {
-    DRAWN.store(controls && supported(), Ordering::Relaxed);
-    FRAMELESS.store(frameless && supported(), Ordering::Relaxed);
+pub fn set_window(ctx: &Context, controls: bool, frameless: bool) {
+    let s = state(ctx);
+    let on = SUPPORTED || s.preview;
+    store(ctx, State { drawn: controls && on, frameless: frameless && on, ..s });
 }
 
+/// Lets the UI snapshots and tests show the Linux controls on any platform.
 #[cfg(test)]
-static PREVIEW: AtomicBool = AtomicBool::new(false);
-
-/// Lets the UI snapshots show the Linux controls on any platform.
-#[cfg(test)]
-pub fn preview(on: bool) {
-    PREVIEW.store(on, Ordering::Relaxed);
-    set_window(on, on);
-}
-
-fn supported() -> bool {
-    #[cfg(test)]
-    if PREVIEW.load(Ordering::Relaxed) {
-        return true;
-    }
-    SUPPORTED
+pub fn preview(ctx: &Context, on: bool) {
+    store(ctx, State { preview: on, ..state(ctx) });
 }
 
 /// Whether we draw the controls now (not in full screen, where there are none).
 pub fn active(ctx: &Context) -> bool {
-    DRAWN.load(Ordering::Relaxed) && !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
+    state(ctx).drawn && !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
 }
 
 /// The room the buttons take on `side` of the bar, 0 when we draw none there.
@@ -158,37 +160,44 @@ fn bar_id() -> Id {
 /// `None` draws no buttons (Mini). Then the resize bands. Call after the
 /// window's content, so both take the pointer from whatever is underneath.
 pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
-    if !supported() {
+    let s = state(ctx);
+    if !SUPPORTED && !s.preview {
         return;
     }
     let screen = ctx.content_rect();
     let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().fullscreen.unwrap_or(false)));
     let bar = ctx.data_mut(|d| d.remove_temp::<Option<Rect>>(bar_id())).flatten();
+    // One foreground layer over the window. Its widgets take the pointer only
+    // at their own exact rects (an `Area` remembers its size, and could grow
+    // over the content).
+    let layer = egui::LayerId::new(Order::Foreground, Id::unique("window-frame"));
+    let mut ui = egui::Ui::new(ctx.clone(), Id::unique("window-frame"), egui::UiBuilder::new().layer_id(layer).max_rect(screen));
     if let Some(h) = fallback_h
         && active(ctx)
     {
         let layout = layout();
         let y = bar.map_or(screen.top() + h / 2.0, |b| b.center().y);
+        let ui = &mut ui;
         // Right: the last button nearest the edge. Left: the first.
         for (i, &b) in layout.right.iter().rev().enumerate() {
             let x = screen.right() - EDGE - BUTTON / 2.0 - i as f32 * (BUTTON + GAP);
-            button(ctx, b, pos2(x, y), maximized);
+            button(ui, b, pos2(x, y), maximized);
         }
         for (i, &b) in layout.left.iter().enumerate() {
             let x = screen.left() + EDGE + BUTTON / 2.0 + i as f32 * (BUTTON + GAP);
-            button(ctx, b, pos2(x, y), maximized);
+            button(ui, b, pos2(x, y), maximized);
         }
     }
-    if FRAMELESS.load(Ordering::Relaxed) && !maximized && !fullscreen {
-        resize_bands(ctx, screen);
+    if s.frameless && !maximized && !fullscreen {
+        resize_bands(&mut ui, screen);
     }
 }
 
-fn button(ctx: &Context, b: Button, center: Pos2, maximized: bool) {
+fn button(ui: &mut egui::Ui, b: Button, center: Pos2, maximized: bool) {
     let rect = Rect::from_center_size(center, Vec2::splat(BUTTON));
-    egui::Area::new(Id::unique(("window-button", b as u8))).order(Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+    {
+        let resp = ui.interact(rect, Id::unique(("window-button", b as u8)), Sense::click());
         let t = crate::theme::Tokens::of(ui);
-        let (rect, resp) = ui.allocate_exact_size(rect.size(), Sense::click());
         let fill = if resp.is_pointer_button_down_on() {
             t.hairline
         } else if resp.hovered() {
@@ -234,38 +243,38 @@ fn button(ctx: &Context, b: Button, center: Pos2, maximized: bool) {
                 Button::Maximize => ViewportCommand::Maximized(!maximized),
             });
         }
-    });
+    }
 }
 
 /// Thin bands just inside the window's edges that start a resize: without a
 /// system frame there's nothing else to grab.
-fn resize_bands(ctx: &Context, screen: Rect) {
+fn resize_bands(ui: &mut egui::Ui, screen: Rect) {
     use ResizeDirection as D;
     let (l, r, t, b) = (screen.left(), screen.right(), screen.top(), screen.bottom());
+    // Each corner is an L: a short piece along each of its two edges.
+    let h = |x0: f32, x1: f32, y0: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
     let bands = [
-        (D::North, Rect::from_min_max(pos2(l + CORNER, t), pos2(r - CORNER, t + BAND))),
-        (D::South, Rect::from_min_max(pos2(l + CORNER, b - BAND), pos2(r - CORNER, b))),
-        (D::West, Rect::from_min_max(pos2(l, t + CORNER), pos2(l + BAND, b - CORNER))),
-        (D::East, Rect::from_min_max(pos2(r - BAND, t + CORNER), pos2(r, b - CORNER))),
-        (D::NorthWest, Rect::from_min_max(pos2(l, t), pos2(l + CORNER, t + BAND)).union(Rect::from_min_max(pos2(l, t), pos2(l + BAND, t + CORNER)))),
-        (D::NorthEast, Rect::from_min_max(pos2(r - CORNER, t), pos2(r, t + BAND)).union(Rect::from_min_max(pos2(r - BAND, t), pos2(r, t + CORNER)))),
-        (D::SouthWest, Rect::from_min_max(pos2(l, b - BAND), pos2(l + CORNER, b)).union(Rect::from_min_max(pos2(l, b - CORNER), pos2(l + BAND, b)))),
-        (D::SouthEast, Rect::from_min_max(pos2(r - CORNER, b - BAND), pos2(r, b)).union(Rect::from_min_max(pos2(r - BAND, b - CORNER), pos2(r, b)))),
+        (D::North, h(l + CORNER, r - CORNER, t, t + BAND)),
+        (D::South, h(l + CORNER, r - CORNER, b - BAND, b)),
+        (D::West, h(l, l + BAND, t + CORNER, b - CORNER)),
+        (D::East, h(r - BAND, r, t + CORNER, b - CORNER)),
+        (D::NorthWest, h(l, l + CORNER, t, t + BAND)),
+        (D::NorthWest, h(l, l + BAND, t, t + CORNER)),
+        (D::NorthEast, h(r - CORNER, r, t, t + BAND)),
+        (D::NorthEast, h(r - BAND, r, t, t + CORNER)),
+        (D::SouthWest, h(l, l + CORNER, b - BAND, b)),
+        (D::SouthWest, h(l, l + BAND, b - CORNER, b)),
+        (D::SouthEast, h(r - CORNER, r, b - BAND, b)),
+        (D::SouthEast, h(r - BAND, r, b - CORNER, b)),
     ];
-    for (dir, rect) in bands {
-        let corner = matches!(dir, D::NorthWest | D::NorthEast | D::SouthWest | D::SouthEast);
-        egui::Area::new(Id::unique(("resize-band", dir as u8))).order(Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
-            // A corner is an L; its bounding square only takes the pointer along the edges.
-            let resp = ui.allocate_rect(rect, Sense::drag());
-            let pos = ui.ctx().pointer_hover_pos();
-            let on_band = !corner || pos.is_some_and(|p| (p.x - l).min(r - p.x) <= BAND || (p.y - t).min(b - p.y) <= BAND);
-            if resp.hovered() && on_band {
-                ui.ctx().set_cursor_icon(cursor(dir));
-            }
-            if resp.drag_started() && on_band {
-                ui.ctx().send_viewport_cmd(ViewportCommand::BeginResize(dir));
-            }
-        });
+    for (i, (dir, rect)) in bands.into_iter().enumerate() {
+        let resp = ui.interact(rect, Id::unique(("resize-band", i)), Sense::drag());
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(cursor(dir));
+        }
+        if resp.drag_started() {
+            ui.ctx().send_viewport_cmd(ViewportCommand::BeginResize(dir));
+        }
     }
 }
 

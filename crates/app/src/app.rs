@@ -670,6 +670,9 @@ impl OndApp {
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
+        // The window opened from this plan (see `main`); our title bar follows it.
+        let plan = app.prefs.get(|s| s.window.plan());
+        crate::csd::set_window(&cc.egui_ctx, plan.controls, !plan.decorations);
         Ok(app)
     }
 
@@ -1441,7 +1444,7 @@ impl OndApp {
                     w.system_title_bar = on;
                     w.plan()
                 });
-                crate::csd::set_window(plan.controls, !plan.decorations);
+                crate::csd::set_window(&self.ctx, plan.controls, !plan.decorations);
                 self.ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(plan.decorations));
             }
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
@@ -1619,7 +1622,8 @@ impl OndApp {
             plan.apply(&ctx);
             // Until the window reports its new size, don't mistake the old one for it.
             self.ui.seen = None;
-            self.ui.settling = Some((plan.size, 30));
+            // A maximized window takes the screen's size, not the plan's.
+            self.ui.settling = (!plan.maximized).then_some((plan.size, 30));
             self.ui.switch_started = Some(std::time::Instant::now());
             tracing::debug!(target: "ond::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
         }
@@ -2043,6 +2047,11 @@ impl eframe::App for OndApp {
             match self.ui.settling {
                 Some((want, left)) if left > 0 && ((g.size[0] - want[0]).abs() > 2.0 || (g.size[1] - want[1]).abs() > 2.0) => {
                     self.ui.settling = Some((want, left - 1));
+                    // A compositor can answer an un-maximize with the window's
+                    // old size after ours; ask again now and then.
+                    if left % 10 == 0 && !g.maximized {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(want.into()));
+                    }
                     ctx.request_repaint();
                 }
                 _ => {

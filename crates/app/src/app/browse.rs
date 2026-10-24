@@ -362,9 +362,11 @@ impl ViewCtx<'_> {
             if let Some(m) = mark {
                 super::widgets::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
             }
-            if resp.hovered() {
-                let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
-                let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", &id)), Sense::click());
+            // The button sits on the tile, so with the pointer on it the tile
+            // itself doesn't read as hovered: it's there whenever either is.
+            let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
+            let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", &id)), Sense::click());
+            if resp.hovered() || play_resp.hovered() {
                 let fill = if play_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
                 let fg = if play_resp.hovered() { t.on_accent } else { t.text };
                 ui.painter().circle_filled(play.center(), 16.0, fill);

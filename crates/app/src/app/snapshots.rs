@@ -693,14 +693,16 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "recent");
 
     // Linux: our own window buttons in the toolbar (all three, as KDE has them).
-    crate::csd::preview(true);
+    crate::csd::preview(&h.ctx, true);
+    crate::csd::set_window(&h.ctx, true, true);
     reset(h, FULL, Route::Recent);
     s.shoot(h, "linux-titlebar");
     reset(h, vec2(380.0, 880.0), Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     h.run_steps(4);
     s.shoot(h, "linux-player-titlebar");
-    crate::csd::preview(false);
+    crate::csd::preview(&h.ctx, false);
+    crate::csd::set_window(&h.ctx, false, false);
 
     reset(h, FULL, Route::Albums);
     app_mut(h).ui.sort = AlbumSort::Year;
@@ -1305,6 +1307,110 @@ fn the_now_playing_heart_toggles_both_ways() {
     h.get_by_label(&crate::keys::shown("Love (⇧⌘L)")).click();
     h.run_steps(2);
     assert!(loved(&mut h), "loved again from the now-playing display");
+    *h.state_mut() = None;
+}
+
+/// The play button over a hovered album cover plays the album. It covers
+/// part of the tile, so the pointer on it must not count as leaving the tile.
+#[test]
+fn the_play_button_on_an_album_cover_plays_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    h.run_steps(2);
+    let target = album_id(1);
+    let label = {
+        let a = app_mut(&mut h).data.album(&target).unwrap();
+        format!("{} by {}", a.name, a.artist.as_deref().unwrap_or("Unknown artist"))
+    };
+    let tile = h.get_by_label(&label).rect();
+    // Onto the cover, then onto its play button (bottom left of the art).
+    h.hover_at(tile.center());
+    h.run_steps(2);
+    h.get_by_label("Play album").click();
+    h.run_steps(3);
+    // The album's tracks are queued to play (the test's null output can't
+    // actually play them, so look at the queue, not at what's current).
+    let q = &app_mut(&mut h).player.queue;
+    let queued = q.history.iter().chain(&q.current).chain(&q.upcoming).filter(|i| matches!(&i.source, Source::Album { id, .. } if *id == target)).count();
+    assert!(queued > 0, "the album was queued to play");
+    *h.state_mut() = None;
+}
+
+/// Linux draws its own window buttons and resize edges over the content
+/// (`csd`). They must take only their own spots: the Mini player still shows
+/// its controls on hover, the toolbar's Mini button still works, and the
+/// close button closes.
+#[test]
+fn our_window_frame_leaves_the_content_working() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    crate::csd::preview(&ctx, true);
+    crate::csd::set_window(&ctx, true, true);
+    reset(&mut h, FULL, Route::Recent);
+    h.run_steps(2);
+
+    // The window's top edge, over the toolbar: dragging resizes, not moves.
+    let sent = |h: &Harness<'_, Option<OndApp>>, cmd: &egui::ViewportCommand| h.output().viewport_output.values().any(|v| v.commands.contains(cmd));
+    let top = pos2(FULL.x / 2.0, 1.0);
+    let mut seen = Vec::new();
+    for e in [
+        egui::Event::PointerMoved(top),
+        egui::Event::PointerButton { pos: top, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+        egui::Event::PointerMoved(top + vec2(0.0, 20.0)),
+        egui::Event::PointerButton { pos: top + vec2(0.0, 20.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+    ] {
+        h.event(e);
+        h.step();
+        seen.extend(h.output().viewport_output.values().flat_map(|v| v.commands.clone()));
+    }
+    assert!(seen.contains(&egui::ViewportCommand::BeginResize(egui::ResizeDirection::North)), "the top edge resizes: {seen:?}");
+    assert!(!seen.contains(&egui::ViewportCommand::StartDrag), "and doesn't move the window");
+    h.run_steps(2);
+
+    h.get_by_label(&crate::keys::shown("Mini player (⇧⌘M)")).click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).window_mode(), WindowMode::Mini, "the toolbar's Mini button switches");
+
+    h.set_size(vec2(280.0, 280.0));
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(20);
+    assert!(h.query_by_label("Next").is_some(), "hovering Mini shows its controls");
+
+    // Back to the full window: the close button closes.
+    app_mut(&mut h).edit_windows(|w| w.mode = WindowMode::Full);
+    crate::csd::set_window(&ctx, true, true);
+    h.set_size(FULL);
+    h.run_steps(2);
+    h.get_by_label("Close").click();
+    h.run_steps(1);
+    assert!(sent(&h, &egui::ViewportCommand::Close), "the close button asks the window to close");
     *h.state_mut() = None;
 }
 
