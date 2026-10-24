@@ -381,6 +381,8 @@ pub struct OndApp {
     song_stats: HashMap<String, Option<SongStats>>,
     /// The diagnostics bar: whether it's on, and what it measures.
     diagnostics: diagnostics::Diagnostics,
+    /// Track waveforms for the seek bar (experimental).
+    waveforms: crate::visuals::waveform::Waveforms,
 }
 
 /// How long a mode switch waits for the window to leave maximized.
@@ -849,6 +851,7 @@ impl OndApp {
             now_playing,
             downloads,
             diagnostics: diagnostics::Diagnostics::default(),
+            waveforms: crate::visuals::waveform::Waveforms::new(ctx.clone()),
             prefs,
             analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
             favorites: Favorites::default(),
@@ -1931,6 +1934,7 @@ impl OndApp {
         let ctx = ui.ctx().clone();
         self.art.poll();
         self.art_tint(&ctx);
+        self.want_waveform();
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
         match self.window_mode() {
@@ -2002,6 +2006,23 @@ impl OndApp {
         if moving {
             ctx.request_repaint();
         }
+    }
+
+    /// Waveform seek bar (experimental): has the playing track's peaks read
+    /// once a complete copy is on disk (downloaded, or fully streamed).
+    fn want_waveform(&mut self) {
+        self.waveforms.poll();
+        if !self.experimental().waveform {
+            return;
+        }
+        let Some(track) = self.player.queue.current.as_ref().map(|c| &c.track) else { return };
+        let (downloads, cache, transcode) = (&self.downloads.store, &self.cache, self.output.transcode());
+        self.waveforms.want(&track.id, track.suffix.as_deref(), || {
+            downloads
+                .local_path(&track.id)
+                .or_else(|| cache.complete_path(&streamcache::CacheKey::original(track.id.clone(), track.suffix.clone())))
+                .or_else(|| transcode.and_then(|t| cache.complete_path(&streamcache::CacheKey::transcode(&track.id, &t.format, t.kbps))))
+        });
     }
 
     /// The blurred cover to draw behind the Player or Mini (experimental),

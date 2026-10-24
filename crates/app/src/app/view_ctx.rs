@@ -35,6 +35,8 @@ pub struct ViewCtx<'a> {
     pub diagnostics: &'a mut diagnostics::Diagnostics,
     pub ui: &'a mut UiState,
     pub actions: &'a mut Vec<Action>,
+    /// Track waveforms, for the seek bar (experimental).
+    pub waveforms: &'a mut crate::visuals::waveform::Waveforms,
 }
 
 impl ViewCtx<'_> {
@@ -49,6 +51,11 @@ impl ViewCtx<'_> {
     /// Whether `track` can play right now: downloaded, or the server is there.
     pub fn playable(&self, track: &Track) -> bool {
         super::playable(self.session, self.downloads, track)
+    }
+
+    /// Which experimental visuals are on.
+    pub fn experimental(&self) -> crate::visuals::Experimental {
+        self.prefs.get(|s| s.experimental)
     }
 
     /// The Player's lyrics drawer is open.
@@ -83,6 +90,7 @@ impl OndApp {
             diagnostics: &mut self.diagnostics,
             ui: &mut self.ui,
             actions: &mut self.actions,
+            waveforms: &mut self.waveforms,
         }
     }
 }

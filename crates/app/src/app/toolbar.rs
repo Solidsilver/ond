@@ -176,6 +176,7 @@ impl OndApp {
             grow: 0.5,
             knob: t.text,
             knob_r: 3.5,
+            wave_h: 4.0,
         };
         let mut v = self.view();
         let (shown, strip_resp) = v.seek_line(ui, bar, strip, "lcd-seek", &style);

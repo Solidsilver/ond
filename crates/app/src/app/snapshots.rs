@@ -494,6 +494,34 @@ fn settle_look(h: &mut Harness<'_, Option<OndApp>>) {
     h.run_steps(6);
 }
 
+/// A made-up waveform for the playing track: a quiet intro, verses and
+/// louder choruses, a break, and a fade at the end, with some grain.
+fn fixture_waveform(app: &mut OndApp) {
+    let Some(item) = app.player.queue.current.as_ref() else { return };
+    let secs = item.track.duration_secs.unwrap_or(240) as usize;
+    let n = secs * analysis::peaks::PEAKS_PER_SEC as usize;
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let values = (0..n)
+        .map(|i| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let t = i as f32 / n as f32;
+            let section = match t {
+                t if t < 0.08 => 0.25 + 2.0 * t,
+                t if t < 0.55 => if ((t * 9.0) as u32).is_multiple_of(2) { 0.55 } else { 0.85 },
+                t if t < 0.62 => 0.3,
+                t if t < 0.9 => if ((t * 11.0) as u32).is_multiple_of(2) { 0.65 } else { 0.95 },
+                t => 0.95 * (1.0 - t) * 10.0,
+            };
+            let grain = 0.7 + 0.3 * (seed % 1000) as f32 / 1000.0;
+            (section * grain * 255.0).clamp(0.0, 255.0) as u8
+        })
+        .collect();
+    let id = item.track.id.clone();
+    app.waveforms.insert(id, analysis::Peaks { values });
+}
+
 /// Plays Kind of Blue instead (another cover than the fixture's).
 fn play_blue(app: &mut OndApp) {
     app.player.queue.play_now(kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
@@ -1236,8 +1264,35 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.hover_at(pos2(140.0, 140.0));
     h.run_steps(6);
     s.shoot(h, "x-backdrop-mini-hover");
-}
 
+    // The waveform seek bar: in the Player and the now-playing display, with
+    // the pointer on it, and before its peaks are ready (the plain line).
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    experiment(h, |x| x.waveform = true);
+    s.shoot(h, "x-waveform-loading-player");
+    fixture_waveform(app_mut(h));
+    s.shoot(h, "x-waveform-player");
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| x.waveform = true);
+    fixture_waveform(app_mut(h));
+    s.shoot(h, "x-waveform-full");
+    h.hover_at(pos2(820.0, 41.0));
+    h.run_steps(2);
+    s.shoot(h, "x-waveform-lcd-hover");
+
+    // Everything that's still on the page at once, in the Player.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    experiment(h, |x| {
+        x.art_colors = true;
+        x.backdrop = true;
+        x.waveform = true;
+    });
+    fixture_waveform(app_mut(h));
+    settle_look(h);
+    s.shoot(h, "x-together-player");
+}
 
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]

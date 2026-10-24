@@ -21,6 +21,8 @@ use library::Track;
 
 /// Height of everything under the artwork in the player column.
 const BELOW_ART_H: f32 = 272.0;
+/// Room the waveform seek bar adds, when that's on.
+const WAVE_EXTRA: f32 = 16.0;
 /// Room the open details strip takes.
 const DETAILS_H: f32 = 110.0;
 /// The queue keeps at least this much of the Player window.
@@ -177,7 +179,10 @@ impl ViewCtx<'_> {
     /// elapsed and remaining underneath.
     pub(super) fn big_seek(&mut self, ui: &mut Ui, width: f32) {
         let t = Tokens::of(ui);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, 16.0), Sense::hover());
+        // The waveform needs the room; the layout keeps it while that's on,
+        // so nothing moves when the waveform arrives.
+        let wave = self.experimental().waveform;
+        let (rect, _) = ui.allocate_exact_size(vec2(width, if wave { 16.0 + WAVE_EXTRA } else { 16.0 }), Sense::hover());
         let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
         let style = SeekStyle {
             track: t.hairline,
@@ -189,6 +194,7 @@ impl ViewCtx<'_> {
             grow: 0.0,
             knob: t.text,
             knob_r: 6.0,
+            wave_h: if wave { 13.0 } else { 0.0 },
         };
         let (shown, _) = self.seek_line(ui, bar, rect, "player-seek", &style);
         let (elapsed, remaining) = self.seek_times(shown);
@@ -555,7 +561,9 @@ impl OndApp {
             .frame(egui::Frame::new().fill(stage).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
             .show(ui, |ui| {
                 let full = ui.available_rect_before_wrap();
-                let below = BELOW_ART_H + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
+                let wave = if self.experimental().waveform { WAVE_EXTRA } else { 0.0 };
+                let below = BELOW_ART_H + wave + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
+
                 let side = full.width().min(full.height() - below).max(120.0).floor();
                 if let Some(slot) = backdrop {
                     let art_bottom = full.top() + if self.player.queue.current.is_some() { side } else { 0.0 };

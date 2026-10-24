@@ -9,6 +9,7 @@
 
 pub mod backdrop;
 pub mod colors;
+pub mod waveform;
 
 
 use serde::{Deserialize, Serialize};

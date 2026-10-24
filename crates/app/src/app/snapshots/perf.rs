@@ -246,7 +246,7 @@ fn perf() {
 /// Each experimental visual's frame cost: the same scenes with it off, then on.
 fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
     type Switch = fn(&mut crate::visuals::Experimental);
-    let features: [(&str, Switch); 2] = [("colors from the art", |x| x.art_colors = true), ("blurred artwork", |x| x.backdrop = true)];
+    let features: [(&str, Switch); 3] = [("colors from the art", |x| x.art_colors = true), ("blurred artwork", |x| x.backdrop = true), ("waveform seek bar", |x| x.waveform = true)];
     println!("experimental visuals, mean frame time off → on:");
     for (name, on) in features {
         for (scene, player) in [("full window", false), ("Player", true)] {
@@ -260,6 +260,7 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
             let off = time_frames(h, 60);
             setup(h);
             experiment(h, on);
+            fixture_waveform(app_mut(h));
             settle_look(h);
             let with = time_frames(h, 60);
             println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off.mean), ms(with.mean));

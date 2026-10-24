@@ -13,12 +13,15 @@
 
 mod decode;
 mod dr;
+pub mod peaks;
 mod spectrum;
 
 #[cfg(test)]
 mod tests;
 
-pub use decode::{AnalyzeError, analyze, analyze_reader};
+pub use decode::{AnalyzeError, analyze, analyze_reader, peaks, peaks_reader};
+pub use peaks::{PeakMeter, Peaks};
+
 
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};

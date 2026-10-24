@@ -113,6 +113,7 @@ impl OndApp {
                 grow: 1.0,
                 knob: ON_ART,
                 knob_r: 5.0,
+                wave_h: 0.0,
             };
             let mut v = self.view();
             let (shown, _) = v.seek_line(&mut ui, bar, bar.expand2(vec2(4.0, 7.0)), "mini-seek", &style);
