@@ -2118,7 +2118,7 @@ impl OndApp {
         };
         let look = self.art.look(&cover);
         let next = look.as_ref().and_then(|l| l.backdrop.as_ref());
-        let (layers, fading) = self.ui.backdrop.step(next.map(|(t, e)| (cover.as_str(), t, *e)), ctx.input(|i| i.time));
+        let (layers, fading) = self.ui.backdrop.step(next.map(|b| (cover.as_str(), b)), ctx.input(|i| i.time));
         if fading {
             ctx.request_repaint();
         }

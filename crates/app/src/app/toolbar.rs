@@ -51,7 +51,7 @@ pub(super) fn lcd_rect(full: Rect, left_end: f32, right_start: f32) -> Rect {
 impl OndApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         let mut full = ui.available_rect_before_wrap();
-        crate::csd::set_bar(ui.ctx(), full);
+        crate::csd::set_bar(ui.ctx(), full, None);
         // The bar is the window's title bar too: its empty parts move the
         // window, and a double-click zooms it. Widgets drawn after this take
         // the pointer where they are.

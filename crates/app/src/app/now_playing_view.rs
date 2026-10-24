@@ -14,6 +14,7 @@ use crate::icons::{self, Icon};
 use crate::lyrics::{self, Fetch, Lyrics};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
+use crate::visuals::over_art::OnArt;
 use crate::window::WindowMode;
 use audio::PlayState;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -38,7 +39,10 @@ impl ViewCtx<'_> {
     /// The Player's top bar, which is also its title bar: the traffic lights
     /// on the left (macOS), Mini and Full window on the right. Its empty part
     /// moves the window; a double-click zooms it.
-    pub(super) fn player_bar(&mut self, ui: &mut Ui) {
+    /// The Player's top bar: it moves the window, and holds the Full and
+    /// Mini buttons (and on Linux the window's own). `on_art`: how to draw
+    /// them over the blurred backdrop, when that's behind the bar.
+    pub(super) fn player_bar(&mut self, ui: &mut Ui, on_art: Option<OnArt>) {
         let t = Tokens::of(ui);
         let rect = ui.max_rect();
         let bg = ui.interact(rect, ui.scope_id().with("player-titlebar"), Sense::click_and_drag());
@@ -48,14 +52,23 @@ impl ViewCtx<'_> {
         if bg.double_clicked() {
             crate::chrome::title_double_click(ui.ctx());
         }
-        crate::csd::set_bar(ui.ctx(), rect);
+        crate::csd::set_bar(ui.ctx(), rect, on_art);
+        let fg = on_art.map_or(t.muted, |o| o.fg);
         let mut right = rect.shrink2(vec2(10.0, 0.0));
         // Our own window buttons (Linux) take the very end.
         right.max.x -= crate::csd::reserved(ui.ctx(), crate::csd::Side::Right);
         ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            if let Some(o) = on_art {
+                o.apply(ui);
+            }
             for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⇧⌘M)", WindowMode::Mini)] {
-                if icons::sized_button(ui, icon, label, vec2(28.0, 28.0), 12.0, Some(t.muted)).clicked() {
+                let r = ui.available_rect_before_wrap();
+                let slot = Rect::from_min_max(pos2(r.right() - 28.0, r.center().y - 14.0), pos2(r.right(), r.center().y + 14.0));
+                if let Some(scrim) = on_art.and_then(|o| o.scrim) {
+                    ui.painter().circle_filled(slot.center(), 13.0, scrim);
+                }
+                if icons::sized_button(ui, icon, label, vec2(28.0, 28.0), 12.0, Some(fg)).clicked() {
                     self.actions.push(Action::SetMode(mode));
                 }
             }
@@ -122,7 +135,12 @@ impl ViewCtx<'_> {
                 let inset = (side * 0.05).round();
                 let area = Rect::from_min_max(pos2(art.left() + inset, art.bottom() - side * 0.2), pos2(art.right() - inset, art.bottom() - inset * 0.6));
                 let n = ((area.width() / 9.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
-                crate::visuals::paint_bars(ui.painter(), area, &crate::visuals::spectrum::grouped(&f.bands, n), Color32::from_white_alpha(120));
+                // Light bars over a dark foot of the cover, dark over a light one;
+                // see-through either way (a meter, not a control).
+                let under = cover.as_deref().and_then(|c| this.art.look(c)).and_then(|l| l.backdrop.clone());
+                let uv = |b: &crate::visuals::backdrop::Blurred| crate::visuals::over_art::region(&b.image, crate::visuals::over_art::uv_of(area, art, crate::art::crop_uv(1.0)));
+                let on = under.map_or(OnArt::plain(Color32::WHITE), |b| OnArt::pick(uv(&b), Color32::WHITE, crate::visuals::over_art::GRAPHIC));
+                crate::visuals::paint_bars(ui.painter(), area, &crate::visuals::spectrum::grouped(&f.bands, n), on.fg.gamma_multiply(0.47));
             }
         };
 
@@ -460,19 +478,28 @@ fn edge_fades(ui: &Ui, rect: Rect, bg: Color32, h: f32, top_too: bool) {
     }
 }
 
+/// How strongly the backdrop is washed out under the Player's text: enough
+/// for `text` and `muted` to read over every part of every layer.
+fn backdrop_wash(layers: &[crate::visuals::backdrop::Layer], wash: Color32, text: Color32, muted: Color32) -> f32 {
+    layers.iter().map(|l| crate::visuals::backdrop::wash_alpha(l.blurred.extremes, wash, text, muted)).fold(0.0, f32::max)
+}
+
+/// The wash around the artwork, where only the window buttons sit (they
+/// pick their own colors for what's under them; see `over_art`).
+fn light_wash(alpha: f32) -> f32 {
+    alpha.min(0.4)
+}
+
 /// The blurred cover `layers` (oldest first) filling `rect`, under a wash of
 /// `wash`: light around the artwork (down to `art_bottom`), then by
-/// `text_top` just strong enough for `text` and `muted` to read over all of it.
-fn backdrop_shape(rect: Rect, layers: &[crate::visuals::backdrop::Layer], wash: Color32, text: Color32, muted: Color32, art_bottom: f32, text_top: f32) -> egui::Shape {
+/// `text_top` at `alpha`, the strength the text needs.
+fn backdrop_shape(rect: Rect, layers: &[crate::visuals::backdrop::Layer], wash: Color32, alpha: f32, art_bottom: f32, text_top: f32) -> egui::Shape {
     let uv = crate::art::crop_uv(rect.width() / rect.height().max(1.0));
-    let mut alpha: f32 = 0.0;
     let mut shapes = Vec::new();
-    for (tex, opacity, extremes) in layers {
-        shapes.push(egui::epaint::RectShape::filled(rect, 0.0, Color32::WHITE.gamma_multiply(*opacity)).with_texture(tex.id(), uv).into());
-        alpha = alpha.max(crate::visuals::backdrop::wash_alpha(*extremes, wash, text, muted));
+    for l in layers {
+        shapes.push(egui::epaint::RectShape::filled(rect, 0.0, Color32::WHITE.gamma_multiply(l.opacity)).with_texture(l.blurred.texture.id(), uv).into());
     }
-    // Only the window buttons sit on the lighter part, and they're icons.
-    let light = alpha.min(0.4);
+    let light = light_wash(alpha);
     let mut mesh = egui::Mesh::default();
     for (y, a) in [(rect.top(), light), (art_bottom.min(text_top), light), (text_top, alpha), (rect.bottom(), alpha)] {
         let c = wash.gamma_multiply(a);
@@ -539,6 +566,12 @@ impl OndApp {
         let under = ui.painter().clone();
         let backdrop = (!layers.is_empty()).then(|| under.add(egui::Shape::Noop));
         let wash = stage;
+        let alpha = backdrop_wash(&layers, wash, t.text, t.muted);
+        // The window buttons over the backdrop: colors for what's under them.
+        let bar = Rect::from_min_size(window.min, vec2(window.width(), PLAYER_BAR_H));
+        let crop = crate::art::crop_uv(window.width() / window.height().max(1.0));
+        let bar_art = crate::visuals::backdrop::seen(&layers, crate::visuals::over_art::uv_of(bar, window, crop), wash, light_wash(alpha))
+            .map(|under| OnArt::pick(under, t.muted, crate::visuals::over_art::ICON));
         if backdrop.is_some() {
             stage = Color32::TRANSPARENT;
         }
@@ -547,7 +580,7 @@ impl OndApp {
             .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(stage))
-            .show(ui, |ui| self.view().player_bar(ui));
+            .show(ui, |ui| self.view().player_bar(ui, bar_art));
         self.player_status_bar(ui);
         if self.lyrics_drawer() {
             egui::Panel::right("lyrics-drawer")
@@ -577,7 +610,7 @@ impl OndApp {
                 let side = full.width().min(full.height() - below).max(120.0).floor();
                 if let Some(slot) = backdrop {
                     let art_bottom = full.top() + if self.player.queue.current.is_some() { side } else { 0.0 };
-                    under.set(slot, backdrop_shape(window, &layers, wash, t.text, t.muted, art_bottom - side * 0.2, art_bottom + 18.0));
+                    under.set(slot, backdrop_shape(window, &layers, wash, alpha, art_bottom - side * 0.2, art_bottom + 18.0));
                 }
 
                 match self.player.queue.current.as_ref().map(|c| c.track.clone()) {

@@ -1,5 +1,6 @@
-//! Visuals. One is settled: the app's colors (the chosen accent, or the
-//! album art's when colors adapt to it; see [`colors`]). The rest are experiments,
+//! Visuals. Two are settled: the app's colors (the chosen accent, or the
+//! album art's when colors adapt to it; see [`colors`]) and how controls
+//! drawn over artwork stay readable ([`over_art`]). The rest are experiments,
 //! each behind its own switch in Settings › Experimental and all off by
 //! default. With every switch off, none of those runs: no audio tap, no
 //! extra frames.
@@ -12,6 +13,7 @@
 pub mod backdrop;
 pub mod colors;
 pub mod gpu;
+pub mod over_art;
 pub mod visualizer;
 pub mod spectrogram;
 pub mod spectrum;

@@ -5,6 +5,7 @@
 
 use super::colors::contrast;
 use egui::{Color32, ColorImage, TextureHandle};
+use std::sync::Arc;
 
 /// The blurred copy's side, in pixels: the blur hides any lack of detail.
 const SIDE: usize = 48;
@@ -83,30 +84,43 @@ pub fn wash_alpha(extremes: [Color32; 2], wash: Color32, text: Color32, muted: C
     1.0
 }
 
+/// A cover's blurred copy, ready to draw: the texture, its pixels (to see
+/// what lies under a control; see [`super::over_art`]) and its darkest and
+/// brightest colors.
+#[derive(Clone)]
+pub struct Blurred {
+    pub texture: TextureHandle,
+    pub image: Arc<ColorImage>,
+    pub extremes: [Color32; 2],
+}
+
 /// The backdrop shown, fading from the previous cover's.
 #[derive(Default)]
 pub struct Crossfade {
-    current: Option<(String, TextureHandle, [Color32; 2])>,
-    previous: Option<(TextureHandle, [Color32; 2])>,
+    current: Option<(String, Blurred)>,
+    previous: Option<Blurred>,
     since: f64,
 }
 
 /// How long one cover's backdrop takes to fade into the next.
 const FADE_SECS: f64 = 0.9;
 
-/// One layer to draw: the texture, how opaque, and its extremes.
-pub type Layer = (TextureHandle, f32, [Color32; 2]);
+/// One layer to draw, and how opaque.
+pub struct Layer {
+    pub blurred: Blurred,
+    pub opacity: f32,
+}
 
 impl Crossfade {
-    /// Shows `next` (a cover id, its blurred texture and extremes), fading
-    /// from what was shown. `None` keeps what's there (still loading).
-    /// Returns the layers to draw, oldest first, and whether it's mid-fade.
-    pub fn step(&mut self, next: Option<(&str, &TextureHandle, [Color32; 2])>, now: f64) -> (Vec<Layer>, bool) {
-        if let Some((cover, tex, ext)) = next
-            && self.current.as_ref().is_none_or(|(c, ..)| c != cover)
+    /// Shows `next` (a cover id and its blurred copy), fading from what was
+    /// shown. `None` keeps what's there (still loading). Returns the layers
+    /// to draw, oldest first, and whether it's mid-fade.
+    pub fn step(&mut self, next: Option<(&str, &Blurred)>, now: f64) -> (Vec<Layer>, bool) {
+        if let Some((cover, blurred)) = next
+            && self.current.as_ref().is_none_or(|(c, _)| c != cover)
         {
-            self.previous = self.current.take().map(|(_, t, e)| (t, e));
-            self.current = Some((cover.to_owned(), tex.clone(), ext));
+            self.previous = self.current.take().map(|(_, b)| b);
+            self.current = Some((cover.to_owned(), blurred.clone()));
             self.since = now;
         }
         let k = ((now - self.since) / FADE_SECS).clamp(0.0, 1.0) as f32;
@@ -115,11 +129,11 @@ impl Crossfade {
             self.previous = None;
         }
         let mut layers = Vec::new();
-        if let Some((t, e)) = &self.previous {
-            layers.push((t.clone(), 1.0, *e));
+        if let Some(b) = &self.previous {
+            layers.push(Layer { blurred: b.clone(), opacity: 1.0 });
         }
-        if let Some((_, t, e)) = &self.current {
-            layers.push((t.clone(), if self.previous.is_some() { k } else { 1.0 }, *e));
+        if let Some((_, b)) = &self.current {
+            layers.push(Layer { blurred: b.clone(), opacity: if self.previous.is_some() { k } else { 1.0 } });
         }
         (layers, self.previous.is_some())
     }
@@ -127,6 +141,15 @@ impl Crossfade {
     pub fn clear(&mut self) {
         *self = Self::default();
     }
+}
+
+/// The darkest and brightest colors seen in `uv` of the backdrop `layers`
+/// under `wash` at `alpha` (either layer's, mid-fade). `None` without layers.
+pub fn seen(layers: &[Layer], uv: egui::Rect, wash: Color32, alpha: f32) -> Option<[Color32; 2]> {
+    layers
+        .iter()
+        .map(|l| super::over_art::region(&l.blurred.image, uv).map(|c| c.lerp_to_gamma(wash, alpha)))
+        .reduce(super::over_art::union)
 }
 
 #[cfg(test)]

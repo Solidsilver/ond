@@ -119,8 +119,9 @@ const LOOK_SIZE: u32 = 128;
 pub struct Look {
     /// `None` for a cover with too little color (or none at all).
     pub palette: Option<crate::visuals::colors::ArtPalette>,
-    /// A small blurred copy of the cover, and its darkest and brightest colors.
-    pub backdrop: Option<(TextureHandle, [Color32; 2])>,
+    /// A small blurred copy of the cover, for the backdrop and for seeing
+    /// what lies under controls drawn over the art.
+    pub backdrop: Option<crate::visuals::backdrop::Blurred>,
 }
 
 /// A look as worked out off the UI thread, before its texture is made.
@@ -213,7 +214,11 @@ impl Art {
         }
         while let Ok((cover, parts)) = self.look_rx.try_recv() {
             self.looks_pending.remove(&cover);
-            let backdrop = parts.blurred.map(|(image, extremes)| (self.ctx.load_texture(format!("backdrop:{cover}"), image, TextureOptions::LINEAR), extremes));
+            let backdrop = parts.blurred.map(|(image, extremes)| crate::visuals::backdrop::Blurred {
+                texture: self.ctx.load_texture(format!("backdrop:{cover}"), image.clone(), TextureOptions::LINEAR),
+                image: Arc::new(image),
+                extremes,
+            });
             let look = Look { palette: parts.palette, backdrop };
             for gone in self.looks_lru.insert(cover.clone(), 1) {
                 self.looks.remove(&gone);

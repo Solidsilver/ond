@@ -229,6 +229,39 @@ fn cover(i: usize) -> ColorImage {
     ColorImage::new([N, N], pixels)
 }
 
+/// A near-white cover (a pale, nearly blank sleeve with a faint emboss and
+/// a small grey title): the hardest case for anything drawn over artwork.
+fn white_cover() -> ColorImage {
+    const N: usize = 256;
+    let mut pixels = Vec::with_capacity(N * N);
+    for y in 0..N {
+        for x in 0..N {
+            let t = (x + y) as f32 / (2 * N) as f32;
+            let mut px = Color32::from_rgb(250, 249, 246).lerp_to_gamma(Color32::from_rgb(236, 236, 231), t);
+            let d = ((x as f32 - 128.0).powi(2) + (y as f32 - 120.0).powi(2)).sqrt();
+            if (60.0..63.0).contains(&d) {
+                px = px.lerp_to_gamma(Color32::from_rgb(222, 222, 218), 0.6);
+            }
+            if (200..206).contains(&y) && (88..168).contains(&x) {
+                px = Color32::from_rgb(196, 196, 192);
+            }
+            pixels.push(px);
+        }
+    }
+    ColorImage::new([N, N], pixels)
+}
+
+/// The cover id of [`white_cover`].
+const WHITE: &str = "white-cover";
+
+/// Plays a few songs whose cover is [`white_cover`].
+fn play_white(app: &mut OndApp) {
+    let mut songs = filler(13, 4);
+    for t in &mut songs {
+        t.cover_art = Some(WHITE.into());
+    }
+    app.player.queue.play_now(songs, 1, Source::Album { id: album_id(13), name: ALBUMS[13].0.into() });
+}
 
 fn devices() -> audio::Event {
     let caps = |name: &str, bits, max, post: Option<&str>| DeviceCaps {
@@ -305,6 +338,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     for i in 0..ALBUMS.len() {
         app.art.preload(&album_id(i), cover(i));
     }
+    app.art.preload(WHITE, white_cover());
     app.data.newest = albums.iter().map(|a| a.id.clone()).collect();
     app.data.set_albums(albums);
     app.rebuild_search();
@@ -1170,6 +1204,17 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.run_steps(6);
     s.shoot(h, "mini-hover");
 
+    // Mini on a near-white cover: the progress line and the corner buttons
+    // turn dark to read on it.
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    play_white(app_mut(h));
+    settle_look(h);
+    s.shoot(h, "mini-white");
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "mini-white-hover");
+
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
@@ -1330,6 +1375,28 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.hover_at(pos2(140.0, 140.0));
     h.run_steps(6);
     s.shoot(h, "x-backdrop-mini-hover");
+
+    // A near-white cover behind the Player: the window buttons (and on Linux
+    // the window's own) turn dark to read on it; then Mini's corner buttons.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    play_white(app_mut(h));
+    experiment(h, |x| x.backdrop = true);
+    settle_look(h);
+    s.shoot(h, "x-backdrop-white-player");
+    crate::csd::preview(&h.ctx, true);
+    crate::csd::set_window(&h.ctx, true, true);
+    s.shoot(h, "x-backdrop-white-linux-player");
+    crate::csd::preview(&h.ctx, false);
+    crate::csd::set_window(&h.ctx, false, false);
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    play_white(app_mut(h));
+    experiment(h, |x| x.backdrop = true);
+    settle_look(h);
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "x-backdrop-white-mini-hover");
 
     // The waveform seek bar: in the Player and the now-playing display, with
     // the pointer on it, and before its peaks are ready (the plain line).

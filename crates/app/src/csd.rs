@@ -12,6 +12,7 @@
 //! of this off.
 
 use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
+use crate::visuals::over_art::OnArt;
 use std::sync::RwLock;
 
 /// Whether this platform draws its own window controls.
@@ -159,10 +160,20 @@ fn fallback() -> Layout {
     Layout::parse(if desktop.contains("gnome") { "appmenu:close" } else { ":minimize,maximize,close" })
 }
 
+/// This frame's title bar, as it recorded itself.
+#[derive(Debug, Clone, Copy)]
+struct Bar {
+    rect: Rect,
+    /// How to draw over the artwork behind the bar, when there is some
+    /// (the Player's blurred backdrop); `None` over the theme's own colors.
+    on_art: Option<OnArt>,
+}
+
 /// Where this frame's title bar is: the toolbar or the Player's top bar
-/// records itself, and [`overlay`] centres the buttons in it.
-pub fn set_bar(ctx: &Context, bar: Rect) {
-    ctx.data_mut(|d| d.insert_temp(bar_id(), Some(bar)));
+/// records itself, and [`overlay`] centres the buttons in it. `on_art`: the
+/// colors for what's under the bar when that's artwork.
+pub fn set_bar(ctx: &Context, bar: Rect, on_art: Option<OnArt>) {
+    ctx.data_mut(|d| d.insert_temp(bar_id(), Some(Bar { rect: bar, on_art })));
 }
 
 fn bar_id() -> Id {
@@ -180,7 +191,7 @@ pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
     }
     let screen = ctx.content_rect();
     let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().fullscreen.unwrap_or(false)));
-    let bar = ctx.data_mut(|d| d.remove_temp::<Option<Rect>>(bar_id())).flatten();
+    let bar = ctx.data_mut(|d| d.remove_temp::<Option<Bar>>(bar_id())).flatten();
     // One foreground layer over the window. Its widgets take the pointer only
     // at their own exact rects (an `Area` remembers its size, and could grow
     // over the content).
@@ -190,16 +201,17 @@ pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
         && active(ctx)
     {
         let layout = layout();
-        let y = bar.map_or(screen.top() + h / 2.0, |b| b.center().y);
+        let y = bar.map_or(screen.top() + h / 2.0, |b| b.rect.center().y);
+        let on_art = bar.and_then(|b| b.on_art);
         let ui = &mut ui;
         // Right: the last button nearest the edge. Left: the first.
         for (i, &b) in layout.right.iter().rev().enumerate() {
             let x = screen.right() - EDGE - BUTTON / 2.0 - i as f32 * (BUTTON + GAP);
-            button(ui, b, pos2(x, y), maximized);
+            button(ui, b, pos2(x, y), maximized, on_art);
         }
         for (i, &b) in layout.left.iter().enumerate() {
             let x = screen.left() + EDGE + BUTTON / 2.0 + i as f32 * (BUTTON + GAP);
-            button(ui, b, pos2(x, y), maximized);
+            button(ui, b, pos2(x, y), maximized, on_art);
         }
     }
     if s.frameless && !maximized && !fullscreen {
@@ -207,20 +219,36 @@ pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
     }
 }
 
-fn button(ui: &mut egui::Ui, b: Button, center: Pos2, maximized: bool) {
+/// One button: a disc in the theme's colors, or over artwork (`on_art`) a
+/// faint one in the foreground's own tone, on a scrim if it needs one.
+fn button(ui: &mut egui::Ui, b: Button, center: Pos2, maximized: bool, on_art: Option<OnArt>) {
     let rect = Rect::from_center_size(center, Vec2::splat(BUTTON));
     let resp = ui.interact(rect, Id::unique(("window-button", b as u8)), Sense::click());
     let t = crate::theme::Tokens::of(ui);
-    let fill = if resp.is_pointer_button_down_on() {
-        t.hairline
-    } else if resp.hovered() {
-        t.selected
-    } else {
-        t.hover
-    };
+    let (pressed, hovered) = (resp.is_pointer_button_down_on(), resp.hovered());
     let p = ui.painter();
-    p.circle_filled(rect.center(), BUTTON / 2.0, fill);
-    let stroke = Stroke::new(1.4, t.text);
+    let fg = match on_art {
+        Some(o) => {
+            if let Some(scrim) = o.scrim {
+                p.circle_filled(rect.center(), BUTTON / 2.0, scrim);
+            }
+            let fill = if pressed || hovered { o.hover(pressed) } else { o.fg.gamma_multiply(0.08) };
+            p.circle_filled(rect.center(), BUTTON / 2.0, fill);
+            o.fg
+        }
+        None => {
+            let fill = if pressed {
+                t.hairline
+            } else if hovered {
+                t.selected
+            } else {
+                t.hover
+            };
+            p.circle_filled(rect.center(), BUTTON / 2.0, fill);
+            t.text
+        }
+    };
+    let stroke = Stroke::new(1.4, fg);
     let c = rect.center();
     let s = 4.0;
     match b {
