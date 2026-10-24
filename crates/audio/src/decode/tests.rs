@@ -176,7 +176,8 @@ fn gapless_two_tracks_share_one_ring_and_switch_on_the_exact_sample() {
 
 #[test]
 fn format_change_starts_a_new_ring() {
-    let a = pcm(2 * 4_000, 1);
+    // Longer than the ring, so `b` is queued before `a` can finish decoding.
+    let a = pcm(2 * 30_000, 1);
     let dir = tempfile::tempdir().unwrap();
     let b_path = dir.path().join("b.wav");
     std::fs::write(&b_path, wav(48_000, 2, &pcm(2 * 4_000, 2))).unwrap();
@@ -478,7 +479,9 @@ fn surround_is_downmixed_to_stereo() {
 fn each_track_gets_its_gain_before_its_first_sample() {
     use crate::replaygain::{GainMode, db_to_linear};
     let dir = tempfile::tempdir().unwrap();
-    let mut a = file_source(&dir, "a", &pcm(2 * 3_000, 1));
+    // Longer than the ring, so the decoder waits on the device and can't
+    // finish `a` before `b` is queued.
+    let mut a = file_source(&dir, "a", &pcm(2 * 30_000, 1));
     a.replay_gain = ReplayGain { track_gain: Some(-6.0), album_gain: Some(-9.0), ..Default::default() };
     let mut b = file_source(&dir, "b", &pcm(2 * 3_000, 2));
     b.replay_gain = ReplayGain { track_gain: Some(-12.0), album_gain: Some(-9.0), ..Default::default() };
@@ -489,7 +492,7 @@ fn each_track_gets_its_gain_before_its_first_sample() {
     s.set_next(0, Some(b));
     let (input, mut seen) = wait_ring(&s);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         seen.extend(std::iter::from_fn(|| s.try_msg()));
