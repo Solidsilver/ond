@@ -160,7 +160,7 @@ impl ViewCtx<'_> {
             let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.downloads.base.display().to_string());
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new(self.downloads.base.display().to_string()).size(11.0).color(t.muted));
-                if ui.button("Show in Finder").clicked() {
+                if ui.button(format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
                     self.actions.push(Action::RevealOffline);
                 }
                 if ui.button("Change…").clicked() {

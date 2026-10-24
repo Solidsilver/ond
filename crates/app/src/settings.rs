@@ -143,15 +143,17 @@ pub struct Paths {
 impl Paths {
     pub fn resolve() -> anyhow::Result<Self> {
         // On macOS the folders are named `dev.solidsilver.ond`, the bundle id.
+        // The library and downloads go in the local (not roaming) folder on
+        // Windows; elsewhere that's the same as the data folder.
         let dirs = directories::ProjectDirs::from("dev", "solidsilver", "ond").ok_or_else(|| anyhow::anyhow!("no home directory"))?;
         std::fs::create_dir_all(dirs.config_dir())?;
-        std::fs::create_dir_all(dirs.data_dir())?;
+        std::fs::create_dir_all(dirs.data_local_dir())?;
         Ok(Self {
             config_file: dirs.config_dir().join("settings.json"),
-            library_db: dirs.data_dir().join("library.redb"),
+            library_db: dirs.data_local_dir().join("library.redb"),
             stream_cache: dirs.cache_dir().join("streams"),
             art_cache: dirs.cache_dir().join("art"),
-            offline: dirs.data_dir().join("Offline"),
+            offline: dirs.data_local_dir().join("Offline"),
         })
     }
 }

@@ -910,9 +910,16 @@ fn free_space(dir: &Path) -> Option<u64> {
     Some(s.f_bavail as u64 * s.f_frsize as u64)
 }
 
-#[cfg(not(unix))]
-fn free_space(_: &Path) -> Option<u64> {
-    None
+#[cfg(windows)]
+fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let path: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let mut available = 0u64;
+    // SAFETY: `path` is NUL-terminated and `available` a valid out pointer;
+    // the totals we don't need may be null.
+    let ok = unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
+    (ok != 0).then_some(available)
 }
 
 /// Moves a store's files from `from` to `to` (run before opening it at `to`),

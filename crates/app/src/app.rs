@@ -598,7 +598,7 @@ impl Downloads {
                 prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
             }
             Action::RevealOffline => {
-                std::process::Command::new("open").arg(&self.base).spawn().map_err(|e| format!("open {}: {e}", self.base.display()))?;
+                crate::folder::reveal(&self.base).map_err(|e| format!("open {}: {e}", self.base.display()))?;
             }
             Action::MoveOffline => {
                 let current = self.base.clone();
@@ -746,6 +746,8 @@ impl OndApp {
             retry_file: paths.library_db.with_file_name("scrobbles.json"),
             scrobble,
             remote: Arc::new(move |r| remote_bridge.post(Msg::Remote(r))),
+            #[cfg(windows)]
+            hwnd: hwnd(cc),
         });
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
@@ -1136,6 +1138,11 @@ impl OndApp {
 
     /// A media key, Control Center or headphone command.
     fn remote(&mut self, r: Remote) {
+        if r == Remote::Raise {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            return;
+        }
         self.with_player(|p, cx| p.remote(r, cx));
     }
 
@@ -2682,5 +2689,15 @@ mod tests {
         let second = app.player.queue.current.clone().unwrap();
         assert_ne!(second.uid, first.uid, "a new pass began");
         assert_eq!(app.player.queue.history.len(), 1);
+    }
+}
+
+/// The main window's HWND, for the media controls.
+#[cfg(windows)]
+fn hwnd(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
     }
 }

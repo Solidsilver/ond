@@ -168,7 +168,7 @@ fn shortcuts_ui(ui: &mut egui::Ui) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             for k in keys.iter().rev() {
-                                key_cap(ui, k);
+                                key_cap(ui, &crate::keys::shown(k));
                             }
                         });
                     });

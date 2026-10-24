@@ -187,43 +187,80 @@ fn visuals(theme: Theme, t: &Tokens) -> egui::Visuals {
     v
 }
 
-/// Uses the macOS system font (SF) when it's there: a variable font, so one
-/// file gives both the regular and semibold faces via the weight axis. Falls
-/// back to egui's bundled fonts everywhere else.
+/// Uses the system UI font (SF, Segoe UI, or whatever fontconfig calls
+/// sans-serif) and a CJK fallback when they're there, ahead of egui's bundled
+/// fonts.
 fn install_fonts(ctx: &Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    let mut semibold_family = fallback.clone();
-    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
-        let regular = egui::FontData::from_owned(bytes.clone())
-            .tweak(egui::FontTweak { coords: egui::epaint::text::VariationCoords::new([(b"wght", 400.0)]), ..Default::default() });
-        let semi = egui::FontData::from_owned(bytes)
-            .tweak(egui::FontTweak { coords: egui::epaint::text::VariationCoords::new([(b"wght", 590.0)]), ..Default::default() });
-        fonts.font_data.insert("sf".into(), regular.into());
-        fonts.font_data.insert("sf-semibold".into(), semi.into());
+    let mut semibold_family = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let system = system_fonts();
+    // The UI font first, then CJK, then egui's bundled fallbacks.
+    for (name, faces) in [("cjk", system.cjk), ("ui", system.ui)] {
+        let Some([regular, semi]) = faces else { continue };
+        let semi_name = format!("{name}-semibold");
+        fonts.font_data.insert(name.into(), regular.into());
+        fonts.font_data.insert(semi_name.clone(), semi.into());
         if let Some(p) = fonts.families.get_mut(&FontFamily::Proportional) {
-            p.insert(0, "sf".into());
+            p.insert(0, name.into());
         }
-        semibold_family.insert(0, "sf-semibold".into());
+        semibold_family.insert(0, semi_name);
     }
+    fonts.families.insert(semibold(), semibold_family);
+    ctx.set_fonts(fonts);
+}
+
+/// Regular and semibold faces of the UI font and of a CJK font.
+#[derive(Default)]
+struct SystemFonts {
+    ui: Option<[egui::FontData; 2]>,
+    cjk: Option<[egui::FontData; 2]>,
+}
+
+/// One file per weight; the semibold falls back to the regular.
+fn pair(regular: &std::path::Path, semibold: &std::path::Path) -> Option<[egui::FontData; 2]> {
+    let regular = std::fs::read(regular).ok()?;
+    let semi = std::fs::read(semibold).unwrap_or_else(|_| regular.clone());
+    Some([egui::FontData::from_owned(regular), egui::FontData::from_owned(semi)])
+}
+
+#[cfg(target_os = "macos")]
+fn system_fonts() -> SystemFonts {
+    use egui::epaint::text::VariationCoords;
+    // SF is a variable font: one file gives both weights via the weight axis.
+    let ui = std::fs::read("/System/Library/Fonts/SFNS.ttf").ok().map(|bytes| {
+        let weight = |w: f32| egui::FontTweak { coords: VariationCoords::new([(b"wght", w)]), ..Default::default() };
+        [egui::FontData::from_owned(bytes.clone()).tweak(weight(400.0)), egui::FontData::from_owned(bytes).tweak(weight(590.0))]
+    });
     // SF has no CJK. Hiragino Sans covers kanji, kana and most common hanzi in
     // ~8 MB a weight; the Chinese and Korean system fonts are 20–55 MB each,
     // too much to hold in memory for the odd title. Colour emoji is a bitmap
     // font egui can't draw, so it's left out.
-    for (name, file, family) in [
-        ("cjk", "ヒラギノ角ゴシック W3.ttc", FontFamily::Proportional),
-        ("cjk-semibold", "ヒラギノ角ゴシック W6.ttc", semibold()),
-    ] {
-        if let Ok(bytes) = std::fs::read(format!("/System/Library/Fonts/{file}")) {
-            fonts.font_data.insert(name.into(), egui::FontData::from_owned(bytes).into());
-            let list = if family == FontFamily::Proportional { fonts.families.get_mut(&family) } else { Some(&mut semibold_family) };
-            if let Some(list) = list {
-                // After the UI font, before egui's bundled fallbacks.
-                let at = usize::from(list.first().is_some_and(|f| f.starts_with("sf")));
-                list.insert(at, name.into());
-            }
-        }
-    }
-    fonts.families.insert(semibold(), semibold_family);
-    ctx.set_fonts(fonts);
+    let dir = std::path::Path::new("/System/Library/Fonts");
+    let cjk = pair(&dir.join("ヒラギノ角ゴシック W3.ttc"), &dir.join("ヒラギノ角ゴシック W6.ttc"));
+    SystemFonts { ui, cjk }
+}
+
+#[cfg(target_os = "windows")]
+fn system_fonts() -> SystemFonts {
+    let dir = std::env::var_os("WINDIR").map_or_else(|| "C:\\Windows".into(), std::path::PathBuf::from).join("Fonts");
+    // Yu Gothic plays Hiragino's part: Japanese plus the common hanzi.
+    SystemFonts { ui: pair(&dir.join("segoeui.ttf"), &dir.join("seguisb.ttf")), cjk: pair(&dir.join("YuGothR.ttc"), &dir.join("YuGothB.ttc")) }
+}
+
+/// Asks fontconfig, which knows the desktop's chosen sans-serif.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn system_fonts() -> SystemFonts {
+    let find = |pattern: &str| -> Option<std::path::PathBuf> {
+        let out = std::process::Command::new("fc-match").args(["--format=%{file}", pattern]).output().ok()?;
+        let path = String::from_utf8(out.stdout).ok()?;
+        // Only TrueType/OpenType: egui can't read Type 1 or bitmap fonts.
+        let ok = out.status.success() && [".ttf", ".otf", ".ttc"].iter().any(|e| path.to_ascii_lowercase().ends_with(e));
+        ok.then(|| path.into())
+    };
+    let both = |family: &str| {
+        let regular = find(&format!("{family}:weight=regular"))?;
+        let semi = find(&format!("{family}:weight=semibold")).unwrap_or_else(|| regular.clone());
+        pair(&regular, &semi)
+    };
+    SystemFonts { ui: both("sans-serif"), cjk: both("sans-serif:lang=ja") }
 }

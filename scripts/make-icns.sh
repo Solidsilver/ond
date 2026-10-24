@@ -5,7 +5,9 @@
 #   scripts/make-icns.sh path/to/icon.png
 #
 # Writes packaging/macos/Ond.icns (the bundle icon) plus icon-1024.png and
-# icon-256.png (the 256 is the window icon for `cargo run`).
+# icon-256.png (the 256 is the window icon for `cargo run`). The Linux and
+# Windows icons are separate artwork: packaging/linux/hicolor and
+# packaging/windows/ond.ico.
 set -euo pipefail
 
 src=${1:?usage: scripts/make-icns.sh icon.png}

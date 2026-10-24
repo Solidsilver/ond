@@ -238,7 +238,7 @@ impl OndApp {
             ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, t.muted);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if secondary(ui, "Show in Finder").clicked() {
+                if secondary(ui, &format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
                     self.actions.push(Action::RevealOffline);
                 }
                 ui.add_space(4.0);

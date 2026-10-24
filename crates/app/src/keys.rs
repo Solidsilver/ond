@@ -160,6 +160,31 @@ pub fn keys_for(cmd: Cmd) -> Option<&'static str> {
     BINDINGS.iter().find(|b| b.cmd == Some(cmd)).map(|b| b.keys)
 }
 
+/// `keys` as this platform writes them: the table's glyphs on macOS,
+/// "Ctrl+Shift+L" style elsewhere.
+pub fn shown(keys: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") { keys.into() } else { pc_style(keys).into() }
+}
+
+/// "⇧⌘L" → "Ctrl+Shift+L", "⌥↑ ⌥↓" → "Alt+↑ Alt+↓", "⌥⏎" → "Alt+Enter".
+fn pc_style(keys: &str) -> String {
+    let combo = |combo: &str| {
+        let (mut ctrl, mut alt, mut shift, mut key) = (false, false, false, String::new());
+        for ch in combo.chars() {
+            match ch {
+                '⌘' => ctrl = true,
+                '⌥' => alt = true,
+                '⇧' => shift = true,
+                '⏎' => key.push_str("Enter"),
+                c => key.push(c),
+            }
+        }
+        let mods = [(ctrl, "Ctrl+"), (alt, "Alt+"), (shift, "Shift+")];
+        mods.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect::<String>() + &key
+    };
+    keys.split(' ').map(combo).collect::<Vec<_>>().join(" ")
+}
+
 /// Consumes every bound key pressed this frame and returns their commands.
 /// `typing`: a text field has focus, so `idle` keys belong to it.
 pub fn take(input: &mut egui::InputState, typing: bool) -> Vec<Cmd> {
@@ -219,6 +244,15 @@ mod tests {
         }
         h.run_steps(2);
         assert_eq!(h.state(), "hunter2");
+    }
+
+    #[test]
+    fn other_platforms_spell_out_the_modifiers() {
+        assert_eq!(pc_style("⇧⌘L"), "Ctrl+Shift+L");
+        assert_eq!(pc_style("⌥⌘→"), "Ctrl+Alt+→");
+        assert_eq!(pc_style("⌥↑ ⌥↓"), "Alt+↑ Alt+↓");
+        assert_eq!(pc_style("⇧⏎"), "Shift+Enter");
+        assert_eq!(pc_style("Space"), "Space");
     }
 
     #[test]

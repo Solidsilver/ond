@@ -1,4 +1,4 @@
-//! The system's folder picker.
+//! The system's folder picker and file manager.
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,30 @@ pub fn pick(message: &str, start: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(path.to_string()))
 }
 
+/// The XDG desktop portal on Linux (the desktop's own dialog, sandbox or
+/// not), the common item dialog on Windows.
 #[cfg(not(target_os = "macos"))]
-pub fn pick(_: &str, _: &Path) -> Option<PathBuf> {
-    None
+pub fn pick(message: &str, start: &Path) -> Option<PathBuf> {
+    rfd::FileDialog::new().set_title(message).set_directory(start).pick_folder()
+}
+
+/// What the system's file manager is called, for "Show in ...".
+pub const FILE_MANAGER: &str = if cfg!(target_os = "macos") {
+    "Finder"
+} else if cfg!(windows) {
+    "File Explorer"
+} else {
+    "File Manager"
+};
+
+/// Opens `dir` in the file manager.
+pub fn reveal(dir: &Path) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener).arg(dir).spawn().map(drop)
 }

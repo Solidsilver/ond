@@ -33,3 +33,8 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [features]
 # Lets UI previews and tests put `Status` into a state without a running stream.
 preview = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# PipeWire's own API where it's running (cpal falls back to ALSA otherwise).
+# Builds against libpipewire-0.3, which every current desktop distro ships.
+cpal = { version = "0.18.2", features = ["pipewire"] }

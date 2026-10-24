@@ -8,9 +8,23 @@
 //!
 //! Remote commands (media keys, Control Center) come back to the app as
 //! [`Remote`]s, because acting on them needs the queue.
+//!
+//! One module per system, each with the same `install` / `publish` /
+//! `set_artwork`: MediaPlayer on macOS, MPRIS on Linux and the BSDs, the System
+//! Media Transport Controls on Windows.
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+use macos as system;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod mpris;
+#[cfg(all(unix, not(target_os = "macos")))]
+use mpris as system;
+#[cfg(windows)]
+mod smtc;
+#[cfg(windows)]
+use smtc as system;
 pub mod scrobble;
 
 use audio::{PlayState, Status};
@@ -34,6 +48,8 @@ pub enum Remote {
     Seek(f64),
     /// Skip this many seconds forward (negative: back).
     SkipBy(f64),
+    /// Bring the window forward (clicking the player in the desktop's panel).
+    Raise,
 }
 
 /// What the system shows for a track.
@@ -76,8 +92,11 @@ pub struct Config {
     /// Where plays the server didn't take wait for a retry.
     pub retry_file: PathBuf,
     pub scrobble: bool,
-    /// Called on the main thread for each remote command.
+    /// Called for each remote command (on the main thread on macOS).
     pub remote: Arc<dyn Fn(Remote) + Send + Sync>,
+    /// The main window's HWND, which the media controls attach to.
+    #[cfg(windows)]
+    pub hwnd: Option<isize>,
 }
 
 enum In {
@@ -98,8 +117,10 @@ pub struct Session {
 impl Session {
     pub fn start(cfg: Config) -> Self {
         let (tx, rx) = channel();
-        #[cfg(target_os = "macos")]
-        macos::install(cfg.remote.clone());
+        #[cfg(not(windows))]
+        system::install(cfg.remote.clone());
+        #[cfg(windows)]
+        system::install(cfg.remote.clone(), cfg.hwnd);
         let worker = Worker::new(cfg, tx.clone());
         std::thread::Builder::new().name("now-playing".into()).spawn(move || worker.run(rx)).expect("spawn now-playing worker");
         Self { tx }
@@ -406,21 +427,7 @@ impl Worker {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn publish(info: Option<Info>, state: State, elapsed: f64) {
-    macos::publish(info, state, elapsed);
-}
-
-#[cfg(target_os = "macos")]
-fn set_artwork(track_id: String, bytes: Vec<u8>) {
-    macos::set_artwork(track_id, bytes);
-}
-
-#[cfg(not(target_os = "macos"))]
-fn publish(_: Option<Info>, _: State, _: f64) {}
-
-#[cfg(not(target_os = "macos"))]
-fn set_artwork(_: String, _: Vec<u8>) {}
+use system::{publish, set_artwork};
 
 #[cfg(test)]
 mod tests {
