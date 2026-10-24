@@ -4,6 +4,8 @@ Ond is a native macOS music player for [Navidrome](https://www.navidrome.org) an
 
 I wanted a client that treats playback quality as the main feature and stays out of the way otherwise. Ond plays your original files, tells you exactly what happens to the signal on its way to the speakers, and keeps the interface quiet unless you ask for more.
 
+Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
+
 ## What it does
 
 ### Playback
@@ -11,7 +13,6 @@ I wanted a client that treats playback quality as the main feature and stays out
 - Bit-perfect output through CoreAudio. Ond takes exclusive access to the device and switches its sample rate to match each file. It shows a green dot only when every condition holds, and it says why when it can't.
 - Normal mode for everyday listening, with ReplayGain (track, album, or automatic), a sinc resampler and TPDF dither when a file needs converting for your device.
 - Gapless playback, and seeking into parts of a track that haven't downloaded yet.
-- Every output device remembers its own mode. A USB DAC can stay bit-perfect while the laptop speakers stay in Normal mode.
 
 ### Library
 
@@ -104,9 +105,9 @@ Some things need real hardware or a real server. [TESTING.md](TESTING.md) lists 
 
 `main` holds releases and `dev` is where work happens. Pushing a `v*` tag builds the app and publishes a GitHub release.
 
-## How this was made
+## AI Disclosure
 
-I built Ond with Claude Opus 5.5. I set the direction, made the design and product calls, and tested on my own library and hardware. Claude wrote most of the code. I'd rather say that plainly than leave you to guess.
+I built Ond with Claude Opus 5.5 in Claude Code. I came up with the initial idea, did research on the UI design, made all of the design decisions, and tested on my own library and hardware. Claude wrote most of the code. 
 
 ## License
 
