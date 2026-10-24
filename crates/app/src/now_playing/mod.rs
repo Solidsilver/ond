@@ -43,12 +43,15 @@ use subsonic::Client;
 pub enum Remote {
     Play,
     Pause,
+    // The Windows controls have separate play and pause buttons and a seek bar.
+    #[cfg_attr(windows, allow(dead_code))]
     Toggle,
     Next,
     Previous,
     /// Jump to this position, in seconds.
     Seek(f64),
     /// Skip this many seconds forward (negative: back).
+    #[cfg_attr(windows, allow(dead_code))]
     SkipBy(f64),
     /// Bring the window forward (clicking the player in the desktop's panel).
     Raise,

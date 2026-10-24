@@ -2126,6 +2126,16 @@ pub fn track_ref(t: &Track) -> TrackRef {
 }
 
 
+/// The main window's HWND, for the media controls.
+#[cfg(windows)]
+fn hwnd(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Headless frames of the main window with a populated library, queue and
@@ -2689,15 +2699,5 @@ mod tests {
         let second = app.player.queue.current.clone().unwrap();
         assert_ne!(second.uid, first.uid, "a new pass began");
         assert_eq!(app.player.queue.history.len(), 1);
-    }
-}
-
-/// The main window's HWND, for the media controls.
-#[cfg(windows)]
-fn hwnd(cc: &eframe::CreationContext<'_>) -> Option<isize> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    match cc.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
-        _ => None,
     }
 }
