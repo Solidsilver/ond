@@ -6,3 +6,7 @@
 .idea/
 .vscode/
 *.swp
+/.direnv/
+# nix build
+/result
+/result-*
