@@ -166,29 +166,45 @@ pub fn keys_for(cmd: Cmd) -> Option<&'static str> {
     BINDINGS.iter().find(|b| b.cmd == Some(cmd)).map(|b| b.keys)
 }
 
-/// `keys` as this platform writes them: the table's glyphs on macOS,
-/// "Ctrl+Shift+L" style elsewhere.
-pub fn shown(keys: &str) -> std::borrow::Cow<'_, str> {
-    if cfg!(target_os = "macos") { keys.into() } else { pc_style(keys).into() }
+/// Text with key combos, as this platform writes them: the Mac glyphs on
+/// macOS, "Ctrl+Shift+L" style elsewhere. Works on a bare combo ("⇧⌘L") and
+/// on combos inside a sentence ("Back (⌘[)").
+pub fn shown(text: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") || !text.contains(['⌘', '⌥', '⇧', '⏎']) { text.into() } else { pc_style(text).into() }
 }
 
-/// "⇧⌘L" → "Ctrl+Shift+L", "⌥↑ ⌥↓" → "Alt+↑ Alt+↓", "⌥⏎" → "Alt+Enter".
-fn pc_style(keys: &str) -> String {
-    let combo = |combo: &str| {
-        let (mut ctrl, mut alt, mut shift, mut key) = (false, false, false, String::new());
-        for ch in combo.chars() {
-            match ch {
+/// "⇧⌘L" → "Ctrl+Shift+L", "Back (⌘[)" → "Back (Ctrl+[)", "⌥⏎" → "Alt+Enter".
+fn pc_style(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if !matches!(c, '⌘' | '⌥' | '⇧' | '⏎') {
+            out.push(c);
+            continue;
+        }
+        // A run of modifiers, then the key they go with.
+        let (mut ctrl, mut alt, mut shift, mut key) = (false, false, false, Some(c));
+        while let Some(k) = key {
+            match k {
                 '⌘' => ctrl = true,
                 '⌥' => alt = true,
                 '⇧' => shift = true,
-                '⏎' => key.push_str("Enter"),
-                c => key.push(c),
+                _ => break,
+            }
+            key = chars.next();
+        }
+        for (on, name) in [(ctrl, "Ctrl+"), (alt, "Alt+"), (shift, "Shift+")] {
+            if on {
+                out.push_str(name);
             }
         }
-        let mods = [(ctrl, "Ctrl+"), (alt, "Alt+"), (shift, "Shift+")];
-        mods.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect::<String>() + &key
-    };
-    keys.split(' ').map(combo).collect::<Vec<_>>().join(" ")
+        match key {
+            Some('⏎') => out.push_str("Enter"),
+            Some(k) => out.push(k),
+            None => {}
+        }
+    }
+    out
 }
 
 /// Consumes every bound key pressed this frame and returns their commands.
@@ -259,6 +275,9 @@ mod tests {
         assert_eq!(pc_style("⌥↑ ⌥↓"), "Alt+↑ Alt+↓");
         assert_eq!(pc_style("⇧⏎"), "Shift+Enter");
         assert_eq!(pc_style("Space"), "Space");
+        assert_eq!(pc_style("Back (⌘[)"), "Back (Ctrl+[)");
+        assert_eq!(pc_style("⏎ open    ⌘⏎ play"), "Enter open    Ctrl+Enter play");
+        assert_eq!(pc_style("press ⇧⌘D on its page."), "press Ctrl+Shift+D on its page.");
     }
 
     #[test]

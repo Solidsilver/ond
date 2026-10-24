@@ -58,27 +58,27 @@ impl ViewCtx<'_> {
                     }
                 });
                 ui.add_space(14.0);
-                egui::ScrollArea::vertical().id_salt("favorite-songs").auto_shrink(false).show(ui, |ui| {
+                super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("favorite-songs").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
                     self.track_list(ui, &v.songs, &favorites_source(), ListOpts { numbers: false, artist: true, playlist: None });
-                });
+                }));
             }
             FavTab::Albums => {
                 let ids: Vec<usize> = v.albums.iter().filter_map(|id| self.data.by_id.get(id).copied()).collect();
                 if ids.is_empty() {
                     return empty(ui, "Albums you love show up here. Use the heart next to Play on an album.");
                 }
-                let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
-                egui::ScrollArea::vertical().id_salt("favorite-albums").auto_shrink(false).show(ui, |ui| {
+                let (cols, tile) = grid_metrics(ui.available_width());
+                super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("favorite-albums").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
                     for chunk in ids.chunks(cols) {
                         self.grid_row(ui, chunk, tile);
                     }
-                });
+                }));
             }
             FavTab::Artists => {
                 if v.artists.is_empty() {
                     return empty(ui, "Artists you love show up here. Use the heart on an artist's page.");
                 }
-                egui::ScrollArea::vertical().id_salt("favorite-artists").auto_shrink(false).show(ui, |ui| {
+                super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("favorite-artists").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for (id, name) in &v.artists {
                         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
@@ -93,7 +93,7 @@ impl ViewCtx<'_> {
                             self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: Some(id.clone()) }));
                         }
                     }
-                });
+                }));
             }
         }
     }

@@ -104,7 +104,7 @@ pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: b
         };
         crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
     }
-    let label = label.to_owned();
+    let label = crate::keys::shown(label).into_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
 }
@@ -471,7 +471,7 @@ pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &st
         ui.add_space(6.0);
         ui.scope(|ui| {
             ui.set_max_width(440.0);
-            ui.add(egui::Label::new(egui::RichText::new(body).size(13.0).color(t.muted)).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(body)).size(13.0).color(t.muted)).wrap());
         });
     });
 }

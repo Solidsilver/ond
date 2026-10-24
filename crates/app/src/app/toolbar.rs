@@ -212,7 +212,7 @@ impl OndApp {
         if !heart_resp.hovered() && !on_readout && !strip_resp.hovered() {
             body.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
-        heart_resp.on_hover_text(love_label);
+        heart_resp.on_hover_text(crate::keys::shown(love_label));
         if let (Some(resp), Some(r)) = (readout_resp, readout) {
             resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
         }

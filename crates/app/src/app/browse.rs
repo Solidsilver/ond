@@ -187,8 +187,8 @@ impl OndApp {
             });
             ui.add_space(14.0);
         }
-        let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
-        egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).show(ui, |ui| {
+        let (cols, tile) = grid_metrics(ui.available_width());
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
             for chunk in own.chunks(cols) {
                 self.view().grid_row(ui, chunk, tile);
             }
@@ -204,7 +204,7 @@ impl OndApp {
                 let text = if self.sync.tracks { "Nothing yet. Credits fill in while tracks sync." } else { "No albums credit this name." };
                 ui.label(egui::RichText::new(text).color(t.muted));
             }
-        });
+        }));
     }
 }
 
@@ -285,7 +285,7 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
     let label = if kept { "Remove download" } else { "Make available offline" };
     let mut button = egui::Button::new(label);
     if let Some(keys) = shortcut {
-        button = button.shortcut_text(keys);
+        button = button.shortcut_text(crate::keys::shown(keys));
     }
     if ui.add(button).clicked() {
         actions.push(Action::KeepOffline(what(), !kept));
@@ -319,14 +319,14 @@ impl ViewCtx<'_> {
             ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
             return;
         }
-        let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
+        let (cols, tile) = grid_metrics(ui.available_width());
         let rows = ids.len().div_ceil(cols);
-        egui::ScrollArea::vertical().id_salt(("grid", format!("{route:?}"))).auto_shrink(false).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("grid", format!("{route:?}"))).auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
             for row in range {
                 let slice = &ids[row * cols..((row + 1) * cols).min(ids.len())];
                 self.grid_row(ui, slice, tile);
             }
-        });
+        }));
     }
 
     /// One grid row of tiles, followed by the row gap.
@@ -408,7 +408,7 @@ impl ViewCtx<'_> {
         // The server's artists (with ids) once synced, else album-artist names.
         let artists = Arc::clone(&index.artists);
         self.heading(ui, "Artists", Some(artists.len().to_string()));
-        egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).show_rows(ui, 32.0, artists.len(), |ui, range| {
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, 32.0, artists.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for a in &artists[range] {
                 let (name, id, n) = (&a.name, &a.id, &a.albums);
@@ -427,7 +427,7 @@ impl ViewCtx<'_> {
                 }
                 resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(name.clone()), true, false, None, self.actions));
             }
-        });
+        }));
     }
 }
 

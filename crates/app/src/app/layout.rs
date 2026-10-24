@@ -98,6 +98,25 @@ pub fn edge_handle(ui: &Ui, id: Id, x: f32, top: f32, bottom: f32) -> Drag {
     Drag { dx: if resp.dragged() { resp.drag_delta().x } else { 0.0 }, reset: resp.double_clicked() }
 }
 
+/// How far a page's scroll area reaches into the content column's right
+/// margin. The scroll bar sits in that gutter, between the content and the
+/// next column, and the content keeps the right edge the headings have.
+pub const GUTTER: f32 = 20.0;
+
+/// Runs `add` in a ui that reaches [`GUTTER`] into the right margin. Give the
+/// scroll area inside `.content_margin(gutter())` so its content stays put.
+pub fn into_gutter<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let mut rect = ui.available_rect_before_wrap();
+    rect.max.x += GUTTER;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), add).inner
+}
+
+/// A scroll area's content margin that keeps its content out of [`GUTTER`].
+pub fn gutter() -> egui::Margin {
+    egui::Margin { right: GUTTER as i8, ..Default::default() }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

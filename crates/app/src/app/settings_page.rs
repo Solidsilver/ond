@@ -399,7 +399,7 @@ fn row(ui: &mut Ui, label: &str, control: impl FnOnce(&mut Ui)) {
 fn hint(ui: &mut Ui, text: &str) {
     let t = Tokens::of(ui);
     ui.add_space(4.0);
-    ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(t.muted)).wrap());
+    ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(text)).size(12.0).color(t.muted)).wrap());
 }
 
 /// A dB value on a thin slider with a readout, snapped to 0.5 dB.

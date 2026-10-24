@@ -125,7 +125,7 @@ impl ViewCtx<'_> {
         self.songs_keys(ui, &order);
 
         // Header.
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width() - 12.0, 26.0), Sense::hover());
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
         let cols = columns(head);
         for (col, label, rect, right) in [
             (Column::Title, "Title", cols.title, false),
@@ -158,11 +158,11 @@ impl ViewCtx<'_> {
 
         let tracks = self.data.tracks.all.clone();
         let current = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
-        egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false).show_rows(ui, ROW_H, order.len(), |ui, range| {
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, ROW_H, order.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for row in range {
                 let tr = &tracks[order[row]];
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width() - 12.0, ROW_H), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
                 let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(row);
                 if selected {
                     resp.scroll_to_me(None);
@@ -213,7 +213,7 @@ impl ViewCtx<'_> {
                     }
                 });
             }
-        });
+        }));
     }
 
     /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
