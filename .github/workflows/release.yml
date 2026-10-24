@@ -103,13 +103,25 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/release-notes
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
+      # Hand-written notes for this tag, if there are any, above GitHub's changelog.
+      - name: Release notes
+        run: |
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          [ -f "$notes" ] || : > "$notes"
+          echo "notes=$notes" >> "$GITHUB_ENV"
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          body_path: ${{ env.notes }}
           generate_release_notes: true
           files: dist/*
