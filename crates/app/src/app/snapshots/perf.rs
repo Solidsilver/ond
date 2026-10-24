@@ -271,6 +271,22 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
             println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
         }
     }
+    // The spectrogram, with the Info tab showing.
+    for (scene, player) in [("full window", false), ("Player", true)] {
+        let setup = |h: &mut Harness<'_, Option<OndApp>>| {
+            reset(h, if player { vec2(380.0, 880.0) } else { FULL }, Route::Recent);
+            if player {
+                app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+            }
+            app_mut(h).ui.queue_ui.tab = QueueTab::Info;
+        };
+        setup(h);
+        let off = time_with_audio(h, 60);
+        setup(h);
+        experiment(h, |x| x.spectrogram = true);
+        let with = time_with_audio(h, 60);
+        println!("  {:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", "spectrogram in Info", ms(off), ms(with));
+    }
     // The visualizer, full window: its CPU side (the scene and the paint
     // callback; the GPU work isn't timed here) and the painter version.
     for (scene, gpu) in [("visualizer, GPU (CPU side)", Some(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8Unorm)), ("visualizer, painter", None)] {

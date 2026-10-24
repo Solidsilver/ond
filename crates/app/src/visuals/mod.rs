@@ -11,6 +11,7 @@ pub mod backdrop;
 pub mod colors;
 pub mod gpu;
 pub mod visualizer;
+pub mod spectrogram;
 pub mod spectrum;
 pub mod waveform;
 

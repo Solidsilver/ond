@@ -522,21 +522,28 @@ fn fixture_waveform(app: &mut OndApp) {
     app.waveforms.insert(id, analysis::Peaks { values });
 }
 
-/// Stands in for the output callback: hands the audio tap `frames` of a fixed
-/// chord over a little noise, as if they had just played.
+/// Stands in for the output callback: hands the audio tap `frames` of made-up
+/// music, as if they had just played: a chord that moves every two seconds,
+/// a soft kick on the beat and a little noise. Deterministic: where it is in
+/// the progression follows how much the tap has been given.
 fn feed_tap(app: &OndApp, frames: usize) {
     const RATE: u32 = 44_100;
     let tap = &app.engine.status.tap;
-    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-    let tones = [(55.0, 0.5), (110.0, 0.3), (220.0, 0.22), (330.0, 0.16), (440.0, 0.12), (660.0, 0.06), (1320.0, 0.03), (2640.0, 0.015), (5280.0, 0.006)];
+    let (start, _) = tap.read(&mut []);
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ start;
+    let tones = [(55.0, 0.35), (110.0, 0.3), (220.0, 0.22), (330.0, 0.16), (440.0, 0.12), (660.0, 0.06), (1320.0, 0.03), (2640.0, 0.015), (5280.0, 0.006)];
     let mono: Vec<f32> = (0..frames)
         .map(|i| {
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
-            let t = i as f32 / RATE as f32;
-            let noise = ((seed % 2000) as f32 / 1000.0 - 1.0) * 0.002;
-            tones.iter().map(|(hz, a)| a * (std::f32::consts::TAU * hz * t).sin()).sum::<f32>() + noise
+            let n = start + i as u64;
+            let t = n as f32 / RATE as f32;
+            let root = [1.0, 4.0 / 3.0, 3.0 / 2.0, 6.0 / 5.0][(n / (2 * RATE as u64)) as usize % 4];
+            let beat = (t * 2.0).fract();
+            let kick = 0.6 * (-beat * 18.0).exp() * (std::f32::consts::TAU * 50.0 * t).sin();
+            let noise = ((seed % 2000) as f32 / 1000.0 - 1.0) * (0.002 + 0.02 * (-((t * 4.0).fract()) * 30.0).exp());
+            tones.iter().map(|(hz, a)| a * (std::f32::consts::TAU * hz * root * t).sin()).sum::<f32>() * 0.8 + kick + noise
         })
         .collect();
     tap.write(&mono, &[], 1, RATE);
@@ -1383,6 +1390,19 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot_now(h, "x-visualizer-painter");
     app_mut(h).close_visualizer();
     app_mut(h).gpu = gpu;
+    // The spectrogram in the Info tab, full window and Player, after a few
+    // seconds of the fixture chord.
+    for (size, player, name) in [(FULL, false, "x-spectrogram-full"), (player, true, "x-spectrogram-player")] {
+        reset(h, size, Route::Recent);
+        if player {
+            app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+        }
+        app_mut(h).ui.queue_ui.tab = QueueTab::Info;
+        app_mut(h).ui.spectrogram.clear();
+        experiment(h, |x| x.spectrogram = true);
+        frames(h, 150);
+        s.shoot_now(h, name);
+    }
     // What a GPU frame costs with the visualizer against the ordinary window,
     // rendered offscreen and read back (the read-back is in both).
     let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {

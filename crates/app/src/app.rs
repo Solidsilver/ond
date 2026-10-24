@@ -485,6 +485,8 @@ pub struct UiState {
     pub backdrop: crate::visuals::backdrop::Crossfade,
     /// The playing audio's spectrum, for the live visuals (experimental).
     pub listener: crate::visuals::spectrum::Listener,
+    /// The Info tab's spectrogram (experimental).
+    pub spectrogram: crate::visuals::spectrogram::Spectrogram,
     /// The visualizer, while it's open (experimental).
     pub visualizer: Option<visualizer_view::VisualizerView>,
 }
@@ -528,6 +530,7 @@ impl UiState {
             backdrop: Default::default(),
             listener: Default::default(),
             visualizer: None,
+            spectrogram: Default::default(),
         }
     }
 }
@@ -1950,6 +1953,10 @@ impl OndApp {
         self.art.poll();
         self.art_tint(&ctx);
         self.want_waveform();
+        if !self.experimental().spectrogram {
+            // Turned off: the picture goes (and its texture with it).
+            self.ui.spectrogram.clear();
+        }
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
         if self.ui.visualizer.is_some() && !self.experimental().visualizer {
