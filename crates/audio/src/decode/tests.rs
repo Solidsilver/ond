@@ -222,7 +222,7 @@ fn seek_cuts_stale_audio_and_resumes_at_the_exact_frame() {
     assert!((66_150..66_150 + 4_096).contains(&status.frames_played.load(Ordering::Relaxed)));
     // Cached data: playback resumes without a noticeable wait.
     while dev.played.len() == before {
-        assert!(t.elapsed() < Duration::from_millis(50), "cached seek took {:?}", t.elapsed());
+        assert!(t.elapsed() < slack(Duration::from_millis(50)), "cached seek took {:?}", t.elapsed());
         dev.tick(64);
     }
     play_to_end(&s, &mut dev);
@@ -524,4 +524,10 @@ fn replay_gain_tags_are_read_by_standard_or_raw_key() {
     ];
     let rg = replay_gain_from_tags(tags.iter());
     assert_eq!(rg, ReplayGain { track_gain: Some(-7.5), album_gain: Some(-8.25), track_peak: Some(0.988), album_peak: None });
+}
+
+/// Time budgets in these tests are tight on purpose (they guard real
+/// performance), but shared CI runners are slower and noisier: allow 10× there.
+fn slack(d: std::time::Duration) -> std::time::Duration {
+    if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }

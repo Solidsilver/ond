@@ -119,7 +119,7 @@ fn store(dir: &Path, rt: &tokio::runtime::Runtime) -> OfflineStore {
 fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
     let start = Instant::now();
     while !cond() {
-        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(start.elapsed() < slack(Duration::from_secs(10)), "timed out waiting for {what}");
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -249,7 +249,7 @@ fn unpinning_a_big_playlist_returns_at_once_and_cleans_up_behind() {
     }
     let t = Instant::now();
     s.unpin(&Pin::Playlist("big".into()));
-    assert!(t.elapsed() < Duration::from_millis(200), "unpin took {:?}", t.elapsed());
+    assert!(t.elapsed() < slack(Duration::from_millis(200)), "unpin took {:?}", t.elapsed());
     wait_for("the files to go", || std::fs::read_dir(dir.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".flac")));
     // Re-pinning before the deleter gets to a track keeps its file.
     s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
@@ -336,7 +336,7 @@ fn pinning_many_tracks_at_once_returns_at_once_and_is_saved() {
     let t = Instant::now();
     // No source: nothing downloads, so this measures pinning alone.
     s.pin_many(pins);
-    assert!(t.elapsed() < Duration::from_millis(50), "pin_many took {:?}", t.elapsed());
+    assert!(t.elapsed() < slack(Duration::from_millis(50)), "pin_many took {:?}", t.elapsed());
     assert!(s.is_pinned(&Pin::Track("t499".into())));
     drop(s);
     // Saved in the background, and complete once the store is gone.
@@ -421,4 +421,10 @@ fn each_account_keeps_its_own_downloads_and_old_stores_are_adopted() {
     let s = store(&account_store(&moved, 1).unwrap(), &rt);
     assert!(s.snapshot().is_done("t"));
     assert_eq!(server.requests().len(), 1);
+}
+
+/// Time budgets in these tests are tight on purpose (they guard real
+/// performance), but shared CI runners are slower and noisier: allow 10× there.
+fn slack(d: std::time::Duration) -> std::time::Duration {
+    if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }

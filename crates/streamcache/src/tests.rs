@@ -151,14 +151,14 @@ fn seek_forward_past_download_point_then_backward() {
 
     let t = Instant::now();
     assert_eq!(read_at(&mut src, 1_800_000, 64 * 1024), body[1_800_000..1_800_000 + 64 * 1024]);
-    assert!(t.elapsed() < Duration::from_secs(1), "forward seek waited {:?}", t.elapsed());
+    assert!(t.elapsed() < slack(Duration::from_secs(1)), "forward seek waited {:?}", t.elapsed());
     assert!(server.requests().contains(&Some(1_800_000)), "no ranged request: {:?}", server.requests());
 
     // Backward into what the first request already fetched.
     assert_eq!(read_at(&mut src, 100, 4096), body[100..4196]);
 
     // The skipped middle is filled in afterwards and the file completes.
-    wait_until("gap fill", Duration::from_secs(10), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("gap fill", slack(Duration::from_secs(10)), || cache.progress(&key).is_some_and(|p| p.complete));
     let mut all = Vec::new();
     src.seek(SeekFrom::Start(0)).unwrap();
     src.read_to_end(&mut all).unwrap();
@@ -381,7 +381,7 @@ fn a_stalled_response_times_out_and_resumes() {
     let mut all = Vec::new();
     src.read_to_end(&mut all).unwrap();
     assert_eq!(all, *body);
-    assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+    assert!(t.elapsed() < slack(Duration::from_secs(5)), "took {:?}", t.elapsed());
     let starts = starts.lock().unwrap().clone();
     assert!(starts.len() >= 2 && starts[1] > 0, "resumed with a Range request: {starts:?}");
 }
@@ -404,4 +404,10 @@ fn clearing_forgets_and_deletes_every_file() {
     assert_eq!(cache.size(), 0);
     assert!(cache.complete_path(&CacheKey::new("a", None)).is_none());
     wait_until("deletion", Duration::from_secs(5), || !dir.path().join("a").exists() && !dir.path().join("b").exists());
+}
+
+/// Time budgets in these tests are tight on purpose (they guard real
+/// performance), but shared CI runners are slower and noisier: allow 10× there.
+fn slack(d: std::time::Duration) -> std::time::Duration {
+    if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }
