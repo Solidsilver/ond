@@ -3291,6 +3291,7 @@ dependencies = [
  "objc2-media-player",
  "offline",
  "raw-window-handle",
+ "realfft",
  "rfd",
  "serde",
  "serde_json",

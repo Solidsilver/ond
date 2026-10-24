@@ -58,6 +58,17 @@ impl ViewCtx<'_> {
         self.prefs.get(|s| s.experimental)
     }
 
+    /// This frame's spectrum of what's playing, for a visual on screen, which
+    /// keeps the frames coming while it plays. `None` unless playing.
+    pub fn listen(&mut self, ui: &egui::Ui) -> Option<crate::visuals::spectrum::Frame> {
+        if self.engine.status.state() != audio::PlayState::Playing {
+            return None;
+        }
+        self.ui.live.want(crate::visuals::METER);
+        let (pass, now) = (ui.ctx().cumulative_pass_nr(), ui.input(|i| i.time));
+        Some(self.ui.listener.frame(&self.engine.status.tap, pass, now).clone())
+    }
+
     /// The Player's lyrics drawer is open.
     pub fn lyrics_drawer(&self) -> bool {
         self.prefs.get(|s| s.window.lyrics_open)

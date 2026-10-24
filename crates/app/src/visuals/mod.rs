@@ -9,6 +9,7 @@
 
 pub mod backdrop;
 pub mod colors;
+pub mod spectrum;
 pub mod waveform;
 
 
@@ -48,8 +49,6 @@ pub struct Live {
     every: Option<Duration>,
 }
 
-// Nothing moves yet; the live visuals that use this follow.
-#[allow(dead_code)]
 impl Live {
     /// Something on screen moves with the music and wants a frame every `every`.
     pub fn want(&mut self, every: Duration) {
@@ -67,8 +66,24 @@ impl Live {
 #[allow(dead_code)]
 pub const SMOOTH: Duration = Duration::from_millis(16);
 /// About 30 frames a second, for small meters.
-#[allow(dead_code)]
 pub const METER: Duration = Duration::from_millis(33);
+
+/// Bars standing on `floor` (the bottom of `area`), one per value (0..=1),
+/// for a small spectrum.
+pub fn paint_bars(painter: &egui::Painter, area: egui::Rect, values: &[f32], color: egui::Color32) {
+    let step = area.width() / values.len().max(1) as f32;
+    let half_w = (step * 0.62).max(1.0) / 2.0;
+    let mut mesh = egui::Mesh::default();
+    for (i, v) in values.iter().enumerate() {
+        let cx = area.left() + step * (i as f32 + 0.5);
+        let h = area.height() * v.clamp(0.0, 1.0);
+        if h < 0.5 {
+            continue;
+        }
+        mesh.add_colored_rect(egui::Rect::from_min_max(egui::pos2(cx - half_w, area.bottom() - h), egui::pos2(cx + half_w, area.bottom())), color);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
 
 #[cfg(test)]
 mod tests {

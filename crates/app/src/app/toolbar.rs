@@ -122,6 +122,15 @@ impl OndApp {
         let fill = crate::theme::tint_of(ui).map_or(t.sidebar, |x| x.display);
         painter.rect(rect, 7.0, fill, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
         let body = ui.interact(rect, ui.scope_id().with("lcd"), Sense::click());
+        // The live spectrum, faint behind the text (experimental).
+        if self.experimental().spectrum
+            && self.player.queue.current.is_some()
+            && let Some(f) = self.view().listen(ui)
+        {
+            let area = Rect::from_min_max(pos2(rect.left() + rect.height() + 8.0, rect.top() + 5.0), pos2(rect.right() - 8.0, rect.bottom() - 13.0));
+            let n = ((area.width() / 6.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
+            crate::visuals::paint_bars(&painter, area, &crate::visuals::spectrum::grouped(&f.bands, n), t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }));
+        }
         let Some(item) = self.player.queue.current.clone() else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), t.muted);
             return;

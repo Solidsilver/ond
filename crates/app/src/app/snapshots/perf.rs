@@ -246,7 +246,12 @@ fn perf() {
 /// Each experimental visual's frame cost: the same scenes with it off, then on.
 fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
     type Switch = fn(&mut crate::visuals::Experimental);
-    let features: [(&str, Switch); 3] = [("colors from the art", |x| x.art_colors = true), ("blurred artwork", |x| x.backdrop = true), ("waveform seek bar", |x| x.waveform = true)];
+    let features: [(&str, Switch); 4] = [
+        ("colors from the art", |x| x.art_colors = true),
+        ("blurred artwork", |x| x.backdrop = true),
+        ("waveform seek bar", |x| x.waveform = true),
+        ("live spectrum", |x| x.spectrum = true),
+    ];
     println!("experimental visuals, mean frame time off → on:");
     for (name, on) in features {
         for (scene, player) in [("full window", false), ("Player", true)] {
@@ -257,16 +262,30 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
                 }
             };
             setup(h);
-            let off = time_frames(h, 60);
+            let off = time_with_audio(h, 60);
             setup(h);
             experiment(h, on);
             fixture_waveform(app_mut(h));
             settle_look(h);
-            let with = time_frames(h, 60);
-            println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off.mean), ms(with.mean));
+            let with = time_with_audio(h, 60);
+            println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
         }
     }
     reset(h, FULL, Route::Recent);
+}
+
+/// Mean time of `n` frames, each with fresh audio in the tap as if playing
+/// (the copy itself is the output callback's cost, not the frame's).
+fn time_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) -> Duration {
+    steps_with_audio(h, 5);
+    let mut total = Duration::ZERO;
+    for _ in 0..n {
+        feed_tap(app_mut(h), 1024);
+        let t = Instant::now();
+        h.step();
+        total += t.elapsed();
+    }
+    total / n as u32
 }
 
 fn ms(d: Duration) -> f64 {

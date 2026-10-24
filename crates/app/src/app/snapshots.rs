@@ -522,6 +522,34 @@ fn fixture_waveform(app: &mut OndApp) {
     app.waveforms.insert(id, analysis::Peaks { values });
 }
 
+/// Stands in for the output callback: hands the audio tap `frames` of a fixed
+/// chord over a little noise, as if they had just played.
+fn feed_tap(app: &OndApp, frames: usize) {
+    const RATE: u32 = 44_100;
+    let tap = &app.engine.status.tap;
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let tones = [(55.0, 0.5), (110.0, 0.3), (220.0, 0.22), (330.0, 0.16), (440.0, 0.12), (660.0, 0.06), (1320.0, 0.03), (2640.0, 0.015), (5280.0, 0.006)];
+    let mono: Vec<f32> = (0..frames)
+        .map(|i| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let t = i as f32 / RATE as f32;
+            let noise = ((seed % 2000) as f32 / 1000.0 - 1.0) * 0.002;
+            tones.iter().map(|(hz, a)| a * (std::f32::consts::TAU * hz * t).sin()).sum::<f32>() + noise
+        })
+        .collect();
+    tap.write(&mono, &[], 1, RATE);
+}
+
+/// Steps `n` frames with fresh audio in the tap before each.
+fn steps_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) {
+    for _ in 0..n {
+        feed_tap(app_mut(h), 4096);
+        h.step();
+    }
+}
+
 /// Plays Kind of Blue instead (another cover than the fixture's).
 fn play_blue(app: &mut OndApp) {
     app.player.queue.play_now(kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
@@ -1292,6 +1320,28 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     fixture_waveform(app_mut(h));
     settle_look(h);
     s.shoot(h, "x-together-player");
+
+    // The live spectrum: along the foot of the Player's artwork, and faint
+    // behind the now-playing display's text.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    experiment(h, |x| x.spectrum = true);
+    steps_with_audio(h, 4);
+    s.shoot_now(h, "x-spectrum-player");
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| x.spectrum = true);
+    steps_with_audio(h, 4);
+    s.shoot_now(h, "x-spectrum-full");
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| {
+        x.spectrum = true;
+        x.art_colors = true;
+        x.waveform = true;
+    });
+    fixture_waveform(app_mut(h));
+    settle_look(h);
+    steps_with_audio(h, 4);
+    s.shoot_now(h, "x-spectrum-colors-full");
 }
 
 #[test]
@@ -1434,6 +1484,49 @@ fn column_edges_drag_and_persist() {
 
 #[cfg(test)]
 mod perf;
+
+/// A live visual asks for frames, and has the engine copy what plays, only
+/// while it's on screen and something plays; otherwise the app's own pace
+/// (nothing sooner than its clock) and the tap off.
+#[test]
+fn live_visuals_ask_for_frames_only_while_playing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let soon = |h: &mut Harness<'_, Option<OndApp>>| h.output().viewport_output.values().any(|v| v.repaint_delay <= Duration::from_millis(50));
+    reset(&mut h, FULL, Route::Recent);
+    h.run_steps(3);
+    assert!(!soon(&mut h), "every switch off: no extra frames");
+    assert!(!app_mut(&mut h).engine.status.tap.active());
+    experiment(&mut h, |x| x.spectrum = true);
+    steps_with_audio(&mut h, 3);
+    assert!(soon(&mut h), "the spectrum on screen while playing wants frames");
+    assert!(app_mut(&mut h).engine.status.tap.active(), "and the tap is on");
+    app_mut(&mut h).engine.status.preview(PlayState::Paused, 141.0, 383.0, 0.72);
+    h.run_steps(3);
+    assert!(!soon(&mut h), "paused: no extra frames");
+    assert!(!app_mut(&mut h).engine.status.tap.active(), "and the tap is off");
+    // Playing again, but in a view without it (Mini shows no spectrum).
+    app_mut(&mut h).engine.status.preview(PlayState::Playing, 141.0, 383.0, 0.72);
+    app_mut(&mut h).edit_windows(|w| w.mode = WindowMode::Mini);
+    h.set_size(vec2(280.0, 280.0));
+    h.run_steps(3);
+    assert!(!soon(&mut h), "not on screen: no extra frames");
+    assert!(!app_mut(&mut h).engine.status.tap.active());
+    *h.state_mut() = None;
+}
 
 #[test]
 fn the_now_playing_heart_toggles_both_ways() {

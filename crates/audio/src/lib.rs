@@ -33,6 +33,7 @@ pub mod output;
 pub mod replaygain;
 mod resample;
 mod signal;
+pub mod tap;
 
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
@@ -219,6 +220,8 @@ pub struct Status {
     pub(crate) bit_perfect: AtomicBool,
     /// ReplayGain per session track, read by the callback at each boundary.
     pub(crate) gains: TrackGains,
+    /// A copy of what plays, for visuals; idle until something reads it.
+    pub tap: tap::Tap,
 }
 
 impl Status {

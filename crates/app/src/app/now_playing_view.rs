@@ -114,6 +114,16 @@ impl ViewCtx<'_> {
             let shadow = egui::Shadow { offset: [0, (side / 40.0) as i8], blur: (side / 14.0).min(28.0) as u8, spread: 0, color: Color32::from_black_alpha(if dark { 110 } else { 46 }) };
             ui.painter().add(shadow.as_shape(art, 8));
             this.art.paint(ui, art, cover.as_deref(), if side < 120.0 { 6.0 } else { 8.0 });
+            // The live spectrum along the foot of the artwork (experimental).
+            if side >= 120.0
+                && this.experimental().spectrum
+                && let Some(f) = this.listen(ui)
+            {
+                let inset = (side * 0.05).round();
+                let area = Rect::from_min_max(pos2(art.left() + inset, art.bottom() - side * 0.2), pos2(art.right() - inset, art.bottom() - inset * 0.6));
+                let n = ((area.width() / 9.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
+                crate::visuals::paint_bars(ui.painter(), area, &crate::visuals::spectrum::grouped(&f.bands, n), Color32::from_white_alpha(120));
+            }
         };
 
         let compact = side.is_none();

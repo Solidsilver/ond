@@ -479,6 +479,8 @@ pub struct UiState {
     pub tint: crate::visuals::colors::Easing,
     /// The blurred cover behind the Player and Mini, fading between covers (experimental).
     pub backdrop: crate::visuals::backdrop::Crossfade,
+    /// The playing audio's spectrum, for the live visuals (experimental).
+    pub listener: crate::visuals::spectrum::Listener,
 }
 
 impl UiState {
@@ -518,6 +520,7 @@ impl UiState {
             live: Default::default(),
             tint: Default::default(),
             backdrop: Default::default(),
+            listener: Default::default(),
         }
     }
 }
@@ -1971,6 +1974,11 @@ impl OndApp {
         // sooner than the usual clock, but only while something plays.
         if let Some(every) = self.ui.live.next(self.engine.status.state() == PlayState::Playing) {
             ctx.request_repaint_after(every);
+        }
+        // The engine copies what plays only while something on screen shows it.
+        let listening = self.ui.listener.used_in(ctx.cumulative_pass_nr());
+        if listening != self.engine.status.tap.active() {
+            self.engine.status.tap.set_active(listening);
         }
     }
 
