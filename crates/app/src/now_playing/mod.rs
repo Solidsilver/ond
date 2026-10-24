@@ -25,6 +25,8 @@ use mpris as system;
 mod smtc;
 #[cfg(windows)]
 use smtc as system;
+#[cfg(windows)]
+pub use smtc::set_window;
 pub mod scrobble;
 
 use audio::{PlayState, Status};
@@ -94,9 +96,6 @@ pub struct Config {
     pub scrobble: bool,
     /// Called for each remote command (on the main thread on macOS).
     pub remote: Arc<dyn Fn(Remote) + Send + Sync>,
-    /// The main window's HWND, which the media controls attach to.
-    #[cfg(windows)]
-    pub hwnd: Option<isize>,
 }
 
 enum In {
@@ -117,10 +116,7 @@ pub struct Session {
 impl Session {
     pub fn start(cfg: Config) -> Self {
         let (tx, rx) = channel();
-        #[cfg(not(windows))]
         system::install(cfg.remote.clone());
-        #[cfg(windows)]
-        system::install(cfg.remote.clone(), cfg.hwnd);
         let worker = Worker::new(cfg, tx.clone());
         std::thread::Builder::new().name("now-playing".into()).spawn(move || worker.run(rx)).expect("spawn now-playing worker");
         Self { tx }

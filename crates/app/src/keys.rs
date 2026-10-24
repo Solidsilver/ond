@@ -44,12 +44,16 @@ pub enum Cmd {
     /// The diagnostics bar along the bottom.
     ToggleDiagnostics,
     /// System / Light / Dark (menu only).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Appearance(crate::theme::ThemePref),
     /// Edit menu: handed to egui as input, so text fields get it (menu only).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Edit(EditCmd),
 }
 
-/// The Edit menu's text commands.
+/// The Edit menu's text commands. Other systems' text fields take the keys
+/// directly, so only the macOS menu sends these.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditCmd {
     Undo,
@@ -60,6 +64,7 @@ pub enum EditCmd {
     SelectAll,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl EditCmd {
     pub const ALL: [EditCmd; 6] = [EditCmd::Undo, EditCmd::Redo, EditCmd::Cut, EditCmd::Copy, EditCmd::Paste, EditCmd::SelectAll];
 
@@ -155,7 +160,8 @@ pub static BINDINGS: &[Binding] = &[
     b("Window", "Keyboard shortcuts", "?", SHIFT, Key::Questionmark, true, Cmd::Shortcuts),
 ];
 
-/// The display string for `cmd`'s first binding (for tooltips and menus).
+/// The display string for `cmd`'s first binding (for the menu bar).
+#[cfg(target_os = "macos")]
 pub fn keys_for(cmd: Cmd) -> Option<&'static str> {
     BINDINGS.iter().find(|b| b.cmd == Some(cmd)).map(|b| b.keys)
 }

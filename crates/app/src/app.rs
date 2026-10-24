@@ -659,6 +659,8 @@ impl Analysis {
 
 impl OndApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+        #[cfg(windows)]
+        now_playing::set_window(hwnd(cc));
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
@@ -746,8 +748,6 @@ impl OndApp {
             retry_file: paths.library_db.with_file_name("scrobbles.json"),
             scrobble,
             remote: Arc::new(move |r| remote_bridge.post(Msg::Remote(r))),
-            #[cfg(windows)]
-            hwnd: hwnd(cc),
         });
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));

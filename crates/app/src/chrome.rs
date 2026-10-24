@@ -10,7 +10,9 @@
 /// How far the content must stay clear of the traffic lights, from the window's left edge.
 pub const LIGHTS_W: f32 = 84.0;
 /// The first button's left edge and the distance between buttons.
+#[cfg(target_os = "macos")]
 const LIGHTS_X: f64 = 18.0;
+#[cfg(target_os = "macos")]
 const LIGHTS_STEP: f64 = 20.0;
 
 /// What the title bar should look like this frame.

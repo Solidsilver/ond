@@ -23,10 +23,19 @@ enum Msg {
 }
 
 static TX: OnceLock<Sender<Msg>> = OnceLock::new();
+static HWND: OnceLock<isize> = OnceLock::new();
 
-/// Attaches the controls to the window `hwnd`. `handler` runs on a system thread.
-pub fn install(handler: Arc<dyn Fn(Remote) + Send + Sync>, hwnd: Option<isize>) {
-    let Some(hwnd) = hwnd else {
+/// The main window, which the controls attach to; set before [`install`].
+/// Without one (tests, previews) there are no media controls.
+pub fn set_window(hwnd: Option<isize>) {
+    if let Some(h) = hwnd {
+        let _ = HWND.set(h);
+    }
+}
+
+/// Attaches the controls to the main window. `handler` runs on a system thread.
+pub fn install(handler: Arc<dyn Fn(Remote) + Send + Sync>) {
+    let Some(&hwnd) = HWND.get() else {
         return tracing::warn!("media controls off: no window handle");
     };
     let (tx, rx) = channel();
@@ -163,7 +172,7 @@ fn thumbnail(bytes: &[u8]) -> Result<RandomAccessStreamReference> {
     let stream = InMemoryRandomAccessStream::new()?;
     let writer = DataWriter::CreateDataWriter(&stream)?;
     writer.WriteBytes(bytes)?;
-    writer.StoreAsync()?.get()?;
+    writer.StoreAsync()?.join()?;
     writer.DetachStream()?;
     stream.Seek(0)?;
     RandomAccessStreamReference::CreateFromStream(&stream)
