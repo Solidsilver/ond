@@ -381,6 +381,9 @@ pub struct OndApp {
     diagnostics: diagnostics::Diagnostics,
 }
 
+/// How long a mode switch waits for the window to leave maximized.
+const UNMAXIMIZE_WAIT: Duration = Duration::from_secs(1);
+
 /// Waiting for the window to reach a size we asked for.
 #[derive(Debug, Clone, Copy)]
 pub struct Settle {
@@ -636,25 +639,25 @@ impl Downloads {
             Action::RevealOffline => {
                 crate::folder::reveal(&self.base).map_err(|e| format!("open {}: {e}", self.base.display()))?;
             }
-            Action::MoveOffline => {
-                let current = self.base.clone();
-                let start = current.parent().unwrap_or(&current).to_owned();
-                if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
-                    // Always a folder of our own inside the chosen one: the store
-                    // tidies files it doesn't know, which must never be the user's.
-                    let dir = if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") };
-                    if dir != current {
-                        prefs.edit(|s| {
-                            s.offline_dir = Some(dir.clone());
-                            s.offline_move_from = Some(current.clone());
-                        });
-                        return Ok(Some(format!("Downloads move to {} the next time Ond starts", dir.display())));
-                    }
-                }
-            }
             _ => unreachable!("not a download action"),
         }
         Ok(None)
+    }
+
+    /// Moves downloads into `chosen` at the next start. Returns the notice to show.
+    fn move_to(&self, chosen: PathBuf, prefs: &Prefs) -> Option<String> {
+        // Always a folder of our own inside the chosen one: the store tidies
+        // files it doesn't know, which must never be the user's.
+        let dir = if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") };
+        if dir == self.base {
+            return None;
+        }
+        let current = self.base.clone();
+        prefs.edit(|s| {
+            s.offline_dir = Some(dir.clone());
+            s.offline_move_from = Some(current);
+        });
+        Some(format!("Downloads move to {} the next time Ond starts", dir.display()))
     }
 }
 
@@ -702,8 +705,7 @@ impl OndApp {
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
         // The window opened from this plan (see `main`); our title bar follows it.
-        let plan = app.prefs.get(|s| s.window.plan());
-        crate::csd::set_window(&cc.egui_ctx, plan.controls, !plan.decorations);
+        app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
         Ok(app)
     }
 
@@ -1026,6 +1028,11 @@ impl OndApp {
             }
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
+            Msg::OfflineFolder(dir) => {
+                if let Some(notice) = self.downloads.move_to(dir, &self.prefs) {
+                    self.show_notice(notice);
+                }
+            }
             Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
             Msg::Lyrics { track_id, lyrics } => {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
@@ -1475,16 +1482,24 @@ impl OndApp {
                     w.system_title_bar = on;
                     w.plan()
                 });
-                crate::csd::set_window(&self.ctx, plan.controls, !plan.decorations);
-                self.ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(plan.decorations));
+                plan.apply_frame(&self.ctx);
             }
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
+            Action::MoveOffline => {
+                let base = &self.downloads.base;
+                let start = base.parent().unwrap_or(base).to_owned();
+                let bridge = self.bridge.clone();
+                crate::folder::pick("Choose where to keep downloaded music", &start, move |chosen| {
+                    if let Some(dir) = chosen {
+                        bridge.post(Msg::OfflineFolder(dir));
+                    }
+                });
+            }
             a @ (Action::Unpin(_)
             | Action::PauseDownloads(_)
             | Action::RetryDownloads
             | Action::SetOfflineLimit(_)
-            | Action::RevealOffline
-            | Action::MoveOffline) => match self.downloads.apply(a, &self.prefs) {
+            | Action::RevealOffline) => match self.downloads.apply(a, &self.prefs) {
                 Ok(Some(notice)) => self.show_notice(notice),
                 Ok(None) => {}
                 Err(e) => self.show_error(e),
@@ -1654,8 +1669,11 @@ impl OndApp {
         self.ui.seen = None;
         self.ui.switch_started = Some(std::time::Instant::now());
         tracing::debug!(target: "ond::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
-        if !plan.maximized && ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
-            // Un-maximize first; `logic` resizes once the window has let go.
+        // A maximized window ignores sizes (Linux compositors maximize a large
+        // window on their own), and answers an un-maximize with its old size,
+        // which would land over ours. So un-maximize first; `track_window`
+        // resizes once the window has let go. (macOS zoom is just a size.)
+        if !cfg!(target_os = "macos") && !plan.maximized && ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             self.ui.unmaximizing = Some((plan, std::time::Instant::now()));
             ctx.request_repaint();
@@ -1676,7 +1694,7 @@ impl OndApp {
         }
         if let Some((plan, since)) = self.ui.unmaximizing {
             let still = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            if !still || since.elapsed() > Duration::from_secs(1) {
+            if !still || since.elapsed() > UNMAXIMIZE_WAIT {
                 self.ui.unmaximizing = None;
                 self.resize_to(plan);
             } else {

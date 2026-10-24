@@ -12,7 +12,7 @@
 //! of this off.
 
 use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 
 /// Whether this platform draws its own window controls.
 pub const SUPPORTED: bool = cfg!(all(unix, not(target_os = "macos")));
@@ -36,7 +36,19 @@ struct State {
     /// The window has no system frame (so no resize borders either).
     frameless: bool,
     /// The UI snapshots show the Linux controls on any platform.
+    #[cfg(test)]
     preview: bool,
+}
+
+impl State {
+    /// Whether the controls can be drawn here at all.
+    fn supported(&self) -> bool {
+        #[cfg(test)]
+        if self.preview {
+            return true;
+        }
+        SUPPORTED
+    }
 }
 
 fn state(ctx: &Context) -> State {
@@ -96,9 +108,11 @@ impl Layout {
 /// Called whenever the window plan changes: whether we draw the buttons, and
 /// whether the window has a system frame at all.
 pub fn set_window(ctx: &Context, controls: bool, frameless: bool) {
-    let s = state(ctx);
-    let on = SUPPORTED || s.preview;
-    store(ctx, State { drawn: controls && on, frameless: frameless && on, ..s });
+    let mut s = state(ctx);
+    let on = s.supported();
+    s.drawn = controls && on;
+    s.frameless = frameless && on;
+    store(ctx, s);
 }
 
 /// Lets the UI snapshots and tests show the Linux controls on any platform.
@@ -124,19 +138,19 @@ pub fn reserved(ctx: &Context, side: Side) -> f32 {
 /// The desktop's button layout. Read once, in the background; until it
 /// arrives (or when there's no portal) a guess from the desktop's name.
 pub fn layout() -> Layout {
-    static READ: OnceLock<RwLock<Option<Layout>>> = OnceLock::new();
-    let cell = READ.get_or_init(|| {
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let _ = std::thread::Builder::new().name("button-layout".into()).spawn(|| {
-            if let Some(s) = portal::button_layout()
-                && let Some(cell) = READ.get()
-            {
-                *cell.write().unwrap_or_else(|e| e.into_inner()) = Some(Layout::parse(&s));
-            }
+    static READ: RwLock<Option<Layout>> = RwLock::new(None);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        static ASK: std::sync::Once = std::sync::Once::new();
+        ASK.call_once(|| {
+            let _ = std::thread::Builder::new().name("button-layout".into()).spawn(|| {
+                if let Some(s) = portal::button_layout() {
+                    *READ.write().unwrap_or_else(|e| e.into_inner()) = Some(Layout::parse(&s));
+                }
+            });
         });
-        RwLock::new(None)
-    });
-    cell.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(fallback)
+    }
+    READ.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(fallback)
 }
 
 /// GNOME shows only close; KDE and most others all three.
@@ -161,7 +175,7 @@ fn bar_id() -> Id {
 /// window's content, so both take the pointer from whatever is underneath.
 pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
     let s = state(ctx);
-    if !SUPPORTED && !s.preview {
+    if !s.supported() {
         return;
     }
     let screen = ctx.content_rect();
@@ -195,54 +209,52 @@ pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
 
 fn button(ui: &mut egui::Ui, b: Button, center: Pos2, maximized: bool) {
     let rect = Rect::from_center_size(center, Vec2::splat(BUTTON));
-    {
-        let resp = ui.interact(rect, Id::unique(("window-button", b as u8)), Sense::click());
-        let t = crate::theme::Tokens::of(ui);
-        let fill = if resp.is_pointer_button_down_on() {
-            t.hairline
-        } else if resp.hovered() {
-            t.selected
-        } else {
-            t.hover
-        };
-        let p = ui.painter();
-        p.circle_filled(rect.center(), BUTTON / 2.0, fill);
-        let stroke = Stroke::new(1.4, t.text);
-        let c = rect.center();
-        let s = 4.0;
-        match b {
-            Button::Close => {
-                p.line_segment([c + vec2(-s, -s), c + vec2(s, s)], stroke);
-                p.line_segment([c + vec2(-s, s), c + vec2(s, -s)], stroke);
-            }
-            Button::Minimize => {
-                p.line_segment([c + vec2(-s, s), c + vec2(s, s)], stroke);
-            }
-            Button::Maximize if maximized => {
-                // Restore: two overlapping squares.
-                let back = Rect::from_min_size(c + vec2(-s + 2.0, -s - 1.0), Vec2::splat(2.0 * s - 1.0));
-                p.line_segment([back.left_top(), back.right_top()], stroke);
-                p.line_segment([back.right_top(), back.right_bottom()], stroke);
-                p.rect_stroke(Rect::from_min_size(c + vec2(-s - 1.0, -s + 2.0), Vec2::splat(2.0 * s - 1.0)), 1.0, stroke, egui::StrokeKind::Middle);
-            }
-            Button::Maximize => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::splat(2.0 * s)), 1.0, stroke, egui::StrokeKind::Middle);
-            }
+    let resp = ui.interact(rect, Id::unique(("window-button", b as u8)), Sense::click());
+    let t = crate::theme::Tokens::of(ui);
+    let fill = if resp.is_pointer_button_down_on() {
+        t.hairline
+    } else if resp.hovered() {
+        t.selected
+    } else {
+        t.hover
+    };
+    let p = ui.painter();
+    p.circle_filled(rect.center(), BUTTON / 2.0, fill);
+    let stroke = Stroke::new(1.4, t.text);
+    let c = rect.center();
+    let s = 4.0;
+    match b {
+        Button::Close => {
+            p.line_segment([c + vec2(-s, -s), c + vec2(s, s)], stroke);
+            p.line_segment([c + vec2(-s, s), c + vec2(s, -s)], stroke);
         }
-        let label = match b {
-            Button::Close => "Close",
-            Button::Minimize => "Minimize",
-            Button::Maximize if maximized => "Restore",
-            Button::Maximize => "Maximize",
-        };
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-        if resp.clicked() {
-            ui.ctx().send_viewport_cmd(match b {
-                Button::Close => ViewportCommand::Close,
-                Button::Minimize => ViewportCommand::Minimized(true),
-                Button::Maximize => ViewportCommand::Maximized(!maximized),
-            });
+        Button::Minimize => {
+            p.line_segment([c + vec2(-s, s), c + vec2(s, s)], stroke);
         }
+        Button::Maximize if maximized => {
+            // Restore: two overlapping squares.
+            let back = Rect::from_min_size(c + vec2(-s + 2.0, -s - 1.0), Vec2::splat(2.0 * s - 1.0));
+            p.line_segment([back.left_top(), back.right_top()], stroke);
+            p.line_segment([back.right_top(), back.right_bottom()], stroke);
+            p.rect_stroke(Rect::from_min_size(c + vec2(-s - 1.0, -s + 2.0), Vec2::splat(2.0 * s - 1.0)), 1.0, stroke, egui::StrokeKind::Middle);
+        }
+        Button::Maximize => {
+            p.rect_stroke(Rect::from_center_size(c, Vec2::splat(2.0 * s)), 1.0, stroke, egui::StrokeKind::Middle);
+        }
+    }
+    let label = match b {
+        Button::Close => "Close",
+        Button::Minimize => "Minimize",
+        Button::Maximize if maximized => "Restore",
+        Button::Maximize => "Maximize",
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    if resp.clicked() {
+        ui.ctx().send_viewport_cmd(match b {
+            Button::Close => ViewportCommand::Close,
+            Button::Minimize => ViewportCommand::Minimized(true),
+            Button::Maximize => ViewportCommand::Maximized(!maximized),
+        });
     }
 }
 

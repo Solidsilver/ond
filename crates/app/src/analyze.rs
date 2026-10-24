@@ -211,7 +211,7 @@ impl Drop for Runner {
 
 /// Background priority. macOS: the background QoS class, which keeps the
 /// thread to spare capacity (and an efficiency core where there is one) and
-/// throttles its disk and network. Linux: the lowest nice value, for this
+/// throttles its disk and network. Linux: nice 19 (the lowest priority), for this
 /// thread only. Windows: background mode, which lowers its CPU, disk and
 /// memory priority.
 fn lower_priority() {

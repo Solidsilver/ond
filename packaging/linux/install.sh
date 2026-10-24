@@ -20,7 +20,11 @@ if $uninstall; then
   rm -f "$prefix"/share/icons/hicolor/*/apps/$id.png
 else
   install -Dm755 "$here/ond" "$prefix/bin/ond"
-  install -Dm644 "$here/$id.desktop" "$prefix/share/applications/$id.desktop"
+  # The menu entry names the binary by its full path: the desktop's own PATH
+  # often lacks ~/.local/bin.
+  mkdir -p "$prefix/share/applications"
+  sed "s|^Exec=ond|Exec=$prefix/bin/ond|" "$here/$id.desktop" > "$prefix/share/applications/$id.desktop"
+  chmod 644 "$prefix/share/applications/$id.desktop"
   install -Dm644 "$here/$id.metainfo.xml" "$prefix/share/metainfo/$id.metainfo.xml"
   for icon in "$here"/icons/*/apps/$id.png; do
     size="$(basename "$(dirname "$(dirname "$icon")")")"
@@ -36,5 +40,5 @@ if $uninstall; then
   echo "removed Ond from $prefix (your library and settings are kept)"
 else
   echo "installed Ond to $prefix"
-  case ":$PATH:" in *":$prefix/bin:"*) ;; *) echo "note: $prefix/bin is not on your PATH; the app menu entry works either way" ;; esac
+  case ":$PATH:" in *":$prefix/bin:"*) ;; *) echo "note: $prefix/bin is not on your PATH, so start Ond from the app menu (or add it to PATH to run \`ond\`)" ;; esac
 fi

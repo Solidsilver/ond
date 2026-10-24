@@ -2,10 +2,26 @@
 
 use std::path::{Path, PathBuf};
 
-/// Asks for a folder, starting in `start`. Blocks until the user chooses or
-/// cancels; call from the UI thread.
+/// Asks for a folder, starting in `start`, and hands the choice (`None` when
+/// cancelled) to `done`. Call from the UI thread. On macOS and Windows the
+/// dialog is modal and `done` runs before this returns; on Linux the portal's
+/// dialog is another process, so it's waited for on a thread of its own and
+/// the window keeps drawing (and answering the compositor) meanwhile.
+pub fn pick(message: &str, start: &Path, done: impl FnOnce(Option<PathBuf>) + Send + 'static) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dialog = rfd::FileDialog::new().set_title(message).set_directory(start);
+        let spawned = std::thread::Builder::new().name("folder-picker".into()).spawn(move || done(dialog.pick_folder()));
+        if let Err(e) = spawned {
+            tracing::warn!("folder picker: {e}");
+        }
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    done(modal(message, start));
+}
+
 #[cfg(target_os = "macos")]
-pub fn pick(message: &str, start: &Path) -> Option<PathBuf> {
+fn modal(message: &str, start: &Path) -> Option<PathBuf> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSOpenPanel;
     use objc2_foundation::{NSString, NSURL};
@@ -28,10 +44,9 @@ pub fn pick(message: &str, start: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(path.to_string()))
 }
 
-/// The XDG desktop portal on Linux (the desktop's own dialog, sandbox or
-/// not), the common item dialog on Windows.
-#[cfg(not(target_os = "macos"))]
-pub fn pick(message: &str, start: &Path) -> Option<PathBuf> {
+/// The common item dialog.
+#[cfg(windows)]
+fn modal(message: &str, start: &Path) -> Option<PathBuf> {
     rfd::FileDialog::new().set_title(message).set_directory(start).pick_folder()
 }
 

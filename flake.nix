@@ -10,7 +10,7 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        # nixpkgs dropped Intel Macs in 26.11.
+        # nixpkgs 26.11 drops Intel Macs (x86_64-darwin).
         "aarch64-darwin"
       ];
       forAll = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});

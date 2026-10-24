@@ -31,7 +31,8 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 Try at least one GNOME and one KDE Plasma session, Wayland and X11 if you can.
 - [ ] Installs with `./install.sh`; Ond appears in the app grid with its icon, and the running window gets the same icon in the dock/taskbar (app id `dev.solidsilver.ond`).
 - [ ] Playback goes through PipeWire: `pw-top` lists Ond while playing, and the output picker lists PipeWire devices. Unplugging the active device falls back cleanly.
-- [ ] Media controls: GNOME's top-bar player / KDE's media widget show title, artist, album and cover; play/pause, next, previous and the seek bar work; clicking the player raises the window. Media keys work. `playerctl metadata` shows the track.
+- [ ] Media controls: GNOME's top-bar player / KDE's media widget show title, artist, album and cover; play/pause, next, previous and the seek bar work. Clicking the player should bring Ond forward; on Wayland the compositor may only flag it as wanting attention (it won't hand over focus without an activation token), which is fine. Media keys work. `playerctl metadata` shows the track.
+- [ ] Ctrl+Alt+←/→ (skip 10 s): GNOME uses these to switch workspaces by default, so they may never reach Ond there. Note whether they do.
 - [ ] KDE Connect or GSConnect controls playback from a phone.
 - [ ] The password survives a relaunch (GNOME Keyring / KWallet).
 - [ ] UI font is the desktop's sans-serif; Japanese titles render.

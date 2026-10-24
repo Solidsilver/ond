@@ -67,6 +67,6 @@ jobs:
           test -f result/share/icons/hicolor/256x256/apps/dev.solidsilver.ond.png
           # Every linked library resolves, and the ones opened at run time
           # (display, GPU) are on the RPATH.
-          ! ldd result/bin/ond | grep 'not found'
+          if ldd result/bin/ond | grep 'not found'; then exit 1; fi
           readelf -d result/bin/ond | grep -E 'R(UN)?PATH' | grep -q vulkan-loader
           readelf -d result/bin/ond | grep -E 'R(UN)?PATH' | grep -q wayland

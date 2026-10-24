@@ -1312,7 +1312,8 @@ fn the_now_playing_heart_toggles_both_ways() {
 
 /// Leaving a maximized full window: the compositor answers an un-maximize
 /// with the window's old size, so the new size must wait until it has let go,
-/// or the old size lands after it and wins (GNOME and KDE both do this).
+/// or the old size lands after it and wins (GNOME and KDE both do this). On
+/// macOS a zoomed window simply takes the new size.
 #[test]
 fn leaving_a_maximized_window_resizes_after_it_lets_go() {
     let dir = tempfile::tempdir().unwrap();
@@ -1345,6 +1346,12 @@ fn leaving_a_maximized_window_resizes_after_it_lets_go() {
 
     app_mut(&mut h).set_mode(Some(WindowMode::Mini));
     let first = commands(&mut h);
+    if cfg!(target_os = "macos") {
+        // Zoom is just a size there: straight to the new one.
+        assert!(resized(&first) && !first.contains(&egui::ViewportCommand::Maximized(false)), "{first:?}");
+        *h.state_mut() = None;
+        return;
+    }
     assert!(first.contains(&egui::ViewportCommand::Maximized(false)), "un-maximizes: {first:?}");
     assert!(!resized(&first), "but doesn't resize yet: {first:?}");
     for _ in 0..3 {

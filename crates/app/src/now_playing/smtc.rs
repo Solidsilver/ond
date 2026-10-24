@@ -59,7 +59,8 @@ pub fn publish(info: Option<Info>, state: State, elapsed: f64) {
     }
 }
 
-/// Artwork for `track_id` (encoded image bytes); ignored if the track changed meanwhile.
+/// Artwork for `track_id` (encoded image bytes). The worker sends only the
+/// cover of the track it last asked about, so a slow fetch never replaces a newer one.
 pub fn set_artwork(track_id: String, bytes: Vec<u8>) {
     if let Some(tx) = TX.get() {
         let _ = tx.send(Msg::Artwork(track_id, bytes));
@@ -108,8 +109,10 @@ fn run(handler: Arc<dyn Fn(Remote) + Send + Sync>, hwnd: isize, rx: Receiver<Msg
     for msg in rx {
         let done = match msg {
             Msg::Publish(info, state, elapsed) => {
-                let new_track = current.as_ref().map(|i| &i.track_id) != info.as_ref().map(|i| &i.track_id);
-                let r = update(&smtc, info.as_ref(), state, elapsed, new_track, &art);
+                // The same track can come again with more known about it (a
+                // late album name, a duration), so compare everything.
+                let changed = current != info;
+                let r = update(&smtc, info.as_ref(), state, elapsed, changed, &art);
                 current = info;
                 r
             }
@@ -128,14 +131,14 @@ fn run(handler: Arc<dyn Fn(Remote) + Send + Sync>, hwnd: isize, rx: Receiver<Msg
     Ok(())
 }
 
-fn update(smtc: &SystemMediaTransportControls, info: Option<&Info>, state: State, elapsed: f64, new_track: bool, art: &Option<(String, Vec<u8>)>) -> Result<()> {
+fn update(smtc: &SystemMediaTransportControls, info: Option<&Info>, state: State, elapsed: f64, changed: bool, art: &Option<(String, Vec<u8>)>) -> Result<()> {
     let Some(info) = info else {
         smtc.DisplayUpdater()?.ClearAll()?;
         smtc.SetPlaybackStatus(MediaPlaybackStatus::Stopped)?;
         return smtc.SetIsEnabled(false);
     };
     smtc.SetIsEnabled(true)?;
-    if new_track {
+    if changed {
         show_track(smtc, info, art)?;
     }
     smtc.SetPlaybackStatus(match state {

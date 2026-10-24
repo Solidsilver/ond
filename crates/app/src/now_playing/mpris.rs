@@ -47,7 +47,8 @@ pub fn publish(info: Option<Info>, state: State, elapsed: f64) {
     }
 }
 
-/// Artwork for `track_id` (encoded image bytes); ignored if the track changed meanwhile.
+/// Artwork for `track_id` (encoded image bytes). The worker sends only the
+/// cover of the track it last asked about, so a slow fetch never replaces a newer one.
 pub fn set_artwork(track_id: String, bytes: Vec<u8>) {
     if let Some(tx) = TX.get() {
         let _ = tx.send(Msg::Artwork(track_id, bytes));
@@ -96,8 +97,10 @@ async fn serve(handler: Arc<dyn Fn(Remote) + Send + Sync>, mut rx: UnboundedRece
     while let Some(msg) = rx.recv().await {
         let done = match msg {
             Msg::Publish(info, state, elapsed) => {
-                let same_track = last.as_ref().is_some_and(|(i, _)| i.as_ref().map(|i| &i.track_id) == info.as_ref().map(|i| &i.track_id));
-                let r = update(&player, info.as_ref(), state, elapsed, same_track, &art).await;
+                // The same track can come again with more known about it (a
+                // late album name, a duration), so compare everything.
+                let unchanged = last.as_ref().is_some_and(|(i, _)| *i == info);
+                let r = update(&player, info.as_ref(), state, elapsed, unchanged, &art).await;
                 last = Some((info, state));
                 r
             }
@@ -122,14 +125,14 @@ async fn update(
     info: Option<&Info>,
     state: State,
     elapsed: f64,
-    same_track: bool,
+    unchanged: bool,
     art: &Option<(String, PathBuf)>,
 ) -> mpris_server::zbus::Result<()> {
     let Some(info) = info else {
         player.set_metadata(Metadata::new()).await?;
         return player.set_playback_status(PlaybackStatus::Stopped).await;
     };
-    if !same_track {
+    if !unchanged {
         player.set_metadata(metadata(info, art)).await?;
     }
     // MPRIS has no "buffering": clients extrapolate from the rate, and a drift

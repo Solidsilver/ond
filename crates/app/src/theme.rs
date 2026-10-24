@@ -196,10 +196,16 @@ fn install_fonts(ctx: &Context) {
     let system = system_fonts();
     // The UI font first, then CJK, then egui's bundled fallbacks.
     for (name, faces) in [("cjk", system.cjk), ("ui", system.ui)] {
-        let Some([regular, semi]) = faces else { continue };
-        let semi_name = format!("{name}-semibold");
+        let Some(Faces { regular, semibold }) = faces else { continue };
         fonts.font_data.insert(name.into(), regular.into());
-        fonts.font_data.insert(semi_name.clone(), semi.into());
+        let semi_name = match semibold {
+            Some(face) => {
+                let n = format!("{name}-semibold");
+                fonts.font_data.insert(n.clone(), face.into());
+                n
+            }
+            None => name.to_owned(),
+        };
         if let Some(p) = fonts.families.get_mut(&FontFamily::Proportional) {
             p.insert(0, name.into());
         }
@@ -209,28 +215,43 @@ fn install_fonts(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Regular and semibold faces of the UI font and of a CJK font.
+/// The UI font and a CJK font.
 #[derive(Default)]
 struct SystemFonts {
-    ui: Option<[egui::FontData; 2]>,
-    cjk: Option<[egui::FontData; 2]>,
+    ui: Option<Faces>,
+    cjk: Option<Faces>,
 }
 
-/// One file per weight; the semibold falls back to the regular.
-fn pair(regular: &std::path::Path, semibold: &std::path::Path) -> Option<[egui::FontData; 2]> {
-    let regular = std::fs::read(regular).ok()?;
-    let semi = std::fs::read(semibold).unwrap_or_else(|_| regular.clone());
-    Some([egui::FontData::from_owned(regular), egui::FontData::from_owned(semi)])
+/// A regular face and, when there's a separate one, a semibold.
+struct Faces {
+    regular: egui::FontData,
+    /// `None`: semibold text uses the regular face too.
+    semibold: Option<egui::FontData>,
+}
+
+/// One file per weight. Without a separate semibold file (or one that won't
+/// read) semibold text uses the regular face.
+fn pair(regular: &std::path::Path, semibold: &std::path::Path) -> Option<Faces> {
+    let face = |p: &std::path::Path| std::fs::read(p).ok().map(egui::FontData::from_owned);
+    let semibold = if semibold == regular { None } else { face(semibold) };
+    Some(Faces { regular: face(regular)?, semibold })
+}
+
+/// A variable font: one file gives both weights through its weight axis.
+#[cfg_attr(windows, allow(dead_code))]
+fn variable(bytes: Vec<u8>, semibold_weight: f32) -> Faces {
+    use egui::epaint::text::VariationCoords;
+    let weight = |w: f32| egui::FontTweak { coords: VariationCoords::new([(b"wght", w)]), ..Default::default() };
+    Faces {
+        regular: egui::FontData::from_owned(bytes.clone()).tweak(weight(400.0)),
+        semibold: Some(egui::FontData::from_owned(bytes).tweak(weight(semibold_weight))),
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn system_fonts() -> SystemFonts {
-    use egui::epaint::text::VariationCoords;
-    // SF is a variable font: one file gives both weights via the weight axis.
-    let ui = std::fs::read("/System/Library/Fonts/SFNS.ttf").ok().map(|bytes| {
-        let weight = |w: f32| egui::FontTweak { coords: VariationCoords::new([(b"wght", w)]), ..Default::default() };
-        [egui::FontData::from_owned(bytes.clone()).tweak(weight(400.0)), egui::FontData::from_owned(bytes).tweak(weight(590.0))]
-    });
+    // SF is a variable font; its semibold sits at 590 on the weight axis.
+    let ui = std::fs::read("/System/Library/Fonts/SFNS.ttf").ok().map(|bytes| variable(bytes, 590.0));
     // SF has no CJK. Hiragino Sans covers kanji, kana and most common hanzi in
     // ~8 MB a weight; the Chinese and Korean system fonts are 20–55 MB each,
     // too much to hold in memory for the odd title. Colour emoji is a bitmap
@@ -257,10 +278,19 @@ fn system_fonts() -> SystemFonts {
         let ok = out.status.success() && [".ttf", ".otf", ".ttc"].iter().any(|e| path.to_ascii_lowercase().ends_with(e));
         ok.then(|| path.into())
     };
-    let both = |family: &str| {
+    let weights = |family: &str| {
         let regular = find(&format!("{family}:weight=regular"))?;
         let semi = find(&format!("{family}:weight=semibold")).unwrap_or_else(|| regular.clone());
-        pair(&regular, &semi)
+        Some((regular, semi))
     };
-    SystemFonts { ui: both("sans-serif"), cjk: both("sans-serif:lang=ja") }
+    // GNOME's UI fonts (Adwaita Sans, Cantarell) are variable: one file for
+    // every weight, set through the weight axis.
+    let ui_paths = weights("sans-serif");
+    let ui = ui_paths.as_ref().and_then(|(regular, semi)| if regular == semi { std::fs::read(regular).ok().map(|b| variable(b, 600.0)) } else { pair(regular, semi) });
+    // A CJK font is big (Noto Sans CJK is ~20 MB): one face, used for both
+    // weights, and none at all when fontconfig only has the UI font to offer.
+    let cjk = weights("sans-serif:lang=ja")
+        .filter(|(regular, _)| ui_paths.as_ref().is_none_or(|(ui, _)| ui != regular))
+        .and_then(|(regular, _)| pair(&regular, &regular));
+    SystemFonts { ui, cjk }
 }

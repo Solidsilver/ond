@@ -1,7 +1,7 @@
 //! Engine-level tests with a fake device that runs the real callback on a thread.
 
 use super::*;
-use crate::decode::tests::{file_source, pcm};
+use crate::decode::tests::{file_source, pcm, slack};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -483,7 +483,3 @@ fn turning_the_volume_down_is_reported_as_dithered() {
     engine.send(Command::Shutdown);
 }
 
-/// More time on CI machines (`CI` set), which can be slow and noisy; strict locally.
-fn slack(d: std::time::Duration) -> std::time::Duration {
-    if std::env::var_os("CI").is_some() { d * 10 } else { d }
-}

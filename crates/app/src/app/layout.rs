@@ -116,7 +116,6 @@ pub fn gutter() -> egui::Margin {
     egui::Margin { right: GUTTER as i8, ..Default::default() }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

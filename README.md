@@ -22,23 +22,13 @@ Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 - Library analysis: loudness (EBU R128), dynamic range, and a check for files that claim to be hi-res but were upsampled or made from lossy sources.
 - Credits as links, synced lyrics, favorites, ratings and playlist editing.
 
-### Nix and NixOS
-
-The repository is a flake. To try it without installing:
-
-```sh
-nix run github:Solidsilver/ond
-```
-
-To install it into your profile, `nix profile install github:Solidsilver/ond`. In a NixOS or home-manager config, add the flake as an input and either use `ond.packages.${system}.default` directly or apply `ond.overlays.default` and use `pkgs.ond`. Pin a release with `github:Solidsilver/ond/v0.2.0`.
-
 ### Windows and keys
 
 - Three window modes. Full is the whole library. Player has large artwork with the queue below and lyrics in a drawer. Mini is a small square that stays on top.
 - A queue that shows where each track came from and when it will start.
 - Keyboard shortcuts for nearly everything. Press ⌘/ (Ctrl+/ on Linux and Windows) to see them all.
 - Media keys and the system's now-playing controls: Control Center on macOS, the GNOME and KDE media controls (MPRIS, which also reaches phones through KDE Connect and GSConnect) on Linux, and the media flyout on Windows. Play counts and scrobbles go through Navidrome.
-- An optional diagnostics bar (⌥⌘I) with the signal path, buffer, download speed and server latency in one line.
+- An optional diagnostics bar (⌥⌘I, or Ctrl+Alt+I on Linux and Windows) with the signal path, buffer, download speed and server latency in one line.
 
 ## Install
 
@@ -68,6 +58,16 @@ cd Ond-*/
 ```
 
 Ond needs PipeWire's library (`libpipewire-0.3`), which every current desktop distribution ships, and glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13). The password goes in the Secret Service keyring (GNOME Keyring or KWallet).
+
+### Nix and NixOS
+
+The repository is a flake. To try it without installing:
+
+```sh
+nix run github:Solidsilver/ond
+```
+
+To install it into your profile, `nix profile install github:Solidsilver/ond`. In a NixOS or home-manager config, add the flake as an input and either use `ond.packages.${system}.default` directly or apply `ond.overlays.default` and use `pkgs.ond`. Pin a release with `github:Solidsilver/ond/v0.2.0`.
 
 ### Windows
 

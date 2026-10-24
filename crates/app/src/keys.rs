@@ -170,7 +170,7 @@ pub fn keys_for(cmd: Cmd) -> Option<&'static str> {
 /// macOS, "Ctrl+Shift+L" style elsewhere. Works on a bare combo ("⇧⌘L") and
 /// on combos inside a sentence ("Back (⌘[)").
 pub fn shown(text: &str) -> std::borrow::Cow<'_, str> {
-    if cfg!(target_os = "macos") || !text.contains(['⌘', '⌥', '⇧', '⏎']) { text.into() } else { pc_style(text).into() }
+    if cfg!(target_os = "macos") || !text.contains(['⌘', '⌥', '⇧', '⏎', '⌫']) { text.into() } else { pc_style(text).into() }
 }
 
 /// "⇧⌘L" → "Ctrl+Shift+L", "Back (⌘[)" → "Back (Ctrl+[)", "⌥⏎" → "Alt+Enter".
@@ -178,7 +178,7 @@ fn pc_style(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 8);
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
-        if !matches!(c, '⌘' | '⌥' | '⇧' | '⏎') {
+        if !matches!(c, '⌘' | '⌥' | '⇧' | '⏎' | '⌫') {
             out.push(c);
             continue;
         }
@@ -200,6 +200,7 @@ fn pc_style(text: &str) -> String {
         }
         match key {
             Some('⏎') => out.push_str("Enter"),
+            Some('⌫') => out.push_str("Backspace"),
             Some(k) => out.push(k),
             None => {}
         }
@@ -214,6 +215,11 @@ pub fn take(input: &mut egui::InputState, typing: bool) -> Vec<Cmd> {
     for b in BINDINGS {
         let (Some((mods, key)), Some(cmd)) = (b.key, b.cmd) else { continue };
         if b.idle && typing {
+            continue;
+        }
+        // Windows reports AltGr as Ctrl+Alt, so while typing those combos are
+        // characters on many layouts (AltGr+L is "ł" in Polish), not commands.
+        if typing && cfg!(windows) && mods.command && mods.alt {
             continue;
         }
         // Exact modifiers: ⌘→ must not also fire for ⌥⌘→. `?` needs Shift on
@@ -275,6 +281,7 @@ mod tests {
         assert_eq!(pc_style("⌥↑ ⌥↓"), "Alt+↑ Alt+↓");
         assert_eq!(pc_style("⇧⏎"), "Shift+Enter");
         assert_eq!(pc_style("Space"), "Space");
+        assert_eq!(pc_style("⌫"), "Backspace");
         assert_eq!(pc_style("Back (⌘[)"), "Back (Ctrl+[)");
         assert_eq!(pc_style("⏎ open    ⌘⏎ play"), "Enter open    Ctrl+Enter play");
         assert_eq!(pc_style("press ⇧⌘D on its page."), "press Ctrl+Shift+D on its page.");

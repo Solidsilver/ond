@@ -531,6 +531,6 @@ fn replay_gain_tags_are_read_by_standard_or_raw_key() {
 
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
-fn slack(d: std::time::Duration) -> std::time::Duration {
+pub(crate) fn slack(d: std::time::Duration) -> std::time::Duration {
     if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }

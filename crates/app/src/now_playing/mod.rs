@@ -193,6 +193,9 @@ struct Worker {
     flushing: bool,
     next_flush: Instant,
     clock: Instant,
+    /// The track whose cover was last asked for. Fetches run in the
+    /// background, so an earlier track's cover can arrive after a later one's.
+    art_for: Arc<std::sync::Mutex<String>>,
 }
 
 /// How often to look at the engine while something is current.
@@ -220,6 +223,7 @@ impl Worker {
             flushing: false,
             next_flush: Instant::now(),
             clock: Instant::now(),
+            art_for: Arc::default(),
         }
     }
 
@@ -412,15 +416,23 @@ impl Worker {
         let dir = self.cfg.art_dir.clone();
         let client = self.client.clone();
         let track_id = info.track_id.clone();
+        info.track_id.clone_into(&mut self.art_for.lock().unwrap_or_else(|e| e.into_inner()));
+        let art_for = Arc::clone(&self.art_for);
+        // Only the cover for the track asked about last reaches the system.
+        let hand_over = move |bytes: Vec<u8>| {
+            if *art_for.lock().unwrap_or_else(|e| e.into_inner()) == track_id {
+                set_artwork(track_id, bytes);
+            }
+        };
         self.cfg.rt.spawn(async move {
             for size in [512, 256, 128] {
                 if let Ok(bytes) = tokio::fs::read(crate::art::cover_file(&dir, &cover, size)).await {
-                    return set_artwork(track_id, bytes);
+                    return hand_over(bytes);
                 }
             }
             let Some(client) = client else { return };
             if let Some(bytes) = crate::art::fetch_cached(&client, &dir, &cover, 512).await {
-                set_artwork(track_id, bytes);
+                hand_over(bytes);
             }
         });
     }

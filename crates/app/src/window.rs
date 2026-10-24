@@ -62,7 +62,10 @@ impl Geometry {
         ctx.input(|i| {
             let v = i.viewport();
             let size = v.inner_rect?.size();
-            Some(Self { pos: v.outer_rect.map(|r| [r.min.x, r.min.y]), size: [size.x, size.y], maximized: v.maximized.unwrap_or(false) })
+            // macOS reports a zoomed window as maximized; zoom is just a size
+            // there, remembered like any other.
+            let maximized = !cfg!(target_os = "macos") && v.maximized.unwrap_or(false);
+            Some(Self { pos: v.outer_rect.map(|r| [r.min.x, r.min.y]), size: [size.x, size.y], maximized })
         })
     }
 }
@@ -105,19 +108,11 @@ impl Plan {
 
     /// Turns the running window into this one.
     pub fn apply(&self, ctx: &Context) {
-        // A maximized window ignores sizes (Linux compositors maximize a
-        // large window on their own): let go of that first.
-        if !self.maximized && ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
-            ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
-        }
         // Drop the minimum out of the way, resize, then set the new one: a
         // larger minimum set first would resize the window once on its own,
         // and a smaller one set after would refuse the shrink.
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(egui::vec2(1.0, 1.0)));
-        crate::csd::set_window(ctx, self.controls, !self.decorations);
-        if !cfg!(target_os = "macos") {
-            ctx.send_viewport_cmd(ViewportCommand::Decorations(self.decorations));
-        }
+        self.apply_frame(ctx);
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size.into()));
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(self.min_size.into()));
         if let Some(p) = self.pos {
@@ -126,6 +121,15 @@ impl Plan {
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(self.level()));
         if self.maximized {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+        }
+    }
+
+    /// The system frame or our own controls (see `csd`), as this plan has it.
+    /// macOS keeps its frame and folds the title bar instead (see `chrome`).
+    pub fn apply_frame(&self, ctx: &Context) {
+        crate::csd::set_window(ctx, self.controls, !self.decorations);
+        if !cfg!(target_os = "macos") {
+            ctx.send_viewport_cmd(ViewportCommand::Decorations(self.decorations));
         }
     }
 
@@ -255,6 +259,7 @@ impl Windows {
 
     /// Records where the window is now, for the current mode. The Player is
     /// remembered without its drawer.
+    ///
     /// A maximized window keeps its normal size and place, and only notes
     /// that it was maximized; nothing smaller than the mode allows is kept.
     pub fn remember(&mut self, mut now: Geometry) {
