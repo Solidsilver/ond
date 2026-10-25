@@ -35,6 +35,8 @@ pub struct ViewCtx<'a> {
     pub diagnostics: &'a mut diagnostics::Diagnostics,
     pub ui: &'a mut UiState,
     pub actions: &'a mut Vec<Action>,
+    /// Track waveforms, for the seek bar (experimental).
+    pub waveforms: &'a mut crate::visuals::waveform::Waveforms,
 }
 
 impl ViewCtx<'_> {
@@ -49,6 +51,22 @@ impl ViewCtx<'_> {
     /// Whether `track` can play right now: downloaded, or the server is there.
     pub fn playable(&self, track: &Track) -> bool {
         super::playable(self.session, self.downloads, track)
+    }
+
+    /// Which experimental visuals are on.
+    pub fn experimental(&self) -> crate::visuals::Experimental {
+        self.prefs.get(|s| s.experimental)
+    }
+
+    /// This frame's spectrum of what's playing, for a visual on screen, which
+    /// keeps the frames coming while it plays. `None` unless playing.
+    pub fn listen(&mut self, ui: &egui::Ui) -> Option<crate::visuals::spectrum::Frame> {
+        if self.engine.status.state() != audio::PlayState::Playing {
+            return None;
+        }
+        self.ui.live.want(crate::visuals::METER);
+        let (pass, now) = (ui.ctx().cumulative_pass_nr(), ui.input(|i| i.time));
+        Some(self.ui.listener.frame(&self.engine.status.tap, pass, now).clone())
     }
 
     /// The Player's lyrics drawer is open.
@@ -83,6 +101,7 @@ impl OndApp {
             diagnostics: &mut self.diagnostics,
             ui: &mut self.ui,
             actions: &mut self.actions,
+            waveforms: &mut self.waveforms,
         }
     }
 }

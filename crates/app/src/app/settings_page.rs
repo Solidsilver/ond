@@ -6,7 +6,8 @@
 use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, section, thin_slider, toggle};
 use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
-use crate::theme::{ThemePref, Tokens, semibold};
+use crate::theme::{Accent, ThemePref, Tokens, semibold};
+use crate::visuals::visualizer::Pick;
 use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
@@ -20,10 +21,11 @@ pub enum Section {
     Offline,
     Library,
     Account,
+    Experimental,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [Section::General, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account];
+    pub const ALL: [Section; 7] = [Section::General, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -33,6 +35,7 @@ impl Section {
             Section::Offline => "Offline",
             Section::Library => "Library",
             Section::Account => "Account",
+            Section::Experimental => "Experimental",
         }
     }
 }
@@ -88,6 +91,7 @@ impl OndApp {
                             Section::Offline => self.offline_settings(ui),
                             Section::Library => self.library_settings(ui),
                             Section::Account => self.account_settings(ui),
+                            Section::Experimental => self.experimental_settings(ui),
                         }
                         ui.add_space(24.0);
                     });
@@ -101,10 +105,24 @@ impl OndApp {
 
     fn general_settings(&mut self, ui: &mut Ui) {
         group(ui, "Appearance", |ui| {
-            let mut theme = self.theme();
-            if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
-                self.actions.push(Action::SetTheme(theme));
+            row(ui, "Theme", |ui| {
+                let mut theme = self.theme();
+                if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
+                    self.actions.push(Action::SetTheme(theme));
+                }
+            });
+            row(ui, "Accent color", |ui| {
+                let mut accent = self.accent();
+                if accent_swatches(ui, &mut accent) {
+                    self.actions.push(Action::SetAccent(accent));
+                }
+            });
+            ui.add_space(10.0);
+            let mut adapt = self.adapt_colors();
+            if narrow_toggle(ui, &mut adapt, "Adapt colors to the album art").changed() {
+                self.actions.push(Action::SetAdaptColors(adapt));
             }
+            hint(ui, "The accent, the now-playing display and the Player take their colors from the playing album's cover, and an album's page from its own. Text keeps its contrast. Covers without much color use the accent color.");
         });
         group(ui, "Listening", |ui| {
             let mut scrobble = self.scrobble();
@@ -344,6 +362,44 @@ impl OndApp {
         hint(ui, "Measures loudness and dynamic range, and checks for upsampled or lossy-sourced files. Runs in the background and pauses while playback needs the network.");
     }
 
+    /// Visuals still being tried out, one switch each.
+    fn experimental_settings(&mut self, ui: &mut Ui) {
+        let mut x = self.experimental();
+        let before = x;
+        hint(ui, "Visual features that are still being tried out. They may change or go away.");
+        ui.add_space(20.0);
+        group(ui, "Artwork", |ui| {
+            narrow_toggle(ui, &mut x.backdrop, "Blurred artwork behind the Player and Mini");
+            hint(ui, "A soft, dimmed copy of the cover fills the background, and fades to the next one when the track changes.");
+        });
+        group(ui, "Seek bar", |ui| {
+            narrow_toggle(ui, &mut x.waveform, "Waveform seek bar");
+            hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
+        });
+        group(ui, "Live audio", |ui| {
+            narrow_toggle(ui, &mut x.spectrum, "Live spectrum");
+            hint(ui, "A small spectrum of what's playing, in the now-playing display and the Player. It redraws continuously while music plays, which uses more battery.");
+            ui.add_space(10.0);
+            narrow_toggle(ui, &mut x.spectrogram, "Spectrogram in Info");
+            hint(ui, "A scrolling picture of frequency over time in the Info tab. It redraws continuously while music plays, which uses more battery.");
+            ui.add_space(10.0);
+            narrow_toggle(ui, &mut x.visualizer, "Visualizer");
+            hint(ui, "A full-window light show driven by the music. Open it with ⌘T and leave with Esc. It uses the graphics card continuously while open, which uses more battery.");
+            if x.visualizer {
+                ui.add_space(10.0);
+                row(ui, "Show", |ui| {
+                    choice(ui, &Pick::ALL, &mut x.visualizer_pick, None, |p| p.label().into());
+                });
+                hint(ui, "Flow smears shapes into silk through shifting colors. Particles swarm around charged spheres. Ribbons wind in the album's colors. Shuffle picks a different one for each track. Inside the visualizer, ← and → switch.");
+            }
+            ui.add_space(6.0);
+            hint(ui, "None of these change the sound. Bit-perfect playback stays bit-perfect.");
+        });
+        if x != before {
+            self.actions.push(Action::SetExperimental(x));
+        }
+    }
+
     fn account_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let (server, user) = match &self.session.settings {
@@ -408,6 +464,76 @@ fn hint(ui: &mut Ui, text: &str) {
     let t = Tokens::of(ui);
     ui.add_space(4.0);
     ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(text)).size(12.0).color(t.muted)).wrap());
+}
+
+/// The accent presets as round swatches, each in the color this theme
+/// draws it, then the user's own color in a picker. True when it changed.
+fn accent_swatches(ui: &mut Ui, accent: &mut Accent) -> bool {
+    let dark = ui.visuals().dark_mode;
+    let mut changed = false;
+    ui.spacing_mut().item_spacing.x = 4.0;
+    for preset in Accent::PRESETS {
+        if swatch(ui, Some(preset.colors(dark).0), *accent == preset, preset.label()).clicked() && *accent != preset {
+            *accent = preset;
+            changed = true;
+        }
+    }
+    let own = matches!(accent, Accent::Custom(_));
+    let resp = swatch(ui, own.then(|| accent.colors(dark).0), own, "Custom color…");
+    let picker = egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).layout(egui::Layout::top_down(egui::Align::Min));
+    picker.show(|ui| {
+        ui.spacing_mut().slider_width = 240.0;
+        // Starts from the color as picked, or from the accent in use.
+        let mut c = match *accent {
+            Accent::Custom([r, g, b]) => egui::Color32::from_rgb(r, g, b),
+            other => other.colors(dark).0,
+        };
+        if egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque) {
+            *accent = Accent::Custom([c.r(), c.g(), c.b()]);
+            changed = true;
+        }
+        ui.add_space(4.0);
+        ui.set_max_width(240.0);
+        hint(ui, "Made lighter or darker where needed, so text and controls stay readable in both themes.");
+    });
+    changed
+}
+
+/// One round swatch, ringed when chosen: `color`, or a wheel of hues for a
+/// color still to pick.
+fn swatch(ui: &mut Ui, color: Option<egui::Color32>, chosen: bool, label: &str) -> egui::Response {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let c = rect.center();
+        let p = ui.painter();
+        match color {
+            Some(color) => {
+                p.circle_filled(c, 8.5, color);
+            }
+            None => {
+                // Twelve hues around the centre.
+                let mut mesh = egui::Mesh::default();
+                mesh.colored_vertex(c, egui::Color32::from_gray(if ui.visuals().dark_mode { 200 } else { 245 }));
+                for k in 0..=24 {
+                    let a = std::f32::consts::TAU * k as f32 / 24.0;
+                    let hue = egui::ecolor::Hsva::new(k as f32 / 24.0, 0.65, 0.85, 1.0);
+                    mesh.colored_vertex(c + 8.5 * vec2(a.cos(), a.sin()), hue.into());
+                    if k > 0 {
+                        mesh.add_triangle(0, k, k + 1);
+                    }
+                }
+                p.add(egui::Shape::mesh(mesh));
+            }
+        }
+        if chosen {
+            p.circle_stroke(c, 11.5, egui::Stroke::new(1.5, t.text));
+        } else if resp.hovered() {
+            p.circle_stroke(c, 11.5, egui::Stroke::new(1.0, t.muted));
+        }
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, chosen, label));
+    resp.on_hover_text(label)
 }
 
 /// A dB value on a thin slider with a readout, snapped to 0.5 dB.

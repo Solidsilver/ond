@@ -49,6 +49,12 @@ impl ViewCtx<'_> {
                 ui.add_space(-12.0);
             }
 
+            // Live, so near the top where it's seen.
+            if self.experimental().spectrogram {
+                kv_section(ui, "Spectrogram");
+                self.spectrogram(ui);
+            }
+
             let people = song_credits(&track);
             if !people.is_empty() {
                 kv_section(ui, "Credits");
@@ -103,6 +109,31 @@ impl ViewCtx<'_> {
             }
             ui.add_space(24.0);
         });
+    }
+
+    /// The last few seconds as frequency over time (experimental): low notes
+    /// at the bottom on a log scale, louder in a stronger accent.
+    fn spectrogram(&mut self, ui: &mut Ui) {
+        use crate::visuals::spectrogram::height_of;
+        let t = Tokens::of(ui);
+        ui.add_space(4.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 104.0), Sense::hover());
+        let gutter = 30.0;
+        let plot = egui::Rect::from_min_max(egui::pos2(rect.left() + gutter, rect.top() + 4.0), egui::pos2(rect.right(), rect.bottom() - 4.0));
+        let painter = ui.painter();
+        painter.rect_filled(plot.expand(1.0), 4.0, t.field);
+        if let Some(f) = self.listen(ui)
+            && f.fresh
+        {
+            self.ui.spectrogram.push(ui.ctx(), &f.raw, ui.ctx().cumulative_pass_nr());
+        }
+        self.ui.spectrogram.paint(painter, plot, t.accent);
+        for (hz, label) in [(100.0, "100"), (1000.0, "1k"), (10_000.0, "10k")] {
+            let y = plot.bottom() - height_of(hz) * plot.height();
+            painter.hline(plot.x_range(), y, egui::Stroke::new(1.0, t.hairline.gamma_multiply(0.6)));
+            painter.text(egui::pos2(plot.left() - 6.0, y), egui::Align2::RIGHT_CENTER, label, FontId::proportional(9.5), t.muted);
+        }
+        ui.allocate_response(vec2(0.0, 0.0), Sense::hover()).widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Spectrogram of the last few seconds"));
     }
 
     /// Small artwork, the title, and artist / album as links.

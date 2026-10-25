@@ -221,6 +221,8 @@ fn perf() {
     println!("  unanalysed() per call: {:.2} ms", ms(unanalysed));
     println!("  sync messages + rebuild on the UI thread: median {:.2} ms", ms(sync_ui[2]));
 
+    experimental_costs(&mut h);
+
     // Idle: nothing playing, nothing hovered, nothing animating. After the
     // frames settle, nothing should ask for another one.
     reset(&mut h, FULL, Route::Albums);
@@ -241,6 +243,89 @@ fn perf() {
     assert!(!idle_repaint, "idle frames keep asking for repaints");
 }
 
+/// Each experimental visual's frame cost (and the album art's colors'): the
+/// same scenes with it off, then on.
+fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
+    type Switch = fn(&mut crate::settings::Settings);
+    let features: [(&str, Switch); 4] = [
+        ("colors from the art", |s| s.adapt_colors = true),
+        ("blurred artwork", |s| s.experimental.backdrop = true),
+        ("waveform seek bar", |s| s.experimental.waveform = true),
+        ("live spectrum", |s| s.experimental.spectrum = true),
+    ];
+    println!("experimental visuals, mean frame time off → on:");
+    for (name, on) in features {
+        for (scene, player) in [("full window", false), ("Player", true)] {
+            let setup = |h: &mut Harness<'_, Option<OndApp>>| {
+                reset(h, if player { vec2(380.0, 880.0) } else { FULL }, Route::Recent);
+                if player {
+                    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+                }
+            };
+            setup(h);
+            let off = time_with_audio(h, 60);
+            setup(h);
+            app_mut(h).prefs.edit(on);
+            fixture_waveform(app_mut(h));
+            settle_look(h);
+            let with = time_with_audio(h, 60);
+            println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
+        }
+    }
+    // The spectrogram, with the Info tab showing.
+    for (scene, player) in [("full window", false), ("Player", true)] {
+        let setup = |h: &mut Harness<'_, Option<OndApp>>| {
+            reset(h, if player { vec2(380.0, 880.0) } else { FULL }, Route::Recent);
+            if player {
+                app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+            }
+            app_mut(h).ui.queue_ui.tab = QueueTab::Info;
+        };
+        setup(h);
+        let off = time_with_audio(h, 60);
+        setup(h);
+        experiment(h, |x| x.spectrogram = true);
+        let with = time_with_audio(h, 60);
+        println!("  {:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", "spectrogram in Info", ms(off), ms(with));
+    }
+    // The visualizer, full window: each one's CPU side (the scene and the
+    // paint callback; the GPU work isn't timed here) and the painter version.
+    use crate::visuals::visualizer::{Kind, Pick};
+    let target = Some(crate::visuals::gpu::Target::plain(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8Unorm));
+    for (scene, kind, gpu) in Kind::ALL.map(|k| (format!("{}, GPU (CPU side)", k.label()), k, target)).into_iter().chain(Kind::ALL.map(|k| (format!("{}, painter", k.label()), k, None))) {
+        reset(h, FULL, Route::Recent);
+        let off = time_with_audio(h, 60);
+        reset(h, FULL, Route::Recent);
+        experiment(h, |x| {
+            x.visualizer = true;
+            x.visualizer_pick = Pick::of(kind);
+        });
+        let app = app_mut(h);
+        app.gpu = gpu;
+        app.toggle_visualizer();
+        let with = time_with_audio(h, 60);
+        app_mut(h).close_visualizer();
+        app_mut(h).gpu = None;
+        println!("  {scene:<35} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
+    }
+    reset(h, FULL, Route::Recent);
+}
+
+/// Mean time of `n` frames, each with fresh audio in the tap as if playing
+/// (the copy itself is the output callback's cost, not the frame's).
+fn time_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) -> Duration {
+    steps_with_audio(h, 5);
+    let mut total = Duration::ZERO;
+    for _ in 0..n {
+        feed_tap(app_mut(h), 1024);
+        let t = Instant::now();
+        h.step();
+        total += t.elapsed();
+    }
+    total / n as u32
+}
+
 fn ms(d: Duration) -> f64 {
+
     d.as_secs_f64() * 1000.0
 }

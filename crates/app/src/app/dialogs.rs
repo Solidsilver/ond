@@ -33,6 +33,8 @@ impl OndApp {
             self.settings_window(ctx);
             return;
         }
+        // Experimental keys are listed only while their experiment is on.
+        let visualizer = self.experimental().visualizer;
         let Some(overlay) = self.ui.overlay.as_mut() else { return };
         let id = egui::Id::unique("overlay");
         let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(20)).corner_radius(12);
@@ -40,7 +42,7 @@ impl OndApp {
         let modal = egui::Modal::new(id).frame(frame).show(ctx, |ui| {
             let t = Tokens::of(ui);
             match overlay {
-                Overlay::Shortcuts | Overlay::Settings => shortcuts_ui(ui),
+                Overlay::Shortcuts | Overlay::Settings => shortcuts_ui(ui, visualizer),
                 Overlay::NewPlaylist { name, tracks } => {
                     let what = match tracks.len() {
                         0 => String::new(),
@@ -136,7 +138,7 @@ fn name_dialog(ui: &mut egui::Ui, title: &str, sub: &str, name: &mut String, ver
 /// The key map, grouped into two or three balanced columns (three when the
 /// window is wide). Rows with the same label merge their keys. It's sized to
 /// fit; only a really short window scrolls, with a soft fade at the bottom.
-fn shortcuts_ui(ui: &mut egui::Ui) {
+fn shortcuts_ui(ui: &mut egui::Ui, visualizer: bool) {
     let t = Tokens::of(ui);
     const COL_W: f32 = 260.0;
     const GAP: f32 = 32.0;
@@ -161,7 +163,7 @@ fn shortcuts_ui(ui: &mut egui::Ui) {
                 }
                 ui.label(egui::RichText::new(*group).font(FontId::new(11.0, semibold())).color(t.muted));
                 ui.add_space(6.0);
-                for (label, keys) in rows(group) {
+                for (label, keys) in rows(group).into_iter().filter(|(l, _)| visualizer || *l != "Visualizer") {
                     ui.horizontal(|ui| {
                         ui.set_height(ROW_H);
                         ui.label(egui::RichText::new(label).size(13.0).color(t.text));

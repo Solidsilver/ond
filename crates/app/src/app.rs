@@ -24,6 +24,7 @@ mod songs;
 mod toasts;
 mod toolbar;
 mod view_ctx;
+mod visualizer_view;
 mod widgets;
 
 #[cfg(test)]
@@ -176,6 +177,10 @@ pub enum Action {
     Seek(f64),
     OpenPalette,
     SetTheme(ThemePref),
+    /// The accent color used without (or instead of) the album art's.
+    SetAccent(theme::Accent),
+    /// Whether colors adapt to the album art.
+    SetAdaptColors(bool),
     ToggleQueue,
     SetMode(WindowMode),
     /// Into Mini, or back to where Mini was entered from.
@@ -195,6 +200,8 @@ pub enum Action {
     SetDiagnostics(bool),
     /// The system's title bar instead of our own window buttons (Linux).
     SetSystemTitleBar(bool),
+    /// Turn experimental visuals on or off.
+    SetExperimental(crate::visuals::Experimental),
     /// Open the Settings window at a section.
     OpenSettings(settings_page::Section),
     /// Re-read the library from the server (albums, then tracks).
@@ -379,6 +386,11 @@ pub struct OndApp {
     song_stats: HashMap<String, Option<SongStats>>,
     /// The diagnostics bar: whether it's on, and what it measures.
     diagnostics: diagnostics::Diagnostics,
+    /// Track waveforms for the seek bar (experimental).
+    waveforms: crate::visuals::waveform::Waveforms,
+    /// What the window renders to, for the visualizer's own GPU drawing;
+    /// `None` without a wgpu renderer (it then uses the painter).
+    gpu: Option<crate::visuals::gpu::Target>,
 }
 
 /// How long a mode switch waits for the window to leave maximized.
@@ -469,6 +481,27 @@ pub struct UiState {
     pub edit_input: Vec<egui::Event>,
     /// Trackpad coasting where the system doesn't do it (Wayland).
     pub momentum: crate::momentum::Momentum,
+    /// Frames asked for by visuals that move (experimental; see `visuals`).
+    pub live: crate::visuals::Live,
+    /// The colors of the now-playing display, the Player, Mini and the
+    /// window around the page: the chosen accent, or the playing cover's.
+    pub tint: crate::visuals::colors::Easing,
+    /// The page's colors: an album page's own cover's, else the same as [`Self::tint`].
+    pub page_tint: crate::visuals::colors::Easing,
+    /// [`Self::page_tint`] as drawn this frame.
+    pub page_tints: Option<crate::visuals::colors::Tints>,
+    /// Each cover's tints for the chosen accent.
+    pub tint_cache: crate::visuals::colors::TintCache,
+    /// The accent egui's own widgets were last given.
+    pub accent_applied: Option<theme::Accent>,
+    /// The blurred cover behind the Player and Mini, fading between covers (experimental).
+    pub backdrop: crate::visuals::backdrop::Crossfade,
+    /// The playing audio's spectrum, for the live visuals (experimental).
+    pub listener: crate::visuals::spectrum::Listener,
+    /// The Info tab's spectrogram (experimental).
+    pub spectrogram: crate::visuals::spectrogram::Spectrogram,
+    /// The visualizer, while it's open (experimental).
+    pub visualizer: Option<visualizer_view::VisualizerView>,
 }
 
 impl UiState {
@@ -505,6 +538,16 @@ impl UiState {
             bars_shown: false,
             edit_input: Vec::new(),
             momentum: Default::default(),
+            live: Default::default(),
+            tint: Default::default(),
+            page_tint: Default::default(),
+            page_tints: None,
+            tint_cache: Default::default(),
+            accent_applied: None,
+            backdrop: Default::default(),
+            listener: Default::default(),
+            visualizer: None,
+            spectrogram: Default::default(),
         }
     }
 }
@@ -701,6 +744,7 @@ impl OndApp {
         #[cfg(windows)]
         now_playing::set_window(hwnd(cc));
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
+        app.gpu = cc.wgpu_render_state.as_ref().map(|s| crate::visuals::gpu::Target::new(s.target_format, &s.adapter));
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
@@ -838,6 +882,8 @@ impl OndApp {
             now_playing,
             downloads,
             diagnostics: diagnostics::Diagnostics::default(),
+            waveforms: crate::visuals::waveform::Waveforms::new(ctx.clone()),
+            gpu: None,
             prefs,
             analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
             favorites: Favorites::default(),
@@ -1336,6 +1382,9 @@ impl OndApp {
     }
 
     fn apply(&mut self, action: Action) {
+        if self.ui.visualizer.is_some() && Self::leaves_visualizer(&action) {
+            self.close_visualizer();
+        }
         // Browsing and the palette live in the full window.
         if matches!(action, Action::Go(_) | Action::OpenPalette) {
             self.set_mode(Some(WindowMode::Full));
@@ -1421,6 +1470,8 @@ impl OndApp {
                 theme::set_pref(&self.ctx, pref);
                 self.prefs.edit(|s| s.theme = pref);
             }
+            Action::SetAccent(accent) => self.prefs.edit(|s| s.accent = accent),
+            Action::SetAdaptColors(on) => self.prefs.edit(|s| s.adapt_colors = on),
             Action::ToggleQueue if self.ui.queue_narrow => self.ui.queue_sheet = !self.ui.queue_sheet,
             Action::ToggleQueue => self.prefs.edit(|s| s.show_queue = !s.show_queue),
             Action::SignOut => self.sign_out(),
@@ -1477,6 +1528,7 @@ impl OndApp {
                 self.prefs.edit(|s| s.scrobble = on);
             }
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
+            Action::SetExperimental(x) => self.prefs.edit(|s| s.experimental = x),
             Action::SetSystemTitleBar(on) => {
                 let plan = self.edit_windows(|w| {
                     w.system_title_bar = on;
@@ -1619,6 +1671,21 @@ impl OndApp {
 
     pub fn diagnostics_shown(&self) -> bool {
         self.prefs.get(|s| s.diagnostics_bar)
+    }
+
+    /// The accent color the user chose.
+    pub fn accent(&self) -> theme::Accent {
+        self.prefs.get(|s| s.accent)
+    }
+
+    /// Whether colors adapt to the album art.
+    pub fn adapt_colors(&self) -> bool {
+        self.prefs.get(|s| s.adapt_colors)
+    }
+
+    /// Which experimental visuals are on.
+    pub fn experimental(&self) -> crate::visuals::Experimental {
+        self.prefs.get(|s| s.experimental)
     }
 
     pub fn system_title_bar(&self) -> bool {
@@ -1913,28 +1980,43 @@ impl OndApp {
     fn main_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.art.poll();
+        self.art_tint(&ctx);
+        self.want_waveform();
+        if !self.experimental().spectrogram {
+            // Turned off: the picture goes (and its texture with it).
+            self.ui.spectrogram.clear();
+        }
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
-        match self.window_mode() {
-            WindowMode::Full => {
-                self.full_ui(ui);
-                self.view().palette_ui(&ctx);
-                self.overlay_ui(&ctx);
-                self.drag_ghost(&ctx);
+        if self.ui.visualizer.is_some() && !self.experimental().visualizer {
+            self.close_visualizer();
+        }
+        if self.ui.visualizer.is_some() {
+            // The whole window, whatever the mode.
+            self.visualizer_ui(ui);
+            crate::csd::overlay(&ctx, None);
+        } else {
+            match self.window_mode() {
+                WindowMode::Full => {
+                    self.full_ui(ui);
+                    self.view().palette_ui(&ctx);
+                    self.overlay_ui(&ctx);
+                    self.drag_ghost(&ctx);
+                }
+                WindowMode::Player => self.player_ui(ui),
+                WindowMode::Mini => self.mini_ui(ui),
             }
-            WindowMode::Player => self.player_ui(ui),
-            WindowMode::Mini => self.mini_ui(ui),
+            // Mini is all artwork; messages wait for a bigger window.
+            if self.window_mode() != WindowMode::Mini {
+                self.ui.toasts.ui(&ctx, ctx.content_rect());
+            }
+            // Window buttons and resize edges where the system draws none (Linux).
+            crate::csd::overlay(&ctx, match self.window_mode() {
+                WindowMode::Full => Some(toolbar::TOOLBAR_H),
+                WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
+                WindowMode::Mini => None,
+            });
         }
-        // Mini is all artwork; messages wait for a bigger window.
-        if self.window_mode() != WindowMode::Mini {
-            self.ui.toasts.ui(&ctx, ctx.content_rect());
-        }
-        // Window buttons and resize edges where the system draws none (Linux).
-        crate::csd::overlay(&ctx, match self.window_mode() {
-            WindowMode::Full => Some(toolbar::TOOLBAR_H),
-            WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
-            WindowMode::Mini => None,
-        });
         // Commands become actions; apply those in the same frame too (bounded,
         // in case something keeps asking).
         for _ in 0..4 {
@@ -1945,6 +2027,102 @@ impl OndApp {
                 self.apply(a);
             }
         }
+        // A visual that moves with the music was drawn: the next frame comes
+        // sooner than the usual clock, but only while something plays.
+        if let Some(every) = self.ui.live.next(self.engine.status.state() == PlayState::Playing) {
+            ctx.request_repaint_after(every);
+        }
+        // The engine copies what plays only while something on screen shows it.
+        let listening = self.ui.listener.used_in(ctx.cumulative_pass_nr());
+        if listening != self.engine.status.tap.active() {
+            self.engine.status.tap.set_active(listening);
+        }
+    }
+
+    /// The colors in use: the chosen accent, or the album art's when colors
+    /// adapt to it. Two tints ease on their own: the playing cover's, for the
+    /// now-playing display, the Player, Mini and the window around the page;
+    /// and the page's, which on an album page is that album's and elsewhere
+    /// the playing one's. The first goes where `Tokens::of` finds it;
+    /// `full_ui` swaps in the second around the page. A cover's colors are
+    /// worked out in the background: until they arrive the old ones stay.
+    fn art_tint(&mut self, ctx: &egui::Context) {
+        let accent = self.accent();
+        if self.ui.accent_applied != Some(accent) {
+            theme::set_accent(ctx, accent);
+            self.ui.accent_applied = Some(accent);
+        }
+        let base = self.ui.tint_cache.base(accent);
+        let adapt = self.adapt_colors();
+        let playing_cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track).map(str::to_owned));
+        let playing = match playing_cover.filter(|_| adapt) {
+            Some(cover) => self.cover_tints(&cover).or(self.ui.tint.target()).unwrap_or(base),
+            None => base,
+        };
+        let page = match self.page_cover() {
+            Some(Some(cover)) if adapt => self.cover_tints(&cover).or(self.ui.page_tint.target()).unwrap_or(playing),
+            Some(None) if adapt => base,
+            _ => playing,
+        };
+        let now = ctx.input(|i| i.time);
+        let (playing, moving) = self.ui.tint.step(playing, now);
+        let (page, page_moving) = self.ui.page_tint.step(page, now);
+        self.ui.page_tints = Some(page);
+        theme::set_tints(ctx, playing);
+        if moving || page_moving {
+            ctx.request_repaint();
+        }
+    }
+
+    /// The cover the page takes its colors from: `Some` on an album page in
+    /// the full window (`Some(None)` for an album without one), `None` on
+    /// any other page.
+    fn page_cover(&self) -> Option<Option<String>> {
+        match self.ui.nav.current() {
+            Route::Album(id) if self.window_mode() == WindowMode::Full => Some(self.data.album(id).and_then(|a| a.cover_art.clone())),
+            _ => None,
+        }
+    }
+
+    /// `cover`'s tints once its look is worked out (the chosen accent's for
+    /// a cover with no color to give); `None` meanwhile.
+    fn cover_tints(&mut self, cover: &str) -> Option<crate::visuals::colors::Tints> {
+        let look = self.art.look(cover)?;
+        Some(self.ui.tint_cache.cover(cover, look.palette.as_ref()))
+    }
+
+    /// Waveform seek bar (experimental): has the playing track's peaks read
+    /// once a complete copy is on disk (downloaded, or fully streamed).
+    fn want_waveform(&mut self) {
+        self.waveforms.poll();
+        if !self.experimental().waveform {
+            return;
+        }
+        let Some(track) = self.player.queue.current.as_ref().map(|c| &c.track) else { return };
+        let (downloads, cache, transcode) = (&self.downloads.store, &self.cache, self.output.transcode());
+        self.waveforms.want(&track.id, track.suffix.as_deref(), || {
+            downloads
+                .local_path(&track.id)
+                .or_else(|| cache.complete_path(&streamcache::CacheKey::original(track.id.clone(), track.suffix.clone())))
+                .or_else(|| transcode.and_then(|t| cache.complete_path(&streamcache::CacheKey::transcode(&track.id, &t.format, t.kbps))))
+        });
+    }
+
+    /// The blurred cover to draw behind the Player or Mini (experimental),
+    /// oldest layer first; empty when that's off or nothing plays.
+    pub(crate) fn backdrop_layers(&mut self, ctx: &egui::Context) -> Vec<crate::visuals::backdrop::Layer> {
+        let cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track).map(str::to_owned));
+        let Some(cover) = cover.filter(|_| self.experimental().backdrop) else {
+            self.ui.backdrop.clear();
+            return Vec::new();
+        };
+        let look = self.art.look(&cover);
+        let next = look.as_ref().and_then(|l| l.backdrop.as_ref());
+        let (layers, fading) = self.ui.backdrop.step(next.map(|b| (cover.as_str(), b)), ctx.input(|i| i.time));
+        if fading {
+            ctx.request_repaint();
+        }
+        layers
     }
 
     /// What's being dragged, following the pointer.
@@ -2040,9 +2218,13 @@ impl OndApp {
                 .response
                 .rect
         });
-        let content = egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
-            .show(ui, |ui| self.main_view(ui));
+        // The page in its own colors (an album page, its album's).
+        let ctx = ui.ctx().clone();
+        let content = theme::with_tints(&ctx, self.ui.page_tints, || {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
+                .show(ui, |ui| self.main_view(ui))
+        });
 
         // The column edges, after the content so they win the pointer. Widths
         // go straight into the preferences (saved once a drag settles).
@@ -2357,6 +2539,83 @@ mod tests {
         out.textures_delta.clear();
     }
 
+    /// A frame at `time` seconds, so colors can be seen easing.
+    fn frame_at(ctx: &egui::Context, app: &mut OndApp, time: f64) {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), time: Some(time), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn an_album_page_takes_its_own_colors_and_everything_else_the_playing_ones() {
+        use crate::visuals::colors::Tints;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let solid = |c: egui::Color32| egui::ColorImage::new([32, 32], vec![c; 32 * 32]);
+        app.art.preload("al-0", solid(egui::Color32::from_rgb(170, 30, 40)));
+        app.art.preload("al-5", solid(egui::Color32::from_rgb(30, 60, 170)));
+        let playing: Vec<Track> = (1..=3).map(|n| track(&format!("t-{n}"), "al-0", n)).collect();
+        app.player.queue.play_now(playing, 0, Source::Added);
+        app.ui.nav.go(Route::Album("al-5".into()));
+        let time = std::cell::Cell::new(0.0);
+        let settle = |app: &mut OndApp| {
+            // The covers' looks are worked out in the background.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while ["al-0", "al-5"].iter().any(|c| app.art.look(c).is_none()) {
+                assert!(std::time::Instant::now() < deadline, "the looks never arrived");
+                std::thread::sleep(Duration::from_millis(5));
+                app.art.poll();
+            }
+            for _ in 0..4 {
+                time.set(time.get() + 0.5);
+                frame_at(&ctx, app, time.get());
+            }
+        };
+        let tints_of = |app: &mut OndApp, cover: &str| {
+            let look = app.art.look(cover).unwrap();
+            app.ui.tint_cache.cover(cover, look.palette.as_ref())
+        };
+        let shown = |ctx: &egui::Context| ctx.data(|d| d.get_temp::<Tints>(crate::visuals::colors::id())).unwrap();
+        let dark = ctx.global_style().visuals.dark_mode;
+
+        // Not adapting: the chosen accent everywhere, album page or not.
+        app.prefs.edit(|s| s.accent = theme::Accent::Teal);
+        settle(&mut app);
+        let teal = Tints::base(theme::Accent::Teal);
+        assert_eq!((shown(&ctx), app.ui.page_tints), (teal, Some(teal)));
+        assert_eq!(Tokens::of_ctx(&ctx).accent, teal.of(dark).accent);
+
+        // Adapting: the window in the playing album's colors, the page in its own.
+        app.prefs.edit(|s| s.adapt_colors = true);
+        settle(&mut app);
+        let (red, blue) = (tints_of(&mut app, "al-0"), tints_of(&mut app, "al-5"));
+        assert_ne!(red, blue);
+        assert_ne!(red.of(dark).accent, teal.of(dark).accent);
+        assert_eq!(shown(&ctx), red, "the now-playing display and the rest follow the playing track");
+        assert_eq!(app.ui.page_tints, Some(blue), "the album page follows its album");
+        // Drawing the page swaps its colors in, and puts the playing ones back after.
+        let inside = theme::with_tints(&ctx, app.ui.page_tints, || Tokens::of_ctx(&ctx).accent);
+        assert_eq!(inside, blue.of(dark).accent);
+        assert_eq!(Tokens::of_ctx(&ctx).accent, red.of(dark).accent);
+
+        // Leaving the page: its colors ease back to the playing album's.
+        app.ui.nav.go(Route::Recent);
+        for _ in 0..2 {
+            time.set(time.get() + 0.3);
+            frame_at(&ctx, &mut app, time.get());
+        }
+        let easing = app.ui.page_tints.unwrap();
+        assert!(easing != blue && easing != red, "on the way back");
+        settle(&mut app);
+        assert_eq!(app.ui.page_tints, Some(red));
+
+        // Back to the album: no wait, its colors are already known.
+        app.ui.nav.go(Route::Album("al-5".into()));
+        frame_at(&ctx, &mut app, time.get() + 0.01);
+        assert_eq!(app.ui.page_tint.target(), Some(blue), "heading for the album's colors at once");
+    }
+
     #[test]
     fn repeat_queue_with_nothing_playable_stops() {
         let dir = tempfile::tempdir().unwrap();
@@ -2553,6 +2812,84 @@ mod tests {
         frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
         assert_eq!(app.window_mode(), WindowMode::Full);
         assert!(app.ui.palette.is_some());
+    }
+
+    #[test]
+    fn the_visualizer_opens_only_when_its_experiment_is_on_and_esc_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        frame(&ctx, &mut app, vec![key(egui::Key::T, egui::Modifiers::COMMAND)]);
+        assert!(app.ui.visualizer.is_none(), "off: ⌘T does nothing");
+        app.prefs.edit(|s| s.experimental.visualizer = true);
+        frame(&ctx, &mut app, vec![key(egui::Key::T, egui::Modifiers::COMMAND)]);
+        assert!(app.ui.visualizer.is_some());
+        for _ in 0..3 {
+            frame(&ctx, &mut app, Vec::new());
+        }
+        frame(&ctx, &mut app, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.ui.visualizer.is_none(), "Esc leaves");
+        // Going somewhere else leaves it too, and so does turning it off.
+        app.toggle_visualizer();
+        app.apply(Action::Go(Route::Albums));
+        assert!(app.ui.visualizer.is_none());
+        app.toggle_visualizer();
+        app.prefs.edit(|s| s.experimental.visualizer = false);
+        frame(&ctx, &mut app, Vec::new());
+        assert!(app.ui.visualizer.is_none());
+    }
+
+    #[test]
+    fn arrows_switch_the_visualizer_and_the_choice_is_kept() {
+        use crate::visuals::visualizer::{Kind, Pick};
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let showing = |app: &OndApp| app.ui.visualizer.as_ref().map(|v| v.kind());
+        app.prefs.edit(|s| {
+            s.experimental.visualizer = true;
+            s.experimental.visualizer_pick = Pick::Particles;
+        });
+        app.toggle_visualizer();
+        frame(&ctx, &mut app, Vec::new());
+        assert_eq!(showing(&app), Some(Kind::Particles), "it opens on the one chosen");
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        assert_eq!(app.experimental().visualizer_pick, Pick::Ribbons, "and that becomes the choice");
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        assert_eq!(showing(&app), Some(Kind::Flow), "round from the last to the first");
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowLeft, egui::Modifiers::NONE)]);
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        // ⌘→ is still the next track, not a switch.
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::COMMAND)]);
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        // Kept for next time.
+        app.prefs.flush();
+        let saved = crate::settings::Settings::read(&dir.path().join("settings.json")).unwrap();
+        assert_eq!(saved.experimental.visualizer_pick, Pick::Ribbons);
+        app.close_visualizer();
+        app.toggle_visualizer();
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        // Shuffled, the arrows still switch, and it stays shuffled.
+        app.close_visualizer();
+        app.prefs.edit(|s| s.experimental.visualizer_pick = Pick::Shuffle);
+        app.toggle_visualizer();
+        frame(&ctx, &mut app, Vec::new());
+        let first = showing(&app);
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        assert_ne!(showing(&app), first);
+        assert_eq!(app.experimental().visualizer_pick, Pick::Shuffle);
+        // And each new track after the first brings another.
+        app.player.queue.play_now(vec![track("t-first", "al-0", 1)], 0, Source::Added);
+        frame(&ctx, &mut app, Vec::new());
+        for n in 0..4 {
+            let before = showing(&app);
+            app.player.queue.play_now(vec![track(&format!("t-{n}"), "al-0", 1)], 0, Source::Added);
+            frame(&ctx, &mut app, Vec::new());
+            assert_ne!(showing(&app), before, "track {n}");
+        }
     }
 
     #[test]

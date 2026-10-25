@@ -51,7 +51,7 @@ pub(super) fn lcd_rect(full: Rect, left_end: f32, right_start: f32) -> Rect {
 impl OndApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         let mut full = ui.available_rect_before_wrap();
-        crate::csd::set_bar(ui.ctx(), full);
+        crate::csd::set_bar(ui.ctx(), full, None);
         // The bar is the window's title bar too: its empty parts move the
         // window, and a double-click zooms it. Widgets drawn after this take
         // the pointer where they are.
@@ -119,8 +119,18 @@ impl OndApp {
     pub(super) fn lcd(&mut self, ui: &mut Ui, rect: Rect) {
         let t = Tokens::of(ui);
         let painter = ui.painter().clone();
-        painter.rect(rect, 7.0, t.sidebar, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+        let fill = crate::theme::tint_of(ui).map_or(t.sidebar, |x| x.display);
+        painter.rect(rect, 7.0, fill, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
         let body = ui.interact(rect, ui.scope_id().with("lcd"), Sense::click());
+        // The live spectrum, faint behind the text (experimental).
+        if self.experimental().spectrum
+            && self.player.queue.current.is_some()
+            && let Some(f) = self.view().listen(ui)
+        {
+            let area = Rect::from_min_max(pos2(rect.left() + rect.height() + 8.0, rect.top() + 5.0), pos2(rect.right() - 8.0, rect.bottom() - 13.0));
+            let n = ((area.width() / 6.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
+            crate::visuals::paint_bars(&painter, area, &crate::visuals::spectrum::grouped(&f.bands, n), t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }));
+        }
         let Some(item) = self.player.queue.current.clone() else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), t.muted);
             return;
@@ -175,6 +185,7 @@ impl OndApp {
             grow: 0.5,
             knob: t.text,
             knob_r: 3.5,
+            wave_h: 4.0,
         };
         let mut v = self.view();
         let (shown, strip_resp) = v.seek_line(ui, bar, strip, "lcd-seek", &style);

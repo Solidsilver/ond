@@ -23,6 +23,9 @@ pub(super) struct SeekStyle {
     pub grow: f32,
     pub knob: Color32,
     pub knob_r: f32,
+    /// How far the waveform reaches above and below the line, when the
+    /// waveform seek bar is on (0: this line never shows one).
+    pub wave_h: f32,
 }
 
 impl ViewCtx<'_> {
@@ -50,14 +53,24 @@ impl ViewCtx<'_> {
         }
         let painter = ui.painter();
         let grabbed = resp.hovered() || self.ui.seek_preview.is_some();
-        let line = if grabbed { bar.expand2(vec2(0.0, s.grow)) } else { bar };
-        painter.rect_filled(line, s.radius, s.track);
-        if let Some(f) = self.engine.status.fetched_fraction() {
-            painter.rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * f.clamp(0.0, 1.0), line.bottom())), s.radius, s.fetched);
-        }
         let shown = self.ui.seek_preview.unwrap_or_else(|| self.position_secs());
+        let wave = if s.wave_h > 0.0 && self.experimental().waveform {
+            let id = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
+            id.and_then(|id| self.waveforms.bars(&id, ((bar.width() / 3.0) as usize).max(8)))
+        } else {
+            None
+        };
+        let line = if grabbed && wave.is_none() { bar.expand2(vec2(0.0, s.grow)) } else { bar };
         let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
-        painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), s.radius, s.fill);
+        if let Some(bars) = wave {
+            paint_wave(painter, line, &bars, x, s);
+        } else {
+            painter.rect_filled(line, s.radius, s.track);
+            if let Some(f) = self.engine.status.fetched_fraction() {
+                painter.rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * f.clamp(0.0, 1.0), line.bottom())), s.radius, s.fetched);
+            }
+            painter.rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), s.radius, s.fill);
+        }
         if state == PlayState::Buffering || self.player.pending_seek.is_some() {
             let tm = ui.input(|i| i.time) as f32;
             let alpha = 0.35 + 0.35 * (tm * std::f32::consts::TAU / 1.2).sin();
@@ -76,4 +89,20 @@ impl ViewCtx<'_> {
         let remaining = self.duration_secs().filter(|d| *d > 0.0).map(|d| format!("−{}", crate::fmt::clock((d - shown).max(0.0)))).unwrap_or_default();
         (crate::fmt::clock(shown), remaining)
     }
+}
+
+/// The waveform in place of the line: a bar per value, mirrored about the
+/// line's centre, played (left of `x`) in the fill color and the rest faint.
+fn paint_wave(painter: &egui::Painter, line: Rect, bars: &[f32], x: f32, s: &SeekStyle) {
+    let step = line.width() / bars.len().max(1) as f32;
+    let half_w = (step * 0.6).max(1.0) / 2.0;
+    let (cy, rest) = (line.center().y, s.fill.gamma_multiply(0.3));
+    let mut mesh = egui::Mesh::default();
+    for (i, v) in bars.iter().enumerate() {
+        let cx = line.left() + step * (i as f32 + 0.5);
+        // Quiet passages stay visible as a sliver; loud ones fill the height.
+        let h = s.wave_h * (0.12 + 0.88 * v.powf(0.8));
+        mesh.add_colored_rect(Rect::from_min_max(pos2(cx - half_w, cy - h), pos2(cx + half_w, cy + h)), if cx <= x { s.fill } else { rest });
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }

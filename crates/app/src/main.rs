@@ -35,6 +35,7 @@ mod settings;
 mod sync;
 mod theme;
 mod tracks;
+mod visuals;
 mod window;
 
 fn main() -> eframe::Result {

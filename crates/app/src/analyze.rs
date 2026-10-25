@@ -214,7 +214,7 @@ impl Drop for Runner {
 /// throttles its disk and network. Linux: nice 19 (the lowest priority), for this
 /// thread only. Windows: background mode, which lowers its CPU, disk and
 /// memory priority.
-fn lower_priority() {
+pub(crate) fn lower_priority() {
     #[cfg(target_os = "macos")]
     // SAFETY: only changes the calling thread's QoS class.
     unsafe {

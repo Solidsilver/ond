@@ -250,6 +250,7 @@ impl RingInput {
 
         let target = if bit_perfect { 1.0 } else { status.volume() };
         let step = 1.0 / (GAIN_RAMP_SECS * rate.max(1) as f32);
+        let tap = status.tap.active();
         let avail = self.samples.slots().min(out.len());
         let avail = avail - avail % channels;
         let mut written = 0;
@@ -274,6 +275,10 @@ impl RingInput {
             let n = (avail - written).min(until);
             let Ok(chunk) = self.samples.read_chunk(n) else { break };
             let (a, b) = chunk.as_slices();
+            if tap {
+                // A read-only copy for visuals; what reaches the device is untouched.
+                status.tap.write(a, b, channels, rate);
+            }
             let gains = Gains { vol: &mut self.gain, vol_target: target, rg: &mut self.rg, rg_target, step };
             apply_gain(&mut out[written..written + n], a, b, channels, gains);
             chunk.commit_all();
@@ -639,6 +644,33 @@ mod tests {
         assert_eq!(status.underruns.load(Ordering::Relaxed), 1);
         // An underrun drops back into buffering.
         assert!(input.buffering);
+    }
+
+    #[test]
+    fn the_tap_copies_what_plays_without_changing_it() {
+        let samples: Vec<f32> = (0..32).map(|i| (i as f32 * 0.37).sin() * 0.8).collect();
+        for bit_perfect in [true, false] {
+            let play = |tap: bool| {
+                let status = Status::default();
+                status.bit_perfect.store(bit_perfect, Ordering::Relaxed);
+                status.set_volume(0.5);
+                status.tap.set_active(tap);
+                let (_p, _m, mut input) = ring(&samples, false);
+                let mut out = [0.0f32; 32];
+                input.fill(&mut out, 2, RATE, &status);
+                let mut copy = [0.0f32; 16];
+                let (written, _) = status.tap.read(&mut copy);
+                (out, written, copy)
+            };
+            let (plain, none, _) = play(false);
+            let (tapped, written, copy) = play(true);
+            assert_eq!(plain.map(f32::to_bits), tapped.map(f32::to_bits), "the device gets the same samples, bit for bit");
+            assert_eq!((none, written), (0, 16), "off, the tap is skipped; on, it sees every frame");
+            // Mono, before the volume.
+            for (i, c) in copy.iter().enumerate() {
+                assert!((c - (samples[2 * i] + samples[2 * i + 1]) / 2.0).abs() < 1e-6);
+            }
+        }
     }
 
     #[test]
