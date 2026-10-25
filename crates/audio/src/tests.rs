@@ -268,15 +268,18 @@ fn replay_gain_switches_at_the_gapless_boundary_and_is_reported() {
     // (A dropout just before the boundary would fade A's tail too.)
     assert!(engine.status.underruns() > 0 || tail.clone().all(|i| (out[i] - at(a[i], ga)).abs() < 1e-7));
     // ...and B is at its own from its very first sample. The fake device reads
-    // ~11× faster than real time, so a slow machine can run the ring dry; the
-    // fade back in after a dropout is intended, so then B only has to be at
-    // its gain once that fade (15 ms, ~662 frames here) is over.
-    let from = if engine.status.underruns() == 0 { 0 } else { 2 * 1_000 };
-    assert!(
-        (from..b.len()).all(|i| (out[a.len() + i] - at(b[i], gb)).abs() < 1e-7),
-        "B's gain must start on its first sample (underruns: {})",
-        engine.status.underruns()
-    );
+    // ~11× faster than real time, so a slow machine can run the ring dry, and
+    // the fade out and back in around a dropout is intended. It can land
+    // anywhere in B, so then: no sample of B is louder than B's gain (A's,
+    // 6 dB louder, carried over would be), and nearly all of B is exactly at it.
+    let b_out = |i: usize| out[a.len() + i];
+    if engine.status.underruns() == 0 {
+        assert!((0..b.len()).all(|i| (b_out(i) - at(b[i], gb)).abs() < 1e-7), "B's gain must start on its first sample");
+    } else {
+        assert!((0..b.len()).all(|i| b_out(i).abs() <= at(b[i], gb).abs() + 1e-7), "B never above its own gain (underruns: {})", engine.status.underruns());
+        let exact = (0..b.len()).filter(|i| (b_out(*i) - at(b[*i], gb)).abs() < 1e-7).count();
+        assert!(exact * 10 >= b.len() * 8, "B mostly at its gain: {exact} of {} (underruns: {})", b.len(), engine.status.underruns());
+    }
     engine.send(Command::Shutdown);
 }
 
