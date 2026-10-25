@@ -1,7 +1,7 @@
 //! Engine-level tests with a fake device that runs the real callback on a thread.
 
 use super::*;
-use crate::decode::tests::{file_source, pcm};
+use crate::decode::tests::{file_source, pcm, slack};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -110,7 +110,7 @@ fn caps(max_bits: Option<u32>, max_rate: u32) -> DeviceCaps {
 }
 
 fn events_until(engine: &EngineHandle, mut stop: impl FnMut(&Event) -> bool) -> Vec<Event> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
     let mut seen = Vec::new();
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -151,7 +151,7 @@ fn a_decoder_panic_is_an_error_not_a_hang() {
     let Some(Event::Error { message, .. }) = seen.last() else { unreachable!() };
     assert!(message.contains("a decoder blew up"), "{message}");
     // Stopped, not stuck loading or buffering.
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + slack(Duration::from_secs(2));
     while engine.status.state() != PlayState::Stopped {
         assert!(Instant::now() < deadline, "still {:?}", engine.status.state());
         std::thread::sleep(Duration::from_millis(10));
@@ -334,7 +334,7 @@ fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
     // Well into the track before unplugging (wait on progress, not a fixed
     // time: CI runners are slower than a desk Mac).
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
     while engine.status.position_secs() < 1.0 {
         assert!(Instant::now() < deadline, "never got going");
         thread::sleep(Duration::from_millis(10));
@@ -384,7 +384,7 @@ fn a_seek_after_the_decoder_has_finished_still_lands_and_ends() {
     let engine = spawn(config, Box::new(backend), None);
     engine.send(Command::Play(file_source(&dir, "a", &a)));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     while engine.status.state() == PlayState::Loading && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
@@ -482,3 +482,4 @@ fn turning_the_volume_down_is_reported_as_dithered() {
     assert!(!dithered(&engine));
     engine.send(Command::Shutdown);
 }
+

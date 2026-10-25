@@ -76,7 +76,7 @@ impl Device {
 
 /// Waits for the session's first ring; returns it with every other message seen.
 fn wait_ring(s: &Session) -> (RingInput, Vec<DecoderMsg>) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     let mut seen = Vec::new();
     loop {
         match s.try_msg() {
@@ -92,7 +92,7 @@ fn wait_ring(s: &Session) -> (RingInput, Vec<DecoderMsg>) {
 }
 
 fn wait_seeked(s: &Session, dev: &mut Device) -> f64 {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     loop {
         assert!(Instant::now() < deadline, "no Seeked message");
         dev.tick(64);
@@ -105,7 +105,7 @@ fn wait_seeked(s: &Session, dev: &mut Device) -> f64 {
 }
 
 fn play_to_end(s: &Session, dev: &mut Device) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         let (drained, _) = dev.tick(512);
@@ -145,7 +145,7 @@ fn gapless_two_tracks_share_one_ring_and_switch_on_the_exact_sample() {
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
 
     let mut boundary_at = None;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         let (drained, _) = dev.tick(333);
@@ -176,7 +176,8 @@ fn gapless_two_tracks_share_one_ring_and_switch_on_the_exact_sample() {
 
 #[test]
 fn format_change_starts_a_new_ring() {
-    let a = pcm(2 * 4_000, 1);
+    // Longer than the ring, so `b` is queued before `a` can finish decoding.
+    let a = pcm(2 * 30_000, 1);
     let dir = tempfile::tempdir().unwrap();
     let b_path = dir.path().join("b.wav");
     std::fs::write(&b_path, wav(48_000, 2, &pcm(2 * 4_000, 2))).unwrap();
@@ -186,7 +187,7 @@ fn format_change_starts_a_new_ring() {
     s.set_next(0, Some(b));
     let (input, _) = wait_ring(&s);
     let mut dev = Device { input, status, played: Vec::new() };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     let second = loop {
         assert!(Instant::now() < deadline, "no second ring");
         dev.tick(512);
@@ -260,7 +261,7 @@ fn resampled(from: u32, to: u32, samples: &[i16]) -> Vec<f32> {
 fn play_f32(s: &Session, mut input: RingInput, status: &Status, rate: u32) -> (Vec<f32>, Option<u64>) {
     let (mut played, mut frames, mut boundary) = (Vec::new(), 0u64, None);
     let mut buf = vec![0.0f32; 2 * 401];
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         let seq = status.track_seq.load(Ordering::Relaxed);
@@ -315,7 +316,7 @@ fn seek_with_resampling_restarts_cleanly_at_the_target() {
     }
     let hold = input.ctl.hold();
     s.seek(0, Duration::from_millis(1_500), hold);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     loop {
         assert!(Instant::now() < deadline, "no Seeked");
         input.fill(&mut buf, 2, 48_000, &status);
@@ -394,7 +395,7 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     let target = ((crate::PREBUFFER_SECS * RATE as f32) as usize * 2).min(capacity / 2);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     // Play a little of the start (it buffers first, like any track start).
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
     while dev.played.len() < 4_000 {
         assert!(Instant::now() < deadline, "never started");
         dev.tick(256);
@@ -459,7 +460,7 @@ fn surround_is_downmixed_to_stereo() {
     assert_eq!(output.channels, 2);
     assert_eq!(*channels, ChannelChange::Downmix { from: 6, to: 2 });
     let mut played = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     while played.len() < frames * 2 {
         assert!(Instant::now() < deadline, "playback stalled");
         let mut buf = vec![0.0f32; 512];
@@ -478,7 +479,9 @@ fn surround_is_downmixed_to_stereo() {
 fn each_track_gets_its_gain_before_its_first_sample() {
     use crate::replaygain::{GainMode, db_to_linear};
     let dir = tempfile::tempdir().unwrap();
-    let mut a = file_source(&dir, "a", &pcm(2 * 3_000, 1));
+    // Longer than the ring, so the decoder waits on the device and can't
+    // finish `a` before `b` is queued.
+    let mut a = file_source(&dir, "a", &pcm(2 * 30_000, 1));
     a.replay_gain = ReplayGain { track_gain: Some(-6.0), album_gain: Some(-9.0), ..Default::default() };
     let mut b = file_source(&dir, "b", &pcm(2 * 3_000, 2));
     b.replay_gain = ReplayGain { track_gain: Some(-12.0), album_gain: Some(-9.0), ..Default::default() };
@@ -489,7 +492,7 @@ fn each_track_gets_its_gain_before_its_first_sample() {
     s.set_next(0, Some(b));
     let (input, mut seen) = wait_ring(&s);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
     loop {
         assert!(Instant::now() < deadline, "playback stalled");
         seen.extend(std::iter::from_fn(|| s.try_msg()));
@@ -528,6 +531,6 @@ fn replay_gain_tags_are_read_by_standard_or_raw_key() {
 
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
-fn slack(d: std::time::Duration) -> std::time::Duration {
+pub(crate) fn slack(d: std::time::Duration) -> std::time::Duration {
     if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }

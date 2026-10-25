@@ -32,8 +32,8 @@ impl OndApp {
         ui.painter().rect_filled(rect, 6.0, if resp.hovered() { t.selected } else { t.field });
         icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(11.0, 11.0)), Icon::Search, t.muted);
         ui.painter().text(pos2(rect.left() + 26.0, rect.center().y), egui::Align2::LEFT_CENTER, "Search", FontId::proportional(13.0), t.muted);
-        ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, "⌘K", FontId::proportional(11.0), t.muted);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Search (⌘K)"));
+        ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, crate::keys::shown("⌘K"), FontId::proportional(11.0), t.muted);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::keys::shown("Search (⌘K)")));
         if resp.clicked() {
             self.actions.push(Action::OpenPalette);
         }

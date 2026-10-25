@@ -321,8 +321,9 @@ pub fn sized_button(ui: &mut Ui, icon: Icon, label: &str, size: Vec2, glyph: f32
         paint(ui.painter(), Rect::from_center_size(rect.center(), Vec2::splat(glyph)), icon, fg);
     }
     let enabled = ui.is_enabled();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, label));
-    resp.on_hover_text(label)
+    let label = crate::keys::shown(label);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, &*label));
+    resp.on_hover_text(&*label)
 }
 
 /// A thin progress ring (0..=1) around `center`, on a faint full circle.

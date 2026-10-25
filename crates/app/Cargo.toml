@@ -11,9 +11,9 @@ name = "Ond"
 path = "src/main.rs"
 
 [dependencies]
-analysis = { version = "0.1.0", path = "../analysis" }
+analysis = { version = "0.2.0", path = "../analysis" }
 anyhow = "1.0.104"
-audio = { version = "0.1.0", path = "../audio" }
+audio = { version = "0.2.0", path = "../audio" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
 # `clipboard` gives text fields copy and paste; `links` opens URLs in the browser.
@@ -21,13 +21,13 @@ eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "de
 egui = "0.37.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 keyring = "4.2.0"
-library = { version = "0.1.0", path = "../library" }
+library = { version = "0.2.0", path = "../library" }
 nucleo-matcher = "0.3.1"
-offline = { version = "0.1.0", path = "../offline" }
+offline = { version = "0.2.0", path = "../offline" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-streamcache = { version = "0.1.0", path = "../streamcache" }
-subsonic = { version = "0.1.0", path = "../subsonic" }
+streamcache = { version = "0.2.0", path = "../streamcache" }
+subsonic = { version = "0.2.0", path = "../subsonic" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -38,7 +38,7 @@ workspace = true
 
 [dev-dependencies]
 # Offscreen rendering for the review snapshots (`app/snapshots.rs`).
-audio = { version = "0.1.0", path = "../audio", features = ["preview"] }
+audio = { version = "0.2.0", path = "../audio", features = ["preview"] }
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
 tempfile = "3"
 
@@ -53,3 +53,22 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSValue", "NSDictionary", "NSData", "NSObject", "NSURL"] }
 objc2-media-player = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "MPMediaItem", "MPNowPlayingInfoCenter", "MPRemoteCommand", "MPRemoteCommandCenter", "MPRemoteCommandEvent"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# The folder picker: the XDG portal on Linux, the common dialog on Windows.
+rfd = "0.17.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+libc = "0.2"
+# MPRIS: GNOME's and KDE's media controls, media keys, and KDE Connect / GSConnect.
+mpris-server = "0.10.0"
+# Reads the desktop's title bar button layout from the settings portal.
+zbus = "5.19.0"
+
+[target.'cfg(windows)'.dependencies]
+# The window's HWND, which the System Media Transport Controls attach to.
+raw-window-handle = "0.6.2"
+windows = { version = "0.62.2", features = ["Foundation", "Media", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_System_Threading", "Win32_System_WinRT"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1.34", default-features = false }

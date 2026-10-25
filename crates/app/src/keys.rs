@@ -44,12 +44,16 @@ pub enum Cmd {
     /// The diagnostics bar along the bottom.
     ToggleDiagnostics,
     /// System / Light / Dark (menu only).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Appearance(crate::theme::ThemePref),
     /// Edit menu: handed to egui as input, so text fields get it (menu only).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Edit(EditCmd),
 }
 
-/// The Edit menu's text commands.
+/// The Edit menu's text commands. Other systems' text fields take the keys
+/// directly, so only the macOS menu sends these.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditCmd {
     Undo,
@@ -60,6 +64,7 @@ pub enum EditCmd {
     SelectAll,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl EditCmd {
     pub const ALL: [EditCmd; 6] = [EditCmd::Undo, EditCmd::Redo, EditCmd::Cut, EditCmd::Copy, EditCmd::Paste, EditCmd::SelectAll];
 
@@ -155,9 +160,52 @@ pub static BINDINGS: &[Binding] = &[
     b("Window", "Keyboard shortcuts", "?", SHIFT, Key::Questionmark, true, Cmd::Shortcuts),
 ];
 
-/// The display string for `cmd`'s first binding (for tooltips and menus).
+/// The display string for `cmd`'s first binding (for the menu bar).
+#[cfg(target_os = "macos")]
 pub fn keys_for(cmd: Cmd) -> Option<&'static str> {
     BINDINGS.iter().find(|b| b.cmd == Some(cmd)).map(|b| b.keys)
+}
+
+/// Text with key combos, as this platform writes them: the Mac glyphs on
+/// macOS, "Ctrl+Shift+L" style elsewhere. Works on a bare combo ("⇧⌘L") and
+/// on combos inside a sentence ("Back (⌘[)").
+pub fn shown(text: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") || !text.contains(['⌘', '⌥', '⇧', '⏎', '⌫']) { text.into() } else { pc_style(text).into() }
+}
+
+/// "⇧⌘L" → "Ctrl+Shift+L", "Back (⌘[)" → "Back (Ctrl+[)", "⌥⏎" → "Alt+Enter".
+fn pc_style(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if !matches!(c, '⌘' | '⌥' | '⇧' | '⏎' | '⌫') {
+            out.push(c);
+            continue;
+        }
+        // A run of modifiers, then the key they go with.
+        let (mut ctrl, mut alt, mut shift, mut key) = (false, false, false, Some(c));
+        while let Some(k) = key {
+            match k {
+                '⌘' => ctrl = true,
+                '⌥' => alt = true,
+                '⇧' => shift = true,
+                _ => break,
+            }
+            key = chars.next();
+        }
+        for (on, name) in [(ctrl, "Ctrl+"), (alt, "Alt+"), (shift, "Shift+")] {
+            if on {
+                out.push_str(name);
+            }
+        }
+        match key {
+            Some('⏎') => out.push_str("Enter"),
+            Some('⌫') => out.push_str("Backspace"),
+            Some(k) => out.push(k),
+            None => {}
+        }
+    }
+    out
 }
 
 /// Consumes every bound key pressed this frame and returns their commands.
@@ -167,6 +215,11 @@ pub fn take(input: &mut egui::InputState, typing: bool) -> Vec<Cmd> {
     for b in BINDINGS {
         let (Some((mods, key)), Some(cmd)) = (b.key, b.cmd) else { continue };
         if b.idle && typing {
+            continue;
+        }
+        // Windows reports AltGr as Ctrl+Alt, so while typing those combos are
+        // characters on many layouts (AltGr+L is "ł" in Polish), not commands.
+        if typing && cfg!(windows) && mods.command && mods.alt {
             continue;
         }
         // Exact modifiers: ⌘→ must not also fire for ⌥⌘→. `?` needs Shift on
@@ -219,6 +272,19 @@ mod tests {
         }
         h.run_steps(2);
         assert_eq!(h.state(), "hunter2");
+    }
+
+    #[test]
+    fn other_platforms_spell_out_the_modifiers() {
+        assert_eq!(pc_style("⇧⌘L"), "Ctrl+Shift+L");
+        assert_eq!(pc_style("⌥⌘→"), "Ctrl+Alt+→");
+        assert_eq!(pc_style("⌥↑ ⌥↓"), "Alt+↑ Alt+↓");
+        assert_eq!(pc_style("⇧⏎"), "Shift+Enter");
+        assert_eq!(pc_style("Space"), "Space");
+        assert_eq!(pc_style("⌫"), "Backspace");
+        assert_eq!(pc_style("Back (⌘[)"), "Back (Ctrl+[)");
+        assert_eq!(pc_style("⏎ open    ⌘⏎ play"), "Enter open    Ctrl+Enter play");
+        assert_eq!(pc_style("press ⇧⌘D on its page."), "press Ctrl+Shift+D on its page.");
     }
 
     #[test]

@@ -125,6 +125,14 @@ impl OndApp {
                 self.actions.push(Action::SetDiagnostics(shown));
             }
             hint(ui, "Shows the signal path, buffer, downloads, sync and server timing in a thin bar along the bottom (⌥⌘I).");
+            if crate::csd::SUPPORTED {
+                ui.add_space(10.0);
+                let mut system = self.system_title_bar();
+                if narrow_toggle(ui, &mut system, "Use the system title bar").changed() {
+                    self.actions.push(Action::SetSystemTitleBar(system));
+                }
+                hint(ui, "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.");
+            }
         });
     }
 
@@ -238,7 +246,7 @@ impl OndApp {
             ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, t.muted);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if secondary(ui, "Show in Finder").clicked() {
+                if secondary(ui, &format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
                     self.actions.push(Action::RevealOffline);
                 }
                 ui.add_space(4.0);
@@ -399,7 +407,7 @@ fn row(ui: &mut Ui, label: &str, control: impl FnOnce(&mut Ui)) {
 fn hint(ui: &mut Ui, text: &str) {
     let t = Tokens::of(ui);
     ui.add_space(4.0);
-    ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(t.muted)).wrap());
+    ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(text)).size(12.0).color(t.muted)).wrap());
 }
 
 /// A dB value on a thin slider with a readout, snapped to 0.5 dB.

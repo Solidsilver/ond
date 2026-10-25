@@ -12,7 +12,9 @@
 //! goes nowhere. Ours carry the usual keys and hand egui the matching input
 //! instead (see [`EditCmd::events`]).
 
-use crate::keys::{Cmd, EditCmd};
+use crate::keys::Cmd;
+#[cfg(target_os = "macos")]
+use crate::keys::EditCmd;
 use crate::theme::ThemePref;
 
 #[cfg(target_os = "macos")]
@@ -31,10 +33,12 @@ impl MenuBar {
 }
 
 /// Menu item id ↔ command.
+#[cfg(target_os = "macos")]
 fn id_of(cmd: Cmd) -> String {
     format!("{cmd:?}")
 }
 
+#[cfg(target_os = "macos")]
 fn cmd_of(id: &str) -> Option<Cmd> {
     const ALL: &[Cmd] = &[
         Cmd::PlayPause,
@@ -302,7 +306,7 @@ mod imp {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
