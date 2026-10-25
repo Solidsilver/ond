@@ -824,9 +824,18 @@ pub fn file_name(r: &TrackRef) -> String {
 
 /// The saver thread: writes the newest pins handed to it, skipping any that a
 /// newer one superseded while it was busy, until the store goes away.
+///
+/// Saves can arrive out of order (two commits race to hand theirs over once
+/// the state lock is released), so one older than a save already seen is
+/// dropped rather than written over it.
 fn saver(dir: PathBuf, saves: Receiver<Save>, flush: Arc<Flush>) {
+    let mut newest = 0;
     while let Ok(first) = saves.recv() {
         let save = saves.try_iter().fold(first, |a, b| if b.revision > a.revision { b } else { a });
+        if save.revision < newest {
+            continue;
+        }
+        newest = save.revision;
         let write = || -> io::Result<()> {
             let tmp = dir.join(format!("{STATE_FILE}.tmp"));
             let mut f = std::fs::File::create(&tmp)?;

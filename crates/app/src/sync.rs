@@ -146,6 +146,20 @@ pub async fn blocking<T: Send + 'static>(lib: &Arc<Library>, f: impl FnOnce(&Lib
     }
 }
 
+/// Runs a write on the library, unless `live` says the work is stale: the
+/// user signed out since it started, so the library may already hold another
+/// account's mirror.
+async fn write<T: Send + 'static>(
+    lib: &Arc<Library>,
+    live: &impl Fn() -> bool,
+    f: impl FnOnce(&Library) -> library::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    if !live() {
+        return Err("Signed out".into());
+    }
+    blocking(lib, f).await
+}
+
 /// Pages through the server's album list into the library; `progress` gets
 /// the count so far. Once the whole list has arrived, albums no longer on the
 /// server are removed. Returns every stored album. A failure part-way stores
@@ -153,14 +167,14 @@ pub async fn blocking<T: Send + 'static>(lib: &Arc<Library>, f: impl FnOnce(&Lib
 ///
 /// A page shorter than [`ALBUM_PAGE`] ends the list (Navidrome serves full
 /// pages until the last).
-pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, progress: impl Fn(usize)) -> Result<Vec<Album>, String> {
+pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool, progress: impl Fn(usize)) -> Result<Vec<Album>, String> {
     let mut offset = 0;
     let mut seen = HashSet::new();
     loop {
         let page = fetch.album_page(ALBUM_PAGE, offset).await.map_err(|e| format!("Sync failed: {e}"))?;
         seen.extend(page.iter().map(|a| a.id.clone()));
         let n = page.len() as u32;
-        blocking(lib, move |l| l.upsert_albums(page)).await.map_err(|e| format!("Couldn't save the album list: {e}"))?;
+        write(lib, live, move |l| l.upsert_albums(page)).await.map_err(|e| format!("Couldn't save the album list: {e}"))?;
         // Only an empty page ends the list: a server may cap pages below what
         // was asked for, and stopping early would prune everything after it.
         if n == 0 {
@@ -169,7 +183,7 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, progress: impl Fn(u
         offset += n;
         progress(offset as usize);
     }
-    blocking(lib, move |l| {
+    write(lib, live, move |l| {
         let removed = l.retain_albums(&seen)?;
         if removed > 0 {
             tracing::info!("sync: removed {removed} albums no longer on the server");
@@ -180,31 +194,39 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, progress: impl Fn(u
 }
 
 /// Replaces the stored artists with the server's; returns them as stored.
-pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F) -> Result<Vec<library::Artist>, String> {
+pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool) -> Result<Vec<library::Artist>, String> {
     let artists = fetch.artists().await.map_err(|e| format!("Couldn't load artists: {e}"))?;
-    blocking(lib, move |l| l.replace_artists(artists).and_then(|_| l.artists())).await
+    write(lib, live, move |l| l.replace_artists(artists).and_then(|_| l.artists())).await
 }
 
 /// Runs a full sync pass. `progress` is called after every page or album.
-pub async fn run<F: Fetch>(lib: Arc<Library>, fetch: F, cancel: Arc<AtomicBool>, progress: impl Fn(Progress)) -> Outcome {
-    match run_inner(&lib, fetch, &cancel, &progress).await {
+/// Nothing is stored once `live` turns false (see [`write`]); a cancelled
+/// pass still stores what's already on its way.
+pub async fn run<F: Fetch>(lib: Arc<Library>, fetch: F, cancel: Arc<AtomicBool>, live: impl Fn() -> bool, progress: impl Fn(Progress)) -> Outcome {
+    match run_inner(&lib, fetch, &cancel, &live, &progress).await {
         Ok(o) => o,
         Err(e) => Outcome::Failed(e),
     }
 }
 
-async fn run_inner<F: Fetch>(lib: &Arc<Library>, fetch: F, cancel: &AtomicBool, progress: &impl Fn(Progress)) -> Result<Outcome, String> {
+async fn run_inner<F: Fetch>(
+    lib: &Arc<Library>,
+    fetch: F,
+    cancel: &AtomicBool,
+    live: &impl Fn() -> bool,
+    progress: &impl Fn(Progress),
+) -> Result<Outcome, String> {
     let (albums, stamps, done, offset) =
         blocking(lib, |l| Ok((l.albums()?, l.album_stamps()?, l.meta(BULK_DONE)?.is_some(), l.meta(BULK_OFFSET)?))).await?;
     let mut bulk = false;
     if let Plan::Bulk { from } = plan(&albums, &stamps, done, offset) {
         let total = albums.iter().map(|a| a.song_count as usize).sum();
-        match bulk_pass(lib, &fetch, cancel, progress, from, total).await? {
+        match bulk_pass(lib, &fetch, cancel, live, progress, from, total).await? {
             BulkEnd::Cancelled => return Ok(Outcome::Cancelled),
             BulkEnd::Unsupported => {}
             BulkEnd::Done => {
                 let albums2 = albums.clone();
-                blocking(lib, move |l| {
+                write(lib, live, move |l| {
                     l.set_album_stamps(bulk_stamps(&albums2, &l.track_counts()?))?;
                     l.set_meta(BULK_DONE, Some(1))?;
                     l.set_meta(BULK_OFFSET, None)
@@ -218,7 +240,7 @@ async fn run_inner<F: Fetch>(lib: &Arc<Library>, fetch: F, cancel: &AtomicBool, 
     // few the bulk pass couldn't vouch for.
     let stamps = blocking(lib, |l| l.album_stamps()).await?;
     let todo = stale(&albums, &stamps);
-    match per_album(lib, &fetch, cancel, progress, todo).await? {
+    match per_album(lib, &fetch, cancel, live, progress, todo).await? {
         Some(fetched) => Ok(Outcome::Done { fetched, bulk }),
         None => Ok(Outcome::Cancelled),
     }
@@ -235,6 +257,7 @@ async fn bulk_pass<F: Fetch>(
     lib: &Arc<Library>,
     fetch: &F,
     cancel: &AtomicBool,
+    live: &impl Fn() -> bool,
     progress: &impl Fn(Progress),
     from: u32,
     total: usize,
@@ -272,7 +295,7 @@ async fn bulk_pass<F: Fetch>(
         }
         let n = page.len() as u32;
         let next = offset + n;
-        blocking(lib, move |l| {
+        write(lib, live, move |l| {
             l.store_songs(page)?;
             l.set_meta(BULK_OFFSET, Some(next))
         })
@@ -287,7 +310,14 @@ async fn bulk_pass<F: Fetch>(
 
 /// Fetches `ids` with [`CONCURRENCY`] requests in flight, storing them in
 /// batches. `None` when cancelled (what was fetched so far is kept).
-async fn per_album<F: Fetch>(lib: &Arc<Library>, fetch: &F, cancel: &AtomicBool, progress: &impl Fn(Progress), ids: Vec<String>) -> Result<Option<usize>, String> {
+async fn per_album<F: Fetch>(
+    lib: &Arc<Library>,
+    fetch: &F,
+    cancel: &AtomicBool,
+    live: &impl Fn() -> bool,
+    progress: &impl Fn(Progress),
+    ids: Vec<String>,
+) -> Result<Option<usize>, String> {
     let total = ids.len();
     let mut queue = ids.into_iter();
     let mut running = JoinSet::new();
@@ -317,7 +347,7 @@ async fn per_album<F: Fetch>(lib: &Arc<Library>, fetch: &F, cancel: &AtomicBool,
         if batch.len() >= WRITE_BATCH {
             stored += batch.len();
             let b = std::mem::take(&mut batch);
-            blocking(lib, move |l| l.upsert_albums_tracks(b)).await?;
+            write(lib, live, move |l| l.upsert_albums_tracks(b)).await?;
         }
         progress(Progress { done, total, unit: Unit::Albums });
         if failures >= MAX_FAILURES {
@@ -327,7 +357,7 @@ async fn per_album<F: Fetch>(lib: &Arc<Library>, fetch: &F, cancel: &AtomicBool,
     }
     stored += batch.len();
     if !batch.is_empty() {
-        blocking(lib, move |l| l.upsert_albums_tracks(batch)).await?;
+        write(lib, live, move |l| l.upsert_albums_tracks(batch)).await?;
     }
     Ok(if cancel.load(Ordering::Relaxed) && stored < total { None } else { Some(stored) })
 }
@@ -521,7 +551,7 @@ mod tests {
         let mut fake = Fake::new(albums.clone(), true);
         fake.bulk_skips = Some("a100".into());
         let seen = Mutex::new(Vec::new());
-        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), |p| seen.lock().unwrap().push(p)));
+        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |p| seen.lock().unwrap().push(p)));
         // 747 songs: two pages; the skipped album is fetched on its own.
         assert_eq!(out, Outcome::Done { fetched: 1, bulk: true });
         assert_eq!(fake.page_calls.load(Ordering::SeqCst), 2);
@@ -532,7 +562,7 @@ mod tests {
 
         // Nothing changed: nothing fetched.
         fake.album_calls.lock().unwrap().clear();
-        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), |_| {}));
+        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |_| {}));
         assert_eq!(out, Outcome::Done { fetched: 0, bulk: false });
         assert_eq!(fake.page_calls.load(Ordering::SeqCst), 2);
 
@@ -541,7 +571,7 @@ mod tests {
         changed.song_count = 4;
         fake.albums.lock().unwrap()[5] = changed.clone();
         lib.upsert_albums([changed]).unwrap();
-        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), |_| {}));
+        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |_| {}));
         assert_eq!(out, Outcome::Done { fetched: 1, bulk: false });
         assert_eq!(*fake.album_calls.lock().unwrap(), ["a005"]);
         assert_eq!(lib.album_tracks("a005").unwrap().len(), 4);
@@ -554,14 +584,14 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut fake = Fake::new(albums.clone(), true);
         fake.cancel_after_pages = Some((1, cancel.clone()));
-        let out = rt().block_on(run(lib.clone(), fake.clone(), cancel, |_| {}));
+        let out = rt().block_on(run(lib.clone(), fake.clone(), cancel, || true, |_| {}));
         assert_eq!(out, Outcome::Cancelled);
         assert_eq!(lib.meta(BULK_OFFSET).unwrap(), Some(1000));
         assert_eq!(lib.track_count().unwrap(), 1000);
 
         // Next launch: picks up at 1000, one more page, done.
         let fake = Fake::new(albums, true);
-        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), |_| {}));
+        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |_| {}));
         assert_eq!(out, Outcome::Done { fetched: 0, bulk: true });
         assert_eq!(fake.page_calls.load(Ordering::SeqCst), 1);
         assert_eq!(lib.track_count().unwrap(), 1200);
@@ -574,7 +604,7 @@ mod tests {
         let albums = many(220, 2);
         let lib = library(&albums);
         let fake = Fake::new(albums, false);
-        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), |_| {}));
+        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |_| {}));
         assert_eq!(out, Outcome::Done { fetched: 220, bulk: false });
         // Tried "" and then `""` before giving up on bulk.
         assert_eq!(fake.page_calls.load(Ordering::SeqCst), 2);
@@ -590,7 +620,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let c = cancel.clone();
         let fake = Fake::new(albums, false);
-        let out = rt().block_on(run(lib.clone(), fake, cancel, move |p| {
+        let out = rt().block_on(run(lib.clone(), fake, cancel, || true, move |p| {
             if p.done == 20 {
                 c.store(true, Ordering::SeqCst);
             }
@@ -607,7 +637,7 @@ mod tests {
         let lib = library(&albums);
         // The fake knows none of these albums: every getAlbum fails.
         let fake = Fake::new(Vec::new(), false);
-        let out = rt().block_on(run(lib, fake, Arc::default(), |_| {}));
+        let out = rt().block_on(run(lib, fake, Arc::default(), || true, |_| {}));
         assert!(matches!(out, Outcome::Failed(e) if e.contains("not found")));
     }
 
@@ -623,7 +653,7 @@ mod tests {
         let server = many(1001, 1);
         let lib = library(&[album("zz-gone", 1)]);
         let seen = std::sync::Mutex::new(Vec::new());
-        let stored = rt().block_on(albums(&lib, &Fake::new(server.clone(), false), |n| seen.lock().unwrap().push(n))).unwrap();
+        let stored = rt().block_on(albums(&lib, &Fake::new(server.clone(), false), &|| true, |n| seen.lock().unwrap().push(n))).unwrap();
         assert_eq!(*seen.lock().unwrap(), [500, 1000, 1001]);
         assert_eq!(stored.len(), 1001);
         let mut want: Vec<String> = server.iter().map(|a| a.id.clone()).collect();
@@ -637,7 +667,7 @@ mod tests {
         let lib = library(&[]);
         let mut fake = Fake::new(server, false);
         fake.page_cap = Some(100);
-        let stored = rt().block_on(albums(&lib, &fake, |_| {})).unwrap();
+        let stored = rt().block_on(albums(&lib, &fake, &|| true, |_| {})).unwrap();
         assert_eq!(stored.len(), 250, "every page is read, not just the first short one");
     }
 
@@ -647,7 +677,7 @@ mod tests {
         let lib = library(&[album("zz-kept", 1)]);
         let mut fake = Fake::new(server, false);
         fake.list_fails_at = Some(500);
-        let err = rt().block_on(albums(&lib, &fake, |_| {})).unwrap_err();
+        let err = rt().block_on(albums(&lib, &fake, &|| true, |_| {})).unwrap_err();
         assert!(err.contains("server went away"), "{err}");
         let ids = stored_ids(&lib);
         assert_eq!(ids.len(), 501, "the first page is stored");
@@ -655,9 +685,27 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_out_mid_list_stores_and_removes_nothing_more() {
+        // Signed out after the first page: the library may be another
+        // account's by the time the rest arrives.
+        let server = many(1200, 1);
+        let lib = library(&[album("zz-other-account", 1)]);
+        let live = std::sync::atomic::AtomicBool::new(true);
+        let out = rt().block_on(albums(&lib, &Fake::new(server, false), &|| live.load(Ordering::SeqCst), |_| live.store(false, Ordering::SeqCst)));
+        assert!(out.is_err());
+        let ids = stored_ids(&lib);
+        assert_eq!(ids.len(), 501, "only the page before the sign-out");
+        assert!(ids.contains(&"zz-other-account".to_owned()), "nothing pruned");
+        let lib = library(&many(10, 1));
+        let out = rt().block_on(run(lib.clone(), Fake::new(many(10, 1), false), Arc::default(), || false, |_| {}));
+        assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+        assert_eq!(lib.track_count().unwrap(), 0, "a track sync stores nothing either");
+    }
+
+    #[test]
     fn artists_replace_what_was_stored() {
         let lib = library(&[]);
-        let stored = rt().block_on(artists(&lib, &Fake::new(Vec::new(), false))).unwrap();
+        let stored = rt().block_on(artists(&lib, &Fake::new(Vec::new(), false), &|| true)).unwrap();
         assert_eq!(stored.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Bill Evans"]);
     }
 }

@@ -430,3 +430,21 @@ fn each_account_keeps_its_own_downloads_and_old_stores_are_adopted() {
 fn slack(d: std::time::Duration) -> std::time::Duration {
     if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }
+
+#[test]
+fn an_older_save_arriving_late_doesnt_overwrite_a_newer_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let flush = Arc::new(Flush::default());
+    let saver = {
+        let (dir, flush) = (dir.path().to_owned(), flush.clone());
+        thread::spawn(move || saver(dir, rx, flush))
+    };
+    tx.send(Save { revision: 2, bytes: b"two".to_vec() }).unwrap();
+    flush.wait_for(2, Duration::from_secs(5));
+    // The commit that made revision 1 lost the race to hand it over.
+    tx.send(Save { revision: 1, bytes: b"one".to_vec() }).unwrap();
+    drop(tx);
+    saver.join().unwrap();
+    assert_eq!(std::fs::read(dir.path().join(STATE_FILE)).unwrap(), b"two");
+}

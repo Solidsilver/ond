@@ -144,6 +144,10 @@ pub struct Bridge {
     /// The last request sent per heart or rating: the next one for the same
     /// item waits for it, so the server sees them in the order they were made.
     in_order: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Set on a copy made by [`scoped`](Self::scoped): the session its work
+    /// belongs to. Once that session ends, the copy's library writes and
+    /// messages are dropped.
+    scope: Option<u64>,
 }
 
 impl Bridge {
@@ -157,6 +161,7 @@ impl Bridge {
             reconnecting: Arc::default(),
             session: Arc::default(),
             in_order: Arc::default(),
+            scope: None,
         }
     }
 
@@ -183,14 +188,27 @@ impl Bridge {
     }
 
     /// Signing out: connects and reconnect loops in flight give up, and
-    /// anything they still deliver is recognised as stale.
+    /// anything they still deliver is recognised as stale. Server requests
+    /// still running store nothing more: the next sign-in may be another
+    /// account, whose library they'd mix into.
     pub fn end_session(&self) {
         self.session.fetch_add(1, Ordering::AcqRel);
         self.reconnecting.store(false, Ordering::Relaxed);
+        self.cancel_sync();
     }
 
     fn live(&self, session: u64) -> bool {
         self.session() == session
+    }
+
+    /// A copy for work on the current session's behalf (see `scope`).
+    fn scoped(&self) -> Self {
+        Self { scope: Some(self.scope.unwrap_or_else(|| self.session())), ..self.clone() }
+    }
+
+    /// False once the session this copy works for has ended.
+    fn current(&self) -> bool {
+        self.scope.is_none_or(|s| self.live(s))
     }
 
     /// The UI's wake-up, for other background work to share.
@@ -199,12 +217,18 @@ impl Bridge {
     }
 
     fn send(&self, msg: Msg) {
+        if !self.current() {
+            return;
+        }
         let _ = self.tx.send(msg);
         (self.notify)();
     }
 
     /// Runs `f` on the library off the async workers (redb blocks).
     async fn db<T: Send + 'static>(&self, f: impl FnOnce(&Library) -> library::Result<T> + Send + 'static) -> Result<T, String> {
+        if !self.current() {
+            return Err("Signed out".into());
+        }
         crate::sync::blocking(&self.library, f).await
     }
 
@@ -401,10 +425,11 @@ impl Bridge {
 
     /// Pages through every album on the server into the local db.
     pub fn sync_albums(&self, client: Client) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             let progress = |n| this.send(Msg::SyncProgress(n));
-            match crate::sync::albums(&this.library, &client, progress).await {
+            let live = || this.current();
+            match crate::sync::albums(&this.library, &client, &live, progress).await {
                 Ok(albums) => {
                     let n = albums.len();
                     this.send(Msg::Albums(albums));
@@ -412,7 +437,7 @@ impl Bridge {
                 }
                 Err(e) => return this.send(Msg::AlbumSyncDone(Err(e))),
             }
-            match crate::sync::artists(&this.library, &client).await {
+            match crate::sync::artists(&this.library, &client, &live).await {
                 Ok(stored) => this.send(Msg::Artists(stored)),
                 Err(e) => this.send(Msg::Error(e)),
             }
@@ -423,15 +448,20 @@ impl Bridge {
     /// Fetches the tracks of every album that changed since the last sync, in
     /// the background. Replaces (cancels) a sync already running.
     pub fn sync_tracks(&self, client: Client) {
+        // From a session that's over (an album pass finishing after sign-out):
+        // it mustn't cancel the new session's sync, let alone store anything.
+        if !self.current() {
+            return;
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         if let Some(old) = self.sync_cancel.lock().unwrap_or_else(|e| e.into_inner()).replace(cancel.clone()) {
             old.store(true, Ordering::Relaxed);
         }
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             // At most ~10 progress repaints a second, however fast albums arrive.
             let last = Mutex::new(Instant::now() - Duration::from_secs(1));
-            let outcome = sync::run(this.library.clone(), client, cancel.clone(), |p| {
+            let outcome = sync::run(this.library.clone(), client, cancel.clone(), || this.current(), |p| {
                 let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
                 if p.done == p.total || last.elapsed() >= Duration::from_millis(100) {
                     *last = Instant::now();
@@ -471,7 +501,7 @@ impl Bridge {
 
     /// Shows cached tracks immediately, then refreshes them from the server.
     pub fn open_album(&self, client: Option<Client>, album_id: String) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             let id = album_id.clone();
             let key = ListKey::Album(album_id.clone());
@@ -516,7 +546,7 @@ impl Bridge {
 
     /// Recently added albums and the user's playlists; both small, fetched on connect.
     pub fn fetch_home(&self, client: Client) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             match client.album_list(AlbumListType::Newest, 120, 0).await {
                 Ok(albums) => {
@@ -538,7 +568,7 @@ impl Bridge {
         let Some(client) = client else {
             return self.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: None });
         };
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             match client.playlist(&id).await {
                 Ok(p) => {
@@ -555,7 +585,7 @@ impl Bridge {
     /// Everything the user starred, and the ratings that come with it.
     pub fn fetch_starred(&self, client: Option<Client>) {
         let Some(client) = client else { return };
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             match client.starred().await {
                 Ok(s) => {
@@ -578,7 +608,7 @@ impl Bridge {
     /// they're a nicety, never worth an error banner.
     pub fn fetch_lyrics(&self, client: Option<Client>, track_id: String, artist: Option<String>, title: String) {
         let Some(client) = client else { return };
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             let mut lyrics = match client.lyrics_by_song(&track_id).await {
                 Ok(versions) => crate::lyrics::pick(versions),
@@ -603,7 +633,7 @@ impl Bridge {
     /// Info tab. Quietly nothing on failure.
     pub fn fetch_song_stats(&self, client: Option<Client>, track_id: String) {
         let Some(client) = client else { return };
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             let stats = match client.song(&track_id).await {
                 Ok(s) => Some(crate::app::SongStats { plays: s.play_count, last_played: s.played }),
@@ -618,7 +648,7 @@ impl Bridge {
 
     /// Loves or unloves; `seq` comes back in the reply so a stale one is recognised.
     pub fn set_starred(&self, client: Option<Client>, kind: StarKind, id: String, on: bool, seq: u64) {
-        let this = self.clone();
+        let this = self.scoped();
         self.after_previous(format!("star:{kind:?}:{id}"), async move {
             let error = match &client {
                 Some(c) => c.set_starred(kind, &id, on).await.err().map(|e| e.to_string()),
@@ -629,7 +659,7 @@ impl Bridge {
     }
 
     pub fn set_rating(&self, client: Option<Client>, id: String, rating: u8, previous: u8, seq: u64) {
-        let this = self.clone();
+        let this = self.scoped();
         self.after_previous(format!("rating:{id}"), async move {
             let error = match &client {
                 Some(c) => c.set_rating(&id, rating).await.err().map(|e| e.to_string()),
@@ -642,7 +672,7 @@ impl Bridge {
     /// Makes a playlist of `song_ids`; the app opens it when it's there.
     pub fn create_playlist(&self, client: Option<Client>, name: String, song_ids: Vec<String>) {
         let Some(client) = client else { return self.send(Msg::Error("Not connected to a server".into())) };
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             match client.create_playlist(&name, &song_ids).await {
                 Ok(p) => {
@@ -658,7 +688,7 @@ impl Bridge {
     /// also undoes the app's optimistic copy if the edit failed).
     pub fn edit_playlist(&self, client: Option<Client>, id: String, edit: PlaylistEdit) {
         let Some(client) = client else { return self.send(Msg::Error("Not connected to a server".into())) };
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             let result = match &edit {
                 PlaylistEdit::Rename(name) => client.update_playlist(&id, Some(name), &[], &[]).await,
@@ -697,7 +727,7 @@ impl Bridge {
     /// Gathers the tracks of `album_ids` in order: stored ones straight from the
     /// db, the rest from the server (and stored on the way).
     pub fn fetch_tracks(&self, client: Option<Client>, key: ListKey, album_ids: Vec<String>) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             let mut all = Vec::new();
             for id in album_ids {
