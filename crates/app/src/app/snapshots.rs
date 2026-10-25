@@ -1364,6 +1364,40 @@ fn leaving_a_maximized_window_resizes_after_it_lets_go() {
     *h.state_mut() = None;
 }
 
+/// A long album name stays on one line in the Player, cut short, so it
+/// doesn't push the transport and the queue down.
+#[test]
+fn a_long_album_name_doesnt_push_the_player_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(vec2(380.0, 880.0))
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, vec2(380.0, 880.0), Route::Recent);
+    app_mut(&mut h).edit_windows(|w| w.mode = WindowMode::Player);
+    h.run_steps(3);
+    let before = h.get_by_label("Details").rect();
+    {
+        let app = app_mut(&mut h);
+        let id = app.player.queue.current.as_ref().unwrap().track.album_id.clone();
+        let i = app.data.by_id[&id];
+        app.data.albums[i].name = "The Complete Recordings at the Village Vanguard, Including Alternate Takes and Rehearsals".into();
+    }
+    h.run_steps(3);
+    assert_eq!(h.get_by_label("Details").rect().min.y, before.min.y, "everything below the title stays put");
+    *h.state_mut() = None;
+}
+
 /// The play button over a hovered album cover plays the album. It covers
 /// part of the tile, so the pointer on it must not count as leaving the tile.
 #[test]

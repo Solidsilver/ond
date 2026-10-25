@@ -10,6 +10,7 @@
   wayland,
   vulkan-loader,
   libGL,
+  dbus,
   libX11,
   libXcursor,
   libXi,
@@ -21,13 +22,15 @@ let
   cargoToml = lib.importTOML ../Cargo.toml;
 
   # Opened at run time (dlopen) rather than linked: the windowing system,
-  # keyboard handling and the GPU. Without them on the RPATH the app finds no
-  # display on NixOS.
+  # keyboard handling, the GPU, and D-Bus for the folder picker (the desktop
+  # portal). Without them on the RPATH the app finds no display on NixOS, and
+  # the picker silently finds nothing to ask.
   runtimeLibs = [
     libxkbcommon
     wayland
     vulkan-loader
     libGL
+    dbus
     libX11
     libXcursor
     libXi

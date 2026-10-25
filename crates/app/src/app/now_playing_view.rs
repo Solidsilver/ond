@@ -6,7 +6,7 @@
 //! details strip folds out under the transport.
 
 use super::view_ctx::ViewCtx;
-use super::widgets::{elide, heart_button, link};
+use super::widgets::{elide, heart_button, link, link_line};
 use super::seek::SeekStyle;
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
@@ -152,20 +152,30 @@ impl ViewCtx<'_> {
             }
         });
         ui.add_space(2.0);
-        ui.horizontal_wrapped(|ui| {
+        // One line, so a long name can't push everything below it down: when
+        // both don't fit, the album gives way first, the artist keeps at least half.
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let font = FontId::proportional(14.0);
+            let natural = |ui: &Ui, text: &str| ui.painter().layout_no_wrap(text.to_owned(), font.clone(), t.text).size().x;
+            let sep = "  ·  ";
+            let sep_w = if track.artist.is_some() && album.is_some() { natural(ui, sep) } else { 0.0 };
+            let artist_w = track.artist.as_deref().map_or(0.0, |a| natural(ui, a));
+            let album_w = album.map_or(0.0, |al| natural(ui, &al.name));
+            let room = width - sep_w;
+            let artist_max = if artist_w + album_w <= room { artist_w } else { artist_w.min((room - album_w).max(room * 0.5)) };
             if let Some(artist) = &track.artist
-                && link(ui, artist, font.clone(), t.accent).clicked()
+                && link_line(ui, artist, font.clone(), t.accent, artist_max).clicked()
                 && let Some(route) = Route::artist_of(track)
             {
                 self.actions.push(Action::Go(route));
             }
             if let Some(al) = album {
                 if track.artist.is_some() {
-                    ui.label(egui::RichText::new("  ·  ").font(font.clone()).color(t.muted));
+                    ui.label(egui::RichText::new(sep).font(font.clone()).color(t.muted));
                 }
-                if link(ui, &al.name, font, t.muted).clicked() {
+                let left = (width - (ui.cursor().min.x - ui.min_rect().min.x)).max(24.0);
+                if link_line(ui, &al.name, font, t.muted, left).clicked() {
                     self.ui.reveal = Some(track.id.clone());
                     self.actions.push(Action::Go(Route::Album(al.id.clone())));
                 }

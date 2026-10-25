@@ -19,6 +19,20 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
     // Never wider than the room it's in: a long name wraps (in a wrapping row,
     // across the whole row) instead of widening its column.
     let cap = if ui.layout().main_wrap { ui.max_rect().width() } else { ui.available_width() };
+    let wrap = TextWrapping { max_width: cap.max(24.0), ..Default::default() };
+    link_with(ui, text, font, color, wrap)
+}
+
+/// A link kept to one line of at most `width`, cut with an ellipsis; the whole
+/// text shows on hover when it was cut.
+pub fn link_line(ui: &mut Ui, text: &str, font: FontId, color: Color32, width: f32) -> Response {
+    let wrap = TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let resp = link_with(ui, text, font.clone(), color, wrap);
+    let whole = ui.painter().layout_no_wrap(text.to_owned(), font, color).size().x;
+    if whole > resp.rect.width() + 0.5 { resp.on_hover_text(text) } else { resp }
+}
+
+fn link_with(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: TextWrapping) -> Response {
     let job = |underline: bool| {
         let mut job = LayoutJob::single_section(
             text.to_owned(),
@@ -29,7 +43,7 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
                 ..Default::default()
             },
         );
-        job.wrap.max_width = cap.max(24.0);
+        job.wrap = wrap.clone();
         job
     };
     let galley = ui.painter().layout_job(job(false));
