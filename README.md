@@ -1,6 +1,6 @@
 # Ond
 
-Ond is a native macOS music player for [Navidrome](https://www.navidrome.org) and other OpenSubsonic servers, written in Rust with [egui](https://www.egui.rs).
+Ond is a native music player for [Navidrome](https://www.navidrome.org) and other OpenSubsonic servers, written in Rust with [egui](https://www.egui.rs). It runs on macOS, Linux and Windows. macOS is where it started and has the most complete audio path; the Linux and Windows builds are new.
 
 I wanted a client that treats playback quality as the main feature and stays out of the way otherwise. Ond plays your original files, tells you exactly what happens to the signal on its way to the speakers, and keeps the interface quiet unless you ask for more.
 
@@ -10,8 +10,9 @@ Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
 ### Playback
 
-- Bit-perfect output through CoreAudio. Ond takes exclusive access to the device and switches its sample rate to match each file. It shows a green dot only when every condition holds, and it says why when it can't.
+- Bit-perfect output through CoreAudio on macOS. Ond takes exclusive access to the device and switches its sample rate to match each file. It shows a green dot only when every condition holds, and it says why when it can't.
 - Normal mode for everyday listening, with ReplayGain (track, album, or automatic), a sinc resampler and TPDF dither when a file needs converting for your device.
+- PipeWire output on Linux (ALSA where PipeWire isn't running), WASAPI on Windows.
 - Gapless playback, and seeking into parts of a track that haven't downloaded yet.
 
 ### Library
@@ -25,13 +26,17 @@ Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
 - Three window modes. Full is the whole library. Player has large artwork with the queue below and lyrics in a drawer. Mini is a small square that stays on top.
 - A queue that shows where each track came from and when it will start.
-- Keyboard shortcuts for nearly everything. Press ⌘/ to see them all.
-- Media keys, Control Center, and play counts and scrobbles sent through Navidrome.
-- An optional diagnostics bar (⌥⌘I) with the signal path, buffer, download speed and server latency in one line.
+- Keyboard shortcuts for nearly everything. Press ⌘/ (Ctrl+/ on Linux and Windows) to see them all.
+- Media keys and the system's now-playing controls: Control Center on macOS, the GNOME and KDE media controls (MPRIS, which also reaches phones through KDE Connect and GSConnect) on Linux, and the media flyout on Windows. Play counts and scrobbles go through Navidrome.
+- An optional diagnostics bar (⌥⌘I, or Ctrl+Alt+I on Linux and Windows) with the signal path, buffer, download speed and server latency in one line.
 
 ## Install
 
-Download the `.dmg` from [Releases](../../releases) and drag Ond to Applications.
+Downloads are on the [Releases](../../releases) page.
+
+### macOS
+
+Open the `.dmg` and drag Ond to Applications.
 
 The app isn't signed with an Apple Developer ID yet, so macOS blocks the first launch. Right-click Ond in Applications and choose Open, or run:
 
@@ -39,35 +44,75 @@ The app isn't signed with an Apple Developer ID yet, so macOS blocks the first l
 xattr -dr com.apple.quarantine /Applications/Ond.app
 ```
 
-Ond needs macOS 11 (Big Sur) or later and a Navidrome server. Credits need Navidrome 0.55 or newer; everything else works with any OpenSubsonic server.
+Ond needs macOS 11 (Big Sur) or later.
+
+### Linux
+
+Unpack the `.tar.gz` and run its install script. It puts `ond`, the menu entry and the icons under `~/.local`:
+
+```sh
+tar xf Ond-*-linux-*.tar.gz
+cd Ond-*/
+./install.sh                 # or: sudo ./install.sh /usr/local
+./install.sh --uninstall     # to remove it again
+```
+
+Ond needs PipeWire's library (`libpipewire-0.3`), which every current desktop distribution ships, and glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13). The password goes in the Secret Service keyring (GNOME Keyring or KWallet).
+
+### Nix and NixOS
+
+The repository is a flake. To try it without installing:
+
+```sh
+nix run github:Solidsilver/ond
+```
+
+To install it into your profile, `nix profile install github:Solidsilver/ond`. In a NixOS or home-manager config, add the flake as an input and either use `ond.packages.${system}.default` directly or apply `ond.overlays.default` and use `pkgs.ond`. Pin a release with `github:Solidsilver/ond/v0.2.0`.
+
+### Windows
+
+Unzip and run `Ond.exe`. There's no installer yet. Windows SmartScreen may warn on first launch because the app isn't signed; choose More info, then Run anyway.
+
+### Servers
+
+Ond works with Navidrome and other OpenSubsonic servers. Credits need Navidrome 0.55 or newer.
 
 ## Build from source
 
-You need a recent stable Rust toolchain (`rustup`) and the Xcode command line tools.
+With Nix, `nix develop` gives you a shell with Rust, rust-analyzer and every system library the build needs, on Linux and macOS. With direnv, `direnv allow` once and the shell loads whenever you `cd` in. `nix build` builds the Linux package.
+
+Without Nix, you need a recent stable Rust toolchain (`rustup`), plus:
+
+- macOS: the Xcode command line tools.
+- Linux: ALSA and PipeWire headers, clang and pkg-config. On Debian and Ubuntu that's `sudo apt install libasound2-dev libpipewire-0.3-dev clang pkg-config`; on Fedora, `sudo dnf install alsa-lib-devel pipewire-devel clang pkgconf`.
+- Windows: Visual Studio's C++ build tools.
 
 ```sh
 cargo run -p ond-player --release
 ```
 
-Use `--release` for listening. Debug builds are slow enough to cause dropouts. The package is called `ond-player`; the binary it builds is `Ond`, so the app shows as Ond in the menu bar and Dock even when you run it with cargo. To see the window-mode timings in the log, run with `RUST_LOG=ond::window=debug`.
+Use `--release` for listening. Debug builds are slow enough to cause dropouts. The package is called `ond-player`; the binary it builds is `Ond`, so the app shows as Ond in the macOS menu bar and Dock even when you run it with cargo. To see the window-mode timings in the log, run with `RUST_LOG=ond::window=debug`.
 
-To build `Ond.app`, a `.zip` and a `.dmg` in `target/bundle/`:
+To package a release build in `target/bundle/`:
 
 ```sh
-scripts/bundle-macos.sh              # this Mac's architecture
-scripts/bundle-macos.sh --universal  # Apple silicon and Intel
+scripts/bundle-macos.sh              # Ond.app, .zip and .dmg for this Mac's architecture
+scripts/bundle-macos.sh --universal  # the same for Apple silicon and Intel
+scripts/bundle-linux.sh              # .tar.gz with the install script
+pwsh scripts/bundle-windows.ps1      # .zip with Ond.exe
 ```
 
 ## Where things are stored
 
-| What | Where |
-|---|---|
-| Password | macOS Keychain, under `dev.solidsilver.ond` |
-| Settings | `~/Library/Application Support/dev.solidsilver.ond/settings.json` |
-| Library and analysis databases | `~/Library/Application Support/dev.solidsilver.ond/` |
-| Offline downloads | `~/Library/Application Support/dev.solidsilver.ond/Offline` (you can move it in Settings) |
-| Stream and artwork caches | `~/Library/Caches/dev.solidsilver.ond/` |
-| Logs | `~/Library/Logs/Ond/` |
+| What | macOS | Linux | Windows |
+|---|---|---|---|
+| Password | Keychain | Secret Service keyring | Credential Manager |
+| Settings | `~/Library/Application Support/dev.solidsilver.ond/` | `~/.config/ond/` | `%APPDATA%\solidsilver\ond\config\` |
+| Library, analysis and offline downloads | `~/Library/Application Support/dev.solidsilver.ond/` | `~/.local/share/ond/` | `%LOCALAPPDATA%\solidsilver\ond\data\` |
+| Stream and artwork caches | `~/Library/Caches/dev.solidsilver.ond/` | `~/.cache/ond/` | `%LOCALAPPDATA%\solidsilver\ond\cache\` |
+| Logs | `~/Library/Logs/Ond/` | `~/.local/state/ond/logs/` | `%LOCALAPPDATA%\solidsilver\ond\data\logs\` |
+
+You can move the offline downloads folder in Settings.
 
 The library database is a copy of what's on your server. If it ever breaks, Ond moves it aside and syncs again.
 
@@ -77,12 +122,12 @@ The workspace has seven crates:
 
 | Crate | Job |
 |---|---|
-| `app` | The `ond-player` package, which builds the `ond` binary: UI, queue, sync, settings, macOS integration |
+| `app` | The `ond-player` package, which builds the `Ond` binary: UI, queue, sync, settings, and each system's integration |
 | `subsonic` | OpenSubsonic API client |
 | `library` | Local library mirror in redb, with hand-written indexes and migrations |
 | `streamcache` | Download cache that playback can read and seek while it fills |
 | `offline` | Pinned downloads |
-| `audio` | Decoding, the playback engine, resampling, dither, CoreAudio and cpal output |
+| `audio` | Decoding, the playback engine, resampling, dither, CoreAudio and cpal (PipeWire, ALSA, WASAPI) output |
 | `analysis` | Loudness, dynamic range and fake hi-res detection |
 
 None of the crates are published to crates.io.

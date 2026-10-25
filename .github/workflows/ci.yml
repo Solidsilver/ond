@@ -12,7 +12,11 @@ env:
 
 jobs:
   check:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
@@ -20,6 +24,14 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
+
+      # ALSA and PipeWire headers for audio output, clang for PipeWire's
+      # bindings, and Mesa's software Vulkan for the offscreen UI snapshots.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config mesa-vulkan-drivers
 
       - uses: Swatinem/rust-cache@v2
 
@@ -32,3 +44,29 @@ jobs:
       # Hardware-dependent tests are #[ignore]d and stay skipped here.
       - name: Test
         run: cargo test --workspace --no-fail-fast
+
+  # Builds the flake's package on Linux (the build the README's Nix
+  # instructions run) and checks the dev shell evaluates everywhere.
+  nix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - name: Flake check
+        run: nix flake check --all-systems --no-build
+      - name: Build
+        run: nix build --print-build-logs
+      - name: Smoke test
+        run: |
+          test -x result/bin/ond
+          test -f result/share/applications/dev.solidsilver.ond.desktop
+          test -f result/share/icons/hicolor/256x256/apps/dev.solidsilver.ond.png
+          # Every linked library resolves, and the ones opened at run time
+          # (display, GPU) are on the RPATH.
+          if ldd result/bin/ond | grep 'not found'; then exit 1; fi
+          readelf -d result/bin/ond | grep -E 'R(UN)?PATH' | grep -q vulkan-loader
+          readelf -d result/bin/ond | grep -E 'R(UN)?PATH' | grep -q wayland

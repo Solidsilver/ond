@@ -128,7 +128,7 @@ impl ViewCtx<'_> {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("Nothing up next").color(t.muted));
-                ui.label(egui::RichText::new("⌥⏎ play next · ⇧⏎ add to queue").size(11.0).color(t.muted));
+                ui.label(egui::RichText::new(crate::keys::shown("⌥⏎ play next · ⇧⏎ add to queue")).size(11.0).color(t.muted));
             });
             return;
         }

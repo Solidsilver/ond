@@ -105,7 +105,8 @@ pub fn publish(info: Option<Info>, state: State, elapsed: f64) {
     });
 }
 
-/// Artwork for `track_id` (encoded image bytes); ignored if the track changed meanwhile.
+/// Artwork for `track_id` (encoded image bytes). The worker sends only the
+/// cover of the track it last asked about, so a slow fetch never replaces a newer one.
 pub fn set_artwork(track_id: String, bytes: Vec<u8>) {
     DispatchQueue::main().exec_async(move || {
         let data = NSData::from_vec(bytes);

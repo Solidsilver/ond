@@ -8,9 +8,25 @@
 //!
 //! Remote commands (media keys, Control Center) come back to the app as
 //! [`Remote`]s, because acting on them needs the queue.
+//!
+//! One module per system, each with the same `install` / `publish` /
+//! `set_artwork`: MediaPlayer on macOS, MPRIS on Linux and the BSDs, the System
+//! Media Transport Controls on Windows.
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+use macos as system;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod mpris;
+#[cfg(all(unix, not(target_os = "macos")))]
+use mpris as system;
+#[cfg(windows)]
+mod smtc;
+#[cfg(windows)]
+use smtc as system;
+#[cfg(windows)]
+pub use smtc::set_window;
 pub mod scrobble;
 
 use audio::{PlayState, Status};
@@ -27,13 +43,18 @@ use subsonic::Client;
 pub enum Remote {
     Play,
     Pause,
+    // The Windows controls have separate play and pause buttons and a seek bar.
+    #[cfg_attr(windows, allow(dead_code))]
     Toggle,
     Next,
     Previous,
     /// Jump to this position, in seconds.
     Seek(f64),
     /// Skip this many seconds forward (negative: back).
+    #[cfg_attr(windows, allow(dead_code))]
     SkipBy(f64),
+    /// Bring the window forward (clicking the player in the desktop's panel).
+    Raise,
 }
 
 /// What the system shows for a track.
@@ -76,7 +97,7 @@ pub struct Config {
     /// Where plays the server didn't take wait for a retry.
     pub retry_file: PathBuf,
     pub scrobble: bool,
-    /// Called on the main thread for each remote command.
+    /// Called for each remote command (on the main thread on macOS).
     pub remote: Arc<dyn Fn(Remote) + Send + Sync>,
 }
 
@@ -98,8 +119,7 @@ pub struct Session {
 impl Session {
     pub fn start(cfg: Config) -> Self {
         let (tx, rx) = channel();
-        #[cfg(target_os = "macos")]
-        macos::install(cfg.remote.clone());
+        system::install(cfg.remote.clone());
         let worker = Worker::new(cfg, tx.clone());
         std::thread::Builder::new().name("now-playing".into()).spawn(move || worker.run(rx)).expect("spawn now-playing worker");
         Self { tx }
@@ -173,6 +193,9 @@ struct Worker {
     flushing: bool,
     next_flush: Instant,
     clock: Instant,
+    /// The track whose cover was last asked for. Fetches run in the
+    /// background, so an earlier track's cover can arrive after a later one's.
+    art_for: Arc<std::sync::Mutex<String>>,
 }
 
 /// How often to look at the engine while something is current.
@@ -200,6 +223,7 @@ impl Worker {
             flushing: false,
             next_flush: Instant::now(),
             clock: Instant::now(),
+            art_for: Arc::default(),
         }
     }
 
@@ -392,35 +416,29 @@ impl Worker {
         let dir = self.cfg.art_dir.clone();
         let client = self.client.clone();
         let track_id = info.track_id.clone();
+        info.track_id.clone_into(&mut self.art_for.lock().unwrap_or_else(|e| e.into_inner()));
+        let art_for = Arc::clone(&self.art_for);
+        // Only the cover for the track asked about last reaches the system.
+        let hand_over = move |bytes: Vec<u8>| {
+            if *art_for.lock().unwrap_or_else(|e| e.into_inner()) == track_id {
+                set_artwork(track_id, bytes);
+            }
+        };
         self.cfg.rt.spawn(async move {
             for size in [512, 256, 128] {
                 if let Ok(bytes) = tokio::fs::read(crate::art::cover_file(&dir, &cover, size)).await {
-                    return set_artwork(track_id, bytes);
+                    return hand_over(bytes);
                 }
             }
             let Some(client) = client else { return };
             if let Some(bytes) = crate::art::fetch_cached(&client, &dir, &cover, 512).await {
-                set_artwork(track_id, bytes);
+                hand_over(bytes);
             }
         });
     }
 }
 
-#[cfg(target_os = "macos")]
-fn publish(info: Option<Info>, state: State, elapsed: f64) {
-    macos::publish(info, state, elapsed);
-}
-
-#[cfg(target_os = "macos")]
-fn set_artwork(track_id: String, bytes: Vec<u8>) {
-    macos::set_artwork(track_id, bytes);
-}
-
-#[cfg(not(target_os = "macos"))]
-fn publish(_: Option<Info>, _: State, _: f64) {}
-
-#[cfg(not(target_os = "macos"))]
-fn set_artwork(_: String, _: Vec<u8>) {}
+use system::{publish, set_artwork};
 
 #[cfg(test)]
 mod tests {

@@ -61,6 +61,8 @@ pub enum Msg {
     Engine(audio::Event),
     /// Media keys, Control Center, headphone buttons.
     Remote(crate::now_playing::Remote),
+    /// A folder chosen to keep offline downloads in.
+    OfflineFolder(std::path::PathBuf),
     /// `getStarred2`: everything loved, and the ratings seen with it.
     Starred { starred: Starred, ratings: Vec<(String, u8)> },
     /// A track's lyrics arrived (`None`: the server has none).

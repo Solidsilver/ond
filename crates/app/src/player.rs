@@ -276,6 +276,7 @@ impl Player {
                 let to = (self.position_secs(cx.engine) + by).clamp(0.0, end);
                 self.seek(to, cx);
             }
+            Remote::Raise => {}
         }
     }
 

@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Builds and uploads the bundles without publishing, to try the packaging.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,7 +13,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -21,17 +23,11 @@ jobs:
 
       - name: Install Rust (stable, both macOS architectures)
         run: |
-          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --workspace
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace --no-fail-fast
@@ -39,10 +35,93 @@ jobs:
       - name: Bundle
         run: scripts/bundle-macos.sh --universal
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: |
+            target/bundle/*.dmg
+            target/bundle/*.zip
+
+  linux:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    # The oldest Ubuntu with libpipewire 0.3.53+, which the PipeWire output
+    # needs. The binary runs on glibc 2.39 and later.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config mesa-vulkan-drivers
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Bundle
+        run: scripts/bundle-linux.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.runner }}
+          path: target/bundle/*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Bundle
+        run: pwsh scripts/bundle-windows.ps1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: target/bundle/*.zip
+
+  publish:
+    needs: [macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/release-notes
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Hand-written notes for this tag, if there are any, above GitHub's changelog.
+      - name: Release notes
+        run: |
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          [ -f "$notes" ] || : > "$notes"
+          echo "notes=$notes" >> "$GITHUB_ENV"
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          body_path: ${{ env.notes }}
           generate_release_notes: true
-          files: |
-            target/bundle/*.dmg
-            target/bundle/*.zip
+          files: dist/*

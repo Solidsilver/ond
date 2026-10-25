@@ -50,6 +50,10 @@ impl WindowMode {
 pub struct Geometry {
     pub pos: Option<[f32; 2]>,
     pub size: [f32; 2],
+    /// Maximized. The size and position are then the window's normal ones,
+    /// from before it was maximized.
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 impl Geometry {
@@ -58,7 +62,10 @@ impl Geometry {
         ctx.input(|i| {
             let v = i.viewport();
             let size = v.inner_rect?.size();
-            Some(Self { pos: v.outer_rect.map(|r| [r.min.x, r.min.y]), size: [size.x, size.y] })
+            // macOS reports a zoomed window as maximized; zoom is just a size
+            // there, remembered like any other.
+            let maximized = !cfg!(target_os = "macos") && v.maximized.unwrap_or(false);
+            Some(Self { pos: v.outer_rect.map(|r| [r.min.x, r.min.y]), size: [size.x, size.y], maximized })
         })
     }
 }
@@ -77,12 +84,16 @@ pub struct Plan {
     pub on_top: bool,
     /// Keep the window square while resizing (Mini).
     pub square: bool,
+    /// Our own window buttons in the bar instead of a system title bar (see `csd`).
+    pub controls: bool,
+    /// Maximize after resizing (the full window was maximized when last used).
+    pub maximized: bool,
 }
 
 impl Plan {
     /// The window this plan describes, for startup.
     pub fn builder(&self, b: egui::ViewportBuilder) -> egui::ViewportBuilder {
-        let b = b.with_inner_size(self.size).with_min_inner_size(self.min_size).with_window_level(self.level());
+        let b = b.with_inner_size(self.size).with_min_inner_size(self.min_size).with_window_level(self.level()).with_maximized(self.maximized);
         // macOS: the title bar folds into our toolbar (see `chrome`).
         let b = if cfg!(target_os = "macos") {
             b.with_decorations(true).with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false)
@@ -101,15 +112,25 @@ impl Plan {
         // larger minimum set first would resize the window once on its own,
         // and a smaller one set after would refuse the shrink.
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(egui::vec2(1.0, 1.0)));
-        if !cfg!(target_os = "macos") {
-            ctx.send_viewport_cmd(ViewportCommand::Decorations(self.decorations));
-        }
+        self.apply_frame(ctx);
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size.into()));
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(self.min_size.into()));
         if let Some(p) = self.pos {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p.into()));
         }
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(self.level()));
+        if self.maximized {
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+        }
+    }
+
+    /// The system frame or our own controls (see `csd`), as this plan has it.
+    /// macOS keeps its frame and folds the title bar instead (see `chrome`).
+    pub fn apply_frame(&self, ctx: &Context) {
+        crate::csd::set_window(ctx, self.controls, !self.decorations);
+        if !cfg!(target_os = "macos") {
+            ctx.send_viewport_cmd(ViewportCommand::Decorations(self.decorations));
+        }
     }
 
     fn level(&self) -> WindowLevel {
@@ -131,6 +152,9 @@ pub struct Windows {
     /// Keep the mini player above other windows.
     #[serde(default = "yes")]
     pub mini_on_top: bool,
+    /// The system's title bar and frame instead of our own buttons (Linux).
+    #[serde(default)]
+    pub system_title_bar: bool,
     /// The mode Mini returns to (Full or Player).
     #[serde(default)]
     pub before_mini: WindowMode,
@@ -190,6 +214,7 @@ impl Default for Windows {
             mode: WindowMode::Full,
             geometry: HashMap::new(),
             mini_on_top: true,
+            system_title_bar: false,
             before_mini: WindowMode::Full,
             last_player: WindowMode::Player,
             lyrics_open: false,
@@ -211,14 +236,19 @@ impl Windows {
         let drawer = self.drawer_w();
         size[0] += drawer;
         min[0] += drawer;
+        // Linux draws its own buttons in the bar unless asked for the system's.
+        let controls = crate::csd::SUPPORTED && mode != WindowMode::Mini && !self.system_title_bar;
         Plan {
             mode,
             size,
             min_size: min,
             pos: saved.and_then(|g| g.pos),
-            decorations: mode != WindowMode::Mini,
+            decorations: mode != WindowMode::Mini && !controls,
             on_top: mode == WindowMode::Mini && self.mini_on_top,
             square: mode == WindowMode::Mini,
+            controls,
+            // Only the full window goes back to maximized.
+            maximized: mode == WindowMode::Full && saved.is_some_and(|g| g.maximized),
         }
     }
 
@@ -229,8 +259,21 @@ impl Windows {
 
     /// Records where the window is now, for the current mode. The Player is
     /// remembered without its drawer.
+    ///
+    /// A maximized window keeps its normal size and place, and only notes
+    /// that it was maximized; nothing smaller than the mode allows is kept.
     pub fn remember(&mut self, mut now: Geometry) {
-        now.size[0] = (now.size[0] - self.drawer_w()).max(1.0);
+        let min = self.mode.min_size();
+        if now.maximized {
+            if let Some(g) = self.geometry.get_mut(&self.mode) {
+                g.maximized = true;
+                return;
+            }
+            now.size = self.mode.default_size();
+            now.pos = None;
+        }
+        now.size[0] = (now.size[0] - self.drawer_w()).max(min[0]);
+        now.size[1] = now.size[1].max(min[1]);
         self.geometry.insert(self.mode, now);
     }
 
@@ -299,14 +342,17 @@ mod tests {
     use super::*;
 
     fn at(x: f32, y: f32, w: f32, h: f32) -> Option<Geometry> {
-        Some(Geometry { pos: Some([x, y]), size: [w, h] })
+        Some(Geometry { pos: Some([x, y]), size: [w, h], maximized: false })
     }
 
     #[test]
     fn defaults_per_mode() {
         let mut w = Windows::default();
         let full = w.plan();
-        assert_eq!((full.size, full.decorations, full.on_top, full.pos), ([1360.0, 860.0], true, false, None));
+        // Linux draws its own title bar buttons; elsewhere the system's frame stays.
+        let framed = !crate::csd::SUPPORTED;
+        assert_eq!((full.size, full.decorations, full.on_top, full.pos), ([1360.0, 860.0], framed, false, None));
+        assert_eq!(full.controls, crate::csd::SUPPORTED);
         let mini = w.switch(WindowMode::Mini, at(100.0, 80.0, 1200.0, 800.0)).unwrap();
         assert_eq!((mini.size, mini.decorations, mini.on_top), ([280.0, 280.0], false, true));
         // No mini position yet: the OS places it.
@@ -325,13 +371,35 @@ mod tests {
     }
 
     #[test]
+    fn a_maximized_full_window_comes_back_maximized_at_its_normal_size() {
+        let mut w = Windows::default();
+        // Used at 1200×800, then maximized (the desktop did it, or the user).
+        w.remember(Geometry { pos: Some([100.0, 80.0]), size: [1200.0, 800.0], maximized: false });
+        let maxed = Geometry { pos: Some([0.0, 0.0]), size: [1368.0, 880.0], maximized: true };
+        let mini = w.switch(WindowMode::Mini, Some(maxed)).unwrap();
+        assert!(!mini.maximized, "the mini player is never maximized");
+        let back = w.switch(WindowMode::Full, at(1500.0, 40.0, 280.0, 280.0)).unwrap();
+        assert!(back.maximized);
+        assert_eq!((back.size, back.pos), ([1200.0, 800.0], Some([100.0, 80.0])), "and un-maximizes to where it was");
+    }
+
+    #[test]
+    fn a_window_too_small_for_its_mode_is_not_remembered_that_small() {
+        let mut w = Windows::default();
+        // The window never reached the full size (a compositor kept it small).
+        w.remember(Geometry { pos: None, size: [280.0, 280.0], maximized: false });
+        let size = w.geometry[&WindowMode::Full].size;
+        assert_eq!(size, WindowMode::Full.min_size());
+    }
+
+    #[test]
     fn mini_grows_down_into_the_player_and_back_up() {
         let mut w = Windows::default();
         w.switch(WindowMode::Mini, at(0.0, 0.0, 1360.0, 860.0));
         // The player was last somewhere else, but it opens where the mini player is.
-        w.geometry.insert(WindowMode::Player, Geometry { pos: Some([5.0, 5.0]), size: [360.0, 700.0] });
+        w.geometry.insert(WindowMode::Player, Geometry { pos: Some([5.0, 5.0]), size: [360.0, 700.0], maximized: false });
         let player = w.switch(WindowMode::Player, at(1500.0, 40.0, 280.0, 280.0)).unwrap();
-        assert_eq!((player.pos, player.size, player.decorations), (Some([1500.0, 40.0]), [360.0, 700.0], true));
+        assert_eq!((player.pos, player.size, player.decorations), (Some([1500.0, 40.0]), [360.0, 700.0], !crate::csd::SUPPORTED));
         let mini = w.switch(WindowMode::Mini, at(1490.0, 30.0, 360.0, 700.0)).unwrap();
         assert_eq!(mini.pos, Some([1490.0, 30.0]));
     }
@@ -348,7 +416,7 @@ mod tests {
     #[test]
     fn sizes_never_below_the_minimum_and_on_top_is_optional() {
         let mut w = Windows { mini_on_top: false, ..Default::default() };
-        w.geometry.insert(WindowMode::Mini, Geometry { pos: None, size: [50.0, 90.0] });
+        w.geometry.insert(WindowMode::Mini, Geometry { pos: None, size: [50.0, 90.0], maximized: false });
         let mini = w.switch(WindowMode::Mini, None).unwrap();
         // Raised to the minimum, then made square.
         assert_eq!((mini.size, mini.on_top, mini.square), ([180.0, 180.0], false, true));
@@ -374,7 +442,7 @@ mod tests {
         assert_eq!((open.size, open.pos), ([400.0 + DRAWER_W, 780.0], Some([200.0, 100.0])));
         assert_eq!(open.min_size[0], WindowMode::Player.min_size()[0] + DRAWER_W);
         // The player column is what's remembered, whatever the drawer.
-        w.remember(Geometry { pos: Some([200.0, 100.0]), size: [420.0 + DRAWER_W, 800.0] });
+        w.remember(Geometry { pos: Some([200.0, 100.0]), size: [420.0 + DRAWER_W, 800.0], maximized: false });
         assert_eq!(w.geometry[&WindowMode::Player].size, [420.0, 800.0]);
         let closed = w.set_lyrics(false, at(200.0, 100.0, 420.0 + DRAWER_W, 800.0)).unwrap();
         assert_eq!(closed.size, [420.0, 800.0]);

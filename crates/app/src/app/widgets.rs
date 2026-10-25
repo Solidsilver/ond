@@ -19,6 +19,20 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
     // Never wider than the room it's in: a long name wraps (in a wrapping row,
     // across the whole row) instead of widening its column.
     let cap = if ui.layout().main_wrap { ui.max_rect().width() } else { ui.available_width() };
+    let wrap = TextWrapping { max_width: cap.max(24.0), ..Default::default() };
+    link_with(ui, text, font, color, wrap)
+}
+
+/// A link kept to one line of at most `width`, cut with an ellipsis; the whole
+/// text shows on hover when it was cut.
+pub fn link_line(ui: &mut Ui, text: &str, font: FontId, color: Color32, width: f32) -> Response {
+    let wrap = TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let resp = link_with(ui, text, font.clone(), color, wrap);
+    let whole = ui.painter().layout_no_wrap(text.to_owned(), font, color).size().x;
+    if whole > resp.rect.width() + 0.5 { resp.on_hover_text(text) } else { resp }
+}
+
+fn link_with(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: TextWrapping) -> Response {
     let job = |underline: bool| {
         let mut job = LayoutJob::single_section(
             text.to_owned(),
@@ -29,7 +43,7 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
                 ..Default::default()
             },
         );
-        job.wrap.max_width = cap.max(24.0);
+        job.wrap = wrap.clone();
         job
     };
     let galley = ui.painter().layout_job(job(false));
@@ -104,7 +118,7 @@ pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: b
         };
         crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
     }
-    let label = label.to_owned();
+    let label = crate::keys::shown(label).into_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
 }
@@ -471,7 +485,7 @@ pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &st
         ui.add_space(6.0);
         ui.scope(|ui| {
             ui.set_max_width(440.0);
-            ui.add(egui::Label::new(egui::RichText::new(body).size(13.0).color(t.muted)).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(body)).size(13.0).color(t.muted)).wrap());
         });
     });
 }

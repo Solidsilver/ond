@@ -209,13 +209,27 @@ impl Drop for Runner {
     }
 }
 
-/// Background QoS: the scheduler keeps it to spare capacity (and an
-/// efficiency core where there is one), and throttles its disk and network.
+/// Background priority. macOS: the background QoS class, which keeps the
+/// thread to spare capacity (and an efficiency core where there is one) and
+/// throttles its disk and network. Linux: nice 19 (the lowest priority), for this
+/// thread only. Windows: background mode, which lowers its CPU, disk and
+/// memory priority.
 fn lower_priority() {
     #[cfg(target_os = "macos")]
     // SAFETY: only changes the calling thread's QoS class.
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: on Linux a thread id given to setpriority names just that thread.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, 19);
+    }
+    #[cfg(windows)]
+    // SAFETY: only changes the calling thread's priority.
+    unsafe {
+        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
     }
 }
 

@@ -27,6 +27,27 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 - [ ] Menu bar: all menus present; checkmarks follow queue/bit-perfect/appearance; ⌘C/⌘V still work in the search field.
 - [ ] Mini (⇧⌘M): on top, draggable; "Up next" grows into Compact; geometry restored per mode after relaunch.
 
+## Linux
+Try at least one GNOME and one KDE Plasma session, Wayland and X11 if you can.
+- [ ] Installs with `./install.sh`; Ond appears in the app grid with its icon, and the running window gets the same icon in the dock/taskbar (app id `dev.solidsilver.ond`).
+- [ ] Playback goes through PipeWire: `pw-top` lists Ond while playing, and the output picker lists PipeWire devices. Unplugging the active device falls back cleanly.
+- [ ] Media controls: GNOME's top-bar player / KDE's media widget show title, artist, album and cover; play/pause, next, previous and the seek bar work. Clicking the player should bring Ond forward; on Wayland the compositor may only flag it as wanting attention (it won't hand over focus without an activation token), which is fine. Media keys work. `playerctl metadata` shows the track.
+- [ ] Ctrl+Alt+←/→ (skip 10 s): GNOME uses these to switch workspaces by default, so they may never reach Ond there. Note whether they do.
+- [ ] KDE Connect or GSConnect controls playback from a phone.
+- [ ] The password survives a relaunch (GNOME Keyring / KWallet).
+- [ ] UI font is the desktop's sans-serif; Japanese titles render.
+- [ ] Shortcut overlay (Ctrl+/) shows Ctrl/Alt/Shift names; Ctrl+K, Ctrl+1..6, Ctrl+V into the login fields work.
+- [ ] Mini mode: undecorated window can be dragged, resized and closed (Alt+F4); on Wayland check resizing in particular.
+- [ ] Settings → Offline → Move opens the desktop's folder dialog; "Show in File Manager" opens the folder.
+
+## Windows
+CI builds and runs the tests; nothing below has been tried on real Windows yet.
+- [ ] `Ond.exe` has the icon in Explorer and the taskbar; no console window opens.
+- [ ] The volume flyout's media panel shows the track and cover, and its buttons and seek work; keyboard media keys work.
+- [ ] Password survives a relaunch (Credential Manager).
+- [ ] Segoe UI is the UI font; Japanese titles render.
+- [ ] Folder picker, "Show in File Explorer", offline free-space figure.
+
 ## Server features
 - [ ] Navidrome "now playing" shows the track; play count increments once after half the track (or 4 min).
 - [ ] Hearts and ratings show up in the Navidrome web UI; quick repeated toggles end in the right state.

@@ -201,7 +201,8 @@ impl ViewCtx<'_> {
                                 }
                             };
                             let x = tile.right() + 12.0;
-                            let hint_w = if selected { 170.0 } else { 0.0 };
+                            let hint = crate::keys::shown("⏎ open    ⌘⏎ play");
+                            let hint_w = if selected { ui.painter().layout_no_wrap(hint.to_string(), FontId::proportional(11.0), t.muted).size().x + 16.0 } else { 0.0 };
                             let w = inner.right() - x - hint_w - 12.0;
                             let g = elide(ui, &main, FontId::proportional(13.0), t.text, w);
                             ui.painter().galley(pos2(x, inner.center().y - g.size().y), g, t.text);
@@ -211,7 +212,7 @@ impl ViewCtx<'_> {
                                 ui.painter().text(
                                     pos2(inner.right() - 12.0, inner.center().y),
                                     egui::Align2::RIGHT_CENTER,
-                                    "⏎ open    ⌘⏎ play",
+                                    hint,
                                     FontId::proportional(11.0),
                                     t.muted,
                                 );
@@ -235,7 +236,7 @@ impl ViewCtx<'_> {
             ui.painter().text(
                 pos2(bar.left() + 18.0, bar.center().y),
                 egui::Align2::LEFT_CENTER,
-                "⏎ open    ⌘⏎ play    ⌥⏎ play next    ⇧⏎ add to queue    ⇧⌘D download",
+                crate::keys::shown("⏎ open    ⌘⏎ play    ⌥⏎ play next    ⇧⏎ add to queue    ⇧⌘D download"),
                 FontId::proportional(11.0),
                 t.muted,
             );

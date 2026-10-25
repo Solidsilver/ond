@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ond
+GenericName=Music Player
+Comment=Play music from a Navidrome server
+Exec=ond
+Icon=dev.solidsilver.ond
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;navidrome;subsonic;player;
+StartupWMClass=dev.solidsilver.ond
+SingleMainWindow=true

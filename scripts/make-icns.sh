@@ -2,10 +2,16 @@
 # Builds the app icon files from one square PNG (1024 px or larger, transparent
 # corners, artwork on Apple's icon grid):
 #
+# The tile must be exactly Apple's rounded square, 824 x 824 centred on the
+# 1024 canvas, with no shadow of its own. macOS 26 and later shrink any other
+# shape onto a grey tile, so the icon looks smaller than its neighbours.
+#
 #   scripts/make-icns.sh path/to/icon.png
 #
 # Writes packaging/macos/Ond.icns (the bundle icon) plus icon-1024.png and
-# icon-256.png (the 256 is the window icon for `cargo run`).
+# icon-256.png (the 256 is the window icon for `cargo run`). The Linux and
+# Windows icons are separate artwork: packaging/linux/hicolor and
+# packaging/windows/ond.ico.
 set -euo pipefail
 
 src=${1:?usage: scripts/make-icns.sh icon.png}

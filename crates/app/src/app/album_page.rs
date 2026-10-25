@@ -137,7 +137,7 @@ impl ViewCtx<'_> {
         let found: Vec<Option<TrackAnalysis>> = tracks.iter().map(|t| self.analysis_of(t).cloned()).collect();
         let summary = analysis::summarize(&found.iter().flatten().collect::<Vec<_>>(), tracks.len());
         let analysing = self.analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
-        egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).show(ui, |ui| {
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
             // Header: art beside the text, or above it when there's no room.
             let avail = ui.available_width();
             let stacked = avail < 460.0;
@@ -273,7 +273,7 @@ impl ViewCtx<'_> {
             ui.add_space(10.0);
             self.album_details(ui, &tracks, &found, summary.verdict.as_ref().map(|(v, _)| v), analysing > 0);
             ui.add_space(24.0);
-        });
+        }));
     }
 
     /// "Album details ›": the album's credits and its per-track measurements,
@@ -394,9 +394,9 @@ impl ViewCtx<'_> {
             super::widgets::empty_state(ui, Icon::Note, "This playlist is empty", hint);
             return;
         }
-        egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).show(ui, |ui| {
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
             self.track_list(ui, &tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) });
-        });
+        }));
     }
 
     /// Rename… and Delete… for one of the user's playlists.

@@ -105,7 +105,7 @@ impl ViewCtx<'_> {
             return;
         }
 
-        egui::ScrollArea::vertical().id_salt("offline").auto_shrink(false).show(ui, |ui| {
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("offline").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
             let in_progress: Vec<&PinSummary> = snap.pins.iter().filter(|p| !p.complete()).collect();
             if !in_progress.is_empty() {
                 self.in_progress(ui, &snap, &in_progress);
@@ -114,7 +114,7 @@ impl ViewCtx<'_> {
             if !albums.is_empty() {
                 super::widgets::section(ui, "Albums");
                 ui.add_space(8.0);
-                let (cols, tile) = grid_metrics(ui.available_width() - 12.0);
+                let (cols, tile) = grid_metrics(ui.available_width());
                 let ids: Vec<usize> = albums.iter().map(|(i, _)| *i).collect();
                 for chunk in ids.chunks(cols) {
                     self.grid_row(ui, chunk, tile);
@@ -137,7 +137,7 @@ impl ViewCtx<'_> {
                 }
             }
             ui.add_space(24.0);
-        });
+        }));
     }
 
     /// The storage summary, then the limit and Finder.
@@ -160,7 +160,7 @@ impl ViewCtx<'_> {
             let resp = link(ui, "Location", FontId::proportional(12.0), t.muted).on_hover_text(self.downloads.base.display().to_string());
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new(self.downloads.base.display().to_string()).size(11.0).color(t.muted));
-                if ui.button("Show in Finder").clicked() {
+                if ui.button(format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
                     self.actions.push(Action::RevealOffline);
                 }
                 if ui.button("Change…").clicked() {

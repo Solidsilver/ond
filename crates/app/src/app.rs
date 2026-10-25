@@ -193,6 +193,8 @@ pub enum Action {
     SetScrobble(bool),
     /// Show or hide the diagnostics bar.
     SetDiagnostics(bool),
+    /// The system's title bar instead of our own window buttons (Linux).
+    SetSystemTitleBar(bool),
     /// Open the Settings window at a section.
     OpenSettings(settings_page::Section),
     /// Re-read the library from the server (albums, then tracks).
@@ -379,6 +381,35 @@ pub struct OndApp {
     diagnostics: diagnostics::Diagnostics,
 }
 
+/// How long a mode switch waits for the window to leave maximized.
+const UNMAXIMIZE_WAIT: Duration = Duration::from_secs(1);
+
+/// Waiting for the window to reach a size we asked for.
+#[derive(Debug, Clone, Copy)]
+pub struct Settle {
+    pub want: [f32; 2],
+    /// Give up (and take the window as it is) after this.
+    until: std::time::Instant,
+    /// When the size was last asked for.
+    pub asked: std::time::Instant,
+}
+
+impl Settle {
+    const WAIT: Duration = Duration::from_millis(1500);
+    const REASK: Duration = Duration::from_millis(200);
+
+    fn new(want: [f32; 2]) -> Self {
+        let now = std::time::Instant::now();
+        Self { want, until: now + Self::WAIT, asked: now }
+    }
+
+    /// Still short of the size, and still willing to wait for it.
+    fn waiting(&self, size: [f32; 2]) -> bool {
+        let off = (size[0] - self.want[0]).abs() > 2.0 || (size[1] - self.want[1]).abs() > 2.0;
+        off && std::time::Instant::now() < self.until
+    }
+}
+
 /// What the window shows and how: the place and its selections, open sheets
 /// and panels, toasts, and the window's own bookkeeping. Nothing here is
 /// library data or playback state.
@@ -422,9 +453,13 @@ pub struct UiState {
     pub square_native: bool,
     /// The window as last seen, saved on quit.
     pub seen: Option<Geometry>,
-    /// After a mode switch: the size asked for, and frames left to wait for it.
-    /// The window reports its old size for a frame or two meanwhile.
-    pub settling: Option<([f32; 2], u32)>,
+    /// A mode switch waiting for the window to leave maximized first: a
+    /// compositor answers an un-maximize with the window's old size, which
+    /// would land after (and over) the new one.
+    pub unmaximizing: Option<(crate::window::Plan, std::time::Instant)>,
+    /// After a mode switch, until the window reaches the size asked for. It
+    /// reports its old size for a frame or two meanwhile.
+    pub settling: Option<Settle>,
     /// When the current mode switch was asked for (for the debug log).
     pub switch_started: Option<std::time::Instant>,
     /// When the last scroll happened (frame clock), for showing scroll bars.
@@ -432,6 +467,8 @@ pub struct UiState {
     pub bars_shown: bool,
     /// Edit menu commands (paste, undo…) waiting to reach egui as input.
     pub edit_input: Vec<egui::Event>,
+    /// Trackpad coasting where the system doesn't do it (Wayland).
+    pub momentum: crate::momentum::Momentum,
 }
 
 impl UiState {
@@ -461,11 +498,13 @@ impl UiState {
             square_wanted: None,
             square_native: false,
             seen: None,
+            unmaximizing: None,
             settling: None,
             switch_started: None,
             last_scroll: f64::NEG_INFINITY,
             bars_shown: false,
             edit_input: Vec::new(),
+            momentum: Default::default(),
         }
     }
 }
@@ -598,27 +637,27 @@ impl Downloads {
                 prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
             }
             Action::RevealOffline => {
-                std::process::Command::new("open").arg(&self.base).spawn().map_err(|e| format!("open {}: {e}", self.base.display()))?;
-            }
-            Action::MoveOffline => {
-                let current = self.base.clone();
-                let start = current.parent().unwrap_or(&current).to_owned();
-                if let Some(chosen) = crate::folder::pick("Choose where to keep downloaded music", &start) {
-                    // Always a folder of our own inside the chosen one: the store
-                    // tidies files it doesn't know, which must never be the user's.
-                    let dir = if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") };
-                    if dir != current {
-                        prefs.edit(|s| {
-                            s.offline_dir = Some(dir.clone());
-                            s.offline_move_from = Some(current.clone());
-                        });
-                        return Ok(Some(format!("Downloads move to {} the next time Ond starts", dir.display())));
-                    }
-                }
+                crate::folder::reveal(&self.base).map_err(|e| format!("open {}: {e}", self.base.display()))?;
             }
             _ => unreachable!("not a download action"),
         }
         Ok(None)
+    }
+
+    /// Moves downloads into `chosen` at the next start. Returns the notice to show.
+    fn move_to(&self, chosen: PathBuf, prefs: &Prefs) -> Option<String> {
+        // Always a folder of our own inside the chosen one: the store tidies
+        // files it doesn't know, which must never be the user's.
+        let dir = if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") };
+        if dir == self.base {
+            return None;
+        }
+        let current = self.base.clone();
+        prefs.edit(|s| {
+            s.offline_dir = Some(dir.clone());
+            s.offline_move_from = Some(current);
+        });
+        Some(format!("Downloads move to {} the next time Ond starts", dir.display()))
     }
 }
 
@@ -659,10 +698,14 @@ impl Analysis {
 
 impl OndApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+        #[cfg(windows)]
+        now_playing::set_window(hwnd(cc));
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
+        // The window opened from this plan (see `main`); our title bar follows it.
+        app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
         Ok(app)
     }
 
@@ -985,6 +1028,11 @@ impl OndApp {
             }
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
+            Msg::OfflineFolder(dir) => {
+                if let Some(notice) = self.downloads.move_to(dir, &self.prefs) {
+                    self.show_notice(notice);
+                }
+            }
             Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
             Msg::Lyrics { track_id, lyrics } => {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
@@ -1136,6 +1184,11 @@ impl OndApp {
 
     /// A media key, Control Center or headphone command.
     fn remote(&mut self, r: Remote) {
+        if r == Remote::Raise {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            return;
+        }
         self.with_player(|p, cx| p.remote(r, cx));
     }
 
@@ -1424,13 +1477,29 @@ impl OndApp {
                 self.prefs.edit(|s| s.scrobble = on);
             }
             Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
+            Action::SetSystemTitleBar(on) => {
+                let plan = self.edit_windows(|w| {
+                    w.system_title_bar = on;
+                    w.plan()
+                });
+                plan.apply_frame(&self.ctx);
+            }
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
+            Action::MoveOffline => {
+                let base = &self.downloads.base;
+                let start = base.parent().unwrap_or(base).to_owned();
+                let bridge = self.bridge.clone();
+                crate::folder::pick("Choose where to keep downloaded music", &start, move |chosen| {
+                    if let Some(dir) = chosen {
+                        bridge.post(Msg::OfflineFolder(dir));
+                    }
+                });
+            }
             a @ (Action::Unpin(_)
             | Action::PauseDownloads(_)
             | Action::RetryDownloads
             | Action::SetOfflineLimit(_)
-            | Action::RevealOffline
-            | Action::MoveOffline) => match self.downloads.apply(a, &self.prefs) {
+            | Action::RevealOffline) => match self.downloads.apply(a, &self.prefs) {
                 Ok(Some(notice)) => self.show_notice(notice),
                 Ok(None) => {}
                 Err(e) => self.show_error(e),
@@ -1552,6 +1621,10 @@ impl OndApp {
         self.prefs.get(|s| s.diagnostics_bar)
     }
 
+    pub fn system_title_bar(&self) -> bool {
+        self.prefs.get(|s| s.window.system_title_bar)
+    }
+
     /// Software volume, 0..=1.
     pub fn volume(&self) -> f32 {
         self.prefs.get(|s| s.volume)
@@ -1590,15 +1663,83 @@ impl OndApp {
     /// Resizes the window to `plan` (if any). The window state itself is in the
     /// preferences already (they save in the background).
     fn follow_plan(&mut self, plan: Option<crate::window::Plan>) {
+        let Some(plan) = plan else { return };
         let ctx = self.ctx.clone();
-        if let Some(plan) = plan {
-            plan.apply(&ctx);
-            // Until the window reports its new size, don't mistake the old one for it.
-            self.ui.seen = None;
-            self.ui.settling = Some((plan.size, 30));
-            self.ui.switch_started = Some(std::time::Instant::now());
-            tracing::debug!(target: "ond::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
+        // Until the window reports its new size, don't mistake the old one for it.
+        self.ui.seen = None;
+        self.ui.switch_started = Some(std::time::Instant::now());
+        tracing::debug!(target: "ond::window", mode = ?plan.mode, size = ?plan.size, "window mode switch");
+        // A maximized window ignores sizes (Linux compositors maximize a large
+        // window on their own), and answers an un-maximize with its old size,
+        // which would land over ours. So un-maximize first; `track_window`
+        // resizes once the window has let go. (macOS zoom is just a size.)
+        if !cfg!(target_os = "macos") && !plan.maximized && ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            self.ui.unmaximizing = Some((plan, std::time::Instant::now()));
+            ctx.request_repaint();
+            return;
         }
+        self.resize_to(plan);
+    }
+
+    /// Follows the window each frame: finishes a mode switch (after an
+    /// un-maximize, until the new size lands), keeps Mini square, and notes
+    /// where the window is for next time.
+    fn track_window(&mut self, ctx: &egui::Context) {
+        let square = self.window_mode() == WindowMode::Mini;
+        // Until the window exists the platform can't lock it; keep asking.
+        if self.ui.square_wanted != Some(square) || (square && !self.ui.square_native) {
+            self.ui.square_wanted = Some(square);
+            self.ui.square_native = crate::window::lock_square(square) && square;
+        }
+        if let Some((plan, since)) = self.ui.unmaximizing {
+            let still = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            if !still || since.elapsed() > UNMAXIMIZE_WAIT {
+                self.ui.unmaximizing = None;
+                self.resize_to(plan);
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.ui.unmaximizing.is_none()
+            && let Some(g) = Geometry::read(ctx)
+        {
+            match &mut self.ui.settling {
+                Some(s) if s.waiting(g.size) => {
+                    // A compositor can still answer with an older size after
+                    // ours; ask again now and then.
+                    if !g.maximized && s.asked.elapsed() > Settle::REASK {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(s.want.into()));
+                        s.asked = std::time::Instant::now();
+                    }
+                    ctx.request_repaint();
+                }
+                _ => {
+                    if self.ui.settling.take().is_some() {
+                        // Our own resize has landed: put presentation back to normal
+                        // (see `chrome::end_programmatic_resize`).
+                        crate::chrome::end_programmatic_resize();
+                        if let Some(t) = self.ui.switch_started.take() {
+                            tracing::debug!(target: "ond::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
+                        }
+                    }
+                    // Mini is square; where the platform doesn't hold it so, snap back.
+                    if square
+                        && !self.ui.square_native
+                        && let Some(side) = crate::window::square(self.ui.seen.map_or(g.size, |s| s.size), g.size)
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(side.into()));
+                    }
+                    self.ui.seen = Some(g);
+                }
+            }
+        }
+    }
+
+    fn resize_to(&mut self, plan: crate::window::Plan) {
+        plan.apply(&self.ctx);
+        // A maximized window takes the screen's size, not the plan's.
+        self.ui.settling = (!plan.maximized).then(|| Settle::new(plan.size));
     }
 
     fn go(&mut self, route: Route) {
@@ -1788,6 +1929,12 @@ impl OndApp {
         if self.window_mode() != WindowMode::Mini {
             self.ui.toasts.ui(&ctx, ctx.content_rect());
         }
+        // Window buttons and resize edges where the system draws none (Linux).
+        crate::csd::overlay(&ctx, match self.window_mode() {
+            WindowMode::Full => Some(toolbar::TOOLBAR_H),
+            WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
+            WindowMode::Mini => None,
+        });
         // Commands become actions; apply those in the same frame too (bounded,
         // in case something keeps asking).
         for _ in 0..4 {
@@ -1952,8 +2099,11 @@ impl OndApp {
 impl eframe::App for OndApp {
     /// Edit menu commands become ordinary input, so the focused field
     /// pastes, copies or undoes as if the keys had reached it.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         raw_input.events.append(&mut self.ui.edit_input);
+        if self.ui.momentum.process(&mut raw_input.events, std::time::Instant::now()) {
+            ctx.request_repaint();
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -2000,38 +2150,7 @@ impl eframe::App for OndApp {
             _ => {}
         }
         crate::chrome::sync(ctx, crate::chrome::Bar { height: self.title_bar_h() });
-        let square = self.window_mode() == WindowMode::Mini;
-        // Until the window exists the platform can't lock it; keep asking.
-        if self.ui.square_wanted != Some(square) || (square && !self.ui.square_native) {
-            self.ui.square_wanted = Some(square);
-            self.ui.square_native = crate::window::lock_square(square) && square;
-        }
-        if let Some(g) = Geometry::read(ctx) {
-            match self.ui.settling {
-                Some((want, left)) if left > 0 && ((g.size[0] - want[0]).abs() > 2.0 || (g.size[1] - want[1]).abs() > 2.0) => {
-                    self.ui.settling = Some((want, left - 1));
-                    ctx.request_repaint();
-                }
-                _ => {
-                    if self.ui.settling.take().is_some() {
-                        // Our own resize has landed: put presentation back to normal
-                        // (see `chrome::end_programmatic_resize`).
-                        crate::chrome::end_programmatic_resize();
-                        if let Some(t) = self.ui.switch_started.take() {
-                            tracing::debug!(target: "ond::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
-                        }
-                    }
-                    // Mini is square; where the platform doesn't hold it so, snap back.
-                    if square
-                        && !self.ui.square_native
-                        && let Some(side) = crate::window::square(self.ui.seen.map_or(g.size, |s| s.size), g.size)
-                    {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(side.into()));
-                    }
-                    self.ui.seen = Some(g);
-                }
-            }
-        }
+        self.track_window(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2040,6 +2159,7 @@ impl eframe::App for OndApp {
             // Logging in needs the full window.
             self.set_mode(Some(WindowMode::Full));
             self.login_ui(ui);
+            crate::csd::overlay(ui.ctx(), Some(toolbar::TOOLBAR_H));
         } else {
             self.main_ui(ui);
         }
@@ -2118,6 +2238,16 @@ pub fn track_ref(t: &Track) -> TrackRef {
     TrackRef::new(t.id.clone(), t.suffix.clone(), t.size)
 }
 
+
+/// The main window's HWND, for the media controls.
+#[cfg(windows)]
+fn hwnd(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
