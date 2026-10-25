@@ -69,6 +69,14 @@ impl Flow {
         Self { rng, t: 0.0, field, shape, palette, field_var: [v, v], shape_var: [sv, sv], album: album_palette([0.6, 0.7, 0.9]), spin: 0.0 }
     }
 
+    /// Keeps to one field, shape and colour map (for snapshots of each).
+    #[cfg(test)]
+    pub fn hold(&mut self, field: usize, shape: usize, palette: usize) {
+        self.field.hold(field % FIELDS);
+        self.shape.hold(shape % SHAPES);
+        self.palette.hold(palette % (PALETTES.len() + 1));
+    }
+
     pub fn set_colors(&mut self, glow: &[[f32; 3]]) {
         if let Some(c) = glow.first() {
             self.album = album_palette(*c);

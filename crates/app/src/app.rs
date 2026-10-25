@@ -2881,6 +2881,15 @@ mod tests {
         frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
         assert_ne!(showing(&app), first);
         assert_eq!(app.experimental().visualizer_pick, Pick::Shuffle);
+        // And each new track after the first brings another.
+        app.player.queue.play_now(vec![track("t-first", "al-0", 1)], 0, Source::Added);
+        frame(&ctx, &mut app, Vec::new());
+        for n in 0..4 {
+            let before = showing(&app);
+            app.player.queue.play_now(vec![track(&format!("t-{n}"), "al-0", 1)], 0, Source::Added);
+            frame(&ctx, &mut app, Vec::new());
+            assert_ne!(showing(&app), before, "track {n}");
+        }
     }
 
     #[test]

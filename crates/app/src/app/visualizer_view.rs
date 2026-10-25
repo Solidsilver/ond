@@ -73,6 +73,12 @@ impl VisualizerView {
         self.scene.kind()
     }
 
+    /// The scene, to set up a snapshot.
+    #[cfg(test)]
+    pub fn scene(&mut self) -> &mut Scene {
+        &mut self.scene
+    }
+
     /// Starts again with `seed` (for snapshots): the same scene from the start.
     #[cfg(test)]
     pub fn reseed(&mut self, seed: u64) {

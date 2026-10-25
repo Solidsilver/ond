@@ -300,6 +300,15 @@ impl Scene {
         }
     }
 
+    /// The Flow scene, if that's what this is.
+    #[cfg(test)]
+    pub fn flow(&mut self) -> Option<&mut flow::Flow> {
+        match self {
+            Scene::Flow(f) => Some(f),
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Scene::Flow(_) => Kind::Flow,
@@ -453,6 +462,12 @@ impl Morph {
         }
         self.change(rng);
         true
+    }
+
+    /// Settles on `choice` and keeps it (for snapshots of each one).
+    #[cfg(test)]
+    pub fn hold(&mut self, choice: usize) {
+        (self.from, self.to, self.progress, self.wait) = (choice, choice, 1.0, f32::INFINITY);
     }
 
     /// Starts a morph to another choice now.

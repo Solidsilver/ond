@@ -1593,6 +1593,15 @@ fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         v.fixed_step = Some(1.0 / 60.0);
         v.reseed(seed);
     };
+    // The choice in Settings › Experimental, scrolled down to it.
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| x.visualizer = true);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Experimental));
+    h.run_steps(2);
+    h.hover_at(pos2(FULL.x / 2.0, FULL.y / 2.0));
+    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -600.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
+    h.run_steps(30);
+    s.shoot(h, "x-settings-visualizer");
     open(h, Kind::Flow, 1, false);
     frames(h, 75);
     s.shoot_now(h, "x-visualizer-title");
@@ -1611,6 +1620,21 @@ fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         frames(h, 360);
         s.shoot_now(h, &format!("x-visualizer-{}-alt", kind.label().to_lowercase()));
     }
+    // The 8-bit pictures used where the adapter has no half-float targets.
+    let gpu = app_mut(h).gpu;
+    app_mut(h).gpu = gpu.map(|g| crate::visuals::gpu::Target::plain(g.format));
+    open(h, Kind::Flow, 2, false);
+    frames(h, 900);
+    s.shoot_now(h, "x-visualizer-flow-8bit");
+    app_mut(h).close_visualizer();
+    app_mut(h).gpu = gpu;
+    // Each of Flow's fields, with each shape and colour map along the way.
+    for field in 0..8 {
+        open(h, Kind::Flow, 6, false);
+        app_mut(h).ui.visualizer.as_mut().and_then(|v| v.scene().flow()).expect("flow").hold(field, field, field);
+        frames(h, 240);
+        s.shoot_now(h, &format!("x-visualizer-flow-field-{field}"));
+    }
     // → from Flow: Particles, its name fading in, and kept as the choice.
     open(h, Kind::Flow, 1, false);
     frames(h, 300);
@@ -1619,6 +1643,21 @@ fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot_now(h, "x-visualizer-switched");
     assert_eq!(app_mut(h).experimental().visualizer_pick, Pick::Particles);
     app_mut(h).close_visualizer();
+    // What a GPU frame costs with each, rendered offscreen and read back (the
+    // read-back is in all of them), against the ordinary window.
+    let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {
+        frames(h, 5);
+        let t = std::time::Instant::now();
+        frames(h, 30);
+        t.elapsed().as_secs_f64() * 1000.0 / 30.0
+    };
+    reset(h, vec2(1280.0, 800.0), Route::Recent);
+    println!("  render + read-back per frame at 2560x1600 px: window {:.2} ms", render_ms(h));
+    for kind in Kind::ALL {
+        open(h, kind, 1, false);
+        println!("    {}: {:.2} ms", kind.label(), render_ms(h));
+        app_mut(h).close_visualizer();
+    }
     let gpu = app_mut(h).gpu.take();
     for kind in Kind::ALL {
         open(h, kind, 1, false);
