@@ -1,9 +1,10 @@
 //! What's playing, as the visuals see it: an FFT of the audio tap's latest
 //! samples, once per frame that needs it, bucketed into log-spaced bands and
-//! smoothed (quick to rise, slower to fall), plus a beat signal from the low
-//! end. The FFT runs on the UI thread: a 4096-point real transform is tens of
-//! microseconds, less than drawing the bars.
+//! smoothed (quick to rise, slower to fall), plus the music's feel for the
+//! visualizer (see [`pulse`](super::pulse)). The FFT runs on the UI thread: a
+//! 4096-point real transform is tens of microseconds, less than drawing the bars.
 
+use super::pulse::{Feel, Pulse};
 use audio::tap::Tap;
 use realfft::RealFftPlanner;
 use realfft::num_complex::Complex;
@@ -28,17 +29,15 @@ pub struct Frame {
     pub bands: [f32; BANDS],
     /// The same, unsmoothed (for a spectrogram).
     pub raw: [f32; BANDS],
-    /// 0..=1, jumps on a kick or a strong low-end onset and decays.
-    pub beat: f32,
-    /// Overall level, 0..=1.
-    pub level: f32,
+    /// Low, middle and high, beats and the waveform, each against the track's own loudness.
+    pub feel: Feel,
     /// New audio arrived for this frame (false while paused or stalled).
     pub fresh: bool,
 }
 
 impl Default for Frame {
     fn default() -> Self {
-        Self { bands: [0.0; BANDS], raw: [0.0; BANDS], beat: 0.0, level: 0.0, fresh: false }
+        Self { bands: [0.0; BANDS], raw: [0.0; BANDS], feel: Feel::default(), fresh: false }
     }
 }
 
@@ -46,6 +45,8 @@ pub struct Listener {
     fft: Arc<dyn realfft::RealToComplex<f32>>,
     window: Vec<f32>,
     input: Vec<f32>,
+    /// The input as read, before the window shapes it.
+    samples: Vec<f32>,
     output: Vec<Complex<f32>>,
     scratch: Vec<Complex<f32>>,
     frame: Frame,
@@ -54,8 +55,7 @@ pub struct Listener {
     written: u64,
     /// When the last frame was made (frame clock), for the smoothing.
     time: f64,
-    /// A running average of the low end, for telling a beat from loudness.
-    low_avg: f32,
+    pulse: Pulse,
 }
 
 impl Default for Listener {
@@ -64,6 +64,7 @@ impl Default for Listener {
         let window = (0..FFT).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / FFT as f32).cos()).collect();
         Self {
             input: fft.make_input_vec(),
+            samples: vec![0.0; FFT],
             output: fft.make_output_vec(),
             scratch: fft.make_scratch_vec(),
             fft,
@@ -72,7 +73,7 @@ impl Default for Listener {
             pass: None,
             written: 0,
             time: 0.0,
-            low_avg: 0.0,
+            pulse: Pulse::default(),
         }
     }
 }
@@ -104,9 +105,8 @@ impl Listener {
     }
 
     fn analyse(&mut self, rate: u32, dt: f32) {
-        let mut sum_sq = 0.0;
+        self.samples.copy_from_slice(&self.input);
         for (x, w) in self.input.iter_mut().zip(&self.window) {
-            sum_sq += *x * *x;
             *x *= w;
         }
         if self.fft.process_with_scratch(&mut self.input, &mut self.output, &mut self.scratch).is_err() {
@@ -116,18 +116,13 @@ impl Listener {
         let norm = 4.0 / FFT as f32;
         let mags: Vec<f32> = self.output.iter().map(|c| c.norm() * norm).collect();
         let raw = bands(&mags, rate);
-        let level = ((sum_sq / FFT as f32).sqrt() * 2.0).min(1.0);
+        self.pulse.hear(&self.samples, &mags, rate, dt);
         let f = &mut self.frame;
         f.raw = raw;
         for (b, r) in f.bands.iter_mut().zip(raw) {
             *b = if r > *b { r } else { (*b - FALL * dt).max(r) };
         }
-        f.level = level;
-        // A beat: the low end well above its recent average.
-        let low = raw[..BANDS / 8].iter().sum::<f32>() / (BANDS / 8) as f32;
-        let onset = ((low - self.low_avg) * 4.0).clamp(0.0, 1.0);
-        self.low_avg += (low - self.low_avg) * (dt * 3.0).min(1.0);
-        f.beat = onset.max(f.beat - 2.5 * dt).max(0.0);
+        f.feel.clone_from(self.pulse.feel());
     }
 
     /// No new audio: everything falls toward rest.
@@ -137,8 +132,8 @@ impl Listener {
             *b = (*b - FALL * dt).max(0.0);
         }
         f.raw = [0.0; BANDS];
-        f.beat = (f.beat - 2.5 * dt).max(0.0);
-        f.level = (f.level - FALL * dt).max(0.0);
+        self.pulse.rest(dt);
+        f.feel.clone_from(self.pulse.feel());
     }
 }
 
@@ -192,7 +187,7 @@ mod tests {
             // −6 dBFS reads near the top of the range; far-off bands are near the floor.
             assert!(f.raw[loudest] > 0.85, "{}", f.raw[loudest]);
             assert!(f.raw[(band_of(hz) + 20) % BANDS] < 0.3);
-            assert!(f.fresh && f.level > 0.3);
+            assert!(f.fresh);
         }
     }
 
@@ -241,9 +236,9 @@ mod tests {
             tone(&tap, hz, 0.05, 44_100, 1024);
             l.frame(&tap, pass, pass as f64 * 0.03);
         }
-        assert!(l.frame.beat < 0.1, "{}", l.frame.beat);
+        assert!(l.frame.feel.beat < 0.1, "{}", l.frame.feel.beat);
         tone(&tap, 60.0, 0.8, 44_100, FFT);
-        assert!(l.frame(&tap, 11, 0.33).beat > 0.5);
+        assert!(l.frame(&tap, 11, 0.33).feel.beat > 0.5);
     }
 
     #[test]

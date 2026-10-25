@@ -61,3 +61,12 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 
 ## Analysis
 - [ ] Settings → Library → Analyze library: progress, pauses while playback buffers; album pages show `DR · LUFS` and, only when suspicious, a "likely upsampled / lossy source" chip.
+
+## Visualizer (Settings › Experimental)
+Just the visualizers as PNGs: `cargo test -p ond-player --release visualizer_snapshots -- --ignored --nocapture`.
+- [ ] ⌘T opens the chosen one; ← → switch with its name showing briefly; the choice is there after a restart. Shuffle changes it at each new track.
+- [ ] Apple-silicon laptop, full screen (F): smooth at the display's rate (120 Hz on ProMotion); the fans stay quiet.
+- [ ] Surface Pro 6 (Intel iGPU, Linux, Vulkan), full screen: Flow and Particles stay smooth; the log doesn't say the pictures fell back to 8-bit.
+- [ ] A quiet recording (classical, solo piano) still moves; a track with a kick drum makes Flow and Particles jump on the beat.
+- [ ] The cover, title, artist and album show bottom-left for a few seconds when a track starts, then fade.
+- [ ] Paused: the picture holds still and the app goes back to its idle frame rate.

@@ -288,13 +288,18 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
         let with = time_with_audio(h, 60);
         println!("  {:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", "spectrogram in Info", ms(off), ms(with));
     }
-    // The visualizer, full window: its CPU side (the scene and the paint
-    // callback; the GPU work isn't timed here) and the painter version.
-    for (scene, gpu) in [("visualizer, GPU (CPU side)", Some(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8Unorm)), ("visualizer, painter", None)] {
+    // The visualizer, full window: each one's CPU side (the scene and the
+    // paint callback; the GPU work isn't timed here) and the painter version.
+    use crate::visuals::visualizer::{Kind, Pick};
+    let target = Some(crate::visuals::gpu::Target::plain(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8Unorm));
+    for (scene, kind, gpu) in Kind::ALL.map(|k| (format!("{}, GPU (CPU side)", k.label()), k, target)).into_iter().chain(Kind::ALL.map(|k| (format!("{}, painter", k.label()), k, None))) {
         reset(h, FULL, Route::Recent);
         let off = time_with_audio(h, 60);
         reset(h, FULL, Route::Recent);
-        experiment(h, |x| x.visualizer = true);
+        experiment(h, |x| {
+            x.visualizer = true;
+            x.visualizer_pick = Pick::of(kind);
+        });
         let app = app_mut(h);
         app.gpu = gpu;
         app.toggle_visualizer();

@@ -1,32 +1,87 @@
 //! The visualizer on the GPU, as an egui paint callback with its own wgpu
-//! pipelines. Two offscreen textures take turns: each frame the previous
-//! picture is drawn into the other one faded, slightly zoomed, turned and
-//! drifted (the feedback that turns moving lights into trails), the lights
-//! are added on top, and the result is drawn into egui's pass.
+//! pipelines. Two offscreen pictures take turns: each frame the previous one
+//! is drawn into the other moved along the scene's flow field, blurred a
+//! touch and faded (the feedback that turns moving lights into trails), the
+//! lights are added on top (dark spheres between two layers of them), and the
+//! result is drawn into egui's pass: through a colour map, or as light over a
+//! backdrop.
+//!
+//! The pictures are half-float where the adapter can render to and blend
+//! half-float textures (no banding as trails fade), and 8-bit with a little
+//! dither otherwise. They're drawn at most [`MAX_SIDE`] pixels on the long
+//! side and scaled up: the trails are soft anyway, and it keeps the cost
+//! steady on a big display or an integrated GPU.
 //!
 //! Everything lives in egui-wgpu's callback resources and is made the first
-//! time it's needed, for the target format egui renders to; the offscreen
-//! textures follow the size drawn at.
+//! time it's needed; the pictures follow the size drawn at.
 
-use super::visualizer::{Feedback, Light};
+use super::visualizer::{Dot, Field, Look, Picture};
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
 
-/// The offscreen picture's format (filterable and blendable everywhere).
-const OFFSCREEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// Lights a frame can carry.
-const MAX_LIGHTS: usize = 256;
-/// Bytes per light: centre, radius (x, y), color.
-const LIGHT_BYTES: usize = 8 * 4;
+/// The pictures' longest side, in pixels.
+pub const MAX_SIDE: u32 = 1440;
+/// Floats per light: centre and axis, radius and core (plus 2 for a joined
+/// stroke), color.
+const DOT_FLOATS: usize = 10;
+/// Floats in the uniforms (20 vec4s; see `U` in the shader).
+const UNIFORM_FLOATS: usize = 80;
+
+/// Where the visualizer draws: egui's target format, and the format of its
+/// own pictures (half-float where the adapter supports it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub format: wgpu::TextureFormat,
+    pub offscreen: wgpu::TextureFormat,
+}
+
+impl Target {
+    pub fn new(format: wgpu::TextureFormat, adapter: &wgpu::Adapter) -> Self {
+        let f = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+        let usable = f.allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            && f.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE | wgpu::TextureFormatFeatureFlags::BLENDABLE);
+        if !usable {
+            tracing::info!("visualizer: no half-float render targets on this adapter; its pictures are 8-bit");
+        }
+        Self { format, offscreen: if usable { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm } }
+    }
+
+    /// 8-bit pictures, for a renderer whose adapter isn't to hand.
+    #[cfg(test)]
+    pub fn plain(format: wgpu::TextureFormat) -> Self {
+        Self { format, offscreen: wgpu::TextureFormat::Rgba8Unorm }
+    }
+
+    fn float(&self) -> bool {
+        self.offscreen == wgpu::TextureFormat::Rgba16Float
+    }
+}
+
+/// The pictures' size for a view `size` pixels big.
+pub fn picture_size(size: [u32; 2]) -> [u32; 2] {
+    let long = size[0].max(size[1]);
+    if long <= MAX_SIDE {
+        return size;
+    }
+    let k = MAX_SIDE as f32 / long as f32;
+    size.map(|v| ((v as f32 * k).round() as u32).max(1))
+}
 
 const SHADER: &str = r#"
+struct Flow { a: vec4<f32>, b: vec4<f32>, c: vec4<f32> };
 struct U {
-    fade: f32,
-    zoom: f32,
-    turn: f32,
-    aspect: f32,
-    drift: vec2<f32>,
-    linear_out: f32,
-    _pad: f32,
+    // fade, flow mix, time, -
+    frame: vec4<f32>,
+    // blur (texels), floor (taken off each frame), linear output, mapped
+    misc: vec4<f32>,
+    // palette mix, dither, texel size
+    look: vec4<f32>,
+    // half the view in scene units, brightness, -
+    view: vec4<f32>,
+    fa: Flow,
+    fb: Flow,
+    pa: array<vec4<f32>, 4>,
+    pb: array<vec4<f32>, 4>,
+    back: array<vec4<f32>, 2>,
 };
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
@@ -47,19 +102,51 @@ fn vs_full(@builtin(vertex_index) i: u32) -> Full {
     return o;
 }
 
-// Last frame, faded, scaled up about the centre, turned and drifted.
+fn rot(p: vec2<f32>, a: f32) -> vec2<f32> {
+    let s = sin(a);
+    let c = cos(a);
+    return vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+// Where the flow field brings the point at `q` from (scene units).
+fn source(q: vec2<f32>, f: Flow, t: f32) -> vec2<f32> {
+    let p = q - f.c.zw;
+    let r = length(p);
+    let th = atan2(p.y, p.x);
+    let zoom = f.a.x * (1.0 + f.b.y * cos(f.b.x * th + t * 0.4)) * (1.0 + f.b.w * sin(f.b.z * r - t * 1.7));
+    let turn = f.a.y + f.a.z * r + f.a.w / (r + 0.2);
+    var s = rot(p, -turn) / zoom;
+    s = s - f.c.y * vec2<f32>(sin(p.y * f.c.x + t), cos(p.x * f.c.x * 0.8 + t * 1.3));
+    return s + f.c.zw;
+}
+
+fn grab(uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(tex, samp, uv, 0.0);
+}
+
+fn hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+// Last frame, moved along the flow field (part way to the next one),
+// blurred a touch and faded. Outside the old picture is black.
 @fragment
 fn fs_feedback(in: Full) -> @location(0) vec4<f32> {
-    var c = in.uv - vec2<f32>(0.5, 0.5);
-    c.x = c.x * u.aspect;
-    let s = sin(u.turn);
-    let k = cos(u.turn);
-    c = vec2<f32>(c.x * k - c.y * s, c.x * s + c.y * k) / u.zoom;
-    c.x = c.x / u.aspect;
-    let prev = textureSample(tex, samp, c + vec2<f32>(0.5, 0.5) + u.drift).rgb;
-    // The small subtraction lets the dimmest trail reach black: on an 8-bit
-    // picture, scaling alone would round it back up forever and leave a haze.
-    return vec4<f32>(max(prev * u.fade - vec3<f32>(1.5 / 255.0), vec3<f32>(0.0)), 1.0);
+    let span = vec2<f32>(2.0 * u.view.x, -2.0 * u.view.y);
+    let q = (in.uv - 0.5) * span;
+    let t = u.frame.z;
+    let s = mix(source(q, u.fa, t), source(q, u.fb, t), u.frame.y);
+    let uv = s / span + 0.5;
+    let d = u.look.zw * u.misc.x;
+    var c = grab(uv).rgb * 0.5;
+    c += (grab(uv + d).rgb + grab(uv - d).rgb + grab(uv + vec2<f32>(d.x, -d.y)).rgb + grab(uv + vec2<f32>(-d.x, d.y)).rgb) * 0.125;
+    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    c *= clamp(edge * 200.0, 0.0, 1.0);
+    // The small subtraction lets the dimmest trail reach black (on an 8-bit
+    // picture, scaling alone would round it back up forever and leave a haze);
+    // the dither keeps 8-bit trails from banding.
+    let n = (hash(in.pos.xy + vec2<f32>(t * 61.0, t * 37.0)) - 0.5) * u.look.y;
+    return vec4<f32>(max(c * u.frame.x - vec3<f32>(u.misc.y) + vec3<f32>(n), vec3<f32>(0.0)), 0.0);
 }
 
 fn to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -68,11 +155,39 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+// A colour map: brightness through four stops (rgb, position).
+fn ramp(i: f32, s0: vec4<f32>, s1: vec4<f32>, s2: vec4<f32>, s3: vec4<f32>) -> vec3<f32> {
+    if (i <= s1.w) {
+        return mix(s0.rgb, s1.rgb, clamp((i - s0.w) / max(s1.w - s0.w, 1e-4), 0.0, 1.0));
+    }
+    if (i <= s2.w) {
+        return mix(s1.rgb, s2.rgb, (i - s1.w) / max(s2.w - s1.w, 1e-4));
+    }
+    return mix(s2.rgb, s3.rgb, clamp((i - s2.w) / max(s3.w - s2.w, 1e-4), 0.0, 1.0));
+}
+
+// Bright light rolls off instead of clipping.
+fn tone(x: vec3<f32>) -> vec3<f32> {
+    let knee = vec3<f32>(0.6);
+    return select(x, knee + 0.4 * (1.0 - exp(-(x - knee) / 0.4)), x > knee);
+}
+
 // The picture into egui's pass.
 @fragment
 fn fs_show(in: Full) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, in.uv).rgb;
-    if (u.linear_out > 0.5) {
+    let px = grab(in.uv);
+    var c: vec3<f32>;
+    if (u.misc.w > 0.5) {
+        // Brightness eases toward the map's top, so piled-up light stays colored.
+        let i = 1.0 - exp(-1.4 * max(px.r, max(px.g, px.b)));
+        c = mix(ramp(i, u.pa[0], u.pa[1], u.pa[2], u.pa[3]), ramp(i, u.pb[0], u.pb[1], u.pb[2], u.pb[3]), u.look.x);
+    } else {
+        let r = length((in.uv - 0.5) * 2.0);
+        let back = mix(u.back[0].rgb, u.back[1].rgb, smoothstep(0.0, 1.3, r));
+        c = back * (1.0 - clamp(px.a, 0.0, 1.0)) + tone(px.rgb);
+    }
+    c = c * u.view.z;
+    if (u.misc.z > 0.5) {
         return vec4<f32>(to_linear(c), 1.0);
     }
     return vec4<f32>(c, 1.0);
@@ -80,39 +195,72 @@ fn fs_show(in: Full) -> @location(0) vec4<f32> {
 
 struct Lit {
     @builtin(position) pos: vec4<f32>,
+    // Across the light, in radii: x along the streak, y across it.
     @location(0) local: vec2<f32>,
-    @location(1) color: vec4<f32>,
+    // The streak's half-length, in radii, and how crisp (plus 2 for a joined stroke).
+    @location(1) shape: vec2<f32>,
+    @location(2) color: vec4<f32>,
 };
 
 @vertex
-fn vs_light(@builtin(vertex_index) i: u32, @location(0) centre: vec2<f32>, @location(1) radius: vec2<f32>, @location(2) color: vec4<f32>) -> Lit {
+fn vs_dot(@builtin(vertex_index) i: u32, @location(0) at_axis: vec4<f32>, @location(1) size: vec2<f32>, @location(2) color: vec4<f32>) -> Lit {
     var corners = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0));
     let k = corners[i];
+    let len = length(at_axis.zw);
+    let dir = select(vec2<f32>(1.0, 0.0), at_axis.zw / max(len, 1e-6), len > 1e-6);
+    let r = max(size.x, 1e-5);
+    let p = at_axis.xy + dir * k.x * (len + r) + vec2<f32>(-dir.y, dir.x) * k.y * r;
     var o: Lit;
-    o.pos = vec4<f32>(centre + k * radius, 0.0, 1.0);
-    o.local = k;
+    o.pos = vec4<f32>(p / u.view.xy, 0.0, 1.0);
+    o.local = vec2<f32>(k.x * (len + r) / r, k.y);
+    o.shape = vec2<f32>(len / r, size.y);
     o.color = color;
     return o;
 }
 
-// A soft round glow, added to what's there.
+// How much of a light covers this point: a soft glow, or a crisp dot.
+fn profile(d: f32, crisp: f32) -> f32 {
+    let soft = exp(-d * d * 3.5);
+    let hard = 1.0 - smoothstep(0.55, 1.0, d);
+    return mix(soft, hard, crisp) * (1.0 - smoothstep(0.85, 1.0, d));
+}
+
+fn cover(in: Lit) -> f32 {
+    if (in.shape.y >= 2.0) {
+        // A stroke of a line: full across its length, then a half-radius
+        // ramp either side of each end, so where two strokes meet they sum
+        // to one instead of doubling.
+        let along = clamp(in.shape.x + 0.5 - abs(in.local.x), 0.0, 1.0);
+        return profile(abs(in.local.y), in.shape.y - 2.0) * along;
+    }
+    let x = max(abs(in.local.x) - in.shape.x, 0.0);
+    return profile(sqrt(x * x + in.local.y * in.local.y), in.shape.y);
+}
+
+// A light, added to what's there.
 @fragment
-fn fs_light(in: Lit) -> @location(0) vec4<f32> {
-    let d = dot(in.local, in.local);
-    let a = exp(-d * 3.5) * (1.0 - smoothstep(0.7, 1.0, d)) * in.color.a;
-    return vec4<f32>(in.color.rgb * a, a);
+fn fs_dot(in: Lit) -> @location(0) vec4<f32> {
+    let a = cover(in) * in.color.a;
+    return vec4<f32>(in.color.rgb * a, 0.0);
+}
+
+// A dark sphere over what's there, solid to a crisp edge; its alpha marks
+// it, so the backdrop doesn't show through it either.
+@fragment
+fn fs_shade(in: Lit) -> @location(0) vec4<f32> {
+    let d = length(in.local);
+    return vec4<f32>(0.0, 0.0, 0.0, (1.0 - smoothstep(0.9, 1.0, d)) * in.color.a);
 }
 "#;
 
-/// What one frame draws: the lights (in the scene's units), the feedback
-/// for this frame's length, and the size drawn at.
+/// What one frame draws: the scene's picture, at `size_px`.
 pub struct VisualizerCallback {
-    /// egui's render target format.
-    pub format: wgpu::TextureFormat,
+    pub target: Target,
     pub size_px: [u32; 2],
-    pub lights: Vec<Light>,
-    pub feedback: Feedback,
-    /// Start from black (the view just opened).
+    /// Half the view in scene units.
+    pub half: [f32; 2],
+    pub picture: Picture,
+    /// Start from black (the view just opened, or switched visualizer).
     pub clear: bool,
 }
 
@@ -126,25 +274,61 @@ struct Pictures {
 }
 
 struct Gpu {
-    format: wgpu::TextureFormat,
+    target: Target,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
-    lights: wgpu::Buffer,
+    dots: wgpu::Buffer,
+    /// Lights the buffer holds.
+    capacity: usize,
     feedback: wgpu::RenderPipeline,
-    light: wgpu::RenderPipeline,
+    dot: wgpu::RenderPipeline,
+    shade: wgpu::RenderPipeline,
     show: wgpu::RenderPipeline,
     pictures: Option<Pictures>,
-    /// Lights in the buffer this frame.
-    count: u32,
 }
 
 fn bytes(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_ne_bytes()).collect()
 }
 
+fn field_floats(f: &Field) -> [f32; 12] {
+    [f.zoom, f.turn, f.twist, f.vortex, f.petals, f.petal, f.ripples, f.ripple, f.waves, f.wave, f.centre[0], f.centre[1]]
+}
+
+/// The shader's uniforms for `picture`.
+fn uniforms(c: &VisualizerCallback, texel: [f32; 2]) -> [f32; UNIFORM_FLOATS] {
+    let p = &c.picture;
+    let w = &p.warp;
+    let fade = if c.clear { 0.0 } else { w.fade };
+    let float = c.target.float();
+    let (floor, dither) = if float { (0.0008, 0.0) } else { (1.5 / 255.0, 1.0 / 255.0) };
+    let linear = if c.target.format.is_srgb() { 1.0 } else { 0.0 };
+    let mut u = Vec::with_capacity(UNIFORM_FLOATS);
+    u.extend([fade, w.mix, p.time, 0.0]);
+    let (mapped, pal_mix, pa, pb, back) = match p.look {
+        Look::Mapped { from, to, mix } => (1.0, mix, from.0, to.0, [[0.0; 3]; 2]),
+        Look::Lit { centre, edge } => (0.0, 0.0, [[0.0; 4]; 4], [[0.0; 4]; 4], [centre, edge]),
+    };
+    u.extend([w.blur, floor, linear, mapped]);
+    u.extend([pal_mix, dither, texel[0], texel[1]]);
+    u.extend([c.half[0], c.half[1], p.bright, 0.0]);
+    u.extend(field_floats(&w.from));
+    u.extend(field_floats(&w.to));
+    u.extend(pa.iter().chain(&pb).flatten());
+    for b in back {
+        u.extend([b[0], b[1], b[2], 0.0]);
+    }
+    u.try_into().expect("the uniforms are 20 vec4s")
+}
+
+fn dot_floats(d: &Dot) -> [f32; DOT_FLOATS] {
+    let core = d.core + if d.joined { 2.0 } else { 0.0 };
+    [d.at[0], d.at[1], d.axis[0], d.axis[1], d.radius, core, d.color[0], d.color[1], d.color[2], d.color[3]]
+}
+
 impl Gpu {
-    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    fn new(device: &wgpu::Device, target: Target) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("visualizer"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("visualizer"),
@@ -158,15 +342,14 @@ impl Gpu {
                 wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("visualizer"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let lights_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("visualizer lights"), bind_group_layouts: &[], immediate_size: 0 });
-        let full = |entry: &str, target: wgpu::TextureFormat| {
+        let full = |entry: &str, format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
@@ -177,41 +360,45 @@ impl Gpu {
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some(entry),
-                    targets: &[Some(wgpu::ColorTargetState { format: target, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
                     compilation_options: Default::default(),
                 }),
                 multiview_mask: None,
                 cache: None,
             })
         };
-        let feedback = full("fs_feedback", OFFSCREEN);
-        let show = full("fs_show", format);
-        let additive = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
-        let light = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("visualizer lights"),
-            layout: Some(&lights_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_light"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: LIGHT_BYTES as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
-                })],
-                compilation_options: Default::default(),
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_light"),
-                targets: &[Some(wgpu::ColorTargetState { format: OFFSCREEN, blend: Some(wgpu::BlendState { color: additive, alpha: additive }), write_mask: wgpu::ColorWrites::ALL })],
-                compilation_options: Default::default(),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let lights = |entry: &str, blend: wgpu::BlendState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_dot"),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: (DOT_FLOATS * 4) as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Float32x4],
+                    })],
+                    compilation_options: Default::default(),
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState { format: target.offscreen, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let component = |src_factor, dst_factor| wgpu::BlendComponent { src_factor, dst_factor, operation: wgpu::BlendOperation::Add };
+        use wgpu::BlendFactor::{One, OneMinusSrcAlpha, Zero};
+        // Lights add to the color and leave the alpha (where dark spheres are) alone.
+        let dot = lights("fs_dot", wgpu::BlendState { color: component(One, One), alpha: component(Zero, One) });
+        let shade = lights("fs_shade", wgpu::BlendState { color: component(One, OneMinusSrcAlpha), alpha: component(One, OneMinusSrcAlpha) });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("visualizer"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -220,14 +407,30 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor { label: Some("visualizer"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let lights = device.create_buffer(&wgpu::BufferDescriptor {
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor { label: Some("visualizer"), size: (UNIFORM_FLOATS * 4) as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let capacity = 4096;
+        Self {
+            target,
+            layout,
+            sampler,
+            uniforms,
+            dots: Self::dot_buffer(device, capacity),
+            capacity,
+            feedback: full("fs_feedback", target.offscreen),
+            dot,
+            shade,
+            show: full("fs_show", target.format),
+            pictures: None,
+        }
+    }
+
+    fn dot_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("visualizer lights"),
-            size: (MAX_LIGHTS * LIGHT_BYTES) as u64,
+            size: (capacity * DOT_FLOATS * 4) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        Self { format, layout, sampler, uniforms, lights, feedback, light, show, pictures: None, count: 0 }
+        })
     }
 
     /// The two pictures at `size`, made (black) when the size changes.
@@ -241,7 +444,7 @@ impl Gpu {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: OFFSCREEN,
+                        format: self.target.offscreen,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                         view_formats: &[],
                     })
@@ -271,44 +474,55 @@ impl CallbackTrait for VisualizerCallback {
         if self.size_px[0] == 0 || self.size_px[1] == 0 {
             return Vec::new();
         }
-        if resources.get::<Gpu>().is_none_or(|g| g.format != self.format) {
-            resources.insert(Gpu::new(device, self.format));
+        if resources.get::<Gpu>().is_none_or(|g| g.target != self.target) {
+            resources.insert(Gpu::new(device, self.target));
         }
         let Some(gpu) = resources.get_mut::<Gpu>() else { return Vec::new() };
-        let aspect = self.size_px[0] as f32 / self.size_px[1] as f32;
-        let f = &self.feedback;
-        let fade = if self.clear { 0.0 } else { f.fade };
-        queue.write_buffer(&gpu.uniforms, 0, &bytes(&[fade, f.zoom, f.turn, aspect, f.drift[0], f.drift[1], if self.format.is_srgb() { 1.0 } else { 0.0 }, 0.0]));
-        // The scene's units span the shorter side; the pass's span its own.
-        let (sx, sy) = if aspect >= 1.0 { (1.0 / aspect, 1.0) } else { (1.0, aspect) };
-        let lights: Vec<f32> = self.lights.iter().take(MAX_LIGHTS).flat_map(|l| [l.x * sx, l.y * sy, l.radius * sx, l.radius * sy, l.color[0], l.color[1], l.color[2], l.color[3]]).collect();
-        gpu.count = (lights.len() / 8) as u32;
-        queue.write_buffer(&gpu.lights, 0, &bytes(&lights));
+        let size = picture_size(self.size_px);
+        queue.write_buffer(&gpu.uniforms, 0, &bytes(&uniforms(self, [1.0 / size[0] as f32, 1.0 / size[1] as f32])));
+        let p = &self.picture;
+        let counts = [p.dots.len(), p.shades.len(), p.front.len()];
+        let total: usize = counts.iter().sum();
+        if total > gpu.capacity {
+            gpu.capacity = total.next_power_of_two();
+            gpu.dots = Gpu::dot_buffer(device, gpu.capacity);
+        }
+        let floats: Vec<f32> = p.dots.iter().chain(&p.shades).chain(&p.front).flat_map(dot_floats).collect();
+        if !floats.is_empty() {
+            queue.write_buffer(&gpu.dots, 0, &bytes(&floats));
+        }
 
-        let (count, light_pipe, feedback_pipe, light_buf) = (gpu.count, gpu.light.clone(), gpu.feedback.clone(), gpu.lights.clone());
-        let p = gpu.pictures(device, self.size_px);
-        let next = 1 - p.current;
+        let (feedback, dot, shade, buffer) = (gpu.feedback.clone(), gpu.dot.clone(), gpu.shade.clone(), gpu.dots.clone());
+        let pics = gpu.pictures(device, size);
+        let next = 1 - pics.current;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("visualizer"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &p.views[next],
+                    view: &pics.views[next],
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                     depth_slice: None,
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&feedback_pipe);
-            pass.set_bind_group(0, &p.reads[p.current], &[]);
+            pass.set_bind_group(0, &pics.reads[pics.current], &[]);
+            pass.set_pipeline(&feedback);
             pass.draw(0..3, 0..1);
-            if count > 0 {
-                pass.set_pipeline(&light_pipe);
-                pass.set_vertex_buffer(0, light_buf.slice(..));
-                pass.draw(0..6, 0..count);
+            if total > 0 {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                let mut start = 0u32;
+                for (count, pipeline) in counts.iter().zip([&dot, &shade, &dot]) {
+                    let end = start + *count as u32;
+                    if end > start {
+                        pass.set_pipeline(pipeline);
+                        pass.draw(0..6, start..end);
+                    }
+                    start = end;
+                }
             }
         }
-        p.current = next;
+        pics.current = next;
         Vec::new()
     }
 
@@ -324,4 +538,27 @@ impl CallbackTrait for VisualizerCallback {
 /// The paint callback for one frame, filling `rect`.
 pub fn shape(rect: egui::Rect, callback: VisualizerCallback) -> egui::Shape {
     egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(rect, callback))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn big_views_are_drawn_smaller_and_scaled_up() {
+        assert_eq!(picture_size([1280, 800]), [1280, 800]);
+        assert_eq!(picture_size([2880, 1800]), [1440, 900]);
+        assert_eq!(picture_size([1824, 2736]), [960, 1440]);
+    }
+
+    #[test]
+    fn the_uniforms_fill_their_buffer() {
+        let pic = Picture::new(Default::default(), Look::Lit { centre: [0.1; 3], edge: [0.0; 3] }, 1.0);
+        let cb = VisualizerCallback { target: Target::plain(wgpu::TextureFormat::Bgra8UnormSrgb), size_px: [10, 10], half: [1.6, 1.0], picture: pic, clear: true };
+        let u = uniforms(&cb, [0.1, 0.1]);
+        assert_eq!(u[0], 0.0, "cleared: nothing carries over");
+        assert_eq!(u[6], 1.0, "an sRGB target gets linear color");
+        assert_eq!(u[5], 1.5 / 255.0, "8-bit pictures lose a little each frame");
+        assert_eq!(&u[72..75], &[0.1; 3], "the backdrop");
+    }
 }

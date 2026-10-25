@@ -12,18 +12,22 @@
 
 pub mod backdrop;
 pub mod colors;
+pub mod flow;
 pub mod gpu;
 pub mod over_art;
-pub mod visualizer;
+pub mod particles;
+pub mod pulse;
+pub mod ribbons;
 pub mod spectrogram;
 pub mod spectrum;
+pub mod visualizer;
 pub mod waveform;
 
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Which experimental visuals are on.
+/// Which experimental visuals are on (and which visualizer the visualizer shows).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Experimental {
@@ -39,6 +43,9 @@ pub struct Experimental {
     pub spectrum: bool,
     /// The full-window visualizer (⌘T).
     pub visualizer: bool,
+    /// Which one it shows, or a different one each track.
+    #[serde(deserialize_with = "visualizer::lenient_pick")]
+    pub visualizer_pick: visualizer::Pick,
     /// A scrolling spectrogram in the Info tab.
     pub spectrogram: bool,
 }
@@ -71,8 +78,8 @@ impl Live {
     }
 }
 
-/// About 60 frames a second, for the visualizer.
-pub const SMOOTH: Duration = Duration::from_millis(16);
+/// Every frame the display shows (vsync paces it), for the visualizer.
+pub const EVERY_FRAME: Duration = Duration::ZERO;
 /// About 30 frames a second, for small meters.
 pub const METER: Duration = Duration::from_millis(33);
 
@@ -105,6 +112,11 @@ mod tests {
         // A newer file with a switch this build doesn't know still reads.
         let read: Experimental = serde_json::from_str(r#"{"waveform": true, "hologram": true}"#).unwrap();
         assert!(read.waveform && !read.spectrum);
+        // The visualizer's choice reads, and one this build doesn't know is the default.
+        let read: Experimental = serde_json::from_str(r#"{"visualizer": true, "visualizer_pick": "ribbons"}"#).unwrap();
+        assert_eq!(read.visualizer_pick, visualizer::Pick::Ribbons);
+        let read: Experimental = serde_json::from_str(r#"{"visualizer_pick": "lasers"}"#).unwrap();
+        assert_eq!(read.visualizer_pick, visualizer::Pick::default());
     }
 
     #[test]
@@ -112,10 +124,10 @@ mod tests {
         let mut live = Live::default();
         assert_eq!(live.next(true), None, "nothing on screen asked");
         live.want(METER);
-        live.want(SMOOTH);
-        assert_eq!(live.next(true), Some(SMOOTH), "the most demanding visual sets the pace");
+        live.want(EVERY_FRAME);
+        assert_eq!(live.next(true), Some(EVERY_FRAME), "the most demanding visual sets the pace");
         assert_eq!(live.next(true), None, "a request lasts one frame");
-        live.want(SMOOTH);
+        live.want(EVERY_FRAME);
         assert_eq!(live.next(false), None, "paused: no extra frames");
         assert_eq!(live.next(true), None, "and the request didn't linger");
     }

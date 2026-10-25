@@ -388,9 +388,9 @@ pub struct OndApp {
     diagnostics: diagnostics::Diagnostics,
     /// Track waveforms for the seek bar (experimental).
     waveforms: crate::visuals::waveform::Waveforms,
-    /// The format the window renders to, for the visualizer's own GPU
-    /// drawing; `None` without a wgpu renderer (it then uses the painter).
-    gpu: Option<eframe::egui_wgpu::wgpu::TextureFormat>,
+    /// What the window renders to, for the visualizer's own GPU drawing;
+    /// `None` without a wgpu renderer (it then uses the painter).
+    gpu: Option<crate::visuals::gpu::Target>,
 }
 
 /// How long a mode switch waits for the window to leave maximized.
@@ -744,7 +744,7 @@ impl OndApp {
         #[cfg(windows)]
         now_playing::set_window(hwnd(cc));
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
-        app.gpu = cc.wgpu_render_state.as_ref().map(|s| s.target_format);
+        app.gpu = cc.wgpu_render_state.as_ref().map(|s| crate::visuals::gpu::Target::new(s.target_format, &s.adapter));
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
@@ -2838,6 +2838,49 @@ mod tests {
         app.prefs.edit(|s| s.experimental.visualizer = false);
         frame(&ctx, &mut app, Vec::new());
         assert!(app.ui.visualizer.is_none());
+    }
+
+    #[test]
+    fn arrows_switch_the_visualizer_and_the_choice_is_kept() {
+        use crate::visuals::visualizer::{Kind, Pick};
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let showing = |app: &OndApp| app.ui.visualizer.as_ref().map(|v| v.kind());
+        app.prefs.edit(|s| {
+            s.experimental.visualizer = true;
+            s.experimental.visualizer_pick = Pick::Particles;
+        });
+        app.toggle_visualizer();
+        frame(&ctx, &mut app, Vec::new());
+        assert_eq!(showing(&app), Some(Kind::Particles), "it opens on the one chosen");
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        assert_eq!(app.experimental().visualizer_pick, Pick::Ribbons, "and that becomes the choice");
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        assert_eq!(showing(&app), Some(Kind::Flow), "round from the last to the first");
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowLeft, egui::Modifiers::NONE)]);
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        // ⌘→ is still the next track, not a switch.
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::COMMAND)]);
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        // Kept for next time.
+        app.prefs.flush();
+        let saved = crate::settings::Settings::read(&dir.path().join("settings.json")).unwrap();
+        assert_eq!(saved.experimental.visualizer_pick, Pick::Ribbons);
+        app.close_visualizer();
+        app.toggle_visualizer();
+        assert_eq!(showing(&app), Some(Kind::Ribbons));
+        // Shuffled, the arrows still switch, and it stays shuffled.
+        app.close_visualizer();
+        app.prefs.edit(|s| s.experimental.visualizer_pick = Pick::Shuffle);
+        app.toggle_visualizer();
+        frame(&ctx, &mut app, Vec::new());
+        let first = showing(&app);
+        frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        assert_ne!(showing(&app), first);
+        assert_eq!(app.experimental().visualizer_pick, Pick::Shuffle);
     }
 
     #[test]

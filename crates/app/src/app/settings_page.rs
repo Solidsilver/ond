@@ -7,6 +7,7 @@ use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, s
 use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
+use crate::visuals::visualizer::Pick;
 use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
@@ -383,7 +384,14 @@ impl OndApp {
             hint(ui, "A scrolling picture of frequency over time in the Info tab. It redraws continuously while music plays, which uses more battery.");
             ui.add_space(10.0);
             narrow_toggle(ui, &mut x.visualizer, "Visualizer");
-            hint(ui, "A full-window light show in the album's colors, driven by the music. Open it with ⌘T and leave with Esc. It uses the graphics card continuously while open, which uses more battery.");
+            hint(ui, "A full-window light show driven by the music. Open it with ⌘T and leave with Esc. It uses the graphics card continuously while open, which uses more battery.");
+            if x.visualizer {
+                ui.add_space(10.0);
+                row(ui, "Show", |ui| {
+                    choice(ui, &Pick::ALL, &mut x.visualizer_pick, None, |p| p.label().into());
+                });
+                hint(ui, "Flow smears shapes into silk through shifting colors. Particles swarm around charged spheres. Ribbons wind in the album's colors. Shuffle picks a different one for each track. Inside the visualizer, ← and → switch.");
+            }
             ui.add_space(6.0);
             hint(ui, "None of these change the sound. Bit-perfect playback stays bit-perfect.");
         });

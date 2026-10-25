@@ -588,7 +588,9 @@ fn feed_tap(app: &OndApp, frames: usize) {
             let t = n as f32 / RATE as f32;
             let root = [1.0, 4.0 / 3.0, 3.0 / 2.0, 6.0 / 5.0][(n / (2 * RATE as u64)) as usize % 4];
             let beat = (t * 2.0).fract();
-            let kick = 0.6 * (-beat * 18.0).exp() * (std::f32::consts::TAU * 50.0 * t).sin();
+            // A kick drum, its pitch dropping from about 130 Hz to 50.
+            let since = beat / 2.0;
+            let kick = 0.9 * (-since * 14.0).exp() * (std::f32::consts::TAU * (50.0 * since + 3.2 * (1.0 - (-since * 25.0).exp()))).sin();
             let noise = ((seed % 2000) as f32 / 1000.0 - 1.0) * (0.002 + 0.02 * (-((t * 4.0).fract()) * 30.0).exp());
             tones.iter().map(|(hz, a)| a * (std::f32::consts::TAU * hz * root * t).sin()).sum::<f32>() * 0.8 + kick + noise
         })
@@ -1448,9 +1450,6 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     steps_with_audio(h, 4);
     s.shoot_now(h, "x-spectrum-colors-full");
 
-    // The visualizer, on the GPU: two seconds in (the title still showing),
-    // then later with the trails built up; in the album's colors and in
-    // another album's; and the painter version used without wgpu.
     let frames = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
         for _ in 0..n {
             // At 60 frames a second, as the app draws it.
@@ -1462,32 +1461,8 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
             let _ = h.render();
         }
     };
+    visualizer_scenes(h, s);
     let wide = vec2(1280.0, 800.0);
-    reset(h, wide, Route::Recent);
-    experiment(h, |x| x.visualizer = true);
-    settle_look(h);
-    app_mut(h).toggle_visualizer();
-    frames(h, 90);
-    s.shoot_now(h, "x-visualizer-title");
-    frames(h, 240);
-    s.shoot_now(h, "x-visualizer");
-    reset(h, wide, Route::Recent);
-    play_blue(app_mut(h));
-    experiment(h, |x| x.visualizer = true);
-    settle_look(h);
-    app_mut(h).toggle_visualizer();
-    frames(h, 300);
-    s.shoot_now(h, "x-visualizer-alt");
-    app_mut(h).close_visualizer();
-    reset(h, wide, Route::Recent);
-    experiment(h, |x| x.visualizer = true);
-    settle_look(h);
-    let gpu = app_mut(h).gpu.take();
-    app_mut(h).toggle_visualizer();
-    frames(h, 300);
-    s.shoot_now(h, "x-visualizer-painter");
-    app_mut(h).close_visualizer();
-    app_mut(h).gpu = gpu;
     // The spectrogram in the Info tab, full window and Player, after a few
     // seconds of the fixture chord.
     for (size, player, name) in [(FULL, false, "x-spectrogram-full"), (player, true, "x-spectrogram-player")] {
@@ -1526,15 +1501,31 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]
 fn snapshots() {
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], scenes);
+}
+
+/// Only the visualizers (they look the same in either theme):
+///
+/// ```sh
+/// cargo test -p ond-player --release visualizer_snapshots -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "renders PNGs for review; run with --ignored"]
+fn visualizer_snapshots() {
+    shoot_scenes(&[(egui::Theme::Dark, "dark")], visualizer_scenes);
+}
+
+/// Renders `scenes` in each of `themes`, offscreen through wgpu, into `target/snapshots`.
+fn shoot_scenes(themes: &[(egui::Theme, &'static str)], scenes: fn(&mut Harness<'_, Option<OndApp>>, &Shooter)) {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
     std::fs::create_dir_all(&out).unwrap();
     let out = out.canonicalize().unwrap();
-    for (theme, name) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
+    for &(theme, name) in themes {
         let dir = tempfile::tempdir().unwrap();
         // Our own render state (the harness's default one, made here), so the
-        // app knows the format it renders to, for the visualizer's pipelines.
+        // app knows what it renders to, for the visualizer's pipelines.
         let rs = egui_kittest::wgpu::create_render_state(egui_kittest::wgpu::default_wgpu_setup(), eframe::egui_wgpu::RendererOptions::PREDICTABLE);
-        let format = rs.target_format;
+        let target = crate::visuals::gpu::Target::new(rs.target_format, &rs.adapter);
         let mut h = Harness::builder()
             .with_size(FULL)
             .with_pixels_per_point(2.0)
@@ -1558,15 +1549,84 @@ fn snapshots() {
             );
         let ctx = h.ctx.clone();
         let mut app = populated(&ctx, dir.path());
-        app.gpu = Some(format);
+        app.gpu = Some(target);
         // `build` installs the theme with the saved (system) preference.
         theme::set_pref(&ctx, if theme == egui::Theme::Dark { ThemePref::Dark } else { ThemePref::Light });
         *h.state_mut() = Some(app);
-        println!("{name}:");
+        println!("{name} ({:?} pictures):", target.offscreen);
         scenes(&mut h, &Shooter { out: out.clone(), theme: name });
         // Drop the app (and its engine/runtime) before the next theme.
         *h.state_mut() = None;
     }
+}
+
+/// The visualizers, each fed the fixture's music in real time at 60 frames a
+/// second from a fixed seed: Flow as it opens (its name, the key hint and the
+/// track's caption showing), each a few seconds in, Flow at other seeds and
+/// later (other fields, shapes and colour maps), Particles in another album's
+/// colors, a switch with →, and the painter versions.
+fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    use crate::visuals::visualizer::{Kind, Pick};
+    let frames = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
+        for _ in 0..n {
+            let t = h.ctx.input(|i| i.time) + 1.0 / 60.0;
+            h.input_mut().time = Some(t);
+            feed_tap(app_mut(h), 44_100 / 60);
+            h.step();
+            // Each render is one GPU frame: the feedback builds up across them.
+            let _ = h.render();
+        }
+    };
+    let open = |h: &mut Harness<'_, Option<OndApp>>, kind: Kind, seed: u64, blue: bool| {
+        reset(h, vec2(1280.0, 800.0), Route::Recent);
+        if blue {
+            play_blue(app_mut(h));
+        }
+        experiment(h, |x| {
+            x.visualizer = true;
+            x.visualizer_pick = Pick::of(kind);
+        });
+        settle_look(h);
+        feed_tap(app_mut(h), 4096);
+        app_mut(h).toggle_visualizer();
+        let v = app_mut(h).ui.visualizer.as_mut().expect("open");
+        v.fixed_step = Some(1.0 / 60.0);
+        v.reseed(seed);
+    };
+    open(h, Kind::Flow, 1, false);
+    frames(h, 75);
+    s.shoot_now(h, "x-visualizer-title");
+    for kind in Kind::ALL {
+        open(h, kind, 1, false);
+        frames(h, 360);
+        s.shoot_now(h, &format!("x-visualizer-{}", kind.label().to_lowercase()));
+    }
+    for (seed, n) in [(2, 900), (3, 1500), (4, 2400)] {
+        open(h, Kind::Flow, seed, false);
+        frames(h, n);
+        s.shoot_now(h, &format!("x-visualizer-flow-{seed}"));
+    }
+    for kind in [Kind::Particles, Kind::Ribbons] {
+        open(h, kind, 5, true);
+        frames(h, 360);
+        s.shoot_now(h, &format!("x-visualizer-{}-alt", kind.label().to_lowercase()));
+    }
+    // → from Flow: Particles, its name fading in, and kept as the choice.
+    open(h, Kind::Flow, 1, false);
+    frames(h, 300);
+    h.key_press(egui::Key::ArrowRight);
+    frames(h, 40);
+    s.shoot_now(h, "x-visualizer-switched");
+    assert_eq!(app_mut(h).experimental().visualizer_pick, Pick::Particles);
+    app_mut(h).close_visualizer();
+    let gpu = app_mut(h).gpu.take();
+    for kind in Kind::ALL {
+        open(h, kind, 1, false);
+        frames(h, 300);
+        s.shoot_now(h, &format!("x-visualizer-{}-painter", kind.label().to_lowercase()));
+        app_mut(h).close_visualizer();
+    }
+    app_mut(h).gpu = gpu;
 }
 
 /// A song with long credits and a long ReplayGain line in the Info tab, then a
