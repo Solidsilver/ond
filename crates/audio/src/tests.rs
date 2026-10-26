@@ -443,6 +443,30 @@ fn a_lost_device_falls_back_in_its_remembered_mode() {
 }
 
 #[test]
+fn a_device_that_blinks_out_and_back_as_the_default_is_not_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 25);
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
+    *devices.lock().unwrap() = vec![device("hp", "Headphones", DeviceKind::Bluetooth), device("spk", "Speakers", DeviceKind::BuiltInSpeakers)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::SelectDevice(Some("hp".into())));
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // Gone for a moment (Bluetooth renegotiating), then back as the system default.
+    devices.lock().unwrap().retain(|d| d.uid != "hp");
+    events.lock().unwrap().push(DeviceEvent::ListChanged);
+    events_until(&engine, |e| matches!(e, Event::Devices { current: Some(d), .. } if d == "spk"));
+    devices.lock().unwrap().insert(0, device("hp", "Headphones", DeviceKind::Bluetooth));
+    events.lock().unwrap().extend([DeviceEvent::ListChanged, DeviceEvent::DefaultChanged]);
+    let mut seen = events_until(&engine, |e| matches!(e, Event::Devices { current: Some(d), .. } if d == "hp"));
+    engine.send(Command::RefreshDevices);
+    seen.extend(events_until(&engine, |e| matches!(e, Event::Devices { .. })));
+    assert!(!seen.iter().any(|e| matches!(e, Event::DeviceReturned { .. })), "already playing there: {seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
 fn remembered_modes_win_over_device_defaults() {
     let backend = FakeBackend::new(caps(Some(24), 192_000));
     *backend.devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];

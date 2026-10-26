@@ -680,7 +680,7 @@ impl OndApp {
             }
             // Mini is all artwork; messages wait for a bigger window.
             if self.ui.prefs.mode != WindowMode::Mini {
-                self.ui.toasts.ui(&ctx, ctx.content_rect());
+                self.ui.toasts.ui(&ctx, ctx.content_rect(), &mut self.actions);
             }
             // Window buttons and resize edges where the system draws none (Linux).
             crate::csd::overlay(&ctx, title_bar_h(self.ui.prefs.mode));

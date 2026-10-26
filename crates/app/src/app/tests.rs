@@ -914,3 +914,21 @@ fn the_playing_song_queued_next_still_advances_gaplessly() {
     assert_ne!(second.uid, first.uid, "a new pass began");
     assert_eq!(app.player.queue.history.len(), 1);
 }
+
+#[test]
+fn a_lost_device_is_a_notice_and_its_return_an_offer_until_playing_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let dev = |uid: &str, name: &str| audio::DeviceInfo { uid: uid.into(), name: name.into(), kind: audio::DeviceKind::Usb, caps: Default::default(), is_default: false };
+    let list = || vec![dev("spk", "Speakers"), dev("dac", "DAC")];
+    app.handle_engine(audio::Event::DeviceLost { name: "DAC".into() });
+    assert!(app.ui.toasts.texts().iter().any(|t| t.starts_with("DAC disconnected")), "{:?}", app.ui.toasts.texts());
+    app.handle_engine(audio::Event::DeviceReturned { uid: "dac".into(), name: "DAC".into() });
+    assert!(app.ui.toasts.texts().contains(&"DAC is back"));
+    // Something else playing changes nothing; playing through the DAC again ends the offer.
+    app.handle_engine(audio::Event::Devices { devices: list(), current: Some("spk".into()) });
+    assert!(app.ui.toasts.texts().contains(&"DAC is back"));
+    app.handle_engine(audio::Event::Devices { devices: list(), current: Some("dac".into()) });
+    assert!(!app.ui.toasts.texts().contains(&"DAC is back"));
+}

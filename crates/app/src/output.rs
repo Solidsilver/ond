@@ -20,10 +20,6 @@ pub struct Outputs {
     devices: Vec<DeviceInfo>,
     current: Option<String>,
     signal: Option<SignalPath>,
-    /// A device that went away and came back: (uid, name). Offered, not switched to.
-    returned: Option<(String, String)>,
-    /// Name of a device that just went away.
-    lost: Option<String>,
     /// "Playback settings…" was clicked in the popup this frame.
     wants_settings: bool,
     /// Something else (the readout) asked for the picker to open.
@@ -69,8 +65,6 @@ impl Outputs {
             devices: Vec::new(),
             current: None,
             signal: None,
-            returned: None,
-            lost: None,
             wants_settings: false,
             open_requested: false,
         }
@@ -165,23 +159,14 @@ impl Outputs {
                 self.devices = devices.clone();
                 self.current = current.clone();
             }
-            audio::Event::DeviceLost { name } => {
-                self.lost = Some(name.clone());
-                self.returned = None;
-            }
-            audio::Event::DeviceReturned { uid, name } => {
-                self.returned = Some((uid.clone(), name.clone()));
-                self.lost = None;
-            }
             audio::Event::ModeChanged { mode, .. } => return Some(*mode),
             _ => {}
         }
         None
     }
 
-    fn choose(&mut self, uid: Option<String>, engine: &EngineHandle) {
-        self.returned = None;
-        self.lost = None;
+    /// Plays through the device `uid` (the system default for `None`) and remembers it.
+    pub fn choose(&mut self, uid: Option<String>, engine: &EngineHandle) {
         engine.send(Command::SelectDevice(uid.clone()));
         self.prefs.edit(|s| s.output_device = uid);
     }
@@ -190,13 +175,6 @@ impl Outputs {
     /// and holds the bit-perfect switch for the device in use.
     /// Returns true when "Playback settings…" was chosen in the popup.
     pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool) -> bool {
-        if let Some((uid, name)) = self.returned.clone() {
-            if ui.small_button(format!("Switch back to {name}")).clicked() {
-                self.choose(Some(uid), engine);
-            }
-        } else if let Some(name) = &self.lost {
-            ui.weak(format!("{name} disconnected"));
-        }
         let current = self.devices.iter().find(|d| Some(&d.uid) == self.current.as_ref());
         let label = current.map_or("Output", |d| d.name.as_str()).to_owned();
         let dot = self.dot_color(ui);

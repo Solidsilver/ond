@@ -785,7 +785,12 @@ impl Engine {
             && let Some(back) = devices.iter().find(|d| d.uid == uid)
         {
             self.lost = None;
-            let _ = self.events.send(Event::DeviceReturned { uid, name: back.name.clone() });
+            // Nothing to offer when playback is there already: the default followed
+            // it back, or it only dropped out for a moment (Bluetooth can, when the
+            // mode changes).
+            if self.current_device.as_ref() != Some(&uid) {
+                let _ = self.events.send(Event::DeviceReturned { uid, name: back.name.clone() });
+            }
         }
     }
 
