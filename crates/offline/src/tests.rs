@@ -365,12 +365,19 @@ fn a_move_cut_short_finishes_when_run_again() {
     // still whole, and a partial copy waits under its temporary name.
     std::fs::create_dir_all(to.join("0000abcd")).unwrap();
     std::fs::write(to.join("0000abcd").join(".t.flac.moving"), b"mu").unwrap();
+    // Another was copied whole, but stopped before the original went.
+    std::fs::write(from.join("0000abcd").join("u.flac"), b"tune").unwrap();
+    std::fs::write(to.join("0000abcd").join("u.flac"), b"tune").unwrap();
     // One left in the source by an earlier move into it isn't carried along.
     std::fs::write(from.join("0000abcd").join(".x.flac.moving"), b"m").unwrap();
-    move_store(&from, &to).unwrap();
+    let mut seen = Vec::new();
+    move_store_with(&from, &to, &mut |p| seen.push(p)).unwrap();
     assert_eq!(std::fs::read(to.join("0000abcd").join("t.flac")).unwrap(), b"music");
+    assert_eq!(std::fs::read(to.join("0000abcd").join("u.flac")).unwrap(), b"tune");
     assert!(!to.join("0000abcd").join(".x.flac.moving").exists());
     assert!(!from.exists(), "the old folder goes once it's empty");
+    assert_eq!(seen.first(), Some(&MoveProgress { done: 0, total: 12 }));
+    assert_eq!(seen.last(), Some(&MoveProgress { done: 12, total: 12 }));
 }
 
 #[test]

@@ -1118,14 +1118,50 @@ fn free_space(dir: &Path) -> Option<u64> {
     (ok != 0).then_some(available)
 }
 
+/// How far [`move_store_with`] has got, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MoveProgress {
+    pub done: u64,
+    pub total: u64,
+}
+
 /// Moves a store's files from `from` to `to` (run before opening it at `to`),
 /// including the per-account stores in folders under it. Renames where it can,
 /// copies across volumes. Files already at `to` win.
+///
+/// Stopping it anywhere (quitting, a crash) loses nothing, and running it again
+/// finishes the job: a copy is made under a temporary name (see
+/// [`moving_name`]) and renamed into place before the original goes, and a file
+/// found at both ends with the same size is one whose copy was done.
 pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
+    move_store_with(from, to, &mut |_| {})
+}
+
+/// [`move_store`], telling `progress` after each file. It can take a while
+/// across volumes: run it off the UI thread.
+pub fn move_store_with(from: &Path, to: &Path, progress: &mut dyn FnMut(MoveProgress)) -> io::Result<()> {
     if from == to || !from.is_dir() {
         return Ok(());
     }
-    move_files(from, to, true)
+    let mut at = MoveProgress { done: 0, total: tree_size(from) };
+    progress(at);
+    move_files(from, to, true, &mut |bytes| {
+        at.done += bytes;
+        progress(at);
+    })
+}
+
+/// Bytes in the files under `dir`.
+fn tree_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => tree_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The folder for `account`'s downloads under the downloads folder `base`.
@@ -1136,32 +1172,41 @@ pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
 pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
     let dir = base.join(format!("{account:08x}"));
     if base.join(STATE_FILE).is_file() && !dir.join(STATE_FILE).exists() {
-        move_files(base, &dir, false)?;
+        move_files(base, &dir, false, &mut |_| {})?;
     }
     Ok(dir)
 }
 
-fn move_files(from: &Path, to: &Path, folders: bool) -> io::Result<()> {
+/// Moves the files in `from` (with `folders`, the folders in it too) to `to`,
+/// calling `moved` with each file's size once it's dealt with.
+fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64)) -> io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let kind = e.file_type()?;
         if kind.is_dir() {
             if folders {
-                move_files(&e.path(), &to.join(e.file_name()), true)?;
+                move_files(&e.path(), &to.join(e.file_name()), true, moved)?;
             }
             continue;
         }
         if !kind.is_file() {
             continue;
         }
+        let len = e.metadata()?.len();
         if is_moving(&e.file_name().to_string_lossy()) {
             // A copy cut short by an earlier move into `from`.
             let _ = std::fs::remove_file(e.path());
+            moved(len);
             continue;
         }
         let dest = to.join(e.file_name());
-        if dest.exists() {
+        if let Ok(there) = dest.symlink_metadata() {
+            if there.is_file() && there.len() == len {
+                // Copied, but the move stopped before the original went.
+                std::fs::remove_file(e.path())?;
+            }
+            moved(len);
             continue;
         }
         if std::fs::rename(e.path(), &dest).is_err() {
@@ -1170,6 +1215,7 @@ fn move_files(from: &Path, to: &Path, folders: bool) -> io::Result<()> {
             std::fs::rename(&tmp, &dest)?;
             std::fs::remove_file(e.path())?;
         }
+        moved(len);
     }
     // Leaves `from` behind only if something else is in it.
     let _ = std::fs::remove_dir(from);
