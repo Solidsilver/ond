@@ -20,6 +20,7 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 - [ ] A 44.1 kHz track followed by a 48 kHz one (a format change): the first track's last note isn't clipped before the switch. Same at the end of the queue: the last track's tail plays out before playback stops.
 
 ## Playback
+- [ ] Debug build (`cargo run -p ond-player`, no `--release`): a 24/96 FLAC plays without dropouts (dependencies are optimised in debug builds).
 - [ ] Gapless: a live album plays without gaps (also a hi-res one, resampled on the UMC22).
 - [ ] Seek into an undownloaded part: old audio stops at once, spinner, then plays from the new spot.
 - [ ] Previous / ⌥⌘← in the last seconds of the queue: lands and plays (no stuck silence).
