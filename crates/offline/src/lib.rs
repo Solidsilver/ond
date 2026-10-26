@@ -27,6 +27,8 @@ use streamcache::fetch::{self, FetchError};
 use tokio::sync::Notify;
 
 const STATE_FILE: &str = "offline.json";
+/// A state file that failed to load, kept under this prefix; see [`load_pins`].
+const SET_ASIDE: &str = "offline.json.bad-";
 /// Downloads running at once.
 const CONCURRENCY: usize = 2;
 /// Failed attempts before a track waits for a manual retry or a reconnect.
@@ -247,20 +249,18 @@ impl OfflineStore {
     /// starts the download workers on `rt`.
     pub fn open(cfg: OfflineConfig, rt: tokio::runtime::Handle, on_change: OnChange) -> io::Result<Self> {
         std::fs::create_dir_all(&cfg.dir)?;
-        let mut pins: Pins = match std::fs::read(cfg.dir.join(STATE_FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                tracing::warn!("offline state unreadable, starting empty: {e}");
-                Pins::default()
-            }),
-            Err(_) => Pins::default(),
-        };
+        let (mut pins, trusted) = load_pins(&cfg.dir);
         // A finished file that's gone (deleted by hand) downloads again.
         for s in pins.tracks.values_mut() {
             if s.done.is_some() && !cfg.dir.join(file_name(&s.r)).is_file() {
                 s.done = None;
             }
         }
-        remove_strays(&cfg.dir, &pins);
+        if trusted {
+            remove_strays(&cfg.dir, &pins);
+        } else {
+            tracing::warn!("offline: keeping files the pins don't know in {}, while a {SET_ASIDE}* file is there", cfg.dir.display());
+        }
         let (doomed, doomed_rx) = std::sync::mpsc::channel();
         let (saves, saves_rx) = std::sync::mpsc::channel();
         let flush = Arc::new(Flush::default());
@@ -886,7 +886,61 @@ fn remove_files(dir: &Path, ids: &[String]) {
     }
 }
 
-/// Removes files nothing refers to (a crash between unpin and delete).
+/// Reads the pins. Also says whether they can be trusted to name every
+/// download, so files they don't know may be removed as strays.
+///
+/// A state file that can't be read or parsed (a torn write, a permissions
+/// problem, a format change), or one missing beside downloads, may have named
+/// files that are still here. It's moved aside as `offline.json.bad-<ms>` (or a
+/// note is left under that name when there's nothing to move), and as long as
+/// such a file is in the folder no stray is removed, in this session or any
+/// later one: deleting gigabytes of downloads is never the way to recover.
+fn load_pins(dir: &Path) -> (Pins, bool) {
+    let path = dir.join(STATE_FILE);
+    let problem = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(pins) => return (pins, !has_set_aside(dir)),
+            Err(e) => format!("can't be parsed: {e}"),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if !has_downloads(dir) {
+                return (Pins::default(), !has_set_aside(dir));
+            }
+            "is missing, but downloads are here".to_owned()
+        }
+        Err(e) => format!("can't be read: {e}"),
+    };
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let aside = dir.join(format!("{SET_ASIDE}{millis}"));
+    let moved = path.symlink_metadata().is_ok() && std::fs::rename(&path, &aside).is_ok();
+    if !moved {
+        let note = format!("{STATE_FILE} {problem}. Files here that the pins don't name are kept until this file is deleted.\n");
+        if let Err(e) = std::fs::write(&aside, note) {
+            tracing::warn!("offline: noting the lost state at {}: {e}", aside.display());
+        }
+    }
+    tracing::warn!("offline: {} {problem}; starting with no pins and keeping every file (see {})", path.display(), aside.display());
+    (Pins::default(), false)
+}
+
+/// A state file that failed to load was set aside in `dir`.
+fn has_set_aside(dir: &Path) -> bool {
+    std::fs::read_dir(dir).map_or(true, |entries| entries.flatten().any(|e| e.file_name().to_string_lossy().starts_with(SET_ASIDE)))
+}
+
+/// `dir` holds files other than the store's own bookkeeping.
+fn has_downloads(dir: &Path) -> bool {
+    std::fs::read_dir(dir).map_or(true, |entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with(STATE_FILE) && !name.starts_with('.') && e.file_type().is_ok_and(|t| t.is_file())
+        })
+    })
+}
+
+/// Removes files nothing refers to (a crash between unpin and delete). Only
+/// with pins that [`load_pins`] trusts.
 fn remove_strays(dir: &Path, pins: &Pins) {
     let known: std::collections::HashSet<String> = pins.tracks.values().flat_map(|s| {
         let n = file_name(&s.r);

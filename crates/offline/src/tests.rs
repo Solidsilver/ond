@@ -301,9 +301,17 @@ fn the_limit_holds_back_downloads() {
 fn strays_are_removed_on_open() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
+    let s = store(dir.path(), &rt);
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", 1)]);
+    drop(s);
+    // Left behind by a crash between an unpin and its delete.
     std::fs::write(dir.path().join("orphan.flac"), b"x").unwrap();
+    std::fs::write(dir.path().join("orphan.flac.part"), b"x").unwrap();
+    std::fs::write(dir.path().join("t.flac.part"), b"x").unwrap();
     let s = store(dir.path(), &rt);
     assert!(!dir.path().join("orphan.flac").exists());
+    assert!(!dir.path().join("orphan.flac.part").exists());
+    assert!(dir.path().join("t.flac.part").exists(), "a pinned track's partial download stays");
     assert_eq!(s.snapshot().used_bytes, 0);
 }
 
@@ -447,4 +455,57 @@ fn an_older_save_arriving_late_doesnt_overwrite_a_newer_one() {
     drop(tx);
     saver.join().unwrap();
     assert_eq!(std::fs::read(dir.path().join(STATE_FILE)).unwrap(), b"two");
+}
+
+/// Names in `dir` starting with `prefix`.
+fn names_starting(dir: &Path, prefix: &str) -> Vec<String> {
+    std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(prefix)).collect()
+}
+
+#[test]
+fn a_corrupt_state_file_is_set_aside_and_no_download_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    std::fs::write(dir.path().join("t2.flac.part"), b"tw").unwrap();
+    std::fs::write(dir.path().join(STATE_FILE), b"{\"pins\": [tor").unwrap();
+    let s = store(dir.path(), &rt);
+    assert!(dir.path().join("t1.flac").exists() && dir.path().join("t2.flac.part").exists(), "files stay");
+    assert!(!dir.path().join(STATE_FILE).exists(), "the bad file is moved aside");
+    let aside = names_starting(dir.path(), &format!("{STATE_FILE}.bad-"));
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(std::fs::read(dir.path().join(&aside[0])).unwrap(), b"{\"pins\": [tor");
+    // A new state file that doesn't know the old files doesn't make them strays
+    // either, as long as the bad one is still beside them.
+    s.pin(Pin::Track("x".into()), "X", vec![track("x", 1)]);
+    drop(s);
+    let s = store(dir.path(), &rt);
+    assert!(s.is_pinned(&Pin::Track("x".into())));
+    assert!(dir.path().join("t1.flac").exists() && dir.path().join("t2.flac.part").exists(), "files still stay");
+}
+
+#[test]
+fn an_unreadable_state_file_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    // Reading a folder fails with something other than "not found", as a
+    // permissions error would (which root, running the tests, would get past).
+    std::fs::create_dir(dir.path().join(STATE_FILE)).unwrap();
+    let s = store(dir.path(), &rt);
+    assert!(dir.path().join("t1.flac").exists());
+    assert!(s.snapshot().pins.is_empty());
+    assert_eq!(names_starting(dir.path(), &format!("{STATE_FILE}.bad-")).len(), 1);
+}
+
+#[test]
+fn a_missing_state_file_beside_downloads_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    let s = store(dir.path(), &rt);
+    s.pin(Pin::Track("x".into()), "X", vec![track("x", 1)]);
+    drop(s);
+    drop(store(dir.path(), &rt));
+    assert!(dir.path().join("t1.flac").exists());
 }
