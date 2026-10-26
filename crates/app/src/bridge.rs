@@ -118,7 +118,18 @@ pub fn connect_error(e: &subsonic::Error) -> String {
         subsonic::Error::Api { message, .. } if !message.is_empty() => format!("The server said: {message}"),
         subsonic::Error::Url(_) => "That doesn't look like a server address. Try something like https://music.example.com.".into(),
         subsonic::Error::Http(h) if h.is_connect() || h.is_timeout() => "Couldn't reach the server. Check the address and that it's running.".into(),
-        subsonic::Error::Http(h) if h.status().is_some() => format!("The server answered with an error ({}).", h.status().map(|s| s.to_string()).unwrap_or_default()),
+        subsonic::Error::Http(h) if let Some(status) = h.status() => {
+            // What the server (or a proxy in front of it) said, unless it only
+            // repeats the status, as "502 Bad Gateway" pages do.
+            let said = h.message().map(str::trim).filter(|m| {
+                let m = m.trim_end_matches('.');
+                !m.is_empty() && !m.eq_ignore_ascii_case(&status.to_string()) && !status.canonical_reason().is_some_and(|r| m.eq_ignore_ascii_case(r)) && m != status.as_str()
+            });
+            match said {
+                Some(said) => format!("The server answered with an error ({status}): {said}"),
+                None => format!("The server answered with an error ({status})."),
+            }
+        }
         subsonic::Error::Decode(_) => "That address answered, but not like a Navidrome server.".into(),
         other => other.to_string(),
     }
@@ -841,7 +852,10 @@ enum PingError {
 async fn ping(client: &Client) -> Result<String, PingError> {
     match tokio::time::timeout(Duration::from_secs(10), client.ping()).await {
         Err(_) => Err(PingError::Unreachable("The server didn't answer".into())),
-        Ok(Err(e @ subsonic::Error::Http(_))) => Err(PingError::Unreachable(e.to_string())),
+        Ok(Err(e @ subsonic::Error::Http(_))) => {
+            tracing::debug!("ping: {e}");
+            Err(PingError::Unreachable(connect_error(&e)))
+        }
         Ok(Err(e)) => Err(PingError::Refused(connect_error(&e))),
         Ok(Ok(info)) => Ok(format!("{} {}", info.server_type.as_deref().unwrap_or("subsonic"), info.server_version.as_deref().unwrap_or(&info.version))),
     }
@@ -1072,5 +1086,48 @@ mod tests {
         assert_eq!(connect_error(&other), "The server said: Not allowed");
         let url = subsonic::Client::new("not a url", subsonic::Credentials::new("a", "b")).err().unwrap();
         assert!(connect_error(&url).contains("server address"));
+    }
+
+    /// Answers one request on a local port with `status` and an HTML page
+    /// titled `title`. Returns the base URL.
+    fn answer_once(status: &'static str, title: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let (mut req, mut buf) = (Vec::new(), [0u8; 1024]);
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let body = format!("<html><head><title>{title}</title></head><body>proxy</body></html>");
+            let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        });
+        format!("http://{addr}/")
+    }
+
+    /// Signing in to a server behind a reverse proxy that answers with an
+    /// error page shows what the page says, in the friendly sentence, and
+    /// without repeating the status when that's all the page says.
+    #[test]
+    fn a_failed_sign_in_shows_what_the_server_said() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let sign_in = |base: String| {
+            let client = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+            match rt.block_on(ping(&client)) {
+                Err(PingError::Unreachable(e)) => e,
+                Err(PingError::Refused(e)) => panic!("refused: {e}"),
+                Ok(s) => panic!("connected to {s}"),
+            }
+        };
+        assert_eq!(
+            sign_in(answer_once("502 Bad Gateway", "Navidrome is restarting, try again in a minute")),
+            "The server answered with an error (502 Bad Gateway): Navidrome is restarting, try again in a minute"
+        );
+        assert_eq!(sign_in(answer_once("502 Bad Gateway", "502 Bad Gateway")), "The server answered with an error (502 Bad Gateway).");
+        assert_eq!(sign_in(answer_once("503 Service Unavailable", "Service Unavailable")), "The server answered with an error (503 Service Unavailable).");
     }
 }

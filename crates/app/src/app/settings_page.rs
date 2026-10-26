@@ -241,6 +241,10 @@ impl OndApp {
     fn offline_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let snap = self.downloads.snap.clone();
+        if snap.set_aside.is_some() {
+            super::offline_page::set_aside_notice(ui, &snap, &mut self.actions, "settings");
+            ui.add_space(28.0);
+        }
         group(ui, "Storage", |ui| {
             ui.label(egui::RichText::new(super::offline_page::storage_used(&snap)).size(13.0).color(t.text));
             ui.add_space(10.0);
