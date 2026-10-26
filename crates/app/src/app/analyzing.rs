@@ -105,7 +105,7 @@ impl OndApp {
     /// Queues the whole library, once the tracks, the stored results and the
     /// server are all there (so finished tracks aren't redone).
     pub(super) fn resume_library_analysis(&mut self) {
-        if self.analysis_library() && self.analysis.loaded && self.session.client.is_some() && !self.data.tracks.all.is_empty() {
+        if self.prefs_now().analysis_resume && self.analysis.loaded && self.session.client.is_some() && !self.data.tracks.all.is_empty() {
             let all = self.data.tracks.all.clone();
             self.enqueue_analysis(&all);
             self.analysis.library_run = true;
@@ -119,26 +119,16 @@ impl OndApp {
     /// and isn't resumed at the next launch. Until it has been queued (the
     /// server not answered yet, or offline) there's nothing to finish.
     pub(super) fn check_library_analysis(&mut self) {
-        if self.analysis.library_run && self.analysis_library() && !self.analysis.runner.progress().active() {
+        if self.analysis.library_run && self.prefs_now().analysis_resume && !self.analysis.runner.progress().active() {
             self.finish_library_analysis();
         }
     }
 
     pub(super) fn finish_library_analysis(&mut self) {
         self.analysis.library_run = false;
-        if self.analysis_library() {
+        if self.prefs_now().analysis_resume {
             self.prefs.edit(|s| s.analysis_resume = false);
         }
-    }
-
-    /// A library-wide analysis should be running (resumed after a restart).
-    pub(super) fn analysis_library(&self) -> bool {
-        self.prefs.get(|s| s.analysis_resume)
-    }
-
-    /// Analyse each track as it plays (it's in the playback cache by then).
-    pub fn analyze_playing(&self) -> bool {
-        self.prefs.get(|s| s.analyze_playing)
     }
 
     /// Tracks in the library without a current analysis, and their total length.

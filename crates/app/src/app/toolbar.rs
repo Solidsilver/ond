@@ -121,7 +121,7 @@ impl OndApp {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = 10.0;
         // In narrow windows the queue is a sheet: the button shows whether it's open.
-        let shown = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.show_queue() };
+        let shown = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
         let queue_icon = icons::sized_button(ui, Icon::Queue, if shown { "Hide queue (⌥⌘U)" } else { "Show queue (⌥⌘U)" }, vec2(28.0, 28.0), 14.0, Some(if shown { t.accent } else { t.muted }));
         if shown {
             ui.painter().rect_filled(queue_icon.rect, 6.0, t.accent.gamma_multiply(0.12));
@@ -133,7 +133,7 @@ impl OndApp {
             self.actions.push(Action::ToggleMini);
         }
         let mut volume = |ui: &mut Ui, width: f32| {
-            let mut level = self.volume();
+            let mut level = self.ui.prefs.volume;
             let resp = ui
                 .add_enabled_ui(!self.bit_perfect, |ui| super::widgets::thin_slider(ui, &mut level, width, "Volume"))
                 .inner
@@ -238,7 +238,7 @@ impl ViewCtx<'_> {
 
     /// The live spectrum, faint behind the display's text (experimental).
     fn lcd_spectrum(&mut self, ui: &Ui, painter: &egui::Painter, t: &Tokens, rect: Rect) {
-        if self.experimental().spectrum
+        if self.ui.prefs.experimental.spectrum
             && self.player.queue.current.is_some()
             && let Some(f) = self.listen(ui)
         {

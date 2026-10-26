@@ -106,46 +106,46 @@ impl OndApp {
     fn general_settings(&mut self, ui: &mut Ui) {
         group(ui, "Appearance", |ui| {
             row(ui, "Theme", |ui| {
-                let mut theme = self.theme();
+                let mut theme = self.ui.prefs.theme;
                 if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
                     self.actions.push(Action::SetTheme(theme));
                 }
             });
             row(ui, "Accent color", |ui| {
-                let mut accent = self.accent();
+                let mut accent = self.ui.prefs.accent;
                 if accent_swatches(ui, &mut accent) {
                     self.actions.push(Action::SetAccent(accent));
                 }
             });
             ui.add_space(10.0);
-            let mut adapt = self.adapt_colors();
+            let mut adapt = self.ui.prefs.adapt_colors;
             if narrow_toggle(ui, &mut adapt, "Adapt colors to the album art").changed() {
                 self.actions.push(Action::SetAdaptColors(adapt));
             }
             hint(ui, "The accent, the now-playing display and the Player take their colors from the playing album's cover, and an album's page from its own. Text keeps its contrast. Covers without much color use the accent color.");
         });
         group(ui, "Listening", |ui| {
-            let mut scrobble = self.scrobble();
+            let mut scrobble = self.ui.prefs.scrobble;
             if narrow_toggle(ui, &mut scrobble, "Scrobble plays").changed() {
                 self.actions.push(Action::SetScrobble(scrobble));
             }
             hint(ui, "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.");
             ui.add_space(10.0);
-            let mut playing = self.analyze_playing();
+            let mut playing = self.ui.prefs.analyze_playing;
             if narrow_toggle(ui, &mut playing, "Analyze tracks as they play").changed() {
                 self.actions.push(Action::SetAnalyzePlaying(playing));
             }
             hint(ui, "Measures loudness and dynamic range once a track has downloaded for playback.");
         });
         group(ui, "Advanced", |ui| {
-            let mut shown = self.diagnostics_shown();
+            let mut shown = self.ui.prefs.diagnostics_bar;
             if narrow_toggle(ui, &mut shown, "Show diagnostics bar").changed() {
                 self.actions.push(Action::SetDiagnostics(shown));
             }
             hint(ui, "Shows the signal path, buffer, downloads, sync and server timing in a thin bar along the bottom (⌥⌘I).");
             if crate::csd::SUPPORTED {
                 ui.add_space(10.0);
-                let mut system = self.system_title_bar();
+                let mut system = self.ui.prefs.system_title_bar;
                 if narrow_toggle(ui, &mut system, "Use the system title bar").changed() {
                     self.actions.push(Action::SetSystemTitleBar(system));
                 }
@@ -368,7 +368,7 @@ impl OndApp {
 
     /// Visuals still being tried out, one switch each.
     fn experimental_settings(&mut self, ui: &mut Ui) {
-        let mut x = self.experimental();
+        let mut x = self.ui.prefs.experimental;
         let before = x;
         hint(ui, "Visual features that are still being tried out. They may change or go away.");
         ui.add_space(20.0);

@@ -59,7 +59,7 @@ impl ViewCtx<'_> {
         let painter = ui.painter();
         let grabbed = resp.hovered() || self.ui.seek_preview.is_some();
         let shown = self.ui.seek_preview.unwrap_or_else(|| self.position_secs());
-        let wave = if s.wave_h > 0.0 && self.experimental().waveform {
+        let wave = if s.wave_h > 0.0 && self.ui.prefs.experimental.waveform {
             let id = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
             id.and_then(|id| self.waveforms.bars(&id, ((bar.width() / 3.0) as usize).max(8)))
         } else {

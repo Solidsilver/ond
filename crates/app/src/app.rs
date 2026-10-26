@@ -18,6 +18,7 @@ mod info_panel;
 mod layout;
 mod now_playing_view;
 mod palette;
+mod prefs_view;
 mod pins;
 mod settings_page;
 mod queue_panel;
@@ -70,6 +71,7 @@ pub use data::{Data, SearchState, SyncState};
 use data::Pending;
 pub use pins::{Downloads, Keep};
 use pins::playable;
+use prefs_view::PrefsView;
 pub use session::Session;
 use window_state::WindowState;
 use session::LoginForm;
@@ -399,11 +401,14 @@ pub struct UiState {
     pub visualizer: Option<visualizer_view::VisualizerView>,
     /// What views work out from the library, kept between frames.
     pub memos: view_ctx::Memos,
+    /// The preferences as of this frame (see [`PrefsView`]).
+    pub prefs: PrefsView,
 }
 
 impl UiState {
-    fn new(notices: Vec<String>) -> Self {
+    fn new(notices: Vec<String>, prefs: PrefsView) -> Self {
         Self {
+            prefs,
             nav: Nav::default(),
             sort: AlbumSort::default(),
             grid: Default::default(),
@@ -550,6 +555,7 @@ impl OndApp {
             LoginForm { server: saved.server.clone(), username: saved.username.clone(), busy: true, ..Default::default() }
         };
 
+        let shown = PrefsView::read(&prefs);
         Ok(Self {
             _rt: AppRuntime(Some(rt)),
             ctx: ctx.clone(),
@@ -566,7 +572,7 @@ impl OndApp {
             cache: app_cache,
             player: Player::default(),
             output,
-            ui: UiState::new(notices),
+            ui: UiState::new(notices, shown),
             bit_perfect: false,
             search: SearchState::default(),
             now_playing,
@@ -654,14 +660,15 @@ impl OndApp {
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
     /// it's already showing that tab.
     fn toggle_side_tab(&mut self, tab: QueueTab) {
-        if self.ui.queue_ui.tab == tab && (self.show_queue() || self.ui.queue_sheet) {
+        let show_queue = self.prefs_now().show_queue;
+        if self.ui.queue_ui.tab == tab && (show_queue || self.ui.queue_sheet) {
             self.ui.queue_ui.tab = QueueTab::UpNext;
             return;
         }
         self.ui.queue_ui.tab = tab;
         if self.ui.queue_narrow {
             self.ui.queue_sheet = true;
-        } else if !self.show_queue() {
+        } else if !show_queue {
             self.actions.push(Action::ToggleQueue);
         }
     }
@@ -702,7 +709,7 @@ impl OndApp {
                 Note::Error(text) => self.show_error(text),
                 Note::Probe => self.probe(),
                 Note::Started { track, restart } => {
-                    if self.analyze_playing() && !restart {
+                    if self.prefs_now().analyze_playing && !restart {
                         self.enqueue_analysis(std::slice::from_ref(&*track));
                     }
                 }
@@ -842,15 +849,15 @@ impl OndApp {
                 let plan = self.edit_windows(|w| w.toggle_player(seen));
                 self.follow_plan(plan);
             }
-            Action::Lyrics => match self.window_mode() {
+            Action::Lyrics => match self.prefs_now().mode {
                 WindowMode::Full => self.toggle_side_tab(QueueTab::Lyrics),
-                WindowMode::Player => self.actions.push(Action::SetLyricsDrawer(!self.lyrics_drawer())),
+                WindowMode::Player => self.actions.push(Action::SetLyricsDrawer(!self.prefs_now().lyrics_open)),
                 WindowMode::Mini => {
                     self.edit_windows(|w| w.lyrics_open = true);
                     self.set_mode(Some(WindowMode::Player));
                 }
             },
-            Action::Info => match self.window_mode() {
+            Action::Info => match self.prefs_now().mode {
                 WindowMode::Full => self.toggle_side_tab(QueueTab::Info),
                 WindowMode::Player => {
                     self.ui.queue_ui.tab = if self.ui.queue_ui.tab == QueueTab::Info { QueueTab::UpNext } else { QueueTab::Info };
@@ -920,62 +927,6 @@ impl OndApp {
         }
     }
 
-    /// Sidebar and queue column widths, as saved (dragged by their inner edges).
-    pub fn columns(&self) -> layout::Columns {
-        self.prefs.get(|s| layout::Columns::restore(s.sidebar_width, s.queue_width))
-    }
-
-    /// Full, Player or Mini.
-    pub fn window_mode(&self) -> WindowMode {
-        self.prefs.get(|s| s.window.mode)
-    }
-
-    /// The Player's lyrics drawer is open.
-    pub fn lyrics_drawer(&self) -> bool {
-        self.prefs.get(|s| s.window.lyrics_open)
-    }
-
-    /// Whether the queue column is open (in windows wide enough to dock it).
-    pub fn show_queue(&self) -> bool {
-        self.prefs.get(|s| s.show_queue)
-    }
-
-    pub fn theme(&self) -> ThemePref {
-        self.prefs.get(|s| s.theme)
-    }
-
-    pub fn scrobble(&self) -> bool {
-        self.prefs.get(|s| s.scrobble)
-    }
-
-    pub fn diagnostics_shown(&self) -> bool {
-        self.prefs.get(|s| s.diagnostics_bar)
-    }
-
-    /// The accent color the user chose.
-    pub fn accent(&self) -> theme::Accent {
-        self.prefs.get(|s| s.accent)
-    }
-
-    /// Whether colors adapt to the album art.
-    pub fn adapt_colors(&self) -> bool {
-        self.prefs.get(|s| s.adapt_colors)
-    }
-
-    /// Which experimental visuals are on.
-    pub fn experimental(&self) -> crate::visuals::Experimental {
-        self.prefs.get(|s| s.experimental)
-    }
-
-    pub fn system_title_bar(&self) -> bool {
-        self.prefs.get(|s| s.window.system_title_bar)
-    }
-
-    /// Software volume, 0..=1.
-    pub fn volume(&self) -> f32 {
-        self.prefs.get(|s| s.volume)
-    }
-
     /// Sets the volume now; the preference is saved once the change settles.
     pub fn set_volume(&mut self, volume: f32) {
         let volume = volume.clamp(0.0, 1.0);
@@ -1040,17 +991,18 @@ impl OndApp {
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui) {
+        self.read_prefs();
         let ctx = ui.ctx().clone();
         self.art.poll();
         self.art_tint(&ctx);
         self.want_waveform();
-        if !self.experimental().spectrogram {
+        if !self.ui.prefs.experimental.spectrogram {
             // Turned off: the picture goes (and its texture with it).
             self.ui.spectrogram.clear();
         }
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
-        if self.ui.visualizer.is_some() && (!self.experimental().visualizer || self.visualizer_escaped(&ctx)) {
+        if self.ui.visualizer.is_some() && (!self.ui.prefs.experimental.visualizer || self.visualizer_escaped(&ctx)) {
             self.close_visualizer();
         }
         if self.ui.visualizer.is_some() {
@@ -1058,7 +1010,7 @@ impl OndApp {
             self.visualizer_ui(ui);
             crate::csd::overlay(&ctx, None);
         } else {
-            match self.window_mode() {
+            match self.ui.prefs.mode {
                 WindowMode::Full => {
                     self.full_ui(ui);
                     self.view().palette_ui(&ctx);
@@ -1069,11 +1021,11 @@ impl OndApp {
                 WindowMode::Mini => self.mini_ui(ui),
             }
             // Mini is all artwork; messages wait for a bigger window.
-            if self.window_mode() != WindowMode::Mini {
+            if self.ui.prefs.mode != WindowMode::Mini {
                 self.ui.toasts.ui(&ctx, ctx.content_rect());
             }
             // Window buttons and resize edges where the system draws none (Linux).
-            crate::csd::overlay(&ctx, match self.window_mode() {
+            crate::csd::overlay(&ctx, match self.ui.prefs.mode {
                 WindowMode::Full => Some(toolbar::TOOLBAR_H),
                 WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
                 WindowMode::Mini => None,
@@ -1109,16 +1061,16 @@ impl OndApp {
     /// `full_ui` swaps in the second around the page. A cover's colors are
     /// worked out in the background: until they arrive the old ones stay.
     fn art_tint(&mut self, ctx: &egui::Context) {
-        let accent = self.accent();
+        let accent = self.ui.prefs.accent;
         if self.ui.accent_applied != Some(accent) {
             theme::set_accent(ctx, accent);
             self.ui.accent_applied = Some(accent);
         }
         let base = self.ui.tint_cache.base(accent);
-        let adapt = self.adapt_colors();
+        let adapt = self.ui.prefs.adapt_colors;
         // The covers' ids are borrowed (this runs every frame): a cover's tints
         // once its look is worked out, `None` meanwhile.
-        let full = self.window_mode() == WindowMode::Full;
+        let full = self.ui.prefs.mode == WindowMode::Full;
         let (art, cache) = (&mut self.art, &mut self.ui.tint_cache);
         let mut cover_tints = |cover: &str| art.look(cover).map(|look| cache.cover(cover, look.palette.as_ref()));
         let playing_cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track));
@@ -1151,7 +1103,7 @@ impl OndApp {
     #[cfg(test)]
     fn page_cover(&self) -> Option<Option<String>> {
         match self.ui.nav.current() {
-            Route::Album(id) if self.window_mode() == WindowMode::Full => Some(self.data.album(id).and_then(|a| a.cover_art.clone())),
+            Route::Album(id) if self.prefs_now().mode == WindowMode::Full => Some(self.data.album(id).and_then(|a| a.cover_art.clone())),
             _ => None,
         }
     }
@@ -1160,7 +1112,7 @@ impl OndApp {
     /// once a complete copy is on disk (downloaded, or fully streamed).
     fn want_waveform(&mut self) {
         self.waveforms.poll();
-        if !self.experimental().waveform {
+        if !self.ui.prefs.experimental.waveform {
             return;
         }
         let Some(track) = self.player.queue.current.as_ref().map(|c| &c.track) else { return };
@@ -1177,7 +1129,7 @@ impl OndApp {
     /// oldest layer first; empty when that's off or nothing plays.
     pub(crate) fn backdrop_layers(&mut self, ctx: &egui::Context) -> Vec<crate::visuals::backdrop::Layer> {
         let cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track).map(str::to_owned));
-        let Some(cover) = cover.filter(|_| self.experimental().backdrop) else {
+        let Some(cover) = cover.filter(|_| self.ui.prefs.experimental.backdrop) else {
             self.ui.backdrop.clear();
             return Vec::new();
         };
@@ -1230,7 +1182,7 @@ impl OndApp {
         // Narrow windows give the content the room: the queue becomes a sheet
         // over it, and below that the sidebar becomes a rail of icons. The
         // columns are as wide as the user dragged them.
-        let mut columns = self.columns();
+        let mut columns = self.ui.prefs.columns;
         let plan = columns.plan(width);
         self.ui.queue_narrow = !plan.queue_docked;
         if !self.ui.queue_narrow {
@@ -1242,7 +1194,7 @@ impl OndApp {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.toolbar(ui));
-        if self.diagnostics_shown() {
+        if self.ui.prefs.diagnostics_bar {
             egui::Panel::bottom("diagnostics")
                 .exact_size(diagnostics::BAR_H)
                 .resizable(false)
@@ -1271,7 +1223,7 @@ impl OndApp {
                     .rect,
             ),
         };
-        let right_panel = (self.show_queue() && !self.ui.queue_narrow).then(|| {
+        let right_panel = (self.ui.prefs.show_queue && !self.ui.queue_narrow).then(|| {
             egui::Panel::right("queue")
                 .exact_size(columns.right)
                 .resizable(false)
@@ -1296,7 +1248,7 @@ impl OndApp {
         let before = columns;
         if let Some(r) = left_panel {
             let d = layout::edge_handle(ui, egui::Id::unique("sidebar-edge"), r.right(), r.top(), r.bottom());
-            let limit = columns.left_limit(width, plan.queue_docked && self.show_queue());
+            let limit = columns.left_limit(width, plan.queue_docked && self.ui.prefs.show_queue);
             if d.reset {
                 columns.left = layout::LEFT_DEFAULT.min(limit);
             } else if d.dx != 0.0 {
@@ -1316,15 +1268,15 @@ impl OndApp {
             self.set_columns(columns);
         }
         if self.ui.queue_sheet {
-            self.queue_sheet_ui(ui.ctx(), content.response.rect);
+            self.queue_sheet_ui(ui.ctx(), content.response.rect, columns.right);
         }
     }
 
     /// The queue as a sheet sliding over the right of the content (narrow
     /// windows). Esc or a click outside closes it.
-    fn queue_sheet_ui(&mut self, ctx: &egui::Context, content: egui::Rect) {
+    fn queue_sheet_ui(&mut self, ctx: &egui::Context, content: egui::Rect, width: f32) {
         let t = Tokens::of_ctx(ctx);
-        let w = self.columns().right.min(content.width() - 24.0);
+        let w = width.min(content.width() - 24.0);
         let id = egui::Id::unique("queue-sheet");
         let area = egui::Modal::default_area(id).anchor(egui::Align2::RIGHT_TOP, egui::vec2(0.0, content.top()));
         let shadow = egui::Shadow { offset: [-6, 0], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 120 } else { 40 }) };
@@ -1360,15 +1312,17 @@ impl eframe::App for OndApp {
         self.after_messages();
         self.poll_downloads();
         self.check_library_analysis();
-        let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.show_queue() };
-        let (theme, diagnostics) = self.prefs.get(|s| (s.theme, s.diagnostics_bar));
+        // The rest of this frame reads the preferences as they are now.
+        self.read_prefs();
+        let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
+        let (theme, diagnostics) = (self.ui.prefs.theme, self.ui.prefs.diagnostics_bar);
         if let Some(menu) = self.menu.as_mut() {
             menu.sync(queue, self.bit_perfect, theme);
             menu.set_diagnostics(diagnostics);
         }
         // The diagnostics bar keeps the server round trip fresh, but only while
         // something plays (idle stays idle).
-        if self.diagnostics_shown()
+        if self.ui.prefs.diagnostics_bar
             && self.session.online
             && self.engine.status.state() == PlayState::Playing
             && self.diagnostics.latency_stale()
@@ -1858,7 +1812,7 @@ mod tests {
         let mut app = app(&ctx, dir.path());
         let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
         frame(&ctx, &mut app, vec![key(egui::Key::M, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
-        assert_eq!(app.window_mode(), WindowMode::Mini);
+        assert_eq!(app.prefs_now().mode, WindowMode::Mini);
         // Hovered (overlay drawn) and not.
         for at in [egui::pos2(100.0, 100.0), egui::pos2(-10.0, -10.0)] {
             for _ in 0..3 {
@@ -1866,18 +1820,18 @@ mod tests {
             }
         }
         frame(&ctx, &mut app, vec![key(egui::Key::Num2, egui::Modifiers::COMMAND | egui::Modifiers::ALT)]);
-        assert_eq!(app.window_mode(), WindowMode::Player);
+        assert_eq!(app.prefs_now().mode, WindowMode::Player);
         for _ in 0..2 {
             frame(&ctx, &mut app, vec![egui::Event::PointerMoved(egui::pos2(120.0, 60.0))]);
         }
         // Browsing goes back to the full window.
         app.actions.push(Action::Go(Route::Album("al-0".into())));
         frame(&ctx, &mut app, Vec::new());
-        assert_eq!(app.window_mode(), WindowMode::Full);
+        assert_eq!(app.prefs_now().mode, WindowMode::Full);
         // ⌘K from a small mode does too.
         app.edit_windows(|w| w.mode = WindowMode::Player);
         frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
-        assert_eq!(app.window_mode(), WindowMode::Full);
+        assert_eq!(app.prefs_now().mode, WindowMode::Full);
         assert!(app.ui.palette.is_some());
     }
 
@@ -1924,7 +1878,7 @@ mod tests {
         assert_eq!(showing(&app), Some(Kind::Particles), "it opens on the one chosen");
         frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
         assert_eq!(showing(&app), Some(Kind::Ribbons));
-        assert_eq!(app.experimental().visualizer_pick, Pick::Ribbons, "and that becomes the choice");
+        assert_eq!(app.prefs_now().experimental.visualizer_pick, Pick::Ribbons, "and that becomes the choice");
         frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
         assert_eq!(showing(&app), Some(Kind::Flow), "round from the last to the first");
         frame(&ctx, &mut app, vec![key(egui::Key::ArrowLeft, egui::Modifiers::NONE)]);
@@ -1947,7 +1901,7 @@ mod tests {
         let first = showing(&app);
         frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
         assert_ne!(showing(&app), first);
-        assert_eq!(app.experimental().visualizer_pick, Pick::Shuffle);
+        assert_eq!(app.prefs_now().experimental.visualizer_pick, Pick::Shuffle);
         // And each new track after the first brings another.
         app.player.queue.play_now(vec![track("t-first", "al-0", 1)], 0, Source::Added);
         frame(&ctx, &mut app, Vec::new());
@@ -1972,20 +1926,20 @@ mod tests {
         assert_eq!(app.ui.queue_ui.tab, QueueTab::UpNext);
         // The artwork toggles to the Player (nothing used yet), where ⌥⌘L opens the drawer.
         app.apply(Action::TogglePlayer);
-        assert_eq!(app.window_mode(), WindowMode::Player);
+        assert_eq!(app.prefs_now().mode, WindowMode::Player);
         app.apply(Action::Lyrics);
         frame(&ctx, &mut app, Vec::new());
-        assert!(app.lyrics_drawer());
+        assert!(app.prefs_now().lyrics_open);
         // Mini, then back to full: the artwork now toggles to Mini.
         app.apply(Action::ToggleMini);
         app.apply(Action::SetMode(WindowMode::Full));
         app.apply(Action::TogglePlayer);
-        assert_eq!(app.window_mode(), WindowMode::Mini);
+        assert_eq!(app.prefs_now().mode, WindowMode::Mini);
         // Lyrics from Mini open the Player with its drawer.
         app.edit_windows(|w| w.lyrics_open = false);
         app.apply(Action::Lyrics);
-        assert_eq!(app.window_mode(), WindowMode::Player);
-        assert!(app.lyrics_drawer());
+        assert_eq!(app.prefs_now().mode, WindowMode::Player);
+        assert!(app.prefs_now().lyrics_open);
         for _ in 0..2 {
             frame(&ctx, &mut app, Vec::new());
         }
@@ -2187,26 +2141,26 @@ mod tests {
         for _ in 0..3 {
             app.check_library_analysis();
         }
-        assert!(app.analysis_library(), "the run is still due");
+        assert!(app.prefs_now().analysis_resume, "the run is still due");
         assert!(!app.analysis.runner.progress().active());
 
         app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         assert_eq!(app.analysis.runner.progress().total, 20, "the whole library is queued");
         app.check_library_analysis();
-        assert!(app.analysis_library());
+        assert!(app.prefs_now().analysis_resume);
 
         // Signing out drops the old account's queue, but the run is still due for the next.
         app.sign_out();
         assert!(!app.analysis.runner.progress().active());
         app.check_library_analysis();
-        assert!(app.analysis_library());
+        assert!(app.prefs_now().analysis_resume);
         app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
         assert_eq!(app.analysis.runner.progress().total, 20);
 
         // The queue runs dry: done, and not resumed at the next launch.
         app.analysis.runner.clear();
         app.check_library_analysis();
-        assert!(!app.analysis_library());
+        assert!(!app.prefs_now().analysis_resume);
     }
 
     #[test]

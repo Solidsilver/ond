@@ -107,7 +107,7 @@ impl OndApp {
     /// un-maximize, until the new size lands), keeps Mini square, and notes
     /// where the window is for next time.
     pub(super) fn track_window(&mut self, ctx: &egui::Context) {
-        let square = self.window_mode() == WindowMode::Mini;
+        let square = self.ui.prefs.mode == WindowMode::Mini;
         // Until the window exists the platform can't lock it; keep asking.
         if self.ui.window.square_wanted != Some(square) || (square && !self.ui.window.square_native) {
             self.ui.window.square_wanted = Some(square);
@@ -165,7 +165,7 @@ impl OndApp {
 
     /// The height our bar gives the traffic lights to centre in; `None` hides them.
     pub(super) fn title_bar_h(&self) -> Option<f32> {
-        match self.window_mode() {
+        match self.prefs_now().mode {
             WindowMode::Full => Some(toolbar::TOOLBAR_H),
             WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
             WindowMode::Mini => None,

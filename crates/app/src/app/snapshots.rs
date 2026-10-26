@@ -920,10 +920,10 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).ui.queue_ui.tab = QueueTab::Info;
     h.run_steps(3);
     s.shoot(h, "info-long");
-    { let mut c = app_mut(h).columns(); c.right = super::layout::RIGHT_MIN; app_mut(h).set_columns(c); }
+    { let mut c = app_mut(h).prefs_now().columns; c.right = super::layout::RIGHT_MIN; app_mut(h).set_columns(c); }
     h.run_steps(3);
     s.shoot(h, "info-long-min");
-    { let mut c = app_mut(h).columns(); c.right = super::layout::RIGHT_DEFAULT; app_mut(h).set_columns(c); }
+    { let mut c = app_mut(h).prefs_now().columns; c.right = super::layout::RIGHT_DEFAULT; app_mut(h).set_columns(c); }
     app_mut(h).player.queue.current = saved;
     info_fixture(app_mut(h));
     h.run_steps(3);
@@ -1657,7 +1657,7 @@ fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.key_press(egui::Key::ArrowRight);
     frames(h, 40);
     s.shoot_now(h, "x-visualizer-switched");
-    assert_eq!(app_mut(h).experimental().visualizer_pick, Pick::Particles);
+    assert_eq!(app_mut(h).prefs_now().experimental.visualizer_pick, Pick::Particles);
     app_mut(h).close_visualizer();
     // What a GPU frame costs with each, rendered offscreen and read back (the
     // read-back is in all of them), against the ordinary window.
@@ -1705,7 +1705,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     let check = |h: &mut Harness<'_, Option<OndApp>>, what: &str| {
-        let right = app_mut(h).columns().right;
+        let right = app_mut(h).prefs_now().columns.right;
         let column = egui::Rect::from_x_y_ranges(FULL.x - right..=FULL.x, 0.0..=FULL.y);
         for label in ["Up next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
             for n in h.query_all_by_label_contains(label) {
@@ -1719,7 +1719,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
     };
     for right in [super::layout::RIGHT_DEFAULT, super::layout::RIGHT_MIN] {
         reset(&mut h, FULL, Route::Album(album_id(0)));
-        { let mut c = app_mut(&mut h).columns(); c.right = right; app_mut(&mut h).set_columns(c); }
+        { let mut c = app_mut(&mut h).prefs_now().columns; c.right = right; app_mut(&mut h).set_columns(c); }
         let saved = long_info(app_mut(&mut h));
         app_mut(&mut h).ui.queue_ui.tab = QueueTab::Info;
         h.run_steps(4);
@@ -1762,7 +1762,7 @@ fn column_edges_drag_and_persist() {
     h.run_steps(1);
     h.drop_at(edge + vec2(60.0, 0.0));
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).columns().left, super::layout::LEFT_DEFAULT + 60.0);
+    assert_eq!(app_mut(&mut h).prefs_now().columns.left, super::layout::LEFT_DEFAULT + 60.0);
     // The queue's edge, dragged far out, stops at its limit.
     let q = pos2(FULL.x - 8.0 - super::layout::RIGHT_DEFAULT, 400.0);
     h.drag_at(q);
@@ -1771,7 +1771,7 @@ fn column_edges_drag_and_persist() {
     h.run_steps(1);
     h.drop_at(q - vec2(600.0, 0.0));
     h.run_steps(2);
-    let c = app_mut(&mut h).columns();
+    let c = app_mut(&mut h).prefs_now().columns;
     assert_eq!(c.right, c.right_limit(FULL.x));
     // Saved when let go, and restored from there.
     app_mut(&mut h).prefs.flush();
@@ -2033,7 +2033,7 @@ fn our_window_frame_leaves_the_content_working() {
 
     h.get_by_label(&crate::keys::shown("Mini player (⇧⌘M)")).click();
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).window_mode(), WindowMode::Mini, "the toolbar's Mini button switches");
+    assert_eq!(app_mut(&mut h).prefs_now().mode, WindowMode::Mini, "the toolbar's Mini button switches");
 
     h.set_size(vec2(280.0, 280.0));
     h.hover_at(pos2(140.0, 140.0));

@@ -49,7 +49,7 @@ impl OndApp {
                 // Bit-perfect leaves volume to the DAC.
                 if !self.bit_perfect {
                     let step = if cmd == Cmd::VolumeUp { VOLUME_STEP } else { -VOLUME_STEP };
-                    self.set_volume(self.volume() + step);
+                    self.set_volume(self.prefs_now().volume + step);
                 }
             }
             Cmd::SeekForward | Cmd::SeekBack => {
@@ -103,7 +103,7 @@ impl OndApp {
                 let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
                 self.output.set_mode_in_use(mode, &self.engine);
             }
-            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.diagnostics_shown())),
+            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.prefs_now().diagnostics_bar)),
             Cmd::Visualizer => self.toggle_visualizer(),
             Cmd::Appearance(pref) => self.actions.push(Action::SetTheme(pref)),
             Cmd::Edit(e) => {

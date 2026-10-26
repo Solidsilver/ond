@@ -87,7 +87,7 @@ impl ViewCtx<'_> {
             }
 
             // Live, so near the top where it's seen.
-            if self.experimental().spectrogram {
+            if self.ui.prefs.experimental.spectrogram {
                 kv_section(ui, "Spectrogram");
                 self.spectrogram(ui);
             }

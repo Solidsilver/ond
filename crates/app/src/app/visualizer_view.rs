@@ -158,9 +158,9 @@ impl OndApp {
     pub(super) fn toggle_visualizer(&mut self) {
         if self.ui.visualizer.is_some() {
             self.close_visualizer();
-        } else if self.experimental().visualizer {
+        } else if self.prefs_now().experimental.visualizer {
             let now = self.ctx.input(|i| i.time);
-            self.ui.visualizer = Some(VisualizerView::new(self.experimental().visualizer_pick, now, now.to_bits()));
+            self.ui.visualizer = Some(VisualizerView::new(self.prefs_now().experimental.visualizer_pick, now, now.to_bits()));
             self.ctx.request_repaint();
         }
     }
@@ -188,7 +188,7 @@ impl OndApp {
         let Some(v) = self.ui.visualizer.as_mut() else { return };
         let kind = v.kind().step(by);
         v.show(kind, now);
-        if self.experimental().visualizer_pick != Pick::Shuffle {
+        if self.prefs_now().experimental.visualizer_pick != Pick::Shuffle {
             self.prefs.edit(|s| s.experimental.visualizer_pick = Pick::of(kind));
         }
     }
@@ -217,7 +217,7 @@ impl OndApp {
             let album = current.and_then(|(_, t)| self.data.album(&t.album_id)).map(|a| a.name.as_str());
             let cover = current.and_then(|(_, t)| self.data.cover_for(t));
             let look = cover.and_then(|c| self.art.look(c));
-            let shuffle = self.experimental().visualizer_pick == Pick::Shuffle;
+            let shuffle = self.ui.prefs.experimental.visualizer_pick == Pick::Shuffle;
             let Some(v) = self.ui.visualizer.as_mut() else { return };
             v.follow(current.map(|(u, _)| u), cover, look.as_deref(), shuffle, now);
             let half = if rect.width() >= rect.height() { [rect.width() / rect.height().max(1.0), 1.0] } else { [1.0, rect.height() / rect.width().max(1.0)] };

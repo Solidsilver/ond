@@ -131,7 +131,7 @@ impl ViewCtx<'_> {
             this.art.paint(ui, art, cover, if side < 120.0 { 6.0 } else { 8.0 });
             // The live spectrum along the foot of the artwork (experimental).
             if side >= 120.0
-                && this.experimental().spectrum
+                && this.ui.prefs.experimental.spectrum
                 && let Some(f) = this.listen(ui)
             {
                 let inset = (side * 0.05).round();
@@ -221,7 +221,7 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         // The waveform needs the room; the layout keeps it while that's on,
         // so nothing moves when the waveform arrives.
-        let wave = self.experimental().waveform;
+        let wave = self.ui.prefs.experimental.waveform;
         let (rect, _) = ui.allocate_exact_size(vec2(width, if wave { 16.0 + WAVE_EXTRA } else { 16.0 }), Sense::hover());
         let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
         let style = SeekStyle {
@@ -295,7 +295,7 @@ impl ViewCtx<'_> {
             }
             if lyrics_toggle {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let open = self.lyrics_drawer();
+                    let open = self.ui.prefs.lyrics_open;
                     let color = if open { t.accent } else { t.muted };
                     let label = if open { "Hide lyrics (⌥⌘L)" } else { "Show lyrics (⌥⌘L)" };
                     let b = icons::sized_button(ui, Icon::Lyrics, label, vec2(28.0, 24.0), 14.0, Some(color));
@@ -624,7 +624,7 @@ impl OndApp {
             .frame(egui::Frame::new().fill(stage))
             .show(ui, |ui| self.view().player_bar(ui, bar_art));
         self.player_status_bar(ui);
-        if self.lyrics_drawer() {
+        if self.ui.prefs.lyrics_open {
             egui::Panel::right("lyrics-drawer")
                 .exact_size(crate::window::DRAWER_W)
                 .resizable(false)
@@ -646,7 +646,7 @@ impl OndApp {
             .frame(egui::Frame::new().fill(stage).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
             .show(ui, |ui| {
                 let full = ui.available_rect_before_wrap();
-                let wave = if self.experimental().waveform { WAVE_EXTRA } else { 0.0 };
+                let wave = if self.ui.prefs.experimental.waveform { WAVE_EXTRA } else { 0.0 };
                 let below = BELOW_ART_H + wave + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
 
                 let side = full.width().min(full.height() - below).max(120.0).floor();
