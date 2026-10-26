@@ -195,10 +195,10 @@ fn perf() {
         h.step();
     }
     results.push((format!("playlist, {PLAYLIST_N} songs"), time_frames(&mut h, 60)));
-    // Sanity: the frames drew the list's rows (the queue's say "… by …"),
+    // Sanity: the frames drew the list's rows (the queue's are "… by …"),
     // scrolled away from the top.
     let first = app_mut(&mut h).data.tracks.all[0].title.clone();
-    let rows: Vec<String> = h.query_all_by_label_contains(" part ").map(|n| format!("{n:?}")).filter(|l| !l.contains(" by ")).map(|l| l.chars().take(80).collect()).take(2).collect();
+    let rows: Vec<String> = h.query_all_by_label_contains(" part ").map(|n| format!("{n:?}")).filter(|l| l.contains("ListBoxOption") && !l.contains(" by ")).map(|l| l.chars().take(80).collect()).take(2).collect();
     println!("  playlist rows on screen, e.g. {rows:?}");
     assert!(!rows.is_empty(), "playlist view drew no rows");
     assert!(h.query_by_label(&first).is_none(), "the playlist scrolled");
