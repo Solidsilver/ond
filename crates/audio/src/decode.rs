@@ -583,7 +583,13 @@ impl Ctx {
     /// shorter than the buffer is after the decoder is done with it. Leaving
     /// at once would lose that track's gapless start. Returns true when a seek
     /// or a cancel came in (the caller's loop handles both), false to finish
-    /// the track (a next track is set, or the output is nearly through).
+    /// the track (a next track is set, the output is nearly through, or it
+    /// is prebuffering).
+    ///
+    /// A prebuffering output (a short track's start, or after an underrun)
+    /// waits for more audio or the end of the input before it plays anything.
+    /// Waiting here for it to drain would then be a deadlock: it ends the
+    /// wait, and the track ends. Holding for a seek doesn't: the seek follows.
     fn linger(&self, seq: u64, out: Option<&Out>) -> bool {
         let Some(o) = out else { return false };
         let floor = (o.format.sample_rate as f32 * o.format.channels as f32 * LINGER_FLOOR_SECS) as usize;
@@ -596,6 +602,9 @@ impl Ctx {
             }
             let queued = o.samples.buffer().capacity() - o.samples.slots();
             if queued <= floor || o.samples.is_abandoned() {
+                return false;
+            }
+            if self.status.buffering.load(Ordering::Relaxed) && !o.ctl.holding() {
                 return false;
             }
             thread::sleep(Duration::from_millis(2));
