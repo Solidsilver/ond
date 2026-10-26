@@ -523,7 +523,7 @@ pub(crate) mod tests {
     /// A frame of steady music with a beat now and then (every `every`th frame).
     pub fn music(frame: usize, every: usize) -> Frame {
         let onset = frame.is_multiple_of(every);
-        let wave = (0..crate::visuals::pulse::WAVE).map(|i| (i as f32 * 0.07 + frame as f32 * 0.3).sin() * 0.8).collect();
+        let wave = std::sync::Arc::new((0..crate::visuals::pulse::WAVE).map(|i| (i as f32 * 0.07 + frame as f32 * 0.3).sin() * 0.8).collect());
         let bands = std::array::from_fn(|b| 0.75 - b as f32 / BANDS as f32 * 0.5);
         let feel = Feel { bass: 0.8, mid: 0.6, treble: 0.4, level: 0.7, onset, beat: if onset { 1.0 } else { 0.3 }, beats: (frame / every) as u64, wave };
         Frame { bands, raw: bands, feel, fresh: true }

@@ -55,8 +55,8 @@ pub enum EndAction {
 
 /// A run of consecutive upcoming items with the same source.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Group {
-    pub source: Source,
+pub struct Group<'a> {
+    pub source: &'a Source,
     /// Index into `upcoming` of the first item.
     pub start: usize,
     pub len: usize,
@@ -228,16 +228,17 @@ impl Queue {
         true
     }
 
-    /// Consecutive runs of upcoming items by source.
-    pub fn groups(&self) -> Vec<Group> {
-        let mut out: Vec<Group> = Vec::new();
-        for (i, item) in self.upcoming.iter().enumerate() {
-            match out.last_mut() {
-                Some(g) if g.source == item.source => g.len += 1,
-                _ => out.push(Group { source: item.source.clone(), start: i, len: 1 }),
-            }
-        }
-        out
+    /// Consecutive runs of upcoming items by source (borrowed: the queue
+    /// column walks them every frame).
+    pub fn groups(&self) -> impl Iterator<Item = Group<'_>> {
+        let mut start = 0;
+        std::iter::from_fn(move || {
+            let source = &self.upcoming.get(start)?.source;
+            let len = self.upcoming[start..].iter().take_while(|i| i.source == *source).count();
+            let group = Group { source, start, len };
+            start += len;
+            Some(group)
+        })
     }
 }
 
@@ -355,7 +356,7 @@ mod tests {
         q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
         q.play_next(album(&["n1", "n2"]));
         q.add(album(&["z"]));
-        let g = q.groups();
+        let g: Vec<Group> = q.groups().collect();
         assert_eq!(g.len(), 3);
         assert_eq!((g[0].source.label(), g[0].start, g[0].len), ("You added", 0, 2));
         assert_eq!((g[1].source.label(), g[1].start, g[1].len), ("A", 2, 2));

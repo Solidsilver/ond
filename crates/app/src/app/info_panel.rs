@@ -14,11 +14,40 @@ use egui::{FontId, Sense, Ui, vec2};
 use library::Track;
 
 
+/// The Info tab's text worked out from the song, its album and its analysis,
+/// kept between frames (see [`InfoKey`]).
+pub(super) struct InfoFacts {
+    credits: Vec<Credit>,
+    place: Option<String>,
+    year: Option<String>,
+    /// The file's facts (how it plays is added each frame: it can change).
+    file: Vec<(&'static str, String)>,
+    measurements: Vec<(&'static str, String)>,
+}
+
+/// The [`InfoFacts`] key: the song id's hash, the album and analysis versions.
+pub(super) type InfoKey = (u64, u64, u64);
+
+impl InfoFacts {
+    fn new(track: &Track, album: Option<&library::Album>, analysis: Option<&analysis::TrackAnalysis>) -> Self {
+        Self {
+            credits: song_credits(track),
+            place: track_place(track),
+            year: album.and_then(|al| al.year).map(|y| y.to_string()),
+            file: crate::fmt::track_facts(track, None),
+            measurements: analysis.map(crate::fmt::measurements).unwrap_or_default(),
+        }
+    }
+}
+
 impl ViewCtx<'_> {
     /// `header`: lead with the song's artwork and title (not in the Player,
     /// where they're right above).
     pub fn sidebar_info(&mut self, ui: &mut Ui, header: bool) {
-        let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
+        // Borrowed from the player and library, not from `self`, so drawing can
+        // take `&mut self`.
+        let (player, data, analysis) = (self.player, self.data, self.analysis);
+        let Some(track) = player.queue.current.as_ref().map(|c| &c.track) else {
             // Wrapped to the column: a long line must not widen the sidebar.
             let t = Tokens::of(ui);
             let width = ui.available_width();
@@ -37,14 +66,16 @@ impl ViewCtx<'_> {
         if !self.song_stats.contains_key(&track.id) {
             self.actions.push(Action::NeedSongStats(track.id.clone()));
         }
-        let album = self.data.album(&track.album_id).cloned();
+        let album = data.album(&track.album_id);
+        let key = (super::view_ctx::hash_str(&track.id), data.version, analysis.version);
+        let facts = self.ui.memos.info.get(key, || InfoFacts::new(track, album, analysis.of(track)));
         // Vertical only, and the content held to the column: a long name or
         // value wraps instead of widening (and then clipping) the sidebar.
         egui::ScrollArea::vertical().id_salt("info").auto_shrink(false).show(ui, |ui| {
             ui.set_max_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
             if header {
-                self.info_header(ui, &track, album.as_ref());
+                self.info_header(ui, track, album);
             } else {
                 ui.add_space(-12.0);
             }
@@ -55,49 +86,48 @@ impl ViewCtx<'_> {
                 self.spectrogram(ui);
             }
 
-            let people = song_credits(&track);
-            if !people.is_empty() {
+            if !facts.credits.is_empty() {
                 kv_section(ui, "Credits");
-                for c in &people {
-                    let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
-                    links_row(self.actions, ui, &c.role, items);
+                for c in &facts.credits {
+                    links_row(self.actions, ui, &c.role, c.people.iter().map(|(name, id)| (name.as_str(), || Route::Artist { name: name.clone(), id: id.clone() })));
                 }
             }
 
-            if let Some(al) = &album {
+            if let Some(al) = album {
                 kv_section(ui, "Album");
-                links_row(self.actions, ui, "Album", vec![(al.name.clone(), Action::Go(Route::Album(al.id.clone())))]);
+                links_row(self.actions, ui, "Album", [(al.name.as_str(), || Route::Album(al.id.clone()))]);
                 if let Some(artist) = &al.artist {
-                    links_row(self.actions, ui, "Album artist", vec![(artist.clone(), Action::Go(Route::Artist { name: artist.clone(), id: al.artist_ref.clone() }))]);
+                    links_row(self.actions, ui, "Album artist", [(artist.as_str(), || Route::Artist { name: artist.clone(), id: al.artist_ref.clone() })]);
                 }
-                if let Some(place) = track_place(&track) {
-                    kv_text(ui, "Track", &place);
+                if let Some(place) = &facts.place {
+                    kv_text(ui, "Track", place);
                 }
-                if let Some(y) = al.year {
-                    links_row(self.actions, ui, "Year", vec![(y.to_string(), Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }))]);
+                if let Some(y) = &facts.year {
+                    links_row(self.actions, ui, "Year", [(y.as_str(), || Route::Filter { kind: FilterKind::Year, value: y.clone() })]);
                 }
-                let genres: Vec<(String, Action)> =
-                    al.all_genres().into_iter().map(|g| (g.to_owned(), Action::Go(Route::Filter { kind: FilterKind::Genre, value: g.to_owned() }))).collect();
+                let genres = al.all_genres();
                 if !genres.is_empty() {
-                    links_row(self.actions, ui, if genres.len() == 1 { "Genre" } else { "Genres" }, genres);
+                    let label = if genres.len() == 1 { "Genre" } else { "Genres" };
+                    links_row(self.actions, ui, label, genres.into_iter().map(|g| (g, move || Route::Filter { kind: FilterKind::Genre, value: g.to_owned() })));
                 }
-                let labels: Vec<(String, Action)> =
-                    al.labels.iter().map(|l| (l.clone(), Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }))).collect();
-                if !labels.is_empty() {
-                    links_row(self.actions, ui, "Label", labels);
+                if !al.labels.is_empty() {
+                    links_row(self.actions, ui, "Label", al.labels.iter().map(|l| (l.as_str(), || Route::Filter { kind: FilterKind::Label, value: l.clone() })));
                 }
             }
 
-            let file = crate::fmt::track_facts(&track, self.output.signal().map(|s| s.summary()));
-            if !file.is_empty() {
+            let playback = self.output.signal().map(|s| s.summary());
+            if !facts.file.is_empty() || playback.is_some() {
                 kv_section(ui, "File");
-                for (k, v) in &file {
+                for (k, v) in &facts.file {
                     kv_text(ui, k, v);
+                }
+                if let Some(p) = &playback {
+                    kv_text(ui, "Playback", p);
                 }
             }
 
             kv_section(ui, "Analysis");
-            self.analysis_rows(ui, &track);
+            self.analysis_rows(ui, track, &facts.measurements);
 
             let rating = self.favorites.rating(&track.id);
             let plays = play_rows(self.song_stats.get(&track.id).and_then(Option::as_ref), rating);
@@ -143,8 +173,8 @@ impl ViewCtx<'_> {
         ui.add_space(4.0);
         ui.horizontal_top(|ui| {
             let (art, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-            let cover = self.data.cover_for(track).map(str::to_owned);
-            self.art.paint(ui, art, cover.as_deref(), 4.0);
+            let data = self.data;
+            self.art.paint(ui, art, data.cover_for(track), 4.0);
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -172,11 +202,12 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Loudness, peak and dynamic range, a chip per finding (evidence on
-    /// hover); or a way to measure it.
-    fn analysis_rows(&mut self, ui: &mut Ui, track: &Track) {
+    /// Loudness, peak and dynamic range (`measurements`, as worked out from
+    /// it), a chip per finding (evidence on hover); or a way to measure it.
+    fn analysis_rows(&mut self, ui: &mut Ui, track: &Track, measurements: &[(&'static str, String)]) {
         let t = Tokens::of(ui);
-        let Some(a) = self.analysis_of(track).cloned() else {
+        let analysis = self.analysis;
+        let Some(a) = analysis.of(track) else {
             let busy = self.analysis.runner.pending([track.id.as_str()]) > 0;
             kv_row(ui, "Loudness", |ui| {
                 if busy {
@@ -190,8 +221,8 @@ impl ViewCtx<'_> {
             });
             return;
         };
-        for (k, v) in crate::fmt::measurements(&a) {
-            kv_text(ui, k, &v);
+        for (k, v) in measurements {
+            kv_text(ui, k, v);
         }
         if !a.verdicts.is_empty() {
             kv_row(ui, "Finding", |ui| {
@@ -206,8 +237,9 @@ impl ViewCtx<'_> {
     }
 }
 
-/// A label and one or more links ("Matthew West, Mark Hall"), wrapping.
-pub(super) fn links_row(actions: &mut Vec<Action>, ui: &mut Ui, label: &str, items: Vec<(String, Action)>) {
+/// A label and one or more links ("Matthew West, Mark Hall"), wrapping. Each
+/// item's place is made only when it's clicked.
+pub(super) fn links_row<'s, F: FnOnce() -> Route>(actions: &mut Vec<Action>, ui: &mut Ui, label: &str, items: impl IntoIterator<Item = (&'s str, F)>) {
     let t = Tokens::of(ui);
     kv_row(ui, label, |ui| {
         // Rows as tall as the text, so links sit level with their label
@@ -215,12 +247,12 @@ pub(super) fn links_row(actions: &mut Vec<Action>, ui: &mut Ui, label: &str, ite
         ui.spacing_mut().interact_size.y = 0.0;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
-            for (i, (text, action)) in items.into_iter().enumerate() {
+            for (i, (text, route)) in items.into_iter().enumerate() {
                 if i > 0 {
                     ui.label(egui::RichText::new(", ").size(VALUE).color(t.muted));
                 }
-                if link(ui, &text, FontId::proportional(VALUE), t.accent).clicked() {
-                    actions.push(action);
+                if link(ui, text, FontId::proportional(VALUE), t.accent).clicked() {
+                    actions.push(Action::Go(route()));
                 }
             }
         });

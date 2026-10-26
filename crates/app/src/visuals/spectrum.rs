@@ -122,7 +122,7 @@ impl Listener {
         for (b, r) in f.bands.iter_mut().zip(raw) {
             *b = if r > *b { r } else { (*b - FALL * dt).max(r) };
         }
-        f.feel.clone_from(self.pulse.feel());
+        f.feel.copy_from(self.pulse.feel());
     }
 
     /// No new audio: everything falls toward rest.
@@ -133,7 +133,7 @@ impl Listener {
         }
         f.raw = [0.0; BANDS];
         self.pulse.rest(dt);
-        f.feel.clone_from(self.pulse.feel());
+        f.feel.copy_from(self.pulse.feel());
     }
 }
 

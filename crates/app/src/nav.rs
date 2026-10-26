@@ -1,7 +1,7 @@
 //! Where the main view is, and how it got there: back/forward stacks plus the
 //! trail of recent places shown as breadcrumbs.
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Route {
     Recent,
     Albums,
@@ -19,7 +19,7 @@ pub enum Route {
     Offline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FilterKind {
     Genre,
     Year,

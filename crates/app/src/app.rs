@@ -522,6 +522,8 @@ pub struct UiState {
     pub spectrogram: crate::visuals::spectrogram::Spectrogram,
     /// The visualizer, while it's open (experimental).
     pub visualizer: Option<visualizer_view::VisualizerView>,
+    /// What views work out from the library, kept between frames.
+    pub memos: view_ctx::Memos,
 }
 
 impl UiState {
@@ -538,6 +540,7 @@ impl UiState {
             track_sel: None,
             seek_preview: None,
             songs: songs::SongsView::default(),
+            memos: Default::default(),
             // Something worth knowing at start-up (e.g. the library was rebuilt).
             toasts: toasts::Toasts::with_notices(notices),
             palette: None,
@@ -2214,7 +2217,7 @@ impl OndApp {
         }
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
-        if self.ui.visualizer.is_some() && !self.experimental().visualizer {
+        if self.ui.visualizer.is_some() && (!self.experimental().visualizer || self.visualizer_escaped(&ctx)) {
             self.close_visualizer();
         }
         if self.ui.visualizer.is_some() {
@@ -2280,13 +2283,22 @@ impl OndApp {
         }
         let base = self.ui.tint_cache.base(accent);
         let adapt = self.adapt_colors();
-        let playing_cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track).map(str::to_owned));
+        // The covers' ids are borrowed (this runs every frame): a cover's tints
+        // once its look is worked out, `None` meanwhile.
+        let full = self.window_mode() == WindowMode::Full;
+        let (art, cache) = (&mut self.art, &mut self.ui.tint_cache);
+        let mut cover_tints = |cover: &str| art.look(cover).map(|look| cache.cover(cover, look.palette.as_ref()));
+        let playing_cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track));
         let playing = match playing_cover.filter(|_| adapt) {
-            Some(cover) => self.cover_tints(&cover).or(self.ui.tint.target()).unwrap_or(base),
+            Some(cover) => cover_tints(cover).or(self.ui.tint.target()).unwrap_or(base),
             None => base,
         };
-        let page = match self.page_cover() {
-            Some(Some(cover)) if adapt => self.cover_tints(&cover).or(self.ui.page_tint.target()).unwrap_or(playing),
+        let page_cover = match self.ui.nav.current() {
+            Route::Album(id) if full => Some(self.data.album(id).and_then(|a| a.cover_art.as_deref())),
+            _ => None,
+        };
+        let page = match page_cover {
+            Some(Some(cover)) if adapt => cover_tints(cover).or(self.ui.page_tint.target()).unwrap_or(playing),
             Some(None) if adapt => base,
             _ => playing,
         };
@@ -2302,19 +2314,13 @@ impl OndApp {
 
     /// The cover the page takes its colors from: `Some` on an album page in
     /// the full window (`Some(None)` for an album without one), `None` on
-    /// any other page.
+    /// any other page. (`art_tint` works it out in place.)
+    #[cfg(test)]
     fn page_cover(&self) -> Option<Option<String>> {
         match self.ui.nav.current() {
             Route::Album(id) if self.window_mode() == WindowMode::Full => Some(self.data.album(id).and_then(|a| a.cover_art.clone())),
             _ => None,
         }
-    }
-
-    /// `cover`'s tints once its look is worked out (the chosen accent's for
-    /// a cover with no color to give); `None` meanwhile.
-    fn cover_tints(&mut self, cover: &str) -> Option<crate::visuals::colors::Tints> {
-        let look = self.art.look(cover)?;
-        Some(self.ui.tint_cache.cover(cover, look.palette.as_ref()))
     }
 
     /// Waveform seek bar (experimental): has the playing track's peaks read

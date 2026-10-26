@@ -28,11 +28,17 @@ pub fn bucket(px: f32) -> u32 {
     SIZES.iter().copied().find(|&s| s as f32 >= px).unwrap_or(SIZES[SIZES.len() - 1])
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A cover at one size. Covers go by their number in [`Art::covers`], so
+/// finding a texture while drawing copies no string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
-    cover: String,
+    cover: u32,
     size: u32,
 }
+
+/// Textures uploaded per frame at most: a screenful of covers arriving at
+/// once spreads over a few frames instead of stalling one.
+const UPLOADS_PER_FRAME: usize = 8;
 
 /// Least-recently-used set with a weight budget. Pure bookkeeping; the caller
 /// owns the values and drops whatever `insert` reports as evicted.
@@ -49,7 +55,10 @@ impl<K: Clone + Eq + Hash> Lru<K> {
         Self { entries: HashMap::new(), clock: 0, total: 0, budget }
     }
 
-    pub fn touch(&mut self, k: &K) {
+    pub fn touch<Q: Hash + Eq + ?Sized>(&mut self, k: &Q)
+    where
+        K: std::borrow::Borrow<Q>,
+    {
         self.clock += 1;
         if let Some(e) = self.entries.get_mut(k) {
             e.0 = self.clock;
@@ -105,7 +114,8 @@ pub fn eviction_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, budget: u64) ->
     out
 }
 
-type Loaded = (Key, Option<ColorImage>);
+/// A finished load: the key, the cover's id and the image (`None`: no art).
+type Loaded = (Key, String, Option<ColorImage>);
 
 /// Covers whose [`Look`] is kept: enough that going back to a few album
 /// pages finds their colors at once.
@@ -142,6 +152,8 @@ pub struct Art {
     ctx: egui::Context,
     dir: Arc<PathBuf>,
     client: Option<Client>,
+    /// Every cover id asked for, numbered (see [`Key`]).
+    covers: HashMap<String, u32>,
     textures: HashMap<Key, TextureHandle>,
     lru: Lru<Key>,
     pending: HashSet<Key>,
@@ -173,6 +185,7 @@ impl Art {
             ctx,
             dir,
             client: None,
+            covers: HashMap::new(),
             textures: HashMap::new(),
             lru: Lru::new(TEXTURE_BUDGET),
             pending: HashSet::new(),
@@ -197,17 +210,36 @@ impl Art {
         self.looks.retain(|_, l| l.palette.is_some());
     }
 
-    /// Uploads finished loads. Call once per frame before drawing.
+    /// `cover` at `size`, numbering the cover the first time it's seen.
+    fn key(&mut self, cover: &str, size: u32) -> Key {
+        let next = self.covers.len() as u32;
+        let cover = match self.covers.get(cover) {
+            Some(&n) => n,
+            None => *self.covers.entry(cover.to_owned()).or_insert(next),
+        };
+        Key { cover, size }
+    }
+
+    /// Uploads finished loads (a few per frame). Call once per frame before
+    /// drawing.
     pub fn poll(&mut self) {
-        while let Ok((key, image)) = self.rx.try_recv() {
+        let mut uploads = 0;
+        while uploads < UPLOADS_PER_FRAME
+            && let Ok((key, cover, image)) = self.rx.try_recv()
+        {
             self.pending.remove(&key);
             let Some(image) = image else {
                 self.missing.insert(key);
                 continue;
             };
+            uploads += 1;
+            if uploads == UPLOADS_PER_FRAME {
+                // There may be more waiting: the next frame takes them.
+                self.ctx.request_repaint();
+            }
             let weight = image.width() * image.height() * 4;
-            let tex = self.ctx.load_texture(format!("art:{}:{}", key.cover, key.size), image, TextureOptions::LINEAR);
-            for gone in self.lru.insert(key.clone(), weight) {
+            let tex = self.ctx.load_texture(format!("art:{cover}:{}", key.size), image, TextureOptions::LINEAR);
+            for gone in self.lru.insert(key, weight) {
                 self.textures.remove(&gone);
             }
             self.textures.insert(key, tex);
@@ -231,11 +263,11 @@ impl Art {
     /// background) and returns `None` meanwhile.
     pub fn look(&mut self, cover: &str) -> Option<Arc<Look>> {
         if let Some(l) = self.looks.get(cover) {
-            self.looks_lru.touch(&cover.to_owned());
+            self.looks_lru.touch(cover);
             return Some(l.clone());
         }
         if self.looks_pending.insert(cover.to_owned()) {
-            let key = Key { cover: cover.to_owned(), size: LOOK_SIZE };
+            let key = (cover.to_owned(), LOOK_SIZE);
             #[cfg(test)]
             let given = self.preloaded.get(cover).cloned();
             #[cfg(not(test))]
@@ -245,12 +277,12 @@ impl Art {
                 let image = match given {
                     Some(i) => Some(i),
                     None => match permits.acquire().await {
-                        Ok(_permit) => load(client.as_ref(), &dir, &key).await,
+                        Ok(_permit) => load(client.as_ref(), &dir, &key.0, key.1).await,
                         Err(_) => None,
                     },
                 };
                 let look = tokio::task::spawn_blocking(move || LookParts::of(image.as_ref())).await.unwrap_or_default();
-                let _ = tx.send((key.cover, look));
+                let _ = tx.send((key.0, look));
                 ctx.request_repaint();
             });
         }
@@ -261,30 +293,30 @@ impl Art {
     /// the right size isn't here yet, and meanwhile returns any other size
     /// already loaded so a resize doesn't flash the placeholder.
     pub fn texture(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
-        let size = bucket(points * self.ctx.pixels_per_point());
-        let key = Key { cover: cover.to_owned(), size };
+        let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
         if let Some(t) = self.textures.get(&key) {
             self.lru.touch(&key);
             return Some(t.clone());
         }
-        self.request(key);
-        SIZES.iter().rev().find_map(|&s| self.textures.get(&Key { cover: cover.to_owned(), size: s }).cloned())
+        self.request(key, cover);
+        SIZES.iter().rev().find_map(|&size| self.textures.get(&Key { size, ..key }).cloned())
     }
 
-    fn request(&mut self, key: Key) {
+    fn request(&mut self, key: Key, cover: &str) {
         if self.pending.contains(&key) || self.missing.contains(&key) {
             return;
         }
         // No server: art already on disk still loads (offline browsing).
         let client = self.client.clone();
-        self.pending.insert(key.clone());
+        self.pending.insert(key);
+        let cover = cover.to_owned();
         let (tx, ctx, dir, permits) = (self.tx.clone(), self.ctx.clone(), self.dir.clone(), self.permits.clone());
         self.rt.spawn(async move {
             let image = match permits.acquire().await {
-                Ok(_permit) => load(client.as_ref(), &dir, &key).await,
+                Ok(_permit) => load(client.as_ref(), &dir, &cover, key.size).await,
                 Err(_) => None,
             };
-            let _ = tx.send((key, image));
+            let _ = tx.send((key, cover, image));
             ctx.request_repaint();
         });
     }
@@ -295,7 +327,8 @@ impl Art {
         self.preloaded.insert(cover.to_owned(), image.clone());
         let tex = self.ctx.load_texture(format!("art:{cover}"), image, TextureOptions::LINEAR);
         for size in SIZES {
-            self.textures.insert(Key { cover: cover.to_owned(), size }, tex.clone());
+            let key = self.key(cover, size);
+            self.textures.insert(key, tex.clone());
         }
     }
 
@@ -330,20 +363,16 @@ pub fn crop_uv(aspect: f32) -> Rect {
     }
 }
 
-fn file_for(dir: &Path, key: &Key) -> PathBuf {
-    cover_file(dir, &key.cover, key.size)
-}
-
 /// Where the cache keeps `cover` at `size` px.
 pub fn cover_file(dir: &Path, cover: &str, size: u32) -> PathBuf {
     let safe: String = cover.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
     dir.join(format!("{safe}-{size}"))
 }
 
-/// The cached file for `key`, else the server's (cached on the way); `None`
-/// when neither has it, or there's no server to ask.
-async fn load(client: Option<&Client>, dir: &Path, key: &Key) -> Option<ColorImage> {
-    let path = file_for(dir, key);
+/// The cached file for `cover` at `size`, else the server's (cached on the
+/// way); `None` when neither has it, or there's no server to ask.
+async fn load(client: Option<&Client>, dir: &Path, cover: &str, size: u32) -> Option<ColorImage> {
+    let path = cover_file(dir, cover, size);
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => {
             // Mark as recently used for the disk budget.
@@ -352,9 +381,8 @@ async fn load(client: Option<&Client>, dir: &Path, key: &Key) -> Option<ColorIma
                 .await;
             b
         }
-        Err(_) => fetch_cached(client?, dir, &key.cover, key.size).await?,
+        Err(_) => fetch_cached(client?, dir, cover, size).await?,
     };
-    let size = key.size;
     tokio::task::spawn_blocking(move || decode(&bytes, size)).await.ok().flatten()
 }
 
@@ -432,7 +460,7 @@ mod tests {
         }
         // Art that isn't cached can't load without a server, and isn't asked for again.
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !art.missing.contains(&Key { cover: "al-2".into(), size: 64 }) {
+        while !art.covers.get("al-2").is_some_and(|&cover| art.missing.contains(&Key { cover, size: 64 })) {
             art.poll();
             assert!(art.texture("al-2", 40.0).is_none());
             assert!(std::time::Instant::now() < deadline);
@@ -473,7 +501,7 @@ mod tests {
 
     #[test]
     fn file_names_are_safe() {
-        let p = file_for(Path::new("/c"), &Key { cover: "al-1/../x?y".into(), size: 256 });
+        let p = cover_file(Path::new("/c"), "al-1/../x?y", 256);
         assert_eq!(p, PathBuf::from("/c/al-1____x_y-256"));
     }
 

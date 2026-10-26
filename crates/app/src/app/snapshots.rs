@@ -2086,3 +2086,129 @@ fn list_keys_stay_with_an_open_sheet() {
     assert_eq!(app_mut(&mut h).player.queue.upcoming.len(), len - 1, "⌫ works once the sheet is closed");
     *h.state_mut() = None;
 }
+
+/// The full window with the fixture library, for the behaviour tests below.
+fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir));
+    h
+}
+
+/// Scrolls the wheel by `dy` points over `at`, a little at a time.
+fn wheel(h: &mut Harness<'_, Option<OndApp>>, at: Pos2, dy: f32, steps: usize) {
+    h.hover_at(at);
+    h.step();
+    for _ in 0..steps {
+        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, dy / steps as f32), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
+        h.run_steps(3);
+    }
+    h.run_steps(10);
+}
+
+/// A key going down, alone, so the next step is the frame that sees it.
+fn key_down(h: &Harness<'_, Option<OndApp>>, key: egui::Key) {
+    h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+}
+
+/// The Songs view keeps the keyboard selection in view when the keys move
+/// it, but the wheel can still scroll it away.
+#[test]
+fn songs_selection_scrolls_away_with_the_wheel() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Songs);
+    app_mut(&mut h).ui.focus = Focus::Main;
+    let row_label = |h: &mut Harness<'_, Option<OndApp>>, row: usize| {
+        let app = app_mut(h);
+        let order = app.view().songs_order();
+        let t = &app.data.tracks.all[order[row]];
+        let playing = app.player.queue.current.as_ref().is_some_and(|c| c.track.id == t.id);
+        format!("{}, {}{}", t.title, t.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" })
+    };
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.songs.selected, Some(0));
+    let first = row_label(&mut h, 0);
+    assert!(h.query_by_label(&first).is_some(), "the selected row shows");
+
+    // Small wheel steps: each leaves the row part-cut for a frame or two.
+    wheel(&mut h, pos2(FULL.x * 0.4, FULL.y * 0.6), -400.0, 50);
+    assert_eq!(app_mut(&mut h).ui.songs.selected, Some(0), "the selection stays");
+    assert!(h.query_by_label(&first).is_none(), "the wheel scrolled the selected row away");
+
+    // ↓ brings the new selection back into view.
+    let second = row_label(&mut h, 1);
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(40);
+    assert_eq!(app_mut(&mut h).ui.songs.selected, Some(1));
+    assert!(h.query_by_label(&second).is_some(), "↓ scrolled to the selection");
+    *h.state_mut() = None;
+}
+
+/// The playlist name field takes the keyboard each time the dialog opens,
+/// however the last one was closed.
+#[test]
+fn name_dialog_focuses_its_field_after_esc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let focused = |h: &Harness<'_, Option<OndApp>>| h.ctx.memory(|m| m.focused().is_some());
+    for round in 0..3 {
+        app_mut(&mut h).ui.overlay = Some(Overlay::new_playlist(Vec::new()));
+        h.run_steps(3);
+        assert!(focused(&h), "round {round}: the name field has the keyboard");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(app_mut(&mut h).ui.overlay.is_none(), "round {round}: Esc closed the dialog");
+    }
+    *h.state_mut() = None;
+}
+
+/// Esc leaves the visualizer for the window in the same frame (no blank one
+/// in between).
+#[test]
+fn esc_from_the_visualizer_draws_the_window_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    experiment(&mut h, |x| x.visualizer = true);
+    app_mut(&mut h).toggle_visualizer();
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Visualizer:").is_some(), "the visualizer is open");
+    key_down(&h, egui::Key::Escape);
+    h.step();
+    assert!(app_mut(&mut h).ui.visualizer.is_none(), "Esc closed it");
+    assert!(h.query_by_label_contains("Now playing:").is_some(), "the window drew in the frame Esc closed it");
+    *h.state_mut() = None;
+}
+
+/// A click on the seek line seeks to where it was clicked; a preview left
+/// by a drag that ended elsewhere doesn't stick.
+#[test]
+fn seek_line_click_seeks_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    h.get_by_label("Position").click();
+    h.run_steps(2);
+    let to = app_mut(&mut h).player.pending_seek.expect("the click seeked");
+    assert!((to - 383.0 / 2.0).abs() < 2.0, "seeked to the middle of 383 s, got {to}");
+
+    // A drag in another window mode that never ended here.
+    app_mut(&mut h).ui.seek_preview = Some(10.0);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.seek_preview, None, "the stale preview went");
+    *h.state_mut() = None;
+}
