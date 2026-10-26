@@ -574,3 +574,17 @@ fn a_seek_interrupts_a_push_on_a_frame_boundary() {
     assert!(matches!(push_all(&mut p, &[0.5; 8], 2, &mut pushed, &cancel, &seek), Push::Done));
     assert_eq!(pushed, 12);
 }
+
+#[test]
+fn a_track_shorter_than_the_prebuffer_plays_out() {
+    // 0.25 s: more than the decoder waits at the end for a next track to be
+    // named (0.1 s), less than the output prebuffers (0.4 s) before it plays.
+    let a = pcm(RATE as usize / 4 * 2, 5);
+    let dir = tempfile::tempdir().unwrap();
+    let status = bit_perfect_status();
+    let s = Session::start(file_source(&dir, "a", &a), None, config(1.0), status.clone(), None, None, Arc::default());
+    let (input, _) = wait_ring(&s);
+    let mut dev = Device { input, status, played: Vec::new() };
+    play_to_end(&s, &mut dev);
+    assert_eq!(dev.played, a);
+}

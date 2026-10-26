@@ -69,7 +69,7 @@ impl RingCtl {
         self.hold_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    fn holding(&self) -> bool {
+    pub(crate) fn holding(&self) -> bool {
         self.hold_gen.load(Ordering::Acquire) > self.released_gen.load(Ordering::Acquire)
     }
 
