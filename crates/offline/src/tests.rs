@@ -216,6 +216,24 @@ fn takes_complete_stream_cache_files_without_downloading() {
 }
 
 #[test]
+fn a_track_taken_from_the_stream_cache_leaves_no_partial_download_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(50_000);
+    std::fs::write(cache.path().join("t.flac"), &body).unwrap();
+    let s = store(dir.path(), &rt);
+    // Half downloaded earlier, then played to the end.
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    std::fs::write(dir.path().join("t.flac.part"), &body[..1000]).unwrap();
+    let cache_dir = cache.path().to_owned();
+    s.set_cache_lookup(Arc::new(move |r| Some(cache_dir.join(file_name(r)))));
+    wait_for("the promotion", || s.snapshot().is_done("t"));
+    assert!(!dir.path().join("t.flac.part").exists());
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
 fn unpinning_deletes_only_unshared_files() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
@@ -252,13 +270,15 @@ fn unpinning_a_big_playlist_returns_at_once_and_cleans_up_behind() {
     let t = Instant::now();
     s.unpin(&Pin::Playlist("big".into()));
     assert!(t.elapsed() < slack(Duration::from_millis(200)), "unpin took {:?}", t.elapsed());
-    // Re-pinning before the deleter gets to a track keeps its file. The
-    // deleter has the big playlist's files ahead of this one in its queue.
-    s.unpin(&Pin::Track("keep".into()));
-    s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
+    // A track pinned again before the deleter gets to it keeps its file: as if
+    // it was unpinned and pinned again while the deleter had the big
+    // playlist's files ahead of it in its queue.
+    s.inner.delete(vec!["keep".into()]);
+    // Then one that does go, to know the deleter got past "keep".
+    std::fs::write(dir.path().join("last.flac"), b"x").unwrap();
+    s.inner.delete(vec!["last".into()]);
     let gone = |e: &std::fs::DirEntry| e.file_name() != "keep.flac" && e.file_name().to_string_lossy().ends_with(".flac");
     wait_for("the files to go", || !std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| gone(&e)));
-    thread::sleep(Duration::from_millis(100));
     assert!(dir.path().join("keep.flac").exists());
 }
 
@@ -301,9 +321,17 @@ fn the_limit_holds_back_downloads() {
 fn strays_are_removed_on_open() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
+    let s = store(dir.path(), &rt);
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", 1)]);
+    drop(s);
+    // Left behind by a crash between an unpin and its delete.
     std::fs::write(dir.path().join("orphan.flac"), b"x").unwrap();
+    std::fs::write(dir.path().join("orphan.flac.part"), b"x").unwrap();
+    std::fs::write(dir.path().join("t.flac.part"), b"x").unwrap();
     let s = store(dir.path(), &rt);
     assert!(!dir.path().join("orphan.flac").exists());
+    assert!(!dir.path().join("orphan.flac.part").exists());
+    assert!(dir.path().join("t.flac.part").exists(), "a pinned track's partial download stays");
     assert_eq!(s.snapshot().used_bytes, 0);
 }
 
@@ -447,4 +475,211 @@ fn an_older_save_arriving_late_doesnt_overwrite_a_newer_one() {
     drop(tx);
     saver.join().unwrap();
     assert_eq!(std::fs::read(dir.path().join(STATE_FILE)).unwrap(), b"two");
+}
+
+/// Names in `dir` starting with `prefix`.
+fn names_starting(dir: &Path, prefix: &str) -> Vec<String> {
+    std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(prefix)).collect()
+}
+
+#[test]
+fn a_corrupt_state_file_is_set_aside_and_no_download_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    std::fs::write(dir.path().join("t2.flac.part"), b"tw").unwrap();
+    std::fs::write(dir.path().join(STATE_FILE), b"{\"pins\": [tor").unwrap();
+    let s = store(dir.path(), &rt);
+    assert!(dir.path().join("t1.flac").exists() && dir.path().join("t2.flac.part").exists(), "files stay");
+    assert!(!dir.path().join(STATE_FILE).exists(), "the bad file is moved aside");
+    let aside = names_starting(dir.path(), &format!("{STATE_FILE}.bad-"));
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(std::fs::read(dir.path().join(&aside[0])).unwrap(), b"{\"pins\": [tor");
+    // A new state file that doesn't know the old files doesn't make them strays
+    // either, as long as the bad one is still beside them.
+    s.pin(Pin::Track("x".into()), "X", vec![track("x", 1)]);
+    drop(s);
+    let s = store(dir.path(), &rt);
+    assert!(s.is_pinned(&Pin::Track("x".into())));
+    assert!(dir.path().join("t1.flac").exists() && dir.path().join("t2.flac.part").exists(), "files still stay");
+}
+
+#[test]
+fn an_unreadable_state_file_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    // Reading a folder fails with something other than "not found", as a
+    // permissions error would (which root, running the tests, would get past).
+    std::fs::create_dir(dir.path().join(STATE_FILE)).unwrap();
+    let s = store(dir.path(), &rt);
+    assert!(dir.path().join("t1.flac").exists());
+    assert!(s.snapshot().pins.is_empty());
+    assert_eq!(names_starting(dir.path(), &format!("{STATE_FILE}.bad-")).len(), 1);
+}
+
+#[test]
+fn dropping_the_store_stops_it_and_it_never_writes_over_one_reopened_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(2_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    let progress = |s: &OfflineStore| match s.snapshot().track("t") {
+        Some(TrackState::Downloading { done, .. }) => *done,
+        _ => 0,
+    };
+    wait_for("some progress", || progress(&s) > 0);
+    // Dropping a copy isn't dropping the store: it keeps going.
+    let at = progress(&s);
+    drop(s.clone());
+    wait_for("more progress", || progress(&s) > at);
+
+    let old = Arc::downgrade(&s.inner);
+    drop(s);
+    wait_for("the dropped store's tasks to end", || old.upgrade().is_none());
+
+    // Signed back in to the same account: the old store's download can't
+    // finish behind this one's back and save its pins over these.
+    let s = store(dir.path(), &rt);
+    assert!(s.is_pinned(&Pin::Track("t".into())));
+    s.unpin(&Pin::Track("t".into()));
+    wait_for("the partial file to go", || !dir.path().join("t.flac.part").exists());
+    drop(s);
+    let s = store(dir.path(), &rt);
+    assert!(s.snapshot().pins.is_empty());
+    assert!(!dir.path().join("t.flac").exists());
+}
+
+#[test]
+fn a_track_repinned_with_another_suffix_while_downloading_is_found_where_it_landed() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(1_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("the download to start", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { .. })));
+    // The server now reports another format (transcoding switched on, say).
+    s.pin(Pin::Playlist("p".into()), "P", vec![TrackRef::new("t", Some("mp3".into()), Some(10))]);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    let path = s.local_path("t").unwrap();
+    assert_eq!(path, dir.path().join("t.flac"));
+    assert_eq!(std::fs::read(path).unwrap(), body);
+    assert_eq!(s.snapshot().used_bytes, body.len() as u64);
+}
+
+#[test]
+fn a_track_pinned_again_while_its_files_are_being_deleted_downloads_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(10_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    // The deleter, with an unpinned track's files, past its check that the
+    // track isn't pinned again...
+    let mut ids = vec!["t".to_owned()];
+    assert!(s.inner.deleting(&mut ids));
+    assert_eq!(ids, ["t"]);
+    // ...and the track pinned again while it removes them: a download now
+    // would write a partial file the delete unlinks.
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    s.set_source(Some(server.url()));
+    // Nothing to wait on for something that mustn't happen: give it a moment.
+    thread::sleep(Duration::from_millis(100));
+    assert!(server.requests().is_empty(), "no download while the delete runs");
+    s.inner.deleted(&ids);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
+fn unpinning_mid_download_deletes_the_partial_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(2_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 0));
+    s.unpin(&Pin::Track("t".into()));
+    wait_for("the download to stop", || s.snapshot().active == 0);
+    wait_for("the partial file to go", || !dir.path().join("t.flac.part").exists());
+    assert!(!dir.path().join("t.flac").exists());
+    assert!(s.snapshot().tracks.is_empty());
+}
+
+#[test]
+fn a_pin_shrinking_on_the_server_mid_download_drops_the_track_it_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(2_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    let pin = Pin::Playlist("p".into());
+    s.pin(pin.clone(), "P", vec![track("a", body.len()), track("b", body.len())]);
+    // Two at a time: both are downloading.
+    wait_for("both downloads", || s.snapshot().active == 2);
+    s.update(&pin, "P", vec![track("a", body.len())]);
+    wait_for("b's partial file to go", || !dir.path().join("b.flac.part").exists() && s.snapshot().active <= 1);
+    assert!(s.snapshot().track("b").is_none());
+    wait_for("a", || s.snapshot().is_done("a"));
+    assert_eq!(s.pin_tracks(&pin).unwrap().1, ["a"]);
+    assert!(!dir.path().join("b.flac").exists());
+}
+
+#[test]
+fn extend_grows_a_pin_and_never_shrinks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let s = store(dir.path(), &rt);
+    let pin = Pin::Album("a".into());
+    s.pin(pin.clone(), "A", vec![track("1", 10), track("2", 10)]);
+    // A partial list (the library mid-sync) leaves the rest alone.
+    s.extend(&pin, vec![track("2", 10)]);
+    assert_eq!(s.pin_tracks(&pin).unwrap(), ("A".to_owned(), vec!["1".to_owned(), "2".to_owned()]));
+    s.extend(&pin, vec![track("3", 10), track("1", 10)]);
+    assert_eq!(s.pin_tracks(&pin).unwrap().1, ["1", "2", "3"]);
+    assert_eq!(s.snapshot().track("3"), Some(&TrackState::Queued));
+    // Only pins that exist grow.
+    s.extend(&Pin::Album("b".into()), vec![track("4", 10)]);
+    assert!(!s.is_pinned(&Pin::Album("b".into())));
+    assert!(s.snapshot().track("4").is_none());
+}
+
+#[test]
+fn the_limit_lets_unknown_sizes_through_only_until_it_is_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(10_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = OfflineStore::open(OfflineConfig { dir: dir.path().to_owned(), limit: Some(5_000) }, rt.handle().clone(), Arc::new(|| {})).unwrap();
+    s.set_source(Some(server.url()));
+    let unknown = |id: &str| TrackRef::new(id, Some("flac".into()), None);
+    // Nothing tells it this one won't fit.
+    s.pin(Pin::Track("1".into()), "1", vec![unknown("1")]);
+    wait_for("the first download", || s.snapshot().is_done("1"));
+    assert_eq!(s.snapshot().used_bytes, 10_000);
+    // Over the limit now: nothing more starts, whatever its size.
+    s.pin(Pin::Track("2".into()), "2", vec![unknown("2")]);
+    wait_for("the limit", || s.snapshot().limit_reached);
+    assert_eq!(s.snapshot().track("2"), Some(&TrackState::Queued));
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn a_missing_state_file_beside_downloads_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    let s = store(dir.path(), &rt);
+    s.pin(Pin::Track("x".into()), "X", vec![track("x", 1)]);
+    drop(s);
+    drop(store(dir.path(), &rt));
+    assert!(dir.path().join("t1.flac").exists());
 }
