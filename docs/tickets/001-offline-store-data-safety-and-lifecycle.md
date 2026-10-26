@@ -1,7 +1,7 @@
 # 001 · Offline store: pins-file failure deletes downloads; store never shuts down
 
 - Area: `crates/offline` · Kind: bug · Priority: P0
-- Status: open · Claimed by: —
+- Status: done (branch fix/offline-store) · Claimed by: —
 - Source: data-layer review (findings 11, 12, 14, 15, 16, Drop note). Line numbers at commit 669bb00.
 
 ## Problem
@@ -29,3 +29,15 @@
 ## Acceptance
 
 Dropping the store ends its tasks within a bounded time; no code path deletes files when the state file failed to load; `cargo test -p offline` covers both.
+
+## Resolution
+
+All six items were real and are fixed, all inside `crates/offline` (no change to `app.rs` was needed: replacing `Downloads::store` drops the old handle, which now shuts the store down).
+
+1. `load_pins` replaces the inline read. A state file that can't be read or parsed is renamed to `offline.json.bad-<ms>`. A state file that's missing while downloads are in the folder gets a note under that name instead. While any `offline.json.bad-*` is in the folder, `remove_strays` is skipped in that session and in every later one. Skipping it for one session wasn't enough: the next save writes a new `offline.json` that doesn't name the old files, so the next launch would delete them. Deleting the `.bad-` file turns tidying back on. Nothing in the UI mentions it yet.
+2. and 3. `OfflineStore` now holds an `Arc<Owner>` that the workers don't hold, so the `Owner`'s drop runs when the last handle goes. That drop sets `State::closed` (under the state lock, so a racing commit either counts toward the flush or doesn't happen), cancels active downloads, wakes the workers and aborts them. Only after that does it wait for queued saves. Copies of the handle drop without blocking. When closed, `claim` returns `Next::Stop`, `complete` records nothing and the deleter stops. `Inner` is then freed, which ends the deleter and saver threads.
+4. `promote` removes the `.part` after a successful hard link.
+5. `complete` records the job's `TrackRef` (the name and size it actually downloaded) along with `done`, so a re-pin mid-download can't point `local_path` at a file that doesn't exist. `Pins::store` is unchanged.
+6. The deleter marks the ids it's about to remove in `State::deleting`. `claim` skips them, and when the files are gone the deleter clears the marks and wakes the workers if any of those tracks were pinned again.
+
+Tests: corrupt, unreadable (a folder named `offline.json`) and missing state files; dropping the store mid-download ends it and doesn't overwrite a store reopened on the same folder; a re-pin with another suffix mid-download; promotion leaves no `.part`; re-pin while deleting; unpin and `update()` shrinking mid-download; `extend()`; limit with unknown sizes. `strays_are_removed_on_open` now starts from a saved state file. `unpinning_a_big_playlist…` used to race the deleter (it failed under load) and now hands the deleter a stale batch directly.
