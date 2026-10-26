@@ -19,6 +19,8 @@ struct FakeBackend {
     /// The device the open stream plays on: like CoreAudio, a stream stays on
     /// its device when the default moves.
     open_dev: Option<String>,
+    /// How long the device takes to play one buffer, and its size in frames.
+    period: (Duration, usize),
 }
 
 impl FakeBackend {
@@ -33,6 +35,7 @@ impl FakeBackend {
             device_events: Arc::default(),
             selected: None,
             open_dev: None,
+            period: (Duration::from_millis(1), 512),
         }
     }
 
@@ -87,14 +90,24 @@ impl OutputBackend for FakeBackend {
         self.drained = drained.clone();
         let (played, stop2) = (self.played.clone(), stop.clone());
         let channels = format.channels as usize;
+        let (period, frames) = self.period;
         let handle = thread::spawn(move || {
-            let mut buf = vec![0.0f32; 512 * channels];
-            while !stop2.load(Ordering::Relaxed) {
+            let mut buf = vec![0.0f32; frames * channels];
+            let mut rendered = false;
+            loop {
+                // Like a real device, it plays a buffer during the period after
+                // the callback filled it: stopped meanwhile, that buffer is lost.
+                thread::sleep(period);
+                if stop2.load(Ordering::Relaxed) {
+                    break;
+                }
+                if rendered {
+                    played.lock().unwrap().extend(buf.iter().filter(|s| **s != 0.0));
+                }
                 if input.fill(&mut buf, channels, format.sample_rate, &status) {
                     drained.store(true, Ordering::Release);
                 }
-                played.lock().unwrap().extend(buf.iter().filter(|s| **s != 0.0));
-                thread::sleep(Duration::from_millis(1));
+                rendered = true;
             }
         });
         self.stop = Some((stop, handle));
@@ -833,5 +846,57 @@ fn rapid_plays_settle_on_the_last_track_with_its_own_gain_and_position() {
     engine.send(Command::Resume);
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
     assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "t3"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+fn source_at(dir: &tempfile::TempDir, name: &str, rate: u32, samples: &[i16]) -> TrackSource {
+    let path = dir.path().join(format!("{name}.wav"));
+    std::fs::write(&path, crate::decode::tests::wav(rate, 2, samples)).unwrap();
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
+}
+
+fn played_i16(played: &Mutex<Vec<f32>>) -> Vec<i16> {
+    played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect()
+}
+
+#[test]
+fn a_format_change_and_the_queue_end_play_out_to_the_last_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 22_050, 35), pcm(2 * 14_400, 36));
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    // A device with long periods (slower than the engine's tick), at about 3x real time.
+    backend.period = (Duration::from_millis(30), 4_096);
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::Play(source_at(&dir, "a", 44_100, &a)));
+    engine.send(Command::SetNext(Some(source_at(&dir, "b", 48_000, &b))));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("a".to_owned(), false, false), ("b".to_owned(), false, false)], "{seen:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 2, "the device reopened at 48 kHz");
+    let out = played_i16(&played);
+    assert_eq!(out.len(), a.len() + b.len(), "nothing cut off: {} of A, then B", a.len());
+    let expected: Vec<i16> = a.iter().chain(&b).copied().collect();
+    assert!(out == expected, "A to its last sample, then all of B");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn an_underrun_rebuffers_and_resumes_where_it_left_off() {
+    use crate::decode::tests::{slow_server, wav};
+    let a = pcm(2 * 44_100 * 4, 37);
+    // The server sends ~3x real time; the fake device plays ~10x.
+    let url = slow_server(wav(44_100, 2, &a));
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(streamcache::CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), Some(cache));
+    engine.send(Command::Play(TrackSource { id: "net".into(), url, suffix: Some("wav".into()), ..Default::default() }));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "net"), "{seen:?}");
+    assert!(engine.status.underruns() > 0, "the device outran the download");
+    // Bit-perfect: no fades around the dropouts, so every sample arrives exactly once, in order.
+    assert!(played_i16(&played) == a, "playback resumed where it ran dry each time");
     engine.send(Command::Shutdown);
 }

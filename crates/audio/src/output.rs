@@ -196,11 +196,17 @@ impl RingInput {
 
     /// The realtime path: copy what's available, split at track boundaries,
     /// apply volume and ReplayGain (Normal mode only), pad with silence, update atomics.
-    /// Returns whether everything has been played out (input done, ring empty).
+    ///
+    /// Returns whether everything has been played out: the input is done and
+    /// this call had nothing left to write. (The call that writes the last
+    /// samples returns false: the device has yet to play that buffer, and
+    /// closing it now would cut them off.)
     pub fn fill<T>(&mut self, out: &mut [T], channels: usize, rate: u32, status: &Status) -> bool
     where
         T: SizedSample + FromSample<f32>,
     {
+        // A device reporting no channels gets mono rather than a division by zero.
+        let channels = channels.max(1);
         let silence = T::EQUILIBRIUM;
         let bit_perfect = status.bit_perfect.load(Ordering::Relaxed);
         // Before the pause check, so a seek while paused doesn't wait for resume.
@@ -229,10 +235,9 @@ impl RingInput {
         }
 
         let done = self.input_done.load(Ordering::Acquire);
-        status.buffered_frames.store((self.samples.slots() / channels.max(1)) as u64, Ordering::Relaxed);
+        status.buffered_frames.store((self.samples.slots() / channels) as u64, Ordering::Relaxed);
         if self.buffering {
-            let channels_u = channels.max(1);
-            let target = ((PREBUFFER_SECS * rate as f32) as usize * channels_u).min(self.samples.buffer().capacity() / 2);
+            let target = ((PREBUFFER_SECS * rate as f32) as usize * channels).min(self.samples.buffer().capacity() / 2);
             if self.samples.slots() >= target || done {
                 self.buffering = false;
                 // Fade in from silence (Normal mode); bit-perfect starts on the exact sample.
@@ -289,8 +294,10 @@ impl RingInput {
         out[written..].fill(silence);
 
         if written < out.len() {
-            if done {
-                return self.samples.is_empty();
+            // Loaded again: the decoder may have queued its last samples and
+            // finished after `done` was read above. That's the end, not a dropout.
+            if done || self.input_done.load(Ordering::Acquire) {
+                return written == 0 && self.samples.slots() < channels;
             }
             // Ran dry mid-track: count it once and rebuild the prebuffer before resuming.
             status.underruns.fetch_add(1, Ordering::Relaxed);
@@ -611,10 +618,11 @@ where
     if device_bits.is_none() || scratch.is_empty() {
         return input.fill(out, channels, rate, status);
     }
-    let mut drained = false;
+    // Played out only if no part of this buffer had audio left to play.
+    let mut drained = true;
     for chunk in out.chunks_mut(scratch.len()) {
         let buf = &mut scratch[..chunk.len()];
-        drained = input.fill_for_device(buf, channels, rate, status, device_bits, dither);
+        drained &= input.fill_for_device(buf, channels, rate, status, device_bits, dither);
         for (o, s) in chunk.iter_mut().zip(buf.iter()) {
             *o = T::from_sample(*s);
         }
@@ -691,8 +699,23 @@ mod tests {
         let status = bit_perfect_status();
         let (_p, _m, mut input) = ring(&[0.5, 0.5], true);
         let mut out = [0.0f32; 4];
-        assert!(input.fill(&mut out, 2, RATE, &status));
+        assert!(!input.fill(&mut out, 2, RATE, &status), "this buffer carries the last frame: not played yet");
+        assert_eq!(out, [0.5, 0.5, 0.0, 0.0]);
+        assert!(input.fill(&mut out, 2, RATE, &status), "a whole callback with nothing left: played out");
         assert_eq!(status.underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_device_without_channels_gets_silence_not_a_panic() {
+        let status = Status::default();
+        status.set_volume(0.5);
+        let (_p, mut m, mut input) = ring(&[0.5; 8], true);
+        m.push(3).unwrap();
+        let mut out = [9.0f32; 6];
+        input.fill(&mut out, 0, RATE, &status);
+        input.ctl.hold();
+        input.fill(&mut out, 0, RATE, &status);
+        assert!(out.iter().all(|s| s.abs() <= 0.5));
     }
 
     #[test]

@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Start fetching the next track this long before the current one ends, even if
 /// the current download hasn't finished.
@@ -338,6 +338,9 @@ impl Status {
 
 /// How often the engine checks on playback while something is happening.
 const TICK: Duration = Duration::from_millis(10);
+/// The longest a format change waits for the old stream's last buffer to play
+/// (normally one device period).
+const REOPEN_DRAIN_WAIT: Duration = Duration::from_millis(250);
 /// The longest it sleeps while stopped or paused (it still notices devices
 /// coming and going). A command always wakes it at once.
 const IDLE_TICK: Duration = Duration::from_millis(250);
@@ -953,6 +956,16 @@ impl Engine {
     fn open_ring(&mut self, format: StreamFormat, input: RingInput, first_seq: u64) -> bool {
         let ctl = input.ctl.clone();
         let reopened = self.ring.is_some();
+        if reopened {
+            // The decoder only sends a new ring once the old one is empty, but
+            // the device may not have played the callback's last buffer yet:
+            // closing now would cut the end of the old track. (Bounded: a pause
+            // pressed just now keeps the callback from reporting it.)
+            let deadline = Instant::now() + REOPEN_DRAIN_WAIT;
+            while !self.backend.drained() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
         // Close first so the old callback can't touch the counters set below.
         // (The device itself may stay claimed: it's reopened right away.)
         self.backend.close_for_reopen();
