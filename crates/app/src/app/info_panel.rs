@@ -25,6 +25,10 @@ pub(super) struct InfoFacts {
     measurements: Vec<(&'static str, String)>,
 }
 
+/// Without the header (the Player, where the song shows right above), the
+/// tab starts this much higher.
+const NO_HEADER_PULL: f32 = 12.0;
+
 /// The [`InfoFacts`] key: the song id's hash, the album and analysis versions.
 pub(super) type InfoKey = (u64, u64, u64);
 
@@ -77,7 +81,9 @@ impl ViewCtx<'_> {
             if header {
                 self.info_header(ui, track, album);
             } else {
-                ui.add_space(-12.0);
+                // The first section's room above it is meant to follow the
+                // header; without one, most of it goes.
+                ui.add_space(-NO_HEADER_PULL);
             }
 
             // Live, so near the top where it's seen.

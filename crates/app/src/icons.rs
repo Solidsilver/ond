@@ -64,7 +64,6 @@ pub enum Icon {
     Help,
 }
 
-/// The heart's outline, top notch first, clockwise, in icon units (−1..1).
 /// A five-point star's outline, top point first, in icon units (−1..1):
 /// points and inner corners alternate.
 fn star_points() -> [(f32, f32); 10] {

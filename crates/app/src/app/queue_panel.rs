@@ -82,20 +82,22 @@ impl ViewCtx<'_> {
             });
         }
         ui.add_space(6.0);
-        match self.ui.queue_ui.tab {
+        let history = match self.ui.queue_ui.tab {
             QueueTab::Lyrics => return self.sidebar_lyrics(ui),
             // The Player already shows the song large right above.
             QueueTab::Info => return self.sidebar_info(ui, lyrics_tab),
-            QueueTab::UpNext | QueueTab::History => {}
-        }
+            QueueTab::UpNext => false,
+            QueueTab::History => true,
+        };
 
         let footer_h = 40.0;
         let list_h = (ui.available_height() - footer_h).max(60.0);
         egui::ScrollArea::vertical().id_salt("queue").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            match self.ui.queue_ui.tab {
-                QueueTab::UpNext => self.up_next(ui, now, remaining),
-                QueueTab::History | QueueTab::Lyrics | QueueTab::Info => self.history(ui),
+            if history {
+                self.history(ui);
+            } else {
+                self.up_next(ui, now, remaining);
             }
         });
         self.queue_keys(ui);

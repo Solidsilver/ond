@@ -20,6 +20,9 @@ const ROW_H: f32 = 32.0;
 const TIME_W: f32 = 56.0;
 const FORMAT_W: f32 = 96.0;
 
+/// A Songs column, to sort by. Sorted by artist at first (not by title, the
+/// first column): ties fall back to album order, so the list starts out as
+/// each artist's albums, intact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Column {
     Title,

@@ -79,8 +79,11 @@ impl<'a> ViewCtx<'a> {
         self.prefs.get(|s| s.experimental)
     }
 
-    /// This frame's spectrum of what's playing, for a visual on screen, which
-    /// keeps the frames coming while it plays. `None` unless playing.
+    /// This frame's spectrum of what's playing, for a visual on screen;
+    /// `None` unless playing. Not only a read: while playing, asking for it
+    /// keeps frames coming at the meters' rate (so call it only for a visual
+    /// that's drawn). The returned `Frame` is a copy, but its waveform is
+    /// shared, not copied.
     pub fn listen(&mut self, ui: &egui::Ui) -> Option<crate::visuals::spectrum::Frame> {
         if self.engine.status.state() != audio::PlayState::Playing {
             return None;

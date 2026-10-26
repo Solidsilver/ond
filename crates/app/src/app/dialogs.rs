@@ -51,7 +51,9 @@ impl OndApp {
         let modal = egui::Modal::new(id).frame(frame).show(ctx, |ui| {
             let t = Tokens::of(ui);
             match overlay {
-                Overlay::Shortcuts | Overlay::Settings => shortcuts_ui(ui, visualizer),
+                Overlay::Shortcuts => shortcuts_ui(ui, visualizer),
+                // Drawn by `settings_window` above, which returns first.
+                Overlay::Settings => {}
                 Overlay::NewPlaylist { name, tracks } => {
                     let what = match tracks.len() {
                         0 => String::new(),

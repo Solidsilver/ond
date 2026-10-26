@@ -243,7 +243,9 @@ pub enum Action {
     PlaylistEdit(PlaylistAction),
 }
 
-/// What a download action applies to.
+/// What a download action applies to, as the user asked for it. The
+/// offline store keeps it as `offline::Pin`s: an album or playlist as one,
+/// songs one each. `browse::offline_item` is the menu item that asks.
 #[derive(Debug, Clone)]
 pub enum Keep {
     Album(String),
