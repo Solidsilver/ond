@@ -499,6 +499,41 @@ fn an_unreadable_state_file_deletes_nothing() {
 }
 
 #[test]
+fn dropping_the_store_stops_it_and_it_never_writes_over_one_reopened_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(2_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    let progress = |s: &OfflineStore| match s.snapshot().track("t") {
+        Some(TrackState::Downloading { done, .. }) => *done,
+        _ => 0,
+    };
+    wait_for("some progress", || progress(&s) > 0);
+    // Dropping a copy isn't dropping the store: it keeps going.
+    let at = progress(&s);
+    drop(s.clone());
+    wait_for("more progress", || progress(&s) > at);
+
+    let old = Arc::downgrade(&s.inner);
+    drop(s);
+    wait_for("the dropped store's tasks to end", || old.upgrade().is_none());
+
+    // Signed back in to the same account: the old store's download can't
+    // finish behind this one's back and save its pins over these.
+    let s = store(dir.path(), &rt);
+    assert!(s.is_pinned(&Pin::Track("t".into())));
+    s.unpin(&Pin::Track("t".into()));
+    wait_for("the partial file to go", || !dir.path().join("t.flac.part").exists());
+    drop(s);
+    let s = store(dir.path(), &rt);
+    assert!(s.snapshot().pins.is_empty());
+    assert!(!dir.path().join("t.flac").exists());
+}
+
+#[test]
 fn a_missing_state_file_beside_downloads_deletes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();

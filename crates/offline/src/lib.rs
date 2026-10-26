@@ -134,15 +134,33 @@ impl Snapshot {
     }
 }
 
+/// A handle to the store; copies share it. The store shuts down when the last
+/// copy is dropped (see [`Owner`]).
 #[derive(Clone)]
 pub struct OfflineStore {
     inner: Arc<Inner>,
+    _owner: Arc<Owner>,
 }
 
-impl Drop for OfflineStore {
-    /// Waits for queued saves to reach the disk, so reopening (or moving) the
-    /// store right after sees them.
+/// Held only by the [`OfflineStore`] handles, so its drop is the last handle's.
+/// The workers hold [`Inner`] but not this.
+struct Owner {
+    inner: Arc<Inner>,
+    workers: Vec<tokio::task::AbortHandle>,
+}
+
+impl Drop for Owner {
+    /// Stops the store: running downloads stop (their partial files stay for
+    /// next time), the workers end, and nothing it does afterwards reaches the
+    /// disk, so a store opened on the same folder (switching back to this
+    /// account) is the only one writing there. Then waits for saves already
+    /// queued to reach the disk, so reopening (or moving) the store right after
+    /// sees them.
     fn drop(&mut self) {
+        self.inner.close();
+        for w in &self.workers {
+            w.abort();
+        }
         self.inner.flush.wait_for(self.inner.flush.requested.load(Ordering::Acquire), Duration::from_secs(5));
     }
 }
@@ -209,6 +227,8 @@ struct State {
     free: Option<(Instant, Option<u64>)>,
     /// Bumped by every change to `pins` that needs saving.
     pins_revision: u64,
+    /// The last handle is gone: nothing more is claimed, saved or deleted.
+    closed: bool,
 }
 
 struct Active {
@@ -285,6 +305,7 @@ impl OfflineStore {
                 snapshot: Arc::new(Snapshot::default()),
                 free: None,
                 pins_revision: 0,
+                closed: false,
             }),
         });
         {
@@ -292,10 +313,14 @@ impl OfflineStore {
             let snap = inner.build_snapshot(&mut st);
             st.snapshot = Arc::new(snap);
         }
-        for _ in 0..CONCURRENCY {
-            let inner = inner.clone();
-            rt.spawn(async move { worker(inner).await });
-        }
+        let workers = (0..CONCURRENCY)
+            .map(|_| {
+                let inner = inner.clone();
+                rt.spawn(async move { worker(inner).await }).abort_handle()
+            })
+            .collect();
+        // From here on, an early return drops this and stops the workers.
+        let owner = Arc::new(Owner { inner: inner.clone(), workers });
         let (weak, dir) = (Arc::downgrade(&inner), inner.dir.clone());
         std::thread::Builder::new()
             .name("offline-delete".into())
@@ -306,7 +331,7 @@ impl OfflineStore {
             .name("offline-save".into())
             .spawn(move || saver(dir, saves_rx, flush))
             .map_err(io::Error::other)?;
-        Ok(Self { inner })
+        Ok(Self { inner, _owner: owner })
     }
 
     pub fn dir(&self) -> &Path {
@@ -456,6 +481,20 @@ impl Inner {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Shuts the store down (the last handle went): running downloads are
+    /// cancelled and idle workers woken to end. Taken under the state lock, so
+    /// a commit is either before it (and its save already counted in
+    /// `flush.requested`) or doesn't happen.
+    fn close(&self) {
+        let mut st = self.lock();
+        st.closed = true;
+        for a in st.active.values() {
+            a.cancel.store(true, Ordering::Relaxed);
+        }
+        drop(st);
+        self.wake.notify_waiters();
+    }
+
     /// Bumps the version, wakes the workers and tells the UI.
     fn changed(&self, mut st: MutexGuard<'_, State>) {
         st.version += 1;
@@ -518,12 +557,14 @@ impl Inner {
         }
     }
 
-    /// Picks the next track to fetch and marks it active. Also returns when the
-    /// earliest backoff ends, for the idle wait.
-    fn claim(&self) -> (Option<Job>, Option<Instant>) {
+    /// Picks the next track to fetch and marks it active.
+    fn claim(&self) -> Next {
         let mut st = self.lock();
+        if st.closed {
+            return Next::Stop;
+        }
         if st.pins.paused {
-            return (None, None);
+            return Next::Wait(None);
         }
         let now = Instant::now();
         let mut due: Option<Instant> = None;
@@ -562,7 +603,7 @@ impl Inner {
             st.limit_reached = blocked_by_limit;
             st.version += 1;
         }
-        let Some((r, url, from_cache)) = pick else { return (None, due) };
+        let Some((r, url, from_cache)) = pick else { return Next::Wait(due) };
         let cancel = Arc::new(AtomicBool::new(false));
         st.active.insert(r.id.clone(), Active { cancel: cancel.clone(), done: 0, total: r.size });
         st.version += 1;
@@ -570,7 +611,7 @@ impl Inner {
         let job = Job { part: self.dir.join(format!("{name}.part")), dest: self.dir.join(name), r, url, from_cache, cancel };
         drop(st);
         (self.on_change)();
-        (Some(job), due)
+        Next::Job(job)
     }
 
     fn progress(&self, id: &str, done: u64, total: Option<u64>, note: bool) {
@@ -589,6 +630,11 @@ impl Inner {
     fn complete(&self, job: Job, result: Result<u64, JobError>) {
         let mut st = self.lock();
         st.active.remove(&job.r.id);
+        if st.closed {
+            // Whatever it got to stays on disk for the next store here to
+            // find; this one records nothing more.
+            return;
+        }
         if !st.pins.tracks.contains_key(&job.r.id) {
             // Unpinned while downloading.
             self.changed(st);
@@ -690,18 +736,32 @@ impl Inner {
     }
 }
 
+/// What a worker does next.
+enum Next {
+    Job(Job),
+    /// Nothing to do until woken, or until a backoff ends (when there's one).
+    Wait(Option<Instant>),
+    /// The store shut down.
+    Stop,
+}
+
+/// Downloads one track after another until the store shuts down (and is also
+/// aborted then, so a download in flight stops at once).
 async fn worker(inner: Arc<Inner>) {
     loop {
         // Registered before looking, so a change in between still wakes us.
         let notified = inner.wake.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let (job, due) = inner.claim();
-        if let Some(job) = job {
-            let result = run(&inner, &job).await;
-            inner.complete(job, result);
-            continue;
-        }
+        let due = match inner.claim() {
+            Next::Job(job) => {
+                let result = run(&inner, &job).await;
+                inner.complete(job, result);
+                continue;
+            }
+            Next::Wait(due) => due,
+            Next::Stop => return,
+        };
         let wait = due.map_or(Duration::from_secs(60), |d| d.saturating_duration_since(Instant::now()));
         tokio::select! {
             _ = &mut notified => {}
@@ -857,11 +917,16 @@ fn deleter(store: Weak<Inner>, dir: PathBuf, batches: Receiver<Vec<String>>) {
         // Anything else that piled up goes in the same directory scan.
         ids.extend(batches.try_iter().flatten());
         let Some(inner) = store.upgrade() else { return };
-        // Pinned again since (or downloading again): its files stay.
-        ids.retain(|id| {
+        {
             let st = inner.lock();
-            !st.pins.tracks.contains_key(id) && !st.active.contains_key(id)
-        });
+            if st.closed {
+                // A store opened here since owns the folder; what's left
+                // over is a stray to it.
+                return;
+            }
+            // Pinned again since (or downloading again): its files stay.
+            ids.retain(|id| !st.pins.tracks.contains_key(id) && !st.active.contains_key(id));
+        }
         drop(inner);
         remove_files(&dir, &ids);
     }
