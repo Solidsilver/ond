@@ -5,6 +5,7 @@
 //! compact layout.
 
 mod album_page;
+mod analyzing;
 mod browse;
 mod commands;
 mod compact;
@@ -63,6 +64,7 @@ use subsonic::Client;
 pub use commands::PlaylistAction;
 pub use dialogs::Overlay;
 pub use palette::Palette;
+pub use analyzing::Analysis;
 pub use data::{Data, SearchState, SyncState};
 use data::Pending;
 pub use pins::{Downloads, Keep};
@@ -488,43 +490,6 @@ impl UiState {
     }
 }
 
-/// Library analysis: stored results and the background runner.
-pub struct Analysis {
-    /// Stored analysis results by track id, with the file stamp they're for.
-    pub records: HashMap<String, analysis::Record>,
-    /// Bumped whenever `records` changes, so counts over it know to recount.
-    pub version: u64,
-    /// How much of the library has no current analysis, per (records, tracks) version.
-    pub unanalysed: crate::memo::Memo<(u64, u64), (usize, f64)>,
-    /// The stored results have been read (until then everything looks unanalysed).
-    pub loaded: bool,
-    pub runner: analyze::Runner,
-    /// This session queued the library-wide run (see `check_library_analysis`).
-    pub library_run: bool,
-}
-
-impl Analysis {
-    /// Applies the analysis actions that need only the runner and preferences.
-    fn apply(&mut self, action: Action, prefs: &Prefs) {
-        match action {
-            Action::PauseAnalysis(paused) => self.runner.set_paused(paused),
-            Action::StopAnalysis => {
-                self.runner.clear();
-                self.runner.set_paused(false);
-                // A library-wide run isn't resumed at the next launch either.
-                prefs.edit(|s| s.analysis_resume = false);
-            }
-            Action::SetAnalyzePlaying(on) => prefs.edit(|s| s.analyze_playing = on),
-            _ => unreachable!("not an analysis action"),
-        }
-    }
-
-    /// A track's analysis, if there is one for the file as it is now.
-    pub fn of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
-        self.records.get(&t.id).filter(|r| r.stamp == analyze::stamp_of(t)).map(|r| &r.analysis)
-    }
-}
-
 impl OndApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         #[cfg(windows)]
@@ -655,7 +620,7 @@ impl OndApp {
             waveforms: crate::visuals::waveform::Waveforms::new(ctx.clone()),
             gpu: None,
             prefs,
-            analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer, library_run: false },
+            analysis: Analysis::new(analyzer),
             favorites: Favorites::default(),
             menu: None,
             lyrics: HashMap::new(),
@@ -687,16 +652,7 @@ impl OndApp {
             | Msg::PlaylistTracks { .. }
             | Msg::Credited { .. }
             | Msg::TrackBatch { .. }) => self.library_msg(m),
-            Msg::Analyzed { track_id, record } => {
-                self.analysis.records.insert(track_id, record);
-                self.analysis.version += 1;
-            }
-            Msg::AnalysesLoaded(rows) => {
-                self.analysis.records.extend(rows);
-                self.analysis.version += 1;
-                self.analysis.loaded = true;
-                self.resume_library_analysis();
-            }
+            m @ (Msg::Analyzed { .. } | Msg::AnalysesLoaded(_)) => self.analysis_msg(m),
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
             m @ (Msg::OfflineFolder(_) | Msg::OfflineStore { .. } | Msg::OfflineMoving(_) | Msg::OfflineMoved(_)) => self.offline_msg(m),
@@ -998,15 +954,8 @@ impl OndApp {
                 Ok(None) => {}
                 Err(e) => self.show_error(e),
             },
-            Action::Analyze(tracks) => {
-                self.analysis.runner.set_paused(false);
-                self.enqueue_analysis(&tracks);
-            }
-            Action::AnalyzeLibrary => {
-                self.prefs.edit(|s| s.analysis_resume = true);
-                self.analysis.runner.set_paused(false);
-                self.resume_library_analysis();
-            }
+            Action::Analyze(tracks) => self.analyze(&tracks),
+            Action::AnalyzeLibrary => self.analyze_library(),
             a @ (Action::PauseAnalysis(_) | Action::StopAnalysis | Action::SetAnalyzePlaying(_)) => self.analysis.apply(a, &self.prefs),
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
@@ -1014,66 +963,6 @@ impl OndApp {
             Action::Overlay(o) => self.ui.overlay = Some(o),
             Action::PlaylistEdit(edit) => self.playlist_action(edit),
         }
-    }
-
-    /// A track's analysis, if there is one for the file as it is now.
-    pub fn analysis_of(&self, t: &Track) -> Option<&analysis::TrackAnalysis> {
-        self.analysis.of(t)
-    }
-
-    /// Queues the tracks that have no current analysis; returns how many.
-    /// Downloaded copies are read straight from disk (and need no server).
-    /// The stream URLs are made by the runner as it gets to each track.
-    fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
-        let online = self.session.client.is_some();
-        let jobs: Vec<analyze::Job> = tracks
-            .iter()
-            .filter(|t| self.analysis_of(t).is_none())
-            .filter_map(|t| {
-                let local = self.downloads.local_path(&t.id);
-                (online || local.is_some()).then(|| analyze::job_for(t, local))
-            })
-            .collect();
-        self.analysis.runner.enqueue(jobs)
-    }
-
-    /// Queues the whole library, once the tracks, the stored results and the
-    /// server are all there (so finished tracks aren't redone).
-    fn resume_library_analysis(&mut self) {
-        if self.analysis_library() && self.analysis.loaded && self.session.client.is_some() && !self.data.tracks.all.is_empty() {
-            let all = self.data.tracks.all.clone();
-            self.enqueue_analysis(&all);
-            self.analysis.library_run = true;
-            if !self.analysis.runner.progress().active() {
-                self.finish_library_analysis();
-            }
-        }
-    }
-
-    /// The library run, once queued, has nothing left to do: it's finished
-    /// and isn't resumed at the next launch. Until it has been queued (the
-    /// server not answered yet, or offline) there's nothing to finish.
-    fn check_library_analysis(&mut self) {
-        if self.analysis.library_run && self.analysis_library() && !self.analysis.runner.progress().active() {
-            self.finish_library_analysis();
-        }
-    }
-
-    fn finish_library_analysis(&mut self) {
-        self.analysis.library_run = false;
-        if self.analysis_library() {
-            self.prefs.edit(|s| s.analysis_resume = false);
-        }
-    }
-
-    /// A library-wide analysis should be running (resumed after a restart).
-    fn analysis_library(&self) -> bool {
-        self.prefs.get(|s| s.analysis_resume)
-    }
-
-    /// Analyse each track as it plays (it's in the playback cache by then).
-    pub fn analyze_playing(&self) -> bool {
-        self.prefs.get(|s| s.analyze_playing)
     }
 
     /// Sidebar and queue column widths, as saved (dragged by their inner edges).
@@ -1152,19 +1041,6 @@ impl OndApp {
         let volume = volume.clamp(0.0, 1.0);
         self.engine.send(Command::SetVolume(volume));
         self.prefs.edit(|s| s.volume = volume);
-    }
-
-    /// Tracks in the library without a current analysis, and their total length.
-    /// Counted once per change to either, not every frame Settings is open.
-    pub fn unanalysed(&mut self) -> (usize, f64) {
-        let key = (self.analysis.version, self.data.tracks_version);
-        let (analyses, tracks) = (&self.analysis.records, &self.data.tracks.all);
-        *self.analysis.unanalysed.get(key, || {
-            tracks
-                .iter()
-                .filter(|t| !analyses.get(&t.id).is_some_and(|r| r.stamp == crate::analyze::stamp_of(t)))
-                .fold((0, 0.0), |(n, secs), t| (n + 1, secs + f64::from(t.duration_secs.unwrap_or(0))))
-        })
     }
 
     /// Switches window mode (`None` toggles Mini) and saves the choice.
