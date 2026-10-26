@@ -59,16 +59,18 @@ impl ViewCtx<'_> {
         let painter = ui.painter();
         let grabbed = resp.hovered() || self.ui.seek_preview.is_some();
         let shown = self.ui.seek_preview.unwrap_or_else(|| self.position_secs());
-        let wave = if s.wave_h > 0.0 && self.ui.prefs.experimental.waveform {
+        let x_prefs = self.ui.prefs.experimental;
+        let wave = if s.wave_h > 0.0 && x_prefs.waveform {
+            let grid = WaveGrid::along(bar, painter.pixels_per_point());
             let id = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
-            id.and_then(|id| self.waveforms.bars(&id, ((bar.width() / 3.0) as usize).max(8)))
+            id.and_then(|id| self.waveforms.bars(&id, grid.n)).map(|bars| (grid, bars))
         } else {
             None
         };
         let line = if grabbed && wave.is_none() { bar.expand2(vec2(0.0, s.grow)) } else { bar };
         let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
-        if let Some(bars) = wave {
-            paint_wave(painter, line, &bars, x, s);
+        if let Some((grid, bars)) = wave {
+            paint_wave(painter, line, &grid, &bars, x, x_prefs.waveform_rounded, s);
         } else {
             painter.rect_filled(line, s.radius, s.track);
             if let Some(f) = self.engine.status.fetched_fraction() {
@@ -112,25 +114,90 @@ fn seek_times(shown: f64, duration: Option<f64>) -> (String, String) {
     (crate::fmt::clock(elapsed), remaining)
 }
 
+/// A waveform bar's width and the gap after it, in points (each rounds to
+/// whole pixels).
+const WAVE_BAR: f32 = 2.0;
+const WAVE_GAP: f32 = 1.0;
+
+/// Where the waveform's bars go along a line: every bar the same whole number
+/// of pixels wide with the same whole-pixel gap between, the run centred, so
+/// none comes out a pixel wider or further apart than its neighbours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WaveGrid {
+    n: usize,
+    /// The first bar's left edge, the distance from one bar to the next, and
+    /// a bar's width, in points on the pixel grid.
+    left: f32,
+    step: f32,
+    width: f32,
+}
+
+impl WaveGrid {
+    fn along(line: Rect, ppp: f32) -> Self {
+        let px = |pt: f32| (pt * ppp).round().max(1.0);
+        let (w, gap) = (px(WAVE_BAR), px(WAVE_GAP));
+        let span = (line.width() * ppp).floor().max(w);
+        let n = ((span + gap) / (w + gap)).floor().max(1.0);
+        let used = n * (w + gap) - gap;
+        let left = (line.left() * ppp + (span - used) / 2.0).round();
+        Self { n: n as usize, left: left / ppp, step: (w + gap) / ppp, width: w / ppp }
+    }
+}
+
 /// The waveform in place of the line: a bar per value, mirrored about the
 /// line's centre, played (left of `x`) in the fill color and the rest faint.
-fn paint_wave(painter: &egui::Painter, line: Rect, bars: &[f32], x: f32, s: &SeekStyle) {
-    let step = line.width() / bars.len().max(1) as f32;
-    let half_w = (step * 0.6).max(1.0) / 2.0;
-    let (cy, rest) = (line.center().y, s.fill.gamma_multiply(0.3));
+/// Square bars stay crisp on the pixel grid; rounded ones are anti-aliased.
+fn paint_wave(painter: &egui::Painter, line: Rect, grid: &WaveGrid, bars: &[f32], x: f32, rounded: bool, s: &SeekStyle) {
+    let ppp = painter.pixels_per_point();
+    let snap = |pt: f32| (pt * ppp).round() / ppp;
+    let (cy, rest) = (snap(line.center().y), s.fill.gamma_multiply(0.3));
     let mut mesh = egui::Mesh::default();
+    let mut shapes = Vec::new();
     for (i, v) in bars.iter().enumerate() {
-        let cx = line.left() + step * (i as f32 + 0.5);
+        let left = grid.left + grid.step * i as f32;
         // Quiet passages stay visible as a sliver; loud ones fill the height.
-        let h = s.wave_h * (0.12 + 0.88 * v.powf(0.8));
-        mesh.add_colored_rect(Rect::from_min_max(pos2(cx - half_w, cy - h), pos2(cx + half_w, cy + h)), if cx <= x { s.fill } else { rest });
+        // Never shorter than the bar is wide, so a rounded one stays a pill.
+        let h = snap(s.wave_h * (0.12 + 0.88 * v.powf(0.8))).max(grid.width / 2.0);
+        let rect = Rect::from_min_max(pos2(left, cy - h), pos2(left + grid.width, cy + h));
+        let color = if rect.center().x <= x { s.fill } else { rest };
+        if rounded {
+            shapes.push(egui::Shape::rect_filled(rect, grid.width / 2.0, color));
+        } else {
+            mesh.add_colored_rect(rect, color);
+        }
     }
-    painter.add(egui::Shape::mesh(mesh));
+    if rounded {
+        painter.extend(shapes);
+    } else {
+        painter.add(egui::Shape::mesh(mesh));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waveform_bars_sit_on_whole_pixels_evenly() {
+        for (ppp, left, width) in [(1.0, 10.0, 300.0), (2.0, 10.25, 301.3), (1.5, 33.7, 512.9), (2.0, 0.0, 3.0)] {
+            let line = Rect::from_min_size(pos2(left, 0.0), vec2(width, 4.0));
+            let g = WaveGrid::along(line, ppp);
+            assert!(g.n >= 1);
+            // Every edge on a pixel boundary: the same width and gap each time.
+            for i in 0..g.n {
+                let l = (g.left + g.step * i as f32) * ppp;
+                let r = l + g.width * ppp;
+                assert!((l - l.round()).abs() < 1e-3 && (r - r.round()).abs() < 1e-3, "bar {i} at {l}..{r} ({ppp}x)");
+            }
+            // Inside the line, centred to within a pixel.
+            let end = g.left + g.step * (g.n - 1) as f32 + g.width;
+            assert!(g.left >= line.left() - 0.5 / ppp && end <= line.right() + 0.5 / ppp, "{g:?} in {line:?}");
+            assert!(((g.left - line.left()) - (line.right() - end)).abs() <= 1.0 / ppp + 1e-3, "{g:?} in {line:?}");
+        }
+        // The same look at any scale: 2 pt bars with 1 pt gaps.
+        let g = WaveGrid::along(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 4.0)), 2.0);
+        assert_eq!((g.n, g.step, g.width), (100, 3.0, 2.0));
+    }
 
     #[test]
     fn elapsed_and_remaining_add_up_to_the_length() {

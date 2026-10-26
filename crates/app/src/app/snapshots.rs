@@ -1429,6 +1429,11 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "x-waveform-loading-player");
     fixture_waveform(app_mut(h));
     s.shoot(h, "x-waveform-player");
+    experiment(h, |x| {
+        x.waveform = true;
+        x.waveform_rounded = true;
+    });
+    s.shoot(h, "x-waveform-rounded-player");
     reset(h, FULL, Route::Recent);
     experiment(h, |x| x.waveform = true);
     fixture_waveform(app_mut(h));

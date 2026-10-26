@@ -380,6 +380,10 @@ impl OndApp {
         group(ui, "Seek bar", |ui| {
             narrow_toggle(ui, &mut x.waveform, "Waveform seek bar");
             hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
+            if x.waveform {
+                ui.add_space(10.0);
+                narrow_toggle(ui, &mut x.waveform_rounded, "Rounded bars");
+            }
         });
         group(ui, "Live audio", |ui| {
             narrow_toggle(ui, &mut x.spectrum, "Live spectrum");

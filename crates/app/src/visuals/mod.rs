@@ -39,6 +39,8 @@ pub struct Experimental {
     pub backdrop: bool,
     /// The track's waveform as the seek bar.
     pub waveform: bool,
+    /// Its bars with rounded ends rather than square.
+    pub waveform_rounded: bool,
     /// A small live spectrum in the now-playing display and the Player.
     pub spectrum: bool,
     /// The full-window visualizer (⌘T).
