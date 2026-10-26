@@ -301,6 +301,9 @@ struct Pending {
     key: ListKey,
     source: Source,
     action: QueueAction,
+    /// What's stored is known to be incomplete (an album a sync stored only
+    /// part of): wait for the server's own listing, not the stored copy.
+    fresh: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -910,6 +913,9 @@ impl OndApp {
                 self.session.server_label = format!("{} · {}", settings.username, server);
                 self.session.server_info = server.clone();
                 self.login = None;
+                // Always a new pass, even if the flags say one runs: any still
+                // running is from before the server went away, and the bridge
+                // has this one replace it.
                 self.sync.label = "syncing…".into();
                 self.sync.albums = true;
                 self.bridge.sync_albums(client.clone());
@@ -1040,8 +1046,13 @@ impl OndApp {
                 }
             }
             Msg::LoadFailed { key, error } => {
-                // Whatever waited for these tracks gives up, so it can't fire
-                // much later when they turn up for some other reason.
+                // One that only waited for a complete listing plays what's stored.
+                if let Some(at) = self.pending.iter().position(|p| p.key == key && p.fresh) {
+                    self.pending[at].fresh = false;
+                    self.run_pending(&key, false);
+                }
+                // Whatever else waited for these tracks gives up, so it can't
+                // fire much later when they turn up for some other reason.
                 self.pending.retain(|p| p.key != key);
                 self.downloads.pending_pins.retain(|(k, _)| *k != key);
                 if let Some(e) = error {
@@ -1054,7 +1065,7 @@ impl OndApp {
             Msg::Tracks { album_id, tracks, fresh } => {
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.set_album(&album_id, tracks);
-                self.run_pending(&ListKey::Album(album_id));
+                self.run_pending(&ListKey::Album(album_id), fresh);
             }
             Msg::Newest(ids) => {
                 self.data.newest = ids;
@@ -1065,7 +1076,7 @@ impl OndApp {
                 // Always the server's complete listing.
                 self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
                 self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
-                self.run_pending(&ListKey::Playlist(id));
+                self.run_pending(&ListKey::Playlist(id), true);
             }
             Msg::Credited { name, album_ids } => {
                 self.data.credited.insert(name, album_ids);
@@ -1139,6 +1150,8 @@ impl OndApp {
         self.search.stale = true;
         self.pending.clear();
         self.favorites = Favorites::default();
+        self.lyrics.clear();
+        self.song_stats.clear();
         self.ui.nav = Nav::default();
         self.cache.clear();
     }
@@ -1372,8 +1385,10 @@ impl OndApp {
         }
     }
 
-    fn run_pending(&mut self, key: &ListKey) {
-        let Some(at) = self.pending.iter().position(|p| &p.key == key) else { return };
+    /// Runs what waited for `key`'s tracks, now loaded (`fresh`: the server's
+    /// own listing, not the stored copy).
+    fn run_pending(&mut self, key: &ListKey, fresh: bool) {
+        let Some(at) = self.pending.iter().position(|p| &p.key == key && (fresh || !p.fresh)) else { return };
         let p = self.pending.remove(at);
         let tracks = match &p.source {
             Source::Album { id, .. } => self.data.tracks.album(id).map(|s| s.to_vec()),
@@ -1422,10 +1437,15 @@ impl OndApp {
             Action::Album(id, action) => {
                 let name = self.data.album(&id).map(|a| a.name.clone()).unwrap_or_default();
                 let source = Source::Album { id: id.clone(), name };
-                match self.data.tracks.album(&id) {
-                    Some(t) => self.queue_tracks(t.to_vec(), source, action),
-                    None => {
-                        self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action });
+                // An album a sync stored only part of (cut short) would play a
+                // subset: fetch it, unless there's no server to ask.
+                let stored = self.data.tracks.album(&id);
+                let count = self.data.album(&id).map_or(0, |a| a.song_count as usize);
+                let partial = stored.is_some_and(|t| t.len() < count) && self.session.client.is_some();
+                match stored {
+                    Some(t) if !partial => self.queue_tracks(t.to_vec(), source, action),
+                    _ => {
+                        self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action, fresh: partial });
                         self.bridge.open_album(self.session.client.clone(), id);
                     }
                 }
@@ -1439,7 +1459,7 @@ impl OndApp {
                 };
                 // Playing an artist means all of their albums, shuffled.
                 let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Shuffle } else { action };
-                self.wait_for(Pending { key: key.clone(), source, action });
+                self.wait_for(Pending { key: key.clone(), source, action, fresh: false });
                 self.bridge.fetch_tracks(self.session.client.clone(), key, ids);
             }
             Action::Playlist(id, action) => {
@@ -1448,7 +1468,7 @@ impl OndApp {
                 match self.data.playlist_tracks.get(&id) {
                     Some(t) => self.queue_tracks(t.to_vec(), source, action),
                     None => {
-                        self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action });
+                        self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action, fresh: false });
                         self.bridge.open_playlist(self.session.client.clone(), id);
                     }
                 }
@@ -1857,6 +1877,10 @@ impl OndApp {
         self.ui.palette = None;
         self.ui.overlay = None;
         self.favorites = Favorites::default();
+        // Another account may sign in next (ids can collide), and a fetch still
+        // in flight now delivers nothing, so its `Loading` would stay for good.
+        self.lyrics.clear();
+        self.song_stats.clear();
         self.bridge.cancel_sync();
         // Reconnect loops and connects in flight stop; anything they still
         // deliver is ignored. Downloads lose their server (and its credentials).
@@ -3079,6 +3103,74 @@ mod tests {
         app.analysis.runner.clear();
         app.check_library_analysis();
         assert!(!app.analysis_library());
+    }
+
+    #[test]
+    fn signing_out_forgets_lyrics_and_song_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+        let t = app.data.tracks.all[0].clone();
+        // Asked for, still on their way when the user signs out.
+        app.apply(Action::NeedLyrics(Box::new(t.clone())));
+        app.apply(Action::NeedSongStats(t.id.clone()));
+        assert!(matches!(app.lyrics.get(&t.id), Some(crate::lyrics::Fetch::Loading)));
+        assert!(app.song_stats.contains_key(&t.id));
+        app.sign_out();
+        assert!(app.lyrics.is_empty() && app.song_stats.is_empty(), "nothing left loading for good, nor for the next account");
+        // Signed in again: asked for afresh.
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+        app.apply(Action::NeedLyrics(Box::new(t.clone())));
+        assert!(matches!(app.lyrics.get(&t.id), Some(crate::lyrics::Fetch::Loading)));
+        // Another account: what was fetched for the last one goes too.
+        app.handle(Msg::Lyrics { track_id: t.id.clone(), lyrics: None });
+        app.handle(Msg::SongStats { track_id: t.id.clone(), stats: None });
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: true });
+        assert!(app.lyrics.is_empty() && app.song_stats.is_empty());
+    }
+
+    #[test]
+    fn playing_an_album_stored_only_in_part_waits_for_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let all: Vec<Track> = (1..=20).map(|n| track(&format!("p-{n}"), "al-3", n)).collect();
+        // A sync cut short stored 5 of its 20 songs.
+        app.data.tracks.set_album("al-3", all[..5].to_vec());
+        app.player.queue = crate::queue::Queue::default();
+        // Queued (offline nothing here is downloaded, so it's all skipped into history).
+        let queued = |app: &OndApp| app.player.queue.history.len() + app.player.queue.pass_len();
+
+        // Offline: what's stored is all there is.
+        app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
+        assert_eq!(queued(&app), 5);
+
+        // Online: the server's listing, not the stored part.
+        app.player.queue = crate::queue::Queue::default();
+        app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+        app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
+        assert_eq!(queued(&app), 0, "waits");
+        // The stored copy arrives first: still waiting.
+        app.handle(Msg::Tracks { album_id: "al-3".into(), tracks: all[..5].to_vec(), fresh: false });
+        assert_eq!(queued(&app), 0);
+        app.handle(Msg::Tracks { album_id: "al-3".into(), tracks: all.clone(), fresh: true });
+        assert_eq!(queued(&app), 20);
+        assert!(app.pending.is_empty());
+
+        // The server can't be reached: play what's stored rather than nothing.
+        app.player.queue = crate::queue::Queue::default();
+        app.data.tracks.set_album("al-3", all[..5].to_vec());
+        app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
+        app.handle(Msg::LoadFailed { key: ListKey::Album("al-3".into()), error: Some("timed out".into()) });
+        assert_eq!(queued(&app), 5);
+        assert!(app.pending.is_empty());
+
+        // A complete album plays at once.
+        app.player.queue = crate::queue::Queue::default();
+        app.apply(Action::Album("al-0".into(), QueueAction::Play { start: 0 }));
+        assert_eq!(queued(&app), 20);
     }
 
     #[test]
