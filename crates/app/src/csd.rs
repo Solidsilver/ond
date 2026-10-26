@@ -13,7 +13,7 @@
 
 use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
 use crate::visuals::over_art::OnArt;
-use std::sync::RwLock;
+use std::sync::OnceLock;
 
 /// Whether this platform draws its own window controls.
 pub const SUPPORTED: bool = cfg!(all(unix, not(target_os = "macos")));
@@ -137,21 +137,23 @@ pub fn reserved(ctx: &Context, side: Side) -> f32 {
 }
 
 /// The desktop's button layout. Read once, in the background; until it
-/// arrives (or when there's no portal) a guess from the desktop's name.
-pub fn layout() -> Layout {
-    static READ: RwLock<Option<Layout>> = RwLock::new(None);
+/// arrives (or when there's no portal) a guess from the desktop's name (also
+/// worked out once: this is asked a few times a frame).
+pub fn layout() -> &'static Layout {
+    static READ: OnceLock<Layout> = OnceLock::new();
+    static GUESS: OnceLock<Layout> = OnceLock::new();
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         static ASK: std::sync::Once = std::sync::Once::new();
         ASK.call_once(|| {
             let _ = std::thread::Builder::new().name("button-layout".into()).spawn(|| {
                 if let Some(s) = portal::button_layout() {
-                    *READ.write().unwrap_or_else(|e| e.into_inner()) = Some(Layout::parse(&s));
+                    let _ = READ.set(Layout::parse(&s));
                 }
             });
         });
     }
-    READ.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(fallback)
+    READ.get().unwrap_or_else(|| GUESS.get_or_init(fallback))
 }
 
 /// GNOME shows only close; KDE and most others all three.

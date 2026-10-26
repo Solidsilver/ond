@@ -286,10 +286,15 @@ struct Gpu {
     shade: wgpu::RenderPipeline,
     show: wgpu::RenderPipeline,
     pictures: Option<Pictures>,
+    /// The lights' bytes for the buffer, kept so a frame doesn't allocate.
+    staging: Vec<u8>,
 }
 
-fn bytes(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|v| v.to_ne_bytes()).collect()
+/// `values` as the bytes a buffer takes, appended to `out`.
+fn put_bytes(out: &mut Vec<u8>, values: &[f32]) {
+    for v in values {
+        out.extend_from_slice(&v.to_ne_bytes());
+    }
 }
 
 fn field_floats(f: &Field) -> [f32; 12] {
@@ -304,22 +309,29 @@ fn uniforms(c: &VisualizerCallback, texel: [f32; 2]) -> [f32; UNIFORM_FLOATS] {
     let float = c.target.float();
     let (floor, dither) = if float { (0.0008, 0.0) } else { (1.5 / 255.0, 1.0 / 255.0) };
     let linear = if c.target.format.is_srgb() { 1.0 } else { 0.0 };
-    let mut u = Vec::with_capacity(UNIFORM_FLOATS);
-    u.extend([fade, w.mix, p.time, 0.0]);
+    let mut u = [0.0; UNIFORM_FLOATS];
+    let mut at = 0;
+    let mut put = |values: &[f32]| {
+        u[at..at + values.len()].copy_from_slice(values);
+        at += values.len();
+    };
+    put(&[fade, w.mix, p.time, 0.0]);
     let (mapped, pal_mix, pa, pb, back) = match p.look {
         Look::Mapped { from, to, mix } => (1.0, mix, from.0, to.0, [[0.0; 3]; 2]),
         Look::Lit { centre, edge } => (0.0, 0.0, [[0.0; 4]; 4], [[0.0; 4]; 4], [centre, edge]),
     };
-    u.extend([w.blur, floor, linear, mapped]);
-    u.extend([pal_mix, dither, texel[0], texel[1]]);
-    u.extend([c.half[0], c.half[1], p.bright, 0.0]);
-    u.extend(field_floats(&w.from));
-    u.extend(field_floats(&w.to));
-    u.extend(pa.iter().chain(&pb).flatten());
+    put(&[w.blur, floor, linear, mapped]);
+    put(&[pal_mix, dither, texel[0], texel[1]]);
+    put(&[c.half[0], c.half[1], p.bright, 0.0]);
+    put(&field_floats(&w.from));
+    put(&field_floats(&w.to));
+    put(pa.as_flattened());
+    put(pb.as_flattened());
     for b in back {
-        u.extend([b[0], b[1], b[2], 0.0]);
+        put(&[b[0], b[1], b[2], 0.0]);
     }
-    u.try_into().expect("the uniforms are 20 vec4s")
+    assert_eq!(at, UNIFORM_FLOATS, "the uniforms are 20 vec4s");
+    u
 }
 
 fn dot_floats(d: &Dot) -> [f32; DOT_FLOATS] {
@@ -421,6 +433,7 @@ impl Gpu {
             shade,
             show: full("fs_show", target.format),
             pictures: None,
+            staging: Vec::new(),
         }
     }
 
@@ -481,7 +494,11 @@ impl CallbackTrait for VisualizerCallback {
         }
         let Some(gpu) = resources.get_mut::<Gpu>() else { return Vec::new() };
         let size = picture_size(self.size_px);
-        queue.write_buffer(&gpu.uniforms, 0, &bytes(&uniforms(self, [1.0 / size[0] as f32, 1.0 / size[1] as f32])));
+        let mut u = [0u8; UNIFORM_FLOATS * 4];
+        for (b, v) in u.as_chunks_mut::<4>().0.iter_mut().zip(uniforms(self, [1.0 / size[0] as f32, 1.0 / size[1] as f32])) {
+            b.copy_from_slice(&v.to_ne_bytes());
+        }
+        queue.write_buffer(&gpu.uniforms, 0, &u);
         let p = &self.picture;
         let counts = [p.dots.len(), p.shades.len(), p.front.len()];
         let total: usize = counts.iter().sum();
@@ -489,9 +506,12 @@ impl CallbackTrait for VisualizerCallback {
             gpu.capacity = total.next_power_of_two();
             gpu.dots = Gpu::dot_buffer(device, gpu.capacity);
         }
-        let floats: Vec<f32> = p.dots.iter().chain(&p.shades).chain(&p.front).flat_map(dot_floats).collect();
-        if !floats.is_empty() {
-            queue.write_buffer(&gpu.dots, 0, &bytes(&floats));
+        gpu.staging.clear();
+        for d in p.dots.iter().chain(&p.shades).chain(&p.front) {
+            put_bytes(&mut gpu.staging, &dot_floats(d));
+        }
+        if !gpu.staging.is_empty() {
+            queue.write_buffer(&gpu.dots, 0, &gpu.staging);
         }
 
         let (feedback, dot, shade, buffer) = (gpu.feedback.clone(), gpu.dot.clone(), gpu.shade.clone(), gpu.dots.clone());

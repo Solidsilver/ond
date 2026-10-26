@@ -8,6 +8,7 @@
 //! hits. A quiet recording moves the picture as much as a loud one.
 
 use std::f32::consts::TAU;
+use std::sync::Arc;
 
 /// Points in [`Feel::wave`].
 pub const WAVE: usize = 512;
@@ -38,13 +39,28 @@ pub struct Feel {
     /// Beats so far (to tell a new one from the same one seen twice).
     pub beats: u64,
     /// The latest stretch of waveform, oldest first, scaled so its recent
-    /// loudest reaches ±1 (it can overshoot a little).
-    pub wave: Vec<f32>,
+    /// loudest reaches ±1 (it can overshoot a little). Shared, so handing a
+    /// frame to each visual on screen copies no samples; written in place
+    /// while no one else holds it.
+    pub wave: Arc<Vec<f32>>,
+}
+
+impl Feel {
+    /// Becomes a copy of `src`, reusing this one's wave when no one else
+    /// holds it (`clone_from` would share `src`'s, and the next write there
+    /// would then have to copy it).
+    pub fn copy_from(&mut self, src: &Feel) {
+        let Feel { bass, mid, treble, level, onset, beat, beats, wave } = src;
+        (self.bass, self.mid, self.treble, self.level, self.onset, self.beat, self.beats) = (*bass, *mid, *treble, *level, *onset, *beat, *beats);
+        let own = Arc::make_mut(&mut self.wave);
+        own.clear();
+        own.extend_from_slice(wave);
+    }
 }
 
 impl Default for Feel {
     fn default() -> Self {
-        Self { bass: 0.0, mid: 0.0, treble: 0.0, level: 0.0, onset: false, beat: 0.0, beats: 0, wave: vec![0.0; WAVE] }
+        Self { bass: 0.0, mid: 0.0, treble: 0.0, level: 0.0, onset: false, beat: 0.0, beats: 0, wave: Arc::new(vec![0.0; WAVE]) }
     }
 }
 
@@ -105,7 +121,7 @@ impl Pulse {
         }
         f.onset = false;
         f.beat = (f.beat - 3.0 * dt).max(0.0);
-        for w in &mut f.wave {
+        for w in Arc::make_mut(&mut f.wave).iter_mut() {
             *w *= (-dt * 8.0).exp();
         }
     }
@@ -118,7 +134,7 @@ impl Pulse {
         // Up at once, down slowly; never so low that hiss fills the screen.
         self.wave_peak = (self.wave_peak * (-dt / 3.0).exp()).max(loudest).max(0.02);
         let scale = 1.0 / self.wave_peak;
-        for (i, w) in self.feel.wave.iter_mut().enumerate() {
+        for (i, w) in Arc::make_mut(&mut self.feel.wave).iter_mut().enumerate() {
             *w = recent[i * span / WAVE] * scale;
         }
     }

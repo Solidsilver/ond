@@ -159,7 +159,7 @@ fn shortcuts_ui(ui: &mut egui::Ui, visualizer: bool) {
         });
     });
     ui.add_space(16.0);
-    let columns = balance(&GROUPS, cols);
+    let columns = columns_of(cols);
     let column = |ui: &mut egui::Ui, groups: &[&str]| {
         ui.vertical(|ui| {
             ui.set_width(COL_W);
@@ -169,10 +169,10 @@ fn shortcuts_ui(ui: &mut egui::Ui, visualizer: bool) {
                 }
                 ui.label(egui::RichText::new(*group).font(FontId::new(11.0, semibold())).color(t.muted));
                 ui.add_space(6.0);
-                for (label, keys) in rows(group).into_iter().filter(|(l, _)| visualizer || *l != "Visualizer") {
+                for (label, keys) in group_rows(group).iter().filter(|(l, _)| visualizer || *l != "Visualizer") {
                     ui.horizontal(|ui| {
                         ui.set_height(ROW_H);
-                        ui.label(egui::RichText::new(label).size(13.0).color(t.text));
+                        ui.label(egui::RichText::new(*label).size(13.0).color(t.text));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             for k in keys.iter().rev() {
@@ -220,7 +220,21 @@ const ROW_H: f32 = 22.0;
 
 /// A group's height in the list: its rows plus header and gap.
 fn group_height(group: &str) -> f32 {
-    rows(group).len() as f32 * (ROW_H + 8.0) + 44.0
+    group_rows(group).len() as f32 * (ROW_H + 8.0) + 44.0
+}
+
+/// A group's rows, worked out once (the key map is fixed).
+fn group_rows(group: &str) -> &'static [(&'static str, Vec<&'static str>)] {
+    type Rows = Vec<(&'static str, Vec<&'static str>)>;
+    static ALL: std::sync::OnceLock<Vec<(&'static str, Rows)>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| GROUPS.iter().map(|g| (*g, rows(g))).collect()).iter().find(|(g, _)| *g == group).map_or(&[], |(_, r)| r.as_slice())
+}
+
+/// The groups split into two or three columns, worked out once each.
+fn columns_of(cols: usize) -> &'static [Vec<&'static str>] {
+    static SPLITS: std::sync::OnceLock<[Vec<Vec<&'static str>>; 2]> = std::sync::OnceLock::new();
+    let [two, three] = SPLITS.get_or_init(|| [balance(&GROUPS, 2), balance(&GROUPS, 3)]);
+    if cols >= 3 { three } else { two }
 }
 
 /// Splits `groups` (in order) into `cols` columns of roughly equal height.

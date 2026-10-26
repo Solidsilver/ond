@@ -331,10 +331,11 @@ impl ViewCtx<'_> {
 
     /// One grid row of tiles, followed by the row gap.
     pub(super) fn grid_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32) {
+        let t = Tokens::of(ui);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = GAP_X;
             for &i in ids {
-                self.album_tile(ui, i, tile);
+                self.album_tile(ui, &t, i, tile);
             }
         });
         ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
@@ -342,8 +343,7 @@ impl ViewCtx<'_> {
 
     /// Cover, title and artist. Click opens; double-click or the hover play
     /// button plays; right-click has the queue actions.
-    pub(super) fn album_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32) {
-        let t = Tokens::of(ui);
+    pub(super) fn album_tile(&mut self, ui: &mut Ui, t: &Tokens, idx: usize, tile: f32) {
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
         // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
         let data = self.data;

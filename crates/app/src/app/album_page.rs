@@ -368,9 +368,11 @@ impl ViewCtx<'_> {
     /// deleted, reordered by dragging (or ⌥↑/↓) and trimmed (⌫).
     pub(super) fn playlist_page(&mut self, ui: &mut Ui, id: &str, name: &str) {
         let t = Tokens::of(ui);
-        let info = self.data.playlists.iter().find(|p| p.id == id).cloned();
-        let tracks = self.data.playlist_tracks.get(id).cloned();
-        let mine = info.as_ref().is_some_and(|p| self.owns(p));
+        // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
+        let data = self.data;
+        let info = data.playlists.iter().find(|p| p.id == id);
+        let tracks = data.playlist_tracks.get(id);
+        let mine = info.is_some_and(|p| self.owns(p));
         let source = Source::Playlist { id: id.to_owned(), name: name.to_owned() };
         let pin = offline::Pin::Playlist(id.to_owned());
         let kept = self.downloads.snap.pin(&pin).is_some();
@@ -381,7 +383,7 @@ impl ViewCtx<'_> {
         let art_side = (ui.available_width() * 0.3).clamp(120.0, 180.0);
         ui.horizontal(|ui| {
             let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
-            self.mosaic(ui, art, tracks.as_deref().map_or(&[], Vec::as_slice));
+            self.mosaic(ui, art, tracks.map_or(&[][..], |ts| ts.as_slice()));
             ui.add_space(20.0);
             ui.vertical(|ui| {
                 ui.add_space((art_side - 118.0).max(0.0));
@@ -389,7 +391,7 @@ impl ViewCtx<'_> {
                 ui.add(egui::Label::new(egui::RichText::new(name).font(FontId::new(26.0, semibold())).color(t.text)).truncate());
                 // The loaded songs are newer than the playlist list's counts
                 // (an edit since the last refresh).
-                let counts = match (&tracks, &info) {
+                let counts = match (tracks, info) {
                     (Some(ts), _) => Some((ts.len(), ts.iter().filter_map(|t| t.duration_secs).sum::<u32>())),
                     (None, Some(p)) => Some((p.song_count as usize, p.duration)),
                     (None, None) => None,
@@ -402,7 +404,7 @@ impl ViewCtx<'_> {
                 ui.label(egui::RichText::new(sub).size(12.0).color(t.muted));
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    let has_tracks = tracks.as_ref().is_some_and(|t| !t.is_empty());
+                    let has_tracks = tracks.is_some_and(|t| !t.is_empty());
                     ui.add_enabled_ui(has_tracks, |ui| {
                         if let Some(a) = super::browse::play_shuffle(ui) {
                             self.actions.push(Action::Playlist(id.to_owned(), a));
@@ -433,7 +435,7 @@ impl ViewCtx<'_> {
             return;
         }
         super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-            self.track_list(ui, &tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) });
+            self.track_list(ui, tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) });
         }));
     }
 
@@ -455,10 +457,10 @@ impl ViewCtx<'_> {
     /// Up to four album covers in a 2×2 square (one fills it; none: a note glyph).
     pub(super) fn mosaic(&mut self, ui: &mut Ui, rect: Rect, tracks: &[Track]) {
         let t = Tokens::of(ui);
-        let mut covers: Vec<String> = Vec::new();
+        let data = self.data;
+        let mut covers: Vec<&str> = Vec::with_capacity(4);
         for tr in tracks {
-            let cover = self.data.cover_for(tr).map(str::to_owned);
-            if let Some(c) = cover
+            if let Some(c) = data.cover_for(tr)
                 && !covers.contains(&c)
             {
                 covers.push(c);
@@ -472,7 +474,7 @@ impl ViewCtx<'_> {
                 ui.painter().rect_filled(rect, 6.0, t.field);
                 icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(rect.width() * 0.28, rect.width() * 0.28)), Icon::Note, t.muted);
             }
-            1..=3 => self.art.paint(ui, rect, Some(&covers[0]), 6.0),
+            1..=3 => self.art.paint(ui, rect, Some(covers[0]), 6.0),
             _ => {
                 let half = rect.width() / 2.0;
                 for (i, c) in covers.iter().enumerate() {

@@ -126,7 +126,10 @@ impl ViewCtx<'_> {
             ui.painter().hline(ui.min_rect().x_range(), ui.min_rect().bottom(), egui::Stroke::new(1.0, t.hairline));
 
             let mut clicked = None;
-            let r = palette.results.clone();
+            let follow = std::mem::take(&mut palette.follow);
+            let (r, selected_row) = (&palette.results, palette.selected);
+            // Borrowed from the library, not from `self`, so rows can paint art.
+            let data = self.data;
             if r.len() == 0 {
                 if !palette.query.trim().is_empty() {
                     ui.add_space(14.0);
@@ -137,22 +140,24 @@ impl ViewCtx<'_> {
                     ui.add_space(14.0);
                 }
             } else {
-                let groups: [(&str, Vec<Hit>); 4] = [
-                    ("Top hit", r.top.into_iter().collect()),
-                    ("Artists", r.artists.iter().map(|&i| Hit::Artist(i)).collect()),
-                    ("Albums", r.albums.iter().map(|&i| Hit::Album(i)).collect()),
-                    ("Songs", r.tracks.iter().map(|&i| Hit::Track(i)).collect()),
-                ];
+                // Each group's title and hits, read from the results in place.
+                let top = r.top.as_slice();
+                let groups: [(&str, usize); 4] = [("Top hit", top.len()), ("Artists", r.artists.len()), ("Albums", r.albums.len()), ("Songs", r.tracks.len())];
+                let hit_at = |group: usize, k: usize| match group {
+                    0 => top[k],
+                    1 => Hit::Artist(r.artists[k]),
+                    2 => Hit::Album(r.albums[k]),
+                    _ => Hit::Track(r.tracks[k]),
+                };
                 // Tall enough for everything when it fits, so groups aren't
                 // hidden behind a scroll; scrolls only past ~70% of the window.
-                let shown = groups.iter().filter(|(_, h)| !h.is_empty());
-                let content_h = 6.0 + shown.map(|(_, h)| GROUP_H + ROW_H * h.len() as f32 + 6.0).sum::<f32>();
-                let follow = std::mem::take(&mut palette.follow);
+                let shown = groups.iter().filter(|(_, n)| *n > 0);
+                let content_h = 6.0 + shown.map(|(_, n)| GROUP_H + ROW_H * *n as f32 + 6.0).sum::<f32>();
                 egui::ScrollArea::vertical().min_scrolled_height(content_h.min(list_max)).max_height(list_max).show(ui, |ui| {
                     ui.add_space(6.0);
                     let mut row = 0;
-                    for (title, hits) in groups {
-                        if hits.is_empty() {
+                    for (g, (title, n)) in groups.into_iter().enumerate() {
+                        if n == 0 {
                             continue;
                         }
                         let (head, _) = ui.allocate_exact_size(vec2(WIDTH, GROUP_H), Sense::hover());
@@ -163,8 +168,8 @@ impl ViewCtx<'_> {
                             FontId::new(11.0, semibold()),
                             t.muted,
                         );
-                        for hit in hits {
-                            let selected = row == palette.selected;
+                        for hit in (0..n).map(|k| hit_at(g, k)) {
+                            let selected = row == selected_row;
                             let (rect, resp) = ui.allocate_exact_size(vec2(WIDTH, ROW_H), Sense::click());
                             let inner = rect.shrink2(vec2(8.0, 1.0));
                             if selected {
@@ -181,30 +186,28 @@ impl ViewCtx<'_> {
                                     let a = &index.artists[i];
                                     ui.painter().circle_filled(tile.center(), 15.0, t.field);
                                     icons::paint(ui.painter(), tile.shrink(8.0), Icon::Person, t.muted);
-                                    (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
+                                    (a.name.as_str(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
                                 }
                                 Hit::Album(i) => {
                                     let a = &index.albums[i];
-                                    let cover = self.data.album(&a.id).and_then(|al| al.cover_art.clone());
-                                    self.art.paint(ui, tile, cover.as_deref(), 4.0);
+                                    self.art.paint(ui, tile, data.album(&a.id).and_then(|al| al.cover_art.as_deref()), 4.0);
                                     let sub = match a.year {
                                         Some(y) => format!("{} · {y}", a.artist),
                                         None => a.artist.clone(),
                                     };
-                                    (a.title.clone(), sub)
+                                    (a.title.as_str(), sub)
                                 }
                                 Hit::Track(i) => {
                                     let tr = &index.tracks[i];
-                                    let cover = self.data.album(&tr.album_id).and_then(|al| al.cover_art.clone());
-                                    self.art.paint(ui, tile, cover.as_deref(), 4.0);
-                                    (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album))
+                                    self.art.paint(ui, tile, data.album(&tr.album_id).and_then(|al| al.cover_art.as_deref()), 4.0);
+                                    (tr.title.as_str(), format!("Song · {} · {}", tr.artist, tr.album))
                                 }
                             };
                             let x = tile.right() + 12.0;
                             let hint = crate::keys::shown("⏎ open    ⌘⏎ play");
                             let hint_w = if selected { ui.painter().layout_no_wrap(hint.to_string(), FontId::proportional(11.0), t.muted).size().x + 16.0 } else { 0.0 };
                             let w = inner.right() - x - hint_w - 12.0;
-                            let g = elide(ui, &main, FontId::proportional(13.0), t.text, w);
+                            let g = elide(ui, main, FontId::proportional(13.0), t.text, w);
                             ui.painter().galley(pos2(x, inner.center().y - g.size().y), g, t.text);
                             let g = elide(ui, &sub, FontId::proportional(12.0), t.muted, w);
                             ui.painter().galley(pos2(x, inner.center().y + 1.0), g, t.muted);
@@ -217,7 +220,7 @@ impl ViewCtx<'_> {
                                     t.muted,
                                 );
                             }
-                            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &main));
+                            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, main));
                             if resp.clicked() {
                                 let play = ui.input(|i| i.modifiers.command);
                                 clicked = Some((hit, if play { Verb::Play } else { Verb::Open }));

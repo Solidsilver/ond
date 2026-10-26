@@ -168,7 +168,7 @@ impl ViewCtx<'_> {
                     ui.label(egui::RichText::new(format!("and {more} more")).size(11.0).color(t.muted));
                     return;
                 }
-                self.queue_row(ui, &queue.upcoming[i], Some(i), Some((now, *start)));
+                self.queue_row(ui, &t, &queue.upcoming[i], Some(i), Some((now, *start)));
                 drawn += 1;
             }
             ui.add_space(4.0);
@@ -184,22 +184,22 @@ impl ViewCtx<'_> {
         }
         let history = &self.player.queue.history;
         for item in history.iter().rev().take(MAX_ROWS) {
-            self.queue_row(ui, item, None, None);
+            self.queue_row(ui, &t, item, None, None);
         }
     }
 
-    /// One queue item. `index` is its place in `upcoming` (None in history);
-    /// `starts` is (now, seconds until it starts), shown on hover.
-    /// Drag to reorder; double-click plays; right-click has the actions.
-    pub(super) fn queue_row(&mut self, ui: &mut Ui, item: &Item, index: Option<usize>, starts: Option<(chrono::NaiveTime, f64)>) {
-        let t = Tokens::of(ui);
+    /// One queue item, in the list's colors `t`. `index` is its place in
+    /// `upcoming` (None in history); `starts` is (now, seconds until it
+    /// starts), shown on hover. Drag to reorder; double-click plays;
+    /// right-click has the actions.
+    pub(super) fn queue_row(&mut self, ui: &mut Ui, t: &Tokens, item: &Item, index: Option<usize>, starts: Option<(chrono::NaiveTime, f64)>) {
         let sense = if index.is_some() { Sense::click_and_drag() } else { Sense::click() };
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
         let selected = self.ui.queue_ui.selected == Some(item.uid);
         if ui.is_rect_visible(rect) {
             // A selection the keyboard isn't on reads as a hover.
             let focused = selected && self.ui.focus == Focus::Queue;
-            ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, focused, resp.hovered() || selected));
+            ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(t, focused, resp.hovered() || selected));
             let art = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 16.0), vec2(32.0, 32.0));
             let data = self.data;
             self.art.paint(ui, art, data.cover_for(&item.track), 3.0);
@@ -214,7 +214,7 @@ impl ViewCtx<'_> {
             let text_w = rect.right() - 10.0 - right_g.size().x - 8.0 - (art.right() + 10.0);
             ui.painter().galley(pos2(rect.right() - 10.0 - right_g.size().x, rect.center().y - right_g.size().y / 2.0), right_g, t.muted);
             let x = art.right() + 10.0;
-            let color = super::widgets::track_color(&t, false, available);
+            let color = super::widgets::track_color(t, false, available);
             let title = elide(ui, &item.track.title, FontId::proportional(12.5), color, text_w);
             ui.painter().galley(pos2(x, rect.center().y - title.size().y), title, color);
             let sub = elide(ui, item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted, text_w);
