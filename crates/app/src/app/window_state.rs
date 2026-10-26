@@ -201,7 +201,6 @@ impl OndApp {
         // A maximized window takes the screen's size, not the plan's.
         self.ui.window.settling = (!plan.maximized).then(|| Settle::new(plan.size));
     }
-
 }
 
 /// The height of the bar along the top in `mode`, which the traffic lights

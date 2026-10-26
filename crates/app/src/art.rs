@@ -303,10 +303,10 @@ pub struct Art {
     ctx: egui::Context,
     dir: Arc<PathBuf>,
     client: Option<Client>,
-    /// Every cover id asked for, numbered (see [`Key`]).
-    covers: HashMap<String, u32>,
-    /// The cover ids by number.
-    names: Vec<String>,
+    /// Every cover id asked for, numbered (see [`Key`]), and the ids by
+    /// number; the two share each id.
+    covers: HashMap<Arc<str>, u32>,
+    names: Vec<Arc<str>>,
     textures: HashMap<Key, TextureHandle>,
     lru: Lru<Key>,
     queue: Queue<Key>,
@@ -370,12 +370,13 @@ impl Art {
 
     /// `cover` at `size`, numbering the cover the first time it's seen.
     fn key(&mut self, cover: &str, size: u32) -> Key {
-        let next = self.covers.len() as u32;
         let cover = match self.covers.get(cover) {
             Some(&n) => n,
             None => {
-                self.names.push(cover.to_owned());
-                *self.covers.entry(cover.to_owned()).or_insert(next)
+                let (n, name) = (self.names.len() as u32, Arc::<str>::from(cover));
+                self.covers.insert(name.clone(), n);
+                self.names.push(name);
+                n
             }
         };
         Key { cover, size }
@@ -607,12 +608,18 @@ async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<ColorImage> {
 /// into place) and returns its bytes.
 pub async fn fetch_cached(client: &Client, dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
     let bytes = client.cover_art(cover, Some(size)).await.ok()?;
-    let path = cover_file(dir, cover, size);
-    let tmp = path.with_extension("part");
-    if tokio::fs::create_dir_all(dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
-        let _ = tokio::fs::rename(&tmp, &path).await;
-    }
-    Some(bytes)
+    let (dir, path) = (dir.to_owned(), cover_file(dir, cover, size));
+    // Saved by a task of its own: a load aborted from here on (scrolled past)
+    // still leaves the cover cached, and never a half-written file.
+    tokio::spawn(async move {
+        let tmp = path.with_extension("part");
+        if tokio::fs::create_dir_all(&dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
+            let _ = tokio::fs::rename(&tmp, &path).await;
+        }
+        bytes
+    })
+    .await
+    .ok()
 }
 
 fn decode(bytes: &[u8], size: u32) -> Option<ColorImage> {
