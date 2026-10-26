@@ -229,6 +229,10 @@ struct State {
     pins_revision: u64,
     /// The last handle is gone: nothing more is claimed, saved or deleted.
     closed: bool,
+    /// Tracks whose files the deleter is removing right now. One pinned again
+    /// meanwhile isn't downloaded until it's done, so the delete can't unlink
+    /// the new partial file.
+    deleting: HashSet<String>,
 }
 
 struct Active {
@@ -306,6 +310,7 @@ impl OfflineStore {
                 free: None,
                 pins_revision: 0,
                 closed: false,
+                deleting: HashSet::new(),
             }),
         });
         {
@@ -572,7 +577,7 @@ impl Inner {
         let used = st.pins.used() + st.active.values().map(|a| a.total.unwrap_or(0)).sum::<u64>();
         let mut pick = None;
         for id in st.pins.pending() {
-            if st.active.contains_key(id) {
+            if st.active.contains_key(id) || st.deleting.contains(id) {
                 continue;
             }
             if let Some(f) = st.failures.get(id) {
@@ -923,18 +928,41 @@ fn deleter(store: Weak<Inner>, dir: PathBuf, batches: Receiver<Vec<String>>) {
         // Anything else that piled up goes in the same directory scan.
         ids.extend(batches.try_iter().flatten());
         let Some(inner) = store.upgrade() else { return };
-        {
-            let st = inner.lock();
-            if st.closed {
-                // A store opened here since owns the folder; what's left
-                // over is a stray to it.
-                return;
-            }
-            // Pinned again since (or downloading again): its files stay.
-            ids.retain(|id| !st.pins.tracks.contains_key(id) && !st.active.contains_key(id));
+        if !inner.deleting(&mut ids) {
+            return;
         }
         drop(inner);
         remove_files(&dir, &ids);
+        let Some(inner) = store.upgrade() else { return };
+        inner.deleted(&ids);
+    }
+}
+
+impl Inner {
+    /// Before the deleter removes the files of `ids`: drops those pinned again
+    /// since (or downloading again), whose files stay, and holds back new
+    /// downloads of the rest until [`deleted`](Self::deleted). False once the
+    /// store has shut down: a store opened here since owns the folder, and
+    /// what's left over is a stray to it.
+    fn deleting(&self, ids: &mut Vec<String>) -> bool {
+        let mut st = self.lock();
+        if st.closed {
+            return false;
+        }
+        ids.retain(|id| !st.pins.tracks.contains_key(id) && !st.active.contains_key(id));
+        st.deleting.extend(ids.iter().cloned());
+        true
+    }
+
+    /// The files of `ids` are gone: any pinned again meanwhile can download.
+    fn deleted(&self, ids: &[String]) {
+        let mut st = self.lock();
+        for id in ids {
+            st.deleting.remove(id);
+        }
+        if ids.iter().any(|id| st.pins.tracks.contains_key(id)) {
+            self.changed(st);
+        }
     }
 }
 

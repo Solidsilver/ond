@@ -571,6 +571,30 @@ fn a_track_repinned_with_another_suffix_while_downloading_is_found_where_it_land
 }
 
 #[test]
+fn a_track_pinned_again_while_its_files_are_being_deleted_downloads_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(10_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    // The deleter, with an unpinned track's files, past its check that the
+    // track isn't pinned again...
+    let mut ids = vec!["t".to_owned()];
+    assert!(s.inner.deleting(&mut ids));
+    assert_eq!(ids, ["t"]);
+    // ...and the track pinned again while it removes them: a download now
+    // would write a partial file the delete unlinks.
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    s.set_source(Some(server.url()));
+    // Nothing to wait on for something that mustn't happen: give it a moment.
+    thread::sleep(Duration::from_millis(100));
+    assert!(server.requests().is_empty(), "no download while the delete runs");
+    s.inner.deleted(&ids);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
 fn a_missing_state_file_beside_downloads_deletes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
