@@ -172,6 +172,23 @@ const ROW_H_ARTIST: f32 = 44.0;
 /// Room above a disc heading after the first.
 const DISC_GAP: f32 = 12.0;
 
+/// The album page's header stacks the artwork above the text below this width.
+const HEADER_STACK_BELOW: f32 = 460.0;
+/// The artwork's side beside the text: 30% of the width, within these.
+const HEADER_ART_MIN: f32 = 150.0;
+const HEADER_ART_MAX: f32 = 220.0;
+/// The header text's height before it's first measured.
+const HEADER_TEXT_H_GUESS: f32 = 150.0;
+
+/// What the album page's header draws from.
+struct AlbumHeader<'p> {
+    album: &'p library::Album,
+    tracks: &'p [Track],
+    facts: &'p AlbumFacts,
+    /// How many of its tracks wait to be (or are being) analysed.
+    analysing: usize,
+}
+
 impl ListOpts {
     pub fn row_h(&self) -> f32 {
         if self.artist { ROW_H_ARTIST } else { ROW_H }
@@ -219,123 +236,10 @@ impl ViewCtx<'_> {
         }
         let key = (super::view_ctx::hash_str(id), data.version, analysis.version, tracks.as_ptr() as usize, tracks.len());
         let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis));
-        let summary = &facts.summary;
         let analysing = analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
+        let page = AlbumHeader { album, tracks, facts: &facts, analysing };
         super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-            // Header: art beside the text, or above it when there's no room.
-            let avail = ui.available_width();
-            let stacked = avail < 460.0;
-            let art_side = if stacked { avail.min(220.0) } else { (avail * 0.3).clamp(150.0, 220.0) };
-            let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
-            ui.with_layout(layout, |ui| {
-                let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
-                self.art.paint(ui, art, album.cover_art.as_deref(), 6.0);
-                ui.add_space(if stacked { 16.0 } else { 20.0 });
-                // The text block sits on the artwork's bottom edge. Its height
-                // (it wraps) is known after drawing, so use last frame's and
-                // redo the frame when it changed.
-                let measured = ui.scope_id().with(("album-header-h", id));
-                let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(150.0);
-                let block = ui.vertical(|ui| {
-                    if !stacked {
-                        ui.add_space((art_side - last_h).max(0.0));
-                    }
-                    let top = ui.cursor().top();
-                    ui.add(egui::Label::new(egui::RichText::new(&album.name).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
-                    if let Some(artist) = &album.artist
-                        && link(ui, artist, FontId::proportional(18.0), t.accent).clicked()
-                    {
-                        self.actions.push(Action::Go(Route::Artist { name: artist.clone(), id: album.artist_ref.clone() }));
-                    }
-                    ui.add_space(2.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        let small = FontId::proportional(12.0);
-                        let mut first = true;
-                        let mut sep = |ui: &mut Ui| {
-                            if !first {
-                                ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
-                            }
-                            first = false;
-                        };
-                        for g in album.all_genres() {
-                            sep(ui);
-                            if link(ui, g, small.clone(), t.muted).clicked() {
-                                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Genre, value: g.to_owned() }));
-                            }
-                        }
-                        if let Some(y) = album.year {
-                            sep(ui);
-                            if link(ui, &y.to_string(), small.clone(), t.muted).clicked() {
-                                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }));
-                            }
-                        }
-                        for l in &album.labels {
-                            sep(ui);
-                            if link(ui, l, small.clone(), t.muted).clicked() {
-                                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }));
-                            }
-                        }
-                        if let Some(f) = &facts.format {
-                            sep(ui);
-                            ui.label(egui::RichText::new(f).size(12.0).color(t.muted));
-                        }
-                        // Measurements once the whole album is known; a quiet
-                        // count while it's being worked on.
-                        if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
-                            sep(ui);
-                            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
-                                .on_hover_text("Dynamic range (DR meter), averaged across the album");
-                            sep(ui);
-                            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
-                                .on_hover_text("Integrated loudness (EBU R128), across the album");
-                        } else if analysing > 0 {
-                            sep(ui);
-                            ui.label(egui::RichText::new(format!("analyzing {}/{}", summary.analyzed, tracks.len())).size(12.0).color(t.muted));
-                        }
-                        if let Some((v, n)) = &summary.verdict {
-                            ui.add_space(10.0);
-                            let tracks_note = if *n == summary.analyzed { "every analyzed track".to_owned() } else { format!("{n} of {} analyzed tracks", summary.analyzed) };
-                            chip(ui, &v.label(), t.warn).on_hover_text(format!("{}\n\nSeen in {tracks_note}.", v.evidence()));
-                        }
-                    });
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if let Some(a) = super::browse::play_shuffle(ui) {
-                            self.actions.push(Action::Album(album.id.clone(), a));
-                        }
-                        let loved = self.favorites.is_on(StarKind::Album, &album.id);
-                        if heart_button(ui, loved, 30.0, 14.0).clicked() {
-                            self.actions.push(Action::ToggleStar { kind: StarKind::Album, id: album.id.clone(), track: None, name: None });
-                        }
-                        let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
-                        let pin = offline::Pin::Album(album.id.clone());
-                        let kept = self.downloads.snap.pin(&pin).is_some();
-                        egui::Popup::menu(&more).show(|ui| {
-                            let c = super::browse::Collection::Album(album.id.clone());
-                            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
-                            if !summary.complete() && analysing == 0 && !tracks.is_empty() {
-                                ui.separator();
-                                if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {
-                                    self.actions.push(Action::Analyze(tracks.to_vec()));
-                                }
-                            }
-                            if !tracks.is_empty() {
-                                ui.separator();
-                                self.add_to_playlist_menu(ui, tracks);
-                            }
-                        });
-                        ui.add_space(6.0);
-                        self.pin_status(ui, &pin);
-                    });
-                    ui.min_rect().bottom() - top
-                });
-                let h = block.inner.round();
-                if (h - last_h).abs() > 0.5 {
-                    ui.data_mut(|d| d.insert_temp(measured, h));
-                    ui.ctx().request_discard("album header height changed");
-                }
-            });
+            self.album_header(ui, &t, &page);
             ui.add_space(24.0);
             if tracks.is_empty() {
                 ui.label(egui::RichText::new("Loading tracks…").color(t.muted));
@@ -349,6 +253,140 @@ impl ViewCtx<'_> {
             self.album_details(ui, tracks, &facts, analysing > 0);
             ui.add_space(24.0);
         }));
+    }
+
+    /// The artwork beside the album's name, artist, facts and buttons, or
+    /// above them when there's no room.
+    fn album_header(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let avail = ui.available_width();
+        let stacked = avail < HEADER_STACK_BELOW;
+        let art_side = if stacked { avail.min(HEADER_ART_MAX) } else { (avail * 0.3).clamp(HEADER_ART_MIN, HEADER_ART_MAX) };
+        let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
+        ui.with_layout(layout, |ui| {
+            let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
+            self.art.paint(ui, art, page.album.cover_art.as_deref(), 6.0);
+            ui.add_space(if stacked { 16.0 } else { 20.0 });
+            // The text block sits on the artwork's bottom edge. Its height
+            // (it wraps) is known after drawing, so use last frame's and
+            // redo the frame when it changed.
+            let measured = ui.scope_id().with(("album-header-h", &page.album.id));
+            let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(HEADER_TEXT_H_GUESS);
+            let block = ui.vertical(|ui| {
+                if !stacked {
+                    ui.add_space((art_side - last_h).max(0.0));
+                }
+                let top = ui.cursor().top();
+                self.album_header_text(ui, t, page);
+                ui.min_rect().bottom() - top
+            });
+            let h = block.inner.round();
+            if (h - last_h).abs() > 0.5 {
+                ui.data_mut(|d| d.insert_temp(measured, h));
+                ui.ctx().request_discard("album header height changed");
+            }
+        });
+    }
+
+    /// The name, the artist, a line of facts and the buttons.
+    fn album_header_text(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let album = page.album;
+        ui.add(egui::Label::new(egui::RichText::new(&album.name).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
+        if let Some(artist) = &album.artist
+            && link(ui, artist, FontId::proportional(18.0), t.accent).clicked()
+        {
+            self.actions.push(Action::Go(Route::Artist { name: artist.clone(), id: album.artist_ref.clone() }));
+        }
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| self.album_facts_line(ui, t, page));
+        ui.add_space(12.0);
+        ui.horizontal(|ui| self.album_buttons(ui, t, page));
+    }
+
+    /// Genres, year and labels as links, the shared format, then the
+    /// measurements (or how far analysing has got) and any finding.
+    fn album_facts_line(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let (album, summary) = (page.album, &page.facts.summary);
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let small = FontId::proportional(12.0);
+        let mut first = true;
+        let mut sep = |ui: &mut Ui| {
+            if !first {
+                ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
+            }
+            first = false;
+        };
+        for g in album.all_genres() {
+            sep(ui);
+            if link(ui, g, small.clone(), t.muted).clicked() {
+                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Genre, value: g.to_owned() }));
+            }
+        }
+        if let Some(y) = album.year {
+            sep(ui);
+            if link(ui, &y.to_string(), small.clone(), t.muted).clicked() {
+                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }));
+            }
+        }
+        for l in &album.labels {
+            sep(ui);
+            if link(ui, l, small.clone(), t.muted).clicked() {
+                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }));
+            }
+        }
+        if let Some(f) = &page.facts.format {
+            sep(ui);
+            ui.label(egui::RichText::new(f).size(12.0).color(t.muted));
+        }
+        // Measurements once the whole album is known; a quiet
+        // count while it's being worked on.
+        if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
+            sep(ui);
+            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
+                .on_hover_text("Dynamic range (DR meter), averaged across the album");
+            sep(ui);
+            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
+                .on_hover_text("Integrated loudness (EBU R128), across the album");
+        } else if page.analysing > 0 {
+            sep(ui);
+            ui.label(egui::RichText::new(format!("analyzing {}/{}", summary.analyzed, page.tracks.len())).size(12.0).color(t.muted));
+        }
+        if let Some((v, n)) = &summary.verdict {
+            ui.add_space(10.0);
+            let tracks_note = if *n == summary.analyzed { "every analyzed track".to_owned() } else { format!("{n} of {} analyzed tracks", summary.analyzed) };
+            chip(ui, &v.label(), t.warn).on_hover_text(format!("{}\n\nSeen in {tracks_note}.", v.evidence()));
+        }
+    }
+
+    /// Play and Shuffle, the heart, ⋯ (the album's menu), and how its
+    /// download is going.
+    fn album_buttons(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let (album, tracks) = (page.album, page.tracks);
+        if let Some(a) = super::browse::play_shuffle(ui) {
+            self.actions.push(Action::Album(album.id.clone(), a));
+        }
+        let loved = self.favorites.is_on(StarKind::Album, &album.id);
+        if heart_button(ui, loved, 30.0, 14.0).clicked() {
+            self.actions.push(Action::ToggleStar { kind: StarKind::Album, id: album.id.clone(), track: None, name: None });
+        }
+        let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
+        let pin = offline::Pin::Album(album.id.clone());
+        let kept = self.downloads.snap.pin(&pin).is_some();
+        egui::Popup::menu(&more).show(|ui| {
+            let c = super::browse::Collection::Album(album.id.clone());
+            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
+            if !page.facts.summary.complete() && page.analysing == 0 && !tracks.is_empty() {
+                ui.separator();
+                if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {
+                    self.actions.push(Action::Analyze(tracks.to_vec()));
+                }
+            }
+            if !tracks.is_empty() {
+                ui.separator();
+                self.add_to_playlist_menu(ui, tracks);
+            }
+        });
+        ui.add_space(6.0);
+        self.pin_status(ui, &pin);
     }
 
     /// "Album details ›": the album's credits and its per-track measurements,
