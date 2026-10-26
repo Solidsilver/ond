@@ -16,6 +16,8 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 - [ ] Following the system default, plug in headphones mid-track (or pick another default in Control Center): playback moves there and carries on from where it was.
 - [ ] UMC22 in bit-perfect, a 44.1 kHz track followed by a 96 kHz one: other apps stay silent across the switch (hog kept through the reopen); no extra click beyond the rate change.
 - [ ] Toggle Normal → bit-perfect mid-track with a 24-bit file on a DAC that shares at 16 bits: the status shows the wider format, and a bit-exact check (loopback recording, or the DAC's own bit meter) shows the samples weren't dithered down to 16 bits.
+- [ ] A 16-bit track followed by a 24-bit one at the same rate (queue them by hand if no album mixes them), bit-perfect on the headphone jack: no gap or click between them, Audio MIDI Setup shows no reopen, and the status changes from `16/44.1` to `24/44.1` at the boundary. On the UMC22 (16-bit) the 24-bit track reads `dithered` and the 16-bit one doesn't; a loopback recording of the 16-bit one is bit-exact.
+- [ ] A 44.1 kHz track followed by a 48 kHz one (a format change): the first track's last note isn't clipped before the switch. Same at the end of the queue: the last track's tail plays out before playback stops.
 
 ## Playback
 - [ ] Gapless: a live album plays without gaps (also a hi-res one, resampled on the UMC22).
