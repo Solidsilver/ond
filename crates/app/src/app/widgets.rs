@@ -165,6 +165,13 @@ pub fn secondary(ui: &mut Ui, text: &str) -> Response {
     filled(ui, None, text, Fill { text: t.accent, rest: t.field, hover: t.selected, pad: 28.0 })
 }
 
+/// [`secondary`] for something that can't be taken back (Sign out): red
+/// text, the same quiet fill.
+pub fn secondary_danger(ui: &mut Ui, text: &str) -> Response {
+    let t = Tokens::of(ui);
+    filled(ui, None, text, Fill { text: t.danger, rest: t.field, hover: t.selected, pad: 28.0 })
+}
+
 /// Mutually exclusive choices in a pill (Up Next / History, sort order).
 /// Returns the index clicked, if any.
 pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize> {
@@ -444,17 +451,17 @@ pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Res
     resp
 }
 
-/// An on/off switch with its label on the left, the row filling the width.
-pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+/// An on/off switch on its own; `label` names it for accessibility (the
+/// row it sits in shows the name).
+pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let t = Tokens::of(ui);
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
     }
     if ui.is_rect_visible(rect) {
-        ui.painter().text(egui::pos2(rect.left(), rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
-        let sw = Rect::from_min_size(egui::pos2(rect.right() - 30.0, rect.center().y - 9.0), vec2(30.0, 18.0));
+        let sw = Rect::from_center_size(rect.center(), vec2(30.0, 18.0));
         let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
         let track = if *on { t.accent } else { t.selected };
         ui.painter().rect_filled(sw, 9.0, track);
