@@ -1,5 +1,6 @@
-//! Output device picker and the compact signal-path readout in the
-//! now-playing display.
+//! The output: which device plays and in which mode, the playback
+//! preferences in use (see `playback` for what they are), the device picker,
+//! and the compact signal-path readout in the now-playing display.
 
 use crate::icons::{self, Icon};
 use crate::playback::{NetworkProbe, PlaybackPrefs};

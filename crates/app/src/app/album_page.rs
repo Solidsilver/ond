@@ -4,6 +4,7 @@
 //! per-track measurements, folded away until asked for. Playlists reuse the
 //! track list.
 
+use super::{AnalysisAction, OfflineAction};
 use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
 use super::widgets::{chip, elide, heart_button, link};
@@ -232,7 +233,7 @@ impl ViewCtx<'_> {
         let tracks: &[Track] = slice.map_or(&[], |s| s);
         if self.download_key(ui) {
             let kept = self.downloads.snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
-            self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
+            self.actions.push(Action::Offline(OfflineAction::Keep(Keep::Album(id.to_owned()), !kept)));
         }
         let key = (super::view_ctx::hash_str(id), data.version, analysis.version, tracks.as_ptr() as usize, tracks.len());
         let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis));
@@ -377,7 +378,7 @@ impl ViewCtx<'_> {
             if !page.facts.summary.complete() && page.analysing == 0 && !tracks.is_empty() {
                 ui.separator();
                 if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {
-                    self.actions.push(Action::Analyze(tracks.to_vec()));
+                    self.actions.push(Action::Analysis(AnalysisAction::Tracks(tracks.to_vec())));
                 }
             }
             if !tracks.is_empty() {
@@ -428,7 +429,7 @@ impl ViewCtx<'_> {
                         .on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files")
                         .clicked()
                     {
-                        self.actions.push(Action::Analyze(tracks.to_vec()));
+                        self.actions.push(Action::Analysis(AnalysisAction::Tracks(tracks.to_vec())));
                     }
                 });
             } else {
@@ -452,7 +453,7 @@ impl ViewCtx<'_> {
         let pin = offline::Pin::Playlist(id.to_owned());
         let kept = self.downloads.snap.pin(&pin).is_some();
         if self.download_key(ui) {
-            self.actions.push(Action::KeepOffline(Keep::Playlist(id.to_owned()), !kept));
+            self.actions.push(Action::Offline(OfflineAction::Keep(Keep::Playlist(id.to_owned()), !kept)));
         }
 
         let art_side = (ui.available_width() * 0.3).clamp(120.0, 180.0);

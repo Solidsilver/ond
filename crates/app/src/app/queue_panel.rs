@@ -4,6 +4,7 @@
 //! The same column can show the playing track's lyrics (in the full window)
 //! or its details instead (Up Next · History · Lyrics · Info).
 
+use super::QueueEdit;
 use super::track_row::{TrackRow, col, length};
 use super::view_ctx::ViewCtx;
 use super::widgets::{choice, elide};
@@ -118,13 +119,13 @@ impl ViewCtx<'_> {
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
                 });
                 if end != self.player.queue.end {
-                    self.actions.push(Action::SetEnd(end));
+                    self.actions.push(Action::Queue(QueueEdit::SetEnd(end)));
                 }
                 if !self.player.queue.upcoming.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
                         if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text("Remove everything up next").clicked() {
-                            self.actions.push(Action::ClearQueue);
+                            self.actions.push(Action::Queue(QueueEdit::Clear));
                         }
                     });
                 }
@@ -250,7 +251,7 @@ impl ViewCtx<'_> {
                 if from < to {
                     to -= 1;
                 }
-                self.actions.push(Action::Move(*uid, to));
+                self.actions.push(Action::Queue(QueueEdit::Move(*uid, to)));
             }
         }
         if resp.clicked() {
@@ -258,21 +259,21 @@ impl ViewCtx<'_> {
             self.ui.focus = Focus::Queue;
         }
         if resp.double_clicked() {
-            self.actions.push(if index.is_some() { Action::JumpTo(item.uid) } else { Action::Replay(item.uid) });
+            self.actions.push(if index.is_some() { Action::Queue(QueueEdit::JumpTo(item.uid)) } else { Action::Queue(QueueEdit::Replay(item.uid)) });
         }
         resp.context_menu(|ui| {
             if index.is_some() {
                 if ui.button("Play now").clicked() {
-                    self.actions.push(Action::JumpTo(item.uid));
+                    self.actions.push(Action::Queue(QueueEdit::JumpTo(item.uid)));
                 }
                 if ui.button("Move to top").clicked() {
-                    self.actions.push(Action::Move(item.uid, 0));
+                    self.actions.push(Action::Queue(QueueEdit::Move(item.uid, 0)));
                 }
                 if ui.button("Remove").clicked() {
-                    self.actions.push(Action::Remove(item.uid));
+                    self.actions.push(Action::Queue(QueueEdit::Remove(item.uid)));
                 }
             } else if ui.button("Play again").clicked() {
-                self.actions.push(Action::Replay(item.uid));
+                self.actions.push(Action::Queue(QueueEdit::Replay(item.uid)));
             }
             ui.separator();
             if ui.button("Go to album").clicked() {
@@ -290,16 +291,16 @@ impl ViewCtx<'_> {
             self.ui.queue_ui.selected = Some(self.player.queue.upcoming[to].uid);
         }
         if k.move_up {
-            self.actions.push(Action::MoveBy(uid, -1));
+            self.actions.push(Action::Queue(QueueEdit::MoveBy(uid, -1)));
         }
         if k.move_down {
-            self.actions.push(Action::MoveBy(uid, 1));
+            self.actions.push(Action::Queue(QueueEdit::MoveBy(uid, 1)));
         }
         if k.remove {
-            self.actions.push(Action::Remove(uid));
+            self.actions.push(Action::Queue(QueueEdit::Remove(uid)));
         }
         if k.enter {
-            self.actions.push(Action::JumpTo(uid));
+            self.actions.push(Action::Queue(QueueEdit::JumpTo(uid)));
         }
         if k.escape {
             self.ui.queue_ui.selected = None;

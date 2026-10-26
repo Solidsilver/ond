@@ -3,6 +3,7 @@
 //! it. "Up next" grows it into the Player (see `now_playing_view`), whose
 //! bottom status line lives here too.
 
+use super::WindowAction;
 use super::widgets::elide;
 use super::seek::SeekStyle;
 use super::{Action, OndApp};
@@ -53,7 +54,7 @@ impl OndApp {
                 ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
             }
             if body.double_clicked() {
-                self.actions.push(Action::ToggleMini);
+                self.actions.push(Action::Window(WindowAction::ToggleMini));
             }
             let shown = ui.ctx().animate_bool_with_time(ui.scope_id().with("mini-hover"), ui.rect_contains_pointer(rect), 0.15);
             // At rest: a thin line inset from the edges, just to show where the
@@ -148,7 +149,7 @@ impl OndApp {
             let mut b = ui.new_child(UiBuilder::new().max_rect(r));
             on.apply(&mut b);
             if icons::sized_button(&mut b, icon, label, r.size(), 10.0, Some(on.fg)).clicked() {
-                self.actions.push(Action::SetMode(mode));
+                self.actions.push(Action::Window(WindowAction::SetMode(mode)));
             }
         }
     }

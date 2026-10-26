@@ -1,8 +1,15 @@
 //! What a view gets to work with: the library, playback, downloads and the
 //! rest to read, the window's own state to change, and a list of [`Action`]s
-//! to ask for everything else. A view that takes a `ViewCtx` can't start a
-//! request or touch the engine behind the app's back; the app applies the
+//! to ask for everything else. A view that takes a `ViewCtx` doesn't start a
+//! request or change playback behind the app's back; the app applies the
 //! actions after the frame.
+//!
+//! Some views are still `OndApp` methods: the toolbar, the sidebar, Settings
+//! and the other sheets, the Player's and Mini's frames, and the visualizer.
+//! They ask for changes with actions too, with two exceptions: the output
+//! picker (`Outputs::picker_ui`, in the toolbar and the Player's status bar)
+//! keeps its own state and switches bit-perfect on the spot, and the
+//! visualizer saves the one it switches to (←/→) as it switches.
 
 use super::{Action, Analysis, Data, Downloads, OndApp, SearchState, Session, SongStats, SyncState, UiState, diagnostics};
 use crate::art::Art;
@@ -28,7 +35,6 @@ pub struct ViewCtx<'a> {
     pub search: &'a mut SearchState,
     /// Lyrics by track id, as fetched so far.
     pub lyrics: &'a HashMap<String, crate::lyrics::Fetch>,
-    pub prefs: &'a crate::prefs::Prefs,
     pub song_stats: &'a HashMap<String, Option<SongStats>>,
     /// Artwork loads as it's first drawn.
     pub art: &'a mut Art,
@@ -74,11 +80,6 @@ impl<'a> ViewCtx<'a> {
         super::playable(self.session, self.downloads, track)
     }
 
-    /// Which experimental visuals are on.
-    pub fn experimental(&self) -> crate::visuals::Experimental {
-        self.prefs.get(|s| s.experimental)
-    }
-
     /// This frame's spectrum of what's playing, for a visual on screen;
     /// `None` unless playing. Not only a read: while playing, asking for it
     /// keeps frames coming at the meters' rate (so call it only for a visual
@@ -91,11 +92,6 @@ impl<'a> ViewCtx<'a> {
         self.ui.live.want(crate::visuals::METER);
         let (pass, now) = (ui.ctx().cumulative_pass_nr(), ui.input(|i| i.time));
         Some(self.ui.listener.frame(&self.engine.status.tap, pass, now).clone())
-    }
-
-    /// The Player's lyrics drawer is open.
-    pub fn lyrics_drawer(&self) -> bool {
-        self.prefs.get(|s| s.window.lyrics_open)
     }
 
     /// The album's download, when it's kept offline (found without making a
@@ -126,7 +122,6 @@ impl OndApp {
             sync: &self.sync,
             search: &mut self.search,
             lyrics: &self.lyrics,
-            prefs: &self.prefs,
             song_stats: &self.song_stats,
             art: &mut self.art,
             diagnostics: &mut self.diagnostics,

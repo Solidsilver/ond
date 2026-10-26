@@ -3,6 +3,7 @@
 //! it's from, the file and how it reaches the device, the loudness analysis
 //! when there is one, and the user's plays. It follows playback.
 
+use super::AnalysisAction;
 use super::album_page::{Credit, credits};
 use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use super::view_ctx::ViewCtx;
@@ -87,7 +88,7 @@ impl ViewCtx<'_> {
             }
 
             // Live, so near the top where it's seen.
-            if self.experimental().spectrogram {
+            if self.ui.prefs.experimental.spectrogram {
                 kv_section(ui, "Spectrogram");
                 self.spectrogram(ui);
             }
@@ -219,7 +220,7 @@ impl ViewCtx<'_> {
                     .on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files")
                     .clicked()
                 {
-                    self.actions.push(Action::Analyze(vec![track.clone()]));
+                    self.actions.push(Action::Analysis(AnalysisAction::Tracks(vec![track.clone()])));
                 }
             });
             return;

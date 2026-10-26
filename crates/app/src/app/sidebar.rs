@@ -63,7 +63,7 @@ impl OndApp {
             ui.label(egui::RichText::new("Playlists").font(FontId::new(11.0, semibold())).color(t.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::sized_button(ui, Icon::Plus, "New Playlist (⌘N)", vec2(20.0, 18.0), 9.0, Some(t.muted)).clicked() {
-                    self.actions.push(Action::Command(crate::keys::Cmd::NewPlaylist));
+                    self.actions.push(Action::NewPlaylist);
                 }
             });
         });
@@ -204,12 +204,8 @@ impl OndApp {
             ui.set_width(250.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             // Opening the popover refreshes the round trip if it's old.
-            if self.session.online
-                && self.diagnostics.latency_stale()
-                && let Some(c) = self.session.client.clone()
-            {
-                self.diagnostics.latency_asked();
-                self.bridge.measure_latency(c);
+            if self.session.online && self.diagnostics.latency_stale() {
+                self.actions.push(Action::MeasureLatency);
             }
             let (server, user) = self.session.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
             ui.add_space(6.0);
@@ -264,7 +260,7 @@ impl OndApp {
                     ui.add_space(8.0);
                     if super::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
                         if self.sync.tracks {
-                            self.bridge.cancel_sync();
+                            self.actions.push(Action::StopSync);
                         } else {
                             self.actions.push(Action::SyncNow);
                             ui.close();
@@ -296,7 +292,7 @@ impl OndApp {
         let t = Tokens::of(ui);
         let button = icons::sized_button(ui, Icon::Help, "Keyboard shortcuts (⌘/)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
         if button.clicked() {
-            self.actions.push(Action::Command(crate::keys::Cmd::Shortcuts));
+            self.actions.push(Action::ToggleShortcuts);
         }
     }
 

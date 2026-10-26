@@ -7,7 +7,7 @@
 //! or with the painter where there's no wgpu renderer to hand.
 
 use super::widgets::elide_job;
-use super::{Action, OndApp};
+use super::{Action, OndApp, WindowAction};
 use crate::visuals::visualizer::{Dot, Input, Kind, Pick, Picture, Rng, Scene, caption_alpha, name_alpha};
 use crate::visuals::{EVERY_FRAME, gpu};
 use egui::{Align2, Color32, FontId, Galley, Key, Modifiers, Rect, Ui, pos2, vec2};
@@ -158,9 +158,9 @@ impl OndApp {
     pub(super) fn toggle_visualizer(&mut self) {
         if self.ui.visualizer.is_some() {
             self.close_visualizer();
-        } else if self.experimental().visualizer {
+        } else if self.prefs_now().experimental.visualizer {
             let now = self.ctx.input(|i| i.time);
-            self.ui.visualizer = Some(VisualizerView::new(self.experimental().visualizer_pick, now, now.to_bits()));
+            self.ui.visualizer = Some(VisualizerView::new(self.prefs_now().experimental.visualizer_pick, now, now.to_bits()));
             self.ctx.request_repaint();
         }
     }
@@ -188,7 +188,7 @@ impl OndApp {
         let Some(v) = self.ui.visualizer.as_mut() else { return };
         let kind = v.kind().step(by);
         v.show(kind, now);
-        if self.experimental().visualizer_pick != Pick::Shuffle {
+        if self.prefs_now().experimental.visualizer_pick != Pick::Shuffle {
             self.prefs.edit(|s| s.experimental.visualizer_pick = Pick::of(kind));
         }
     }
@@ -217,7 +217,7 @@ impl OndApp {
             let album = current.and_then(|(_, t)| self.data.album(&t.album_id)).map(|a| a.name.as_str());
             let cover = current.and_then(|(_, t)| self.data.cover_for(t));
             let look = cover.and_then(|c| self.art.look(c));
-            let shuffle = self.experimental().visualizer_pick == Pick::Shuffle;
+            let shuffle = self.ui.prefs.experimental.visualizer_pick == Pick::Shuffle;
             let Some(v) = self.ui.visualizer.as_mut() else { return };
             v.follow(current.map(|(u, _)| u), cover, look.as_deref(), shuffle, now);
             let half = if rect.width() >= rect.height() { [rect.width() / rect.height().max(1.0), 1.0] } else { [1.0, rect.height() / rect.width().max(1.0)] };
@@ -246,7 +246,13 @@ impl OndApp {
     pub(super) fn leaves_visualizer(action: &Action) -> bool {
         matches!(
             action,
-            Action::Go(_) | Action::OpenPalette | Action::SetMode(_) | Action::ToggleMini | Action::TogglePlayer | Action::OpenSettings(_) | Action::Overlay(_) | Action::Lyrics | Action::Info
+            Action::Go(_)
+                | Action::OpenPalette
+                | Action::Window(WindowAction::SetMode(_) | WindowAction::ToggleMini | WindowAction::TogglePlayer)
+                | Action::OpenSettings(_)
+                | Action::Overlay(_)
+                | Action::Lyrics
+                | Action::Info
         )
     }
 }

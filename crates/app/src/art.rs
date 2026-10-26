@@ -87,6 +87,19 @@ impl<K: Clone + Eq + Hash> Lru<K> {
         evicted
     }
 
+    /// Keeps only the entries `keep` says to, and stops counting the rest.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        let mut dropped = 0;
+        self.entries.retain(|k, (_, w)| {
+            let kept = keep(k);
+            if !kept {
+                dropped += *w;
+            }
+            kept
+        });
+        self.total -= dropped;
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -208,6 +221,9 @@ impl Art {
         // Failures may have been "not connected yet".
         self.missing.clear();
         self.looks.retain(|_, l| l.palette.is_some());
+        // The dropped looks leave the LRU too, or they'd count against its
+        // budget and evict real ones.
+        self.looks_lru.retain(|cover| self.looks.contains_key(cover));
     }
 
     /// `cover` at `size`, numbering the cover the first time it's seen.
@@ -466,6 +482,19 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn lru_retain_drops_entries_and_their_weight() {
+        let mut l = Lru::new(100);
+        l.insert("a", 30);
+        l.insert("b", 30);
+        l.insert("c", 30);
+        l.retain(|k| *k != "b");
+        assert_eq!((l.len(), l.total()), (2, 60));
+        // Room again for what the dropped entry took: nothing is evicted.
+        assert!(l.insert("d", 40).is_empty());
+        assert_eq!(l.total(), 100);
     }
 
     #[test]

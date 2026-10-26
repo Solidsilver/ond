@@ -49,8 +49,8 @@ pub enum Msg {
     LoadFailed { key: ListKey, error: Option<String> },
     /// The server's artists (split from joined credits), sorted.
     Artists(Vec<library::Artist>),
-    /// Every stored track, grouped by album; sent after load and after a sync.
-    /// Every stored track, grouped and indexed (built here, off the UI thread).
+    /// Every stored track, grouped by album and indexed (built here, off the
+    /// UI thread); sent after load and after a sync.
     AllTracks(Box<crate::tracks::TrackSet>),
     TrackSync(sync::Progress),
     TrackSyncDone(sync::Outcome),
@@ -288,7 +288,7 @@ impl Bridge {
 
     /// Builds the search index on a worker (tens of ms on a big library) and
     /// sends it back tagged with `generation`, so a stale build can be dropped.
-    pub fn build_search(&self, generation: u64, albums: Vec<Album>, artists: Vec<library::Artist>, tracks: Arc<Vec<Track>>) {
+    pub fn build_search(&self, generation: u64, albums: Arc<Vec<Album>>, artists: Arc<Vec<library::Artist>>, tracks: Arc<Vec<Track>>) {
         let this = self.clone();
         self.rt.spawn_blocking(move || {
             let index = crate::search::SearchIndex::new(&albums, &artists, &tracks);
