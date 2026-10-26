@@ -41,6 +41,31 @@ pub(crate) fn file_source(dir: &tempfile::TempDir, name: &str, samples: &[i16]) 
     TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
 }
 
+/// A file that can only be read forward (`test-unseekable://` sources).
+pub(crate) struct Unseekable(pub std::fs::File);
+
+impl Read for Unseekable {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Seek for Unseekable {
+    fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unseekable"))
+    }
+}
+
+impl MediaSource for Unseekable {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
+
 fn config(buffer_secs: f32) -> EngineConfig {
     EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs }
 }
@@ -533,4 +558,19 @@ fn replay_gain_tags_are_read_by_standard_or_raw_key() {
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
 pub(crate) fn slack(d: std::time::Duration) -> std::time::Duration {
     if std::env::var_os("CI").is_some() { d * 10 } else { d }
+}
+
+#[test]
+fn a_seek_interrupts_a_push_on_a_frame_boundary() {
+    let (mut p, c) = RingBuffer::new(16);
+    let (cancel, seek) = (AtomicBool::new(false), AtomicBool::new(true));
+    // Half a stereo frame is in: the other half goes in before the push gives way.
+    let mut pushed = 3;
+    assert!(matches!(push_all(&mut p, &[0.5; 8], 2, &mut pushed, &cancel, &seek), Push::Interrupted));
+    assert_eq!((pushed, c.slots()), (4, 1));
+    assert!(matches!(push_all(&mut p, &[0.5; 8], 2, &mut pushed, &cancel, &seek), Push::Interrupted));
+    assert_eq!(pushed, 4, "on a boundary it stops at once");
+    seek.store(false, Ordering::Relaxed);
+    assert!(matches!(push_all(&mut p, &[0.5; 8], 2, &mut pushed, &cancel, &seek), Push::Done));
+    assert_eq!(pushed, 12);
 }

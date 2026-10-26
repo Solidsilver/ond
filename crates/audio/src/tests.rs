@@ -590,3 +590,101 @@ fn a_short_track_waits_for_its_next_to_be_named() {
     engine.send(Command::Shutdown);
 }
 
+#[test]
+fn a_seek_past_the_end_moves_on_to_the_next_track_from_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 20, 17), pcm(2 * 44_100, 18));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    // A is longer than the buffer: the decoder is still on it when the seek comes.
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 2.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    engine.send(Command::Seek(Duration::from_secs(100)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("b".to_owned(), true, false)], "B started once, from its start: {seen:?}");
+    let seeked: Vec<_> = seen.iter().filter(|e| matches!(e, Event::Seeked { .. })).collect();
+    assert!(matches!(seeked[..], [Event::Seeked { track_id, .. }] if track_id == "a"), "one Seeked, for A: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "b"));
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    assert!(out.ends_with(&b), "all of B played, from its first sample");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_past_the_end_after_the_decoder_moved_on_starts_the_next_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 3, 21), pcm(2 * 44_100, 22));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // Both fit the buffer: by now the decoder is done with A and on B, so the
+    // seek restarts A past its end, which has no audio left: B takes over.
+    thread::sleep(Duration::from_millis(100));
+    engine.send(Command::Seek(Duration::from_secs(100)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert_eq!(starts(&seen), [("b".to_owned(), false, false)], "B starts as itself, not as a restart: {seen:?}");
+    let seeked: Vec<_> = seen.iter().filter(|e| matches!(e, Event::Seeked { .. })).collect();
+    assert!(matches!(seeked[..], [Event::Seeked { track_id, .. }] if track_id == "a"), "one Seeked, for A: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "b"), "{seen:?}");
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    assert!(out.ends_with(&b), "all of B played, from its first sample");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_storm_settles_on_the_last_target_and_plays_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 30, 19);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 2.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    for i in 0..200u64 {
+        engine.send(Command::Seek(Duration::from_millis(100 + (i * 37) % 9_000)));
+        if i % 20 == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    engine.send(Command::Seek(Duration::from_secs(20)));
+    events_until(&engine, |e| matches!(e, Event::Seeked { position_secs, .. } if (*position_secs - 20.0).abs() < 0.1));
+    // Not left holding: playback carries on from there.
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while engine.status.position_secs() < 20.5 {
+        assert!(Instant::now() < deadline, "stuck at {:.2} s, {:?}", engine.status.position_secs(), engine.status.state());
+        thread::sleep(Duration::from_millis(10));
+    }
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 30, 20);
+    let src = file_source(&dir, "a", &a);
+    let src = TrackSource { url: src.url.replacen("file://", "test-unseekable://", 1), ..src };
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::Play(src));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    while engine.status.position_secs() < 2.0 {
+        assert!(Instant::now() < deadline, "never got going");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Backwards on a forward-only source.
+    engine.send(Command::Seek(Duration::ZERO));
+    let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
+    assert!(matches!(seen.last(), Some(Event::Error { track_id: Some(id), message }) if id == "a" && message.contains("seek")), "{seen:?}");
+    let deadline = Instant::now() + slack(Duration::from_secs(2));
+    while engine.status.state() != PlayState::Stopped {
+        assert!(Instant::now() < deadline, "still {:?}", engine.status.state());
+        thread::sleep(Duration::from_millis(10));
+    }
+    engine.send(Command::Shutdown);
+}
+

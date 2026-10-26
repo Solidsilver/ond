@@ -890,6 +890,9 @@ impl Engine {
         while self.out_seq < crossed && (self.out_seq as usize + 1) < self.tracks.len() {
             self.out_seq += 1;
             advanced = true;
+            // The output can't cross while it holds for a seek: one still on
+            // record is stale (it ended its track), and must not restart this one.
+            self.held_seek = None;
             // The UI names the new next once it hears about this track.
             self.forget_next();
             self.announce(true);
@@ -947,8 +950,10 @@ impl Engine {
             (t.src.id.clone(), t.src.token, t.format, t.total_frames, t.output.sample_rate);
         self.status.total_frames.store(total.unwrap_or(0), Ordering::Relaxed);
         self.status.sample_rate.store(rate, Ordering::Relaxed);
-        // Only the first announcement of a restarted session is a restart.
-        let restart = !gapless && std::mem::take(&mut self.restarting);
+        // Only the first announcement of a restarted session is a restart, and only
+        // if it's the track that was restarted (not the next one, when that had no audio left).
+        let restarted = self.opening.as_ref().is_some_and(|o| o.id == t.src.id && o.token == t.src.token);
+        let restart = !gapless && std::mem::take(&mut self.restarting) && restarted;
         let _ = self.events.send(Event::TrackStarted { track_id, token, format, gapless, restart });
     }
 }
