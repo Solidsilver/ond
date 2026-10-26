@@ -222,7 +222,7 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         // The waveform needs the room; the layout keeps it while that's on,
         // so nothing moves when the waveform arrives.
-        let wave = self.ui.prefs.experimental.waveform;
+        let wave = self.ui.prefs.waveform;
         let (rect, _) = ui.allocate_exact_size(vec2(width, if wave { 16.0 + WAVE_EXTRA } else { 16.0 }), Sense::hover());
         let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
         let style = SeekStyle {
@@ -647,7 +647,7 @@ impl OndApp {
             .frame(egui::Frame::new().fill(stage).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
             .show(ui, |ui| {
                 let full = ui.available_rect_before_wrap();
-                let wave = if self.ui.prefs.experimental.waveform { WAVE_EXTRA } else { 0.0 };
+                let wave = if self.ui.prefs.waveform { WAVE_EXTRA } else { 0.0 };
                 let below = BELOW_ART_H + wave + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
 
                 let side = full.width().min(full.height() - below).max(120.0).floor();

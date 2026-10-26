@@ -60,9 +60,9 @@ impl ViewCtx<'_> {
         let painter = ui.painter();
         let grabbed = resp.hovered() || self.ui.seek_preview.is_some();
         let shown = self.ui.seek_preview.unwrap_or_else(|| self.position_secs());
-        let x_prefs = self.ui.prefs.experimental;
-        let wave = if s.wave_h > 0.0 && x_prefs.waveform {
-            let grid = WaveGrid::along(bar, painter.pixels_per_point(), x_prefs.waveform_bars);
+        let look = self.ui.prefs.waveform_bars;
+        let wave = if s.wave_h > 0.0 && self.ui.prefs.waveform {
+            let grid = WaveGrid::along(bar, painter.pixels_per_point(), look);
             let id = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
             id.and_then(|id| self.waveforms.bars(&id, grid.n)).map(|bars| (grid, bars))
         } else {
@@ -71,7 +71,7 @@ impl ViewCtx<'_> {
         let line = if grabbed && wave.is_none() { bar.expand2(vec2(0.0, s.grow)) } else { bar };
         let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
         if let Some((grid, bars)) = wave {
-            paint_wave(painter, line, &grid, &bars, x, x_prefs.waveform_bars.rounded, s.wave_h, s.fill);
+            paint_wave(painter, line, &grid, &bars, x, look.rounded, s.wave_h, s.fill);
         } else {
             painter.rect_filled(line, s.radius, s.track);
             if let Some(f) = self.engine.status.fetched_fraction() {

@@ -254,7 +254,7 @@ pub struct OndApp {
     song_stats: HashMap<String, Option<SongStats>>,
     /// The diagnostics bar: whether it's on, and what it measures.
     diagnostics: diagnostics::Diagnostics,
-    /// Track waveforms for the seek bar (experimental).
+    /// Track waveforms for the seek bar.
     waveforms: crate::visuals::waveform::Waveforms,
     /// What the window renders to, for the visualizer's own GPU drawing;
     /// `None` without a wgpu renderer (it then uses the painter).

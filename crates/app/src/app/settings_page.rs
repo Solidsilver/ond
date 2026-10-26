@@ -19,6 +19,7 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 pub enum Section {
     #[default]
     General,
+    Appearance,
     Playback,
     Output,
     Offline,
@@ -28,11 +29,12 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [Section::General, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
+    pub const ALL: [Section; 8] = [Section::General, Section::Appearance, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::General => "General",
+            Section::Appearance => "Appearance",
             Section::Playback => "Playback",
             Section::Output => "Output",
             Section::Offline => "Offline",
@@ -89,6 +91,7 @@ impl OndApp {
                         ui.add_space(16.0);
                         match self.ui.settings_section {
                             Section::General => self.general_settings(ui),
+                            Section::Appearance => self.appearance_settings(ui),
                             Section::Playback => self.playback_settings(ui, width),
                             Section::Output => self.output_settings(ui),
                             Section::Offline => self.offline_settings(ui),
@@ -107,26 +110,6 @@ impl OndApp {
     }
 
     fn general_settings(&mut self, ui: &mut Ui) {
-        group(ui, "Appearance", |ui| {
-            row(ui, "Theme", |ui| {
-                let mut theme = self.ui.prefs.theme;
-                if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
-                    self.actions.push(Action::Prefs(PrefsAction::Theme(theme)));
-                }
-            });
-            row(ui, "Accent color", |ui| {
-                let mut accent = self.ui.prefs.accent;
-                if accent_swatches(ui, &mut accent) {
-                    self.actions.push(Action::Prefs(PrefsAction::Accent(accent)));
-                }
-            });
-            ui.add_space(10.0);
-            let mut adapt = self.ui.prefs.adapt_colors;
-            if narrow_toggle(ui, &mut adapt, "Adapt colors to the album art").changed() {
-                self.actions.push(Action::Prefs(PrefsAction::AdaptColors(adapt)));
-            }
-            hint(ui, "The accent, the now-playing display and the Player take their colors from the playing album's cover, and an album's page from its own. Text keeps its contrast. Covers without much color use the accent color.");
-        });
         group(ui, "Listening", |ui| {
             let mut scrobble = self.ui.prefs.scrobble;
             if narrow_toggle(ui, &mut scrobble, "Scrobble plays").changed() {
@@ -153,6 +136,53 @@ impl OndApp {
                     self.actions.push(Action::Window(WindowAction::SetSystemTitleBar(system)));
                 }
                 hint(ui, "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.");
+            }
+        });
+    }
+
+    /// How Ond looks: its colors, the artwork behind the Player and Mini, and
+    /// the seek bar.
+    fn appearance_settings(&mut self, ui: &mut Ui) {
+        group(ui, "Colors", |ui| {
+            row(ui, "Theme", |ui| {
+                let mut theme = self.ui.prefs.theme;
+                if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
+                    self.actions.push(Action::Prefs(PrefsAction::Theme(theme)));
+                }
+            });
+            row(ui, "Accent color", |ui| {
+                let mut accent = self.ui.prefs.accent;
+                if accent_swatches(ui, &mut accent) {
+                    self.actions.push(Action::Prefs(PrefsAction::Accent(accent)));
+                }
+            });
+            ui.add_space(10.0);
+            let mut adapt = self.ui.prefs.adapt_colors;
+            if narrow_toggle(ui, &mut adapt, "Adapt colors to the album art").changed() {
+                self.actions.push(Action::Prefs(PrefsAction::AdaptColors(adapt)));
+            }
+            hint(ui, "The accent, the now-playing display and the Player take their colors from the playing album's cover, and an album's page from its own. Text keeps its contrast. Covers without much color use the accent color.");
+        });
+        group(ui, "Artwork", |ui| {
+            let mut on = self.ui.prefs.backdrop;
+            if narrow_toggle(ui, &mut on, "Blurred artwork behind the Player and Mini").changed() {
+                self.actions.push(Action::Prefs(PrefsAction::Backdrop(on)));
+            }
+            hint(ui, "A soft, dimmed copy of the cover fills the background, and fades to the next one when the track changes.");
+        });
+        group(ui, "Seek bar", |ui| {
+            let mut on = self.ui.prefs.waveform;
+            if narrow_toggle(ui, &mut on, "Waveform seek bar").changed() {
+                self.actions.push(Action::Prefs(PrefsAction::Waveform(on)));
+            }
+            hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
+            if on {
+                ui.add_space(10.0);
+                let mut bars = self.ui.prefs.waveform_bars;
+                waveform_bar_settings(ui, &mut bars);
+                if bars != self.ui.prefs.waveform_bars {
+                    self.actions.push(Action::Prefs(PrefsAction::WaveformBars(bars)));
+                }
             }
         });
     }
@@ -373,20 +403,8 @@ impl OndApp {
     fn experimental_settings(&mut self, ui: &mut Ui) {
         let mut x = self.ui.prefs.experimental;
         let before = x;
-        hint(ui, "Visual features that are still being tried out. They may change or go away.");
+        hint(ui, "Visual features that are still being tried out. They may change or go away, and their settings may not carry over to the next version, even when a feature moves out of Experimental.");
         ui.add_space(20.0);
-        group(ui, "Artwork", |ui| {
-            narrow_toggle(ui, &mut x.backdrop, "Blurred artwork behind the Player and Mini");
-            hint(ui, "A soft, dimmed copy of the cover fills the background, and fades to the next one when the track changes.");
-        });
-        group(ui, "Seek bar", |ui| {
-            narrow_toggle(ui, &mut x.waveform, "Waveform seek bar");
-            hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
-            if x.waveform {
-                ui.add_space(10.0);
-                waveform_bar_settings(ui, &mut x.waveform_bars);
-            }
-        });
         group(ui, "Live audio", |ui| {
             narrow_toggle(ui, &mut x.spectrum, "Live spectrum");
             hint(ui, "A small spectrum of what's playing, in the now-playing display and the Player. It redraws continuously while music plays, which uses more battery.");

@@ -19,7 +19,7 @@ const LOOK_EVERY: Duration = Duration::from_secs(1);
 
 type Done = (String, Option<Peaks>);
 
-/// How the waveform's bars look (Settings › Experimental): their ends, and
+/// How the waveform's bars look (Settings › Appearance): their ends, and
 /// how thick and how far apart, in half points (each rounds to whole pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

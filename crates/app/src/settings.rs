@@ -57,6 +57,14 @@ pub struct Settings {
     /// the Player take the playing cover's, and an album's page its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub adapt_colors: bool,
+    /// A blurred copy of the cover behind the Player and Mini.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub backdrop: bool,
+    /// The track's waveform as the seek bar, and how its bars look.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waveform: bool,
+    #[serde(default)]
+    pub waveform_bars: crate::visuals::waveform::Bars,
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
@@ -123,6 +131,9 @@ impl Default for Settings {
             theme: Default::default(),
             accent: Default::default(),
             adapt_colors: false,
+            backdrop: false,
+            waveform: false,
+            waveform_bars: Default::default(),
             show_queue: true,
             window: Default::default(),
             scrobble: true,
@@ -265,9 +276,20 @@ mod tests {
         let mut s: Settings = serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"art_colors": true, "backdrop": true}}"#).unwrap();
         s.migrate();
         assert!(s.adapt_colors);
-        assert!(s.experimental.backdrop && !s.experimental.art_colors);
+        assert!(!s.experimental.art_colors);
         let saved = serde_json::to_string(&s).unwrap();
         assert!(!saved.contains("art_colors"), "{saved}");
+    }
+
+    #[test]
+    fn appearance_switches_start_off_and_experiments_that_moved_start_over() {
+        let fresh = Settings::default();
+        assert!(!fresh.backdrop && !fresh.waveform && !fresh.adapt_colors && fresh.experimental.all_off());
+        // An experiment's switch isn't carried over when the feature moves
+        // out of Experimental: the old key is dropped, the rest still reads.
+        let mut s: Settings = serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"backdrop": true, "waveform": true, "spectrum": true}}"#).unwrap();
+        s.migrate();
+        assert!(!s.backdrop && !s.waveform && s.experimental.spectrum);
     }
 
     #[cfg(target_os = "macos")]
