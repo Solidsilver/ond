@@ -629,6 +629,78 @@ fn a_seek_while_reconnecting_is_not_lost() {
     assert_eq!(starts.lock().unwrap()[2], far);
 }
 
+/// A server that declares more than it has (an estimated transcode length, a
+/// truncated file) answers 416 for the missing tail. The file ends where the
+/// data does, instead of re-requesting the tail forever.
+#[test]
+fn a_declared_length_past_the_real_end_ends_at_the_data() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let body = data(300_000);
+    let server = Server::start(body.clone(), Opts { declared_extra: 50_000, ..FAST });
+    let key = CacheKey::new("long", None);
+
+    let src = cache.open(&key, &server.url, never()).unwrap();
+    assert_eq!(src.byte_len(), Some(350_000));
+    let (out, src) = read_to_end_within(src, 0, slack(Duration::from_secs(5)));
+    assert_bytes(&out.unwrap(), &body);
+    assert_eq!(src.byte_len(), Some(300_000), "the reader learns the real length");
+
+    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 300_000);
+    assert_bytes(&std::fs::read(dir.path().join("long")).unwrap(), &body);
+    assert_eq!(server.requests(), [Some(0), Some(300_000)]);
+}
+
+/// `Content-Range: bytes a-b/*` never says how long the file is. A relocated
+/// request running to the end tells us, but the part skipped before it must
+/// still be fetched before the file counts as complete.
+#[test]
+fn ranges_without_a_total_fill_the_skipped_part() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let body = data(2_000_000);
+    let server = Server::start(body.clone(), Opts { star_total: true, delay: Duration::from_millis(5), ..FAST });
+    let key = CacheKey::new("star", None);
+
+    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    assert_eq!(src.byte_len(), None);
+    assert_eq!(read_at(&mut src, 0, 1024), body[..1024]);
+    assert_eq!(read_at(&mut src, 1_500_000, 64 * 1024), body[1_500_000..1_500_000 + 64 * 1024]);
+    assert!(server.requests().contains(&Some(1_500_000)), "no ranged request: {:?}", server.requests());
+
+    let (out, _src) = read_to_end_within(src, 0, slack(Duration::from_secs(10)));
+    assert_bytes(&out.unwrap(), &body);
+    wait_until("completion", slack(Duration::from_secs(5)), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 2_000_000);
+    assert_bytes(&std::fs::read(dir.path().join("star")).unwrap(), &body);
+}
+
+/// With no total, a seek past the real end is only found out by the server's
+/// 416. The reader gets the end of the file, and the download still completes
+/// at the right length.
+#[test]
+fn a_seek_past_the_end_of_a_file_without_a_total_reads_as_the_end() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let body = data(1_000_000);
+    let server = Server::start(body.clone(), Opts { star_total: true, delay: Duration::from_millis(5), ..FAST });
+    let key = CacheKey::new("past", None);
+
+    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    assert_eq!(read_at(&mut src, 0, 1024), body[..1024]);
+    let (tail, src) = read_to_end_within(src, 1_800_000, slack(Duration::from_secs(5)));
+    assert_eq!(tail.unwrap().len(), 0);
+    assert!(server.requests().contains(&Some(1_800_000)), "no ranged request: {:?}", server.requests());
+
+    let (out, _src) = read_to_end_within(src, 0, slack(Duration::from_secs(10)));
+    assert_bytes(&out.unwrap(), &body);
+    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 1_000_000);
+    assert_bytes(&std::fs::read(dir.path().join("past")).unwrap(), &body);
+}
+
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
 fn slack(d: std::time::Duration) -> std::time::Duration {

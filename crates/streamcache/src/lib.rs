@@ -498,7 +498,10 @@ impl Read for StreamReader {
         let dl = &self.hold.dl;
         let mut st = dl.lock();
         loop {
-            if let Some(len) = st.len
+            // The length can arrive late (a stream that didn't declare one) or
+            // shrink (one that declared more than it has).
+            self.len = st.len.or(self.len);
+            if let Some(len) = self.len
                 && self.pos >= len
             {
                 return Ok(0);
@@ -526,8 +529,6 @@ impl Read for StreamReader {
                 dl.wake.notify_one();
             }
             st = dl.cond.wait_timeout(st, POLL).unwrap_or_else(|e| e.into_inner()).0;
-            // A length may have arrived with the first bytes of an unknown-length stream.
-            self.len = self.len.or(st.len);
         }
     }
 }
@@ -537,7 +538,7 @@ impl Seek for StreamReader {
         let target = match to {
             SeekFrom::Start(n) => Some(n),
             SeekFrom::Current(d) => self.pos.checked_add_signed(d),
-            SeekFrom::End(d) => match self.len.or(self.hold.dl.lock().len) {
+            SeekFrom::End(d) => match self.hold.dl.lock().len.or(self.len) {
                 Some(len) => len.checked_add_signed(d),
                 None => return Err(io::Error::new(io::ErrorKind::Unsupported, "length unknown")),
             },
