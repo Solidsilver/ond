@@ -1,9 +1,10 @@
-//! Visuals. Two are settled: the app's colors (the chosen accent, or the
-//! album art's when colors adapt to it; see [`colors`]) and how controls
-//! drawn over artwork stay readable ([`over_art`]). The rest are experiments,
-//! each behind its own switch in Settings › Experimental and all off by
-//! default. With every switch off, none of those runs: no audio tap, no
-//! extra frames.
+//! Visuals. Some are settled: the app's colors (the chosen accent, or the
+//! album art's when colors adapt to it; see [`colors`]), how controls drawn
+//! over artwork stay readable ([`over_art`]), and, each behind a switch in
+//! Settings › Appearance, the blurred artwork ([`backdrop`]) and the waveform
+//! seek bar ([`waveform`]). The rest are experiments, each behind its own
+//! switch in Settings › Experimental. Every switch is off by default, and
+//! with them off none of those runs: no audio tap, no extra frames.
 //!
 //! The ones that move (a live spectrum, the visualizer) ask for frames through
 //! [`Live`], and only while they're on screen and something plays; otherwise
@@ -35,12 +36,6 @@ pub struct Experimental {
     /// setting now (`Settings::adapt_colors`, see `Settings::migrate`).
     #[serde(skip_serializing)]
     pub art_colors: bool,
-    /// A blurred copy of the cover behind the Player and Mini.
-    pub backdrop: bool,
-    /// The track's waveform as the seek bar.
-    pub waveform: bool,
-    /// Its bars with rounded ends rather than square.
-    pub waveform_rounded: bool,
     /// A small live spectrum in the now-playing display and the Player.
     pub spectrum: bool,
     /// The full-window visualizer (⌘T).
@@ -112,8 +107,8 @@ mod tests {
         let read: Experimental = serde_json::from_str("{}").unwrap();
         assert!(read.all_off());
         // A newer file with a switch this build doesn't know still reads.
-        let read: Experimental = serde_json::from_str(r#"{"waveform": true, "hologram": true}"#).unwrap();
-        assert!(read.waveform && !read.spectrum);
+        let read: Experimental = serde_json::from_str(r#"{"spectrum": true, "hologram": true}"#).unwrap();
+        assert!(read.spectrum && !read.visualizer);
         // The visualizer's choice reads, and one this build doesn't know is the default.
         let read: Experimental = serde_json::from_str(r#"{"visualizer": true, "visualizer_pick": "ribbons"}"#).unwrap();
         assert_eq!(read.visualizer_pick, visualizer::Pick::Ribbons);

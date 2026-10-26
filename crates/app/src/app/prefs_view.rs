@@ -5,6 +5,7 @@ use super::{OndApp, layout};
 use crate::prefs::Prefs;
 use crate::theme::{Accent, ThemePref};
 use crate::visuals::Experimental;
+use crate::visuals::waveform::Bars;
 use crate::window::WindowMode;
 
 /// The preferences the app reads, copied out under one lock. A frame reads
@@ -30,6 +31,11 @@ pub struct PrefsView {
     pub accent: Accent,
     /// Whether colors adapt to the album art.
     pub adapt_colors: bool,
+    /// The blurred cover behind the Player and Mini.
+    pub backdrop: bool,
+    /// The waveform seek bar, and how its bars look.
+    pub waveform: bool,
+    pub waveform_bars: Bars,
     pub scrobble: bool,
     /// The diagnostics bar is shown.
     pub diagnostics_bar: bool,
@@ -54,6 +60,9 @@ impl PrefsView {
             theme: s.theme,
             accent: s.accent,
             adapt_colors: s.adapt_colors,
+            backdrop: s.backdrop,
+            waveform: s.waveform,
+            waveform_bars: s.waveform_bars,
             scrobble: s.scrobble,
             diagnostics_bar: s.diagnostics_bar,
             experimental: s.experimental,
@@ -71,6 +80,11 @@ pub enum PrefsAction {
     Accent(Accent),
     /// Whether colors adapt to the album art.
     AdaptColors(bool),
+    /// The blurred cover behind the Player and Mini.
+    Backdrop(bool),
+    /// The waveform seek bar, and how its bars look.
+    Waveform(bool),
+    WaveformBars(Bars),
     Scrobble(bool),
     /// Show or hide the diagnostics bar.
     Diagnostics(bool),
@@ -87,6 +101,9 @@ impl OndApp {
             }
             PrefsAction::Accent(accent) => self.prefs.edit(|s| s.accent = accent),
             PrefsAction::AdaptColors(on) => self.prefs.edit(|s| s.adapt_colors = on),
+            PrefsAction::Backdrop(on) => self.prefs.edit(|s| s.backdrop = on),
+            PrefsAction::Waveform(on) => self.prefs.edit(|s| s.waveform = on),
+            PrefsAction::WaveformBars(bars) => self.prefs.edit(|s| s.waveform_bars = bars),
             PrefsAction::Scrobble(on) => {
                 self.now_playing.set_scrobbling(on);
                 self.prefs.edit(|s| s.scrobble = on);

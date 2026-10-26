@@ -8,7 +8,9 @@ use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, s
 use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
+use super::seek::{WaveGrid, paint_wave};
 use crate::visuals::visualizer::Pick;
+use crate::visuals::waveform::{self, Bars};
 use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
@@ -17,6 +19,7 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 pub enum Section {
     #[default]
     General,
+    Appearance,
     Playback,
     Output,
     Offline,
@@ -26,11 +29,12 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [Section::General, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
+    pub const ALL: [Section; 8] = [Section::General, Section::Appearance, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::General => "General",
+            Section::Appearance => "Appearance",
             Section::Playback => "Playback",
             Section::Output => "Output",
             Section::Offline => "Offline",
@@ -87,6 +91,7 @@ impl OndApp {
                         ui.add_space(16.0);
                         match self.ui.settings_section {
                             Section::General => self.general_settings(ui),
+                            Section::Appearance => self.appearance_settings(ui),
                             Section::Playback => self.playback_settings(ui, width),
                             Section::Output => self.output_settings(ui),
                             Section::Offline => self.offline_settings(ui),
@@ -105,26 +110,6 @@ impl OndApp {
     }
 
     fn general_settings(&mut self, ui: &mut Ui) {
-        group(ui, "Appearance", |ui| {
-            row(ui, "Theme", |ui| {
-                let mut theme = self.ui.prefs.theme;
-                if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
-                    self.actions.push(Action::Prefs(PrefsAction::Theme(theme)));
-                }
-            });
-            row(ui, "Accent color", |ui| {
-                let mut accent = self.ui.prefs.accent;
-                if accent_swatches(ui, &mut accent) {
-                    self.actions.push(Action::Prefs(PrefsAction::Accent(accent)));
-                }
-            });
-            ui.add_space(10.0);
-            let mut adapt = self.ui.prefs.adapt_colors;
-            if narrow_toggle(ui, &mut adapt, "Adapt colors to the album art").changed() {
-                self.actions.push(Action::Prefs(PrefsAction::AdaptColors(adapt)));
-            }
-            hint(ui, "The accent, the now-playing display and the Player take their colors from the playing album's cover, and an album's page from its own. Text keeps its contrast. Covers without much color use the accent color.");
-        });
         group(ui, "Listening", |ui| {
             let mut scrobble = self.ui.prefs.scrobble;
             if narrow_toggle(ui, &mut scrobble, "Scrobble plays").changed() {
@@ -151,6 +136,53 @@ impl OndApp {
                     self.actions.push(Action::Window(WindowAction::SetSystemTitleBar(system)));
                 }
                 hint(ui, "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.");
+            }
+        });
+    }
+
+    /// How Ond looks: its colors, the artwork behind the Player and Mini, and
+    /// the seek bar.
+    fn appearance_settings(&mut self, ui: &mut Ui) {
+        group(ui, "Colors", |ui| {
+            row(ui, "Theme", |ui| {
+                let mut theme = self.ui.prefs.theme;
+                if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
+                    self.actions.push(Action::Prefs(PrefsAction::Theme(theme)));
+                }
+            });
+            row(ui, "Accent color", |ui| {
+                let mut accent = self.ui.prefs.accent;
+                if accent_swatches(ui, &mut accent) {
+                    self.actions.push(Action::Prefs(PrefsAction::Accent(accent)));
+                }
+            });
+            ui.add_space(10.0);
+            let mut adapt = self.ui.prefs.adapt_colors;
+            if narrow_toggle(ui, &mut adapt, "Adapt colors to the album art").changed() {
+                self.actions.push(Action::Prefs(PrefsAction::AdaptColors(adapt)));
+            }
+            hint(ui, "The accent, the now-playing display and the Player take their colors from the playing album's cover, and an album's page from its own. Text keeps its contrast. Covers without much color use the accent color.");
+        });
+        group(ui, "Artwork", |ui| {
+            let mut on = self.ui.prefs.backdrop;
+            if narrow_toggle(ui, &mut on, "Blurred artwork behind the Player and Mini").changed() {
+                self.actions.push(Action::Prefs(PrefsAction::Backdrop(on)));
+            }
+            hint(ui, "A soft, dimmed copy of the cover fills the background, and fades to the next one when the track changes.");
+        });
+        group(ui, "Seek bar", |ui| {
+            let mut on = self.ui.prefs.waveform;
+            if narrow_toggle(ui, &mut on, "Waveform seek bar").changed() {
+                self.actions.push(Action::Prefs(PrefsAction::Waveform(on)));
+            }
+            hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
+            if on {
+                ui.add_space(10.0);
+                let mut bars = self.ui.prefs.waveform_bars;
+                waveform_bar_settings(ui, &mut bars);
+                if bars != self.ui.prefs.waveform_bars {
+                    self.actions.push(Action::Prefs(PrefsAction::WaveformBars(bars)));
+                }
             }
         });
     }
@@ -371,20 +403,8 @@ impl OndApp {
     fn experimental_settings(&mut self, ui: &mut Ui) {
         let mut x = self.ui.prefs.experimental;
         let before = x;
-        hint(ui, "Visual features that are still being tried out. They may change or go away.");
+        hint(ui, "Visual features that are still being tried out. They may change or go away, and their settings may not carry over to the next version, even when a feature moves out of Experimental.");
         ui.add_space(20.0);
-        group(ui, "Artwork", |ui| {
-            narrow_toggle(ui, &mut x.backdrop, "Blurred artwork behind the Player and Mini");
-            hint(ui, "A soft, dimmed copy of the cover fills the background, and fades to the next one when the track changes.");
-        });
-        group(ui, "Seek bar", |ui| {
-            narrow_toggle(ui, &mut x.waveform, "Waveform seek bar");
-            hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
-            if x.waveform {
-                ui.add_space(10.0);
-                narrow_toggle(ui, &mut x.waveform_rounded, "Rounded bars");
-            }
-        });
         group(ui, "Live audio", |ui| {
             narrow_toggle(ui, &mut x.spectrum, "Live spectrum");
             hint(ui, "A small spectrum of what's playing, in the now-playing display and the Player. It redraws continuously while music plays, which uses more battery.");
@@ -558,6 +578,82 @@ fn db_row(ui: &mut Ui, label: &str, db: &mut f32, range: std::ops::RangeInclusiv
         let (r, _) = ui.allocate_exact_size(vec2(56.0, 18.0), Sense::hover());
         ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, readout, FontId::proportional(12.0), t.muted);
     });
+}
+
+/// The waveform's bars (their ends, thickness and spacing) beside a
+/// preview of them, or above it when the pane is narrow.
+fn waveform_bar_settings(ui: &mut Ui, bars: &mut Bars) {
+    const CONTROLS_W: f32 = 300.0;
+    let width = ui.available_width();
+    let wide = width >= CONTROLS_W + 16.0 + 160.0;
+    // Narrow, the sliders give up length so their readouts stay in the pane.
+    let slider = if wide { 116.0 } else { (width - LABEL_W - 64.0).clamp(48.0, 116.0) };
+    let controls = |ui: &mut Ui, bars: &mut Bars| {
+        row(ui, "Bars", |ui| {
+            choice(ui, &[false, true], &mut bars.rounded, None, |r| if r { "Rounded" } else { "Square" }.into());
+        });
+        step_row(ui, "Thickness", &mut bars.width, Bars::WIDTHS, slider, half_points);
+        step_row(ui, "Spacing", &mut bars.gap, Bars::GAPS, slider, half_points);
+    };
+    if wide {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(CONTROLS_W);
+                controls(ui, bars);
+            });
+            ui.add_space(16.0);
+            waveform_preview(ui, *bars, width - CONTROLS_W - 16.0);
+        });
+    } else {
+        controls(ui, bars);
+        ui.add_space(8.0);
+        waveform_preview(ui, *bars, width);
+    }
+    hint(ui, "The preview shows the seek bar in the Player, and below it the one in the now-playing display.");
+}
+
+/// A made-up waveform's bars as `look` draws them, at the Player's size and
+/// the now-playing display's, part played, `width` wide.
+fn waveform_preview(ui: &mut Ui, look: Bars, width: f32) {
+    let t = Tokens::of(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 96.0), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter();
+    painter.rect(rect, 8.0, t.bg, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+    let inner = rect.shrink2(vec2(14.0, 0.0));
+    for (y, wave_h, fill) in [(rect.top() + 36.0, 13.0, t.text), (rect.bottom() - 22.0, 4.0, t.muted)] {
+        let line = Rect::from_center_size(pos2(inner.center().x, y), vec2(inner.width(), 2.0));
+        let grid = WaveGrid::along(line, painter.pixels_per_point(), look);
+        paint_wave(painter, line, &grid, &waveform::sample(grid.n), line.left() + line.width() * 0.4, look.rounded, wave_h, fill);
+    }
+}
+
+/// A whole-number setting in `range` on a thin slider, with its value read
+/// out. The slider's own position is kept between frames, so the wheel and
+/// the arrow keys, which move it a little at a time, add up to a step.
+fn step_row(ui: &mut Ui, label: &str, value: &mut u8, range: std::ops::RangeInclusive<u8>, slider: f32, readout: fn(u8) -> String) {
+    let t = Tokens::of(ui);
+    let (lo, hi) = (*range.start(), *range.end());
+    let span = f32::from(hi - lo);
+    let at = (*value).clamp(lo, hi);
+    let snapped = |v: f32| lo + (v * span).round() as u8;
+    row(ui, label, |ui| {
+        let id = ui.scope_id().with(("step", label));
+        let mut v = ui.data(|d| d.get_temp::<f32>(id)).filter(|&v| snapped(v) == at).unwrap_or(f32::from(at - lo) / span);
+        if thin_slider(ui, &mut v, slider, label).changed() {
+            ui.data_mut(|d| d.insert_temp(id, v));
+            *value = snapped(v);
+        }
+        let (r, _) = ui.allocate_exact_size(vec2(44.0, 18.0), Sense::hover());
+        ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, readout((*value).clamp(lo, hi)), FontId::proportional(12.0), t.muted);
+    });
+}
+
+/// Half points as points: "1 pt", "1.5 pt".
+fn half_points(v: u8) -> String {
+    if v.is_multiple_of(2) { format!("{} pt", v / 2) } else { format!("{}.5 pt", v / 2) }
 }
 
 /// A switch row kept to a readable width, so the switch sits near its label.

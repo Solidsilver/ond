@@ -273,8 +273,8 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
     type Switch = fn(&mut crate::settings::Settings);
     let features: [(&str, Switch); 4] = [
         ("colors from the art", |s| s.adapt_colors = true),
-        ("blurred artwork", |s| s.experimental.backdrop = true),
-        ("waveform seek bar", |s| s.experimental.waveform = true),
+        ("blurred artwork", |s| s.backdrop = true),
+        ("waveform seek bar", |s| s.waveform = true),
         ("live spectrum", |s| s.experimental.spectrum = true),
     ];
     println!("experimental visuals, mean frame time off → on:");

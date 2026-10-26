@@ -28,7 +28,7 @@ impl ThemePref {
     }
 }
 
-/// The accent color (Settings › General): one of a few presets, chosen for
+/// The accent color (Settings › Appearance): one of a few presets, chosen for
 /// each theme, or the user's own, held to the theme's contrast.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

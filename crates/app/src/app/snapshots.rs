@@ -520,7 +520,19 @@ fn adapt(h: &mut Harness<'_, Option<OndApp>>) {
 fn experiment(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::visuals::Experimental)) {
     let mut x = crate::visuals::Experimental::default();
     on(&mut x);
-    app_mut(h).prefs.edit(|s| s.experimental = x);
+    looks(h, |s| s.experimental = x);
+}
+
+/// Turns the visuals that can be turned on (Appearance's and Experimental's)
+/// off, then `on` the ones a scene shows.
+fn looks(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::settings::Settings)) {
+    app_mut(h).prefs.edit(|s| {
+        s.backdrop = false;
+        s.waveform = false;
+        s.waveform_bars = Default::default();
+        s.experimental = Default::default();
+        on(s);
+    });
 }
 
 /// Waits for the playing cover's look and the album page's (worked out in
@@ -1128,7 +1140,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The user's own (a bright yellow, darkened or lightened to read), and the picker.
     reset(h, FULL, Route::Recent);
     app_mut(h).prefs.edit(|s| s.accent = theme::Accent::Custom([0xF5, 0xC5, 0x18]));
-    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Appearance));
     h.run_steps(2);
     h.get_by_label("Custom color…").click();
     s.shoot(h, "settings-accent-picker");
@@ -1368,13 +1380,13 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // under Mini's controls, and halfway through the fade to the next cover.
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
-    experiment(h, |x| x.backdrop = true);
+    looks(h, |s| s.backdrop = true);
     settle_look(h);
     s.shoot(h, "x-backdrop-player");
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     play_blue(app_mut(h));
-    experiment(h, |x| x.backdrop = true);
+    looks(h, |s| s.backdrop = true);
     adapt(h);
     settle_look(h);
     s.shoot(h, "x-backdrop-colors-player");
@@ -1393,7 +1405,7 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot_now(h, "x-backdrop-crossfade");
     reset(h, vec2(280.0, 280.0), Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
-    experiment(h, |x| x.backdrop = true);
+    looks(h, |s| s.backdrop = true);
     settle_look(h);
     h.hover_at(pos2(140.0, 140.0));
     h.run_steps(6);
@@ -1404,7 +1416,7 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     play_white(app_mut(h));
-    experiment(h, |x| x.backdrop = true);
+    looks(h, |s| s.backdrop = true);
     settle_look(h);
     s.shoot(h, "x-backdrop-white-player");
     crate::csd::preview(&h.ctx, true);
@@ -1415,7 +1427,7 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(280.0, 280.0), Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
     play_white(app_mut(h));
-    experiment(h, |x| x.backdrop = true);
+    looks(h, |s| s.backdrop = true);
     settle_look(h);
     h.hover_at(pos2(140.0, 140.0));
     h.run_steps(6);
@@ -1425,29 +1437,40 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // the pointer on it, and before its peaks are ready (the plain line).
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
-    experiment(h, |x| x.waveform = true);
+    looks(h, |s| s.waveform = true);
     s.shoot(h, "x-waveform-loading-player");
     fixture_waveform(app_mut(h));
     s.shoot(h, "x-waveform-player");
-    experiment(h, |x| {
-        x.waveform = true;
-        x.waveform_rounded = true;
+    looks(h, |s| {
+        s.waveform = true;
+        s.waveform_bars = crate::visuals::waveform::Bars { rounded: true, width: 6, gap: 3 };
     });
     s.shoot(h, "x-waveform-rounded-player");
     reset(h, FULL, Route::Recent);
-    experiment(h, |x| x.waveform = true);
+    looks(h, |s| s.waveform = true);
     fixture_waveform(app_mut(h));
     s.shoot(h, "x-waveform-full");
     h.hover_at(pos2(820.0, 41.0));
     h.run_steps(2);
     s.shoot(h, "x-waveform-lcd-hover");
+    // Its bars' settings, with their preview beside them, and under them
+    // where the window is narrow.
+    for (size, name) in [(FULL, "x-settings-waveform"), (vec2(560.0, 700.0), "x-settings-waveform-narrow")] {
+        reset(h, size, Route::Recent);
+        looks(h, |s| {
+            s.waveform = true;
+            s.waveform_bars.rounded = true;
+        });
+        app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Appearance));
+        s.shoot(h, name);
+    }
 
     // Everything that's still on the page at once, in the Player.
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
-    experiment(h, |x| {
-        x.backdrop = true;
-        x.waveform = true;
+    looks(h, |s| {
+        s.backdrop = true;
+        s.waveform = true;
     });
     adapt(h);
     fixture_waveform(app_mut(h));
@@ -1466,9 +1489,9 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     steps_with_audio(h, 4);
     s.shoot_now(h, "x-spectrum-full");
     reset(h, FULL, Route::Recent);
-    experiment(h, |x| {
-        x.spectrum = true;
-        x.waveform = true;
+    looks(h, |s| {
+        s.experimental.spectrum = true;
+        s.waveform = true;
     });
     adapt(h);
     fixture_waveform(app_mut(h));
