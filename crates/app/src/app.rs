@@ -17,6 +17,7 @@ mod info_panel;
 mod layout;
 mod now_playing_view;
 mod palette;
+mod pins;
 mod settings_page;
 mod queue_panel;
 mod seek;
@@ -35,7 +36,7 @@ mod snapshots;
 
 use crate::analyze;
 use crate::art::Art;
-use crate::bridge::{Bridge, ListKey, Msg};
+use crate::bridge::{Bridge, Msg};
 use crate::favorites::{Favorites, StarKind};
 use crate::keys::Cmd;
 use crate::nav::{Nav, Route};
@@ -47,14 +48,13 @@ use crate::prefs::{Loaded, Prefs};
 use crate::queue::{EndAction, Source};
 use crate::settings::Paths;
 #[cfg(test)]
-use {crate::search::SearchIndex, crate::settings::Settings, crate::tracks::TrackSet, library::Album};
+use {crate::bridge::ListKey, offline::TrackRef, pins::track_ref, crate::search::SearchIndex, crate::settings::Settings, crate::tracks::TrackSet, library::Album};
 use crate::theme::{self, ThemePref, Tokens};
 use crate::window::{Geometry, WindowMode, Windows};
 use audio::{Command, EngineHandle, PlayState, PlaybackMode, TrackSource};
 use library::{Library, Track};
-use offline::{OfflineStore, Pin, TrackRef};
+use offline::{OfflineStore, Pin};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
@@ -65,6 +65,8 @@ pub use dialogs::Overlay;
 pub use palette::Palette;
 pub use data::{Data, SearchState, SyncState};
 use data::Pending;
+pub use pins::{Downloads, Keep};
+use pins::playable;
 pub use session::Session;
 use session::LoginForm;
 pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
@@ -169,16 +171,6 @@ pub enum Action {
     /// Open a sheet (new playlist, rename, delete, shortcuts).
     Overlay(Overlay),
     PlaylistEdit(PlaylistAction),
-}
-
-/// What a download action applies to, as the user asked for it. The
-/// offline store keeps it as `offline::Pin`s: an album or playlist as one,
-/// songs one each. `browse::offline_item` is the menu item that asks.
-#[derive(Debug, Clone)]
-pub enum Keep {
-    Album(String),
-    Playlist(String),
-    Tracks(Vec<Track>),
 }
 
 /// Tracks being dragged (onto a sidebar playlist, or within a playlist to
@@ -496,191 +488,6 @@ impl UiState {
     }
 }
 
-/// Whether `track` can play right now: downloaded, or the server is there.
-fn playable(session: &Session, downloads: &Downloads, track: &Track) -> bool {
-    session.online || downloads.snap.is_done(&track.id)
-}
-
-/// Offline downloads, and their state as of this frame.
-pub struct Downloads {
-    /// The open store. `None` while one is being opened off the UI thread
-    /// (another account signed in, or the downloads folder is moving), or if
-    /// that failed: meanwhile nothing plays from disk and download actions
-    /// wait in `deferred`.
-    pub store: Option<OfflineStore>,
-    pub snap: Arc<offline::Snapshot>,
-    /// Pins waiting for their track lists to load, by the same keys as `pending`.
-    pub pending_pins: Vec<(ListKey, Pin)>,
-    /// The downloads folder; each account's store is a folder inside it.
-    pub base: PathBuf,
-    /// Whose store is open, or opening (`None` before anyone has signed in).
-    account: Option<u32>,
-    /// Numbers the opens started. A store that arrives for an older one (the
-    /// user switched again meanwhile) is closed unused.
-    generation: u64,
-    /// An open is under way.
-    opening: bool,
-    /// Download actions taken while the store was opening, run once it's open.
-    deferred: Vec<Action>,
-    /// The notice showing the downloads folder's move, while it moves.
-    moving: Option<String>,
-    open: OpenStore,
-}
-
-/// Opens the offline store kept in a folder, with an optional size limit.
-type OpenStore = Arc<dyn Fn(PathBuf, Option<u64>) -> anyhow::Result<OfflineStore> + Send + Sync>;
-
-/// A move's progress notice is updated at most this often.
-const MOVE_PROGRESS_EVERY: Duration = Duration::from_millis(500);
-
-impl Downloads {
-    /// The store folder for `account` under `base`. Before any sign-in there is
-    /// no account; an empty store stands in until one connects.
-    fn dir_for(base: &Path, account: Option<u32>) -> std::io::Result<PathBuf> {
-        match account {
-            Some(a) => offline::account_store(base, a),
-            None => Ok(base.join("signed-out")),
-        }
-    }
-
-    /// Opens `account`'s store in place of the current one (another server or
-    /// user signed in), in the background (see [`open_in_background`](Self::open_in_background)).
-    /// Its pins and files stay apart from everyone else's.
-    fn switch_account(&mut self, account: Option<u32>, limit: Option<u64>, bridge: &Bridge) {
-        if account == self.account && (self.store.is_some() || self.opening) {
-            return;
-        }
-        self.account = account;
-        self.open_in_background(limit, None, bridge);
-    }
-
-    /// Shuts the current store down and opens `self.account`'s, on the
-    /// bridge's offline queue: reading its pins and checking its files takes a
-    /// while with thousands of downloads. With `move_from`, the downloads are
-    /// first moved from there into `base`. The store arrives as
-    /// `Msg::OfflineStore`, for [`opened`](Self::opened).
-    fn open_in_background(&mut self, limit: Option<u64>, move_from: Option<PathBuf>, bridge: &Bridge) {
-        self.generation += 1;
-        self.opening = true;
-        self.pending_pins.clear();
-        self.snap = Arc::default();
-        let old = self.store.take();
-        let (generation, base, account, open) = (self.generation, self.base.clone(), self.account, self.open.clone());
-        bridge.offline_job(move |b| {
-            // First, as it may be the same folder's: this waits for its last save.
-            drop(old);
-            if let Some(from) = move_from {
-                let mut posted: Option<std::time::Instant> = None;
-                let moved = offline::move_store_with(&from, &base, &mut |p| {
-                    if posted.is_none_or(|at| at.elapsed() >= MOVE_PROGRESS_EVERY) {
-                        posted = Some(std::time::Instant::now());
-                        b.post(Msg::OfflineMoving(p));
-                    }
-                });
-                if let Err(e) = &moved {
-                    tracing::warn!("moving downloads from {}: {e}", from.display());
-                }
-                b.post(Msg::OfflineMoved(moved.map_err(|e| e.to_string())));
-            }
-            let store = Self::dir_for(&base, account).map_err(anyhow::Error::from).and_then(|dir| open(dir, limit));
-            b.post(Msg::OfflineStore { generation, store: store.map_err(|e| format!("{e:#}")) });
-        });
-    }
-
-    /// A store opened in the background arrived. Returns whether it's the one
-    /// waited for, now in use; one for an older open is shut down (off this
-    /// thread, in turn) instead.
-    fn opened(&mut self, generation: u64, store: Result<OfflineStore, String>, bridge: &Bridge) -> Result<bool, String> {
-        if generation != self.generation {
-            if let Ok(store) = store {
-                bridge.offline_job(move |_| drop(store));
-            }
-            return Ok(false);
-        }
-        self.opening = false;
-        self.store = Some(store?);
-        self.refresh();
-        Ok(true)
-    }
-
-    /// Download actions that need the store: they wait while it opens.
-    /// (Not `RemoveSetAside`: the store that opens may be another account's.)
-    fn needs_store(action: &Action) -> bool {
-        matches!(
-            action,
-            Action::KeepOffline(..) | Action::Unpin(_) | Action::PauseDownloads(_) | Action::RetryDownloads | Action::SetOfflineLimit(_)
-        )
-    }
-
-    /// The finished file for track `id`, if there is one.
-    pub fn local_path(&self, id: &str) -> Option<PathBuf> {
-        self.store.as_ref()?.local_path(id)
-    }
-
-    /// Takes in what changed since the last frame.
-    pub fn refresh(&mut self) {
-        if let Some(store) = &self.store {
-            self.snap = store.snapshot();
-        }
-    }
-
-    /// The open store (tests).
-    #[cfg(test)]
-    pub fn store(&self) -> &OfflineStore {
-        self.store.as_ref().expect("the offline store is open")
-    }
-
-    /// Applies a download action. Returns a notice to show, or an error.
-    fn apply(&mut self, action: Action, prefs: &Prefs) -> Result<Option<String>, String> {
-        let store = || self.store.clone().ok_or_else(|| "Downloads aren't open".to_owned());
-        match action {
-            Action::Unpin(pin) => {
-                store()?.unpin(&pin);
-                self.refresh();
-            }
-            Action::PauseDownloads(paused) => store()?.set_paused(paused),
-            Action::RetryDownloads => store()?.retry_failed(),
-            Action::SetOfflineLimit(bytes) => {
-                store()?.set_limit(bytes);
-                prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
-            }
-            Action::RevealOffline => {
-                crate::folder::reveal(&self.base).map_err(|e| format!("open {}: {e}", self.base.display()))?;
-            }
-            Action::RevealSetAside => {
-                let store = store()?;
-                crate::folder::reveal(store.dir()).map_err(|e| format!("open {}: {e}", store.dir().display()))?;
-            }
-            Action::RemoveSetAside => {
-                store()?.remove_set_aside();
-                self.refresh();
-            }
-            _ => unreachable!("not a download action"),
-        }
-        Ok(None)
-    }
-
-    /// Moves downloads into `chosen` at the next start. Returns the notice to show.
-    fn move_to(&self, chosen: PathBuf, prefs: &Prefs) -> Option<String> {
-        // Always a folder of our own inside the chosen one: the store tidies
-        // files it doesn't know, which must never be the user's.
-        let dir = if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") };
-        if dir == self.base {
-            return None;
-        }
-        if self.moving.is_some() {
-            // Its source would be forgotten if Ond quit before the move ends.
-            return Some("Downloads are still moving. Choose another folder once they're done.".into());
-        }
-        let current = self.base.clone();
-        prefs.edit(|s| {
-            s.offline_dir = Some(dir.clone());
-            s.offline_move_from = Some(current);
-        });
-        Some(format!("Downloads move to {} the next time Ond starts", dir.display()))
-    }
-}
-
 /// Library analysis: stored results and the background runner.
 pub struct Analysis {
     /// Stored analysis results by track id, with the file stamp they're for.
@@ -768,50 +575,15 @@ impl OndApp {
             cache_cfg.max_bytes = mb * 1024 * 1024;
         }
         let cache = streamcache::StreamCache::new(cache_cfg, rt.handle().clone())?;
-        let downloads = {
-            let base = saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone());
-            let open: OpenStore = {
-                let (rt, ctx, cache) = (rt.handle().clone(), ctx.clone(), cache.clone());
-                Arc::new(move |dir, limit| {
-                    let repaint = ctx.clone();
-                    let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.clone(), Arc::new(move || repaint.request_repaint()))?;
-                    // A track that finished streaming is linked in rather than downloaded again.
-                    let cached = cache.clone();
-                    store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&streamcache::CacheKey::original(r.id.clone(), r.suffix.clone()))));
-                    Ok(store)
-                })
-            };
-            let account = if prefs.has_login() { saved.account_id() } else { None };
-            let limit = saved.offline_limit_gb.map(|gb| gb * 1_000_000_000);
-            let mut downloads = Downloads {
-                store: None,
-                snap: Arc::default(),
-                pending_pins: Vec::new(),
-                base,
-                account,
-                generation: 0,
-                opening: false,
-                deferred: Vec::new(),
-                moving: None,
-                open,
-            };
-            match saved.offline_move_from.clone() {
-                // A new location chosen last time: the downloads move there
-                // first, in the background (a copy across drives takes a while).
-                Some(from) => {
-                    let notice = format!("Moving downloads to {}…", downloads.base.display());
-                    notices.push(notice.clone());
-                    downloads.moving = Some(notice);
-                    downloads.open_in_background(limit, Some(from), &bridge);
-                }
-                None => {
-                    let store = (downloads.open)(Downloads::dir_for(&downloads.base, account)?, limit)?;
-                    downloads.store = Some(store);
-                    downloads.refresh();
-                }
-            }
-            downloads
-        };
+        let downloads = Downloads::start(
+            saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone()),
+            if prefs.has_login() { saved.account_id() } else { None },
+            saved.offline_limit_gb.map(|gb| gb * 1_000_000_000),
+            saved.offline_move_from.clone(),
+            Downloads::opener(rt.handle().clone(), ctx.clone(), cache.clone()),
+            &bridge,
+            &mut notices,
+        )?;
         let playback_cache = cache.clone();
         let app_cache = cache.clone();
         // Analysis fetches uncached files here, so a library-wide run doesn't
@@ -927,45 +699,7 @@ impl OndApp {
             }
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
-            Msg::OfflineFolder(dir) => {
-                if let Some(notice) = self.downloads.move_to(dir, &self.prefs) {
-                    self.show_notice(notice);
-                }
-            }
-            Msg::OfflineStore { generation, store } => match self.downloads.opened(generation, store, &self.bridge) {
-                Ok(true) => {
-                    if let Some(client) = self.session.live().cloned() {
-                        self.connect_downloads(&client);
-                    }
-                    // Download actions taken while it opened.
-                    self.actions.append(&mut self.downloads.deferred);
-                    if !self.session.online {
-                        // What's downloaded can play again.
-                        self.sync_next();
-                    }
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    self.downloads.deferred.clear();
-                    self.show_error(format!("Downloads couldn't be opened: {e}"));
-                }
-            },
-            Msg::OfflineMoving(p) => {
-                let text = format!("Moving downloads to {}: {} of {}", self.downloads.base.display(), crate::fmt::bytes(p.done), crate::fmt::bytes(p.total));
-                self.moving_notice(text, false);
-            }
-            Msg::OfflineMoved(result) => {
-                let base = self.downloads.base.display().to_string();
-                match result {
-                    Ok(()) => {
-                        self.prefs.edit(|s| s.offline_move_from = None);
-                        self.moving_notice(format!("Downloads moved to {base}"), false);
-                    }
-                    // The pref stays: the next start carries on where this stopped.
-                    Err(e) => self.moving_notice(format!("Some downloads couldn't be moved to {base} ({e}). Ond tries again next time it starts."), true),
-                }
-                self.downloads.moving = None;
-            }
+            m @ (Msg::OfflineFolder(_) | Msg::OfflineStore { .. } | Msg::OfflineMoving(_) | Msg::OfflineMoved(_)) => self.offline_msg(m),
             Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
             Msg::Lyrics { track_id, lyrics } => {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
@@ -1005,57 +739,6 @@ impl OndApp {
 
 
 
-    /// Hands the offline store the server, and refetches pinned playlists so
-    /// what was added to them downloads. Nothing while the store is opening:
-    /// it gets the same once it's open.
-    fn connect_downloads(&mut self, client: &Client) {
-        let Some(store) = &self.downloads.store else { return };
-        let url = client.clone();
-        store.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
-        for p in &self.downloads.snap.pins {
-            if let Pin::Playlist(id) = &p.pin {
-                self.bridge.open_playlist(Some(client.clone()), id.clone());
-            }
-        }
-    }
-
-    /// Shows `text` in place of the move's last notice.
-    fn moving_notice(&mut self, text: String, error: bool) {
-        let old = self.downloads.moving.replace(text.clone());
-        self.ui.toasts.replace(old.as_deref(), text, error);
-    }
-
-
-    /// Pins `pin` if it was waiting for these tracks, or refreshes its track
-    /// list if it's already pinned. Only `complete` lists (the server's own
-    /// answer for that album or playlist) may drop tracks and delete their
-    /// downloads; anything else (the local library, which may be mid-sync or
-    /// rebuilt) can only add.
-    fn refresh_pin(&mut self, pin: Pin, tracks: &[Track], complete: bool) {
-        // While a store opens there's nothing to refresh: its pins aren't
-        // known yet, and none waits (opening clears `pending_pins`).
-        let Some(store) = self.downloads.store.clone() else { return };
-        let label = self.pin_label(&pin);
-        let refs = || tracks.iter().map(track_ref).collect::<Vec<_>>();
-        if let Some(at) = self.downloads.pending_pins.iter().position(|(_, p)| p == &pin) {
-            self.downloads.pending_pins.remove(at);
-            store.pin(pin, label, refs());
-        } else if store.is_pinned(&pin) {
-            if complete {
-                store.update(&pin, label, refs());
-            } else {
-                store.extend(&pin, refs());
-            }
-        }
-    }
-
-    fn pin_label(&self, pin: &Pin) -> String {
-        match pin {
-            Pin::Album(id) => self.data.album(id).map(|a| a.name.clone()).unwrap_or_default(),
-            Pin::Playlist(id) => self.data.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
-            Pin::Track(id) => self.data.track(id).map(|t| t.title.clone()).unwrap_or_default(),
-        }
-    }
 
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
     /// it's already showing that tab.
@@ -1070,45 +753,6 @@ impl OndApp {
         } else if !self.show_queue() {
             self.actions.push(Action::ToggleQueue);
         }
-    }
-
-    /// Runs only with the store open (see `apply`, which holds it back while one opens).
-    fn keep_offline(&mut self, what: Keep, on: bool) {
-        let Some(store) = self.downloads.store.clone() else { return };
-        // An album or playlist is pinned whole, once its track list is known.
-        let (key, pin, refs) = match what {
-            Keep::Album(id) => {
-                let refs = self.data.tracks.album(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
-                (ListKey::Album(id.clone()), Pin::Album(id), refs)
-            }
-            Keep::Playlist(id) => {
-                let refs = self.data.playlist_tracks.get(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
-                (ListKey::Playlist(id.clone()), Pin::Playlist(id), refs)
-            }
-            // One pin per song, saved together: a big selection doesn't stall.
-            Keep::Tracks(tracks) => {
-                if on {
-                    store.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
-                } else {
-                    store.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
-                }
-                self.downloads.refresh();
-                return;
-            }
-        };
-        match refs {
-            _ if !on => store.unpin(&pin),
-            Some(refs) => store.pin(pin.clone(), self.pin_label(&pin), refs),
-            None => {
-                self.wait_to_pin(key.clone(), pin);
-                match key {
-                    ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
-                    ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
-                    ListKey::Artist(_) => {}
-                }
-            }
-        }
-        self.downloads.refresh();
     }
 
     /// A media key, Control Center or headphone command.
@@ -1207,13 +851,6 @@ impl OndApp {
 
     fn seek(&mut self, to: f64) {
         self.with_player(|p, cx| p.seek(to, cx));
-    }
-
-    /// Pins `pin` once its tracks load (once, however often it's asked).
-    fn wait_to_pin(&mut self, key: ListKey, pin: Pin) {
-        if !self.downloads.pending_pins.iter().any(|(k, _)| *k == key) {
-            self.downloads.pending_pins.push((key, pin));
-        }
     }
 
     fn apply(&mut self, action: Action) {
@@ -1349,16 +986,7 @@ impl OndApp {
                 plan.apply_frame(&self.ctx);
             }
             Action::KeepOffline(what, on) => self.keep_offline(what, on),
-            Action::MoveOffline => {
-                let base = &self.downloads.base;
-                let start = base.parent().unwrap_or(base).to_owned();
-                let bridge = self.bridge.clone();
-                crate::folder::pick("Choose where to keep downloaded music", &start, move |chosen| {
-                    if let Some(dir) = chosen {
-                        bridge.post(Msg::OfflineFolder(dir));
-                    }
-                });
-            }
+            Action::MoveOffline => self.choose_offline_folder(),
             a @ (Action::Unpin(_)
             | Action::PauseDownloads(_)
             | Action::RetryDownloads
@@ -2015,17 +1643,7 @@ impl eframe::App for OndApp {
             self.handle(msg);
         }
         self.after_messages();
-        if let Some(snap) = self.downloads.store.as_ref().map(|s| s.snapshot())
-            && snap.version != self.downloads.snap.version
-        {
-            // A download finished: what's next may now play from disk, or play at all.
-            let done_changed = snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count()
-                != self.downloads.snap.tracks.values().filter(|s| matches!(s, offline::TrackState::Done { .. })).count();
-            self.downloads.snap = snap;
-            if done_changed && !self.session.online {
-                self.sync_next();
-            }
-        }
+        self.poll_downloads();
         self.check_library_analysis();
         let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.show_queue() };
         let (theme, diagnostics) = self.prefs.get(|s| (s.theme, s.diagnostics_bar));
@@ -2135,11 +1753,6 @@ impl player::Sources for AppSources<'_> {
             cover: self.data.cover_for(track).map(str::to_owned),
         });
     }
-}
-
-/// What the offline store needs to download `t`.
-pub fn track_ref(t: &Track) -> TrackRef {
-    TrackRef::new(t.id.clone(), t.suffix.clone(), t.size)
 }
 
 
