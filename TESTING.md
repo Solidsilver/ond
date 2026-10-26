@@ -58,6 +58,10 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 - [ ] Download an album (⇧⌘D): ring → "Downloaded · N MB"; an album already played to the end downloads almost instantly.
 - [ ] Stop Navidrome and relaunch: opens offline; downloaded tracks play; others are dimmed and skipped with a notice; reconnects by itself.
 - [ ] Stop a track sync midway: downloads are NOT removed.
+- [ ] Move downloads to a folder on another drive (a USB stick), relaunch: the window opens at once with "Moving downloads to …: X of Y" counting up, then "Downloads moved to …"; downloaded songs play once it's done (offline: not before), and an album downloaded meanwhile starts then.
+- [ ] Quit mid-move (⌘Q), relaunch: the move carries on and finishes; the old folder ends up gone, no `.…moving` files are left in the new one, and no download is lost.
+- [ ] Sign in as another user with many downloads: no hitch when it connects; switch back and that user's downloads are all still there.
+- [ ] Quit while a big download or a move runs: the app is gone within a couple of seconds.
 
 ## Analysis
 - [ ] Settings → Library → Analyze library: progress, pauses while playback buffers; album pages show `DR · LUFS` and, only when suspicious, a "likely upsampled / lossy source" chip.
