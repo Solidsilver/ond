@@ -372,9 +372,16 @@ pub trait OutputBackend: Send {
     fn devices(&mut self) -> Vec<DeviceInfo> {
         Vec::new()
     }
-    /// The device playback goes to (or would go to).
+    /// The device playback goes to: the open stream's, else the one a new
+    /// `open` would use.
     fn current_device(&mut self) -> Option<DeviceInfo> {
         None
+    }
+    /// The device a new `open` would use: the selected one if it's plugged in,
+    /// else the system default. Differs from [`current_device`](Self::current_device)
+    /// when the default has moved while a stream stays on its device.
+    fn target_device(&mut self) -> Option<DeviceInfo> {
+        self.current_device()
     }
     /// Picks a device by UID; `None` follows the system default. Takes effect at the next `open`.
     fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
@@ -400,6 +407,12 @@ pub trait OutputBackend: Send {
     fn drained(&self) -> bool;
     /// Stops the stream. When this returns, the callback will not run again.
     fn close(&mut self);
+    /// Stops the stream like [`close`](Self::close) because another `open`
+    /// follows at once (the format changed): a backend may keep the device
+    /// claimed (exclusive access) across the two.
+    fn close_for_reopen(&mut self) {
+        self.close();
+    }
 }
 
 /// cpal on the default output device. On macOS cpal sets the device's nominal

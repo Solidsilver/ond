@@ -51,13 +51,17 @@ pub(crate) enum DecoderMsg {
     },
     /// A new ring whose first track is `first_seq`: open (or reopen) the device for it.
     Ring { format: StreamFormat, input: RingInput, first_seq: u64 },
-    /// A seek in track `seq` landed.
+    /// A seek in track `seq` landed (past the end: at the end, and the track is over).
     Seeked { seq: u64, position_secs: f64 },
     /// A seek for track `seq` arrived after the decoder had moved past it.
     SeekMiss { seq: u64, to: Duration },
-    /// Track `seq` failed; the session ends after what's already queued.
-    Error { seq: u64, message: String },
+    /// Track `seq` (`track_id`) failed; the session ends after what's already queued.
+    Error { seq: u64, track_id: String, message: String },
 }
+
+/// At the end of the last queued track the decode thread waits for a next one
+/// until the output has only this much of it left to play.
+const LINGER_FLOOR_SECS: f32 = 0.1;
 
 /// The track to decode after track `.0`.
 type NextSlot = Arc<Mutex<Option<(u64, TrackSource)>>>;
@@ -120,6 +124,7 @@ impl Session {
             cancel,
             seek_pending,
             at_seq,
+            track_id: String::new(),
             seek_rx,
             next,
             caps,
@@ -137,7 +142,8 @@ impl Session {
                 if let Err((seq, message)) = result
                     && !ctx.cancel.load(Ordering::Relaxed)
                 {
-                    let _ = ctx.msgs.send(DecoderMsg::Error { seq, message });
+                    let track_id = ctx.track_id.clone();
+                    let _ = ctx.msgs.send(DecoderMsg::Error { seq, track_id, message });
                 }
                 done.store(true, Ordering::Release);
             })
@@ -163,13 +169,26 @@ impl Session {
     /// Asks the decode thread to jump to `to` within track `seq`. Only the latest
     /// pending request is honoured.
     pub fn seek(&self, seq: u64, to: Duration, hold: u64) {
-        self.seek_pending.store(true, Ordering::Release);
+        // The request first, then the flag: a decoder that sees the flag always
+        // finds the request. The other way round, a decoder running between the
+        // two would clear the flag, find nothing, and strand the request (and
+        // the output's hold) until the next seek.
         let _ = self.seeks.send(SeekReq { seq, to, hold });
+        self.seek_pending.store(true, Ordering::Release);
     }
 
-    /// Sets what plays after track `after`. Replaces any earlier choice.
-    pub fn set_next(&self, after: u64, next: Option<TrackSource>) {
-        *self.next.lock().unwrap_or_else(|e| e.into_inner()) = next.map(|n| (after, n));
+    /// Sets what plays after track `after`, replacing any earlier choice, if the
+    /// decode thread is still on `after` (decoding it or waiting at its end).
+    /// Returns false when it has already moved past it: the choice came too late.
+    pub fn set_next(&self, after: u64, next: Option<TrackSource>) -> bool {
+        let mut slot = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        // Checked under the lock the decode thread takes the slot with, so the
+        // answer can't go stale before the slot is written.
+        if self.at_seq.load(Ordering::Acquire) != after {
+            return false;
+        }
+        *slot = next.map(|n| (after, n));
+        true
     }
 
     /// Signals the thread to stop. It isn't joined: a blocked read notices within ~50 ms.
@@ -186,6 +205,8 @@ struct Ctx {
     cancel: Arc<AtomicBool>,
     seek_pending: Arc<AtomicBool>,
     at_seq: Arc<AtomicU64>,
+    /// Id of the track at `at_seq`, for error reports.
+    track_id: String,
     seek_rx: Receiver<SeekReq>,
     next: NextSlot,
     /// The output device, as it was when the session started (picks the ring's rate).
@@ -282,6 +303,8 @@ enum Push {
 
 enum TrackEnd {
     Eof,
+    /// The end, without a single frame of audio.
+    Empty,
     Cancelled,
 }
 
@@ -291,21 +314,34 @@ impl Ctx {
         let mut src = first;
         let mut out: Option<Out> = None;
         let result = loop {
-            self.at_seq.store(seq, Ordering::Release);
+            self.track_id.clone_from(&src.id);
             let mut track = match self.open(&src) {
                 Ok(t) => t,
                 Err(_) if self.cancel.load(Ordering::Relaxed) => return Ok(()),
                 Err(e) => break Err((seq, e)),
             };
-            match self.play(seq, &src, &mut track, &mut out) {
+            // A track that produced no audio (empty, or sought past its end
+            // before it started) was never reported or marked in the ring: the
+            // next one takes over its sequence number, so the engine's list of
+            // tracks stays indexed by it.
+            let advance = match self.play(seq, &src, &mut track, &mut out) {
                 Ok(TrackEnd::Cancelled) => return Ok(()),
-                Ok(TrackEnd::Eof) => {}
+                Ok(TrackEnd::Eof) => 1,
+                Ok(TrackEnd::Empty) => 0,
                 Err(e) => break Err((seq, e)),
-            }
-            let next = self.next.lock().unwrap_or_else(|e| e.into_inner()).take_if(|(after, _)| *after == seq);
+            };
+            let next = {
+                let mut slot = self.next.lock().unwrap_or_else(|e| e.into_inner());
+                let next = slot.take_if(|(after, _)| *after == seq);
+                if next.is_some() {
+                    // Under the lock: from here on `Session::set_next` for `seq` is refused.
+                    self.at_seq.store(seq + advance, Ordering::Release);
+                }
+                next
+            };
             match next {
                 Some((_, n)) => {
-                    seq += 1;
+                    seq += advance;
                     src = n;
                 }
                 None => break Ok(()),
@@ -326,7 +362,8 @@ impl Ctx {
         self.resampled.clear();
         r.flush(&mut self.resampled);
         o.rs_base = o.pushed + self.resampled.len() as u64;
-        let _ = push_all(&mut o.samples, &self.resampled, &mut o.pushed, &self.cancel, &self.seek_pending);
+        let frame = o.format.channels as usize;
+        let _ = push_all(&mut o.samples, &self.resampled, frame, &mut o.pushed, &self.cancel, &self.seek_pending);
     }
 
     fn open(&mut self, src: &TrackSource) -> Result<Track, String> {
@@ -408,10 +445,16 @@ impl Ctx {
                 Ok(Some(p)) => p,
                 // A seek that came in as the track ran out is still applied.
                 Ok(None) if self.seek_pending.load(Ordering::Acquire) => continue,
+                Ok(None) if self.linger(seq, out.as_ref().filter(|_| started)) => continue,
                 Ok(None) => break,
                 // The read was interrupted for a seek or cancel; the loop head handles both.
                 Err(_) if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) => continue,
-                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    if self.linger(seq, out.as_ref().filter(|_| started)) {
+                        continue;
+                    }
+                    break;
+                }
                 Err(e) => return Err(format!("read: {e}")),
             };
             if packet.track_id != t.track_id {
@@ -516,7 +559,12 @@ impl Ctx {
                 }
                 None => &*mapped,
             };
-            match push_all(&mut o.samples, data, &mut o.pushed, &self.cancel, &self.seek_pending) {
+            let frame = o.format.channels as usize;
+            match push_all(&mut o.samples, data, frame, &mut o.pushed, &self.cancel, &self.seek_pending) {
+                // Interrupted: the rest of the packet is dropped. The seek that
+                // interrupted normally flushes the ring; when it turns out to be
+                // nothing to do (stale flag) the output skips that bit of audio,
+                // but stays on whole frames.
                 Push::Done | Push::Interrupted => {}
                 Push::Cancelled => return Ok(TrackEnd::Cancelled),
             }
@@ -526,7 +574,32 @@ impl Ctx {
                 self.msgs.send(DecoderMsg::Ring { format: o.format, input, first_seq: seq }).map_err(|_| "engine gone")?;
             }
         }
-        Ok(TrackEnd::Eof)
+        Ok(if started { TrackEnd::Eof } else { TrackEnd::Empty })
+    }
+
+    /// At the end of track `seq` with nothing lined up after it, waits while the
+    /// output still has more than [`LINGER_FLOOR_SECS`] of it queued: the UI
+    /// names the next track once the output reaches this one, which for a track
+    /// shorter than the buffer is after the decoder is done with it. Leaving
+    /// at once would lose that track's gapless start. Returns true when a seek
+    /// or a cancel came in (the caller's loop handles both), false to finish
+    /// the track (a next track is set, or the output is nearly through).
+    fn linger(&self, seq: u64, out: Option<&Out>) -> bool {
+        let Some(o) = out else { return false };
+        let floor = (o.format.sample_rate as f32 * o.format.channels as f32 * LINGER_FLOOR_SECS) as usize;
+        loop {
+            if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) {
+                return true;
+            }
+            if self.next.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(after, _)| *after == seq) {
+                return false;
+            }
+            let queued = o.samples.buffer().capacity() - o.samples.slots();
+            if queued <= floor || o.samples.is_abandoned() {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// Hooks a starting track up to an output ring: continue the current one when
@@ -582,7 +655,8 @@ impl Ctx {
             match StreamResampler::new(src_rate, format.sample_rate, format.channels as usize) {
                 Ok(r) => Some(r),
                 Err(e) => {
-                    let _ = self.msgs.send(DecoderMsg::Error { seq: u64::MAX, message: e });
+                    let (seq, track_id) = (self.at_seq.load(Ordering::Acquire), self.track_id.clone());
+                    let _ = self.msgs.send(DecoderMsg::Error { seq, track_id, message: e });
                     return None;
                 }
             }
@@ -619,12 +693,13 @@ impl Ctx {
             Err(SymError::SeekError(SeekErrorKind::OutOfRange)) => Seeked::End,
             Err(e) => {
                 if !self.seek_pending.load(Ordering::Acquire) {
-                    let _ = self.msgs.send(DecoderMsg::Error { seq, message: format!("seek: {e}") });
+                    let _ = self.msgs.send(DecoderMsg::Error { seq, track_id: self.track_id.clone(), message: format!("seek: {e}") });
                 }
                 Seeked::Nothing
             }
         };
         // Whatever happened, the output must stop holding: flush, then let it buffer.
+        let started = out.is_some();
         if let Some(o) = out {
             let generation = o.ctl.request_flush(req.hold);
             // The callback empties the ring. It runs whenever the device is open
@@ -650,11 +725,19 @@ impl Ctx {
                 r.reset();
             }
         }
-        if let Seeked::To(ts) = outcome {
-            let frames = t.clock.frames(ts.get());
-            // The callback counts frames at the output rate.
-            let played = t.to_output(frames);
-            self.status.frames_played.store(played, Ordering::Relaxed);
+        // Every seek that moved the track is reported: the engine forgets the
+        // seek it's holding for only then.
+        let frames = match outcome {
+            Seeked::To(ts) => Some(t.clock.frames(ts.get())),
+            Seeked::End => Some(t.total_frames.unwrap_or((req.to.as_secs_f64() * t.clock.rate as f64) as u64)),
+            Seeked::Nothing => None,
+        };
+        if let Some(frames) = frames {
+            // The callback counts frames at the output rate. (Past the end of a
+            // track that hasn't started, the next one starts its own count.)
+            if started || matches!(outcome, Seeked::To(_)) {
+                self.status.frames_played.store(t.to_output(frames), Ordering::Relaxed);
+            }
             let position_secs = if t.clock.rate == 0 { 0.0 } else { frames as f64 / t.clock.rate as f64 };
             let _ = self.msgs.send(DecoderMsg::Seeked { seq, position_secs });
         }
@@ -744,6 +827,25 @@ fn open_source(src: &TrackSource, cache: Option<&StreamCache>, abort: Abort) -> 
     if src.url == "test://panic" {
         panic!("a decoder blew up");
     }
+    // A source that can only be read forward.
+    #[cfg(test)]
+    if let Some(path) = src.url.strip_prefix("test-unseekable://") {
+        let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        return Ok(Box::new(tests::Unseekable(f)));
+    }
+    // A file behind a slow server: opening takes half a second.
+    #[cfg(test)]
+    if let Some(path) = src.url.strip_prefix("test-slow://") {
+        let until = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < until {
+            if abort() {
+                return Err("aborted".into());
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        return Ok(Box::new(f));
+    }
     if let Some(path) = src.url.strip_prefix("file://") {
         let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
         return Ok(Box::new(f));
@@ -779,21 +881,38 @@ impl MediaSource for Cached {
 }
 
 /// Blocks (politely) until all of `data` is in the ring, or a cancel or seek
-/// interrupts. Counts what went in.
-fn push_all(p: &mut Producer<f32>, mut data: &[f32], pushed: &mut u64, cancel: &AtomicBool, seek: &AtomicBool) -> Push {
+/// interrupts. Counts what went in. A seek interrupts on a `frame` boundary
+/// (samples per frame), so the ring never ends mid-frame: the channels would
+/// swap for everything after it if no flush followed.
+fn push_all(
+    p: &mut Producer<f32>,
+    mut data: &[f32],
+    frame: usize,
+    pushed: &mut u64,
+    cancel: &AtomicBool,
+    seek: &AtomicBool,
+) -> Push {
+    let frame = frame.max(1);
     while !data.is_empty() {
         if cancel.load(Ordering::Relaxed) || p.is_abandoned() {
             return Push::Cancelled;
         }
+        let mut chunk = data;
         if seek.load(Ordering::Acquire) {
-            return Push::Interrupted;
+            let partial = (*pushed % frame as u64) as usize;
+            if partial == 0 {
+                return Push::Interrupted;
+            }
+            // Finish the frame that's half in first.
+            chunk = &data[..(frame - partial).min(data.len())];
         }
-        let (_, rest) = p.push_partial_slice(data);
-        *pushed += (data.len() - rest.len()) as u64;
-        if rest.len() == data.len() {
+        let (_, rest) = p.push_partial_slice(chunk);
+        let n = chunk.len() - rest.len();
+        *pushed += n as u64;
+        if n == 0 {
             thread::sleep(Duration::from_millis(5));
         }
-        data = rest;
+        data = &data[n..];
     }
     Push::Done
 }

@@ -20,7 +20,7 @@ use objc2_core_foundation::{CFRetained, CFString};
 use std::ffi::c_void;
 use std::mem::{MaybeUninit, size_of};
 use std::ptr::{NonNull, null};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 pub type Id = AudioObjectID;
@@ -244,47 +244,62 @@ pub fn set_hog(dev: Id, take: bool) -> Result<bool> {
     Ok(hog_pid(dev) == me)
 }
 
+type Callback = Box<dyn FnMut() + Send>;
+
+/// What a listener registration points the HAL at. Never freed once
+/// registered: Apple doesn't promise that a callback already under way has
+/// returned when `AudioObjectRemovePropertyListener` does, so removal only
+/// empties it (dropping the callback and what it holds) and leaks the slot
+/// itself, a few bytes per listener.
+struct Slot(Mutex<Option<Callback>>);
+
 /// A property listener; removed on drop. The callback runs on a HAL thread.
 pub struct Listener {
-    callback: Box<Box<dyn FnMut() + Send>>,
+    slot: &'static Slot,
     obj: Id,
     addr: AudioObjectPropertyAddress,
 }
 
-// SAFETY: the callback is Send; the rest is plain data identifying the registration.
+// SAFETY: the slot is Sync (a Mutex around a Send callback); the rest is plain
+// data identifying the registration.
 unsafe impl Send for Listener {}
 
 impl Listener {
     pub fn new(obj: Id, selector: u32, scope: u32, callback: impl FnMut() + Send + 'static) -> Result<Self> {
-        let callback: Box<Box<dyn FnMut() + Send>> = Box::new(Box::new(callback));
+        let slot = Box::into_raw(Box::new(Slot(Mutex::new(Some(Box::new(callback))))));
         let a = addr(selector, scope);
-        // SAFETY: the boxed callback outlives the registration (removed in Drop).
-        let status = unsafe {
-            AudioObjectAddPropertyListener(obj, NonNull::from(&a), Some(shim), &*callback as *const _ as *mut c_void)
-        };
-        check(status, "add listener")?;
-        Ok(Self { callback, obj, addr: a })
+        // SAFETY: `slot` is a live heap allocation; once registered it's never freed.
+        let status = unsafe { AudioObjectAddPropertyListener(obj, NonNull::from(&a), Some(shim), slot.cast()) };
+        if let Err(e) = check(status, "add listener") {
+            // SAFETY: never registered, so nothing else can see it: ours to free.
+            drop(unsafe { Box::from_raw(slot) });
+            return Err(e);
+        }
+        // SAFETY: from `Box::into_raw` above and never freed from here on.
+        Ok(Self { slot: unsafe { &*slot }, obj, addr: a })
     }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
+        let data = self.slot as *const Slot as *mut c_void;
         // SAFETY: same registration as in `new`.
         unsafe {
-            AudioObjectRemovePropertyListener(
-                self.obj,
-                NonNull::from(&self.addr),
-                Some(shim),
-                &*self.callback as *const _ as *mut c_void,
-            );
+            AudioObjectRemovePropertyListener(self.obj, NonNull::from(&self.addr), Some(shim), data);
         }
+        // A call still under way finishes first (it holds the lock); a later one finds nothing.
+        let callback = self.slot.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        drop(callback);
     }
 }
 
 unsafe extern "C-unwind" fn shim(_: Id, _: u32, _: NonNull<AudioObjectPropertyAddress>, data: *mut c_void) -> i32 {
-    // SAFETY: `data` is the Box<dyn FnMut> registered in `Listener::new`, alive until removal.
-    let callback = unsafe { &mut *(data as *mut Box<dyn FnMut() + Send>) };
-    callback();
+    // SAFETY: `data` is the `Slot` registered in `Listener::new`, which is never freed.
+    // Only shared references are made to it; the callback is reached through its lock.
+    let slot = unsafe { &*(data as *const Slot) };
+    if let Some(callback) = slot.0.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        callback();
+    }
     0
 }
 

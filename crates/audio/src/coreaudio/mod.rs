@@ -36,7 +36,7 @@ use objc2_core_audio::{
     kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeUSB, kAudioDeviceTransportTypeVirtual,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// `kAudioOutputUnitProperty_CurrentDevice`.
 const CURRENT_DEVICE: u32 = 2000;
@@ -48,6 +48,16 @@ struct Open {
     format: StreamFormat,
     /// Integer bits of the physical format in effect (None: float).
     active_bits: Option<u32>,
+    /// The same, shared with the render callback (0: float), which dithers to it.
+    /// A mode switch can change the physical format under a running stream.
+    device_bits: Arc<AtomicU32>,
+}
+
+impl Open {
+    fn set_bits(&mut self, bits: Option<u32>) {
+        self.active_bits = bits;
+        self.device_bits.store(bits.unwrap_or(0), Ordering::Relaxed);
+    }
 }
 
 pub struct CoreAudioBackend {
@@ -170,7 +180,8 @@ impl CoreAudioBackend {
 
         let drained = self.drained.clone();
         let rate = format.sample_rate;
-        let mut render = Render { input, status, device_bits: active_bits, dither: Tpdf::default() };
+        let device_bits = Arc::new(AtomicU32::new(active_bits.unwrap_or(0)));
+        let mut render = Render { input, status, device_bits: device_bits.clone(), dither: Tpdf::default() };
         unit.set_render_callback(move |args: render_callback::Args<data::Interleaved<f32>>| {
             if render.fill(args.data.buffer, args.data.channels, rate) {
                 drained.store(true, Ordering::Release);
@@ -180,7 +191,15 @@ impl CoreAudioBackend {
         .map_err(err("render callback"))?;
         unit.initialize().map_err(err("initialize"))?;
         unit.start().map_err(err("start"))?;
-        Ok(Open { dev, unit, format, active_bits })
+        Ok(Open { dev, unit, format, active_bits, device_bits })
+    }
+
+    /// Stops the stream, keeping any exclusive access.
+    fn stop_unit(&mut self) {
+        if let Some(mut open) = self.open.take() {
+            // Stopping is synchronous: no render callback runs after it returns.
+            let _ = open.unit.stop();
+        }
     }
 
     fn info(&self, dev: hal::Id, default: Option<hal::Id>) -> Option<DeviceInfo> {
@@ -207,13 +226,17 @@ impl Drop for CoreAudioBackend {
 struct Render {
     input: RingInput,
     status: Arc<Status>,
-    device_bits: Option<u32>,
+    /// Integer bits of the device's physical format, 0 for float. Read on every
+    /// callback: a mode switch can change it while the stream runs.
+    device_bits: Arc<AtomicU32>,
     dither: Tpdf,
 }
 
 impl Render {
     fn fill(&mut self, out: &mut [f32], channels: usize, rate: u32) -> bool {
-        self.input.fill_for_device(out, channels, rate, &self.status, self.device_bits, &mut self.dither)
+        let bits = self.device_bits.load(Ordering::Relaxed);
+        let bits = (bits != 0).then_some(bits);
+        self.input.fill_for_device(out, channels, rate, &self.status, bits, &mut self.dither)
     }
 }
 
@@ -300,6 +323,11 @@ impl OutputBackend for CoreAudioBackend {
         self.info(dev, hal::default_output())
     }
 
+    fn target_device(&mut self) -> Option<DeviceInfo> {
+        let dev = self.resolve()?;
+        self.info(dev, hal::default_output())
+    }
+
     /// A UID that isn't plugged in is kept: playback uses the default until it appears.
     fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
         self.close();
@@ -337,11 +365,19 @@ impl OutputBackend for CoreAudioBackend {
                 self.take_hog(dev);
                 let bits = self.set_integer_format(dev, format.sample_rate, format.channels);
                 if let Some(o) = self.open.as_mut() {
-                    o.active_bits = bits;
+                    o.set_bits(bits);
                     let _ = o.unit.start();
                 }
             }
-            PlaybackMode::Normal => self.release_hog(),
+            PlaybackMode::Normal => {
+                self.release_hog();
+                // The format we had exclusively may not survive sharing: dither to what's in effect.
+                let stream = hal::output_streams(dev).first().copied();
+                let bits = stream.and_then(hal::physical_format).filter(hal::is_int).map(|f| f.mBitsPerChannel);
+                if let Some(o) = self.open.as_mut() {
+                    o.set_bits(bits);
+                }
+            }
             _ => {}
         }
     }
@@ -351,7 +387,8 @@ impl OutputBackend for CoreAudioBackend {
     }
 
     fn open(&mut self, format: StreamFormat, input: RingInput, status: Arc<Status>) -> Result<(), OutputError> {
-        self.close();
+        // Exclusive access carries over when it's the same device in the same mode.
+        self.stop_unit();
         self.drained = Arc::new(AtomicBool::new(false));
         let dev = self.resolve().ok_or(OutputError::NoDevice)?;
         // The engine's mode flag is the source of truth when a stream opens.
@@ -382,11 +419,14 @@ impl OutputBackend for CoreAudioBackend {
     /// Stops the stream and lets go of the device: an idle player never keeps
     /// other apps (or system sounds) off it. The next `open` takes it again.
     fn close(&mut self) {
-        if let Some(mut open) = self.open.take() {
-            // Stopping is synchronous: no render callback runs after it returns.
-            let _ = open.unit.stop();
-        }
+        self.stop_unit();
         self.release_hog();
+    }
+
+    /// Keeps exclusive access for the `open` that follows: releasing and
+    /// retaking it would only add HAL notifications (and possibly pops).
+    fn close_for_reopen(&mut self) {
+        self.stop_unit();
     }
 }
 
@@ -408,7 +448,7 @@ fn bit_perfect_self_check() -> Result<(), String> {
         let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), resampled);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
-        let mut render = Render { input, status, device_bits: Some(bits), dither: Tpdf::default() };
+        let mut render = Render { input, status, device_bits: Arc::new(AtomicU32::new(bits)), dither: Tpdf::default() };
         let mut out = vec![0.0f32; samples.len()];
         for chunk in out.chunks_mut(512) {
             render.fill(chunk, 2, 96_000);
@@ -434,6 +474,30 @@ mod tests {
     #[test]
     fn self_check_passes() {
         bit_perfect_self_check().unwrap();
+    }
+
+    #[test]
+    fn the_callback_dithers_to_the_format_in_effect_now() {
+        // 24-bit audio, bit-perfect: a 16-bit device needs it requantized, a 24-bit one doesn't.
+        let samples: Vec<f32> =
+            (0..1_024i64).map(|i| ((i * 2_654_435) % (1 << 24) - (1 << 23)) as f32 / (1 << 23) as f32).collect();
+        let (mut p, c) = rtrb::RingBuffer::new(samples.len());
+        p.push_entire_slice(&samples).unwrap();
+        let (_m, mc) = rtrb::RingBuffer::new(4);
+        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), false);
+        let status = Arc::new(Status::default());
+        status.bit_perfect.store(true, Ordering::Relaxed);
+        let bits = Arc::new(AtomicU32::new(16));
+        let mut render = Render { input, status, device_bits: bits.clone(), dither: Tpdf::default() };
+        let on_grid = |s: &[f32], bits: u32| s.iter().all(|v| (*v * (1u32 << (bits - 1)) as f32).fract() == 0.0);
+        let mut out = vec![0.0f32; 512];
+        render.fill(&mut out, 2, 96_000);
+        assert!(on_grid(&out, 16), "16-bit device: requantized");
+        // Taking the device exclusively switched it to 24 bits mid-stream.
+        bits.store(24, Ordering::Relaxed);
+        render.fill(&mut out, 2, 96_000);
+        let exact = out.iter().zip(&samples[512..]).all(|(a, b)| a.to_bits() == b.to_bits());
+        assert!(exact, "24-bit device: untouched");
     }
 
     /// Needs real hardware: lists output devices and what we'd report for them.

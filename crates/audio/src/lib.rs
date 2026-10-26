@@ -168,7 +168,8 @@ pub enum Event {
     Devices { devices: Vec<DeviceInfo>, current: Option<String> },
     /// The engine changed mode by itself (device switch or fallback). Not sent for `SetMode`.
     ModeChanged { mode: PlaybackMode, device: Option<String> },
-    /// The device in use went away; playback moved to the system default in Normal mode.
+    /// The device in use went away; playback moved to the system default, in
+    /// the mode picked for it if there is one, else in Normal mode.
     DeviceLost { name: String },
     /// A device that went away is back; the UI may offer to switch to it.
     DeviceReturned { uid: String, name: String },
@@ -382,6 +383,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 ring: None,
                 next: None,
                 prefetched: None,
+                opening: None,
                 held_seek: None,
                 device_modes: HashMap::new(),
                 current_device: None,
@@ -439,6 +441,8 @@ struct Engine {
     next: Option<TrackSource>,
     /// Id of the track already handed to the cache's prefetch slot.
     prefetched: Option<String>,
+    /// The track the session started with: what ends if it never produces audio.
+    opening: Option<TrackSource>,
     /// A seek the output is holding for, until the decoder reports it done.
     held_seek: Option<Duration>,
     device_modes: HashMap<String, PlaybackMode>,
@@ -477,7 +481,11 @@ impl Engine {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Play(src) => self.start(src, None),
+            Command::Play(src) => {
+                // A new queue: whatever the old one had lined up doesn't follow this track.
+                self.forget_next();
+                self.start(src, None);
+            }
             Command::Pause => {
                 // Loading too: a pause pressed while a slow server answers must
                 // hold once the track opens (`open_ring` respects `paused`).
@@ -492,7 +500,10 @@ impl Engine {
                     self.status.set_state(PlayState::Playing);
                 }
             }
-            Command::Stop => self.stop(),
+            Command::Stop => {
+                self.forget_next();
+                self.stop();
+            }
             Command::SetVolume(v) => {
                 let was_full = self.status.volume() >= 1.0;
                 self.status.set_volume(v);
@@ -514,7 +525,7 @@ impl Engine {
             Command::SelectDevice(uid) => match self.backend.select_device(uid.as_deref()) {
                 Ok(()) => {
                     self.lost = None;
-                    self.device_switched(None);
+                    self.device_switched(false);
                     // Chosen but not plugged in (e.g. the saved DAC at startup): offer it when it appears.
                     if let Some(uid) = uid.filter(|u| self.current_device.as_ref() != Some(u)) {
                         self.lost = Some((uid.clone(), uid));
@@ -548,6 +559,7 @@ impl Engine {
         self.status.set_state(PlayState::Loading);
         self.status.paused.store(false, Ordering::Relaxed);
         let caps = self.backend.device_caps();
+        self.opening = Some(src.clone());
         let session = Session::start(
             src,
             start_at,
@@ -563,6 +575,7 @@ impl Engine {
 
     fn stop(&mut self) {
         self.held_seek = None;
+        self.opening = None;
         if let Some(s) = self.session.take() {
             s.cancel();
         }
@@ -618,21 +631,34 @@ impl Engine {
         if next.as_ref().map(|n| &n.id) != self.prefetched.as_ref() {
             self.prefetched = None;
         }
-        self.next = next.clone();
+        let before = std::mem::replace(&mut self.next, next.clone());
         let Some(session) = &self.session else { return };
-        match self.tracks.get(self.out_seq as usize + 1) {
-            // The decoder is still on the output's track: tell it what follows.
-            None => session.set_next(self.out_seq, next),
-            // It already moved on to the right track.
-            Some(t) if next.as_ref().is_some_and(|n| n.id == t.src.id && n.token == t.src.token) => {}
-            // It moved on to a track that's no longer next (the queue changed in the
-            // last few seconds of the track). Restart the current track where it is.
-            Some(_) => {
-                if let Some(resume) = self.take_position() {
-                    self.resume(resume);
-                }
-            }
+        let after = self.out_seq;
+        let queued = self.tracks.get(after as usize + 1).map(|t| &t.src);
+        // The decoder is still on the output's track (decoding it, or waiting at
+        // its end): it takes this as what follows. (A decoder that has exited
+        // takes nothing; `Ended` follows and the UI starts the next track itself.)
+        if queued.is_none() && session.set_next(after, next.clone()) {
+            return;
         }
+        // It moved on: to the track it has reported, or, until that track's first
+        // audio, to the one it was last told about.
+        let queued = queued.or(before.as_ref());
+        let same = |a: &TrackSource, b: &TrackSource| a.id == b.id && a.token == b.token;
+        if queued.zip(next.as_ref()).is_some_and(|(q, n)| same(q, n)) {
+            return;
+        }
+        // It moved on to a track that's no longer next (the queue changed in the
+        // last few seconds of the track). Restart the current track where it is.
+        if let Some(resume) = self.take_position() {
+            self.resume(resume);
+        }
+    }
+
+    /// The UI's next track no longer applies (a new queue, or stopped).
+    fn forget_next(&mut self) {
+        self.next = None;
+        self.prefetched = None;
     }
 
     /// The current track and position, if something is playing or paused.
@@ -665,16 +691,20 @@ impl Engine {
     }
 
     /// Playback moved to another device: pick its mode and carry on where we were.
-    fn device_switched(&mut self, force: Option<PlaybackMode>) {
+    /// The mode is the one the user picked for that device; failing that, the
+    /// device's default, or Normal for a `fallback` (the device in use went away).
+    fn device_switched(&mut self, fallback: bool) {
         let resume = self.take_position();
         self.stop();
         self.known = self.backend.devices();
         let info = self.backend.current_device();
         self.current_device = info.as_ref().map(|d| d.uid.clone());
-        let mode = force.unwrap_or_else(|| match &info {
-            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or_else(|| d.default_mode()),
+        let unpicked = |d: &DeviceInfo| if fallback { PlaybackMode::Normal } else { d.default_mode() };
+        let mode = match &info {
+            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or_else(|| unpicked(d)),
+            None if fallback => PlaybackMode::Normal,
             None => self.config.mode,
-        });
+        };
         if mode != self.config.mode {
             self.apply_mode(mode);
             let _ = self.events.send(Event::ModeChanged { mode, device: self.current_device.clone() });
@@ -706,12 +736,13 @@ impl Engine {
             self.lost = Some((uid.clone(), name.clone()));
             let _ = self.backend.select_device(None);
             let _ = self.events.send(Event::DeviceLost { name });
-            self.device_switched(Some(PlaybackMode::Normal));
+            self.device_switched(true);
         } else if events.contains(&DeviceEvent::DefaultChanged)
-            && self.backend.current_device().map(|d| d.uid) != current
+            // Where a new stream would go, not where the open one is (it stays put).
+            && self.backend.target_device().map(|d| d.uid) != current
         {
             // Following the default and it moved (e.g. headphones plugged in).
-            self.device_switched(None);
+            self.device_switched(false);
         } else {
             self.known = devices.clone();
             self.send_devices();
@@ -771,14 +802,17 @@ impl Engine {
 
     /// Publishes download progress and starts the next track's prefetch when it's time.
     fn poll_fetch(&mut self) {
-        let downloading = self.network_in_use();
+        let progress = match (&self.cache, self.current().map(|t| &t.src)) {
+            (Some(cache), Some(src)) if !src.is_local() => cache.progress(&src.cache_key()),
+            _ => None,
+        };
+        let downloading = self.network_in_use(progress.as_ref());
         self.status.downloading.store(downloading, Ordering::Relaxed);
         let Some(cache) = &self.cache else { return };
-        let Some(src) = self.tracks.get(self.out_seq as usize).map(|t| &t.src) else { return };
+        let Some(src) = self.current().map(|t| &t.src) else { return };
         if src.is_local() {
             return;
         }
-        let progress = cache.progress(&src.cache_key());
         if let Some(pr) = progress {
             self.status.fetched_bytes.store(pr.downloaded, Ordering::Relaxed);
             self.status.total_bytes.store(pr.len.unwrap_or(0), Ordering::Relaxed);
@@ -796,11 +830,13 @@ impl Engine {
         }
     }
 
-    /// The current track's stream or the next one's prefetch is still downloading.
-    fn network_in_use(&self) -> bool {
+    /// The current track's stream (whose `progress` the caller already has) or
+    /// the next one's prefetch is still downloading.
+    fn network_in_use(&self, progress: Option<&streamcache::Progress>) -> bool {
         let Some(cache) = &self.cache else { return false };
         let incomplete = |src: &TrackSource| !src.is_local() && cache.progress(&src.cache_key()).is_none_or(|p| !p.complete);
-        let current = self.session.is_some() && self.current().is_some_and(|t| incomplete(&t.src));
+        let current = self.session.is_some()
+            && self.current().is_some_and(|t| !t.src.is_local() && progress.is_none_or(|p| !p.complete));
         let prefetch = self.prefetched.is_some() && self.next.as_ref().is_some_and(incomplete);
         current || prefetch
     }
@@ -834,10 +870,8 @@ impl Engine {
                     }
                     return;
                 }
-                DecoderMsg::Error { seq, message } => {
-                    let seq = seq.min(self.tracks.len().saturating_sub(1) as u64);
-                    let track_id = self.tracks.get(seq as usize).map(|t| t.src.id.clone());
-                    let _ = self.events.send(Event::Error { track_id, message });
+                DecoderMsg::Error { seq, track_id, message } => {
+                    let _ = self.events.send(Event::Error { track_id: Some(track_id), message });
                     // A later track failing lets the current one play out; anything else stops.
                     if self.ring.is_none() || seq <= self.out_seq {
                         self.stop();
@@ -858,22 +892,30 @@ impl Engine {
             return;
         }
 
-        // Track boundaries the callback has played past.
+        // Track boundaries the callback has played past. The decoder reports a
+        // track before queuing its audio, but the callback can cross into it
+        // between the messages being drained above and this load: such a track is
+        // announced on the next poll, once its report is in.
         let crossed = self.status.track_seq.load(Ordering::Acquire);
-        if self.out_seq < crossed {
-            while self.out_seq < crossed {
-                self.out_seq += 1;
-                // The UI names the new next once it hears about this track.
-                self.next = None;
-                self.prefetched = None;
-                self.announce(true);
-            }
+        let mut advanced = false;
+        while self.out_seq < crossed && (self.out_seq as usize + 1) < self.tracks.len() {
+            self.out_seq += 1;
+            advanced = true;
+            // The output can't cross while it holds for a seek: one still on
+            // record is stale (it ended its track), and must not restart this one.
+            self.held_seek = None;
+            // The UI names the new next once it hears about this track.
+            self.forget_next();
+            self.announce(true);
+        }
+        if advanced {
             // Same device format, but the gain, transcode or channel layout may differ.
             self.report_signal_path();
         }
 
         if self.session.is_some() && finished && (self.ring.is_none() || self.backend.drained()) {
-            let ended = self.current().map(|t| (t.src.id.clone(), t.src.token));
+            // A session that never produced audio (an empty file) ends too, as its first track.
+            let ended = self.current().map(|t| &t.src).or(self.opening.as_ref()).map(|s| (s.id.clone(), s.token));
             self.stop();
             if let Some((track_id, token)) = ended {
                 let _ = self.events.send(Event::Ended { track_id, token });
@@ -886,7 +928,8 @@ impl Engine {
         let ctl = input.ctl.clone();
         let reopened = self.ring.is_some();
         // Close first so the old callback can't touch the counters set below.
-        self.backend.close();
+        // (The device itself may stay claimed: it's reopened right away.)
+        self.backend.close_for_reopen();
         self.out_seq = first_seq;
         self.status.track_seq.store(first_seq, Ordering::Release);
         self.status.sample_rate.store(format.sample_rate, Ordering::Relaxed);
@@ -919,8 +962,10 @@ impl Engine {
             (t.src.id.clone(), t.src.token, t.format, t.total_frames, t.output.sample_rate);
         self.status.total_frames.store(total.unwrap_or(0), Ordering::Relaxed);
         self.status.sample_rate.store(rate, Ordering::Relaxed);
-        // Only the first announcement of a restarted session is a restart.
-        let restart = !gapless && std::mem::take(&mut self.restarting);
+        // Only the first announcement of a restarted session is a restart, and only
+        // if it's the track that was restarted (not the next one, when that had no audio left).
+        let restarted = self.opening.as_ref().is_some_and(|o| o.id == t.src.id && o.token == t.src.token);
+        let restart = !gapless && std::mem::take(&mut self.restarting) && restarted;
         let _ = self.events.send(Event::TrackStarted { track_id, token, format, gapless, restart });
     }
 }

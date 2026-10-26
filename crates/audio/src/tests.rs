@@ -16,6 +16,9 @@ struct FakeBackend {
     devices: Arc<Mutex<Vec<DeviceInfo>>>,
     device_events: Arc<Mutex<Vec<DeviceEvent>>>,
     selected: Option<String>,
+    /// The device the open stream plays on: like CoreAudio, a stream stays on
+    /// its device when the default moves.
+    open_dev: Option<String>,
 }
 
 impl FakeBackend {
@@ -29,7 +32,15 @@ impl FakeBackend {
             devices: Arc::default(),
             device_events: Arc::default(),
             selected: None,
+            open_dev: None,
         }
+    }
+
+    /// The device a new stream would open on: the selected one if plugged in, else the default.
+    fn target(&self) -> Option<DeviceInfo> {
+        let devices = self.devices.lock().unwrap();
+        let chosen = self.selected.as_ref().and_then(|uid| devices.iter().find(|d| &d.uid == uid));
+        chosen.or(devices.first()).cloned()
     }
 }
 
@@ -47,9 +58,12 @@ impl OutputBackend for FakeBackend {
     }
 
     fn current_device(&mut self) -> Option<DeviceInfo> {
-        let devices = self.devices.lock().unwrap();
-        let chosen = self.selected.as_ref().and_then(|uid| devices.iter().find(|d| &d.uid == uid));
-        chosen.or(devices.first()).cloned()
+        let open = self.open_dev.as_ref().and_then(|uid| self.devices.lock().unwrap().iter().find(|d| &d.uid == uid).cloned());
+        open.or_else(|| self.target())
+    }
+
+    fn target_device(&mut self) -> Option<DeviceInfo> {
+        self.target()
     }
 
     fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
@@ -67,6 +81,7 @@ impl OutputBackend for FakeBackend {
             return Err(OutputError::Unsupported { rate: format.sample_rate, channels: format.channels });
         }
         self.opens.fetch_add(1, Ordering::Relaxed);
+        self.open_dev = self.target().map(|d| d.uid);
         let stop = Arc::new(AtomicBool::new(false));
         let drained = Arc::new(AtomicBool::new(false));
         self.drained = drained.clone();
@@ -91,6 +106,7 @@ impl OutputBackend for FakeBackend {
     }
 
     fn close(&mut self) {
+        self.open_dev = None;
         if let Some((stop, handle)) = self.stop.take() {
             stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
@@ -363,6 +379,54 @@ fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
 }
 
 #[test]
+fn playback_follows_the_default_device_when_it_changes_mid_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 23);
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
+    *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("hp", "Headphones", DeviceKind::BuiltInHeadphones)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
+    while engine.status.position_secs() < 1.0 {
+        assert!(Instant::now() < deadline, "never got going");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Headphones plugged in: they become the system default.
+    devices.lock().unwrap().reverse();
+    events.lock().unwrap().push(DeviceEvent::DefaultChanged);
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::Devices { current: Some(d), .. } if d == "hp")), "{seen:?}");
+    assert!(matches!(seen.last(), Some(Event::TrackStarted { track_id, restart: true, .. }) if track_id == "a"));
+    assert!(engine.status.position_secs() > 0.5, "carried on mid-track");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_lost_device_falls_back_in_its_remembered_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 24);
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
+    *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    // The user plays the speakers bit-perfect, the DAC in Normal.
+    engine.send(Command::DeviceModes(HashMap::from([("spk".to_owned(), PlaybackMode::BitPerfect), ("dac".to_owned(), PlaybackMode::Normal)])));
+    engine.send(Command::SelectDevice(Some("dac".into())));
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert_eq!(engine.status.mode(), PlaybackMode::Normal);
+    devices.lock().unwrap().retain(|d| d.uid != "dac");
+    events.lock().unwrap().push(DeviceEvent::ListChanged);
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::DeviceLost { name } if name == "DAC")));
+    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, device: Some(d) } if d == "spk")), "{seen:?}");
+    assert_eq!(engine.status.mode(), PlaybackMode::BitPerfect);
+    engine.send(Command::Shutdown);
+}
+
+#[test]
 fn remembered_modes_win_over_device_defaults() {
     let backend = FakeBackend::new(caps(Some(24), 192_000));
     *backend.devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
@@ -380,7 +444,8 @@ fn remembered_modes_win_over_device_defaults() {
 #[test]
 fn a_seek_after_the_decoder_has_finished_still_lands_and_ends() {
     let dir = tempfile::tempdir().unwrap();
-    // 16 s, all of it fits the buffer: the decoder is done long before the output.
+    // 16 s, all of it fits the buffer: the decoder is done long before the output
+    // (it waits at the end for a next track, so the seek lands in place).
     let a = pcm(2 * 44_100 * 16, 3);
     let backend = FakeBackend::new(caps(None, 192_000));
     let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
@@ -483,6 +548,207 @@ fn turning_the_volume_down_is_reported_as_dithered() {
     assert!(dithered(&engine), "software volume requantizes");
     engine.send(Command::SetVolume(1.0));
     assert!(!dithered(&engine));
+    engine.send(Command::Shutdown);
+}
+
+/// (track id, gapless, restart) of every `TrackStarted` in `seen`.
+fn starts(seen: &[Event]) -> Vec<(String, bool, bool)> {
+    seen.iter()
+        .filter_map(|e| match e {
+            Event::TrackStarted { track_id, gapless, restart, .. } => Some((track_id.clone(), *gapless, *restart)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_next_track_that_fails_to_open_lets_the_current_one_play_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100, 7);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    let missing = TrackSource { id: "gone".into(), url: format!("file://{}", dir.path().join("gone.wav").display()), ..Default::default() };
+    engine.send(Command::SetNext(Some(missing)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let errors: Vec<_> = seen.iter().filter_map(|e| if let Event::Error { track_id, .. } = e { Some(track_id.clone()) } else { None }).collect();
+    assert_eq!(errors, [Some("gone".to_owned())], "the error names the track that failed: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "a"), "{seen:?}");
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    assert!(out == a, "the current track played out: {} of {} samples", out.len(), a.len());
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_next_named_while_the_decoder_opens_the_old_one_is_honoured() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, c) = (pcm(2 * 44_100 * 3, 8), pcm(2 * 44_100, 9), pcm(2 * 44_100, 10));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    // B takes a while to open (a slow server): the decoder sits between A and B.
+    let b = file_source(&dir, "b", &b);
+    let slow_b = TrackSource { url: b.url.replacen("file://", "test-slow://", 1), ..b };
+    engine.send(Command::SetNext(Some(slow_b)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // All of A is decoded within a few ms; by now the decoder is opening B.
+    thread::sleep(Duration::from_millis(50));
+    engine.send(Command::SetNext(Some(file_source(&dir, "c", &c))));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let ids: Vec<_> = starts(&seen).into_iter().map(|(id, ..)| id).collect();
+    assert!(!ids.iter().any(|id| id == "b"), "B was replaced: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "c"), "C followed A: {seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_track_without_audio_still_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(FakeBackend::new(caps(None, 192_000))), None);
+    engine.send(Command::Play(TrackSource { token: 3, ..file_source(&dir, "empty", &[]) }));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, token: 3 }) if track_id == "empty"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn play_does_not_inherit_the_previous_queues_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, c) = (pcm(2 * 44_100 * 20, 11), pcm(2 * 4_410, 12), pcm(2 * 4_410, 13));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // A new queue whose only track is C: the UI has no next to name.
+    engine.send(Command::Stop);
+    engine.send(Command::Play(file_source(&dir, "c", &c)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("c".to_owned(), false, false)], "{seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "c"));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_short_track_waits_for_its_next_to_be_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, c) = (pcm(2 * 44_100 * 2, 14), pcm(2 * 44_100 * 3, 15), pcm(2 * 4_410, 16));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    // B fits the buffer whole: the decoder is done with it long before it plays.
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    // Like the UI: the track after B is named once B starts.
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { track_id, .. } if track_id == "b"));
+    engine.send(Command::SetNext(Some(file_source(&dir, "c", &c))));
+    let rest = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let all: Vec<Event> = seen.into_iter().chain(rest).collect();
+    let started: Vec<_> = starts(&all).into_iter().map(|(id, gapless, _)| (id, gapless)).collect();
+    assert_eq!(started, [("a".to_owned(), false), ("b".to_owned(), true), ("c".to_owned(), true)], "{all:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    let expected: Vec<i16> = a.iter().chain(&b).chain(&c).copied().collect();
+    assert!(out == expected, "played {} samples, expected {}", out.len(), expected.len());
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_past_the_end_moves_on_to_the_next_track_from_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 20, 17), pcm(2 * 44_100, 18));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    // A is longer than the buffer: the decoder is still on it when the seek comes.
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 2.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    engine.send(Command::Seek(Duration::from_secs(100)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("b".to_owned(), true, false)], "B started once, from its start: {seen:?}");
+    let seeked: Vec<_> = seen.iter().filter(|e| matches!(e, Event::Seeked { .. })).collect();
+    assert!(matches!(seeked[..], [Event::Seeked { track_id, .. }] if track_id == "a"), "one Seeked, for A: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "b"));
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    assert!(out.ends_with(&b), "all of B played, from its first sample");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_past_the_end_after_the_decoder_moved_on_starts_the_next_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 3, 21), pcm(2 * 44_100, 22));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // Both fit the buffer: by now the decoder is done with A and on B, so the
+    // seek restarts A past its end, which has no audio left: B takes over.
+    thread::sleep(Duration::from_millis(100));
+    engine.send(Command::Seek(Duration::from_secs(100)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert_eq!(starts(&seen), [("b".to_owned(), false, false)], "B starts as itself, not as a restart: {seen:?}");
+    let seeked: Vec<_> = seen.iter().filter(|e| matches!(e, Event::Seeked { .. })).collect();
+    assert!(matches!(seeked[..], [Event::Seeked { track_id, .. }] if track_id == "a"), "one Seeked, for A: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "b"), "{seen:?}");
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    assert!(out.ends_with(&b), "all of B played, from its first sample");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_storm_settles_on_the_last_target_and_plays_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 30, 19);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 2.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    for i in 0..200u64 {
+        engine.send(Command::Seek(Duration::from_millis(100 + (i * 37) % 9_000)));
+        if i % 20 == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    engine.send(Command::Seek(Duration::from_secs(20)));
+    events_until(&engine, |e| matches!(e, Event::Seeked { position_secs, .. } if (*position_secs - 20.0).abs() < 0.1));
+    // Not left holding: playback carries on from there.
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while engine.status.position_secs() < 20.5 {
+        assert!(Instant::now() < deadline, "stuck at {:.2} s, {:?}", engine.status.position_secs(), engine.status.state());
+        thread::sleep(Duration::from_millis(10));
+    }
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 30, 20);
+    let src = file_source(&dir, "a", &a);
+    let src = TrackSource { url: src.url.replacen("file://", "test-unseekable://", 1), ..src };
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::Play(src));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    while engine.status.position_secs() < 2.0 {
+        assert!(Instant::now() < deadline, "never got going");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Backwards on a forward-only source.
+    engine.send(Command::Seek(Duration::ZERO));
+    let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
+    assert!(matches!(seen.last(), Some(Event::Error { track_id: Some(id), message }) if id == "a" && message.contains("seek")), "{seen:?}");
+    let deadline = Instant::now() + slack(Duration::from_secs(2));
+    while engine.status.state() != PlayState::Stopped {
+        assert!(Instant::now() < deadline, "still {:?}", engine.status.state());
+        thread::sleep(Duration::from_millis(10));
+    }
     engine.send(Command::Shutdown);
 }
 

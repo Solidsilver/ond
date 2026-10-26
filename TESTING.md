@@ -13,6 +13,9 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 - [ ] Stop playback in bit-perfect: other apps can use the DAC again (hog released). Same after quitting.
 - [ ] Unplug the UMC22 mid-track: continues on speakers; "Switch back" appears when it's plugged back in.
 - [ ] Per-device mode remembered across devices and restarts.
+- [ ] Following the system default, plug in headphones mid-track (or pick another default in Control Center): playback moves there and carries on from where it was.
+- [ ] UMC22 in bit-perfect, a 44.1 kHz track followed by a 96 kHz one: other apps stay silent across the switch (hog kept through the reopen); no extra click beyond the rate change.
+- [ ] Toggle Normal → bit-perfect mid-track with a 24-bit file on a DAC that shares at 16 bits: the status shows the wider format, and a bit-exact check (loopback recording, or the DAC's own bit meter) shows the samples weren't dithered down to 16 bits.
 
 ## Playback
 - [ ] Gapless: a live album plays without gaps (also a hi-res one, resampled on the UMC22).

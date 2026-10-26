@@ -1,7 +1,7 @@
 # 002 · Audio engine: wrong track stopped on error; SetNext lost at the track boundary
 
 - Area: `crates/audio` · Kind: bug · Priority: P0
-- Status: open · Claimed by: —
+- Status: done (branch fix/audio-engine) · Claimed by: —
 - Source: audio review (A1, A3, B2, B5, B6, B7). Line numbers at commit 669bb00.
 
 ## Problem
@@ -31,3 +31,16 @@
 ## Acceptance
 
 All four tests pass; existing 81 audio tests still pass.
+
+## Resolution
+
+1. Fixed. The decoder's `Error` now carries the failing track's id (it knows what it was opening), and the engine compares the raw `seq` with `out_seq`. A next track that fails to open is reported by its own id while the current one plays out and ends normally.
+2. Fixed. `Session::set_next` only accepts the choice while the decoder is still on `after`, checked under the slot lock that the decoder takes the next track (and bumps `at_seq`) under, so the answer can't go stale. When it's refused, the engine compares against what the decoder has reported, or, in the gap before the new track's first audio, against what it was last told, and restarts the current track at its position when they differ (same branch as before).
+3. The mechanism described isn't quite right (the callback only pops a marker once samples after it are queued, and those are pushed after `Track` is sent), but a narrower race is real: the callback can cross between `poll_session` draining messages and loading `track_seq`. `out_seq` now only advances onto tracks whose `Track` report is in; the crossing is announced on the next poll. No deterministic test (a two-statement window).
+4. Fixed. The engine keeps the session's first source (`opening`) and emits `Ended` for it when the session ends without ever producing audio.
+5. Fixed. `Play` and `Stop` clear `next`/`prefetched`; `resume` (restarts) still carries them over.
+6. Fixed differently: at the end of the last queued track the decoder now waits (`linger`) while the output has more than 0.1 s of that track left, so a next track named once the output reaches it (what the UI does) still follows gaplessly. Before, a track shorter than the buffer was fully decoded before the UI had a chance to name its next, so its successor always reopened the device. A seek that arrives during the wait lands in place.
+
+Tests added (`crates/audio/src/tests.rs`): `a_next_track_that_fails_to_open_lets_the_current_one_play_out`, `a_next_named_while_the_decoder_opens_the_old_one_is_honoured` (uses a `test-slow://` source that takes 0.5 s to open), `a_track_without_audio_still_ends`, `play_does_not_inherit_the_previous_queues_next`, `a_short_track_waits_for_its_next_to_be_named`. All five failed before the fix.
+
+Hardware: nothing specific; the TESTING.md gapless check (a live album) covers it.
