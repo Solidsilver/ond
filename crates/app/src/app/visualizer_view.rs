@@ -162,14 +162,14 @@ impl OndApp {
             if audio.is_some() {
                 self.ui.live.want(EVERY_FRAME);
             }
-            let current = self.player.queue.current.as_ref().map(|c| (c.uid, c.track.clone()));
-            let album = current.as_ref().and_then(|(_, t)| self.data.album(&t.album_id)).map(|a| a.name.clone());
-            let cover = current.as_ref().and_then(|(_, t)| self.data.cover_for(t).map(str::to_owned));
-            let look = cover.as_deref().and_then(|c| self.art.look(c));
+            let current = self.player.queue.current.as_ref().map(|c| (c.uid, &c.track));
+            let album = current.and_then(|(_, t)| self.data.album(&t.album_id)).map(|a| a.name.as_str());
+            let cover = current.and_then(|(_, t)| self.data.cover_for(t));
+            let look = cover.and_then(|c| self.art.look(c));
             let shuffle = self.experimental().visualizer_pick == Pick::Shuffle;
             let Some(v) = self.ui.visualizer.as_mut() else { return };
             // A new track: its cover and names show, and shuffled, another visualizer.
-            let uid = current.as_ref().map(|(u, _)| *u);
+            let uid = current.map(|(u, _)| u);
             if uid != v.track {
                 if shuffle && v.track.is_some() {
                     let kind = v.shuffled();
@@ -179,10 +179,10 @@ impl OndApp {
                 v.track_since = now;
             }
             // The album's colors, once its look is worked out.
-            if cover != v.cover && (look.is_some() || cover.is_none()) {
+            if cover != v.cover.as_deref() && (look.is_some() || cover.is_none()) {
                 v.colors = look.as_ref().and_then(|l| l.palette.as_ref()).map_or_else(Vec::new, |p| p.colors.clone());
                 v.scene.set_colors(&v.colors);
-                v.cover = cover.clone();
+                v.cover = cover.map(str::to_owned);
             }
             let dt = v.fixed_step.unwrap_or((now - v.last) as f32);
             v.last = now;
@@ -207,11 +207,11 @@ impl OndApp {
                 }
             }
             let (track_since, switched, opened, kind) = (v.track_since, v.switched, v.opened, v.kind());
-            if let Some((_, track)) = &current {
+            if let Some((_, track)) = current {
                 let caption = caption_alpha(now - track_since);
                 if caption > 0.0 {
-                    let art = cover.as_deref().and_then(|c| self.art.texture(c, 96.0));
-                    paint_caption(ui.painter(), rect, art, &track.title, track.artist.as_deref(), album.as_deref(), caption);
+                    let art = cover.and_then(|c| self.art.texture(c, 96.0));
+                    paint_caption(ui.painter(), rect, art, &track.title, track.artist.as_deref(), album, caption);
                     if caption < 1.0 {
                         ctx.request_repaint();
                     }

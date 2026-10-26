@@ -12,7 +12,6 @@ use crate::visuals::backdrop::Blurred;
 use crate::visuals::over_art::{self, OnArt};
 use crate::window::WindowMode;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, ViewportCommand, pos2, vec2};
-use library::Track;
 
 /// Text and icons drawn over artwork on a scrim, whatever the theme.
 const ON_ART: Color32 = over_art::LIGHT;
@@ -31,17 +30,13 @@ fn under(blurred: Option<&Blurred>, part: Rect, whole: Rect) -> Option<[Color32;
 }
 
 impl OndApp {
-    fn cover_of(&self, track: &Track) -> Option<String> {
-        self.data.cover_for(track).map(str::to_owned)
-    }
-
     pub(super) fn mini_ui(&mut self, ui: &mut Ui) {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
             let rect = ui.max_rect();
-            let cover = self.player.queue.current.as_ref().and_then(|i| self.cover_of(&i.track));
-            self.art.paint(ui, rect, cover.as_deref(), 0.0);
+            let cover = self.player.queue.current.as_ref().and_then(|i| self.data.cover_for(&i.track));
+            self.art.paint(ui, rect, cover, 0.0);
             // What's under the controls drawn over the cover, so they can read on it.
-            let blurred = cover.as_deref().and_then(|c| self.art.look(c)).and_then(|l| l.backdrop.clone());
+            let blurred = cover.and_then(|c| self.art.look(c)).and_then(|l| l.backdrop.clone());
             if self.player.queue.current.is_none() {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), ON_ART_MUTED);
             }

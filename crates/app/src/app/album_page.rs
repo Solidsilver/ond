@@ -339,8 +339,7 @@ impl ViewCtx<'_> {
             if !facts.credits.is_empty() {
                 super::widgets::kv_section(ui, "Credits");
                 for c in &facts.credits {
-                    let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
-                    super::info_panel::links_row(self.actions, ui, &c.role, items);
+                    super::info_panel::links_row(self.actions, ui, &c.role, c.people.iter().map(|(name, id)| (name.as_str(), || Route::Artist { name: name.clone(), id: id.clone() })));
                 }
             }
             super::widgets::kv_section(ui, "Analysis");
@@ -450,10 +449,7 @@ impl ViewCtx<'_> {
 
     /// Playlists the user can change (others' public ones are read-only).
     pub(super) fn owns(&self, p: &subsonic::Playlist) -> bool {
-        match (&p.owner, &self.session.client) {
-            (Some(owner), Some(c)) => owner == c.username(),
-            _ => true,
-        }
+        super::sidebar::owns(self.session, p)
     }
 
     /// Up to four album covers in a 2×2 square (one fills it; none: a note glyph).

@@ -3,6 +3,7 @@
 
 use super::widgets::elide;
 use super::seek::SeekStyle;
+use super::view_ctx::ViewCtx;
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -87,7 +88,9 @@ impl OndApp {
         let x = transport_x(free_left, lcd.left());
         let left = Rect::from_min_max(pos2(x, full.top()), pos2(x + TRANSPORT_W, full.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, None));
-        self.lcd(ui, lcd);
+        if self.view().lcd_display(ui, lcd) {
+            self.output.request_open();
+        }
     }
 
     /// Previous · play/pause (a spinner while buffering) · next. `color`
@@ -110,130 +113,6 @@ impl OndApp {
         }
         if icons::sized_button(ui, Icon::Next, "Next", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Next);
-        }
-    }
-
-    /// The now-playing display. Art on the left; title and "artist — album"
-    /// centred; along the bottom a thin seek line with the elapsed and
-    /// remaining times at its ends; the format pill and the heart on the right.
-    pub(super) fn lcd(&mut self, ui: &mut Ui, rect: Rect) {
-        let t = Tokens::of(ui);
-        let painter = ui.painter().clone();
-        let fill = crate::theme::tint_of(ui).map_or(t.sidebar, |x| x.display);
-        painter.rect(rect, 7.0, fill, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
-        let body = ui.interact(rect, ui.scope_id().with("lcd"), Sense::click());
-        // The live spectrum, faint behind the text (experimental).
-        if self.experimental().spectrum
-            && self.player.queue.current.is_some()
-            && let Some(f) = self.view().listen(ui)
-        {
-            let area = Rect::from_min_max(pos2(rect.left() + rect.height() + 8.0, rect.top() + 5.0), pos2(rect.right() - 8.0, rect.bottom() - 13.0));
-            let n = ((area.width() / 6.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
-            crate::visuals::paint_bars(&painter, area, &crate::visuals::spectrum::grouped(&f.bands, n), t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }));
-        }
-        let Some(item) = self.player.queue.current.clone() else {
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), t.muted);
-            return;
-        };
-        let art = Rect::from_min_size(rect.min, vec2(rect.height(), rect.height()));
-        let album = self.data.album(&item.track.album_id).cloned();
-        let cover = self.data.cover_for(&item.track).map(str::to_owned);
-        self.art.paint(ui, art.shrink(1.0), cover.as_deref(), 6.0);
-
-        // The right column: the heart at the end, the format pill just left of
-        // it, both centred vertically.
-        let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(22.0, 22.0));
-        let readout = self.output.readout(&self.engine.status);
-        let readout_anchor = pos2(heart.left() - 2.0, rect.center().y);
-        let readout_rect = readout.as_ref().map(|r| crate::output::paint_readout(ui, readout_anchor, r, 10.0, false));
-        let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
-        let col_left = art.right() + 10.0;
-
-        // Title and subtitle: centred on the display when the same margin fits
-        // on both sides, else centred in the column between art and pill.
-        let reserve = (col_left - rect.left()).max(rect.right() - col_right);
-        let symmetric = rect.width() - 2.0 * reserve;
-        let (center_x, text_w) = if symmetric >= 140.0 { (rect.center().x, symmetric) } else { ((col_left + col_right) / 2.0, (col_right - col_left).max(40.0)) };
-        let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_w);
-        let sub_text = match (&item.track.artist, &album) {
-            (Some(a), Some(al)) => format!("{a} · {}", al.name),
-            (Some(a), None) => a.clone(),
-            (None, Some(al)) => al.name.clone(),
-            _ => String::new(),
-        };
-        let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
-        let y0 = rect.top() + 4.0;
-        let title_h = title.size().y;
-        painter.galley(pos2(center_x - title.size().x / 2.0, y0), title, t.text);
-        painter.galley(pos2(center_x - sub.size().x / 2.0, y0 + title_h), sub, t.muted);
-
-        // The seek line along the bottom of the column, the times at its ends.
-        let time_font = FontId::proportional(9.5);
-        // Sized for the widest time, so the line doesn't shift as digits change.
-        let time_w = painter.layout_no_wrap("−88:88".into(), time_font.clone(), t.muted).size().x;
-        let line_y = rect.bottom() - 7.5;
-        let bar_left = col_left + time_w + 6.0;
-        let bar = Rect::from_min_max(pos2(bar_left, line_y - 1.0), pos2((col_right - time_w - 6.0).max(bar_left + 20.0), line_y + 1.0));
-        let strip = Rect::from_min_max(pos2(bar.left() - 4.0, line_y - 6.0), pos2(bar.right() + 4.0, rect.bottom()));
-        let style = SeekStyle {
-            track: t.hairline,
-            fetched: t.selected,
-            fill: t.muted,
-            pulse: t.accent,
-            pulse_len: 40.0,
-            radius: 1.0,
-            grow: 0.5,
-            knob: t.text,
-            knob_r: 3.5,
-            wave_h: 4.0,
-        };
-        let mut v = self.view();
-        let (shown, strip_resp) = v.seek_line(ui, bar, strip, "lcd-seek", &style);
-        let (elapsed, remaining) = v.seek_times(shown);
-        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, elapsed, time_font.clone(), t.muted);
-        painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
-
-        let hovering = body.hovered() || strip_resp.hovered() || self.ui.seek_preview.is_some();
-        // Love: the heart at the right end, shown when loved or on hover.
-        let loved = self.favorites.is_on(StarKind::Song, &item.track.id);
-        // The signal path in a few characters; hover for all of it, click for the picker.
-        let readout_resp = readout.as_ref().zip(readout_rect).map(|(r, area)| {
-            crate::output::paint_readout(ui, readout_anchor, r, 10.0, true);
-            let resp = ui.interact(area, ui.scope_id().with("lcd-readout"), Sense::click());
-            if resp.hovered() {
-                painter.rect_stroke(area, area.height() / 2.0, egui::Stroke::new(1.0, t.muted.gamma_multiply(0.6)), egui::StrokeKind::Inside);
-            }
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
-            resp
-        });
-        let on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
-        if readout_resp.as_ref().is_some_and(|r| r.clicked()) {
-            self.output.request_open();
-        }
-        // Always clickable: the heart sits over the display, so while the pointer
-        // is on it the display itself doesn't count as hovered.
-        let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
-        let heart_resp = super::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
-        if heart_resp.clicked() {
-            self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
-        }
-        let label = format!("Now playing: {}, {sub_text}", item.track.title);
-        body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        // The artwork switches to the player last used (Player or Mini); the
-        // rest of the display opens the album.
-        let on_art = body.interact_pointer_pos().or(body.hover_pos()).is_some_and(|p| art.contains(p));
-        if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() && !on_readout {
-            self.actions.push(if on_art { Action::TogglePlayer } else { Action::Go(Route::Album(item.track.album_id.clone())) });
-        }
-        if on_art && body.hovered() {
-            painter.rect_stroke(art.shrink(1.0), 6.0, egui::Stroke::new(1.5, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
-        }
-        if !heart_resp.hovered() && !on_readout && !strip_resp.hovered() {
-            body.on_hover_cursor(egui::CursorIcon::PointingHand);
-        }
-        heart_resp.on_hover_text(crate::keys::shown(love_label));
-        if let (Some(resp), Some(r)) = (readout_resp, readout) {
-            resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
         }
     }
 
@@ -278,6 +157,133 @@ impl OndApp {
             self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
         }
     }
+}
+
+impl ViewCtx<'_> {
+    /// The now-playing display. Art on the left; title and "artist — album"
+    /// centred; along the bottom a thin seek line with the elapsed and
+    /// remaining times at its ends; the format pill and the heart on the right.
+    /// Returns whether the format pill was clicked (to open the output picker).
+    fn lcd_display(&mut self, ui: &mut Ui, rect: Rect) -> bool {
+        let t = Tokens::of(ui);
+        let painter = ui.painter().clone();
+        let fill = crate::theme::tint_of(ui).map_or(t.sidebar, |x| x.display);
+        painter.rect(rect, 7.0, fill, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+        let body = ui.interact(rect, ui.scope_id().with("lcd"), Sense::click());
+        // The live spectrum, faint behind the text (experimental).
+        if self.experimental().spectrum
+            && self.player.queue.current.is_some()
+            && let Some(f) = self.listen(ui)
+        {
+            let area = Rect::from_min_max(pos2(rect.left() + rect.height() + 8.0, rect.top() + 5.0), pos2(rect.right() - 8.0, rect.bottom() - 13.0));
+            let n = ((area.width() / 6.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
+            crate::visuals::paint_bars(&painter, area, &crate::visuals::spectrum::grouped(&f.bands, n), t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }));
+        }
+        // Borrowed from the player and library, not from `self`, so drawing can
+        // take `&mut self`.
+        let (player, data) = (self.player, self.data);
+        let Some(item) = player.queue.current.as_ref() else {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), t.muted);
+            return false;
+        };
+        let art = Rect::from_min_size(rect.min, vec2(rect.height(), rect.height()));
+        let album = data.album(&item.track.album_id);
+        self.art.paint(ui, art.shrink(1.0), data.cover_for(&item.track), 6.0);
+
+        // The right column: the heart at the end, the format pill just left of
+        // it, both centred vertically.
+        let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(22.0, 22.0));
+        let readout = self.output.readout(&self.engine.status);
+        let readout_anchor = pos2(heart.left() - 2.0, rect.center().y);
+        let readout_rect = readout.as_ref().map(|r| crate::output::paint_readout(ui, readout_anchor, r, 10.0, false));
+        let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
+        let col_left = art.right() + 10.0;
+
+        // Title and subtitle: centred on the display when the same margin fits
+        // on both sides, else centred in the column between art and pill.
+        let reserve = (col_left - rect.left()).max(rect.right() - col_right);
+        let symmetric = rect.width() - 2.0 * reserve;
+        let (center_x, text_w) = if symmetric >= 140.0 { (rect.center().x, symmetric) } else { ((col_left + col_right) / 2.0, (col_right - col_left).max(40.0)) };
+        let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_w);
+        let sub_text = match (&item.track.artist, album) {
+            (Some(a), Some(al)) => format!("{a} · {}", al.name),
+            (Some(a), None) => a.clone(),
+            (None, Some(al)) => al.name.clone(),
+            _ => String::new(),
+        };
+        let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
+        let y0 = rect.top() + 4.0;
+        let title_h = title.size().y;
+        painter.galley(pos2(center_x - title.size().x / 2.0, y0), title, t.text);
+        painter.galley(pos2(center_x - sub.size().x / 2.0, y0 + title_h), sub, t.muted);
+
+        // The seek line along the bottom of the column, the times at its ends.
+        let time_font = FontId::proportional(9.5);
+        // Sized for the widest time, so the line doesn't shift as digits change.
+        let time_w = painter.layout_no_wrap("−88:88".into(), time_font.clone(), t.muted).size().x;
+        let line_y = rect.bottom() - 7.5;
+        let bar_left = col_left + time_w + 6.0;
+        let bar = Rect::from_min_max(pos2(bar_left, line_y - 1.0), pos2((col_right - time_w - 6.0).max(bar_left + 20.0), line_y + 1.0));
+        let strip = Rect::from_min_max(pos2(bar.left() - 4.0, line_y - 6.0), pos2(bar.right() + 4.0, rect.bottom()));
+        let style = SeekStyle {
+            track: t.hairline,
+            fetched: t.selected,
+            fill: t.muted,
+            pulse: t.accent,
+            pulse_len: 40.0,
+            radius: 1.0,
+            grow: 0.5,
+            knob: t.text,
+            knob_r: 3.5,
+            wave_h: 4.0,
+        };
+        let (shown, strip_resp) = self.seek_line(ui, bar, strip, "lcd-seek", &style);
+        let (elapsed, remaining) = self.seek_times(shown);
+        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, elapsed, time_font.clone(), t.muted);
+        painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
+
+        let hovering = body.hovered() || strip_resp.hovered() || self.ui.seek_preview.is_some();
+        // Love: the heart at the right end, shown when loved or on hover.
+        let loved = self.favorites.is_on(StarKind::Song, &item.track.id);
+        // The signal path in a few characters; hover for all of it, click for the picker.
+        let readout_resp = readout.as_ref().zip(readout_rect).map(|(r, area)| {
+            crate::output::paint_readout(ui, readout_anchor, r, 10.0, true);
+            let resp = ui.interact(area, ui.scope_id().with("lcd-readout"), Sense::click());
+            if resp.hovered() {
+                painter.rect_stroke(area, area.height() / 2.0, egui::Stroke::new(1.0, t.muted.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+            }
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
+            resp
+        });
+        let on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
+        let open_picker = readout_resp.as_ref().is_some_and(|r| r.clicked());
+        // Always clickable: the heart sits over the display, so while the pointer
+        // is on it the display itself doesn't count as hovered.
+        let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
+        let heart_resp = super::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
+        if heart_resp.clicked() {
+            self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
+        }
+        body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Now playing: {}, {sub_text}", item.track.title)));
+        // The artwork switches to the player last used (Player or Mini); the
+        // rest of the display opens the album.
+        let on_art = body.interact_pointer_pos().or(body.hover_pos()).is_some_and(|p| art.contains(p));
+        if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() && !on_readout {
+            self.actions.push(if on_art { Action::TogglePlayer } else { Action::Go(Route::Album(item.track.album_id.clone())) });
+        }
+        if on_art && body.hovered() {
+            painter.rect_stroke(art.shrink(1.0), 6.0, egui::Stroke::new(1.5, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
+        }
+        if !heart_resp.hovered() && !on_readout && !strip_resp.hovered() {
+            body.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+        heart_resp.on_hover_text(crate::keys::shown(love_label));
+        if let (Some(resp), Some(r)) = (readout_resp, readout) {
+            resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+        open_picker
+    }
+
 }
 
 #[cfg(test)]

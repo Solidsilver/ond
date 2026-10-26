@@ -159,8 +159,11 @@ impl ViewCtx<'_> {
         }
         ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, t.hairline));
 
-        let tracks = self.data.tracks.all.clone();
-        let current = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
+        // Borrowed from the library and player, not from `self`, so rows can
+        // take `&mut self`.
+        let (data, player) = (self.data, self.player);
+        let tracks = &data.tracks.all;
+        let current = player.queue.current.as_ref().map(|c| c.track.id.as_str());
         super::layout::into_gutter(ui, |ui| {
             // Rows sit flush: the scroll area places them by the same height.
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -178,7 +181,7 @@ impl ViewCtx<'_> {
                     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
                     let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(row);
                     let hovered = resp.hovered() || resp.contains_pointer();
-                    let playing = current.as_deref() == Some(tr.id.as_str());
+                    let playing = current == Some(tr.id.as_str());
                     if ui.is_rect_visible(rect) {
                         ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
                         let c = columns(rect);
@@ -198,22 +201,21 @@ impl ViewCtx<'_> {
                         };
                         cell(ui, &tr.title, title_x, c.title.right() - title_x + 10.0, title_font, color);
                         cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + 10.0, c.artist.width(), FontId::proportional(13.0), t.muted);
-                        let album = self.data.album(&tr.album_id).map(|a| a.name.clone()).unwrap_or_default();
-                        cell(ui, &album, c.album.left() + 10.0, c.album.width(), FontId::proportional(13.0), t.muted);
+                        let album = data.album(&tr.album_id).map_or("", |a| a.name.as_str());
+                        cell(ui, album, c.album.left() + 10.0, c.album.width(), FontId::proportional(13.0), t.muted);
                         let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
                         ui.painter().text(pos2(c.time.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
                         cell(ui, &crate::fmt::quality(tr), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
                     }
-                    let label = format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" });
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" })));
                     if resp.double_clicked() {
                         self.play_from_album(tr, QueueAction::Play { start: 0 });
                     } else if resp.clicked() {
                         self.ui.songs.selected = Some(row);
                         self.ui.focus = Focus::Main;
                     }
-                    let source = self.album_source(&tr.album_id);
                     resp.context_menu(|ui| {
+                        let source = self.album_source(&tr.album_id);
                         if ui.button("Play").clicked() {
                             self.play_from_album(tr, QueueAction::Play { start: 0 });
                         }

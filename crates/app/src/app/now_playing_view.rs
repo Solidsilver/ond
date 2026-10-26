@@ -91,17 +91,16 @@ impl ViewCtx<'_> {
             ui.add_space(8.0);
             ui.label(egui::RichText::new(text).size(12.5).color(t.muted));
         };
-        let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
+        // Borrowed from the player and the lyrics, not from `self`, so drawing
+        // can take `&mut self`.
+        let (player, fetched) = (self.player, self.lyrics);
+        let Some(track) = player.queue.current.as_ref().map(|c| &c.track) else {
             note(ui, "Nothing playing.");
             return;
         };
-        self.ensure_lyrics(&track);
-        match self.lyrics.get(&track.id) {
-            Some(Fetch::Done(Some(l))) => {
-                let l = l.clone();
-                let bg = t.panel;
-                self.lyrics_block(ui, &track, &l, size, bg);
-            }
+        self.ensure_lyrics(track);
+        match fetched.get(&track.id) {
+            Some(Fetch::Done(Some(l))) => self.lyrics_block(ui, track, l, size, t.panel),
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
             _ if self.session.client.is_none() => note(ui, "Lyrics load when the server is connected."),
             _ => note(ui, "No lyrics for this song."),
@@ -119,14 +118,15 @@ impl ViewCtx<'_> {
     /// details row a lyrics toggle.
     pub(super) fn player_block(&mut self, ui: &mut Ui, track: &Track, side: Option<f32>, window: bool) {
         let width = ui.available_width();
-        let album = self.data.album(&track.album_id).cloned();
-        let cover = self.data.cover_for(track).map(str::to_owned);
+        let data = self.data;
+        let album = data.album(&track.album_id);
+        let cover = data.cover_for(track);
         let art = |this: &mut Self, ui: &mut Ui, side: f32| {
             let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
             let dark = ui.visuals().dark_mode;
             let shadow = egui::Shadow { offset: [0, (side / 40.0) as i8], blur: (side / 14.0).min(28.0) as u8, spread: 0, color: Color32::from_black_alpha(if dark { 110 } else { 46 }) };
             ui.painter().add(shadow.as_shape(art, 8));
-            this.art.paint(ui, art, cover.as_deref(), if side < 120.0 { 6.0 } else { 8.0 });
+            this.art.paint(ui, art, cover, if side < 120.0 { 6.0 } else { 8.0 });
             // The live spectrum along the foot of the artwork (experimental).
             if side >= 120.0
                 && this.experimental().spectrum
@@ -137,7 +137,7 @@ impl ViewCtx<'_> {
                 let n = ((area.width() / 9.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
                 // Light bars over a dark foot of the cover, dark over a light one;
                 // see-through either way (a meter, not a control).
-                let under = cover.as_deref().and_then(|c| this.art.look(c)).and_then(|l| l.backdrop.clone());
+                let under = cover.and_then(|c| this.art.look(c)).and_then(|l| l.backdrop.clone());
                 let uv = |b: &crate::visuals::backdrop::Blurred| crate::visuals::over_art::region(&b.image, crate::visuals::over_art::uv_of(area, art, crate::art::crop_uv(1.0)));
                 let on = under.map_or(OnArt::plain(Color32::WHITE), |b| OnArt::pick(uv(&b), Color32::WHITE, crate::visuals::over_art::GRAPHIC));
                 crate::visuals::paint_bars(ui.painter(), area, &crate::visuals::spectrum::grouped(&f.bands, n), on.fg.gamma_multiply(0.47));
@@ -156,7 +156,7 @@ impl ViewCtx<'_> {
             }
             ui.vertical(|ui| {
                 ui.add_space(if compact { 18.0 } else { 0.0 });
-                self.title_links(ui, track, album.as_ref(), if compact { width - 96.0 } else { width });
+                self.title_links(ui, track, album, if compact { width - 96.0 } else { width });
             });
         });
         ui.add_space(if compact { 12.0 } else { 18.0 });
@@ -340,7 +340,7 @@ impl ViewCtx<'_> {
 
         match l {
             Lyrics::Synced(lines) => {
-                let rows = lyrics::rows_synced(lines);
+                let rows = self.ui.memos.lyrics.get(lyrics_key(track, lines.as_ptr() as usize, lines.len(), true), || lyrics::rows_synced(lines));
                 let cur = lyrics::current(lines, pos_ms);
                 // The line last followed, and the pass it was seen on: a stale
                 // entry (the view was closed meanwhile) re-places it on reopening.
@@ -353,7 +353,7 @@ impl ViewCtx<'_> {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.add_space((view_h * 0.3).max(24.0));
                     let mut first = true;
-                    for row in &rows {
+                    for row in rows.iter() {
                         match row {
                             lyrics::Row::Section(s) => section_label(ui, s, size, !first),
                             lyrics::Row::Break => ui.add_space((size * 0.8).round()),
@@ -379,8 +379,7 @@ impl ViewCtx<'_> {
                                     ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
                                 }
                                 ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
-                                let label = format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0));
-                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0))));
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     seek_to = Some(lines[i].start_ms as f64 / 1000.0);
                                 }
@@ -422,7 +421,7 @@ impl ViewCtx<'_> {
                 }
             }
             Lyrics::Plain(lines) => {
-                let rows = lyrics::rows_plain(lines);
+                let rows = self.ui.memos.lyrics.get(lyrics_key(track, lines.as_ptr() as usize, lines.len(), false), || lyrics::rows_plain(lines));
                 let font = FontId::proportional(size);
                 egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -431,7 +430,7 @@ impl ViewCtx<'_> {
                         .on_hover_text("These lyrics have no timing, so they can't follow the music");
                     ui.add_space((size * 1.0).round());
                     let mut first = true;
-                    for row in &rows {
+                    for row in rows.iter() {
                         match row {
                             lyrics::Row::Section(s) => section_label(ui, s, size, !first),
                             lyrics::Row::Break => ui.add_space((size * 0.8).round()),
@@ -466,6 +465,14 @@ impl ViewCtx<'_> {
             ui.data_mut(|d| d.remove::<(Option<usize>, u64)>(id));
         }
     }
+}
+
+/// The lyrics rows' memo key: the track, the lines' address and count (a
+/// fetch replaces them), and whether they're synced.
+pub(super) type LyricsKey = (u64, usize, usize, bool);
+
+fn lyrics_key(track: &Track, lines: usize, len: usize, synced: bool) -> LyricsKey {
+    (super::view_ctx::hash_str(&track.id), lines, len, synced)
 }
 
 /// Soft fades at the top and bottom of a scrolling column, so lines dissolve
@@ -564,6 +571,29 @@ fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysi
     rows
 }
 
+impl ViewCtx<'_> {
+    /// The Player's artwork, title, seek bar and controls for what's playing,
+    /// or an empty sleeve.
+    fn player_main(&mut self, ui: &mut Ui, side: f32) {
+        let player = self.player;
+        match player.queue.current.as_ref().map(|c| &c.track) {
+            Some(track) => {
+                self.ensure_lyrics(track);
+                self.player_block(ui, track, Some(side), true);
+            }
+            None => {
+                let t = Tokens::of(ui);
+                ui.vertical_centered(|ui| {
+                    let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+                    self.art.paint(ui, art, None, 8.0);
+                    ui.add_space(16.0);
+                    ui.label(egui::RichText::new("Not playing").size(14.0).color(t.muted));
+                });
+            }
+        }
+    }
+}
+
 impl OndApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
@@ -623,20 +653,7 @@ impl OndApp {
                     under.set(slot, backdrop_shape(window, &layers, wash, alpha, art_bottom - side * 0.2, art_bottom + 18.0));
                 }
 
-                match self.player.queue.current.as_ref().map(|c| c.track.clone()) {
-                    Some(track) => {
-                        self.view().ensure_lyrics(&track);
-                        self.view().player_block(ui, &track, Some(side), true);
-                    }
-                    None => {
-                        ui.vertical_centered(|ui| {
-                            let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-                            self.art.paint(ui, art, None, 8.0);
-                            ui.add_space(16.0);
-                            ui.label(egui::RichText::new("Not playing").size(14.0).color(t.muted));
-                        });
-                    }
-                }
+                self.view().player_main(ui, side);
                 ui.add_space(8.0);
                 let top = ui.cursor().top();
                 ui.painter().hline(full.x_range(), top, egui::Stroke::new(1.0, t.hairline));

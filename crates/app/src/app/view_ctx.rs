@@ -46,6 +46,10 @@ pub struct ViewCtx<'a> {
 pub struct Memos {
     /// The album page's summary, credits and footer.
     pub(super) album: Memo<super::album_page::AlbumKey, super::album_page::AlbumFacts>,
+    /// The playing track's lyrics as rows (stanzas, labels, breaks).
+    pub(super) lyrics: Memo<super::now_playing_view::LyricsKey, Vec<crate::lyrics::Row>>,
+    /// The Info tab's rows for the playing song.
+    pub(super) info: Memo<super::info_panel::InfoKey, super::info_panel::InfoFacts>,
 }
 
 /// A string's hash, for memo keys that shouldn't copy the string each frame.
