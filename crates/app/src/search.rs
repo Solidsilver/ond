@@ -22,6 +22,8 @@ pub const MAX_TRACKS: usize = 5;
 pub struct ArtistEntry {
     pub id: Option<String>,
     pub name: String,
+    /// What the list is sorted by: the server's sort name, else the name.
+    pub sort: String,
     pub albums: usize,
 }
 
@@ -165,9 +167,9 @@ impl SearchIndex {
                     *counts.entry(artist).or_default() += 1;
                 }
             }
-            counts.into_iter().map(|(name, albums)| ArtistEntry { id: None, name: name.to_owned(), albums }).collect()
+            counts.into_iter().map(|(name, albums)| ArtistEntry { id: None, name: name.to_owned(), sort: name.to_owned(), albums }).collect()
         } else {
-            artists.iter().map(|a| ArtistEntry { id: Some(a.id.clone()), name: a.name.clone(), albums: a.album_count as usize }).collect()
+            artists.iter().map(|a| ArtistEntry { id: Some(a.id.clone()), name: a.name.clone(), sort: a.sort.clone().unwrap_or_else(|| a.name.clone()), albums: a.album_count as usize }).collect()
         };
         let album_names: std::collections::HashMap<&str, &str> = albums.iter().map(|a| (a.id.as_str(), a.name.as_str())).collect();
         let albums: Vec<AlbumEntry> = albums

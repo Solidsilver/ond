@@ -36,6 +36,8 @@ pub struct PrefsView {
     /// The waveform seek bar, and how its bars look.
     pub waveform: bool,
     pub waveform_bars: Bars,
+    /// The alphabet rail beside long lists.
+    pub alpha_rail: bool,
     pub scrobble: bool,
     /// The diagnostics bar is shown.
     pub diagnostics_bar: bool,
@@ -63,6 +65,7 @@ impl PrefsView {
             backdrop: s.backdrop,
             waveform: s.waveform,
             waveform_bars: s.waveform_bars,
+            alpha_rail: s.alpha_rail,
             scrobble: s.scrobble,
             diagnostics_bar: s.diagnostics_bar,
             experimental: s.experimental,
@@ -85,6 +88,8 @@ pub enum PrefsAction {
     /// The waveform seek bar, and how its bars look.
     Waveform(bool),
     WaveformBars(Bars),
+    /// The alphabet rail beside long lists.
+    AlphaRail(bool),
     Scrobble(bool),
     /// Show or hide the diagnostics bar.
     Diagnostics(bool),
@@ -104,6 +109,7 @@ impl OndApp {
             PrefsAction::Backdrop(on) => self.prefs.edit(|s| s.backdrop = on),
             PrefsAction::Waveform(on) => self.prefs.edit(|s| s.waveform = on),
             PrefsAction::WaveformBars(bars) => self.prefs.edit(|s| s.waveform_bars = bars),
+            PrefsAction::AlphaRail(on) => self.prefs.edit(|s| s.alpha_rail = on),
             PrefsAction::Scrobble(on) => {
                 self.now_playing.set_scrobbling(on);
                 self.prefs.edit(|s| s.scrobble = on);

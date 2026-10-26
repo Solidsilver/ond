@@ -165,6 +165,12 @@ impl OndApp {
                 }
             }
         });
+        group(ui, "Lists", |ui| {
+            let mut on = self.ui.prefs.alpha_rail;
+            if switch_row(ui, "Alphabet rail", "Letters beside Albums, Artists and Songs when they're sorted by name. Click or drag along them to jump.", &mut on) {
+                self.actions.push(Action::Prefs(PrefsAction::AlphaRail(on)));
+            }
+        });
     }
 
     fn playback_settings(&mut self, ui: &mut Ui) {

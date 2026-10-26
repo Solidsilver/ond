@@ -321,22 +321,62 @@ impl ViewCtx<'_> {
             ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
             return;
         }
-        let (cols, tile) = grid_metrics(ui.available_width());
+        let marks = self.grid_marks(route);
+        let margin = if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() };
+        let (cols, tile) = grid_metrics(ui.available_width() - f32::from(margin.right) + super::layout::GUTTER);
         let rows = ids.len().div_ceil(cols);
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("grid", route)).auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
-            let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
-            for row in range.clone() {
-                self.grid_row(ui, row_ids(row), tile);
+        let row_h = tile + LABEL_H + GAP_Y;
+        super::layout::into_gutter(ui, |ui| {
+            let area = ui.available_rect_before_wrap();
+            let row_spacing = ui.spacing().item_spacing.y;
+            let mut top = 0;
+            let mut scroll = egui::ScrollArea::vertical().id_salt(("grid", route)).auto_shrink(false).content_margin(margin);
+            if let Some(y) = super::alpha::take_jump(ui, ("grid", route)) {
+                scroll = scroll.vertical_scroll_offset(y);
             }
-            // The rows just above and below load next, after what's on screen.
-            for row in [range.start.checked_sub(1), Some(range.end).filter(|&r| r < rows)].into_iter().flatten() {
-                for &i in row_ids(row) {
-                    if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
-                        self.art.prefetch(cover, tile);
+            let out = scroll.show_rows(ui, row_h, rows, |ui, range| {
+                top = range.start * cols;
+                let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
+                for row in range.clone() {
+                    self.grid_row(ui, row_ids(row), tile);
+                }
+                // The rows just above and below load next, after what's on screen.
+                for row in [range.start.checked_sub(1), Some(range.end).filter(|&r| r < rows)].into_iter().flatten() {
+                    for &i in row_ids(row) {
+                        if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
+                            self.art.prefetch(cover, tile);
+                        }
                     }
                 }
+            });
+            if let Some(marks) = marks {
+                super::alpha::rail(ui, ("grid", route), area, &out, &marks, top, |i| i / cols, row_h + row_spacing);
             }
-        }));
+        });
+    }
+
+    /// Where each letter starts in a grid sorted by name (albums by artist or
+    /// by title), for the alphabet rail; `None` for one sorted otherwise, or
+    /// with the rail off.
+    fn grid_marks(&mut self, route: &Route) -> Option<Arc<super::alpha::Marks>> {
+        if !self.ui.prefs.alpha_rail {
+            return None;
+        }
+        let sort = match route {
+            Route::Albums => self.ui.sort,
+            Route::Filter { .. } => AlbumSort::Artist,
+            _ => return None,
+        };
+        let by_title = match sort {
+            AlbumSort::Artist => false,
+            AlbumSort::Title => true,
+            _ => return None,
+        };
+        let ids = self.cached_grid(route);
+        let albums = &self.data.albums;
+        Some(self.ui.grid_marks.get((route.clone(), sort, self.data.version), || {
+            super::alpha::Marks::new(ids.iter().map(|&i| if by_title { albums[i].name.as_str() } else { albums[i].artist.as_deref().unwrap_or("") }))
+        }))
     }
 
     /// One grid row of tiles, followed by the row gap.
@@ -417,7 +457,17 @@ impl ViewCtx<'_> {
         // The server's artists (with ids) once synced, else album-artist names.
         let artists = Arc::clone(&index.artists);
         self.heading(ui, "Artists", Some(artists.len().to_string()));
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, 32.0, artists.len(), |ui, range| {
+        let marks = self.ui.prefs.alpha_rail.then(|| self.ui.artist_marks.get(Arc::as_ptr(&artists) as usize, || super::alpha::Marks::new(artists.iter().map(|a| a.sort.as_str()))));
+        super::layout::into_gutter(ui, |ui| {
+            let area = ui.available_rect_before_wrap();
+            let row_h = 32.0 + ui.spacing().item_spacing.y;
+            let mut top = 0;
+            let mut scroll = egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false);
+            if let Some(y) = super::alpha::take_jump(ui, "artists") {
+                scroll = scroll.vertical_scroll_offset(y);
+            }
+            let out = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() }).show_rows(ui, 32.0, artists.len(), |ui, range| {
+            top = range.start;
             ui.spacing_mut().item_spacing.y = 0.0;
             for a in &artists[range] {
                 let (name, id, n) = (&a.name, &a.id, &a.albums);
@@ -436,7 +486,11 @@ impl ViewCtx<'_> {
                 }
                 resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(name.clone()), true, false, None, self.actions));
             }
-        }));
+            });
+            if let Some(marks) = marks {
+                super::alpha::rail(ui, "artists", area, &out, &marks, top, |i| i, row_h);
+            }
+        });
     }
 }
 

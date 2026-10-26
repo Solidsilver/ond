@@ -92,6 +92,10 @@ pub struct UiState {
     pub sort: AlbumSort,
     /// The album list for the current view, cached by (route, sort, data version).
     pub grid: crate::memo::Memo<(Route, AlbumSort, u64), Vec<usize>>,
+    /// Where each letter starts in that list, and in the Artists list (by
+    /// the list's address), for the alphabet rail.
+    pub grid_marks: crate::memo::Memo<(Route, AlbumSort, u64), super::alpha::Marks>,
+    pub artist_marks: crate::memo::Memo<usize, super::alpha::Marks>,
     /// The album page's "Album details" is unfolded (for this session).
     pub album_details_open: bool,
     /// Narrow windows: the queue opens as a sheet over the content instead.
@@ -164,6 +168,8 @@ impl UiState {
             nav: Nav::default(),
             sort: AlbumSort::default(),
             grid: Default::default(),
+            grid_marks: Default::default(),
+            artist_marks: Default::default(),
             album_details_open: false,
             queue_sheet: false,
             queue_narrow: false,

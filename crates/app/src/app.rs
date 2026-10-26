@@ -36,6 +36,7 @@ mod window_state;
 
 // Views and their pieces.
 mod album_page;
+mod alpha;
 mod browse;
 mod compact;
 mod diagnostics;
