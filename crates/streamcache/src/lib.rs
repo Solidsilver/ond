@@ -259,9 +259,13 @@ impl StreamCache {
     }
 
     /// Cancels every download and the prefetch. Completed files stay.
+    ///
+    /// The cancelled downloads leave the index at once, so an `open` right
+    /// after starts afresh instead of attaching to one that's winding down.
+    /// Readers still holding them fail their next blocked read.
     pub fn cancel_all(&self) {
         self.clear_prefetch();
-        for dl in self.inner.lock_index().active.values() {
+        for (_, dl) in self.inner.lock_index().active.drain() {
             dl.cancel();
         }
     }
@@ -330,9 +334,12 @@ impl Inner {
     }
 
     /// Returns the active download for `name`, starting one if needed, with one more holder.
+    ///
+    /// Cancelling a download takes it out of `active` under the same lock, so
+    /// one found here is live; a cancelled one is replaced all the same.
     fn acquire(self: &Arc<Self>, name: &str, url: &str) -> Arc<Download> {
         let mut idx = self.lock_index();
-        if let Some(dl) = idx.active.get(name) {
+        if let Some(dl) = idx.active.get(name).filter(|dl| !dl.is_cancelled()) {
             dl.holders.fetch_add(1, Ordering::Relaxed);
             return dl.clone();
         }
