@@ -373,14 +373,16 @@ impl Inner {
     }
 
     fn finish(&self, dl: &Arc<Download>, result: Result<u64, String>) {
-        let result = result.and_then(|len| {
-            std::fs::rename(&dl.part_path, &dl.final_path).map_err(|e| format!("cache file: {e}"))?;
-            Ok(len)
-        });
         let mut idx = self.lock_index();
         if idx.active.get(&dl.name).is_some_and(|a| Arc::ptr_eq(a, dl)) {
             idx.active.remove(&dl.name);
         }
+        // Renamed under the index lock, like `remove` moves files away, so a
+        // late delete of an evicted copy can't land on this one.
+        let result = result.and_then(|len| {
+            std::fs::rename(&dl.part_path, &dl.final_path).map_err(|e| format!("cache file: {e}"))?;
+            Ok(len)
+        });
         match result {
             Ok(len) => {
                 let old = idx.complete.insert(dl.name.clone(), Entry { size: len, last_used: SystemTime::now() });
@@ -426,11 +428,32 @@ impl Inner {
     /// Deletes evicted files. Open handles keep working: unlinking an open file
     /// is fine on every platform we target (std opens with FILE_SHARE_DELETE on
     /// Windows).
+    ///
+    /// This runs after the index let the victims go, so a victim may have been
+    /// downloaded again since: if it's back in the index, the file is the new
+    /// copy and stays. Otherwise it's moved to a `.part` name (swept at startup
+    /// if the delete doesn't happen) under the index lock, the same lock
+    /// `finish` renames under, and deleted after.
     fn remove(&self, victims: Vec<String>) {
         for victim in victims {
-            if let Err(e) = std::fs::remove_file(self.cfg.dir.join(&victim))
-                && e.kind() != io::ErrorKind::NotFound
-            {
+            let doomed = {
+                let idx = self.lock_index();
+                if idx.complete.contains_key(&victim) {
+                    continue;
+                }
+                let doomed =
+                    self.cfg.dir.join(format!("{victim}.{}.part", self.seq.fetch_add(1, Ordering::Relaxed)));
+                match std::fs::rename(self.cfg.dir.join(&victim), &doomed) {
+                    Ok(()) => doomed,
+                    Err(e) => {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            tracing::warn!("evict {victim}: {e}");
+                        }
+                        continue;
+                    }
+                }
+            };
+            if let Err(e) = std::fs::remove_file(&doomed) {
                 tracing::warn!("evict {victim}: {e}");
             }
         }

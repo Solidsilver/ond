@@ -701,6 +701,45 @@ fn a_seek_past_the_end_of_a_file_without_a_total_reads_as_the_end() {
     assert_bytes(&std::fs::read(dir.path().join("past")).unwrap(), &body);
 }
 
+/// Evicted files are deleted after the index lets them go. If the track was
+/// downloaded again in between, that late delete must leave the new copy alone.
+#[test]
+fn a_late_eviction_spares_a_file_downloaded_again() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let body = data(1_200);
+    let server = Server::start(body.clone(), FAST);
+    let key = CacheKey::new("again", None);
+    let fetch = || {
+        let mut src = cache.open(&key, &server.url, never()).unwrap();
+        let mut out = Vec::new();
+        src.read_to_end(&mut out).unwrap();
+        wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 1_200);
+    };
+
+    fetch();
+    cache.clear();
+    wait_until("deletion", slack(Duration::from_secs(5)), || !dir.path().join("again").exists());
+    fetch();
+    // The delete from the clear, arriving only now.
+    cache.inner.remove(vec![key.file_name()]);
+    assert_eq!(std::fs::read(dir.path().join("again")).unwrap(), body);
+    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    assert!(matches!(src, CachedSource::File { .. }));
+    let mut out = Vec::new();
+    src.read_to_end(&mut out).unwrap();
+    assert_eq!(out, body);
+
+    // A name that's really gone from the index is deleted, leaving nothing behind.
+    cache.clear();
+    cache.inner.remove(vec![key.file_name()]);
+    assert!(!dir.path().join("again").exists());
+    wait_until("background deletion", slack(Duration::from_secs(5)), || {
+        std::fs::read_dir(dir.path()).unwrap().next().is_none()
+    });
+}
+
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
 fn slack(d: std::time::Duration) -> std::time::Duration {
