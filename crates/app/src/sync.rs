@@ -119,6 +119,9 @@ pub fn stale(albums: &[Album], stamps: &HashMap<String, u64>) -> Vec<String> {
 pub fn plan(albums: &[Album], stamps: &HashMap<String, u64>, bulk_done: bool, bulk_offset: Option<u32>) -> Plan {
     let stale = stale(albums, stamps);
     match bulk_offset {
+        // Nothing on the server (yet): a bulk pass would find nothing and mark
+        // itself done, so a library that fills up later would go album by album.
+        _ if albums.is_empty() => Plan::PerAlbum(stale),
         // A bulk pass was interrupted: carry on with it.
         Some(from) if !bulk_done => Plan::Bulk { from },
         _ if !bulk_done && stale.len() > BULK_THRESHOLD => Plan::Bulk { from: 0 },
@@ -224,11 +227,13 @@ async fn run_inner<F: Fetch>(
         match bulk_pass(lib, &fetch, cancel, live, progress, from, total).await? {
             BulkEnd::Cancelled => return Ok(Outcome::Cancelled),
             BulkEnd::Unsupported => {}
-            BulkEnd::Done => {
+            BulkEnd::Done { songs } => {
                 let albums2 = albums.clone();
                 write(lib, live, move |l| {
                     l.set_album_stamps(bulk_stamps(&albums2, &l.track_counts()?))?;
-                    l.set_meta(BULK_DONE, Some(1))?;
+                    // A pass that found no songs at all doesn't count as the
+                    // one bulk pass: the next sync may still want it.
+                    l.set_meta(BULK_DONE, (songs > 0).then_some(1))?;
                     l.set_meta(BULK_OFFSET, None)
                 })
                 .await?;
@@ -247,7 +252,8 @@ async fn run_inner<F: Fetch>(
 }
 
 enum BulkEnd {
-    Done,
+    /// `songs`: where the pass ended (0: the server listed none).
+    Done { songs: u32 },
     Cancelled,
     /// The server returned nothing for an empty query; use per-album sync.
     Unsupported,
@@ -303,7 +309,7 @@ async fn bulk_pass<F: Fetch>(
         offset = next;
         progress(Progress { done: offset as usize, total: total.max(offset as usize), unit: Unit::Tracks });
         if n < BULK_PAGE {
-            return Ok(BulkEnd::Done);
+            return Ok(BulkEnd::Done { songs: offset });
         }
     }
 }
@@ -363,7 +369,7 @@ async fn per_album<F: Fetch>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
@@ -375,7 +381,7 @@ mod tests {
         assert_eq!(retry_delay(50), retry_delay(5), "capped");
     }
 
-    fn album(id: &str, songs: u32) -> subsonic::Album {
+    pub(crate) fn album(id: &str, songs: u32) -> subsonic::Album {
         subsonic::Album {
             id: id.into(),
             name: format!("Album {id}"),
@@ -397,7 +403,7 @@ mod tests {
         }
     }
 
-    fn song(id: String, album_id: &str, n: u32) -> Song {
+    pub(crate) fn song(id: String, album_id: &str, n: u32) -> Song {
         Song {
             id,
             title: format!("t{n}"),
@@ -534,6 +540,26 @@ mod tests {
         assert_eq!(plan(&albums, &stamps, true, None), Plan::PerAlbum(vec!["a007".into(), "a008".into()]));
         // Small libraries skip bulk.
         assert!(matches!(plan(&albums[..20], &none, false, None), Plan::PerAlbum(v) if v.len() == 20));
+    }
+
+    #[test]
+    fn an_empty_library_never_marks_the_bulk_pass_done() {
+        let none = HashMap::new();
+        // Even with a bulk pass to resume: there's nothing to page through.
+        assert_eq!(plan(&[], &none, false, Some(500)), Plan::PerAlbum(Vec::new()));
+        let rt = rt();
+        let lib = library(&[]);
+        let out = rt.block_on(run(lib.clone(), Fake::new(Vec::new(), true), Arc::default(), || true, |_| {}));
+        assert_eq!(out, Outcome::Done { fetched: 0, bulk: false });
+        assert_eq!(lib.meta(BULK_DONE).unwrap(), None);
+        // A big library of albums that list no songs: the pass finds none and
+        // isn't counted as done either.
+        let albums = many(250, 0);
+        let lib = library(&albums);
+        let out = rt.block_on(run(lib.clone(), Fake::new(albums, true), Arc::default(), || true, |_| {}));
+        assert_eq!(out, Outcome::Done { fetched: 0, bulk: true });
+        assert_eq!(lib.meta(BULK_DONE).unwrap(), None);
+        assert_eq!(lib.meta(BULK_OFFSET).unwrap(), None);
     }
 
     #[test]

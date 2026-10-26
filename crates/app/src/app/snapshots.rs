@@ -1156,7 +1156,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), url: String::new(), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
+        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
         app.analysis.runner.enqueue(jobs);
         app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
