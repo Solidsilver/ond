@@ -715,6 +715,8 @@ pub struct Analysis {
     /// The stored results have been read (until then everything looks unanalysed).
     pub loaded: bool,
     pub runner: analyze::Runner,
+    /// This session queued the library-wide run (see `check_library_analysis`).
+    pub library_run: bool,
 }
 
 impl Analysis {
@@ -885,7 +887,7 @@ impl OndApp {
             waveforms: crate::visuals::waveform::Waveforms::new(ctx.clone()),
             gpu: None,
             prefs,
-            analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer },
+            analysis: Analysis { records: HashMap::new(), version: 0, unanalysed: Default::default(), loaded: false, runner: analyzer, library_run: false },
             favorites: Favorites::default(),
             menu: None,
             lyrics: HashMap::new(),
@@ -917,6 +919,8 @@ impl OndApp {
                 self.output.connected(&settings.server);
                 let url = client.clone();
                 self.downloads.store.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
+                let url = client.clone();
+                self.analysis.runner.set_server(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
                 // Pinned playlists follow the server: refetch them so additions download.
                 for p in &self.downloads.snap.pins {
                     if let Pin::Playlist(id) = &p.pin {
@@ -1581,18 +1585,15 @@ impl OndApp {
 
     /// Queues the tracks that have no current analysis; returns how many.
     /// Downloaded copies are read straight from disk (and need no server).
+    /// The stream URLs are made by the runner as it gets to each track.
     fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
+        let online = self.session.client.is_some();
         let jobs: Vec<analyze::Job> = tracks
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
             .filter_map(|t| {
                 let local = self.downloads.store.local_path(&t.id);
-                let url = match &self.session.client {
-                    Some(c) => c.stream_url(&t.id).to_string(),
-                    None if local.is_some() => String::new(),
-                    None => return None,
-                };
-                Some(analyze::job_for(t, url, local))
+                (online || local.is_some()).then(|| analyze::job_for(t, local))
             })
             .collect();
         self.analysis.runner.enqueue(jobs)
@@ -1604,13 +1605,24 @@ impl OndApp {
         if self.analysis_library() && self.analysis.loaded && self.session.client.is_some() && !self.data.tracks.all.is_empty() {
             let all = self.data.tracks.all.clone();
             self.enqueue_analysis(&all);
+            self.analysis.library_run = true;
             if !self.analysis.runner.progress().active() {
                 self.finish_library_analysis();
             }
         }
     }
 
+    /// The library run, once queued, has nothing left to do: it's finished
+    /// and isn't resumed at the next launch. Until it has been queued (the
+    /// server not answered yet, or offline) there's nothing to finish.
+    fn check_library_analysis(&mut self) {
+        if self.analysis.library_run && self.analysis_library() && !self.analysis.runner.progress().active() {
+            self.finish_library_analysis();
+        }
+    }
+
     fn finish_library_analysis(&mut self) {
+        self.analysis.library_run = false;
         if self.analysis_library() {
             self.prefs.edit(|s| s.analysis_resume = false);
         }
@@ -1849,6 +1861,11 @@ impl OndApp {
         // Reconnect loops and connects in flight stop; anything they still
         // deliver is ignored. Downloads lose their server (and its credentials).
         self.bridge.end_session();
+        // So does analysis: the old account's queue goes (a library-wide run
+        // resumes for whoever signs in next).
+        self.analysis.runner.set_server(None);
+        self.analysis.runner.clear();
+        self.analysis.library_run = false;
         self.set_offline();
         self.session.unreachable = false;
         self.session.server_label.clear();
@@ -2303,9 +2320,7 @@ impl eframe::App for OndApp {
                 self.sync_next();
             }
         }
-        if self.analysis_library() && self.analysis.loaded && !self.data.tracks.all.is_empty() && !self.analysis.runner.progress().active() {
-            self.finish_library_analysis();
-        }
+        self.check_library_analysis();
         let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.show_queue() };
         let (theme, diagnostics) = self.prefs.get(|s| (s.theme, s.diagnostics_bar));
         if let Some(menu) = self.menu.as_mut() {
@@ -3026,6 +3041,44 @@ mod tests {
         app.handle(Msg::Error("favorites: timed out".into()));
         let shown = app.ui.toasts.texts();
         assert!(shown.contains(&"playlists: timed out") && shown.contains(&"favorites: timed out"), "{shown:?}");
+    }
+
+    #[test]
+    fn a_library_analysis_resumes_once_the_server_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, dir.path());
+        let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+        // Held, so what's queued stays queued.
+        app.analysis.runner.set_paused(true);
+        app.prefs.edit(|s| s.analysis_resume = true);
+        // Startup: the library and the stored results load well before the
+        // server answers (or offline, never). Nothing has run, so nothing finished.
+        app.handle(Msg::AnalysesLoaded(Vec::new()));
+        app.handle(Msg::AllTracks(Box::new(TrackSet::new(app.data.tracks.all.to_vec()))));
+        for _ in 0..3 {
+            app.check_library_analysis();
+        }
+        assert!(app.analysis_library(), "the run is still due");
+        assert!(!app.analysis.runner.progress().active());
+
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+        assert_eq!(app.analysis.runner.progress().total, 20, "the whole library is queued");
+        app.check_library_analysis();
+        assert!(app.analysis_library());
+
+        // Signing out drops the old account's queue, but the run is still due for the next.
+        app.sign_out();
+        assert!(!app.analysis.runner.progress().active());
+        app.check_library_analysis();
+        assert!(app.analysis_library());
+        app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+        assert_eq!(app.analysis.runner.progress().total, 20);
+
+        // The queue runs dry: done, and not resumed at the next launch.
+        app.analysis.runner.clear();
+        app.check_library_analysis();
+        assert!(!app.analysis_library());
     }
 
     #[test]
