@@ -93,6 +93,11 @@ impl Download {
 /// already on disk, the next request starts at the first gap after the cursor,
 /// wrapping to the start. A server that answers `200` instead of `206` is read
 /// once, sequentially, with no relocation.
+///
+/// The length is the server's, until it turns out wrong or missing: a `416`
+/// at offset `n` cuts it to `n`, and a response with no length that runs to
+/// its end sets it there. Either way the file is only done once every byte
+/// below the length is on disk.
 pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> Result<u64, String> {
     let io = |e: std::io::Error| format!("cache file: {e}");
     let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&dl.part_path).map_err(io)?;
@@ -116,7 +121,23 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
         let mut body = match sent {
             Ok(b) => b,
             Err(FetchError::RangeNotSatisfiable) => {
-                // Asked past the end; whatever is missing must be before `start`.
+                // Nothing at `start`: the file ends at or before it. A declared
+                // length past that (an estimated transcode size, a truncated
+                // file) shrinks to it, so the tail isn't asked for again, and
+                // whatever is missing is earlier. Each shrink is strictly
+                // smaller, so this can't loop.
+                let mut st = dl.lock();
+                if start > 0 && st.len.is_none_or(|l| start < l) {
+                    st.len = Some(start);
+                    let gap = st.ranges.first_gap(0, start).map_or(0, |(gap, _)| gap);
+                    drop(st);
+                    dl.cond.notify_all();
+                    file.set_len(start).map_err(io)?;
+                    sized = true;
+                    start = gap;
+                    continue;
+                }
+                drop(st);
                 failures += 1;
                 if failures > MAX_FAILURES {
                     return Err(FetchError::RangeNotSatisfiable.to_string());
@@ -164,9 +185,11 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
         }
         file.seek(SeekFrom::Start(pos)).map_err(io)?;
 
-        // Stream this response. `next` is where the following request should start;
-        // `None` means the response ended normally.
-        let next: Option<u64> = loop {
+        // Stream this response until it ends, runs into bytes already on disk,
+        // or the next request should start somewhere else.
+        let stop = loop {
+            // Dropping `body.chunk()` when the other branch wins loses nothing:
+            // it only polls the body for its next frame, which stays queued.
             let chunk = tokio::select! {
                 biased;
                 _ = dl.wake.notified() => {
@@ -174,7 +197,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                         return Err("cancelled".into());
                     }
                     match relocation(&mut dl.lock(), pos, ranged == Some(true)) {
-                        Some(w) => break Some(w),
+                        Some(w) => break Stop::Restart(w),
                         None => continue,
                     }
                 }
@@ -194,14 +217,14 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                         ranged == Some(true) && st.ranges.available_from(pos) > 0 && st.len.is_none_or(|l| pos < l);
                     drop(st);
                     dl.cond.notify_all();
-                    if relocate.is_some() {
-                        break relocate;
+                    if let Some(w) = relocate {
+                        break Stop::Restart(w);
                     }
                     if ran_into_data {
-                        break None;
+                        break Stop::RanIntoData;
                     }
                 }
-                Ok(None) => break None,
+                Ok(None) => break Stop::Ended,
                 Err(e) => {
                     failures += 1;
                     if failures > MAX_FAILURES {
@@ -210,28 +233,50 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                     tracing::debug!("{}: {e}; retrying", redact(url));
                     backoff(dl, failures).await;
                     // Ranged: resume where it broke. Sequential: start over (bytes already written stay valid).
-                    break Some(if ranged == Some(true) { pos } else { 0 });
+                    break Stop::Restart(if ranged == Some(true) { pos } else { 0 });
                 }
             }
         };
 
-        start = match next {
-            Some(at) => at,
-            None => {
+        start = match stop {
+            Stop::Restart(at) => at,
+            Stop::Ended | Stop::RanIntoData => {
                 let mut st = dl.lock();
-                let Some(len) = st.len else {
-                    // No length header and the body ended: that was the whole file.
+                let learned = matches!(stop, Stop::Ended) && st.len.is_none();
+                if learned {
+                    // No length given, and a request for everything from here
+                    // on ran out: the file ends here. Bytes skipped by an
+                    // earlier relocation may still be missing below.
                     st.len = Some(pos);
-                    return Ok(pos);
-                };
-                match st.ranges.first_gap(pos, len).or_else(|| st.ranges.first_gap(0, len)) {
-                    Some((gap, _)) if ranged == Some(true) => gap,
-                    Some(_) => 0,
-                    None => return Ok(len),
                 }
+                let gap = match st.len {
+                    Some(len) => match st.ranges.first_gap(pos, len).or_else(|| st.ranges.first_gap(0, len)) {
+                        Some((gap, _)) => gap,
+                        None => return Ok(len),
+                    },
+                    // Ran into bytes from a relocated request with the end
+                    // still unknown: carry on after them.
+                    None => pos + st.ranges.available_from(pos),
+                };
+                drop(st);
+                if learned {
+                    dl.cond.notify_all();
+                }
+                if ranged == Some(true) { gap } else { 0 }
             }
         };
     }
+}
+
+/// Why the download stopped reading a response.
+enum Stop {
+    /// Start the next request here: a reader is waiting elsewhere, or the
+    /// response broke.
+    Restart(u64),
+    /// The body ended.
+    Ended,
+    /// The response reached bytes already on disk.
+    RanIntoData,
 }
 
 fn done_len(st: &DlState) -> Option<u64> {
@@ -252,6 +297,13 @@ fn relocation(st: &mut DlState, pos: u64, ranged: bool) -> Option<u64> {
     Some(w)
 }
 
+/// Resolves once the download is cancelled.
+///
+/// This shares `wake` with relocation requests, so while it runs (during a
+/// request's connect or a backoff) it can take the wake-up a reader sent. That
+/// loses nothing: the reader's offset stays in `wanted`, and the next response
+/// checks it after its first chunk, which `get_from` already holds when it
+/// returns. So a stalled response doesn't keep a reader waiting elsewhere.
 async fn cancelled(dl: &Download) {
     while !dl.is_cancelled() {
         dl.wake.notified().await;

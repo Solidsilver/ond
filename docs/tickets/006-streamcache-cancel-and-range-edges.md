@@ -1,7 +1,7 @@
 # 006 · streamcache: cancel_all leaves dead downloads attachable; range edge cases
 
 - Area: `crates/streamcache` · Kind: bug · Priority: P1
-- Status: open · Claimed by: —
+- Status: done (branch fix/streamcache) · Claimed by: —
 - Source: data-layer review (findings 1–10). Line numbers at commit 669bb00.
 
 ## Problem
@@ -24,3 +24,15 @@
 ## Tests to add
 
 `cancel_all` then immediate `open`; declared total > real length; Content-Length missing (chunked 200); 206 with `*` total; two readers seeking independently; backward seek into a gap; eviction racing a re-download.
+
+## Resolution
+
+1. Fixed. `cancel_all` drains `active` as it cancels, and `acquire` also skips a cancelled entry. Test: `cancel_all_then_open_starts_a_fresh_download`.
+2. Fixed. A 416 at offset `n > 0` cuts the length to `n` (and truncates the `.part`), then the download fetches whatever is still missing below it. Each cut is strictly smaller, so it ends; a 416 at 0 still counts as a failure. Readers take the shrunk length. Tests: `a_declared_length_past_the_real_end_ends_at_the_data`, `a_seek_past_the_end_of_a_file_without_a_total_reads_as_the_end`.
+3. Fixed, and wider than described: the end-of-response step mixed up "body ended" and "ran into bytes already on disk", so with no total, a gap fill that reached a relocated span also finalized the file with a hole. A response now reports how it stopped. Only a body that ends sets an unknown length, and either way the file completes only when every byte below the length is on disk. Test: `ranges_without_a_total_fill_the_skipped_part` (failed before the fix).
+4. Not a real delay. The swallowed wake-up only happens in `get_from` or a backoff, and `get_from` returns holding the first chunk, after which `relocation()` checks `wanted`. Documented on `cancelled()`, with a regression test: `a_seek_while_reconnecting_is_not_lost` (passes on the old code too).
+5. Fixed. `finish` renames under the index lock. `remove` skips a name that's back in `complete`; otherwise it moves the file to a `.part` name under the same lock and deletes it after. Test: `a_late_eviction_spares_a_file_downloaded_again`.
+6. Documented on `Abort` (called with the state lock held, so it must only read a flag) and at the `select!` over `body.chunk()` (cancel-safe).
+7. Left for ticket 014.
+
+Also added: `a_200_without_content_length_is_read_to_its_end`, `a_backward_seek_into_a_gap_fetches_it`, `two_readers_seek_independently`. The last one shows that two readers blocked far apart on one download make it alternate between them every chunk or so: correct, but one request per few KB. Nothing in the app does that today (analysis reads the playback cache only for complete files), so it's left as is.
