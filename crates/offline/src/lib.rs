@@ -3,7 +3,8 @@
 //!
 //! [`OfflineStore`] keeps the pins (see [`pins`]) in `offline.json` next to the
 //! files and runs a small download queue on the tokio runtime: two at a time,
-//! resumed with `Range` after an interruption or a restart, retried with
+//! resumed with `Range` after an interruption or a restart (when the server's
+//! file is provably still the same, see [`RESUME_OVERLAP`]), retried with
 //! backoff, and checked against the size the server reported. A track that's
 //! already complete in the stream cache is hard-linked (or copied) instead of
 //! downloaded again.
@@ -35,6 +36,10 @@ const CONCURRENCY: usize = 2;
 const MAX_ATTEMPTS: u32 = 6;
 /// Progress repaints at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
+/// A resume asks for this much of what the `.part` already holds again, and
+/// appends only if those bytes match: proof that the server's file is still
+/// the one the partial download came from.
+const RESUME_OVERLAP: u64 = 64 * 1024;
 
 /// Makes the stream URL for a track id. The store holds one only while the
 /// server is reachable (see [`OfflineStore::set_source`]).
@@ -819,9 +824,31 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
     if job.r.size.is_some_and(|s| have > s) {
         have = 0;
     }
-    let mut body = match fetch::get_from(&inner.http, url, (have > 0).then_some(have)).await {
+    loop {
+        match fetch_into_part(inner, job, url, have).await? {
+            Some(have) => return finish(job, have).await,
+            // Never twice: from byte 0 there's nothing to match.
+            None => {
+                tracing::info!("offline: {} changed on the server since its partial download; starting over", job.r.id);
+                have = 0;
+            }
+        }
+    }
+}
+
+/// Downloads into the `.part`, resuming after its first `have` bytes when the
+/// server proves it's the same file: its size matches the pin's, and the last
+/// [`RESUME_OVERLAP`] bytes of the `.part`, asked for again, match. Returns
+/// the bytes now in the `.part`, or `None` when the resume didn't line up
+/// (start over from 0).
+async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> Result<Option<u64>, JobError> {
+    let overlap = have.min(RESUME_OVERLAP);
+    let mut body = match fetch::get_from(&inner.http, url, (have > 0).then(|| have - overlap)).await {
         Ok(b) => b,
-        Err(FetchError::RangeNotSatisfiable) if have > 0 && job.r.size == Some(have) => return finish(job, have).await,
+        Err(FetchError::RangeNotSatisfiable) if have > 0 => {
+            // Even the overlap lies past the end: the file shrank.
+            return Ok(None);
+        }
         Err(FetchError::RangeNotSatisfiable) => {
             let _ = std::fs::remove_file(&job.part);
             return Err(JobError::Failed("server rejected the resume; starting over".into()));
@@ -834,9 +861,18 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
         }
         Err(e) => return Err(JobError::Failed(e.to_string())),
     };
+    // What the resumed body must start with.
+    let mut expect: &[u8] = &[];
+    let tail;
     if !body.ranged {
         // The server ignored the range (or there was none): start over.
         have = 0;
+    } else if have > 0 {
+        if job.r.size.is_some_and(|s| body.total != Some(s)) {
+            return Ok(None);
+        }
+        tail = read_tail(&job.part, overlap)?;
+        expect = &tail;
     }
     let total = body.total;
     let mut file = std::fs::OpenOptions::new().create(true).write(true).append(have > 0).truncate(have == 0).open(&job.part)?;
@@ -854,7 +890,15 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
                 return Err(JobError::Failed(e.to_string()));
             }
         };
-        file.write_all(&chunk)?;
+        let mut chunk = &chunk[..];
+        if !expect.is_empty() {
+            let n = expect.len().min(chunk.len());
+            if chunk[..n] != expect[..n] {
+                return Ok(None);
+            }
+            (expect, chunk) = (&expect[n..], &chunk[n..]);
+        }
+        file.write_all(chunk)?;
         have += chunk.len() as u64;
         let note = last_note.elapsed() >= PROGRESS_EVERY;
         if note {
@@ -868,7 +912,20 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
     {
         return Err(JobError::Failed(format!("incomplete: {have} of {t} bytes")));
     }
-    finish(job, have).await
+    if !expect.is_empty() {
+        return Err(JobError::Failed("the resume ended before it could be checked".into()));
+    }
+    Ok(Some(have))
+}
+
+/// The last `len` bytes of `path`.
+fn read_tail(path: &Path, len: u64) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::End(-(len as i64)))?;
+    let mut buf = Vec::with_capacity(len as usize);
+    f.take(len).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// Checks the size and moves the finished `.part` into place.
