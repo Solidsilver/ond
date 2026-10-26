@@ -78,6 +78,12 @@ pub struct Player {
     sent_next: Option<u64>,
     /// A seek that's been sent but not confirmed yet; shown instead of the engine position.
     pub pending_seek: Option<f64>,
+    /// The queue item the engine last reported starting.
+    started: Option<u64>,
+    /// The current item was started because the one before it failed to
+    /// open. If it fails too, playback stops instead of skipping again (the
+    /// server may be gone, and every track would fail).
+    skipped_failure: bool,
 }
 
 impl Player {
@@ -109,6 +115,8 @@ impl Player {
         self.queue.current = None;
         self.sent_next = None;
         self.pending_seek = None;
+        self.started = None;
+        self.skipped_failure = false;
     }
 
     /// The queue entry the engine just started: the current one, or the next (gapless).
@@ -119,6 +127,10 @@ impl Player {
     pub fn handle_engine(&mut self, ev: &audio::Event, cx: &mut Ctx<'_>) {
         match ev {
             audio::Event::TrackStarted { token, gapless, restart, .. } => {
+                // Whatever was being sought, the engine's position is what counts now.
+                self.pending_seek = None;
+                self.started = Some(*token);
+                self.skipped_failure = false;
                 if let Some(t) = self.playing_track(*token) {
                     cx.notes.push(Note::Started { track: Box::new(t.clone()), restart: *restart });
                 }
@@ -131,7 +143,6 @@ impl Player {
                 if is_next && (*gapless || !is_current) {
                     // The engine moved on gaplessly; line up the track after this one.
                     self.queue.advance();
-                    self.pending_seek = None;
                     self.sent_next = None;
                     self.sync_next(cx);
                 }
@@ -146,10 +157,24 @@ impl Player {
                     self.sent_next = None;
                 }
             }
-            audio::Event::Error { message, .. } => {
+            audio::Event::Error { track_id, message } => {
                 self.pending_seek = None;
-                cx.notes.push(Note::Error(message.clone()));
+                // The current track couldn't be opened (e.g. deleted on the
+                // server): carry on with the next rather than leave the queue
+                // parked on it. A track that failed partway, an error not about
+                // a track (the device) or a second failure in a row stops as before.
+                let current = self.queue.current.as_ref().filter(|c| track_id.as_ref() == Some(&c.track.id));
+                let skip = current
+                    .filter(|c| self.started != Some(c.uid) && !self.skipped_failure && self.queue.peek_next().is_some())
+                    .map(|c| c.track.title.clone());
+                let text = skip.as_ref().map_or_else(|| message.clone(), |title| format!("Skipped “{title}”: {message}"));
+                cx.notes.push(Note::Error(text));
                 cx.notes.push(Note::Probe);
+                if skip.is_some() {
+                    self.queue.advance();
+                    self.start_current(cx);
+                    self.skipped_failure = true;
+                }
             }
             audio::Event::SignalPath(_)
             | audio::Event::Devices { .. }
@@ -164,6 +189,8 @@ impl Player {
     pub fn start_current(&mut self, cx: &mut Ctx<'_>) {
         self.pending_seek = None;
         self.sent_next = None;
+        self.started = None;
+        self.skipped_failure = false;
         let mut skipped = 0;
         // With "repeat queue" the queue never runs out, so give up after one
         // full pass in which nothing could play.
@@ -254,7 +281,12 @@ impl Player {
         if self.queue.current.is_none() {
             return;
         }
-        self.pending_seek = Some(to);
+        // A stopped engine has nothing to seek in and never confirms, so don't
+        // show a position it won't reach. (The command still goes: a `Play`
+        // sent just before may not have reached the engine yet.)
+        if cx.engine.state() != PlayState::Stopped {
+            self.pending_seek = Some(to);
+        }
         cx.engine.send(Command::Seek(Duration::from_secs_f64(to)));
     }
 
@@ -571,6 +603,7 @@ mod tests {
         let mut r = Rig::new();
         r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         r.run(|p, cx| p.next(cx));
+        r.engine.state.set(Some(PlayState::Playing));
         r.engine.position.set(10.0);
         r.run(|p, cx| p.previous(cx));
         assert!(matches!(r.engine.sent.borrow().last(), Some(Command::Seek(d)) if d.is_zero()));
@@ -603,5 +636,174 @@ mod tests {
         r.run(|p, cx| p.handle_engine(&ev, cx));
         assert_eq!(r.notes, [Note::Error("boom".into()), Note::Probe]);
         assert_eq!(r.player.pending_seek, None);
+    }
+
+    #[test]
+    fn a_seek_while_stopped_holds_no_position() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Add, cx));
+        r.player.queue.advance();
+        assert!(r.player.queue.current.is_some(), "a current item, but nothing playing (offline, or after an error)");
+        r.run(|p, cx| p.seek(30.0, cx));
+        assert_eq!(r.player.pending_seek, None, "the engine won't confirm it, so it would show for good");
+        assert_eq!(r.player.position_secs(&r.engine), 0.0);
+        r.run(|p, cx| p.remote(crate::now_playing::Remote::SkipBy(15.0), cx));
+        assert_eq!(r.player.pending_seek, None);
+    }
+
+    #[test]
+    fn a_seek_shows_until_the_engine_confirms_it_or_starts_a_track() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.engine.state.set(Some(PlayState::Playing));
+        r.run(|p, cx| p.seek(42.0, cx));
+        assert_eq!(r.player.pending_seek, Some(42.0));
+        assert_eq!(r.player.position_secs(&r.engine), 42.0);
+        let seeked = audio::Event::Seeked { track_id: "a".into(), position_secs: 42.0 };
+        r.run(|p, cx| p.handle_engine(&seeked, cx));
+        assert_eq!(r.player.pending_seek, None);
+        // The engine started the track over instead (a seek it couldn't serve in place).
+        r.run(|p, cx| p.seek(50.0, cx));
+        let a = r.uid_of("a");
+        let ev = audio::Event::TrackStarted {
+            track_id: "a".into(),
+            token: a,
+            format: audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) },
+            gapless: false,
+            restart: true,
+        };
+        r.run(|p, cx| p.handle_engine(&ev, cx));
+        assert_eq!(r.player.pending_seek, None);
+    }
+
+    #[test]
+    fn queue_edits_keep_the_engine_s_next_up_to_date() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c", "d"]), source(), QueueAction::Play { start: 0 }, cx));
+        let (b, c, d) = (r.uid_of("b"), r.uid_of("c"), r.uid_of("d"));
+        let mut sel = None;
+        r.run(|p, cx| p.edit(QueueEdit::Remove(b), &mut sel, cx));
+        assert_eq!(r.engine.last_next(), Some(Some("c".into())));
+        assert_eq!(r.player.sent_next(), Some(c));
+        r.run(|p, cx| p.edit(QueueEdit::Move(d, 0), &mut sel, cx));
+        assert_eq!(r.engine.last_next(), Some(Some("d".into())));
+        r.run(|p, cx| p.edit(QueueEdit::MoveBy(d, 1), &mut sel, cx));
+        assert_eq!(r.engine.last_next(), Some(Some("c".into())));
+        assert_eq!(r.player.sent_next(), Some(c));
+        // Repeat with one item left: the next after the last is the first again.
+        r.run(|p, cx| p.edit(QueueEdit::Clear, &mut sel, cx));
+        assert_eq!(r.engine.last_next(), Some(None));
+        assert_eq!(r.player.sent_next(), None);
+        r.run(|p, cx| p.edit(QueueEdit::SetEnd(crate::queue::EndAction::RepeatQueue), &mut sel, cx));
+        assert_eq!(r.engine.last_next(), Some(Some("a".into())));
+        assert!(r.player.sent_next().is_some());
+    }
+
+    #[test]
+    fn jump_and_replay_start_over_and_line_up_afresh() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c", "d"]), source(), QueueAction::Play { start: 0 }, cx));
+        let (a, c, d) = (r.uid_of("a"), r.uid_of("c"), r.uid_of("d"));
+        let nexts = |r: &Rig| r.engine.sent.borrow().iter().filter(|c| matches!(c, Command::SetNext(Some(s)) if s.id == "d")).count();
+        let mut sel = None;
+        r.run(|p, cx| p.edit(QueueEdit::JumpTo(c), &mut sel, cx));
+        assert_eq!(r.engine.played(), ["a", "c"]);
+        assert_eq!(r.player.sent_next(), Some(d));
+        assert_eq!(nexts(&r), 1);
+        // A new Play: the engine is told d again, though it was the last next.
+        r.run(|p, cx| p.edit(QueueEdit::Replay(a), &mut sel, cx));
+        assert_eq!(r.engine.played(), ["a", "c", "a"]);
+        assert_eq!(r.player.sent_next(), Some(d));
+        assert_eq!(nexts(&r), 2);
+    }
+
+    #[test]
+    fn remote_commands_map_onto_the_player() {
+        use crate::now_playing::Remote;
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Add, cx));
+        r.run(|p, cx| p.remote(Remote::Pause, cx));
+        assert!(r.engine.sent.borrow().iter().all(|c| !matches!(c, Command::Pause)), "stopped: nothing to pause");
+        r.run(|p, cx| p.remote(Remote::Play, cx));
+        assert_eq!(r.engine.played(), ["a"], "stopped: Play starts the queue");
+        r.engine.state.set(Some(PlayState::Playing));
+        r.run(|p, cx| p.remote(Remote::Play, cx));
+        assert_eq!(r.engine.played(), ["a"], "already playing");
+        r.run(|p, cx| p.remote(Remote::Pause, cx));
+        assert!(matches!(r.engine.sent.borrow().last(), Some(Command::Pause)));
+        r.engine.state.set(Some(PlayState::Paused));
+        r.run(|p, cx| p.remote(Remote::Play, cx));
+        assert!(matches!(r.engine.sent.borrow().last(), Some(Command::Resume)));
+        r.run(|p, cx| p.remote(Remote::Toggle, cx));
+        assert!(matches!(r.engine.sent.borrow().last(), Some(Command::Resume)));
+        r.engine.state.set(Some(PlayState::Playing));
+        r.engine.position.set(100.0);
+        r.run(|p, cx| p.remote(Remote::SkipBy(-150.0), cx));
+        assert!(matches!(r.engine.sent.borrow().last(), Some(Command::Seek(d)) if d.is_zero()), "clamped at the start");
+        r.player.pending_seek = None;
+        r.run(|p, cx| p.remote(Remote::SkipBy(500.0), cx));
+        assert_eq!(r.player.pending_seek, Some(200.0), "clamped at the track's length");
+        r.run(|p, cx| p.remote(Remote::Seek(-5.0), cx));
+        assert_eq!(r.player.pending_seek, Some(0.0));
+        r.run(|p, cx| p.remote(Remote::Next, cx));
+        assert_eq!(r.engine.played(), ["a", "b"]);
+        r.engine.position.set(1.0);
+        r.player.pending_seek = None;
+        r.run(|p, cx| p.remote(Remote::Previous, cx));
+        assert_eq!(r.engine.played(), ["a", "b", "a"]);
+    }
+
+    fn error(id: Option<&str>) -> audio::Event {
+        audio::Event::Error { track_id: id.map(Into::into), message: "not found".into() }
+    }
+
+    #[test]
+    fn a_track_that_cannot_be_opened_is_skipped() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
+        assert_eq!(r.engine.played(), ["a", "b"]);
+        assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "b");
+        assert_eq!(r.notes, [Note::Error("Skipped “a”: not found".into()), Note::Probe]);
+        // b starts and ends; then c, the last, fails to open: nothing to skip to, so it stays current.
+        let b = r.uid_of("b");
+        r.started(b, false);
+        r.run(|p, cx| p.handle_engine(&ended_of("b"), cx));
+        r.run(|p, cx| p.handle_engine(&error(Some("c")), cx));
+        assert_eq!(r.engine.played(), ["a", "b", "c"]);
+        assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "c", "the last one stays current");
+    }
+
+    fn ended_of(id: &str) -> audio::Event {
+        audio::Event::Ended { track_id: id.into(), token: 0 }
+    }
+
+    #[test]
+    fn a_second_failure_in_a_row_stops() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
+        r.run(|p, cx| p.handle_engine(&error(Some("b")), cx));
+        assert_eq!(r.engine.played(), ["a", "b"], "the server may be gone: no run through the whole queue");
+        assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "b");
+        assert!(r.notes.ends_with(&[Note::Error("not found".into()), Note::Probe]));
+    }
+
+    #[test]
+    fn errors_that_are_not_a_track_failing_to_open_stop_as_before() {
+        // Not about a track (the device).
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.handle_engine(&error(None), cx));
+        assert_eq!(r.engine.played(), ["a"]);
+        // Partway through a track that had started (e.g. the connection dropped).
+        let a = r.uid_of("a");
+        r.started(a, false);
+        r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
+        assert_eq!(r.engine.played(), ["a"]);
+        // About a later track: the current one plays out.
+        r.run(|p, cx| p.handle_engine(&error(Some("b")), cx));
+        assert_eq!(r.engine.played(), ["a"]);
+        assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "a");
     }
 }
