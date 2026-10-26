@@ -149,6 +149,10 @@ pub enum Action {
     SyncNow,
     /// Stop the track sync that's running.
     StopSync,
+    /// Delete the cover art kept on disk (and forget what's loaded).
+    ClearArtCache,
+    /// Delete the streamed audio kept on disk.
+    ClearStreamCache,
     /// Measure the server's round trip again, if the last reading is old.
     MeasureLatency,
     /// Back to the login screen; the saved password is forgotten.
@@ -571,6 +575,8 @@ impl OndApp {
                 }
             }
             Action::StopSync => self.bridge.cancel_sync(),
+            Action::ClearArtCache => self.art.clear(),
+            Action::ClearStreamCache => self.cache.clear(),
             Action::MeasureLatency => self.refresh_latency(),
             Action::SignOut => self.sign_out(),
             Action::Album(id, action) => self.play_album(id, action),

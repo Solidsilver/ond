@@ -278,6 +278,29 @@ impl OndApp {
             });
         });
         group(ui, "Analysis", |ui| self.analysis_settings(ui));
+        group(ui, "Cache", |ui| {
+            let art = self.art.disk_size();
+            let hint = match art {
+                Some(0) => "Nothing kept on this computer.".to_owned(),
+                Some(n) => format!("{} on this computer. Covers download again as they're shown.", crate::fmt::bytes(n)),
+                None => "Covers download again as they're shown.".to_owned(),
+            };
+            setting(ui, "Cover art", &hint, |ui| {
+                if ui.add_enabled_ui(art != Some(0), |ui| secondary(ui, "Clear")).inner.clicked() {
+                    self.actions.push(Action::ClearArtCache);
+                }
+            });
+            let audio = self.cache.size();
+            let hint = match audio {
+                0 => "Nothing kept on this computer.".to_owned(),
+                n => format!("{} of tracks played lately. They stream again when played.", crate::fmt::bytes(n)),
+            };
+            setting(ui, "Streamed audio", &hint, |ui| {
+                if ui.add_enabled_ui(audio > 0, |ui| secondary(ui, "Clear")).inner.clicked() {
+                    self.actions.push(Action::ClearStreamCache);
+                }
+            });
+        });
     }
 
     /// Library analysis: start it, follow it, pause or stop it; and whether
