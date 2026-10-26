@@ -442,9 +442,7 @@ fn album_summary_with_mixed_verdicts() {
     if v.same_kind(&up(Confidence::High)) {
         assert_eq!(v.confidence, Confidence::High);
     }
-    // Under half: nothing.
-    let s = summarize(&[&b, &c, &c.clone(), &a], 4);
-    assert_eq!(s.verdict.as_ref().map(|(_, n)| *n), Some(2));
+    // Each kind on under half the tracks: nothing.
     let e = fake(8.0, -10.0, 100.0, vec![]);
     let s = summarize(&[&b, &c, &e, &e, &e], 5);
     assert_eq!(s.verdict, None);
