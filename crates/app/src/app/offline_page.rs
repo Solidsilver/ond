@@ -3,14 +3,14 @@
 //! and playlist pages.
 
 use super::browse::grid_metrics;
-use super::widgets::{Mark, elide, link};
+use super::widgets::{Mark, danger, elide, link, secondary};
 use super::view_ctx::ViewCtx;
 use super::{Action, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use offline::{Pin, PinSummary, Snapshot};
+use offline::{Pin, PinSummary, SetAside, Snapshot};
 
 /// Storage caps offered in the limit menu, in GB.
 const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
@@ -35,6 +35,77 @@ pub(super) fn limit_choices(ui: &mut Ui, current: Option<u64>, actions: &mut Vec
             actions.push(Action::SetOfflineLimit(Some(bytes)));
         }
     }
+}
+
+/// "12 files (3.4 GB)".
+fn files_and_bytes(a: &SetAside) -> String {
+    format!("{} ({})", crate::fmt::plural(a.unknown, "file"), crate::fmt::bytes(a.unknown_bytes))
+}
+
+/// The notice's first lines: what happened and what's left in the folder.
+pub(super) fn set_aside_text(a: &SetAside) -> (&'static str, String) {
+    let title = "Ond couldn't read its list of downloads";
+    let body = match a.unknown {
+        0 => "None of the files it listed are left in the downloads folder.".to_owned(),
+        1 => format!("{} it no longer knows is kept in the downloads folder.", files_and_bytes(a)),
+        _ => format!("{} it no longer knows are kept in the downloads folder.", files_and_bytes(a)),
+    };
+    (title, body)
+}
+
+/// After the downloads list couldn't be read (see [`offline::SetAside`]): says
+/// so, and offers to show the folder or remove the files it no longer knows,
+/// after asking. `place` keeps each place's "are you sure" apart.
+pub(super) fn set_aside_notice(ui: &mut Ui, snap: &Snapshot, actions: &mut Vec<Action>, place: &str) {
+    let Some(a) = &snap.set_aside else { return };
+    let t = Tokens::of(ui);
+    let confirm_id = egui::Id::unique("set-aside-confirm").with(place);
+    let mut confirming = ui.data(|d| d.get_temp::<bool>(confirm_id).unwrap_or(false)) && !a.removing;
+    // Outlined, not filled: the buttons inside are filled with `field`.
+    egui::Frame::new().stroke(egui::Stroke::new(1.0, t.hairline)).corner_radius(8).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
+        ui.set_max_width(560.0);
+        let (title, body) = set_aside_text(a);
+        ui.label(egui::RichText::new(title).font(FontId::new(13.0, semibold())).color(t.text));
+        ui.add_space(2.0);
+        ui.add(egui::Label::new(egui::RichText::new(body).size(12.0).color(t.muted)).wrap());
+        ui.add_space(10.0);
+        if a.removing {
+            ui.label(egui::RichText::new("Removing…").size(12.0).color(t.muted));
+        } else if confirming {
+            let ask = format!("Delete {} from the downloads folder? This can't be undone.", files_and_bytes(a));
+            ui.add(egui::Label::new(egui::RichText::new(ask).size(12.0).color(t.text)).wrap());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if danger(ui, "Delete").clicked() {
+                    actions.push(Action::RemoveSetAside);
+                    confirming = false;
+                }
+                ui.add_space(4.0);
+                if secondary(ui, "Cancel").clicked() {
+                    confirming = false;
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                if a.unknown > 0 {
+                    if secondary(ui, &format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
+                        actions.push(Action::RevealSetAside);
+                    }
+                    ui.add_space(4.0);
+                    if secondary(ui, "Remove them…").clicked() {
+                        confirming = true;
+                    }
+                } else if secondary(ui, "Dismiss").clicked() {
+                    // Nothing to delete but the unreadable list itself.
+                    actions.push(Action::RemoveSetAside);
+                }
+            });
+            ui.add_space(6.0);
+            let why = if a.unknown > 0 { "Until then, Ond doesn't tidy up that folder." } else { "Until then, Ond doesn't tidy up the downloads folder." };
+            ui.label(egui::RichText::new(why).size(12.0).color(t.muted));
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(confirm_id, confirming));
 }
 
 /// Why a pin isn't finished, in a few words.
@@ -94,6 +165,11 @@ impl ViewCtx<'_> {
 
         self.storage_line(ui, &snap);
         ui.add_space(14.0);
+
+        if snap.set_aside.is_some() {
+            set_aside_notice(ui, &snap, self.actions, "page");
+            ui.add_space(18.0);
+        }
 
         if snap.pins.is_empty() {
             super::widgets::empty_state(

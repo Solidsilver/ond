@@ -119,6 +119,25 @@ pub struct Snapshot {
     pub queued: usize,
     pub active: usize,
     pub failed: usize,
+    /// A state file that couldn't be read was set aside, so files the pins
+    /// don't name are kept (see [`load_pins`]); `None` normally.
+    pub set_aside: Option<SetAside>,
+}
+
+/// The state file couldn't be read and was set aside: the downloads it named
+/// are no longer listed, and their files stay in the folder (no cleanup)
+/// until [`OfflineStore::remove_set_aside`] or the user deletes the
+/// `offline.json.bad-*` file.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SetAside {
+    /// The set-aside state files.
+    pub files: Vec<PathBuf>,
+    /// Files in the folder that the pins don't name.
+    pub unknown: usize,
+    /// Their bytes.
+    pub unknown_bytes: u64,
+    /// [`OfflineStore::remove_set_aside`] is under way.
+    pub removing: bool,
 }
 
 impl Snapshot {
@@ -185,7 +204,7 @@ struct Inner {
     on_change: OnChange,
     /// Track ids whose files should go, deleted on a thread of their own so an
     /// unpin never waits on the disk (or holds the state lock while it does).
-    doomed: Mutex<Sender<Vec<String>>>,
+    doomed: Mutex<Sender<Chore>>,
     /// Pins to write, saved on a thread of their own for the same reason.
     saves: Mutex<Sender<Save>>,
     flush: Arc<Flush>,
@@ -239,6 +258,29 @@ struct State {
     /// meanwhile isn't downloaded until it's done, so the delete can't unlink
     /// the new partial file.
     deleting: HashSet<String>,
+    /// A state file was set aside (see [`load_pins`]); `None` normally.
+    set_aside: Option<Aside>,
+    /// File names [`Inner::sweep`] is deleting right now: a track pinned
+    /// again meanwhile whose file has one of them waits until it's done.
+    sweeping: HashSet<String>,
+}
+
+/// What [`State::set_aside`] keeps.
+struct Aside {
+    /// The `offline.json.bad-*` files.
+    files: Vec<PathBuf>,
+    /// The files in the folder the pins didn't name at open, with their
+    /// sizes. Those pinned since are left out when counting.
+    strays: Vec<(String, u64)>,
+    removing: bool,
+}
+
+/// Work for the deleter thread.
+enum Chore {
+    /// Delete these tracks' files.
+    Delete(Vec<String>),
+    /// [`Inner::sweep`].
+    Sweep,
 }
 
 struct Active {
@@ -287,11 +329,13 @@ impl OfflineStore {
                 s.done = None;
             }
         }
-        if trusted {
+        let set_aside = if trusted {
             remove_strays(&cfg.dir, &pins);
+            None
         } else {
             tracing::warn!("offline: keeping files the pins don't know in {}, while a {SET_ASIDE}* file is there", cfg.dir.display());
-        }
+            Some(Aside { files: set_aside_files(&cfg.dir), strays: strays(&cfg.dir, &pins), removing: false })
+        };
         let (doomed, doomed_rx) = std::sync::mpsc::channel();
         let (saves, saves_rx) = std::sync::mpsc::channel();
         let flush = Arc::new(Flush::default());
@@ -318,6 +362,8 @@ impl OfflineStore {
                 pins_revision: 0,
                 closed: false,
                 deleting: HashSet::new(),
+                set_aside,
+                sweeping: HashSet::new(),
             }),
         });
         {
@@ -493,6 +539,21 @@ impl OfflineStore {
         self.inner.changed(st);
     }
 
+    /// After a state file was set aside (see [`Snapshot::set_aside`]): deletes
+    /// the files in the folder the pins don't name, then the set-aside state
+    /// files, which turns cleanup back on. Runs in the background; the
+    /// snapshot says when it's done. Does nothing if nothing was set aside.
+    pub fn remove_set_aside(&self) {
+        let mut st = self.inner.lock();
+        let Some(aside) = st.set_aside.as_mut() else { return };
+        if aside.removing {
+            return;
+        }
+        aside.removing = true;
+        self.inner.changed(st);
+        let _ = self.inner.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(Chore::Sweep);
+    }
+
     /// The current state; cheap to call every frame.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         let mut st = self.inner.lock();
@@ -569,7 +630,7 @@ impl Inner {
 
     fn delete(&self, ids: Vec<String>) {
         if !ids.is_empty() {
-            let _ = self.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(ids);
+            let _ = self.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(Chore::Delete(ids));
         }
     }
 
@@ -602,6 +663,12 @@ impl Inner {
         for id in st.pins.pending() {
             if st.active.contains_key(id) || st.deleting.contains(id) {
                 continue;
+            }
+            if !st.sweeping.is_empty() {
+                let name = file_name(&st.pins.tracks[id].r);
+                if st.sweeping.contains(&name) || st.sweeping.contains(&format!("{name}.part")) {
+                    continue;
+                }
             }
             if let Some(f) = st.failures.get(id) {
                 if f.attempts >= MAX_ATTEMPTS {
@@ -753,6 +820,12 @@ impl Inner {
                 free
             }
         };
+        let set_aside = st.set_aside.as_ref().map(|a| {
+            // Rare and short-lived, so the names are worked out each time.
+            let known = known_names(&st.pins);
+            let unknown: Vec<u64> = a.strays.iter().filter(|(n, _)| !known.contains(n)).map(|&(_, len)| len).collect();
+            SetAside { files: a.files.clone(), unknown: unknown.len(), unknown_bytes: unknown.iter().sum(), removing: a.removing }
+        });
         Snapshot {
             version: st.version,
             tracks,
@@ -766,6 +839,7 @@ impl Inner {
             queued,
             active: st.active.len(),
             failed,
+            set_aside,
         }
     }
 }
@@ -1008,22 +1082,81 @@ fn saver(dir: PathBuf, saves: Receiver<Save>, flush: Arc<Flush>) {
 
 /// The deleter thread: removes the files of tracks no pin needs any more, one
 /// batch at a time, until the store goes away.
-fn deleter(store: Weak<Inner>, dir: PathBuf, batches: Receiver<Vec<String>>) {
-    while let Ok(mut ids) = batches.recv() {
+fn deleter(store: Weak<Inner>, dir: PathBuf, chores: Receiver<Chore>) {
+    while let Ok(first) = chores.recv() {
         // Anything else that piled up goes in the same directory scan.
-        ids.extend(batches.try_iter().flatten());
-        let Some(inner) = store.upgrade() else { return };
-        if !inner.deleting(&mut ids) {
-            return;
+        let (mut ids, mut sweep) = (Vec::new(), false);
+        for chore in std::iter::once(first).chain(chores.try_iter()) {
+            match chore {
+                Chore::Delete(batch) => ids.extend(batch),
+                Chore::Sweep => sweep = true,
+            }
         }
-        drop(inner);
-        remove_files(&dir, &ids);
-        let Some(inner) = store.upgrade() else { return };
-        inner.deleted(&ids);
+        if !ids.is_empty() {
+            let Some(inner) = store.upgrade() else { return };
+            if !inner.deleting(&mut ids) {
+                return;
+            }
+            drop(inner);
+            remove_files(&dir, &ids);
+            let Some(inner) = store.upgrade() else { return };
+            inner.deleted(&ids);
+        }
+        if sweep {
+            let Some(inner) = store.upgrade() else { return };
+            if !inner.sweep() {
+                return;
+            }
+        }
     }
 }
 
 impl Inner {
+    /// [`OfflineStore::remove_set_aside`], on the deleter thread: deletes the
+    /// files the pins don't name, then the set-aside state files. A track
+    /// pinned meanwhile whose file is among them waits until they're gone
+    /// (see [`State::sweeping`]). False once the store has shut down.
+    fn sweep(&self) -> bool {
+        let found = listing(&self.dir);
+        let doomed: Vec<String> = {
+            let mut st = self.lock();
+            if st.closed {
+                return false;
+            }
+            let known = known_names(&st.pins);
+            let doomed: Vec<String> = found.into_iter().map(|(name, _)| name).filter(|n| !known.contains(n)).collect();
+            st.sweeping = doomed.iter().cloned().collect();
+            doomed
+        };
+        for name in &doomed {
+            tracing::info!("offline: removing {name}, which the pins don't name");
+            if let Err(e) = std::fs::remove_file(self.dir.join(name))
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                tracing::warn!("offline: removing {name}: {e}");
+            }
+        }
+        // Last, so cleanup only comes back on once the files are gone.
+        for f in set_aside_files(&self.dir) {
+            if let Err(e) = std::fs::remove_file(&f) {
+                tracing::warn!("offline: removing {}: {e}", f.display());
+            }
+        }
+        let left = set_aside_files(&self.dir);
+        let strays = if left.is_empty() { Vec::new() } else { listing(&self.dir) };
+        let mut st = self.lock();
+        st.sweeping.clear();
+        st.set_aside = if left.is_empty() {
+            None
+        } else {
+            let known = known_names(&st.pins);
+            Some(Aside { files: left, strays: strays.into_iter().filter(|(n, _)| !known.contains(n)).collect(), removing: false })
+        };
+        let closed = st.closed;
+        self.changed(st);
+        !closed
+    }
+
     /// Before the deleter removes the files of `ids`: drops those pinned again
     /// since (or downloading again), whose files stay, and holds back new
     /// downloads of the rest until [`deleted`](Self::deleted). False once the
@@ -1045,6 +1178,11 @@ impl Inner {
         for id in ids {
             st.deleting.remove(id);
         }
+        if let Some(aside) = st.set_aside.as_mut() {
+            // A file that was unknown at open, pinned and then unpinned, is gone now.
+            let stems: HashSet<String> = ids.iter().map(|id| streamcache::escape_id(id)).collect();
+            aside.strays.retain(|(name, _)| !stems.contains(stem(name)));
+        }
         if ids.iter().any(|id| st.pins.tracks.contains_key(id)) {
             self.changed(st);
         }
@@ -1062,9 +1200,7 @@ fn remove_files(dir: &Path, ids: &[String]) {
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
-        // `<stem>`, `<stem>.<suffix>` or `<stem>.<suffix>.part`: escaped ids never contain '.'.
-        let stem = name.split('.').next().unwrap_or(name);
-        if stems.contains(stem) {
+        if stems.contains(stem(name)) {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -1123,24 +1259,60 @@ fn has_downloads(dir: &Path) -> bool {
     })
 }
 
+/// The set-aside state files in `dir` (see [`load_pins`]), oldest first.
+fn set_aside_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(SET_ASIDE)).map(|e| e.path()).collect();
+    files.sort();
+    files
+}
+
+/// The names of every file the pins account for, finished or partial.
+fn known_names(pins: &Pins) -> HashSet<String> {
+    pins.tracks
+        .values()
+        .flat_map(|s| {
+            let n = file_name(&s.r);
+            [format!("{n}.part"), n]
+        })
+        .collect()
+}
+
+/// A download's file name up to the first '.': `<stem>`, `<stem>.<suffix>`
+/// or `<stem>.<suffix>.part`, as escaped ids never contain '.'.
+fn stem(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+/// The files in `dir` that could be downloads (not the store's own
+/// bookkeeping or hidden files), with their sizes.
+fn listing(dir: &Path) -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with(STATE_FILE) || name.starts_with('.') {
+                return None;
+            }
+            let meta = std::fs::metadata(e.path()).ok().filter(std::fs::Metadata::is_file)?;
+            Some((name, meta.len()))
+        })
+        .collect()
+}
+
+/// The files in `dir` the pins don't name, with their sizes.
+fn strays(dir: &Path, pins: &Pins) -> Vec<(String, u64)> {
+    let known = known_names(pins);
+    listing(dir).into_iter().filter(|(name, _)| !known.contains(name)).collect()
+}
+
 /// Removes files nothing refers to (a crash between unpin and delete). Only
 /// with pins that [`load_pins`] trusts.
 fn remove_strays(dir: &Path, pins: &Pins) {
-    let known: std::collections::HashSet<String> = pins.tracks.values().flat_map(|s| {
-        let n = file_name(&s.r);
-        [format!("{n}.part"), n]
-    }).collect();
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
-        let name = e.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.starts_with(STATE_FILE) || name.starts_with('.') || !e.path().is_file() {
-            continue;
-        }
-        if !known.contains(name) {
-            tracing::info!("offline: removing stray {name}");
-            let _ = std::fs::remove_file(e.path());
-        }
+    for (name, _) in strays(dir, pins) {
+        tracing::info!("offline: removing stray {name}");
+        let _ = std::fs::remove_file(dir.join(name));
     }
 }
 

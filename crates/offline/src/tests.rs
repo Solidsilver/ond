@@ -781,6 +781,78 @@ fn a_missing_state_file_beside_downloads_deletes_nothing() {
 }
 
 #[test]
+fn a_set_aside_state_file_shows_in_the_snapshot_with_the_files_it_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    assert_eq!(store(dir.path(), &rt).snapshot().set_aside, None, "nothing set aside normally");
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    std::fs::write(dir.path().join("t2.flac.part"), b"tw").unwrap();
+    std::fs::write(dir.path().join(STATE_FILE), b"{\"pins\": [tor").unwrap();
+    let s = store(dir.path(), &rt);
+    let aside = s.snapshot().set_aside.clone().expect("the bad state file is reported");
+    assert_eq!(aside.files, names_starting(dir.path(), SET_ASIDE).iter().map(|n| dir.path().join(n)).collect::<Vec<_>>());
+    assert_eq!(aside.files.len(), 1);
+    assert_eq!((aside.unknown, aside.unknown_bytes, aside.removing), (2, 5, false));
+    // Pinned again, a file is no longer unknown.
+    s.pin(Pin::Track("t1".into()), "T1", vec![track("t1", 3)]);
+    let aside = s.snapshot().set_aside.clone().unwrap();
+    assert_eq!((aside.unknown, aside.unknown_bytes), (1, 2));
+    // Still reported after a restart, while the bad file is there.
+    drop(s);
+    let aside = store(dir.path(), &rt).snapshot().set_aside.clone().unwrap();
+    assert_eq!((aside.files.len(), aside.unknown, aside.unknown_bytes), (1, 1, 2));
+}
+
+#[test]
+fn removing_what_was_set_aside_deletes_only_unknown_files_and_turns_cleanup_back_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    std::fs::write(dir.path().join("t1.flac"), b"one").unwrap();
+    std::fs::write(dir.path().join("t2.flac.part"), b"tw").unwrap();
+    std::fs::write(dir.path().join(STATE_FILE), b"{\"pins\": [tor").unwrap();
+    std::fs::write(dir.path().join(".DS_Store"), b"x").unwrap();
+    let s = store(dir.path(), &rt);
+    // Pinned since: its partial download stays.
+    s.pin(Pin::Track("k".into()), "K", vec![track("k", 10)]);
+    std::fs::write(dir.path().join("k.flac.part"), b"kk").unwrap();
+    s.remove_set_aside();
+    assert!(s.snapshot().set_aside.as_ref().is_none_or(|a| a.removing), "shown as under way at once");
+    wait_for("the removal", || s.snapshot().set_aside.is_none());
+    assert!(!dir.path().join("t1.flac").exists() && !dir.path().join("t2.flac.part").exists(), "unknown files go");
+    assert!(dir.path().join("k.flac.part").exists(), "a pinned track's file stays");
+    assert!(dir.path().join(".DS_Store").exists(), "hidden files aren't the store's");
+    assert!(names_starting(dir.path(), SET_ASIDE).is_empty(), "the bad state file goes");
+    assert!(s.is_pinned(&Pin::Track("k".into())));
+    // Cleanup is back on: the next open removes strays as usual.
+    drop(s);
+    std::fs::write(dir.path().join("orphan.flac"), b"x").unwrap();
+    let s = store(dir.path(), &rt);
+    assert!(!dir.path().join("orphan.flac").exists());
+    assert!(dir.path().join("k.flac.part").exists());
+    assert_eq!(s.snapshot().set_aside, None);
+}
+
+#[test]
+fn a_track_pinned_while_unknown_files_are_removed_downloads_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(10_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    // The sweep, past working out which files are unknown, with t's among them...
+    s.inner.lock().sweeping.insert("t.flac".into());
+    // ...and t pinned while it deletes them: a download now could lose its file.
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    s.set_source(Some(server.url()));
+    thread::sleep(Duration::from_millis(100));
+    assert!(server.requests().is_empty(), "no download while the sweep runs");
+    let mut st = s.inner.lock();
+    st.sweeping.clear();
+    s.inner.changed(st);
+    wait_for("the download", || s.snapshot().is_done("t"));
+}
+
+#[test]
 fn a_pin_refreshed_with_a_new_size_downloads_with_it() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();

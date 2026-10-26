@@ -228,6 +228,11 @@ pub enum Action {
     /// Cap on offline storage in bytes; `None` is unlimited.
     SetOfflineLimit(Option<u64>),
     RevealOffline,
+    /// Show the open store's folder, where files kept after its list of
+    /// downloads couldn't be read are (see `offline::SetAside`).
+    RevealSetAside,
+    /// Delete those files and the unreadable list, so the folder is tidied again.
+    RemoveSetAside,
     /// Pick a new folder for downloads (they move at the next launch).
     MoveOffline,
     /// Love or unlove a song, album or artist. `track` / `name` keep the
@@ -747,6 +752,7 @@ impl Downloads {
     }
 
     /// Download actions that need the store: they wait while it opens.
+    /// (Not `RemoveSetAside`: the store that opens may be another account's.)
     fn needs_store(action: &Action) -> bool {
         matches!(
             action,
@@ -788,6 +794,14 @@ impl Downloads {
             }
             Action::RevealOffline => {
                 crate::folder::reveal(&self.base).map_err(|e| format!("open {}: {e}", self.base.display()))?;
+            }
+            Action::RevealSetAside => {
+                let store = store()?;
+                crate::folder::reveal(store.dir()).map_err(|e| format!("open {}: {e}", store.dir().display()))?;
+            }
+            Action::RemoveSetAside => {
+                store()?.remove_set_aside();
+                self.refresh();
             }
             _ => unreachable!("not a download action"),
         }
@@ -1763,7 +1777,9 @@ impl OndApp {
             | Action::PauseDownloads(_)
             | Action::RetryDownloads
             | Action::SetOfflineLimit(_)
-            | Action::RevealOffline) => match self.downloads.apply(a, &self.prefs) {
+            | Action::RevealOffline
+            | Action::RevealSetAside
+            | Action::RemoveSetAside) => match self.downloads.apply(a, &self.prefs) {
                 Ok(Some(notice)) => self.show_notice(notice),
                 Ok(None) => {}
                 Err(e) => self.show_error(e),

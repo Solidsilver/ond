@@ -1178,6 +1178,22 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Offline);
     s.shoot(h, "offline-empty");
 
+    // The list of downloads couldn't be read: a made-up snapshot, with the
+    // store out of the way so it isn't refreshed over.
+    reset(h, FULL, Route::Offline);
+    let store = app_mut(h).downloads.store.take();
+    app_mut(h).downloads.snap = Arc::new(set_aside_snapshot(&app_mut(h).downloads.snap));
+    s.shoot(h, "offline-set-aside");
+    if !click_label(h, "Remove them", egui::Rect::EVERYTHING) {
+        eprintln!("  (Remove them not found by label)");
+    }
+    s.shoot(h, "offline-set-aside-confirm");
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Offline));
+    s.shoot(h, "settings-offline-set-aside");
+    let app = app_mut(h);
+    app.downloads.store = store;
+    app.downloads.refresh();
+
     reset(h, FULL, Route::Artists);
     s.shoot(h, "artists");
 
@@ -2084,6 +2100,51 @@ fn list_keys_stay_with_an_open_sheet() {
     h.key_press(egui::Key::Backspace);
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).player.queue.upcoming.len(), len - 1, "⌫ works once the sheet is closed");
+    *h.state_mut() = None;
+}
+
+/// `snap` as it would be after the list of downloads couldn't be read.
+fn set_aside_snapshot(snap: &offline::Snapshot) -> offline::Snapshot {
+    let aside = offline::SetAside { files: vec![PathBuf::from("offline.json.bad-1761400000000")], unknown: 214, unknown_bytes: 6_480_000_000, removing: false };
+    offline::Snapshot { set_aside: Some(aside), version: snap.version + 1, ..snap.clone() }
+}
+
+/// After the list of downloads couldn't be read, the Offline page says so;
+/// "Remove them" asks first, then deletes the files the list doesn't name
+/// and the unreadable list, and the notice goes.
+#[test]
+fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    let app = app_mut(&mut h);
+    let store = app.downloads.store.take().expect("the store opens at start");
+    let folder = store.dir().to_owned();
+    drop(store);
+    std::fs::write(folder.join("offline.json"), b"{\"pins\": [tor").unwrap();
+    std::fs::write(folder.join("lost.flac"), vec![0u8; 3000]).unwrap();
+    app.downloads.store = Some((app.downloads.open)(folder.clone(), None).unwrap());
+    app.downloads.refresh();
+    let bad = || std::fs::read_dir(&folder).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("offline.json.bad-")).count();
+    assert_eq!(bad(), 1);
+
+    reset(&mut h, FULL, Route::Offline);
+    h.get_by_label("Ond couldn't read its list of downloads");
+    h.get_by_label("1 file (3.0 KB) it no longer knows is kept in the downloads folder.");
+    h.get_by_label("Remove them…").click();
+    h.run_steps(2);
+    assert!(folder.join("lost.flac").exists(), "nothing deleted before the answer");
+    h.get_by_label("Delete").click();
+    h.run_steps(2);
+    let start = std::time::Instant::now();
+    while app_mut(&mut h).downloads.snap.set_aside.is_some() {
+        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for the removal");
+        std::thread::sleep(Duration::from_millis(10));
+        app_mut(&mut h).downloads.refresh();
+    }
+    h.run_steps(2);
+    assert!(!folder.join("lost.flac").exists());
+    assert_eq!(bad(), 0);
+    assert!(h.query_by_label("Ond couldn't read its list of downloads").is_none(), "the notice goes");
     *h.state_mut() = None;
 }
 
