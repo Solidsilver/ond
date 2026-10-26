@@ -65,6 +65,9 @@ pub struct Settings {
     pub waveform: bool,
     #[serde(default)]
     pub waveform_bars: crate::visuals::waveform::Bars,
+    /// Letters beside long lists sorted by name, to jump along them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alpha_rail: bool,
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
@@ -134,6 +137,7 @@ impl Default for Settings {
             backdrop: false,
             waveform: false,
             waveform_bars: Default::default(),
+            alpha_rail: false,
             show_queue: true,
             window: Default::default(),
             scrobble: true,
@@ -284,7 +288,7 @@ mod tests {
     #[test]
     fn appearance_switches_start_off_and_experiments_that_moved_start_over() {
         let fresh = Settings::default();
-        assert!(!fresh.backdrop && !fresh.waveform && !fresh.adapt_colors && fresh.experimental.all_off());
+        assert!(!fresh.backdrop && !fresh.waveform && !fresh.adapt_colors && !fresh.alpha_rail && fresh.experimental.all_off());
         // An experiment's switch isn't carried over when the feature moves
         // out of Experimental: the old key is dropped, the rest still reads.
         let mut s: Settings = serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"backdrop": true, "waveform": true, "spectrum": true}}"#).unwrap();

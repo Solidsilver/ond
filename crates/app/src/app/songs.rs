@@ -42,6 +42,8 @@ pub struct SongsView {
     keys: Memo<(u64, u64), SortKeys>,
     /// Indices into `Data::tracks.all`, sorted; per versions and sort.
     order: Memo<(u64, u64, Column, bool), Vec<usize>>,
+    /// Where each letter starts in that order, for the alphabet rail.
+    marks: Memo<(u64, u64, Column, bool), super::alpha::Marks>,
     pub selected: Option<usize>,
     /// The keys just moved the selection: bring it into view, once (every
     /// frame would pin it there and fight the scroll wheel).
@@ -102,15 +104,36 @@ pub fn sort_with(tracks: &[Track], keys: &SortKeys, by: Column, descending: bool
 }
 
 impl ViewCtx<'_> {
-    pub(super) fn songs_order(&mut self) -> Arc<Vec<usize>> {
+    fn sort_keys(&mut self) -> Arc<SortKeys> {
         let data = &self.data;
-        let versions = (data.tracks_version, data.version);
-        let keys = self.ui.songs.keys.get(versions, || {
+        self.ui.songs.keys.get((data.tracks_version, data.version), || {
             let names = |id: &str| data.album(id).map(|a| a.name.clone()).unwrap_or_default();
             SortKeys::new(&data.tracks.all, &names)
-        });
+        })
+    }
+
+    pub(super) fn songs_order(&mut self) -> Arc<Vec<usize>> {
+        let keys = self.sort_keys();
+        let data = &self.data;
         let (sort, descending) = (self.ui.songs.sort, self.ui.songs.descending);
-        self.ui.songs.order.get((versions.0, versions.1, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
+        self.ui.songs.order.get((data.tracks_version, data.version, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
+    }
+
+    /// Where each letter starts in `order`, sorted by a name column; `None`
+    /// sorted by time or format, or with the rail off.
+    fn songs_marks(&mut self, order: &[usize]) -> Option<Arc<super::alpha::Marks>> {
+        let (sort, descending) = (self.ui.songs.sort, self.ui.songs.descending);
+        if !self.ui.prefs.alpha_rail || matches!(sort, Column::Time | Column::Format) {
+            return None;
+        }
+        let keys = self.sort_keys();
+        let column = match sort {
+            Column::Title => &keys.title,
+            Column::Album => &keys.album,
+            _ => &keys.artist,
+        };
+        let key = (self.data.tracks_version, self.data.version, sort, descending);
+        Some(self.ui.songs.marks.get(key, || super::alpha::Marks::new(order.iter().map(|&i| column[i].as_str()))))
     }
 
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {
@@ -127,10 +150,12 @@ impl ViewCtx<'_> {
             return;
         }
         let order = self.songs_order();
+        let marks = self.songs_marks(&order);
         self.songs_keys(ui, &order);
 
-        // Header.
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+        // Header, over the columns (clear of the alphabet rail).
+        let rail_w = if marks.is_some() { super::alpha::RAIL_W } else { 0.0 };
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width() - rail_w, 26.0), Sense::hover());
         let cols = columns(head);
         for (col, label, rect, right) in [
             (Column::Title, "Title", cols.title, false),
@@ -169,7 +194,15 @@ impl ViewCtx<'_> {
         super::layout::into_gutter(ui, |ui| {
             // Rows sit flush: the scroll area places them by the same height.
             ui.spacing_mut().item_spacing.y = 0.0;
-            egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, ROW_H, order.len(), |ui, range| {
+            let area = ui.available_rect_before_wrap();
+            let mut scroll = egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false);
+            scroll = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() });
+            if let Some(y) = super::alpha::take_jump(ui, "songs") {
+                scroll = scroll.vertical_scroll_offset(y);
+            }
+            let mut top = 0;
+            let out = scroll.show_rows(ui, ROW_H, order.len(), |ui, range| {
+                top = range.start;
                 // The keys moved the selection: bring its row into view, once. It
                 // may be off screen (and not laid out), so place it by its index.
                 if std::mem::take(&mut self.ui.songs.scroll_to_selected)
@@ -181,7 +214,10 @@ impl ViewCtx<'_> {
                 for i in range {
                     self.songs_row(ui, &t, &tracks[order[i]], i, current);
                 }
-            })
+            });
+            if let Some(marks) = marks {
+                super::alpha::rail(ui, "songs", area, &out, &marks, top, |i| i, ROW_H);
+            }
         });
     }
 

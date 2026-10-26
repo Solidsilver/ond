@@ -534,6 +534,7 @@ fn looks(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::settin
         s.backdrop = false;
         s.waveform = false;
         s.waveform_bars = Default::default();
+        s.alpha_rail = false;
         s.experimental = Default::default();
         on(s);
     });
@@ -873,6 +874,25 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Albums);
     app_mut(h).ui.sort = AlbumSort::Year;
     s.shoot(h, "albums-by-year");
+
+    // The alphabet rail, held on a letter partway down: the grid jumps there.
+    // (By title: the fixture's albums aren't stored in artist order, as the
+    // library's are.)
+    reset(h, FULL, Route::Albums);
+    app_mut(h).ui.sort = AlbumSort::Title;
+    looks(h, |s| s.alpha_rail = true);
+    h.run_steps(2);
+    let rail = h.get_by_label("Jump to letter").rect();
+    let at = pos2(rail.center().x, rail.top() + rail.height() * 0.6);
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(4);
+    s.shoot_now(h, "albums-alpha-held");
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    looks(h, |_| ());
+    h.run_steps(2);
+    assert!(h.query_by_label("Jump to letter").is_none(), "switched off: no rail");
 
     reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: None });
     s.shoot(h, "artist");
@@ -2220,6 +2240,40 @@ fn wheel(h: &mut Harness<'_, Option<OndApp>>, at: Pos2, dy: f32, steps: usize) {
 /// A key going down, alone, so the next step is the frame that sees it.
 fn key_down(h: &Harness<'_, Option<OndApp>>, key: egui::Key) {
     h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+}
+
+/// Holding the alphabet rail's last letter takes the album grid to the end,
+/// and its first back to the start.
+#[test]
+fn the_alphabet_rail_jumps_the_grid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Albums);
+    app_mut(&mut h).ui.sort = AlbumSort::Title;
+    looks(&mut h, |s| s.alpha_rail = true);
+    h.run_steps(2);
+    let label = |h: &mut Harness<'_, Option<OndApp>>, last: bool| {
+        let albums = &app_mut(h).data.albums;
+        let pick = |a: &&library::Album| a.name.to_lowercase();
+        let a = if last { albums.iter().max_by_key(pick) } else { albums.iter().min_by_key(pick) }.unwrap();
+        format!("{} by {}", a.name, a.artist.as_deref().unwrap_or("Unknown artist"))
+    };
+    let (first, last) = (label(&mut h, false), label(&mut h, true));
+    assert!(h.query_by_label(&first).is_some() && h.query_by_label(&last).is_none(), "the grid starts at the top");
+    let hold = |h: &mut Harness<'_, Option<OndApp>>, frac: f32| {
+        let rail = h.get_by_label("Jump to letter").rect();
+        let at = pos2(rail.center().x, rail.top() + rail.height() * frac);
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run_steps(4);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+    };
+    hold(&mut h, 0.98);
+    assert!(h.query_by_label(&last).is_some() && h.query_by_label(&first).is_none(), "the last letter shows the end");
+    hold(&mut h, 0.02);
+    assert!(h.query_by_label(&first).is_some(), "the first letter goes back to the start");
+    *h.state_mut() = None;
 }
 
 /// The Songs view keeps the keyboard selection in view when the keys move
