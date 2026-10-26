@@ -532,11 +532,15 @@ fn v2_rows_migrate_to_v3_with_credits_index() {
             t2.composer = Some("Scott LaFaro".into());
             wt.open_table(TRACKS).unwrap().insert("s-1", encode(&t2).unwrap().as_slice()).unwrap();
             wt.open_table(TRACKS_BY_ALBUM).unwrap().insert(("al-1", 1, 1, "s-1"), ()).unwrap();
+            // No v2 database had stamps, but one here makes the assertion
+            // below mean something: migrated rows lack fields only a refetch
+            // fills, so their stamps must go.
+            wt.open_table(ALBUM_STAMPS).unwrap().insert("al-1", 42).unwrap();
         }
         wt.commit().unwrap();
     }
     let lib = Library::open(&path).unwrap();
-    assert_eq!(lib.schema_version().unwrap(), 3);
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
     assert!(lib.albums().unwrap()[0].artists.is_empty());
     assert_eq!(lib.album_tracks("al-1").unwrap()[0].composer.as_deref(), Some("Scott LaFaro"));
     assert_eq!(lib.albums_crediting("Scott LaFaro").unwrap(), ["al-1"]);
@@ -628,4 +632,100 @@ fn retaining_albums_also_drops_tracks_whose_album_is_not_stored() {
     assert_eq!(ids, ["k1"]);
     assert_eq!(lib.track_count().unwrap(), 1, "gone's and the orphan's tracks are removed");
     assert!(lib.check_indexes().unwrap().is_empty());
+}
+
+#[test]
+fn fold_spells_out_letters_unicode_does_not_decompose() {
+    for (name, folded) in [
+        ("Øystein Sevåg", "oystein sevag"),
+        ("Łódź", "lodz"),
+        ("Straße", "strasse"),
+        ("STRAẞE", "strasse"),
+        ("Ærøskøbing", "aeroskobing"),
+        ("Đorđe Balašević", "dorde balasevic"),
+        ("Œuvre", "oeuvre"),
+        ("Þórir", "thorir"),
+        ("Ðe", "de"),
+        ("Ħal", "hal"),
+        ("Ŧest", "test"),
+        ("Iı", "ii"),
+        ("  Björk ", "bjork"),
+    ] {
+        assert_eq!(fold(name), folded, "{name}");
+    }
+}
+
+#[test]
+fn letters_without_a_decomposition_sort_with_their_base_letter() {
+    let lib = Library::in_memory().unwrap();
+    lib.upsert_albums([album("1", "Z", "Zappa", 1970), album("2", "O", "Øystein Sevåg", 1989), album("3", "N", "Nina Simone", 1965)])
+        .unwrap();
+    let names: Vec<_> = lib.albums().unwrap().into_iter().map(|a| a.name).collect();
+    assert_eq!(names, ["N", "O", "Z"]);
+}
+
+#[test]
+fn v3_indexes_are_rebuilt_with_the_new_folding() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.redb");
+    // A v3 database whose keys were made by the old `fold`, which left ø as is.
+    {
+        let lib = Library::open(&path).unwrap();
+        let mut a = album("al-1", "Link", "Øystein Sevåg", 1989);
+        a.song_count = 1;
+        let mut s = song("s-1", "al-1", 1, 1);
+        s.display_composer = Some("Øystein Sevåg".into());
+        lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a.clone(), song: vec![s] }).unwrap();
+        lib.upsert_artists([subsonic::Artist { id: "ar-1".into(), name: "Øystein Sevåg".into(), album_count: 1, cover_art: None, sort_name: None }])
+            .unwrap();
+        let wt = lib.db.begin_write().unwrap();
+        {
+            wt.open_table(META).unwrap().insert(SCHEMA_KEY, 3).unwrap();
+            let mut albums = wt.open_table(ALBUMS_BY_SORT).unwrap();
+            albums.retain(|_, _| false).unwrap();
+            albums.insert(("øystein sevag", 1989, "link", "al-1"), ()).unwrap();
+            let mut artists = wt.open_table(ARTISTS_BY_NAME).unwrap();
+            artists.retain(|_, _| false).unwrap();
+            artists.insert(("øystein sevag", "ar-1"), ()).unwrap();
+            let mut credits = wt.open_table(CREDITS).unwrap();
+            credits.retain(|_, _| false).unwrap();
+            credits.insert(("øystein sevag", "al-1", "s-1"), ()).unwrap();
+        }
+        wt.commit().unwrap();
+        assert!(!lib.check_indexes().unwrap().is_empty(), "the fixture has old keys");
+    }
+    let lib = Library::open(&path).unwrap();
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_consistent(&lib);
+    assert_eq!(lib.albums_crediting("Oystein Sevag").unwrap(), ["al-1"]);
+    assert_eq!(lib.artists().unwrap().len(), 1);
+    // Rows didn't change, so the tracks don't need fetching again.
+    assert!(lib.album_stamps().unwrap().contains_key("al-1"));
+    // A later sync of the same album replaces its entries instead of adding to them.
+    lib.upsert_albums([album("al-1", "Link", "Øystein Sevåg", 1989)]).unwrap();
+    assert_eq!(lib.albums().unwrap().len(), 1);
+    assert_consistent(&lib);
+}
+
+#[test]
+fn a_row_that_cannot_be_read_is_left_out_of_lists() {
+    let lib = Library::in_memory().unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs {
+        album: album("al-1", "Good", "X", 2000),
+        song: vec![song("s-1", "al-1", 1, 1), song("s-2", "al-1", 1, 2)],
+    })
+    .unwrap();
+    lib.upsert_albums([album("al-2", "Bad", "Y", 2001)]).unwrap();
+    lib.upsert_artists([subsonic::Artist { id: "ar-1".into(), name: "X".into(), album_count: 1, cover_art: None, sort_name: None }]).unwrap();
+    let wt = lib.db.begin_write().unwrap();
+    {
+        wt.open_table(ALBUMS).unwrap().insert("al-2", [0xffu8; 3].as_slice()).unwrap();
+        wt.open_table(TRACKS).unwrap().insert("s-2", [0xffu8; 3].as_slice()).unwrap();
+        wt.open_table(ARTISTS).unwrap().insert("ar-1", [0xffu8; 3].as_slice()).unwrap();
+    }
+    wt.commit().unwrap();
+    assert_eq!(lib.albums().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), ["al-1"]);
+    assert_eq!(lib.album_tracks("al-1").unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(), ["s-1"]);
+    assert_eq!(lib.all_tracks().unwrap().len(), 1);
+    assert!(lib.artists().unwrap().is_empty());
 }

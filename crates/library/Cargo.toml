@@ -12,6 +12,7 @@ redb = "4.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
 subsonic = { version = "0.2.0", path = "../subsonic" }
 thiserror = "2.0.21"
+tracing = "0.1.44"
 unicode-normalization = "0.1.26"
 
 [lints]

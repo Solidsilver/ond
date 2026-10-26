@@ -164,7 +164,58 @@ fn resumes_with_a_range_after_the_connection_drops() {
     wait_for("a failed attempt", || server.requests().len() == 1 && s.snapshot().track("t") == Some(&TrackState::Queued));
     s.retry_failed();
     wait_for("the download", || s.snapshot().is_done("t"));
-    assert_eq!(server.requests(), [None, Some(150_000)]);
+    // The resume asks for the last bit it has again, to check it lines up.
+    assert_eq!(server.requests(), [None, Some(150_000 - RESUME_OVERLAP)]);
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
+fn a_partial_file_from_a_replaced_file_of_the_same_size_starts_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let old = data(300_000);
+    let new: Vec<u8> = old.iter().map(|b| b ^ 0x5a).collect();
+    let server = Server::start(new.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    // Half of the old file, then the server's file was replaced (re-tagged,
+    // re-encoded) by one exactly as big.
+    std::fs::write(dir.path().join("t.flac.part"), &old[..150_000]).unwrap();
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", new.len())]);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), new, "no mix of the two");
+    assert_eq!(server.requests(), [Some(150_000 - RESUME_OVERLAP), None]);
+}
+
+#[test]
+fn a_resume_whose_total_is_not_the_pinned_size_starts_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(300_000);
+    // The same bytes so far, but the server's file is longer than the pin
+    // says: it changed. Start over, which then fails on the size.
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    std::fs::write(dir.path().join("t.flac.part"), &body[..100_000]).unwrap();
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", 200_000)]);
+    wait_for("a failed attempt", || server.requests().len() == 2 && s.snapshot().track("t") == Some(&TrackState::Queued));
+    assert_eq!(server.requests(), [Some(100_000 - RESUME_OVERLAP), None]);
+    assert!(!dir.path().join("t.flac.part").exists());
+}
+
+#[test]
+fn a_partial_file_shorter_than_the_overlap_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(300_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    std::fs::write(dir.path().join("t.flac.part"), &body[..1000]).unwrap();
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    assert_eq!(server.requests(), [Some(0)]);
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
 
@@ -396,19 +447,19 @@ fn an_xml_error_reply_is_never_kept_as_a_track() {
 fn a_resume_answered_from_the_wrong_offset_starts_over() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
-    let body = data(40_000);
+    let body = data(200_000);
     let server = Server::start(body.clone(), Opts { wrong_start: true, ..OPTS });
     let s = store(dir.path(), &rt);
     // Pinned with no source yet, then a partial file from before appears: the
-    // resume asks for byte 1000 and gets byte 0.
+    // resume asks for a byte past 0 and gets byte 0.
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    std::fs::write(dir.path().join("t.flac.part"), vec![7u8; 1000]).unwrap();
+    std::fs::write(dir.path().join("t.flac.part"), vec![7u8; 100_000]).unwrap();
     s.set_source(Some(server.url()));
     wait_for("the refused resume", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
     assert!(!dir.path().join("t.flac.part").exists(), "the partial file is dropped, not appended to");
     s.retry_failed();
     wait_for("the download", || s.snapshot().is_done("t"));
-    assert_eq!(server.requests(), [Some(1000), None]);
+    assert_eq!(server.requests(), [Some(100_000 - RESUME_OVERLAP), None]);
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
 
