@@ -321,7 +321,7 @@ impl ViewCtx<'_> {
         }
         let (cols, tile) = grid_metrics(ui.available_width());
         let rows = ids.len().div_ceil(cols);
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("grid", format!("{route:?}"))).auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
+        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("grid", route)).auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
             for row in range {
                 let slice = &ids[row * cols..((row + 1) * cols).min(ids.len())];
                 self.grid_row(ui, slice, tile);
@@ -345,19 +345,20 @@ impl ViewCtx<'_> {
     pub(super) fn album_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32) {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
-        let album = &self.data.albums[idx];
-        let id = album.id.clone();
+        // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
+        let data = self.data;
+        let album = &data.albums[idx];
+        let id = album.id.as_str();
+        let pin = self.album_pin(id);
         if ui.is_rect_visible(rect) {
             let art = Rect::from_min_size(rect.min, vec2(tile, tile));
-            let cover = album.cover_art.clone();
-            let (name, artist) = (album.name.clone(), album.artist.clone().unwrap_or_default());
-            self.art.paint(ui, art, cover.as_deref(), 6.0);
+            self.art.paint(ui, art, album.cover_art.as_deref(), 6.0);
             // Only albums kept offline carry a mark; nothing otherwise.
-            let mark = Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Album(id.clone())));
+            let mark = Mark::of_pin(pin);
             let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
-            let title = elide(ui, &name, FontId::proportional(13.0), t.text, tile);
+            let title = elide(ui, &album.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
-            let sub = elide(ui, &artist, FontId::proportional(12.0), t.muted, tile - mark_w);
+            let sub = elide(ui, album.artist.as_deref().unwrap_or_default(), FontId::proportional(12.0), t.muted, tile - mark_w);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
             if let Some(m) = mark {
                 super::widgets::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
@@ -365,7 +366,7 @@ impl ViewCtx<'_> {
             // The button sits on the tile, so with the pointer on it the tile
             // itself doesn't read as hovered: it's there whenever either is.
             let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
-            let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", &id)), Sense::click());
+            let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", id)), Sense::click());
             if resp.hovered() || play_resp.hovered() {
                 let fill = if play_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
                 let fg = if play_resp.hovered() { t.on_accent } else { t.text };
@@ -373,28 +374,24 @@ impl ViewCtx<'_> {
                 icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(1.0, 0.0), vec2(12.0, 12.0)), Icon::Play, fg);
                 play_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Play album"));
                 if play_resp.clicked() {
-                    self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
+                    self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
                     return;
                 }
             }
         }
-        let album = &self.data.albums[idx];
-        let label = format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist"));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        let artist = album.artist.clone();
-        let artist_ref = album.artist_ref.clone();
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist"))));
         if resp.double_clicked() {
-            self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
+            self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
         } else if resp.clicked() {
-            self.actions.push(Action::Go(Route::Album(id.clone())));
+            self.actions.push(Action::Go(Route::Album(id.to_owned())));
         }
-        let kept = self.downloads.snap.pin(&offline::Pin::Album(id.clone())).is_some();
+        let kept = pin.is_some();
         resp.context_menu(|ui| {
-            collection_menu(ui, &Collection::Album(id.clone()), true, kept, None, self.actions);
-            if let Some(name) = artist {
+            collection_menu(ui, &Collection::Album(id.to_owned()), true, kept, None, self.actions);
+            if let Some(name) = &album.artist {
                 ui.separator();
                 if ui.button(format!("Go to {name}")).clicked() {
-                    self.actions.push(Action::Go(Route::Artist { name, id: artist_ref }));
+                    self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: album.artist_ref.clone() }));
                 }
             }
         });

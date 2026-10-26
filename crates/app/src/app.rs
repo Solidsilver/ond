@@ -502,6 +502,7 @@ pub struct UiState {
     pub spectrogram: crate::visuals::spectrogram::Spectrogram,
     /// The visualizer, while it's open (experimental).
     pub visualizer: Option<visualizer_view::VisualizerView>,
+    pub memos: view_ctx::Memos,
 }
 
 impl UiState {
@@ -518,6 +519,7 @@ impl UiState {
             track_sel: None,
             seek_preview: None,
             songs: songs::SongsView::default(),
+            memos: Default::default(),
             // Something worth knowing at start-up (e.g. the library was rebuilt).
             toasts: toasts::Toasts::with_notices(notices),
             palette: None,

@@ -70,9 +70,51 @@ fn shared_format(tracks: &[Track]) -> Option<String> {
     tracks.iter().all(|t| crate::fmt::quality(t) == first).then_some(first)
 }
 
+/// What the album page works out from the album and its tracks, kept between
+/// frames: rebuilt when the album, its track list or their analysis change.
+pub(super) struct AlbumFacts {
+    summary: analysis::AlbumSummary,
+    /// `FLAC 16/44.1` when every track shares it.
+    format: Option<String>,
+    /// "6 songs · 41 min · 1961 · Riverside"
+    footer: String,
+    credits: Vec<Credit>,
+    source: Source,
+    /// The tracks the key points at, held so that while this is cached no
+    /// other list can take their address.
+    _tracks: crate::tracks::TrackSlice,
+}
+
+/// The [`AlbumFacts`] key: the album id's hash, the album and analysis
+/// versions, and the track list's address and length (a list fetched again is
+/// a new one).
+pub(super) type AlbumKey = (u64, u64, u64, usize, usize);
+
+impl AlbumFacts {
+    fn new(album: &library::Album, tracks: &crate::tracks::TrackSlice, analysis: &super::Analysis) -> Self {
+        let found: Vec<&TrackAnalysis> = tracks.iter().filter_map(|t| analysis.of(t)).collect();
+        let secs = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>();
+        let mut footer = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
+        if let Some(y) = album.year {
+            footer.push_str(&format!(" · {y}"));
+        }
+        if let Some(l) = album.labels.first() {
+            footer.push_str(&format!(" · {l}"));
+        }
+        Self {
+            summary: analysis::summarize(&found, tracks.len()),
+            format: shared_format(tracks),
+            footer,
+            credits: credits(tracks),
+            source: Source::Album { id: album.id.clone(), name: album.name.clone() },
+            _tracks: tracks.clone(),
+        }
+    }
+}
+
 /// Per-track loudness, peak and dynamic range, with any finding the album as a
 /// whole doesn't already show. The title column takes what's left.
-fn analysis_table(ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>) {
+fn analysis_table(ui: &mut Ui, tracks: &[Track], found: &[Option<&TrackAnalysis>], album_verdict: Option<&analysis::Verdict>) {
     let t = Tokens::of(ui);
     let small = |s: String, c| egui::RichText::new(s).size(12.0).color(c);
     let title_w = (ui.available_width() - 360.0).clamp(90.0, 320.0);
@@ -125,18 +167,23 @@ pub(super) struct ListOpts {
 impl ViewCtx<'_> {
     pub(super) fn album_page(&mut self, ui: &mut Ui, id: &str) {
         let t = Tokens::of(ui);
-        let Some(album) = self.data.album(id).cloned() else {
+        // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
+        let (data, analysis) = (self.data, self.analysis);
+        let Some(album) = data.album(id) else {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
         };
-        let tracks = self.data.tracks.album(id).cloned().unwrap_or_default();
+        let no_tracks = crate::tracks::TrackSlice::default();
+        let slice = data.tracks.album(id).unwrap_or(&no_tracks);
+        let tracks: &[Track] = slice;
         if self.download_key(ui) {
             let kept = self.downloads.snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
             self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
         }
-        let found: Vec<Option<TrackAnalysis>> = tracks.iter().map(|t| self.analysis_of(t).cloned()).collect();
-        let summary = analysis::summarize(&found.iter().flatten().collect::<Vec<_>>(), tracks.len());
-        let analysing = self.analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
+        let key = (super::view_ctx::hash_str(id), data.version, analysis.version, tracks.as_ptr() as usize, tracks.len());
+        let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis));
+        let summary = &facts.summary;
+        let analysing = analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
         super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
             // Header: art beside the text, or above it when there's no room.
             let avail = ui.available_width();
@@ -192,7 +239,7 @@ impl ViewCtx<'_> {
                                 self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }));
                             }
                         }
-                        if let Some(f) = shared_format(&tracks) {
+                        if let Some(f) = &facts.format {
                             sep(ui);
                             ui.label(egui::RichText::new(f).size(12.0).color(t.muted));
                         }
@@ -238,7 +285,7 @@ impl ViewCtx<'_> {
                             }
                             if !tracks.is_empty() {
                                 ui.separator();
-                                self.add_to_playlist_menu(ui, &tracks);
+                                self.add_to_playlist_menu(ui, tracks);
                             }
                         });
                         ui.add_space(6.0);
@@ -258,27 +305,18 @@ impl ViewCtx<'_> {
                 return;
             }
 
-            let source = Source::Album { id: album.id.clone(), name: album.name.clone() };
-            self.track_list(ui, &tracks, &source, ListOpts { numbers: true, artist: false, playlist: None });
+            self.track_list(ui, tracks, &facts.source, ListOpts { numbers: true, artist: false, playlist: None });
             ui.add_space(14.0);
-            let secs = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>();
-            let mut footer = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
-            if let Some(y) = album.year {
-                footer.push_str(&format!(" · {y}"));
-            }
-            if let Some(l) = album.labels.first() {
-                footer.push_str(&format!(" · {l}"));
-            }
-            ui.label(egui::RichText::new(footer).size(12.0).color(t.muted));
+            ui.label(egui::RichText::new(&facts.footer).size(12.0).color(t.muted));
             ui.add_space(10.0);
-            self.album_details(ui, &tracks, &found, summary.verdict.as_ref().map(|(v, _)| v), analysing > 0);
+            self.album_details(ui, tracks, &facts, analysing > 0);
             ui.add_space(24.0);
         }));
     }
 
     /// "Album details ›": the album's credits and its per-track measurements,
     /// folded away until asked for (open stays open for the session).
-    pub(super) fn album_details(&mut self, ui: &mut Ui, tracks: &[Track], found: &[Option<TrackAnalysis>], album_verdict: Option<&analysis::Verdict>, analysing: bool) {
+    pub(super) fn album_details(&mut self, ui: &mut Ui, tracks: &[Track], facts: &AlbumFacts, analysing: bool) {
         let t = Tokens::of(ui);
         let open = self.ui.album_details_open;
         let toggle = ui.horizontal(|ui| {
@@ -298,15 +336,16 @@ impl ViewCtx<'_> {
         ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;
-            let people = credits(tracks);
-            if !people.is_empty() {
+            if !facts.credits.is_empty() {
                 super::widgets::kv_section(ui, "Credits");
-                for c in &people {
+                for c in &facts.credits {
                     let items = c.people.iter().map(|(name, id)| (name.clone(), Action::Go(Route::Artist { name: name.clone(), id: id.clone() }))).collect();
                     super::info_panel::links_row(self.actions, ui, &c.role, items);
                 }
             }
             super::widgets::kv_section(ui, "Analysis");
+            let analysis = self.analysis;
+            let found: Vec<Option<&TrackAnalysis>> = tracks.iter().map(|t| analysis.of(t)).collect();
             if found.iter().all(Option::is_none) {
                 super::widgets::kv_row(ui, "Loudness", |ui| {
                     if analysing {
@@ -320,7 +359,7 @@ impl ViewCtx<'_> {
                 });
             } else {
                 ui.spacing_mut().item_spacing.y = 6.0;
-                analysis_table(ui, tracks, found, album_verdict);
+                analysis_table(ui, tracks, &found, facts.summary.verdict.as_ref().map(|(v, _)| v));
             }
         });
     }
@@ -487,7 +526,8 @@ impl ViewCtx<'_> {
     pub(super) fn track_list(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
         let t = Tokens::of(ui);
         self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
-        let current = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
+        let player = self.player;
+        let current = player.queue.current.as_ref().map(|c| c.track.id.as_str());
         let discs = tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1);
         let mut last_disc = None;
         // Where a reorder drag would land: (index to insert at, y of the line).
@@ -502,7 +542,7 @@ impl ViewCtx<'_> {
             }
             let h = if opts.artist { 44.0 } else { 38.0 };
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
-            let playing = current.as_deref() == Some(tr.id.as_str());
+            let playing = current == Some(tr.id.as_str());
             if self.ui.reveal.as_deref() == Some(tr.id.as_str()) {
                 self.ui.reveal = None;
                 self.ui.track_sel = Some(i);
@@ -620,8 +660,7 @@ impl ViewCtx<'_> {
                     }
                 }
             }
-            let label = format!("{}{}{}", tr.title, if loved { ", loved" } else { "" }, if playing { ", playing" } else { "" });
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, format!("{}{}{}", tr.title, if loved { ", loved" } else { "" }, if playing { ", playing" } else { "" })));
             if resp.double_clicked() {
                 self.actions.push(Action::Tracks { tracks: tracks.to_vec(), source: source.clone(), action: QueueAction::Play { start: i } });
             } else if resp.clicked() {
