@@ -153,16 +153,8 @@ impl OndApp {
 
     /// Where `track` would play from now (tests).
     #[cfg(test)]
-    pub(super) fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
-        use player::Sources;
-        let sources = AppSources {
-            offline: self.downloads.store.as_ref(),
-            client: self.session.live(),
-            output: &self.output,
-            data: &self.data,
-            now_playing: &self.now_playing,
-        };
-        sources.source(token, prev, track, next)
+    pub(super) fn source(&mut self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
+        self.with_player(|_, cx| cx.sources.source(token, prev, track, next))
     }
 
     pub(super) fn sync_next(&mut self) {

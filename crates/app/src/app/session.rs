@@ -176,6 +176,8 @@ impl OndApp {
         self.analysis.runner.clear();
         self.analysis.library_run = false;
         self.set_offline();
+        // Not in `set_offline`: going unreachable sets these for the outage,
+        // and a failed sign-in leaves them be.
         self.session.unreachable = false;
         self.session.server_label.clear();
         let saved = self.prefs.snapshot();

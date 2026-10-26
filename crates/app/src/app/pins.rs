@@ -222,8 +222,8 @@ impl Downloads {
         self.store.as_ref().expect("the offline store is open")
     }
 
-    /// Applies a download action. Returns a notice to show, or an error.
-    pub(super) fn apply(&mut self, action: OfflineAction, prefs: &Prefs) -> Result<Option<String>, String> {
+    /// Applies a download action that needs only the store (or the folder).
+    pub(super) fn apply(&mut self, action: OfflineAction, prefs: &Prefs) -> Result<(), String> {
         let store = || self.store.clone().ok_or_else(|| "Downloads aren't open".to_owned());
         match action {
             OfflineAction::Unpin(pin) => {
@@ -249,7 +249,7 @@ impl Downloads {
             }
             _ => unreachable!("not a download action"),
         }
-        Ok(None)
+        Ok(())
     }
 
     /// Moves downloads into `chosen` at the next start. Returns the notice to show.
@@ -292,11 +292,11 @@ impl OndApp {
         match action {
             OfflineAction::Keep(what, on) => self.keep_offline(what, on),
             OfflineAction::Move => self.choose_offline_folder(),
-            other => match self.downloads.apply(other, &self.prefs) {
-                Ok(Some(notice)) => self.show_notice(notice),
-                Ok(None) => {}
-                Err(e) => self.show_error(e),
-            },
+            other => {
+                if let Err(e) = self.downloads.apply(other, &self.prefs) {
+                    self.show_error(e);
+                }
+            }
         }
     }
 

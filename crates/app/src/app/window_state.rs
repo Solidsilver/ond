@@ -205,12 +205,14 @@ impl OndApp {
         self.ui.window.settling = (!plan.maximized).then(|| Settle::new(plan.size));
     }
 
-    /// The height our bar gives the traffic lights to centre in; `None` hides them.
-    pub(super) fn title_bar_h(&self) -> Option<f32> {
-        match self.prefs_now().mode {
-            WindowMode::Full => Some(toolbar::TOOLBAR_H),
-            WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
-            WindowMode::Mini => None,
-        }
+}
+
+/// The height of the bar along the top in `mode`, which the traffic lights
+/// centre in and our own window buttons sit in; `None`: no bar (Mini).
+pub(super) fn title_bar_h(mode: WindowMode) -> Option<f32> {
+    match mode {
+        WindowMode::Full => Some(toolbar::TOOLBAR_H),
+        WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
+        WindowMode::Mini => None,
     }
 }

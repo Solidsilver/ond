@@ -75,7 +75,7 @@ pub use prefs_view::PrefsAction;
 use prefs_view::PrefsView;
 pub use session::Session;
 pub use window_state::WindowAction;
-use window_state::WindowState;
+use window_state::{WindowState, title_bar_h};
 use session::LoginForm;
 pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
 
@@ -855,11 +855,7 @@ impl OndApp {
                 self.ui.toasts.ui(&ctx, ctx.content_rect());
             }
             // Window buttons and resize edges where the system draws none (Linux).
-            crate::csd::overlay(&ctx, match self.ui.prefs.mode {
-                WindowMode::Full => Some(toolbar::TOOLBAR_H),
-                WindowMode::Player => Some(now_playing_view::PLAYER_BAR_H),
-                WindowMode::Mini => None,
-            });
+            crate::csd::overlay(&ctx, title_bar_h(self.ui.prefs.mode));
         }
         // What the views, keys and menus asked for this frame. Applying an
         // action never queues another, so one pass takes them all.
@@ -1158,7 +1154,7 @@ impl eframe::App for OndApp {
             _ if self.player.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
             _ => {}
         }
-        crate::chrome::sync(ctx, crate::chrome::Bar { height: self.title_bar_h() });
+        crate::chrome::sync(ctx, crate::chrome::Bar { height: title_bar_h(self.ui.prefs.mode) });
         self.track_window(ctx);
     }
 

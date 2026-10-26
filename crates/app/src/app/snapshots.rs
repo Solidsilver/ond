@@ -1558,7 +1558,7 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], scenes: fn(&mut Harness<
                         } else {
                             app.main_ui(ui);
                         }
-                        traffic_lights(ui.ctx(), app.title_bar_h());
+                        traffic_lights(ui.ctx(), title_bar_h(app.prefs_now().mode));
                     }
                 },
                 None,
