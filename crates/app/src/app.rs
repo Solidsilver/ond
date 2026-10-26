@@ -502,6 +502,7 @@ pub struct UiState {
     pub spectrogram: crate::visuals::spectrogram::Spectrogram,
     /// The visualizer, while it's open (experimental).
     pub visualizer: Option<visualizer_view::VisualizerView>,
+    /// What views work out from the library, kept between frames.
     pub memos: view_ctx::Memos,
 }
 

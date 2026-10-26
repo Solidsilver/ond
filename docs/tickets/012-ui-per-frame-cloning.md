@@ -1,7 +1,7 @@
 # 012 · UI perf: per-frame cloning in views (one root cause in ViewCtx)
 
 - Area: `crates/app/src/app/*`, `art.rs`, `view_ctx.rs` · Kind: perf · Priority: P1
-- Status: open · Claimed by: —
+- Status: done (branch fix/ui) · Claimed by: fix/ui
 - Source: UI review (C1–C8, C10–C15; A3). Line numbers at commit 669bb00.
 
 ## Context
@@ -30,3 +30,39 @@ Repaint *scheduling* is correct and tested (idle = 0 frames; `perf.rs:228-243`).
 ## Acceptance
 
 `cargo test -p ond-player --release perf -- --ignored` shows the 500-item queue and album-page scenes with p95 within ~1.5× of mean; no `Track`/`Album`/`Lyrics` clones in draw code (grep).
+
+## Resolution
+
+Views copy the `&'a` references out of `ViewCtx` (`let data = self.data;`) and draw from the library, player, lyrics and analysis in place. Where an `OndApp` method needed `&mut self` while holding a borrow, the drawing moved into a `ViewCtx` method (`lcd_display`, `player_main`, `sidebar_playlists`). Derived text is kept between frames in `UiState::memos` (`view_ctx::Memos`, using `crate::memo::Memo`).
+
+1. Queue: rows borrow their `Item`; History walks the queue in place; the "at 10:56 PM" label is formatted only on hover; `Queue::groups()` is now a borrowing iterator (`Group<'a>` holds `&Source`, so no clone per group). `start_offsets` is still one `Vec<f64>` per frame: the queue has no version counter to cache by, and the cost is small.
+2. Album page: album, tracks and analyses are borrowed. `AlbumFacts` (summary, shared format, credits, footer, `Source`) is memoized on (album id hash, `data.version`, `analysis.version`, track list address and length). Fetching an album doesn't bump `tracks_version`, so the key uses the list's identity, and the memo holds that list so its address can't be reused while cached. `runner.pending` still runs every frame: it changes on the runner thread, with no version to key on.
+3. Grid: tiles borrow the album, find the download pin without building a `Pin`, and build the a11y label lazily. `Art` numbers cover ids (`Key { cover: u32, size }`), so `paint`/`texture` build no `String`, and `look` touches its LRU by `&str`.
+4. Now playing: the toolbar display (`lcd_display`), the Player (`player_main`/`player_block`), Mini, the Info tab and the visualizer borrow the playing item and album.
+5. Lyrics: the pane borrows the lyrics. Rows are memoized on (track id hash, lines address, count, synced), and line labels are built lazily. `lyric_galley` still copies each line's text into its `LayoutJob`, because egui owns that text.
+6. Sidebar: the playlist list is drawn from `&data.playlists` and builds its `Route` only on click. The active place is an index, `owns` is a free function, `ServerState::label` returns `&str`, and tooltips are built only when needed. `server_state()` still builds the host string each frame.
+7. Info tab: `InfoFacts` (credits, track place, year, file facts, measurements) is memoized on (track id hash, `data.version`, `analysis.version`). `links_row` takes `(&str, FnOnce() -> Route)` and builds the route only on click. The Playback row is still per frame, because the signal path changes without a version.
+8. Songs rows: the album name is borrowed, the a11y label is built lazily, and the row's `Source` is made inside the context menu. The duration and format strings stay, one each per visible row.
+9. `Route` and `FilterKind` derive `Hash`; the grid's `id_salt` hashes the route.
+10. Palette: results are read in place (no `Results` clone, no `Vec<Hit>` per group), covers and titles are borrowed.
+11. `Feel::wave` is an `Arc<Vec<f32>>`, written in place while unshared (`Feel::copy_from` replaces `clone_from`), so `listen()`'s `Frame` clone no longer copies the waveform.
+12. `csd::layout()` returns a `&'static Layout` from `OnceLock`s; `XDG_CURRENT_DESKTOP` is read once.
+13. Shortcut sheet: rows per group and the 2/3-column splits are computed once (`OnceLock`).
+14. Partly done: queue rows and grid tiles take `&Tokens` from their list. Not done: resolving tokens once in `full_ui`. `full_ui` swaps in the page tint around the page mid-frame, so one `Tokens` per frame would be wrong, and passing `&Tokens` through every view changes every signature, which fits better with 016/017.
+15. `Art::poll` uploads at most 8 textures per frame and requests a repaint for the rest. `art_tint` (`app.rs`) borrows the cover ids; `cover_tints` is now a closure over `art` and `tint_cache`, and `page_cover` is test-only.
+16. GPU: uniforms fill a fixed array and are written from a stack byte array; lights go through a reused staging `Vec`.
+
+Also: the playlist page and its mosaic borrow their tracks and covers.
+
+Perf (`cargo test -p ond-player --release perf -- --ignored`, Apple Silicon; mean / p95 in ms; "before" is a559478, run twice):
+
+| Scene | Before | After |
+|---|---|---|
+| recent + 500-item queue | 0.30 / 0.32, 0.31 / 0.37 | 0.23 / 0.26 |
+| album page | 0.31 / 0.32, 0.32 / 0.33 | 0.24 / 0.25 |
+| albums grid | 0.31 / 0.32, 0.32 / 0.33 | 0.24 / 0.28 |
+| songs, mid-scroll | 0.32 / 0.33, 0.32 / 0.34 | 0.24 / 0.25 |
+| palette open | 0.33 / 0.34, 0.34 / 0.35 | 0.27 / 0.30 |
+| favorites, 2000 songs | 0.89 / 0.95, 0.88 / 0.92 | 0.79 / 0.82 |
+
+Every scene draws the 500-item queue column, so item 1 shows up in all of them. p95 is within 1.2× of the mean in each scene.

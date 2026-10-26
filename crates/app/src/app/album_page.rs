@@ -82,7 +82,7 @@ pub(super) struct AlbumFacts {
     source: Source,
     /// The tracks the key points at, held so that while this is cached no
     /// other list can take their address.
-    _tracks: crate::tracks::TrackSlice,
+    _tracks: Option<crate::tracks::TrackSlice>,
 }
 
 /// The [`AlbumFacts`] key: the album id's hash, the album and analysis
@@ -91,7 +91,8 @@ pub(super) struct AlbumFacts {
 pub(super) type AlbumKey = (u64, u64, u64, usize, usize);
 
 impl AlbumFacts {
-    fn new(album: &library::Album, tracks: &crate::tracks::TrackSlice, analysis: &super::Analysis) -> Self {
+    fn new(album: &library::Album, slice: Option<&crate::tracks::TrackSlice>, analysis: &super::Analysis) -> Self {
+        let tracks: &[Track] = slice.map_or(&[], |s| s);
         let found: Vec<&TrackAnalysis> = tracks.iter().filter_map(|t| analysis.of(t)).collect();
         let secs = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>();
         let mut footer = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
@@ -107,7 +108,7 @@ impl AlbumFacts {
             footer,
             credits: credits(tracks),
             source: Source::Album { id: album.id.clone(), name: album.name.clone() },
-            _tracks: tracks.clone(),
+            _tracks: slice.cloned(),
         }
     }
 }
@@ -173,9 +174,8 @@ impl ViewCtx<'_> {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;
         };
-        let no_tracks = crate::tracks::TrackSlice::default();
-        let slice = data.tracks.album(id).unwrap_or(&no_tracks);
-        let tracks: &[Track] = slice;
+        let slice = data.tracks.album(id);
+        let tracks: &[Track] = slice.map_or(&[], |s| s);
         if self.download_key(ui) {
             let kept = self.downloads.snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
             self.actions.push(Action::KeepOffline(Keep::Album(id.to_owned()), !kept));
