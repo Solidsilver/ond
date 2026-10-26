@@ -33,7 +33,7 @@ pub struct Job {
 
 /// The stamp a track's stored analysis must carry to still be current.
 pub fn stamp_of(t: &Track) -> String {
-    analysis::stamp(t.size, t.suffix.as_deref(), t.bit_depth, t.sample_rate)
+    analysis::stamp(t.size, t.suffix.as_deref(), t.bit_depth, t.sample_rate, t.duration_secs)
 }
 
 pub fn job_for(t: &Track, url: String, local: Option<std::path::PathBuf>) -> Job {

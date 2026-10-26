@@ -2,10 +2,10 @@
 
 use crate::{Analyzer, TrackAnalysis};
 use crate::peaks::{PeakMeter, Peaks};
-use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use std::io::{Read, Seek, SeekFrom};
@@ -73,19 +73,7 @@ fn decode(source: Box<dyn MediaSource>, suffix: Option<&str>, cancel: &dyn Fn() 
     let mut reader = symphonia::default::get_probe()
         .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
         .map_err(|e| if cancel() { AnalyzeError::Cancelled } else { fail("probe", &e) })?;
-    let track = reader.default_track(TrackType::Audio).ok_or_else(|| AnalyzeError::Failed("no audio track".into()))?;
-    let track_id = track.id;
-    let params = track
-        .codec_params
-        .as_ref()
-        .and_then(|p| p.audio())
-        .ok_or_else(|| AnalyzeError::Failed("no audio codec parameters".into()))?
-        .clone();
-    // Lossy decoders don't report a bit depth; lossless ones do.
-    let bits = params.bits_per_sample;
-    let mut opts = AudioDecoderOptions::default();
-    opts.gapless = true;
-    let mut decoder = symphonia::default::get_codecs().make_audio_decoder(&params, &opts).map_err(|e| fail("decoder", &e))?;
+    let (mut track_id, mut bits, mut decoder) = open_track(reader.as_ref())?;
 
     let mut scratch: Vec<f32> = Vec::new();
     loop {
@@ -97,23 +85,65 @@ fn decode(source: Box<dyn MediaSource>, suffix: Option<&str>, cancel: &dyn Fn() 
             Ok(None) => break,
             Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(_) if cancel() => return Err(AnalyzeError::Cancelled),
+            // The track list changed (a chained Ogg stream, say): start again
+            // with whatever is the audio track now.
+            Err(SymError::ResetRequired) => {
+                (track_id, bits, decoder) = open_track(reader.as_ref())?;
+                continue;
+            }
             Err(e) => return Err(fail("read", &e)),
         };
         if packet.track_id != track_id {
             continue;
         }
-        let buf = match decoder.decode(&packet) {
-            Ok(b) => b,
-            Err(SymError::DecodeError(_)) => continue,
-            Err(e) => return Err(fail("decode", &e)),
-        };
-        let spec = buf.spec();
-        let channels = spec.channels().count().max(1);
-        scratch.resize(buf.samples_interleaved(), 0.0);
-        buf.copy_to_slice_interleaved(&mut scratch);
-        sink(spec.rate(), channels, bits, &scratch);
+        let mut retried = false;
+        loop {
+            let again = match decoder.decode(&packet) {
+                Ok(buf) => {
+                    let spec = buf.spec();
+                    let channels = spec.channels().count().max(1);
+                    scratch.resize(buf.samples_interleaved(), 0.0);
+                    buf.copy_to_slice_interleaved(&mut scratch);
+                    sink(spec.rate(), channels, bits, &scratch);
+                    false
+                }
+                Err(SymError::DecodeError(_)) => false,
+                // The stream's format changed: a fresh decoder, then this
+                // packet again (once).
+                Err(SymError::ResetRequired) if !retried => true,
+                Err(e) => return Err(fail("decode", &e)),
+            };
+            if !again {
+                break;
+            }
+            retried = true;
+            (track_id, bits, decoder) = open_track(reader.as_ref())?;
+            if packet.track_id != track_id {
+                break;
+            }
+        }
     }
     Ok(())
+}
+
+/// A track to decode: its id, its (lossless) bit depth and a decoder for it.
+type Opened = (u32, Option<u32>, Box<dyn AudioDecoder>);
+
+/// The default audio track, opened.
+fn open_track(reader: &dyn FormatReader) -> Result<Opened, AnalyzeError> {
+    let track = reader.default_track(TrackType::Audio).ok_or_else(|| AnalyzeError::Failed("no audio track".into()))?;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or_else(|| AnalyzeError::Failed("no audio codec parameters".into()))?;
+    let mut opts = AudioDecoderOptions::default();
+    opts.gapless = true;
+    let decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &opts)
+        .map_err(|e| AnalyzeError::Failed(format!("decoder: {e}")))?;
+    // Lossy decoders don't report a bit depth; lossless ones do.
+    Ok((track.id, params.bits_per_sample, decoder))
 }
 
 /// [`analyze`] for any seekable reader (a file, a stream cache's reader);
