@@ -448,6 +448,10 @@ impl Shooter {
     /// Renders the frame as it is, without letting anything settle first
     /// (for the middle of a fade).
     fn shoot_now(&self, h: &mut Harness<'_, Option<OndApp>>, scene: &str) {
+        // SNAPSHOTS=settings renders only the scenes with "settings" in their name.
+        if std::env::var("SNAPSHOTS").is_ok_and(|only| !scene.contains(&only)) {
+            return;
+        }
         match h.render() {
             Ok(img) => {
                 let path = self.out.join(format!("{scene}-{}.png", self.theme));
