@@ -1,9 +1,9 @@
 //! One file being fetched: shared state plus the async task that fills it.
 
+use crate::disk::PartFile;
 use crate::fetch::{self, FetchError, redact};
 use crate::ranges::RangeSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -98,9 +98,14 @@ impl Download {
 /// at offset `n` cuts it to `n`, and a response with no length that runs to
 /// its end sets it there. Either way the file is only done once every byte
 /// below the length is on disk.
+///
+/// The file is written on the blocking pool (see [`PartFile`]), and a chunk's
+/// range is only published to readers once its write has returned.
 pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> Result<u64, String> {
     let io = |e: std::io::Error| format!("cache file: {e}");
-    let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&dl.part_path).map_err(io)?;
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    let file = PartFile::open(options, dl.part_path.clone()).await.map_err(io)?;
     let mut ranged: Option<bool> = None;
     let mut sized = false;
     let mut start = 0u64;
@@ -126,18 +131,20 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                 // file) shrinks to it, so the tail isn't asked for again, and
                 // whatever is missing is earlier. Each shrink is strictly
                 // smaller, so this can't loop.
-                let mut st = dl.lock();
-                if start > 0 && st.len.is_none_or(|l| start < l) {
-                    st.len = Some(start);
-                    let gap = st.ranges.first_gap(0, start).map_or(0, |(gap, _)| gap);
-                    drop(st);
+                let shrunk = {
+                    let mut st = dl.lock();
+                    (start > 0 && st.len.is_none_or(|l| start < l)).then(|| {
+                        st.len = Some(start);
+                        st.ranges.first_gap(0, start).map_or(0, |(gap, _)| gap)
+                    })
+                };
+                if let Some(gap) = shrunk {
                     dl.cond.notify_all();
-                    file.set_len(start).map_err(io)?;
+                    file.set_len(start).await.map_err(io)?;
                     sized = true;
                     start = gap;
                     continue;
                 }
-                drop(st);
                 failures += 1;
                 if failures > MAX_FAILURES {
                     return Err(FetchError::RangeNotSatisfiable.to_string());
@@ -180,10 +187,9 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
         dl.cond.notify_all();
         if !sized && let Some(len) = len {
             // Sparse preallocation so later ranged writes land at their offsets.
-            file.set_len(len).map_err(io)?;
+            file.set_len(len).await.map_err(io)?;
             sized = true;
         }
-        file.seek(SeekFrom::Start(pos)).map_err(io)?;
 
         // Stream this response until it ends, runs into bytes already on disk,
         // or the next request should start somewhere else.
@@ -205,8 +211,8 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
             };
             match chunk {
                 Ok(Some(bytes)) => {
-                    file.write_all(&bytes).map_err(io)?;
                     let end = pos + bytes.len() as u64;
+                    file.write_at(pos, bytes).await.map_err(io)?;
                     let mut st = dl.lock();
                     st.ranges.insert(pos, end);
                     pos = end;

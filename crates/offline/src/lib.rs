@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
+use streamcache::disk::{PartFile, blocking};
 use streamcache::fetch::{self, FetchError};
 use tokio::sync::Notify;
 
@@ -596,7 +597,10 @@ impl Inner {
                 blocked_by_limit = true;
                 continue;
             }
-            let from_cache = st.cache.as_ref().and_then(|c| c(&r)).filter(|p| p.is_file());
+            // Not checked on disk here, under the lock: a cached copy that's
+            // gone fails to promote and the job downloads instead (or, with
+            // no server, fails and backs off like any download).
+            let from_cache = st.cache.as_ref().and_then(|c| c(&r));
             let url = st.url.as_ref().map(|u| u(id));
             if from_cache.is_none() && url.is_none() {
                 continue;
@@ -791,9 +795,10 @@ async fn run(inner: &Inner, job: &Job) -> Result<u64, JobError> {
     download(inner, job, url).await
 }
 
-/// Runs disk work that may block (copies, fsync, renames) on tokio's blocking pool.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
-    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| Err(io::Error::other(e)))
+/// Deletes `path` (if it's there) on the blocking pool.
+async fn remove_file(path: &Path) {
+    let path = path.to_owned();
+    let _ = blocking(move || std::fs::remove_file(path)).await;
 }
 
 /// Takes a complete stream-cache file: a hard link where possible (same
@@ -814,8 +819,10 @@ fn promote(src: &Path, size: Option<u64>, part: &Path, dest: &Path) -> io::Resul
     Ok(len)
 }
 
+/// Every touch of the disk here runs on the blocking pool (see [`blocking`]).
 async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> {
-    let mut have = std::fs::metadata(&job.part).map_or(0, |m| m.len());
+    let part = job.part.clone();
+    let mut have = blocking(move || std::fs::metadata(part)).await.map_or(0, |m| m.len());
     if job.r.size.is_some_and(|s| have > s) {
         have = 0;
     }
@@ -823,13 +830,13 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
         Ok(b) => b,
         Err(FetchError::RangeNotSatisfiable) if have > 0 && job.r.size == Some(have) => return finish(job, have).await,
         Err(FetchError::RangeNotSatisfiable) => {
-            let _ = std::fs::remove_file(&job.part);
+            remove_file(&job.part).await;
             return Err(JobError::Failed("server rejected the resume; starting over".into()));
         }
         Err(FetchError::BadRange(e)) => {
             // The server answered the resume from somewhere else: the partial
             // file can't be trusted to line up. Start over.
-            let _ = std::fs::remove_file(&job.part);
+            remove_file(&job.part).await;
             return Err(JobError::Failed(e));
         }
         Err(e) => return Err(JobError::Failed(e.to_string())),
@@ -839,7 +846,9 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
         have = 0;
     }
     let total = body.total;
-    let mut file = std::fs::OpenOptions::new().create(true).write(true).append(have > 0).truncate(have == 0).open(&job.part)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).append(have > 0).truncate(have == 0);
+    let file = PartFile::open(options, job.part.clone()).await?;
     let mut last_note = Instant::now();
     inner.progress(&job.r.id, have, total, true);
     loop {
@@ -849,20 +858,18 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
         let chunk = match body.chunk().await {
             Ok(Some(c)) => c,
             Ok(None) => break,
-            Err(e) => {
-                let _ = file.flush();
-                return Err(JobError::Failed(e.to_string()));
-            }
+            Err(e) => return Err(JobError::Failed(e.to_string())),
         };
-        file.write_all(&chunk)?;
-        have += chunk.len() as u64;
+        let n = chunk.len() as u64;
+        file.write(chunk).await?;
+        have += n;
         let note = last_note.elapsed() >= PROGRESS_EVERY;
         if note {
             last_note = Instant::now();
         }
         inner.progress(&job.r.id, have, total, note);
     }
-    blocking(move || file.sync_all()).await?;
+    file.sync_all().await?;
     if let Some(t) = total
         && have != t
     {
@@ -876,7 +883,7 @@ async fn finish(job: &Job, have: u64) -> Result<u64, JobError> {
     if let Some(expected) = job.r.size
         && have != expected
     {
-        let _ = std::fs::remove_file(&job.part);
+        remove_file(&job.part).await;
         return Err(JobError::Failed(format!("size mismatch: got {have} bytes, server said {expected}")));
     }
     let (part, dest) = (job.part.clone(), job.dest.clone());

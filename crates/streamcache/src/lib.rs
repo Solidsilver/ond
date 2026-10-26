@@ -18,6 +18,7 @@
 //! with [`file_name`], so pinning a track that's complete here can hard-link
 //! it instead of downloading it again.
 
+pub mod disk;
 mod download;
 pub mod fetch;
 mod ranges;
