@@ -2,7 +2,7 @@
 //! track plays from (a download, else the server), what the player reports
 //! back, the engine's events, remote commands and the volume.
 
-use super::{Data, OndApp};
+use super::{Action, Data, OndApp};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
@@ -74,6 +74,8 @@ pub enum OutputAction {
     Volume(f32),
     /// Bit-perfect on the device in use, or back to normal.
     ToggleBitPerfect,
+    /// Play through this device (by UID), e.g. one that came back.
+    SelectDevice(String),
 }
 
 impl OndApp {
@@ -91,6 +93,7 @@ impl OndApp {
                 let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
                 self.output.set_mode_in_use(mode, &self.engine);
             }
+            OutputAction::SelectDevice(uid) => self.output.choose(Some(uid), &self.engine),
         }
     }
 
@@ -108,6 +111,23 @@ impl OndApp {
         if let Some(mode) = self.output.handle(&ev) {
             // The engine picked the mode for a new device (remembered, or its default).
             self.bit_perfect = mode == PlaybackMode::BitPerfect;
+        }
+        match &ev {
+            audio::Event::DeviceLost { name } => {
+                self.ui.toasts.remove(&back_text(name));
+                self.show_notice(format!("{name} disconnected. Playing through the system output."));
+            }
+            // Offered, not switched to.
+            audio::Event::DeviceReturned { uid, name } => {
+                self.ui.toasts.offer(back_text(name), "Switch back", Action::Output(OutputAction::SelectDevice(uid.clone())));
+            }
+            // Playing through it again, however that came about: the offer's done.
+            audio::Event::Devices { devices, current: Some(uid) } => {
+                if let Some(d) = devices.iter().find(|d| &d.uid == uid) {
+                    self.ui.toasts.remove(&back_text(&d.name));
+                }
+            }
+            _ => {}
         }
         self.with_player(|p, cx| p.handle_engine(&ev, cx));
     }
@@ -190,4 +210,9 @@ impl OndApp {
         self.engine.send(Command::SetVolume(volume));
         self.prefs.edit(|s| s.volume = volume);
     }
+}
+
+/// The offer to go back to a device that came back.
+fn back_text(name: &str) -> String {
+    format!("{name} is back")
 }

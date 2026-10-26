@@ -1303,6 +1303,11 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).show_notice("Added 6 songs to Late night, low volume");
     s.shoot(h, "toasts");
 
+    // A device that came back: offered, with a button, until clicked away.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).handle_engine(audio::Event::DeviceReturned { uid: "hp".into(), name: "Technics EAH-AZ100".into() });
+    s.shoot(h, "toast-device-back");
+
     reset(h, vec2(380.0, 880.0), Route::Recent);
     {
         let app = app_mut(h);
