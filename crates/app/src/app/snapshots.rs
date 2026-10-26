@@ -2206,6 +2206,16 @@ fn seek_line_click_seeks_there() {
     let to = app_mut(&mut h).player.pending_seek.expect("the click seeked");
     assert!((to - 383.0 / 2.0).abs() < 2.0, "seeked to the middle of 383 s, got {to}");
 
+    // A screen reader hears the position and the length.
+    {
+        use egui_kittest::kittest::NodeT;
+        let node = h.get_by_label("Position").accesskit_node();
+        assert_eq!(node.min_numeric_value(), Some(0.0));
+        assert_eq!(node.max_numeric_value(), Some(383.0));
+        assert!(node.numeric_value().is_some_and(|v| (0.0..=383.0).contains(&v)), "a position: {:?}", node.numeric_value());
+        assert!(node.value().is_some_and(|v| v.ends_with(" of 6:23")), "spoken as a time: {:?}", node.value());
+    }
+
     // A drag in another window mode that never ended here.
     app_mut(&mut h).ui.seek_preview = Some(10.0);
     h.run_steps(2);
