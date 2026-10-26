@@ -336,9 +336,26 @@ pub struct QueueUi {
     pub selected: Option<u64>,
 }
 
+/// The app's tokio runtime, kept for the app's lifetime (the bridge and the
+/// background services hold handles to it).
+///
+/// Dropping a `Runtime` waits for every `spawn_blocking` call still running,
+/// however long. Quitting gives them [`SHUTDOWN_WAIT`] and then goes: the work
+/// there (renames, copies, keychain calls) is written to survive being cut off.
+struct AppRuntime(Option<tokio::runtime::Runtime>);
+
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
+impl Drop for AppRuntime {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_timeout(SHUTDOWN_WAIT);
+        }
+    }
+}
+
 pub struct OndApp {
-    // Kept alive for the app's lifetime; the bridge holds a handle to it.
-    _rt: tokio::runtime::Runtime,
+    _rt: AppRuntime,
     /// The window's egui context (for theme changes and window commands).
     ctx: egui::Context,
     bridge: Bridge,
@@ -866,7 +883,7 @@ impl OndApp {
         };
 
         Ok(Self {
-            _rt: rt,
+            _rt: AppRuntime(Some(rt)),
             ctx: ctx.clone(),
             bridge,
             inbox,
@@ -2583,6 +2600,23 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), time: Some(time), ..Default::default() };
         let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn quitting_waits_only_a_moment_for_blocking_work() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).build().unwrap();
+        let (started_tx, started) = channel();
+        let (release, stuck) = channel::<()>();
+        // A disk or keychain call that doesn't come back.
+        rt.spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = stuck.recv_timeout(Duration::from_secs(60));
+        });
+        started.recv().unwrap();
+        let t = std::time::Instant::now();
+        drop(AppRuntime(Some(rt)));
+        assert!(t.elapsed() < Duration::from_secs(30), "quitting waited {:?}", t.elapsed());
+        drop(release);
     }
 
     #[test]
