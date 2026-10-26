@@ -180,20 +180,39 @@ fn flush(shared: &Shared) {
     write(&shared.path, &snapshot);
 }
 
-/// A temporary file renamed over the old one, so a reader never sees half of it.
 fn write(path: &Path, settings: &Settings) {
     let result = (|| -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(settings)?)?;
-        std::fs::rename(&tmp, path)?;
+        replace_file(path, &path.with_extension("json.tmp"), &serde_json::to_vec_pretty(settings)?)?;
         Ok(())
     })();
     if let Err(e) = result {
         tracing::warn!("saving settings: {e}");
     }
+}
+
+/// Replaces `path` with `bytes` through `tmp`, renamed over it, so a reader
+/// never sees half a file. The bytes reach the disk before the rename: without
+/// that a power cut can leave an empty file behind the new name (and empty
+/// settings would sign the user out). It waits for the disk, so call it off the
+/// UI thread.
+pub fn replace_file(path: &Path, tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(tmp, path)?;
+    // The rename itself lasts once the directory is on disk too. Best effort:
+    // the file is whole either way.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    Ok(())
 }
 
 /// `settings.json` → `settings.json.bad-<unix seconds>`.
@@ -270,6 +289,20 @@ mod tests {
         prefs.flush();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#""uid-umc22": "bit-perfect""#), "{text}");
+    }
+
+    #[test]
+    fn replacing_a_file_leaves_the_new_contents_and_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let tmp = dir.path().join("settings.json.tmp");
+        replace_file(&path, &tmp, b"first").unwrap();
+        replace_file(&path, &tmp, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert!(!tmp.exists());
+        // A directory that isn't there is an error, not a panic.
+        let gone = dir.path().join("missing").join("settings.json");
+        assert!(replace_file(&gone, &gone.with_extension("json.tmp"), b"x").is_err());
     }
 
     #[test]

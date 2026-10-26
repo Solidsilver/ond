@@ -162,11 +162,10 @@ impl RetryQueue {
     fn save(&self) {
         let Some(path) = &self.path else { return };
         let items: Vec<&PendingPlay> = self.items.iter().collect();
-        let result = serde_json::to_vec(&items).map_err(std::io::Error::other).and_then(|bytes| {
-            let tmp = path.with_extension("json.part");
-            std::fs::write(&tmp, bytes)?;
-            std::fs::rename(&tmp, path)
-        });
+        // On the now-playing worker, so waiting for the disk holds nothing up.
+        let result = serde_json::to_vec(&items)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| crate::prefs::replace_file(path, &path.with_extension("json.part"), &bytes));
         if let Err(e) = result {
             tracing::warn!("saving pending scrobbles: {e}");
         }
