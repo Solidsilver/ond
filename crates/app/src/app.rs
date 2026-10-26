@@ -866,8 +866,12 @@ impl eframe::App for OndApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
         if self.login.is_some() {
-            // Logging in needs the full window.
-            self.set_mode(Some(WindowMode::Full));
+            // Logging in needs the full window. (Asked only when it isn't:
+            // the switch would change nothing, but checking takes a copy of
+            // the preferences, which isn't worth doing every frame.)
+            if self.prefs.get(|s| s.window.mode) != WindowMode::Full {
+                self.set_mode(Some(WindowMode::Full));
+            }
             self.login_ui(ui);
             crate::csd::overlay(ui.ctx(), Some(toolbar::TOOLBAR_H));
         } else {

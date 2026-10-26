@@ -16,7 +16,9 @@ use std::sync::Arc;
 /// Everything known about the library, as last loaded.
 #[derive(Default)]
 pub struct Data {
-    pub albums: Vec<Album>,
+    /// Shared with a search index being built from it, so handing it over
+    /// copies nothing.
+    pub albums: Arc<Vec<Album>>,
     pub by_id: HashMap<String, usize>,
     /// Bumped whenever `albums` changes, so derived lists know to rebuild.
     pub version: u64,
@@ -31,7 +33,7 @@ pub struct Data {
     /// Album ids crediting a person, from stored tracks.
     pub credited: HashMap<String, Vec<String>>,
     /// The server's artists, as separate entities ("A, B & C" split).
-    pub artists: Vec<library::Artist>,
+    pub artists: Arc<Vec<library::Artist>>,
     /// Bumped whenever the stored tracks (`tracks.all`) change.
     pub tracks_version: u64,
 }
@@ -43,7 +45,7 @@ impl Data {
 
     pub(super) fn set_albums(&mut self, albums: Vec<Album>) {
         self.by_id = albums.iter().enumerate().map(|(i, a)| (a.id.clone(), i)).collect();
-        self.albums = albums;
+        self.albums = Arc::new(albums);
         self.version += 1;
     }
 
@@ -78,11 +80,13 @@ impl Data {
     }
 
     pub(super) fn update_album(&mut self, album: Album) {
+        // Copies the list only if a search index is still being built from it.
+        let albums = Arc::make_mut(&mut self.albums);
         match self.by_id.get(&album.id) {
-            Some(&i) => self.albums[i] = album,
+            Some(&i) => albums[i] = album,
             None => {
-                self.by_id.insert(album.id.clone(), self.albums.len());
-                self.albums.push(album);
+                self.by_id.insert(album.id.clone(), albums.len());
+                albums.push(album);
             }
         }
         self.version += 1;
@@ -152,7 +156,7 @@ impl OndApp {
                 self.search.stale = true;
             }
             Msg::Artists(a) => {
-                self.data.artists = a;
+                self.data.artists = Arc::new(a);
                 self.search.stale = true;
             }
             Msg::AllTracks(set) => {
@@ -261,7 +265,7 @@ impl OndApp {
     pub(super) fn after_messages(&mut self) {
         if std::mem::take(&mut self.search.stale) {
             self.search.generation += 1;
-            self.bridge.build_search(self.search.generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
+            self.bridge.build_search(self.search.generation, Arc::clone(&self.data.albums), Arc::clone(&self.data.artists), Arc::clone(&self.data.tracks.all));
         }
     }
 
@@ -349,5 +353,49 @@ impl OndApp {
                 self.bridge.open_playlist(self.session.client.clone(), id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album(id: &str, name: &str) -> Album {
+        Album {
+            id: id.into(),
+            name: name.into(),
+            sort: None,
+            artist: None,
+            artist_ref: None,
+            year: None,
+            genre: None,
+            song_count: 0,
+            duration_secs: 0,
+            cover_art: None,
+            created: None,
+            labels: Vec::new(),
+            genres: Vec::new(),
+            artists: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_album_update_leaves_a_list_handed_out_as_it_was() {
+        let mut data = Data::default();
+        data.set_albums(vec![album("a", "Old"), album("b", "Two")]);
+        // A search index being built holds the list meanwhile.
+        let building = Arc::clone(&data.albums);
+        let version = data.version;
+        data.update_album(album("a", "New"));
+        data.update_album(album("c", "Three"));
+        assert_eq!(building.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Old", "Two"]);
+        assert_eq!(data.album("a").map(|a| a.name.as_str()), Some("New"));
+        assert_eq!(data.album("c").map(|a| a.name.as_str()), Some("Three"));
+        assert_eq!(data.version, version + 2);
+        // Nothing holds it now: an update changes it in place.
+        drop(building);
+        let at = Arc::as_ptr(&data.albums);
+        data.update_album(album("b", "Second"));
+        assert_eq!(Arc::as_ptr(&data.albums), at);
     }
 }

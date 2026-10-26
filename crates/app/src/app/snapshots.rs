@@ -1940,7 +1940,7 @@ fn a_long_album_name_doesnt_push_the_player_down() {
         let app = app_mut(&mut h);
         let id = app.player.queue.current.as_ref().unwrap().track.album_id.clone();
         let i = app.data.by_id[&id];
-        app.data.albums[i].name = "The Complete Recordings at the Village Vanguard, Including Alternate Takes and Rehearsals".into();
+        Arc::make_mut(&mut app.data.albums)[i].name = "The Complete Recordings at the Village Vanguard, Including Alternate Takes and Rehearsals".into();
     }
     h.run_steps(3);
     assert_eq!(h.get_by_label("Details").rect().min.y, before.min.y, "everything below the title stays put");

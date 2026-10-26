@@ -207,7 +207,7 @@ fn perf() {
     // the once-per-batch rebuild of derived data (the search index).
     let (albums, tracks) = {
         let app = app_mut(&mut h);
-        (app.data.albums.clone(), app.data.tracks.all.to_vec())
+        (app.data.albums.to_vec(), app.data.tracks.all.to_vec())
     };
     let mut sync_ui = Vec::new();
     for _ in 0..5 {
