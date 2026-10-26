@@ -4,6 +4,17 @@ From the 2026-10-25 code review (clippy clean; 414 tests passing at commit 669bb
 
 Each ticket has: Problem (with `path:line` references; "Verified" means the lead reviewer re-checked it against source), Fix, Tests to add, Acceptance.
 
+## Status (2026-10-26)
+
+All 21 tickets are done and merged into `dev`; each ticket's Resolution section says what changed. Tests went from 414 to 530; clippy is clean.
+
+Deliberately left, recorded in the Resolutions:
+- Resolve `Tokens` once per frame (012 #14, 016): `full_ui` swaps in the page tint mid-frame, so it means changing every view's signature.
+- Two readers blocked far apart on one unfinished stream-cache download switch between them about every 8 KB (006). Nothing in the app does this today.
+- CoreAudio rate and format switches still block the engine thread for up to 2 s during `open` (004 #5).
+- `Prefs::edit` still clones `Settings` for its no-change check (020); its callers are user actions, not per-frame.
+- Hardware and real-server checks added to `TESTING.md` by tickets 004, 014, 015 and 018.
+
 | # | Title | Area | Kind | Priority |
 |---|---|---|---|---|
 | [001](001-offline-store-data-safety-and-lifecycle.md) | Offline store: pins-file failure deletes downloads; store never shuts down | offline | bug | P0 |
