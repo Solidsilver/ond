@@ -15,7 +15,7 @@
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureOptions, Ui};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -267,12 +267,16 @@ impl<K: Clone + Eq + Hash> Queue<K> {
     }
 }
 
-/// What a load reports: the art (`None`: there's none to be had), or that the
-/// disk cache missed and it needs a download.
+/// What a load reports: the art and its [`Print`] (`None`: there's none to be
+/// had), or that the disk cache missed and it needs a download.
 enum Outcome {
-    Image(Option<ColorImage>),
+    Image(Option<(ColorImage, Print)>),
     Miss,
 }
+
+/// A hash of an image file as the server sent it: the same picture sent for
+/// two covers has the same print.
+type Print = u64;
 
 /// A finished job: its key, its number in the queue and what it found.
 type Loaded = (Key, u64, Outcome);
@@ -323,6 +327,13 @@ pub struct Art {
     downloads: HashMap<Key, (u64, tokio::task::AbortHandle)>,
     /// Art the server doesn't have; not asked for again this session.
     missing: HashSet<Key>,
+    /// Each texture's print, and for artists' photos, the first artist each
+    /// print was seen for (see [`Art::portrait`]).
+    prints: HashMap<Key, Print>,
+    portraits: HashMap<Print, u32>,
+    /// Prints seen for more than one artist: the server's stand-in for an
+    /// artist without a photo.
+    stand_ins: HashSet<Print>,
     tx: Sender<Loaded>,
     rx: Receiver<Loaded>,
     /// Looks by cover id, for the few covers lately asked about.
@@ -359,6 +370,9 @@ impl Art {
             queue: Queue::new(),
             downloads: HashMap::new(),
             missing: HashSet::new(),
+            prints: HashMap::new(),
+            portraits: HashMap::new(),
+            stand_ins: HashSet::new(),
             tx,
             rx,
             looks: HashMap::new(),
@@ -417,7 +431,7 @@ impl Art {
                     image
                 }
             };
-            let Some(image) = image else {
+            let Some((image, print)) = image else {
                 self.missing.insert(key);
                 continue;
             };
@@ -430,8 +444,10 @@ impl Art {
             let tex = self.ctx.load_texture(format!("art:{}:{}", self.names[key.cover as usize], key.size), image, TextureOptions::LINEAR);
             for gone in self.lru.insert(key, weight) {
                 self.textures.remove(&gone);
+                self.prints.remove(&gone);
             }
             self.textures.insert(key, tex);
+            self.prints.insert(key, print);
         }
         while let Ok((cover, parts)) = self.look_rx.try_recv() {
             self.looks_pending.remove(&cover);
@@ -485,13 +501,37 @@ impl Art {
     /// the right size isn't here yet, and meanwhile returns any other size
     /// already loaded so a resize doesn't flash the placeholder.
     pub fn texture(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
+        let key = self.shown(cover, points)?;
+        self.textures.get(&key).cloned()
+    }
+
+    /// An artist's photo, like [`Art::texture`], but `None` for the picture
+    /// the server sends for every artist it has no photo of. That one is
+    /// known once it's come back for a second artist; until then it shows.
+    pub fn portrait(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
+        let key = self.shown(cover, points)?;
+        if let Some(&print) = self.prints.get(&key) {
+            let first = *self.portraits.entry(print).or_insert(key.cover);
+            if first != key.cover {
+                self.stand_ins.insert(print);
+            }
+            if self.stand_ins.contains(&print) {
+                return None;
+            }
+        }
+        self.textures.get(&key).cloned()
+    }
+
+    /// The key of what's loaded for `cover` at `points` wide (asking for it
+    /// when that size isn't), else of the largest size that is.
+    fn shown(&mut self, cover: &str, points: f32) -> Option<Key> {
         let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
-        if let Some(t) = self.textures.get(&key) {
+        if self.textures.contains_key(&key) {
             self.lru.touch(&key);
-            return Some(t.clone());
+            return Some(key);
         }
         self.request(key, false);
-        SIZES.iter().rev().find_map(|&size| self.textures.get(&Key { size, ..key }).cloned())
+        SIZES.iter().rev().map(|&size| Key { size, ..key }).find(|k| self.textures.contains_key(k))
     }
 
     /// Asks for `cover` at `points` wide before it's drawn (just past the
@@ -570,6 +610,9 @@ impl Art {
         }
         self.queue.clear();
         self.textures.clear();
+        self.prints.clear();
+        self.portraits.clear();
+        self.stand_ins.clear();
         self.lru = Lru::new(TEXTURE_BUDGET);
         self.missing.clear();
         self.looks.clear();
@@ -589,10 +632,13 @@ impl Art {
     #[cfg(test)]
     pub fn preload(&mut self, cover: &str, image: ColorImage) {
         self.preloaded.insert(cover.to_owned(), image.clone());
+        let image_pixels = image.pixels.clone();
         let tex = self.ctx.load_texture(format!("art:{cover}"), image, TextureOptions::LINEAR);
+        let print = print(&image_pixels);
         for size in SIZES {
             let key = self.key(cover, size);
             self.textures.insert(key, tex.clone());
+            self.prints.insert(key, print);
         }
     }
 
@@ -640,7 +686,7 @@ async fn load(client: Option<&Client>, dir: &Path, cover: &str, size: u32) -> Op
         Some(b) => b,
         None => fetch_cached(client?, dir, cover, size).await?,
     };
-    decode_off_thread(bytes, size).await
+    decode_off_thread(bytes, size).await.map(|(image, _)| image)
 }
 
 /// The cached file for `cover` at `size`, if there is one.
@@ -652,8 +698,13 @@ async fn read_cached(dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<ColorImage> {
-    tokio::task::spawn_blocking(move || decode(&bytes, size)).await.ok().flatten()
+async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<(ColorImage, Print)> {
+    tokio::task::spawn_blocking(move || {
+        decode(&bytes, size).map(|image| (image, print(&bytes)))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Downloads `cover` at `size` px into the cache (written whole, then renamed
@@ -672,6 +723,13 @@ pub async fn fetch_cached(client: &Client, dir: &Path, cover: &str, size: u32) -
     })
     .await
     .ok()
+}
+
+/// Same bytes, same print (`DefaultHasher::new` has fixed keys).
+fn print(data: impl Hash) -> Print {
+    let mut h = std::hash::DefaultHasher::new();
+    data.hash(&mut h);
+    h.finish()
 }
 
 fn decode(bytes: &[u8], size: u32) -> Option<ColorImage> {
@@ -711,6 +769,23 @@ mod tests {
         assert_eq!(bucket(65.0), 128);
         assert_eq!(bucket(336.0), 512);
         assert_eq!(bucket(4000.0), 512);
+    }
+
+    #[test]
+    fn the_same_photo_for_two_artists_is_the_servers_stand_in() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut art = Art::new(rt.handle().clone(), egui::Context::default(), dir.path().to_owned());
+        let image = |c: u8| ColorImage::new([4, 4], vec![Color32::from_gray(c); 16]);
+        art.preload("ar-1", image(10));
+        art.preload("ar-2", image(20));
+        art.preload("ar-3", image(20));
+        assert!(art.portrait("ar-1", 36.0).is_some());
+        assert!(art.portrait("ar-2", 36.0).is_some(), "not known as the stand-in until it's seen twice");
+        assert!(art.portrait("ar-3", 36.0).is_none());
+        assert!(art.portrait("ar-2", 36.0).is_none());
+        assert!(art.portrait("ar-1", 36.0).is_some());
+        assert!(art.texture("ar-2", 36.0).is_some(), "still there as art");
     }
 
     #[test]

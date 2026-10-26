@@ -34,10 +34,7 @@ impl OndApp {
             Some(cover) => cover_tints(cover).or(self.ui.tint.target()).unwrap_or(base),
             None => base,
         };
-        let page_cover = match self.ui.nav.current() {
-            Route::Album(id) if full => Some(self.data.album(id).and_then(|a| a.cover_art.as_deref())),
-            _ => None,
-        };
+        let page_cover = page_cover(self.ui.nav.current(), full, &self.data, self.search.index.as_ref(), self.ui.prefs.artist_photos);
         let page = match page_cover {
             Some(Some(cover)) if adapt => cover_tints(cover).or(self.ui.page_tint.target()).unwrap_or(playing),
             Some(None) if adapt => base,
@@ -53,15 +50,11 @@ impl OndApp {
         }
     }
 
-    /// The cover the page takes its colors from: `Some` on an album page in
-    /// the full window (`Some(None)` for an album without one), `None` on
-    /// any other page. (`art_tint` works it out in place.)
+    /// The cover the page takes its colors from (see [`page_cover`]).
     #[cfg(test)]
     pub(super) fn page_cover(&self) -> Option<Option<String>> {
-        match self.ui.nav.current() {
-            Route::Album(id) if self.prefs_now().mode == WindowMode::Full => Some(self.data.album(id).and_then(|a| a.cover_art.clone())),
-            _ => None,
-        }
+        let full = self.prefs_now().mode == WindowMode::Full;
+        page_cover(self.ui.nav.current(), full, &self.data, self.search.index.as_ref(), self.ui.prefs.artist_photos).map(|c| c.map(str::to_owned))
     }
 
     /// Waveform seek bar: has the playing track's peaks read once a complete
@@ -130,5 +123,16 @@ impl OndApp {
         if show {
             ctx.request_repaint_after(Duration::from_secs_f64(1.0 - since + 0.02));
         }
+    }
+}
+
+/// The cover a page takes its colors from: `Some` on an album's page, or an
+/// artist's while their photos show, in the full window (`Some(None)` for
+/// one without), `None` on any other page.
+fn page_cover<'a>(route: &Route, full: bool, data: &'a super::Data, index: Option<&'a crate::search::SearchIndex>, photos: bool) -> Option<Option<&'a str>> {
+    match route {
+        Route::Album(id) if full => Some(data.album(id).and_then(|a| a.cover_art.as_deref())),
+        Route::Artist { name, id } if full && photos => Some(index.and_then(|i| i.artist(id.as_deref(), name)).and_then(|a| a.cover.as_deref())),
+        _ => None,
     }
 }
