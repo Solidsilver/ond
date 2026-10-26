@@ -17,7 +17,7 @@ audio = { version = "0.2.0", path = "../audio" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
 # `clipboard` gives text fields copy and paste; `links` opens URLs in the browser.
-eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "clipboard", "links"] }
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "accesskit", "clipboard", "links"] }
 egui = "0.37.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 keyring = "4.2.0"

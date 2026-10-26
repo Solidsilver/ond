@@ -313,7 +313,8 @@ fn visuals(theme: Theme, t: &Tokens) -> egui::Visuals {
 
 /// Uses the system UI font (SF, Segoe UI, or whatever fontconfig calls
 /// sans-serif) and a CJK fallback when they're there, ahead of egui's bundled
-/// fonts.
+/// fonts. Characters none of them has (emoji in a playlist's name) are found
+/// among the system's fonts by eframe (its `system_fonts` feature).
 fn install_fonts(ctx: &Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut semibold_family = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
@@ -378,8 +379,9 @@ fn system_fonts() -> SystemFonts {
     let ui = std::fs::read("/System/Library/Fonts/SFNS.ttf").ok().map(|bytes| variable(bytes, 590.0));
     // SF has no CJK. Hiragino Sans covers kanji, kana and most common hanzi in
     // ~8 MB a weight; the Chinese and Korean system fonts are 20–55 MB each,
-    // too much to hold in memory for the odd title. Colour emoji is a bitmap
-    // font egui can't draw, so it's left out.
+    // too much to hold in memory for the odd title. Emoji (and any other
+    // script these miss) come from eframe's system font fallback, which loads
+    // a font only once some text needs it.
     let dir = std::path::Path::new("/System/Library/Fonts");
     let cjk = pair(&dir.join("ヒラギノ角ゴシック W3.ttc"), &dir.join("ヒラギノ角ゴシック W6.ttc"));
     SystemFonts { ui, cjk }
