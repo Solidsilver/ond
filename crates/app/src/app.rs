@@ -8,6 +8,7 @@ mod album_page;
 mod browse;
 mod commands;
 mod compact;
+mod data;
 mod diagnostics;
 mod offline_page;
 mod dialogs;
@@ -44,15 +45,13 @@ use crate::playback;
 use crate::player::{self, Note, Player, QueueEdit};
 use crate::prefs::{Loaded, Prefs};
 use crate::queue::{EndAction, Source};
-use crate::search::SearchIndex;
 use crate::settings::Paths;
 #[cfg(test)]
-use crate::settings::Settings;
+use {crate::search::SearchIndex, crate::settings::Settings, crate::tracks::TrackSet, library::Album};
 use crate::theme::{self, ThemePref, Tokens};
-use crate::tracks::TrackSet;
 use crate::window::{Geometry, WindowMode, Windows};
 use audio::{Command, EngineHandle, PlayState, PlaybackMode, TrackSource};
-use library::{Album, Library, Track};
+use library::{Library, Track};
 use offline::{OfflineStore, Pin, TrackRef};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -64,86 +63,13 @@ use subsonic::Client;
 pub use commands::PlaylistAction;
 pub use dialogs::Overlay;
 pub use palette::Palette;
+pub use data::{Data, SearchState, SyncState};
+use data::Pending;
 pub use session::Session;
 use session::LoginForm;
 pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
 
 
-
-/// Everything known about the library, as last loaded.
-#[derive(Default)]
-pub struct Data {
-    pub albums: Vec<Album>,
-    pub by_id: HashMap<String, usize>,
-    /// Bumped whenever `albums` changes, so derived lists know to rebuild.
-    pub version: u64,
-    /// Recently added, newest first (album ids from the server).
-    pub newest: Vec<String>,
-    pub playlists: Vec<subsonic::Playlist>,
-    /// Every stored track once, grouped by album and indexed by id, plus the
-    /// albums opened since (fresh from the server).
-    pub tracks: TrackSet,
-    pub playlist_tracks: HashMap<String, Arc<Vec<Track>>>,
-    /// Album ids crediting a person, from stored tracks.
-    pub credited: HashMap<String, Vec<String>>,
-    /// The server's artists, as separate entities ("A, B & C" split).
-    pub artists: Vec<library::Artist>,
-    /// Bumped whenever the stored tracks (`tracks.all`) change.
-    pub tracks_version: u64,
-}
-
-impl Data {
-    pub fn album(&self, id: &str) -> Option<&Album> {
-        self.by_id.get(id).map(|&i| &self.albums[i])
-    }
-
-    fn set_albums(&mut self, albums: Vec<Album>) {
-        self.by_id = albums.iter().enumerate().map(|(i, a)| (a.id.clone(), i)).collect();
-        self.albums = albums;
-        self.version += 1;
-    }
-
-    /// Takes the library's tracks, grouped and indexed (off the UI thread).
-    /// Stored tracks are the server's as of the last sync; anything fetched
-    /// since (an album opened) is in the db too, so this replaces it all.
-    fn set_tracks(&mut self, set: TrackSet) {
-        self.tracks = set;
-        self.tracks_version += 1;
-    }
-
-    /// Empties it for another account's library. Versions only move forward,
-    /// so derived lists never mistake the empty library for one they've seen.
-    fn clear(&mut self) {
-        let (version, tracks_version) = (self.version + 1, self.tracks_version + 1);
-        *self = Data { version, tracks_version, ..Data::default() };
-    }
-
-    #[cfg(test)]
-    fn set_all_tracks(&mut self, tracks: Vec<Track>) {
-        self.set_tracks(TrackSet::new(tracks));
-    }
-
-    /// A track by id, from the stored library or albums opened since.
-    pub fn track(&self, id: &str) -> Option<&Track> {
-        self.tracks.track(id)
-    }
-
-    /// A track's artwork: its own, else its album's.
-    pub fn cover_for<'a>(&'a self, track: &'a Track) -> Option<&'a str> {
-        track.cover_art.as_deref().or_else(|| self.album(&track.album_id).and_then(|a| a.cover_art.as_deref()))
-    }
-
-    fn update_album(&mut self, album: Album) {
-        match self.by_id.get(&album.id) {
-            Some(&i) => self.albums[i] = album,
-            None => {
-                self.by_id.insert(album.id.clone(), self.albums.len());
-                self.albums.push(album);
-            }
-        }
-        self.version += 1;
-    }
-}
 
 pub use crate::player::QueueAction;
 
@@ -299,16 +225,6 @@ pub enum Focus {
     #[default]
     Main,
     Queue,
-}
-
-/// A queue action waiting for tracks to load.
-struct Pending {
-    key: ListKey,
-    source: Source,
-    action: QueueAction,
-    /// What's stored is known to be incomplete (an album a sync stored only
-    /// part of): wait for the server's own listing, not the stored copy.
-    fresh: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -583,46 +499,6 @@ impl UiState {
 /// Whether `track` can play right now: downloaded, or the server is there.
 fn playable(session: &Session, downloads: &Downloads, track: &Track) -> bool {
     session.online || downloads.snap.is_done(&track.id)
-}
-
-
-/// Where the library sync is.
-#[derive(Default)]
-pub struct SyncState {
-    pub label: String,
-    /// The album list is being fetched (before the track sync).
-    pub albums: bool,
-    /// A track sync is running (shows a stop button).
-    pub tracks: bool,
-    /// Where the track sync is, while it runs.
-    pub progress: Option<crate::sync::Progress>,
-    /// When the last full sync finished (this session).
-    pub last: Option<chrono::DateTime<chrono::Local>>,
-}
-
-impl SyncState {
-    /// Marks an album sync as started, if none is running; returns whether to
-    /// start one.
-    fn begin(&mut self) -> bool {
-        if self.albums || self.tracks {
-            return false;
-        }
-        self.label = "syncing…".into();
-        self.albums = true;
-        true
-    }
-}
-
-/// The palette's search index.
-#[derive(Default)]
-pub struct SearchState {
-    /// Rebuilt (off the UI thread) whenever albums, artists or tracks change;
-    /// the old one serves until the new one lands.
-    pub index: Option<SearchIndex>,
-    /// Albums, artists or tracks changed since the index was built.
-    pub stale: bool,
-    /// The latest index build asked for; older builds that land late are dropped.
-    pub generation: u64,
 }
 
 /// Offline downloads, and their state as of this frame.
@@ -1023,33 +899,22 @@ impl OndApp {
             Msg::ConnectFailed(e) => self.connect_failed(e),
             Msg::Unreachable { username, error, .. } => self.unreachable(username, error),
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
-            Msg::SearchIndex { generation, index } => {
-                if generation == self.search.generation {
-                    self.install_search(*index);
-                }
-            }
-            Msg::Albums(a) => {
-                self.data.set_albums(a);
-                self.search.stale = true;
-            }
-            Msg::Artists(a) => {
-                self.data.artists = a;
-                self.search.stale = true;
-            }
-            Msg::AllTracks(set) => {
-                self.data.set_tracks(*set);
-                self.search.stale = true;
-                // A sync may have added tracks to pinned albums. The library can be
-                // partial (a sync stopped or failed, a rebuilt database), so this may
-                // only add: removals wait for the server's own listing of the album.
-                let albums: Vec<String> = self.downloads.snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
-                for id in albums {
-                    if let Some(tracks) = self.data.tracks.album(&id).cloned() {
-                        self.refresh_pin(Pin::Album(id), &tracks, false);
-                    }
-                }
-                self.resume_library_analysis();
-            }
+            m @ (Msg::SearchIndex { .. }
+            | Msg::Albums(_)
+            | Msg::Artists(_)
+            | Msg::AllTracks(_)
+            | Msg::TrackSync(_)
+            | Msg::TrackSyncDone(_)
+            | Msg::AlbumUpdated(_)
+            | Msg::SyncProgress(_)
+            | Msg::AlbumSyncDone(_)
+            | Msg::LoadFailed { .. }
+            | Msg::Tracks { .. }
+            | Msg::Newest(_)
+            | Msg::Playlists(_)
+            | Msg::PlaylistTracks { .. }
+            | Msg::Credited { .. }
+            | Msg::TrackBatch { .. }) => self.library_msg(m),
             Msg::Analyzed { track_id, record } => {
                 self.analysis.records.insert(track_id, record);
                 self.analysis.version += 1;
@@ -1059,89 +924,6 @@ impl OndApp {
                 self.analysis.version += 1;
                 self.analysis.loaded = true;
                 self.resume_library_analysis();
-            }
-            Msg::TrackSync(p) => {
-                self.sync.tracks = true;
-                self.sync.progress = Some(p);
-                self.sync.label = p.label();
-            }
-            Msg::TrackSyncDone(outcome) => {
-                self.sync.tracks = false;
-                self.sync.progress = None;
-                let albums = self.data.albums.len();
-                let tracks = self.data.tracks.all.len();
-                self.sync.label = match outcome {
-                    crate::sync::Outcome::Done { .. } => {
-                        self.sync.last = Some(chrono::Local::now());
-                        format!("{albums} albums · {tracks} tracks")
-                    }
-                    crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
-                    crate::sync::Outcome::Failed(e) => {
-                        self.show_error(e);
-                        format!("{albums} albums · {tracks} tracks")
-                    }
-                };
-            }
-            Msg::AlbumUpdated(a) => self.data.update_album(a),
-            Msg::SyncProgress(n) => {
-                self.sync.albums = true;
-                self.sync.label = format!("Syncing… {n}");
-            }
-            Msg::AlbumSyncDone(Ok(n)) => {
-                self.sync.albums = false;
-                self.sync.label = format!("{n} albums");
-                self.sync.tracks = true;
-            }
-            Msg::AlbumSyncDone(Err(e)) => {
-                // Nothing more follows (no artist or track sync): stop saying "syncing".
-                self.sync.albums = false;
-                self.sync.label = "Sync failed".into();
-                self.probe();
-                if self.session.online {
-                    self.show_error(e);
-                }
-            }
-            Msg::LoadFailed { key, error } => {
-                // One that only waited for a complete listing plays what's stored.
-                if let Some(at) = self.pending.iter().position(|p| p.key == key && p.fresh) {
-                    self.pending[at].fresh = false;
-                    self.run_pending(&key, false);
-                }
-                // Whatever else waited for these tracks gives up, so it can't
-                // fire much later when they turn up for some other reason.
-                self.pending.retain(|p| p.key != key);
-                self.downloads.pending_pins.retain(|(k, _)| *k != key);
-                if let Some(e) = error {
-                    self.probe();
-                    if self.session.online {
-                        self.show_error(e);
-                    }
-                }
-            }
-            Msg::Tracks { album_id, tracks, fresh } => {
-                self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
-                self.data.tracks.set_album(&album_id, tracks);
-                self.run_pending(&ListKey::Album(album_id), fresh);
-            }
-            Msg::Newest(ids) => {
-                self.data.newest = ids;
-                self.data.version += 1;
-            }
-            Msg::Playlists(p) => self.data.playlists = p,
-            Msg::PlaylistTracks { id, tracks } => {
-                // Always the server's complete listing.
-                self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
-                self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
-                self.run_pending(&ListKey::Playlist(id), true);
-            }
-            Msg::Credited { name, album_ids } => {
-                self.data.credited.insert(name, album_ids);
-            }
-            Msg::TrackBatch { key, tracks } => {
-                if let Some(at) = self.pending.iter().position(|p| p.key == key) {
-                    let p = self.pending.remove(at);
-                    self.queue_tracks(tracks, p.source, p.action);
-                }
             }
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
@@ -1339,29 +1121,6 @@ impl OndApp {
         self.with_player(|p, cx| p.remote(r, cx));
     }
 
-    /// Work owed once per batch of messages: a sync delivers albums, artists
-    /// and tracks back to back, so derived data is rebuilt once, not per message.
-    fn after_messages(&mut self) {
-        if std::mem::take(&mut self.search.stale) {
-            self.search.generation += 1;
-            self.bridge.build_search(self.search.generation, self.data.albums.clone(), self.data.artists.clone(), Arc::clone(&self.data.tracks.all));
-        }
-    }
-
-    /// Builds the index here and now (fixtures and tests).
-    #[cfg(test)]
-    fn rebuild_search(&mut self) {
-        self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.tracks.all));
-    }
-
-    /// Swaps in a freshly built index; an open palette re-runs its query on it.
-    fn install_search(&mut self, mut index: SearchIndex) {
-        if let Some(p) = self.ui.palette.as_mut() {
-            p.refresh(&mut index);
-        }
-        self.search.index = Some(index);
-    }
-
     fn handle_engine(&mut self, ev: audio::Event) {
         if let Some(mode) = self.output.handle(&ev) {
             // The engine picked the mode for a new device (remembered, or its default).
@@ -1450,37 +1209,10 @@ impl OndApp {
         self.with_player(|p, cx| p.seek(to, cx));
     }
 
-    /// Applies a queue action once the tracks are known.
-    fn queue_tracks(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction) {
-        self.with_player(|p, cx| p.queue_tracks(tracks, source, action, cx));
-    }
-
-    /// Holds `p` until its tracks load. A newer action for the same list
-    /// replaces an older one still waiting.
-    fn wait_for(&mut self, p: Pending) {
-        self.pending.retain(|q| q.key != p.key);
-        self.pending.push(p);
-    }
-
     /// Pins `pin` once its tracks load (once, however often it's asked).
     fn wait_to_pin(&mut self, key: ListKey, pin: Pin) {
         if !self.downloads.pending_pins.iter().any(|(k, _)| *k == key) {
             self.downloads.pending_pins.push((key, pin));
-        }
-    }
-
-    /// Runs what waited for `key`'s tracks, now loaded (`fresh`: the server's
-    /// own listing, not the stored copy).
-    fn run_pending(&mut self, key: &ListKey, fresh: bool) {
-        let Some(at) = self.pending.iter().position(|p| &p.key == key && (fresh || !p.fresh)) else { return };
-        let p = self.pending.remove(at);
-        let tracks = match &p.source {
-            Source::Album { id, .. } => self.data.tracks.album(id).map(|s| s.to_vec()),
-            Source::Playlist { id, .. } => self.data.playlist_tracks.get(id).map(|v| v.to_vec()),
-            _ => None,
-        };
-        if let Some(t) = tracks {
-            self.queue_tracks(t, p.source, p.action);
         }
     }
 
@@ -1526,45 +1258,9 @@ impl OndApp {
                 self.ui.nav.back_by(n);
                 self.on_arrive();
             }
-            Action::Album(id, action) => {
-                let name = self.data.album(&id).map(|a| a.name.clone()).unwrap_or_default();
-                let source = Source::Album { id: id.clone(), name };
-                // An album a sync stored only part of (cut short) would play a
-                // subset: fetch it, unless there's no server to ask.
-                let stored = self.data.tracks.album(&id);
-                let count = self.data.album(&id).map_or(0, |a| a.song_count as usize);
-                let partial = stored.is_some_and(|t| t.len() < count) && self.session.client.is_some();
-                match stored {
-                    Some(t) if !partial => self.queue_tracks(t.to_vec(), source, action),
-                    _ => {
-                        self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action, fresh: partial });
-                        self.bridge.open_album(self.session.client.clone(), id);
-                    }
-                }
-            }
-            Action::Artist(name, action) => {
-                let ids: Vec<String> = self.data.albums.iter().filter(|a| a.has_artist(None, &name)).map(|a| a.id.clone()).collect();
-                let key = ListKey::Artist(name.clone());
-                let source = match action {
-                    QueueAction::PlayNext | QueueAction::Add => Source::Added,
-                    _ => Source::ArtistShuffle { name: format!("{name}, shuffled") },
-                };
-                // Playing an artist means all of their albums, shuffled.
-                let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Shuffle } else { action };
-                self.wait_for(Pending { key: key.clone(), source, action, fresh: false });
-                self.bridge.fetch_tracks(self.session.client.clone(), key, ids);
-            }
-            Action::Playlist(id, action) => {
-                let name = self.data.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
-                let source = Source::Playlist { id: id.clone(), name };
-                match self.data.playlist_tracks.get(&id) {
-                    Some(t) => self.queue_tracks(t.to_vec(), source, action),
-                    None => {
-                        self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action, fresh: false });
-                        self.bridge.open_playlist(self.session.client.clone(), id);
-                    }
-                }
-            }
+            Action::Album(id, action) => self.play_album(id, action),
+            Action::Artist(name, action) => self.play_artist(name, action),
+            Action::Playlist(id, action) => self.play_playlist(id, action),
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
             Action::JumpTo(uid) => self.queue_edit(QueueEdit::JumpTo(uid)),
             Action::Replay(uid) => self.queue_edit(QueueEdit::Replay(uid)),
