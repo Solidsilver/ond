@@ -982,6 +982,9 @@ impl Engine {
             // The new ring starts on a new track. (A first ring keeps the
             // position a session started at, set by the decoder's seek.)
             self.status.frames_played.store(0, Ordering::Relaxed);
+            // As at a gapless boundary: the track that was next is playing
+            // now, and the UI names the new next once it hears about it.
+            self.forget_next();
         }
         self.status.sample_rate.store(format.sample_rate, Ordering::Relaxed);
         if !reopened && !self.status.paused.load(Ordering::Relaxed) {
