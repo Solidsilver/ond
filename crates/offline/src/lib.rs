@@ -644,6 +644,9 @@ impl Inner {
             Ok(size) => {
                 st.failures.remove(&job.r.id);
                 if let Some(s) = st.pins.tracks.get_mut(&job.r.id) {
+                    // What was downloaded, under the name it got: a re-pin since
+                    // may have brought another suffix or size.
+                    s.r = job.r.clone();
                     s.done = Some(size);
                 }
                 return self.commit(st, Vec::new());

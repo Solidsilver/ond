@@ -552,6 +552,25 @@ fn dropping_the_store_stops_it_and_it_never_writes_over_one_reopened_there() {
 }
 
 #[test]
+fn a_track_repinned_with_another_suffix_while_downloading_is_found_where_it_landed() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(1_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("the download to start", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { .. })));
+    // The server now reports another format (transcoding switched on, say).
+    s.pin(Pin::Playlist("p".into()), "P", vec![TrackRef::new("t", Some("mp3".into()), Some(10))]);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    let path = s.local_path("t").unwrap();
+    assert_eq!(path, dir.path().join("t.flac"));
+    assert_eq!(std::fs::read(path).unwrap(), body);
+    assert_eq!(s.snapshot().used_bytes, body.len() as u64);
+}
+
+#[test]
 fn a_missing_state_file_beside_downloads_deletes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
