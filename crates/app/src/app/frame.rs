@@ -64,8 +64,8 @@ impl OndApp {
         }
     }
 
-    /// Waveform seek bar: has the playing track's peaks read
-    /// once a complete copy is on disk (downloaded, or fully streamed).
+    /// Waveform seek bar: has the playing track's peaks read once a complete
+    /// copy is on disk (downloaded, or fully streamed).
     pub(super) fn want_waveform(&mut self) {
         self.waveforms.poll();
         if !self.ui.prefs.waveform {
@@ -81,8 +81,8 @@ impl OndApp {
         });
     }
 
-    /// The blurred cover to draw behind the Player or Mini,
-    /// oldest layer first; empty when that's off or nothing plays.
+    /// The blurred cover to draw behind the Player or Mini, oldest layer
+    /// first; empty when that's off or nothing plays.
     pub(crate) fn backdrop_layers(&mut self, ctx: &egui::Context) -> Vec<crate::visuals::backdrop::Layer> {
         let cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track).map(str::to_owned));
         let Some(cover) = cover.filter(|_| self.ui.prefs.backdrop) else {

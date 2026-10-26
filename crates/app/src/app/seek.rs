@@ -71,7 +71,7 @@ impl ViewCtx<'_> {
         let line = if grabbed && wave.is_none() { bar.expand2(vec2(0.0, s.grow)) } else { bar };
         let x = line.left() + line.width() * dur.map_or(0.0, |d| (shown / d).clamp(0.0, 1.0) as f32);
         if let Some((grid, bars)) = wave {
-            paint_wave(painter, line, &grid, &bars, x, look.rounded, s.wave_h, s.fill);
+            paint_wave(painter, line, &grid, &bars, x, s.wave_h, s.fill);
         } else {
             painter.rect_filled(line, s.radius, s.track);
             if let Some(f) = self.engine.status.fetched_fraction() {
@@ -117,7 +117,8 @@ fn seek_times(shown: f64, duration: Option<f64>) -> (String, String) {
 
 /// Where the waveform's bars go along a line: every bar the same whole number
 /// of pixels wide with the same whole-pixel gap between, the run centred, so
-/// none comes out a pixel wider or further apart than its neighbours.
+/// none comes out a pixel wider or further apart than its neighbours; and
+/// their shape.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct WaveGrid {
     pub n: usize,
@@ -126,6 +127,8 @@ pub(super) struct WaveGrid {
     left: f32,
     step: f32,
     width: f32,
+    /// Rounded bars rather than square ones.
+    rounded: bool,
 }
 
 impl WaveGrid {
@@ -136,16 +139,15 @@ impl WaveGrid {
         let n = ((span + gap) / (w + gap)).floor().max(1.0);
         let used = n * (w + gap) - gap;
         let left = (line.left() * ppp + (span - used) / 2.0).round();
-        Self { n: n as usize, left: left / ppp, step: (w + gap) / ppp, width: w / ppp }
+        Self { n: n as usize, left: left / ppp, step: (w + gap) / ppp, width: w / ppp, rounded: look.rounded }
     }
 }
 
-/// The waveform in place of the line: a bar per value, reaching up to `wave_h`
-/// above and below the line's centre, played (left of `x`) in `fill` and the
-/// rest faint. Square bars stay crisp on the pixel grid; rounded ones are
-/// anti-aliased.
-#[expect(clippy::too_many_arguments)]
-pub(super) fn paint_wave(painter: &egui::Painter, line: Rect, grid: &WaveGrid, bars: &[f32], x: f32, rounded: bool, wave_h: f32, fill: Color32) {
+/// The waveform in place of the line: a bar per value, laid out by `grid`,
+/// reaching up to `wave_h` above and below the line's centre, played (left of
+/// `x`) in `fill` and the rest faint. Square bars stay crisp on the pixel
+/// grid; rounded ones are anti-aliased.
+pub(super) fn paint_wave(painter: &egui::Painter, line: Rect, grid: &WaveGrid, bars: &[f32], x: f32, wave_h: f32, fill: Color32) {
     let ppp = painter.pixels_per_point();
     let snap = |pt: f32| (pt * ppp).round() / ppp;
     let (cy, rest) = (snap(line.center().y), fill.gamma_multiply(0.3));
@@ -158,13 +160,13 @@ pub(super) fn paint_wave(painter: &egui::Painter, line: Rect, grid: &WaveGrid, b
         let h = snap(wave_h * (0.12 + 0.88 * v.powf(0.8))).max(grid.width / 2.0);
         let rect = Rect::from_min_max(pos2(left, cy - h), pos2(left + grid.width, cy + h));
         let color = if rect.center().x <= x { fill } else { rest };
-        if rounded {
+        if grid.rounded {
             shapes.push(egui::Shape::rect_filled(rect, grid.width / 2.0, color));
         } else {
             mesh.add_colored_rect(rect, color);
         }
     }
-    if rounded {
+    if grid.rounded {
         painter.extend(shapes);
     } else {
         painter.add(egui::Shape::mesh(mesh));

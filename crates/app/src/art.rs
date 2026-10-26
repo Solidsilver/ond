@@ -18,8 +18,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use subsonic::Client;
 
 /// Sizes requested from the server, in pixels. A request picks the smallest
@@ -35,6 +36,8 @@ const FETCHES: usize = 6;
 const READS: usize = 4;
 /// Frames a load may go unasked for before it's dropped.
 const KEEP_FRAMES: u64 = 2;
+/// How often [`Art::disk_size`] counts the files again.
+const RECOUNT: Duration = Duration::from_secs(3);
 
 pub fn bucket(px: f32) -> u32 {
     SIZES.iter().copied().find(|&s| s as f32 >= px).unwrap_or(SIZES[SIZES.len() - 1])
@@ -252,6 +255,12 @@ impl<K: Clone + Eq + Hash> Queue<K> {
         }
     }
 
+    /// Drops every load. Job numbers carry on, so reports from loads still
+    /// running match nothing.
+    pub fn clear(&mut self) {
+        self.wants.clear();
+    }
+
     #[cfg(test)]
     pub fn contains(&self, k: &K) -> bool {
         self.wants.contains_key(k)
@@ -303,10 +312,10 @@ pub struct Art {
     ctx: egui::Context,
     dir: Arc<PathBuf>,
     client: Option<Client>,
-    /// Every cover id asked for, numbered (see [`Key`]).
-    covers: HashMap<String, u32>,
-    /// The cover ids by number.
-    names: Vec<String>,
+    /// Every cover id asked for, numbered (see [`Key`]), and the ids by
+    /// number; the two share each id.
+    covers: HashMap<Arc<str>, u32>,
+    names: Vec<Arc<str>>,
     textures: HashMap<Key, TextureHandle>,
     lru: Lru<Key>,
     queue: Queue<Key>,
@@ -320,6 +329,10 @@ pub struct Art {
     looks: HashMap<String, Arc<Look>>,
     looks_lru: Lru<String>,
     looks_pending: HashSet<String>,
+    /// Bytes of art on disk as last counted (`u64::MAX`: not yet), and when
+    /// that count was started.
+    disk: Arc<AtomicU64>,
+    counted: Option<Instant>,
     look_tx: Sender<(String, LookParts)>,
     look_rx: Receiver<(String, LookParts)>,
     /// Images given by [`Art::preload`], so looks work without a server.
@@ -351,6 +364,8 @@ impl Art {
             looks: HashMap::new(),
             looks_lru: Lru::new(LOOKS),
             looks_pending: HashSet::new(),
+            disk: Arc::new(AtomicU64::new(u64::MAX)),
+            counted: None,
             look_tx,
             look_rx,
             #[cfg(test)]
@@ -370,12 +385,13 @@ impl Art {
 
     /// `cover` at `size`, numbering the cover the first time it's seen.
     fn key(&mut self, cover: &str, size: u32) -> Key {
-        let next = self.covers.len() as u32;
         let cover = match self.covers.get(cover) {
             Some(&n) => n,
             None => {
-                self.names.push(cover.to_owned());
-                *self.covers.entry(cover.to_owned()).or_insert(next)
+                let (n, name) = (self.names.len() as u32, Arc::<str>::from(cover));
+                self.covers.insert(name.clone(), n);
+                self.names.push(name);
+                n
             }
         };
         Key { cover, size }
@@ -532,6 +548,43 @@ impl Art {
         }
     }
 
+    /// Bytes of art on disk, recounted in the background every few seconds
+    /// while asked for; `None` until first counted.
+    pub fn disk_size(&mut self) -> Option<u64> {
+        if self.counted.is_none_or(|at| at.elapsed() > RECOUNT) {
+            self.counted = Some(Instant::now());
+            let (dir, disk, ctx) = (self.dir.clone(), self.disk.clone(), self.ctx.clone());
+            self.rt.spawn_blocking(move || {
+                disk.store(cached_files(&dir).iter().map(|f| f.1).sum(), Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+        }
+        Some(self.disk.load(Ordering::Relaxed)).filter(|&n| n != u64::MAX)
+    }
+
+    /// Forgets every cover, here and on disk: what's on screen loads again
+    /// from the server.
+    pub fn clear(&mut self) {
+        for (_, (_, task)) in self.downloads.drain() {
+            task.abort();
+        }
+        self.queue.clear();
+        self.textures.clear();
+        self.lru = Lru::new(TEXTURE_BUDGET);
+        self.missing.clear();
+        self.looks.clear();
+        self.looks_lru = Lru::new(LOOKS);
+        let (dir, disk, ctx) = (self.dir.clone(), self.disk.clone(), self.ctx.clone());
+        self.rt.spawn_blocking(move || {
+            for (path, _, _) in cached_files(&dir) {
+                let _ = std::fs::remove_file(path);
+            }
+            disk.store(cached_files(&dir).iter().map(|f| f.1).sum(), Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+        self.ctx.request_repaint();
+    }
+
     /// Makes `image` the art for `cover` at every size, without a server.
     #[cfg(test)]
     pub fn preload(&mut self, cover: &str, image: ColorImage) {
@@ -607,12 +660,18 @@ async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<ColorImage> {
 /// into place) and returns its bytes.
 pub async fn fetch_cached(client: &Client, dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
     let bytes = client.cover_art(cover, Some(size)).await.ok()?;
-    let path = cover_file(dir, cover, size);
-    let tmp = path.with_extension("part");
-    if tokio::fs::create_dir_all(dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
-        let _ = tokio::fs::rename(&tmp, &path).await;
-    }
-    Some(bytes)
+    let (dir, path) = (dir.to_owned(), cover_file(dir, cover, size));
+    // Saved by a task of its own: a load aborted from here on (scrolled past)
+    // still leaves the cover cached, and never a half-written file.
+    tokio::spawn(async move {
+        let tmp = path.with_extension("part");
+        if tokio::fs::create_dir_all(&dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
+            let _ = tokio::fs::rename(&tmp, &path).await;
+        }
+        bytes
+    })
+    .await
+    .ok()
 }
 
 fn decode(bytes: &[u8], size: u32) -> Option<ColorImage> {
@@ -623,16 +682,20 @@ fn decode(bytes: &[u8], size: u32) -> Option<ColorImage> {
     Some(ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
 }
 
-fn trim_disk_cache(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let files = entries
+/// The files in the disk cache: path, size and when last used.
+fn cached_files(dir: &Path) -> Vec<(PathBuf, u64, SystemTime)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
         .flatten()
         .filter_map(|e| {
-            let m = e.metadata().ok()?;
+            let m = e.metadata().ok().filter(|m| m.is_file())?;
             Some((e.path(), m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)))
         })
-        .collect();
-    for path in eviction_plan(files, DISK_BUDGET) {
+        .collect()
+}
+
+fn trim_disk_cache(dir: &Path) {
+    for path in eviction_plan(cached_files(dir), DISK_BUDGET) {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -640,7 +703,6 @@ fn trim_disk_cache(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn buckets() {
@@ -662,6 +724,7 @@ mod tests {
             img.write_to(&mut out, image::ImageFormat::Png).unwrap();
             out.into_inner()
         };
+        let png_len = png.len() as u64;
         std::fs::write(cover_file(dir.path(), "al-1", 64), png).unwrap();
         let ctx = egui::Context::default();
         let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned());
@@ -683,6 +746,20 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
+        // Clearing forgets the loaded cover and deletes the file, and the size says so.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while art.disk_size() != Some(png_len) {
+            assert!(std::time::Instant::now() < deadline, "the cache was never counted");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        art.clear();
+        assert!(art.texture("al-1", 40.0).is_none());
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while art.disk_size() != Some(0) {
+            assert!(std::time::Instant::now() < deadline, "the cache was never cleared");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!cover_file(dir.path(), "al-1", 64).exists());
     }
 
     #[test]

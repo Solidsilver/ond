@@ -5,15 +5,14 @@
 
 use super::{AnalysisAction, OfflineAction, OutputAction, PrefsAction, WindowAction};
 use super::widgets::{MODES, choice, menu_label, mode_label, secondary, secondary_danger, section, switch, thin_slider};
+use super::seek::{WaveGrid, paint_wave};
 use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
-use super::seek::{WaveGrid, paint_wave};
 use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
 use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Section {
@@ -279,6 +278,29 @@ impl OndApp {
             });
         });
         group(ui, "Analysis", |ui| self.analysis_settings(ui));
+        group(ui, "Cache", |ui| {
+            let art = self.art.disk_size();
+            let hint = match art {
+                Some(0) => "Nothing kept on this computer.".to_owned(),
+                Some(n) => format!("{} on this computer. Covers download again as they're shown.", crate::fmt::bytes(n)),
+                None => "Covers download again as they're shown.".to_owned(),
+            };
+            setting(ui, "Cover art", &hint, |ui| {
+                if ui.add_enabled_ui(art != Some(0), |ui| secondary(ui, "Clear")).inner.clicked() {
+                    self.actions.push(Action::ClearArtCache);
+                }
+            });
+            let audio = self.cache.size();
+            let hint = match audio {
+                0 => "Nothing kept on this computer.".to_owned(),
+                n => format!("{} of tracks played lately. They stream again when played.", crate::fmt::bytes(n)),
+            };
+            setting(ui, "Streamed audio", &hint, |ui| {
+                if ui.add_enabled_ui(audio > 0, |ui| secondary(ui, "Clear")).inner.clicked() {
+                    self.actions.push(Action::ClearStreamCache);
+                }
+            });
+        });
     }
 
     /// Library analysis: start it, follow it, pause or stop it; and whether
@@ -656,7 +678,7 @@ fn waveform_preview(ui: &mut Ui, look: Bars, width: f32) {
     for (y, wave_h, fill) in [(rect.top() + 36.0, 13.0, t.text), (rect.bottom() - 22.0, 4.0, t.muted)] {
         let line = Rect::from_center_size(pos2(inner.center().x, y), vec2(inner.width(), 2.0));
         let grid = WaveGrid::along(line, painter.pixels_per_point(), look);
-        paint_wave(painter, line, &grid, &waveform::sample(grid.n), line.left() + line.width() * 0.4, look.rounded, wave_h, fill);
+        paint_wave(painter, line, &grid, &waveform::sample(grid.n), line.left() + line.width() * 0.4, wave_h, fill);
     }
 }
 

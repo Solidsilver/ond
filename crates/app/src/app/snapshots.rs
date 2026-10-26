@@ -1457,8 +1457,8 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.hover_at(pos2(820.0, 41.0));
     h.run_steps(2);
     s.shoot(h, "x-waveform-lcd-hover");
-    // Its bars' settings, with their preview beside them, and under them
-    // where the window is narrow.
+    // Its bars' settings under their preview, scrolled down to them, and in a
+    // narrow window with the controls beside or under their names.
     for (size, name) in [(FULL, "x-settings-waveform"), (vec2(560.0, 700.0), "x-settings-waveform-narrow")] {
         reset(h, size, Route::Recent);
         looks(h, |s| {
@@ -1466,6 +1466,8 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
             s.waveform_bars.rounded = true;
         });
         app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Appearance));
+        h.run_steps(2);
+        wheel(h, pos2(size.x * 0.65, size.y * 0.5), -600.0, 10);
         s.shoot(h, name);
     }
 

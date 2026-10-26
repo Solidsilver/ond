@@ -60,7 +60,7 @@ pub fn title_double_click(ctx: &egui::Context) {
 /// The window's size as last seen, and when it last changed (until that
 /// resize is over).
 #[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct Resizing {
     size: egui::Vec2,
     changed: Option<std::time::Instant>,

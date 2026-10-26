@@ -33,11 +33,12 @@ impl Bars {
     pub const WIDTHS: std::ops::RangeInclusive<u8> = 2..=8;
     pub const GAPS: std::ops::RangeInclusive<u8> = 1..=6;
 
-    /// A bar's width and the gap after it, in points, kept in range.
+    /// A bar's width in points, kept in range.
     pub fn width_pt(self) -> f32 {
         f32::from(self.width.clamp(*Self::WIDTHS.start(), *Self::WIDTHS.end())) / 2.0
     }
 
+    /// The gap after a bar in points, kept in range.
     pub fn gap_pt(self) -> f32 {
         f32::from(self.gap.clamp(*Self::GAPS.start(), *Self::GAPS.end())) / 2.0
     }
