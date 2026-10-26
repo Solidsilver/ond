@@ -168,7 +168,8 @@ pub enum Event {
     Devices { devices: Vec<DeviceInfo>, current: Option<String> },
     /// The engine changed mode by itself (device switch or fallback). Not sent for `SetMode`.
     ModeChanged { mode: PlaybackMode, device: Option<String> },
-    /// The device in use went away; playback moved to the system default in Normal mode.
+    /// The device in use went away; playback moved to the system default, in
+    /// the mode picked for it if there is one, else in Normal mode.
     DeviceLost { name: String },
     /// A device that went away is back; the UI may offer to switch to it.
     DeviceReturned { uid: String, name: String },
@@ -524,7 +525,7 @@ impl Engine {
             Command::SelectDevice(uid) => match self.backend.select_device(uid.as_deref()) {
                 Ok(()) => {
                     self.lost = None;
-                    self.device_switched(None);
+                    self.device_switched(false);
                     // Chosen but not plugged in (e.g. the saved DAC at startup): offer it when it appears.
                     if let Some(uid) = uid.filter(|u| self.current_device.as_ref() != Some(u)) {
                         self.lost = Some((uid.clone(), uid));
@@ -690,16 +691,20 @@ impl Engine {
     }
 
     /// Playback moved to another device: pick its mode and carry on where we were.
-    fn device_switched(&mut self, force: Option<PlaybackMode>) {
+    /// The mode is the one the user picked for that device; failing that, the
+    /// device's default, or Normal for a `fallback` (the device in use went away).
+    fn device_switched(&mut self, fallback: bool) {
         let resume = self.take_position();
         self.stop();
         self.known = self.backend.devices();
         let info = self.backend.current_device();
         self.current_device = info.as_ref().map(|d| d.uid.clone());
-        let mode = force.unwrap_or_else(|| match &info {
-            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or_else(|| d.default_mode()),
+        let unpicked = |d: &DeviceInfo| if fallback { PlaybackMode::Normal } else { d.default_mode() };
+        let mode = match &info {
+            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or_else(|| unpicked(d)),
+            None if fallback => PlaybackMode::Normal,
             None => self.config.mode,
-        });
+        };
         if mode != self.config.mode {
             self.apply_mode(mode);
             let _ = self.events.send(Event::ModeChanged { mode, device: self.current_device.clone() });
@@ -731,12 +736,13 @@ impl Engine {
             self.lost = Some((uid.clone(), name.clone()));
             let _ = self.backend.select_device(None);
             let _ = self.events.send(Event::DeviceLost { name });
-            self.device_switched(Some(PlaybackMode::Normal));
+            self.device_switched(true);
         } else if events.contains(&DeviceEvent::DefaultChanged)
-            && self.backend.current_device().map(|d| d.uid) != current
+            // Where a new stream would go, not where the open one is (it stays put).
+            && self.backend.target_device().map(|d| d.uid) != current
         {
             // Following the default and it moved (e.g. headphones plugged in).
-            self.device_switched(None);
+            self.device_switched(false);
         } else {
             self.known = devices.clone();
             self.send_devices();
@@ -796,14 +802,17 @@ impl Engine {
 
     /// Publishes download progress and starts the next track's prefetch when it's time.
     fn poll_fetch(&mut self) {
-        let downloading = self.network_in_use();
+        let progress = match (&self.cache, self.current().map(|t| &t.src)) {
+            (Some(cache), Some(src)) if !src.is_local() => cache.progress(&src.cache_key()),
+            _ => None,
+        };
+        let downloading = self.network_in_use(progress.as_ref());
         self.status.downloading.store(downloading, Ordering::Relaxed);
         let Some(cache) = &self.cache else { return };
-        let Some(src) = self.tracks.get(self.out_seq as usize).map(|t| &t.src) else { return };
+        let Some(src) = self.current().map(|t| &t.src) else { return };
         if src.is_local() {
             return;
         }
-        let progress = cache.progress(&src.cache_key());
         if let Some(pr) = progress {
             self.status.fetched_bytes.store(pr.downloaded, Ordering::Relaxed);
             self.status.total_bytes.store(pr.len.unwrap_or(0), Ordering::Relaxed);
@@ -821,11 +830,13 @@ impl Engine {
         }
     }
 
-    /// The current track's stream or the next one's prefetch is still downloading.
-    fn network_in_use(&self) -> bool {
+    /// The current track's stream (whose `progress` the caller already has) or
+    /// the next one's prefetch is still downloading.
+    fn network_in_use(&self, progress: Option<&streamcache::Progress>) -> bool {
         let Some(cache) = &self.cache else { return false };
         let incomplete = |src: &TrackSource| !src.is_local() && cache.progress(&src.cache_key()).is_none_or(|p| !p.complete);
-        let current = self.session.is_some() && self.current().is_some_and(|t| incomplete(&t.src));
+        let current = self.session.is_some()
+            && self.current().is_some_and(|t| !t.src.is_local() && progress.is_none_or(|p| !p.complete));
         let prefetch = self.prefetched.is_some() && self.next.as_ref().is_some_and(incomplete);
         current || prefetch
     }
@@ -917,7 +928,8 @@ impl Engine {
         let ctl = input.ctl.clone();
         let reopened = self.ring.is_some();
         // Close first so the old callback can't touch the counters set below.
-        self.backend.close();
+        // (The device itself may stay claimed: it's reopened right away.)
+        self.backend.close_for_reopen();
         self.out_seq = first_seq;
         self.status.track_seq.store(first_seq, Ordering::Release);
         self.status.sample_rate.store(format.sample_rate, Ordering::Relaxed);

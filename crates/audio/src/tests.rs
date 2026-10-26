@@ -16,6 +16,9 @@ struct FakeBackend {
     devices: Arc<Mutex<Vec<DeviceInfo>>>,
     device_events: Arc<Mutex<Vec<DeviceEvent>>>,
     selected: Option<String>,
+    /// The device the open stream plays on: like CoreAudio, a stream stays on
+    /// its device when the default moves.
+    open_dev: Option<String>,
 }
 
 impl FakeBackend {
@@ -29,7 +32,15 @@ impl FakeBackend {
             devices: Arc::default(),
             device_events: Arc::default(),
             selected: None,
+            open_dev: None,
         }
+    }
+
+    /// The device a new stream would open on: the selected one if plugged in, else the default.
+    fn target(&self) -> Option<DeviceInfo> {
+        let devices = self.devices.lock().unwrap();
+        let chosen = self.selected.as_ref().and_then(|uid| devices.iter().find(|d| &d.uid == uid));
+        chosen.or(devices.first()).cloned()
     }
 }
 
@@ -47,9 +58,12 @@ impl OutputBackend for FakeBackend {
     }
 
     fn current_device(&mut self) -> Option<DeviceInfo> {
-        let devices = self.devices.lock().unwrap();
-        let chosen = self.selected.as_ref().and_then(|uid| devices.iter().find(|d| &d.uid == uid));
-        chosen.or(devices.first()).cloned()
+        let open = self.open_dev.as_ref().and_then(|uid| self.devices.lock().unwrap().iter().find(|d| &d.uid == uid).cloned());
+        open.or_else(|| self.target())
+    }
+
+    fn target_device(&mut self) -> Option<DeviceInfo> {
+        self.target()
     }
 
     fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
@@ -67,6 +81,7 @@ impl OutputBackend for FakeBackend {
             return Err(OutputError::Unsupported { rate: format.sample_rate, channels: format.channels });
         }
         self.opens.fetch_add(1, Ordering::Relaxed);
+        self.open_dev = self.target().map(|d| d.uid);
         let stop = Arc::new(AtomicBool::new(false));
         let drained = Arc::new(AtomicBool::new(false));
         self.drained = drained.clone();
@@ -91,6 +106,7 @@ impl OutputBackend for FakeBackend {
     }
 
     fn close(&mut self) {
+        self.open_dev = None;
         if let Some((stop, handle)) = self.stop.take() {
             stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
@@ -359,6 +375,54 @@ fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
     let seen = events_until(&engine, |e| matches!(e, Event::DeviceReturned { .. }));
     assert!(matches!(seen.last(), Some(Event::DeviceReturned { uid, .. }) if uid == "dac"));
     assert_eq!(engine.status.mode(), PlaybackMode::Normal);
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn playback_follows_the_default_device_when_it_changes_mid_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 23);
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
+    *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("hp", "Headphones", DeviceKind::BuiltInHeadphones)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
+    while engine.status.position_secs() < 1.0 {
+        assert!(Instant::now() < deadline, "never got going");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Headphones plugged in: they become the system default.
+    devices.lock().unwrap().reverse();
+    events.lock().unwrap().push(DeviceEvent::DefaultChanged);
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::Devices { current: Some(d), .. } if d == "hp")), "{seen:?}");
+    assert!(matches!(seen.last(), Some(Event::TrackStarted { track_id, restart: true, .. }) if track_id == "a"));
+    assert!(engine.status.position_secs() > 0.5, "carried on mid-track");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_lost_device_falls_back_in_its_remembered_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 24);
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
+    *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    // The user plays the speakers bit-perfect, the DAC in Normal.
+    engine.send(Command::DeviceModes(HashMap::from([("spk".to_owned(), PlaybackMode::BitPerfect), ("dac".to_owned(), PlaybackMode::Normal)])));
+    engine.send(Command::SelectDevice(Some("dac".into())));
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert_eq!(engine.status.mode(), PlaybackMode::Normal);
+    devices.lock().unwrap().retain(|d| d.uid != "dac");
+    events.lock().unwrap().push(DeviceEvent::ListChanged);
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::DeviceLost { name } if name == "DAC")));
+    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, device: Some(d) } if d == "spk")), "{seen:?}");
+    assert_eq!(engine.status.mode(), PlaybackMode::BitPerfect);
     engine.send(Command::Shutdown);
 }
 
