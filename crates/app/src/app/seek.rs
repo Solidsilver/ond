@@ -84,7 +84,16 @@ impl ViewCtx<'_> {
         if grabbed && seekable {
             painter.circle_filled(pos2(x, line.center().y), s.knob_r, s.knob);
         }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, seekable, "Position"));
+        // A screen reader hears where it is, in seconds, out of how long
+        // ("2:21 of 6:23").
+        resp.widget_info(|| egui::WidgetInfo::slider(seekable, shown, "Position"));
+        if let Some(d) = dur {
+            ui.ctx().accesskit_node_builder(resp.id, |node| {
+                node.set_min_numeric_value(0.0);
+                node.set_max_numeric_value(d);
+                node.set_value(format!("{} of {}", crate::fmt::clock(shown), crate::fmt::clock(d)));
+            });
+        }
         (shown, resp)
     }
 

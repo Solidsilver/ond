@@ -170,15 +170,7 @@ impl ViewCtx<'_> {
         let fill = crate::theme::tint_of(ui).map_or(t.sidebar, |x| x.display);
         painter.rect(rect, 7.0, fill, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
         let body = ui.interact(rect, ui.scope_id().with("lcd"), Sense::click());
-        // The live spectrum, faint behind the text (experimental).
-        if self.experimental().spectrum
-            && self.player.queue.current.is_some()
-            && let Some(f) = self.listen(ui)
-        {
-            let area = Rect::from_min_max(pos2(rect.left() + rect.height() + 8.0, rect.top() + 5.0), pos2(rect.right() - 8.0, rect.bottom() - 13.0));
-            let n = ((area.width() / 6.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
-            crate::visuals::paint_bars(&painter, area, &crate::visuals::spectrum::grouped(&f.bands, n), t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }));
-        }
+        self.lcd_spectrum(ui, &painter, &t, rect);
         // Borrowed from the player and library, not from `self`, so drawing can
         // take `&mut self`.
         let (player, data) = (self.player, self.data);
@@ -199,48 +191,8 @@ impl ViewCtx<'_> {
         let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
         let col_left = art.right() + 10.0;
 
-        // Title and subtitle: centred on the display when the same margin fits
-        // on both sides, else centred in the column between art and pill.
-        let reserve = (col_left - rect.left()).max(rect.right() - col_right);
-        let symmetric = rect.width() - 2.0 * reserve;
-        let (center_x, text_w) = if symmetric >= 140.0 { (rect.center().x, symmetric) } else { ((col_left + col_right) / 2.0, (col_right - col_left).max(40.0)) };
-        let title = elide(ui, &item.track.title, FontId::new(12.5, semibold()), t.text, text_w);
-        let sub_text = match (&item.track.artist, album) {
-            (Some(a), Some(al)) => format!("{a} · {}", al.name),
-            (Some(a), None) => a.clone(),
-            (None, Some(al)) => al.name.clone(),
-            _ => String::new(),
-        };
-        let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
-        let y0 = rect.top() + 4.0;
-        let title_h = title.size().y;
-        painter.galley(pos2(center_x - title.size().x / 2.0, y0), title, t.text);
-        painter.galley(pos2(center_x - sub.size().x / 2.0, y0 + title_h), sub, t.muted);
-
-        // The seek line along the bottom of the column, the times at its ends.
-        let time_font = FontId::proportional(9.5);
-        // Sized for the widest time, so the line doesn't shift as digits change.
-        let time_w = painter.layout_no_wrap("−88:88".into(), time_font.clone(), t.muted).size().x;
-        let line_y = rect.bottom() - 7.5;
-        let bar_left = col_left + time_w + 6.0;
-        let bar = Rect::from_min_max(pos2(bar_left, line_y - 1.0), pos2((col_right - time_w - 6.0).max(bar_left + 20.0), line_y + 1.0));
-        let strip = Rect::from_min_max(pos2(bar.left() - 4.0, line_y - 6.0), pos2(bar.right() + 4.0, rect.bottom()));
-        let style = SeekStyle {
-            track: t.hairline,
-            fetched: t.selected,
-            fill: t.muted,
-            pulse: t.accent,
-            pulse_len: 40.0,
-            radius: 1.0,
-            grow: 0.5,
-            knob: t.text,
-            knob_r: 3.5,
-            wave_h: 4.0,
-        };
-        let (shown, strip_resp) = self.seek_line(ui, bar, strip, "lcd-seek", &style);
-        let (elapsed, remaining) = self.seek_times(shown);
-        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, elapsed, time_font.clone(), t.muted);
-        painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
+        let sub_text = lcd_titles(ui, &painter, &t, rect, col_left..=col_right, &item.track, album);
+        let strip_resp = self.lcd_seek(ui, &painter, &t, rect, col_left..=col_right);
 
         let hovering = body.hovered() || strip_resp.hovered() || self.ui.seek_preview.is_some();
         // Love: the heart at the right end, shown when loved or on hover.
@@ -284,6 +236,70 @@ impl ViewCtx<'_> {
         open_picker
     }
 
+    /// The live spectrum, faint behind the display's text (experimental).
+    fn lcd_spectrum(&mut self, ui: &Ui, painter: &egui::Painter, t: &Tokens, rect: Rect) {
+        if self.experimental().spectrum
+            && self.player.queue.current.is_some()
+            && let Some(f) = self.listen(ui)
+        {
+            let area = Rect::from_min_max(pos2(rect.left() + rect.height() + 8.0, rect.top() + 5.0), pos2(rect.right() - 8.0, rect.bottom() - 13.0));
+            let n = ((area.width() / 6.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
+            crate::visuals::paint_bars(painter, area, &crate::visuals::spectrum::grouped(&f.bands, n), t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }));
+        }
+    }
+
+    /// The seek line along the bottom of the display's middle column (`cols`,
+    /// left to right), the times at its ends. Returns the strip's response.
+    fn lcd_seek(&mut self, ui: &mut Ui, painter: &egui::Painter, t: &Tokens, rect: Rect, cols: std::ops::RangeInclusive<f32>) -> egui::Response {
+        let (col_left, col_right) = (*cols.start(), *cols.end());
+        let time_font = FontId::proportional(9.5);
+        // Sized for the widest time, so the line doesn't shift as digits change.
+        let time_w = painter.layout_no_wrap("−88:88".into(), time_font.clone(), t.muted).size().x;
+        let line_y = rect.bottom() - 7.5;
+        let bar_left = col_left + time_w + 6.0;
+        let bar = Rect::from_min_max(pos2(bar_left, line_y - 1.0), pos2((col_right - time_w - 6.0).max(bar_left + 20.0), line_y + 1.0));
+        let strip = Rect::from_min_max(pos2(bar.left() - 4.0, line_y - 6.0), pos2(bar.right() + 4.0, rect.bottom()));
+        let style = SeekStyle {
+            track: t.hairline,
+            fetched: t.selected,
+            fill: t.muted,
+            pulse: t.accent,
+            pulse_len: 40.0,
+            radius: 1.0,
+            grow: 0.5,
+            knob: t.text,
+            knob_r: 3.5,
+            wave_h: 4.0,
+        };
+        let (shown, strip_resp) = self.seek_line(ui, bar, strip, "lcd-seek", &style);
+        let (elapsed, remaining) = self.seek_times(shown);
+        painter.text(pos2(bar.left() - 6.0, line_y), egui::Align2::RIGHT_CENTER, elapsed, time_font.clone(), t.muted);
+        painter.text(pos2(bar.right() + 6.0, line_y), egui::Align2::LEFT_CENTER, remaining, time_font, t.muted);
+        strip_resp
+    }
+}
+
+/// The display's title over "artist · album": centred on the display when
+/// the same margin fits on both sides, else centred in the middle column
+/// (`cols`, left to right). Returns the second line's text.
+fn lcd_titles(ui: &Ui, painter: &egui::Painter, t: &Tokens, rect: Rect, cols: std::ops::RangeInclusive<f32>, track: &library::Track, album: Option<&library::Album>) -> String {
+    let (col_left, col_right) = (*cols.start(), *cols.end());
+    let reserve = (col_left - rect.left()).max(rect.right() - col_right);
+    let symmetric = rect.width() - 2.0 * reserve;
+    let (center_x, text_w) = if symmetric >= 140.0 { (rect.center().x, symmetric) } else { ((col_left + col_right) / 2.0, (col_right - col_left).max(40.0)) };
+    let title = elide(ui, &track.title, FontId::new(12.5, semibold()), t.text, text_w);
+    let sub_text = match (&track.artist, album) {
+        (Some(a), Some(al)) => format!("{a} · {}", al.name),
+        (Some(a), None) => a.clone(),
+        (None, Some(al)) => al.name.clone(),
+        _ => String::new(),
+    };
+    let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
+    let y0 = rect.top() + 4.0;
+    let title_h = title.size().y;
+    painter.galley(pos2(center_x - title.size().x / 2.0, y0), title, t.text);
+    painter.galley(pos2(center_x - sub.size().x / 2.0, y0 + title_h), sub, t.muted);
+    sub_text
 }
 
 #[cfg(test)]

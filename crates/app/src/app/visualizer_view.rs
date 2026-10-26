@@ -6,11 +6,13 @@
 //! for a few seconds when it starts. Drawn on the GPU (see `visuals::gpu`),
 //! or with the painter where there's no wgpu renderer to hand.
 
+use super::widgets::elide_job;
 use super::{Action, OndApp};
 use crate::visuals::visualizer::{Dot, Input, Kind, Pick, Picture, Rng, Scene, caption_alpha, name_alpha};
 use crate::visuals::{EVERY_FRAME, gpu};
-use egui::{Align2, Color32, FontId, Key, Modifiers, Rect, Ui, pos2, vec2};
+use egui::{Align2, Color32, FontId, Galley, Key, Modifiers, Rect, Ui, pos2, vec2};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// Earlier frames the painter version keeps, for its trails.
 const TRAIL: usize = 8;
@@ -99,6 +101,55 @@ impl VisualizerView {
     fn shuffled(&mut self) -> Kind {
         self.kind().step(1 + self.rng.below(Kind::ALL.len() - 1) as i32)
     }
+
+    /// Keeps up with what's playing: a new track (`uid`) shows its cover and
+    /// names, and shuffled, another visualizer; a new `cover` lends the scene
+    /// its colors once its `look` is worked out.
+    fn follow(&mut self, uid: Option<u64>, cover: Option<&str>, look: Option<&crate::art::Look>, shuffle: bool, now: f64) {
+        if uid != self.track {
+            if shuffle && self.track.is_some() {
+                let kind = self.shuffled();
+                self.show(kind, now);
+            }
+            self.track = uid;
+            self.track_since = now;
+        }
+        if cover != self.cover.as_deref() && (look.is_some() || cover.is_none()) {
+            self.colors = look.and_then(|l| l.palette.as_ref()).map_or_else(Vec::new, |p| p.colors.clone());
+            self.scene.set_colors(&self.colors);
+            self.cover = cover.map(str::to_owned);
+        }
+    }
+
+    /// Moves the scene on to `now` (`half`: the view's half extents) and
+    /// returns what to draw, fading in after a switch.
+    fn step(&mut self, now: f64, half: [f32; 2], audio: Option<&crate::visuals::spectrum::Frame>) -> Picture {
+        let dt = self.fixed_step.unwrap_or((now - self.last) as f32);
+        self.last = now;
+        let mut picture = self.scene.step(&Input { dt, half, audio });
+        picture.bright = ((now - self.switched) / FADE_IN).clamp(0.0, 1.0) as f32;
+        picture
+    }
+
+    /// Draws `picture` over `rect`: on the GPU when there's a `gpu` target,
+    /// else with the painter (keeping its last frames for the trails).
+    fn draw(&mut self, painter: &egui::Painter, rect: Rect, gpu: Option<gpu::Target>, half: [f32; 2], picture: Picture) {
+        match gpu {
+            Some(target) => {
+                let ppp = painter.pixels_per_point();
+                let size_px = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
+                painter.add(gpu::shape(rect, gpu::VisualizerCallback { target, size_px, half, picture, clear: self.fresh }));
+                self.fresh = false;
+            }
+            None => {
+                self.trails.push_back(picture.dots.iter().chain(&picture.front).map(|d| (*d, picture.shown(d))).collect());
+                while self.trails.len() > TRAIL {
+                    self.trails.pop_front();
+                }
+                paint_trails(painter, rect, half, &picture, &self.trails);
+            }
+        }
+    }
 }
 
 impl OndApp {
@@ -168,44 +219,13 @@ impl OndApp {
             let look = cover.and_then(|c| self.art.look(c));
             let shuffle = self.experimental().visualizer_pick == Pick::Shuffle;
             let Some(v) = self.ui.visualizer.as_mut() else { return };
-            // A new track: its cover and names show, and shuffled, another visualizer.
-            let uid = current.map(|(u, _)| u);
-            if uid != v.track {
-                if shuffle && v.track.is_some() {
-                    let kind = v.shuffled();
-                    v.show(kind, now);
-                }
-                v.track = uid;
-                v.track_since = now;
-            }
-            // The album's colors, once its look is worked out.
-            if cover != v.cover.as_deref() && (look.is_some() || cover.is_none()) {
-                v.colors = look.as_ref().and_then(|l| l.palette.as_ref()).map_or_else(Vec::new, |p| p.colors.clone());
-                v.scene.set_colors(&v.colors);
-                v.cover = cover.map(str::to_owned);
-            }
-            let dt = v.fixed_step.unwrap_or((now - v.last) as f32);
-            v.last = now;
+            v.follow(current.map(|(u, _)| u), cover, look.as_deref(), shuffle, now);
             let half = if rect.width() >= rect.height() { [rect.width() / rect.height().max(1.0), 1.0] } else { [1.0, rect.height() / rect.width().max(1.0)] };
-            let mut picture = v.scene.step(&Input { dt, half, audio: audio.as_ref() });
-            picture.bright = ((now - v.switched) / FADE_IN).clamp(0.0, 1.0) as f32;
+            let picture = v.step(now, half, audio.as_ref());
             if picture.bright < 1.0 {
                 ctx.request_repaint();
             }
-            match self.gpu {
-                Some(target) => {
-                    let size_px = [(rect.width() * ctx.pixels_per_point()).round() as u32, (rect.height() * ctx.pixels_per_point()).round() as u32];
-                    ui.painter().add(gpu::shape(rect, gpu::VisualizerCallback { target, size_px, half, picture, clear: v.fresh }));
-                    v.fresh = false;
-                }
-                None => {
-                    v.trails.push_back(picture.dots.iter().chain(&picture.front).map(|d| (*d, picture.shown(d))).collect());
-                    while v.trails.len() > TRAIL {
-                        v.trails.pop_front();
-                    }
-                    paint_trails(ui.painter(), rect, half, &picture, &v.trails);
-                }
-            }
+            v.draw(ui.painter(), rect, self.gpu, half, picture);
             let (track_since, switched, opened, kind) = (v.track_since, v.switched, v.opened, v.kind());
             if let Some((_, track)) = current {
                 let caption = caption_alpha(now - track_since);
@@ -217,19 +237,7 @@ impl OndApp {
                     }
                 }
             }
-            let name = name_alpha(now - switched.max(opened));
-            if name > 0.0 {
-                let at = pos2(rect.center().x, rect.top() + 72.0);
-                shadowed(ui.painter(), at, Align2::CENTER_CENTER, kind.label(), FontId::new(22.0, crate::theme::semibold()), 230.0 * name);
-                ctx.request_repaint();
-            }
-            let since_open = now - opened;
-            if since_open < HINT_SECS + 1.0 {
-                let a = (1.0 - (since_open - HINT_SECS).max(0.0)) as f32;
-                let hint = crate::keys::shown("← → to switch · F for full screen · Esc to leave").into_owned();
-                shadowed(ui.painter(), pos2(rect.center().x, rect.bottom() - 28.0), Align2::CENTER_CENTER, &hint, FontId::proportional(12.0), 140.0 * a);
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64((HINT_SECS + 1.0 - since_open).clamp(0.02, 1.0)));
-            }
+            paint_titles(ui.painter(), rect, now, switched.max(opened), opened, kind);
             body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, format!("Visualizer: {}", kind.label())));
         });
     }
@@ -243,11 +251,38 @@ impl OndApp {
     }
 }
 
-/// White text with a soft dark edge, so it reads over bright light; `alpha` 0..=255.
-fn shadowed(painter: &egui::Painter, at: egui::Pos2, align: Align2, text: &str, font: FontId, alpha: f32) {
-    let shadow = Color32::from_black_alpha((alpha * 0.6) as u8);
-    painter.text(at + vec2(0.0, 1.0), align, text, font.clone(), shadow);
-    painter.text(at, align, text, font, Color32::from_white_alpha(alpha as u8));
+/// `galley` in white with a soft dark edge, so it reads over bright light,
+/// placed by `align` at `at`; `alpha` 0..=255 (clamped).
+fn shadowed(painter: &egui::Painter, at: egui::Pos2, align: Align2, galley: Arc<Galley>, alpha: f32) {
+    let alpha = alpha.clamp(0.0, 255.0);
+    let min = align.anchor_size(at, galley.size()).min;
+    painter.galley_with_override_text_color(min + vec2(0.0, 1.0), galley.clone(), Color32::from_black_alpha((alpha * 0.6) as u8));
+    painter.galley_with_override_text_color(min, galley, Color32::from_white_alpha(alpha as u8));
+}
+
+/// [`shadowed`] text on one line, whole.
+fn shadowed_text(painter: &egui::Painter, at: egui::Pos2, align: Align2, text: &str, font: FontId, alpha: f32) {
+    shadowed(painter, at, align, painter.layout_no_wrap(text.to_owned(), font, Color32::WHITE), alpha);
+}
+
+/// The visualizer's name for a moment after it's shown (`shown`: when), and
+/// the key hint for the first seconds after it opened; each asks for the
+/// frames its fade needs.
+fn paint_titles(painter: &egui::Painter, rect: Rect, now: f64, shown: f64, opened: f64, kind: Kind) {
+    let ctx = painter.ctx();
+    let name = name_alpha(now - shown);
+    if name > 0.0 {
+        let at = pos2(rect.center().x, rect.top() + 72.0);
+        shadowed_text(painter, at, Align2::CENTER_CENTER, kind.label(), FontId::new(22.0, crate::theme::semibold()), 230.0 * name);
+        ctx.request_repaint();
+    }
+    let since_open = now - opened;
+    if since_open < HINT_SECS + 1.0 {
+        let a = (1.0 - (since_open - HINT_SECS).max(0.0)) as f32;
+        let hint = crate::keys::shown("← → to switch · F for full screen · Esc to leave").into_owned();
+        shadowed_text(painter, pos2(rect.center().x, rect.bottom() - 28.0), Align2::CENTER_CENTER, &hint, FontId::proportional(12.0), 140.0 * a);
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((HINT_SECS + 1.0 - since_open).clamp(0.02, 1.0)));
+    }
 }
 
 /// The cover, title, artist and album in the bottom-left corner, at `alpha` (0..=1).
@@ -271,27 +306,9 @@ fn paint_caption(painter: &egui::Painter, rect: Rect, art: Option<egui::TextureH
     let mut y = tile.center().y - line_h * shown.len() as f32 / 2.0 + line_h / 2.0;
     let room = (rect.right() - x - MARGIN).max(40.0);
     for (text, font, a) in shown {
-        let galley = painter.layout(text.to_owned(), font.clone(), Color32::WHITE, room);
-        let text = if galley.rows.len() > 1 { elide(painter, text, &font, room) } else { text.to_owned() };
-        shadowed(painter, pos2(x, y), Align2::LEFT_CENTER, &text, font, a * alpha);
+        shadowed(painter, pos2(x, y), Align2::LEFT_CENTER, painter.layout_job(elide_job(text, font, Color32::WHITE, room)), a * alpha);
         y += line_h;
     }
-}
-
-/// `text` cut to fit `room` points, with an ellipsis.
-fn elide(painter: &egui::Painter, text: &str, font: &FontId, room: f32) -> String {
-    let fits = |s: &str| painter.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x <= room;
-    let chars: Vec<char> = text.chars().collect();
-    let (mut lo, mut hi) = (0, chars.len());
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if fits(&format!("{}…", chars[..mid].iter().collect::<String>())) {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    format!("{}…", chars[..lo].iter().collect::<String>().trim_end())
 }
 
 /// The painter version: the backdrop, then each light as a soft dot or a

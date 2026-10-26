@@ -17,6 +17,13 @@ use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, ViewportC
 const ON_ART: Color32 = over_art::LIGHT;
 const ON_ART_MUTED: Color32 = Color32::from_rgb(0xC9, 0xCC, 0xD2);
 
+/// Mini's hover panel over the foot of the artwork: its height; the seek
+/// line's centre below the top of its text; the transport row's centre above
+/// its bottom (both inside its padding).
+const PANEL_H: f32 = 112.0;
+const PANEL_SEEK_Y: f32 = 46.0;
+const PANEL_TRANSPORT_Y: f32 = 15.0;
+
 pub(super) fn scrim() -> Color32 {
     Color32::from_rgba_unmultiplied(12, 13, 15, 204)
 }
@@ -77,7 +84,7 @@ impl OndApp {
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
         ui.multiply_opacity(alpha);
         OnArt::plain(ON_ART).apply(&mut ui);
-        let panel = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 112.0), rect.max);
+        let panel = Rect::from_min_max(pos2(rect.left(), rect.bottom() - PANEL_H), rect.max);
         let layers = self.backdrop_layers(ui.ctx());
         if layers.is_empty() {
             ui.painter().rect_filled(panel, 0.0, scrim());
@@ -103,7 +110,7 @@ impl OndApp {
             ui.painter().galley(pos2(inner.left(), inner.top() + title_h + 1.0), artist, ON_ART_MUTED);
         }
         // The seek bar, inset from every edge, with the times at its ends.
-        let seek_y = inner.top() + 46.0;
+        let seek_y = inner.top() + PANEL_SEEK_Y;
         if self.player.queue.current.is_some() {
             let font = FontId::proportional(10.0);
             let time_w = ui.painter().layout_no_wrap("−88:88".into(), font.clone(), ON_ART_MUTED).size().x;
@@ -126,7 +133,7 @@ impl OndApp {
             ui.painter().text(pos2(bar.left() - 8.0, seek_y), egui::Align2::RIGHT_CENTER, elapsed, font.clone(), ON_ART_MUTED);
             ui.painter().text(pos2(bar.right() + 8.0, seek_y), egui::Align2::LEFT_CENTER, remaining, font, ON_ART_MUTED);
         }
-        let row = Rect::from_center_size(pos2(inner.center().x, inner.bottom() - 15.0), vec2(120.0, 32.0));
+        let row = Rect::from_center_size(pos2(inner.center().x, inner.bottom() - PANEL_TRANSPORT_Y), vec2(120.0, 32.0));
         ui.scope_builder(UiBuilder::new().max_rect(row).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, Some(ON_ART)));
         let corner = |at: egui::Pos2| Rect::from_center_size(at, vec2(26.0, 26.0));
         for (r, icon, label, mode) in [

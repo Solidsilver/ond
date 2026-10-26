@@ -2267,9 +2267,83 @@ fn seek_line_click_seeks_there() {
     let to = app_mut(&mut h).player.pending_seek.expect("the click seeked");
     assert!((to - 383.0 / 2.0).abs() < 2.0, "seeked to the middle of 383 s, got {to}");
 
+    // A screen reader hears the position and the length.
+    {
+        use egui_kittest::kittest::NodeT;
+        let node = h.get_by_label("Position").accesskit_node();
+        assert_eq!(node.min_numeric_value(), Some(0.0));
+        assert_eq!(node.max_numeric_value(), Some(383.0));
+        assert!(node.numeric_value().is_some_and(|v| (0.0..=383.0).contains(&v)), "a position: {:?}", node.numeric_value());
+        assert!(node.value().is_some_and(|v| v.ends_with(" of 6:23")), "spoken as a time: {:?}", node.value());
+    }
+
     // A drag in another window mode that never ended here.
     app_mut(&mut h).ui.seek_preview = Some(10.0);
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).ui.seek_preview, None, "the stale preview went");
+    *h.state_mut() = None;
+}
+
+/// A playlist of `n` songs, "Long song 0" onwards, owned by the user.
+fn long_playlist(app: &mut OndApp, id: &str, n: usize) {
+    let tracks: Vec<Track> = (0..n)
+        .map(|k| {
+            let mut t = filler(20, 1).remove(0);
+            t.id = format!("long-{k}");
+            t.title = format!("Long song {k}");
+            t
+        })
+        .collect();
+    app.data.playlists.push(subsonic::Playlist { id: id.into(), name: "Long".into(), song_count: n as u32, duration: 0, cover_art: None, owner: None });
+    app.data.playlist_tracks.insert(id.into(), Arc::new(tracks));
+}
+
+/// A long playlist lays out only the rows on screen, and still reorders by
+/// dragging, brings a song far down it into view when asked (as "Go to
+/// album" does), and keeps the keyboard selection in view.
+#[test]
+fn a_long_playlist_reorders_reveals_and_follows_the_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    let id = "pl-long";
+    long_playlist(app_mut(&mut h), id, 3000);
+    reset(&mut h, FULL, Route::Playlist { id: id.into(), name: "Long".into() });
+    let label = |k: usize| format!("Long song {k}");
+    assert!(h.query_by_label(&label(0)).is_some(), "the first rows show");
+    assert!(h.query_by_label(&label(2000)).is_none(), "rows off screen aren't laid out");
+
+    // Drag the first song onto the lower half of the third: it lands after it.
+    let (from, onto) = (h.get_by_label(&label(0)).rect(), h.get_by_label(&label(2)).rect());
+    let (a, b) = (from.center(), pos2(onto.center().x, onto.center().y + onto.height() / 4.0));
+    h.hover_at(a);
+    h.run_steps(1);
+    h.drag_at(a);
+    h.run_steps(1);
+    for k in 1..=6 {
+        h.hover_at(a + (b - a) * (k as f32 / 6.0));
+        h.run_steps(1);
+    }
+    h.drop_at(b);
+    h.run_steps(2);
+    let order: Vec<String> = app_mut(&mut h).data.playlist_tracks[id].iter().take(4).map(|t| t.id.clone()).collect();
+    assert_eq!(order, ["long-1", "long-2", "long-0", "long-3"], "the dragged song moved to just below the third");
+
+    // Revealed: selected and scrolled to, though it was never laid out.
+    h.remove_cursor();
+    app_mut(&mut h).ui.reveal = Some("long-2000".into());
+    h.run_steps(10);
+    assert_eq!(app_mut(&mut h).ui.track_sel, Some(2000));
+    assert!(app_mut(&mut h).ui.reveal.is_none(), "the reveal was used up");
+    assert!(h.query_by_label(&label(2000)).is_some(), "scrolled to the revealed song");
+    assert!(h.query_by_label(&label(0)).is_none());
+
+    // The keys move the selection and bring it along.
+    for _ in 0..30 {
+        h.key_press(egui::Key::ArrowDown);
+        h.run_steps(1);
+    }
+    h.run_steps(10);
+    assert_eq!(app_mut(&mut h).ui.track_sel, Some(2030));
+    assert!(h.query_by_label(&label(2030)).is_some(), "↓ kept the selection in view");
     *h.state_mut() = None;
 }

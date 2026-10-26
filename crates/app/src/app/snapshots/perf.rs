@@ -1,5 +1,5 @@
-//! Frame-time budget on a large library: 2,000 albums, 25,000 tracks and a
-//! 500-item queue. Headless (no GPU): it times egui's layout and
+//! Frame-time budget on a large library: 2,000 albums, 25,000 tracks, a
+//! 500-item queue and a 20,000-song playlist. Headless (no GPU): it times egui's layout and
 //! tessellation of the real views, which is the CPU cost per frame.
 //!
 //! `cargo test -p ond-player --release perf -- --ignored --nocapture`
@@ -11,6 +11,7 @@ const ALBUMS_N: usize = 2_000;
 const TRACKS_N: usize = 25_000;
 const QUEUE_N: usize = 500;
 const PINS_N: usize = 2_000;
+const PLAYLIST_N: usize = 20_000;
 
 fn big_library(app: &mut OndApp) {
     let albums: Vec<Album> = (0..ALBUMS_N)
@@ -178,6 +179,29 @@ fn perf() {
     }
     scene(&mut h, Route::Favorites);
     results.push((format!("favorites, {PINS_N} songs"), time_frames(&mut h, 60)));
+
+    // A 20,000-song playlist of the user's own, scrolled part-way down
+    // with a row hovered (its heart and actions showing).
+    {
+        let app = app_mut(&mut h);
+        let songs: Vec<Track> = app.data.tracks.all.iter().take(PLAYLIST_N).cloned().collect();
+        app.data.playlists.push(subsonic::Playlist { id: "big-pl".into(), name: "Everything".into(), song_count: PLAYLIST_N as u32, duration: 0, cover_art: None, owner: None });
+        app.data.playlist_tracks.insert("big-pl".into(), Arc::new(songs));
+    }
+    scene(&mut h, Route::Playlist { id: "big-pl".into(), name: "Everything".into() });
+    h.hover_at(pos2(700.0, 500.0));
+    for _ in 0..20 {
+        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -20_000.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
+        h.step();
+    }
+    results.push((format!("playlist, {PLAYLIST_N} songs"), time_frames(&mut h, 60)));
+    // Sanity: the frames drew the list's rows (the queue's are "… by …"),
+    // scrolled away from the top.
+    let first = app_mut(&mut h).data.tracks.all[0].title.clone();
+    let rows: Vec<String> = h.query_all_by_label_contains(" part ").map(|n| format!("{n:?}")).filter(|l| l.contains("ListBoxOption") && !l.contains(" by ")).map(|l| l.chars().take(80).collect()).take(2).collect();
+    println!("  playlist rows on screen, e.g. {rows:?}");
+    assert!(!rows.is_empty(), "playlist view drew no rows");
+    assert!(h.query_by_label(&first).is_none(), "the playlist scrolled");
 
     // What a sync costs the UI thread: the messages carrying the library, then
     // the once-per-batch rebuild of derived data (the search index).

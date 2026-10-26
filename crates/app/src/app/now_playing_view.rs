@@ -22,6 +22,10 @@ use library::Track;
 
 /// Height of everything under the artwork in the player column.
 const BELOW_ART_H: f32 = 272.0;
+/// The compact player block (no room for the big artwork): the artwork's
+/// side beside the title, and the gap between them.
+const COMPACT_ART: f32 = 88.0;
+const COMPACT_ART_GAP: f32 = 8.0;
 /// Room the waveform seek bar adds, when that's on.
 const WAVE_EXTRA: f32 = 16.0;
 /// Room the open details strip takes.
@@ -35,13 +39,11 @@ const SIDEBAR_LYRIC: f32 = 15.5;
 pub const PLAYER_BAR_H: f32 = 40.0;
 
 impl ViewCtx<'_> {
-
     /// The Player's top bar, which is also its title bar: the traffic lights
-    /// on the left (macOS), Mini and Full window on the right. Its empty part
-    /// moves the window; a double-click zooms it.
-    /// The Player's top bar: it moves the window, and holds the Full and
-    /// Mini buttons (and on Linux the window's own). `on_art`: how to draw
-    /// them over the blurred backdrop, when that's behind the bar.
+    /// on the left (macOS), Full window and Mini on the right (and on Linux
+    /// the window's own buttons). Its empty part moves the window; a
+    /// double-click zooms it. `on_art`: how to draw the buttons over the
+    /// blurred backdrop, when that's behind the bar.
     pub(super) fn player_bar(&mut self, ui: &mut Ui, on_art: Option<OnArt>) {
         let t = Tokens::of(ui);
         let rect = ui.max_rect();
@@ -75,8 +77,8 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Asks the server for `track`'s lyrics the first time something shows them.
-    /// Asks for `track`'s lyrics the first time a lyrics view needs them.
+    /// Asks the server for `track`'s lyrics the first time a lyrics view
+    /// needs them.
     pub(super) fn ensure_lyrics(&mut self, track: &Track) {
         if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
             self.actions.push(Action::NeedLyrics(Box::new(track.clone())));
@@ -151,12 +153,12 @@ impl ViewCtx<'_> {
         }
         ui.horizontal(|ui| {
             if compact {
-                art(self, ui, 88.0);
-                ui.add_space(8.0);
+                art(self, ui, COMPACT_ART);
+                ui.add_space(COMPACT_ART_GAP);
             }
             ui.vertical(|ui| {
                 ui.add_space(if compact { 18.0 } else { 0.0 });
-                self.title_links(ui, track, album, if compact { width - 96.0 } else { width });
+                self.title_links(ui, track, album, if compact { width - (COMPACT_ART + COMPACT_ART_GAP) } else { width });
             });
         });
         ui.add_space(if compact { 12.0 } else { 18.0 });

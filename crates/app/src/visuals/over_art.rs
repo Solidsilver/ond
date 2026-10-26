@@ -41,7 +41,8 @@ impl OnArt {
     /// `under[0]` to `under[1]` (darkest and brightest; see [`region`]):
     /// `preferred` if it reaches `need` against both, else [`LIGHT`] or
     /// [`DARK`]; when neither does, the one that comes closer over just
-    /// enough of a scrim in the other.
+    /// enough of a scrim in the other. `need` is a WCAG contrast ratio
+    /// ([`ICON`] 4.5, [`GRAPHIC`] 3).
     pub fn pick(under: [Color32; 2], preferred: Color32, need: f32) -> Self {
         let worst = |fg: Color32| under.iter().map(|c| contrast(fg, *c)).fold(f32::INFINITY, f32::min);
         if let Some(fg) = [preferred, LIGHT, DARK].into_iter().find(|fg| worst(*fg) >= need) {

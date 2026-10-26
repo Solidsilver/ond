@@ -279,8 +279,9 @@ pub fn play_shuffle(ui: &mut Ui) -> Option<QueueAction> {
     picked
 }
 
-/// "Make available offline" / "Remove download", with the key that does it
-/// where there is one.
+/// The menu item that keeps something offline: "Make available offline" /
+/// "Remove download" (`kept`), with the key that does it where there is one.
+/// `what` names it as a [`Keep`], built only when clicked.
 pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl FnOnce() -> Keep, actions: &mut Vec<Action>) {
     let label = if kept { "Remove download" } else { "Make available offline" };
     let mut button = egui::Button::new(label);

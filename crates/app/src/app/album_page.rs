@@ -4,8 +4,9 @@
 //! per-track measurements, folded away until asked for. Playlists reuse the
 //! track list.
 
+use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
-use super::widgets::{Mark, chip, elide, heart_button, link};
+use super::widgets::{chip, elide, heart_button, link};
 use super::{Action, DragTracks, Focus, Keep, Overlay, PlaylistAction, QueueAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -165,6 +166,59 @@ pub(super) struct ListOpts {
     pub playlist: Option<String>,
 }
 
+/// A track row's height: a title alone, or a title over its artist.
+const ROW_H: f32 = 38.0;
+const ROW_H_ARTIST: f32 = 44.0;
+/// Room above a disc heading after the first.
+const DISC_GAP: f32 = 12.0;
+
+/// The album page's header stacks the artwork above the text below this width.
+const HEADER_STACK_BELOW: f32 = 460.0;
+/// The artwork's side beside the text: 30% of the width, within these.
+const HEADER_ART_MIN: f32 = 150.0;
+const HEADER_ART_MAX: f32 = 220.0;
+/// The header text's height before it's first measured.
+const HEADER_TEXT_H_GUESS: f32 = 150.0;
+
+/// What the album page's header draws from.
+struct AlbumHeader<'p> {
+    album: &'p library::Album,
+    tracks: &'p [Track],
+    facts: &'p AlbumFacts,
+    /// How many of its tracks wait to be (or are being) analysed.
+    analysing: usize,
+}
+
+impl ListOpts {
+    pub fn row_h(&self) -> f32 {
+        if self.artist { ROW_H_ARTIST } else { ROW_H }
+    }
+}
+
+/// What every row of one track list shares, worked out once per frame.
+struct List<'l> {
+    t: Tokens,
+    tracks: &'l [Track],
+    source: &'l Source,
+    opts: &'l ListOpts,
+    /// The playing track's id.
+    current: Option<&'l str>,
+}
+
+impl<'l> List<'l> {
+    fn new(ui: &Ui, player: &'l crate::player::Player, tracks: &'l [Track], source: &'l Source, opts: &'l ListOpts) -> Self {
+        Self { t: Tokens::of(ui), tracks, source, opts, current: player.queue.current.as_ref().map(|c| c.track.id.as_str()) }
+    }
+
+    /// The line where a reorder drag would land, at `drop_at`'s y.
+    fn drop_line(&self, ui: &Ui, drop_at: Option<(usize, f32)>) {
+        if let Some((_, y)) = drop_at {
+            let r = ui.min_rect();
+            ui.painter().line_segment([pos2(r.left() + 4.0, y), pos2(r.right() - 4.0, y)], egui::Stroke::new(2.0, self.t.accent));
+        }
+    }
+}
+
 impl ViewCtx<'_> {
     pub(super) fn album_page(&mut self, ui: &mut Ui, id: &str) {
         let t = Tokens::of(ui);
@@ -182,123 +236,10 @@ impl ViewCtx<'_> {
         }
         let key = (super::view_ctx::hash_str(id), data.version, analysis.version, tracks.as_ptr() as usize, tracks.len());
         let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis));
-        let summary = &facts.summary;
         let analysing = analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
+        let page = AlbumHeader { album, tracks, facts: &facts, analysing };
         super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-            // Header: art beside the text, or above it when there's no room.
-            let avail = ui.available_width();
-            let stacked = avail < 460.0;
-            let art_side = if stacked { avail.min(220.0) } else { (avail * 0.3).clamp(150.0, 220.0) };
-            let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
-            ui.with_layout(layout, |ui| {
-                let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
-                self.art.paint(ui, art, album.cover_art.as_deref(), 6.0);
-                ui.add_space(if stacked { 16.0 } else { 20.0 });
-                // The text block sits on the artwork's bottom edge. Its height
-                // (it wraps) is known after drawing, so use last frame's and
-                // redo the frame when it changed.
-                let measured = ui.scope_id().with(("album-header-h", id));
-                let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(150.0);
-                let block = ui.vertical(|ui| {
-                    if !stacked {
-                        ui.add_space((art_side - last_h).max(0.0));
-                    }
-                    let top = ui.cursor().top();
-                    ui.add(egui::Label::new(egui::RichText::new(&album.name).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
-                    if let Some(artist) = &album.artist
-                        && link(ui, artist, FontId::proportional(18.0), t.accent).clicked()
-                    {
-                        self.actions.push(Action::Go(Route::Artist { name: artist.clone(), id: album.artist_ref.clone() }));
-                    }
-                    ui.add_space(2.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        let small = FontId::proportional(12.0);
-                        let mut first = true;
-                        let mut sep = |ui: &mut Ui| {
-                            if !first {
-                                ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
-                            }
-                            first = false;
-                        };
-                        for g in album.all_genres() {
-                            sep(ui);
-                            if link(ui, g, small.clone(), t.muted).clicked() {
-                                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Genre, value: g.to_owned() }));
-                            }
-                        }
-                        if let Some(y) = album.year {
-                            sep(ui);
-                            if link(ui, &y.to_string(), small.clone(), t.muted).clicked() {
-                                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }));
-                            }
-                        }
-                        for l in &album.labels {
-                            sep(ui);
-                            if link(ui, l, small.clone(), t.muted).clicked() {
-                                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }));
-                            }
-                        }
-                        if let Some(f) = &facts.format {
-                            sep(ui);
-                            ui.label(egui::RichText::new(f).size(12.0).color(t.muted));
-                        }
-                        // Measurements once the whole album is known; a quiet
-                        // count while it's being worked on.
-                        if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
-                            sep(ui);
-                            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
-                                .on_hover_text("Dynamic range (DR meter), averaged across the album");
-                            sep(ui);
-                            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
-                                .on_hover_text("Integrated loudness (EBU R128), across the album");
-                        } else if analysing > 0 {
-                            sep(ui);
-                            ui.label(egui::RichText::new(format!("analyzing {}/{}", summary.analyzed, tracks.len())).size(12.0).color(t.muted));
-                        }
-                        if let Some((v, n)) = &summary.verdict {
-                            ui.add_space(10.0);
-                            let tracks_note = if *n == summary.analyzed { "every analyzed track".to_owned() } else { format!("{n} of {} analyzed tracks", summary.analyzed) };
-                            chip(ui, &v.label(), t.warn).on_hover_text(format!("{}\n\nSeen in {tracks_note}.", v.evidence()));
-                        }
-                    });
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if let Some(a) = super::browse::play_shuffle(ui) {
-                            self.actions.push(Action::Album(album.id.clone(), a));
-                        }
-                        let loved = self.favorites.is_on(StarKind::Album, &album.id);
-                        if heart_button(ui, loved, 30.0, 14.0).clicked() {
-                            self.actions.push(Action::ToggleStar { kind: StarKind::Album, id: album.id.clone(), track: None, name: None });
-                        }
-                        let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
-                        let pin = offline::Pin::Album(album.id.clone());
-                        let kept = self.downloads.snap.pin(&pin).is_some();
-                        egui::Popup::menu(&more).show(|ui| {
-                            let c = super::browse::Collection::Album(album.id.clone());
-                            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
-                            if !summary.complete() && analysing == 0 && !tracks.is_empty() {
-                                ui.separator();
-                                if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {
-                                    self.actions.push(Action::Analyze(tracks.to_vec()));
-                                }
-                            }
-                            if !tracks.is_empty() {
-                                ui.separator();
-                                self.add_to_playlist_menu(ui, tracks);
-                            }
-                        });
-                        ui.add_space(6.0);
-                        self.pin_status(ui, &pin);
-                    });
-                    ui.min_rect().bottom() - top
-                });
-                let h = block.inner.round();
-                if (h - last_h).abs() > 0.5 {
-                    ui.data_mut(|d| d.insert_temp(measured, h));
-                    ui.ctx().request_discard("album header height changed");
-                }
-            });
+            self.album_header(ui, &t, &page);
             ui.add_space(24.0);
             if tracks.is_empty() {
                 ui.label(egui::RichText::new("Loading tracks…").color(t.muted));
@@ -312,6 +253,140 @@ impl ViewCtx<'_> {
             self.album_details(ui, tracks, &facts, analysing > 0);
             ui.add_space(24.0);
         }));
+    }
+
+    /// The artwork beside the album's name, artist, facts and buttons, or
+    /// above them when there's no room.
+    fn album_header(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let avail = ui.available_width();
+        let stacked = avail < HEADER_STACK_BELOW;
+        let art_side = if stacked { avail.min(HEADER_ART_MAX) } else { (avail * 0.3).clamp(HEADER_ART_MIN, HEADER_ART_MAX) };
+        let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
+        ui.with_layout(layout, |ui| {
+            let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
+            self.art.paint(ui, art, page.album.cover_art.as_deref(), 6.0);
+            ui.add_space(if stacked { 16.0 } else { 20.0 });
+            // The text block sits on the artwork's bottom edge. Its height
+            // (it wraps) is known after drawing, so use last frame's and
+            // redo the frame when it changed.
+            let measured = ui.scope_id().with(("album-header-h", &page.album.id));
+            let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(HEADER_TEXT_H_GUESS);
+            let block = ui.vertical(|ui| {
+                if !stacked {
+                    ui.add_space((art_side - last_h).max(0.0));
+                }
+                let top = ui.cursor().top();
+                self.album_header_text(ui, t, page);
+                ui.min_rect().bottom() - top
+            });
+            let h = block.inner.round();
+            if (h - last_h).abs() > 0.5 {
+                ui.data_mut(|d| d.insert_temp(measured, h));
+                ui.ctx().request_discard("album header height changed");
+            }
+        });
+    }
+
+    /// The name, the artist, a line of facts and the buttons.
+    fn album_header_text(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let album = page.album;
+        ui.add(egui::Label::new(egui::RichText::new(&album.name).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
+        if let Some(artist) = &album.artist
+            && link(ui, artist, FontId::proportional(18.0), t.accent).clicked()
+        {
+            self.actions.push(Action::Go(Route::Artist { name: artist.clone(), id: album.artist_ref.clone() }));
+        }
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| self.album_facts_line(ui, t, page));
+        ui.add_space(12.0);
+        ui.horizontal(|ui| self.album_buttons(ui, t, page));
+    }
+
+    /// Genres, year and labels as links, the shared format, then the
+    /// measurements (or how far analysing has got) and any finding.
+    fn album_facts_line(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let (album, summary) = (page.album, &page.facts.summary);
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let small = FontId::proportional(12.0);
+        let mut first = true;
+        let mut sep = |ui: &mut Ui| {
+            if !first {
+                ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
+            }
+            first = false;
+        };
+        for g in album.all_genres() {
+            sep(ui);
+            if link(ui, g, small.clone(), t.muted).clicked() {
+                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Genre, value: g.to_owned() }));
+            }
+        }
+        if let Some(y) = album.year {
+            sep(ui);
+            if link(ui, &y.to_string(), small.clone(), t.muted).clicked() {
+                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Year, value: y.to_string() }));
+            }
+        }
+        for l in &album.labels {
+            sep(ui);
+            if link(ui, l, small.clone(), t.muted).clicked() {
+                self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }));
+            }
+        }
+        if let Some(f) = &page.facts.format {
+            sep(ui);
+            ui.label(egui::RichText::new(f).size(12.0).color(t.muted));
+        }
+        // Measurements once the whole album is known; a quiet
+        // count while it's being worked on.
+        if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
+            sep(ui);
+            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
+                .on_hover_text("Dynamic range (DR meter), averaged across the album");
+            sep(ui);
+            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
+                .on_hover_text("Integrated loudness (EBU R128), across the album");
+        } else if page.analysing > 0 {
+            sep(ui);
+            ui.label(egui::RichText::new(format!("analyzing {}/{}", summary.analyzed, page.tracks.len())).size(12.0).color(t.muted));
+        }
+        if let Some((v, n)) = &summary.verdict {
+            ui.add_space(10.0);
+            let tracks_note = if *n == summary.analyzed { "every analyzed track".to_owned() } else { format!("{n} of {} analyzed tracks", summary.analyzed) };
+            chip(ui, &v.label(), t.warn).on_hover_text(format!("{}\n\nSeen in {tracks_note}.", v.evidence()));
+        }
+    }
+
+    /// Play and Shuffle, the heart, ⋯ (the album's menu), and how its
+    /// download is going.
+    fn album_buttons(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let (album, tracks) = (page.album, page.tracks);
+        if let Some(a) = super::browse::play_shuffle(ui) {
+            self.actions.push(Action::Album(album.id.clone(), a));
+        }
+        let loved = self.favorites.is_on(StarKind::Album, &album.id);
+        if heart_button(ui, loved, 30.0, 14.0).clicked() {
+            self.actions.push(Action::ToggleStar { kind: StarKind::Album, id: album.id.clone(), track: None, name: None });
+        }
+        let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
+        let pin = offline::Pin::Album(album.id.clone());
+        let kept = self.downloads.snap.pin(&pin).is_some();
+        egui::Popup::menu(&more).show(|ui| {
+            let c = super::browse::Collection::Album(album.id.clone());
+            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
+            if !page.facts.summary.complete() && page.analysing == 0 && !tracks.is_empty() {
+                ui.separator();
+                if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {
+                    self.actions.push(Action::Analyze(tracks.to_vec()));
+                }
+            }
+            if !tracks.is_empty() {
+                ui.separator();
+                self.add_to_playlist_menu(ui, tracks);
+            }
+        });
+        ui.add_space(6.0);
+        self.pin_status(ui, &pin);
     }
 
     /// "Album details ›": the album's credits and its per-track measurements,
@@ -434,9 +509,8 @@ impl ViewCtx<'_> {
             super::widgets::empty_state(ui, Icon::Note, "This playlist is empty", hint);
             return;
         }
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-            self.track_list(ui, tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) });
-        }));
+        let scroll = egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).content_margin(super::layout::gutter());
+        super::layout::into_gutter(ui, |ui| self.track_list_rows(ui, scroll, tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) }));
     }
 
     /// Rename… and Delete… for one of the user's playlists.
@@ -517,159 +591,230 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Rows of tracks. Click selects, double-click (or ⏎) plays from there;
-    /// ⌥⏎ plays next, ⇧⏎ adds to the queue. Hovering a row shows its composer
-    /// and the queue actions; a loved track keeps its heart. Rows drag onto
-    /// a sidebar playlist, and within the user's own playlist, to reorder.
+    /// Rows of tracks, all laid out (the album page: short, with disc
+    /// headings, inside the page's own scroll area). Click selects,
+    /// double-click (or ⏎) plays from there; ⌥⏎ plays next, ⇧⏎ adds to the
+    /// queue. Hovering a row shows its composer and the queue actions; a
+    /// loved track keeps its heart. Rows drag onto a sidebar playlist.
     pub(super) fn track_list(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
-        let t = Tokens::of(ui);
-        self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
-        let player = self.player;
-        let current = player.queue.current.as_ref().map(|c| c.track.id.as_str());
-        let discs = tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1);
+        let moved = self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
+        let list = List::new(ui, self.player, tracks, source, &opts);
+        let discs = if opts.numbers { tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1) } else { 1 };
         let mut last_disc = None;
-        // Where a reorder drag would land: (index to insert at, y of the line).
-        let mut drop_at: Option<(usize, f32)> = None;
+        let mut drop_at = None;
         ui.spacing_mut().item_spacing.y = 0.0;
         for (i, tr) in tracks.iter().enumerate() {
-            if discs > 1 && opts.playlist.is_none() && tr.disc != last_disc {
+            if discs > 1 && tr.disc != last_disc {
                 last_disc = tr.disc;
-                ui.add_space(if i == 0 { 0.0 } else { 12.0 });
-                ui.label(egui::RichText::new(format!("Disc {}", tr.disc.unwrap_or(1))).font(FontId::new(12.0, semibold())).color(t.muted));
+                ui.add_space(if i == 0 { 0.0 } else { DISC_GAP });
+                ui.label(egui::RichText::new(format!("Disc {}", tr.disc.unwrap_or(1))).font(FontId::new(12.0, semibold())).color(list.t.muted));
                 ui.add_space(4.0);
             }
-            let h = if opts.artist { 44.0 } else { 38.0 };
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
-            let playing = current == Some(tr.id.as_str());
-            if self.ui.reveal.as_deref() == Some(tr.id.as_str()) {
-                self.ui.reveal = None;
-                self.ui.track_sel = Some(i);
-                self.ui.focus = Focus::Main;
-                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+            let row = TrackRow::new(ui, opts.row_h(), Sense::click_and_drag());
+            if self.take_reveal(tr, i) {
+                ui.scroll_to_rect(row.rect, Some(egui::Align::Center));
+            } else if moved && self.ui.track_sel == Some(i) {
+                ui.scroll_to_rect(row.rect, None);
             }
-            // Off screen: the space is kept, nothing else to do (long lists).
-            if !ui.is_rect_visible(rect) {
-                continue;
+            // Off screen: the space is kept, nothing else to do.
+            if ui.is_rect_visible(row.rect) {
+                drop_at = self.track_row(ui, &list, i, &row).or(drop_at);
             }
-            let selected = self.ui.focus == Focus::Main && self.ui.track_sel == Some(i);
-            let hovered = resp.hovered() || resp.contains_pointer();
-            let loved = self.favorites.is_on(StarKind::Song, &tr.id);
-            // Drag: the selection's track (or this one) to a playlist; within
-            // one's own playlist, also to a new place in it.
-            // (Built only when the drag starts, the one frame egui takes it: a
-            // copy per row per frame adds up on long lists.)
-            if resp.drag_started() {
-                resp.dnd_set_drag_payload(DragTracks { tracks: vec![tr.clone()], from: opts.playlist.clone().map(|p| (p, i)) });
-            }
-            if let Some(pid) = &opts.playlist {
-                if let Some(drag) = resp.dnd_hover_payload::<DragTracks>()
-                    && drag.from.as_ref().is_some_and(|(p, _)| p == pid)
-                    && let Some(p) = ui.ctx().pointer_hover_pos()
-                {
-                    let below = p.y > rect.center().y;
-                    drop_at = Some((if below { i + 1 } else { i }, if below { rect.bottom() } else { rect.top() }));
-                }
-                if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
-                    && let Some((p, from)) = &drag.from
-                    && p == pid
-                    && let Some(pos) = ui.ctx().pointer_interact_pos()
-                {
-                    let mut to = if pos.y > rect.center().y { i + 1 } else { i };
-                    if to > *from {
-                        to -= 1;
-                    }
-                    self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.clone(), from: *from, to }));
-                }
-            }
-            if ui.is_rect_visible(rect) {
-                ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
-                let mut x = rect.left() + 10.0;
-                let cy = rect.center().y;
-                // Offline, what isn't downloaded is dimmed rather than hidden.
-                let available = self.playable(tr);
-                let color = super::widgets::track_color(&t, playing, available);
-                if let Some(m) = Mark::of_track(self.downloads.snap.track(&tr.id)) {
-                    super::widgets::mark(ui, pos2(rect.right() - 48.0, cy), 10.0, m);
-                }
-                if opts.numbers {
-                    if playing {
-                        icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 12.0, cy), vec2(9.0, 9.0)), Icon::Play, t.accent);
-                    } else {
-                        let n = tr.track.map(|n| n.to_string()).unwrap_or_default();
-                        ui.painter().text(pos2(x + 18.0, cy), egui::Align2::RIGHT_CENTER, n, FontId::proportional(12.0), t.muted);
-                    }
-                    x += 34.0;
-                } else if playing {
-                    icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 4.0, cy), vec2(8.0, 8.0)), Icon::Play, t.accent);
-                    x += 16.0;
-                }
-                let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
-                ui.painter().text(pos2(rect.right() - 10.0, cy), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
-                // The heart sits just left of the duration: always when loved,
-                // on hover otherwise.
-                let heart = Rect::from_center_size(pos2(rect.right() - 70.0, cy), vec2(24.0, 24.0));
-                if loved || hovered {
-                    let label = if loved { "Unlove" } else { "Love" };
-                    let hr = super::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
-                    if hr.on_hover_text(label).clicked() {
-                        self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
-                    }
-                }
-                let actions_w = if hovered { 150.0 } else { 0.0 };
-                let text_w = rect.right() - 86.0 - actions_w - x;
-                let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-                if opts.artist {
-                    let title = elide(ui, &tr.title, title_font, color, text_w);
-                    ui.painter().galley(pos2(x, cy - title.size().y), title, color);
-                    let sub = elide(ui, tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted, text_w);
-                    ui.painter().galley(pos2(x, cy + 1.0), sub, t.muted);
-                } else {
-                    let title = elide(ui, &tr.title, title_font, color, text_w);
-                    let title_w = title.size().x;
-                    ui.painter().galley(pos2(x, cy - title.size().y / 2.0), title, color);
-                    if hovered && !available {
-                        let g = ui.painter().layout_no_wrap("Not downloaded".into(), FontId::proportional(12.0), t.muted);
-                        if title_w + 10.0 + g.size().x < text_w {
-                            ui.painter().galley(pos2(x + title_w + 10.0, cy - g.size().y / 2.0), g, t.muted);
-                        }
-                    }
-                    // Composer, on hover only.
-                    else if hovered && let Some(composer) = composer_of(tr) {
-                        let at = Rect::from_min_size(pos2(x + title_w + 10.0, cy - 8.0), vec2((text_w - title_w - 10.0).max(0.0), 16.0));
-                        if at.width() > 40.0 {
-                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                            child.spacing_mut().item_spacing.x = 0.0;
-                            child.label(egui::RichText::new("by ").size(12.0).color(t.muted));
-                            if link(&mut child, &composer, FontId::proportional(12.0), t.muted).clicked() {
-                                let id = tr.contributors.iter().find(|c| c.name == composer).and_then(|c| c.artist_id.clone());
-                                self.actions.push(Action::Go(Route::Artist { name: composer.clone(), id }));
-                            }
-                        }
-                    }
-                }
-                if hovered {
-                    let r = Rect::from_min_max(pos2(rect.right() - 86.0 - actions_w, rect.top()), pos2(rect.right() - 84.0, rect.bottom()));
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)));
-                    child.spacing_mut().item_spacing.x = 4.0;
-                    let more = icons::sized_button(&mut child, Icon::More, "More", vec2(24.0, 22.0), 11.0, Some(t.muted));
-                    egui::Popup::menu(&more).show(|ui| self.track_row_menu(ui, tr, i, source, opts.playlist.as_deref()));
-                    if child.add(egui::Button::new(egui::RichText::new("Play next").size(11.0)).corner_radius(11.0).stroke(egui::Stroke::new(1.0, t.hairline))).clicked() {
-                        self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: source.clone(), action: QueueAction::PlayNext });
-                    }
-                }
-            }
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, format!("{}{}{}", tr.title, if loved { ", loved" } else { "" }, if playing { ", playing" } else { "" })));
-            if resp.double_clicked() {
-                self.actions.push(Action::Tracks { tracks: tracks.to_vec(), source: source.clone(), action: QueueAction::Play { start: i } });
-            } else if resp.clicked() {
-                self.ui.track_sel = Some(i);
-                self.ui.focus = Focus::Main;
-            }
-            resp.context_menu(|ui| self.track_row_menu(ui, tr, i, source, opts.playlist.as_deref()));
         }
-        if let Some((_, y)) = drop_at {
-            let r = ui.min_rect();
-            ui.painter().line_segment([pos2(r.left() + 4.0, y), pos2(r.right() - 4.0, y)], egui::Stroke::new(2.0, t.accent));
+        list.drop_line(ui, drop_at);
+    }
+
+    /// [`track_list`](Self::track_list) in its own scroll area, laying out
+    /// only the rows on screen (a playlist or Favorites can run to thousands):
+    /// every row is the same height, and none has a disc heading. Within the
+    /// user's own playlist, rows also drag to a new place in it.
+    pub(super) fn track_list_rows(&mut self, ui: &mut Ui, scroll: egui::ScrollArea, tracks: &[Track], source: &Source, opts: ListOpts) {
+        let moved = self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
+        // A row to bring into view: the one asked to be revealed (centred), or
+        // the selection the keys just moved. It may be off screen, and so not
+        // laid out: it's placed by its index.
+        let revealed = self.ui.reveal.as_deref().and_then(|id| tracks.iter().position(|t| t.id == id));
+        if let Some(i) = revealed {
+            self.take_reveal(&tracks[i], i);
+        }
+        let bring = revealed.map(|i| (i, Some(egui::Align::Center))).or_else(|| self.ui.track_sel.filter(|_| moved).map(|i| (i, None)));
+        let list = List::new(ui, self.player, tracks, source, &opts);
+        let h = opts.row_h();
+        // Rows sit flush: the scroll area places them by the same height.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        scroll.show_rows(ui, h, tracks.len(), |ui, range| {
+            if let Some((i, align)) = bring {
+                let top = ui.cursor().top() + (i as f32 - range.start as f32) * h;
+                ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(ui.available_width(), h)), align);
+            }
+            let mut drop_at = None;
+            for i in range {
+                let row = TrackRow::new(ui, h, Sense::click_and_drag());
+                drop_at = self.track_row(ui, &list, i, &row).or(drop_at);
+            }
+            list.drop_line(ui, drop_at);
+        });
+    }
+
+    /// When `tr` (at `i`) is the track asked to be revealed: selects it and
+    /// says so, once (the caller scrolls to it).
+    fn take_reveal(&mut self, tr: &Track, i: usize) -> bool {
+        if self.ui.reveal.as_deref() != Some(tr.id.as_str()) {
+            return false;
+        }
+        self.ui.reveal = None;
+        self.ui.track_sel = Some(i);
+        self.ui.focus = Focus::Main;
+        true
+    }
+
+    /// The `i`th row of a track list. Returns where a reorder drag over it
+    /// would land: (index to insert at, y of the line).
+    fn track_row(&mut self, ui: &mut Ui, list: &List, i: usize, row: &TrackRow) -> Option<(usize, f32)> {
+        let tr = &list.tracks[i];
+        let playing = list.current == Some(tr.id.as_str());
+        let selected = self.ui.focus == Focus::Main && self.ui.track_sel == Some(i);
+        let loved = self.favorites.is_on(StarKind::Song, &tr.id);
+        let drop_at = self.track_row_drag(ui, list, i, row);
+        if ui.is_rect_visible(row.rect) {
+            self.paint_track_row(ui, list, i, row, playing, selected, loved);
+        }
+        row.describe(selected, || format!("{}{}{}", tr.title, if loved { ", loved" } else { "" }, if playing { ", playing" } else { "" }));
+        let resp = &row.resp;
+        if resp.double_clicked() {
+            self.actions.push(Action::Tracks { tracks: list.tracks.to_vec(), source: list.source.clone(), action: QueueAction::Play { start: i } });
+        } else if resp.clicked() {
+            self.ui.track_sel = Some(i);
+            self.ui.focus = Focus::Main;
+        }
+        resp.context_menu(|ui| self.track_row_menu(ui, tr, i, list.source, list.opts.playlist.as_deref()));
+        drop_at
+    }
+
+    /// Dragging the `i`th row: its track to a playlist; within one's own
+    /// playlist, also to a new place in it. Returns where a reorder dropped
+    /// on this row would land.
+    fn track_row_drag(&mut self, ui: &Ui, list: &List, i: usize, row: &TrackRow) -> Option<(usize, f32)> {
+        let (resp, rect, playlist) = (&row.resp, row.rect, &list.opts.playlist);
+        // Built only when the drag starts, the one frame egui takes it: a
+        // copy per row per frame adds up on long lists.
+        if resp.drag_started() {
+            resp.dnd_set_drag_payload(DragTracks { tracks: vec![list.tracks[i].clone()], from: playlist.clone().map(|p| (p, i)) });
+        }
+        let pid = playlist.as_ref()?;
+        let mut drop_at = None;
+        if let Some(drag) = resp.dnd_hover_payload::<DragTracks>()
+            && drag.from.as_ref().is_some_and(|(p, _)| p == pid)
+            && let Some(p) = ui.ctx().pointer_hover_pos()
+        {
+            let below = p.y > rect.center().y;
+            drop_at = Some((if below { i + 1 } else { i }, if below { rect.bottom() } else { rect.top() }));
+        }
+        if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
+            && let Some((p, from)) = &drag.from
+            && p == pid
+            && let Some(pos) = ui.ctx().pointer_interact_pos()
+        {
+            let mut to = if pos.y > rect.center().y { i + 1 } else { i };
+            if to > *from {
+                to -= 1;
+            }
+            self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.clone(), from: *from, to }));
+        }
+        drop_at
+    }
+
+    /// Draws the `i`th row: number or playing mark, title (and artist), and at
+    /// the right end the length, the download mark and the heart; on hover,
+    /// the composer (or why it can't play) and the actions.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_track_row(&mut self, ui: &mut Ui, list: &List, i: usize, row: &TrackRow, playing: bool, selected: bool, loved: bool) {
+        let (t, opts, tr) = (&list.t, list.opts, &list.tracks[i]);
+        let (rect, cy) = (row.rect, row.cy());
+        let hovered = row.pointer_on();
+        row.fill(ui, t, selected, hovered);
+        let mut x = rect.left() + col::INSET;
+        // Offline, what isn't downloaded is dimmed rather than hidden.
+        let available = self.playable(tr);
+        let color = super::widgets::track_color(t, playing, available);
+        row.mark(ui, rect.right() - col::MARK_FROM_RIGHT, self.downloads.snap.track(&tr.id));
+        if opts.numbers {
+            if playing {
+                let side = col::NUMBER_PLAYING;
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(x + col::NUMBER_PLAYING_X, cy), vec2(side, side)), Icon::Play, t.accent);
+            } else {
+                let n = tr.track.map(|n| n.to_string()).unwrap_or_default();
+                row.right_text(ui, x + col::NUMBER_RIGHT, n, FontId::proportional(12.0), t.muted);
+            }
+            x += col::NUMBER_W;
+        } else if playing {
+            x = row.playing(ui, t, x);
+        }
+        row.right_text(ui, rect.right() - col::INSET, length(tr), FontId::proportional(12.0), t.muted);
+        // The heart sits just left of the duration: always when loved,
+        // on hover otherwise.
+        let heart = Rect::from_center_size(pos2(rect.right() - col::HEART_FROM_RIGHT, cy), vec2(col::HEART_BOX, col::HEART_BOX));
+        if loved || hovered {
+            let label = if loved { "Unlove" } else { "Love" };
+            let hr = super::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
+            if hr.on_hover_text(label).clicked() {
+                self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
+            }
+        }
+        let actions_w = if hovered { col::ACTIONS_W } else { 0.0 };
+        let text_w = rect.right() - col::TEXT_FROM_RIGHT - actions_w - x;
+        let title_font = title_font(13.0, playing);
+        if opts.artist {
+            row.two_lines(ui, x, text_w, (&tr.title, title_font, color), (tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted));
+        } else {
+            let title_w = row.line(ui, x, text_w, &tr.title, title_font, color);
+            if hovered {
+                self.track_row_aside(ui, t, tr, row, x + title_w + col::GAP, text_w - title_w - col::GAP, available);
+            }
+        }
+        if hovered {
+            let r = Rect::from_min_max(pos2(rect.right() - col::TEXT_FROM_RIGHT - actions_w, rect.top()), pos2(rect.right() - col::ACTIONS_END, rect.bottom()));
+            self.track_row_actions(ui, t, list, i, r);
+        }
+    }
+
+    /// After a hovered title, in `width` from `x`: "Not downloaded" when it
+    /// can't play now, else its composer as a link.
+    #[allow(clippy::too_many_arguments)]
+    fn track_row_aside(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, row: &TrackRow, x: f32, width: f32, available: bool) {
+        let cy = row.cy();
+        if !available {
+            let g = ui.painter().layout_no_wrap("Not downloaded".into(), FontId::proportional(12.0), t.muted);
+            if g.size().x < width {
+                ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, t.muted);
+            }
+            return;
+        }
+        let Some(composer) = composer_of(tr) else { return };
+        let at = Rect::from_min_size(pos2(x, cy - 8.0), vec2(width.max(0.0), 16.0));
+        // Too little room for "by" and a name worth reading.
+        if at.width() <= 40.0 {
+            return;
+        }
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        child.spacing_mut().item_spacing.x = 0.0;
+        child.label(egui::RichText::new("by ").size(12.0).color(t.muted));
+        if link(&mut child, &composer, FontId::proportional(12.0), t.muted).clicked() {
+            let id = tr.contributors.iter().find(|c| c.name == composer).and_then(|c| c.artist_id.clone());
+            self.actions.push(Action::Go(Route::Artist { name: composer.clone(), id }));
+        }
+    }
+
+    /// A hovered row's buttons, right to left in `r`: ⋯ (the row's menu) and
+    /// Play Next.
+    fn track_row_actions(&mut self, ui: &mut Ui, t: &Tokens, list: &List, i: usize, r: Rect) {
+        let tr = &list.tracks[i];
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        child.spacing_mut().item_spacing.x = 4.0;
+        let more = icons::sized_button(&mut child, Icon::More, "More", vec2(24.0, 22.0), 11.0, Some(t.muted));
+        egui::Popup::menu(&more).show(|ui| self.track_row_menu(ui, tr, i, list.source, list.opts.playlist.as_deref()));
+        if child.add(egui::Button::new(egui::RichText::new("Play next").size(11.0)).corner_radius(11.0).stroke(egui::Stroke::new(1.0, t.hairline))).clicked() {
+            self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: list.source.clone(), action: QueueAction::PlayNext });
         }
     }
 
@@ -776,14 +921,16 @@ impl ViewCtx<'_> {
 
     /// ↑/↓ select, ⏎ play from the selection, ⌥⏎ play next, ⇧⏎ add. In the
     /// user's own playlist, ⌥↑/⌥↓ move the selected song and ⌫ removes it.
-    pub(super) fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) {
+    /// Returns whether ↑/↓ moved the selection (to bring it into view).
+    pub(super) fn track_list_keys(&mut self, ui: &Ui, tracks: &[Track], source: &Source, playlist: Option<&str>) -> bool {
         if tracks.is_empty() {
-            return;
+            return false;
         }
-        let Some(k) = self.list_keys(ui, Focus::Main, playlist.is_some(), false) else { return };
+        let Some(k) = self.list_keys(ui, Focus::Main, playlist.is_some(), false) else { return false };
         let last = tracks.len() - 1;
         self.ui.track_sel = k.step(self.ui.track_sel, tracks.len());
-        let Some(sel) = self.ui.track_sel.filter(|s| *s <= last) else { return };
+        let moved = k.up || k.down;
+        let Some(sel) = self.ui.track_sel.filter(|s| *s <= last) else { return moved };
         if let Some(pid) = playlist {
             if k.move_up && sel > 0 {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.to_owned(), from: sel, to: sel - 1 }));
@@ -804,6 +951,7 @@ impl ViewCtx<'_> {
         if k.add {
             self.actions.push(Action::Tracks { tracks: vec![tracks[sel].clone()], source: source.clone(), action: QueueAction::Add });
         }
+        moved
     }
 }
 

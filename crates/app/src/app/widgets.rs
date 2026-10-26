@@ -6,11 +6,23 @@ use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align2, Color32, FontId, Galley, Rect, Response, Sense, Ui, vec2};
 use std::sync::Arc;
 
-/// One line of text cut to `width` with an ellipsis.
+/// One line of text cut to `width` with an ellipsis. The one way the app
+/// shortens a name to fit: lists, headers, the display, the visualizer's
+/// caption (through [`elide_job`]) and [`link_line`].
 pub fn elide(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
+    ui.painter().layout_job(elide_job(text, font, color, width))
+}
+
+/// The layout [`elide`] lays out, for a painter without a `Ui`.
+pub fn elide_job(text: &str, font: FontId, color: Color32, width: f32) -> LayoutJob {
     let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    ui.painter().layout_job(job)
+    job.wrap = elide_wrap(width);
+    job
+}
+
+/// One row of at most `width`, cut anywhere, ending in an ellipsis.
+fn elide_wrap(width: f32) -> TextWrapping {
+    TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') }
 }
 
 /// Text that reads as plain until hovered, then underlines: links where they
@@ -26,8 +38,7 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
 /// A link kept to one line of at most `width`, cut with an ellipsis; the whole
 /// text shows on hover when it was cut.
 pub fn link_line(ui: &mut Ui, text: &str, font: FontId, color: Color32, width: f32) -> Response {
-    let wrap = TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let resp = link_with(ui, text, font.clone(), color, wrap);
+    let resp = link_with(ui, text, font.clone(), color, elide_wrap(width));
     let whole = ui.painter().layout_no_wrap(text.to_owned(), font, color).size().x;
     if whole > resp.rect.width() + 0.5 { resp.on_hover_text(text) } else { resp }
 }
