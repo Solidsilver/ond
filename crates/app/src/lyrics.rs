@@ -33,11 +33,12 @@ pub fn pick(versions: Vec<subsonic::StructuredLyrics>) -> Option<Lyrics> {
     for v in versions {
         let synced = v.synced && v.line.iter().any(|l| l.start.is_some());
         let lyrics = if synced {
+            // A positive offset shows the lines sooner (OpenSubsonic, as in LRC).
             let offset = v.offset.unwrap_or(0);
             let mut lines: Vec<Line> = v
                 .line
                 .into_iter()
-                .filter_map(|l| Some(Line { start_ms: (l.start? + offset).max(0), text: squash(&l.value) }))
+                .filter_map(|l| Some(Line { start_ms: l.start?.saturating_sub(offset).max(0), text: squash(&l.value) }))
                 .collect();
             lines.sort_by_key(|l| l.start_ms);
             Lyrics::Synced(lines)
@@ -339,10 +340,29 @@ mod tests {
     #[test]
     fn picks_synced_over_plain_and_applies_offset() {
         let plain = StructuredLyrics { synced: false, line: vec![ln(None, "many many words here"), ln(None, "and more words")], ..Default::default() };
-        let synced = StructuredLyrics { synced: true, offset: Some(-200), line: vec![ln(Some(1000), "one"), ln(Some(100), "zero")], ..Default::default() };
+        let synced = StructuredLyrics { synced: true, offset: Some(200), line: vec![ln(Some(1000), "one"), ln(Some(100), "zero")], ..Default::default() };
         let got = pick(vec![plain, synced]).unwrap();
         // Sorted, shifted, never negative.
         assert_eq!(got, Lyrics::Synced(vec![Line { start_ms: 0, text: "zero".into() }, Line { start_ms: 800, text: "one".into() }]));
+    }
+
+    /// OpenSubsonic, `structuredLyrics.offset`: "The offset to apply to all
+    /// lyrics, in milliseconds. Positive means lyrics appear sooner, negative
+    /// means later." (opensubsonic.netlify.app/docs/responses/structuredlyrics).
+    /// Navidrome passes an `.lrc` file's `[offset:]` through unchanged, and in
+    /// LRC too a positive offset shows the words earlier.
+    #[test]
+    fn a_positive_offset_shows_lines_sooner_and_a_negative_one_later() {
+        let at = |offset| {
+            let v = StructuredLyrics { synced: true, offset: Some(offset), line: vec![ln(Some(5000), "line")], ..Default::default() };
+            match pick(vec![v]) {
+                Some(Lyrics::Synced(l)) => l[0].start_ms,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(at(300), 4700);
+        assert_eq!(at(-300), 5300);
+        assert_eq!(at(0), 5000);
     }
 
     #[test]
