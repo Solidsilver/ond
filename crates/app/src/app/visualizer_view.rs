@@ -6,11 +6,13 @@
 //! for a few seconds when it starts. Drawn on the GPU (see `visuals::gpu`),
 //! or with the painter where there's no wgpu renderer to hand.
 
+use super::widgets::elide_job;
 use super::{Action, OndApp};
 use crate::visuals::visualizer::{Dot, Input, Kind, Pick, Picture, Rng, Scene, caption_alpha, name_alpha};
 use crate::visuals::{EVERY_FRAME, gpu};
-use egui::{Align2, Color32, FontId, Key, Modifiers, Rect, Ui, pos2, vec2};
+use egui::{Align2, Color32, FontId, Galley, Key, Modifiers, Rect, Ui, pos2, vec2};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// Earlier frames the painter version keeps, for its trails.
 const TRAIL: usize = 8;
@@ -220,14 +222,14 @@ impl OndApp {
             let name = name_alpha(now - switched.max(opened));
             if name > 0.0 {
                 let at = pos2(rect.center().x, rect.top() + 72.0);
-                shadowed(ui.painter(), at, Align2::CENTER_CENTER, kind.label(), FontId::new(22.0, crate::theme::semibold()), 230.0 * name);
+                shadowed_text(ui.painter(), at, Align2::CENTER_CENTER, kind.label(), FontId::new(22.0, crate::theme::semibold()), 230.0 * name);
                 ctx.request_repaint();
             }
             let since_open = now - opened;
             if since_open < HINT_SECS + 1.0 {
                 let a = (1.0 - (since_open - HINT_SECS).max(0.0)) as f32;
                 let hint = crate::keys::shown("← → to switch · F for full screen · Esc to leave").into_owned();
-                shadowed(ui.painter(), pos2(rect.center().x, rect.bottom() - 28.0), Align2::CENTER_CENTER, &hint, FontId::proportional(12.0), 140.0 * a);
+                shadowed_text(ui.painter(), pos2(rect.center().x, rect.bottom() - 28.0), Align2::CENTER_CENTER, &hint, FontId::proportional(12.0), 140.0 * a);
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64((HINT_SECS + 1.0 - since_open).clamp(0.02, 1.0)));
             }
             body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, format!("Visualizer: {}", kind.label())));
@@ -243,11 +245,18 @@ impl OndApp {
     }
 }
 
-/// White text with a soft dark edge, so it reads over bright light; `alpha` 0..=255.
-fn shadowed(painter: &egui::Painter, at: egui::Pos2, align: Align2, text: &str, font: FontId, alpha: f32) {
-    let shadow = Color32::from_black_alpha((alpha * 0.6) as u8);
-    painter.text(at + vec2(0.0, 1.0), align, text, font.clone(), shadow);
-    painter.text(at, align, text, font, Color32::from_white_alpha(alpha as u8));
+/// `galley` in white with a soft dark edge, so it reads over bright light,
+/// placed by `align` at `at`; `alpha` 0..=255 (clamped).
+fn shadowed(painter: &egui::Painter, at: egui::Pos2, align: Align2, galley: Arc<Galley>, alpha: f32) {
+    let alpha = alpha.clamp(0.0, 255.0);
+    let min = align.anchor_size(at, galley.size()).min;
+    painter.galley_with_override_text_color(min + vec2(0.0, 1.0), galley.clone(), Color32::from_black_alpha((alpha * 0.6) as u8));
+    painter.galley_with_override_text_color(min, galley, Color32::from_white_alpha(alpha as u8));
+}
+
+/// [`shadowed`] text on one line, whole.
+fn shadowed_text(painter: &egui::Painter, at: egui::Pos2, align: Align2, text: &str, font: FontId, alpha: f32) {
+    shadowed(painter, at, align, painter.layout_no_wrap(text.to_owned(), font, Color32::WHITE), alpha);
 }
 
 /// The cover, title, artist and album in the bottom-left corner, at `alpha` (0..=1).
@@ -271,27 +280,9 @@ fn paint_caption(painter: &egui::Painter, rect: Rect, art: Option<egui::TextureH
     let mut y = tile.center().y - line_h * shown.len() as f32 / 2.0 + line_h / 2.0;
     let room = (rect.right() - x - MARGIN).max(40.0);
     for (text, font, a) in shown {
-        let galley = painter.layout(text.to_owned(), font.clone(), Color32::WHITE, room);
-        let text = if galley.rows.len() > 1 { elide(painter, text, &font, room) } else { text.to_owned() };
-        shadowed(painter, pos2(x, y), Align2::LEFT_CENTER, &text, font, a * alpha);
+        shadowed(painter, pos2(x, y), Align2::LEFT_CENTER, painter.layout_job(elide_job(text, font, Color32::WHITE, room)), a * alpha);
         y += line_h;
     }
-}
-
-/// `text` cut to fit `room` points, with an ellipsis.
-fn elide(painter: &egui::Painter, text: &str, font: &FontId, room: f32) -> String {
-    let fits = |s: &str| painter.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x <= room;
-    let chars: Vec<char> = text.chars().collect();
-    let (mut lo, mut hi) = (0, chars.len());
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if fits(&format!("{}…", chars[..mid].iter().collect::<String>())) {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    format!("{}…", chars[..lo].iter().collect::<String>().trim_end())
 }
 
 /// The painter version: the backdrop, then each light as a soft dot or a

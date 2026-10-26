@@ -4,7 +4,7 @@
 //! when there is one, and the user's plays. It follows playback.
 
 use super::album_page::{Credit, credits};
-use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link};
+use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use super::view_ctx::ViewCtx;
 use super::{Action, SongStats};
 use crate::icons::Icon;
@@ -183,20 +183,17 @@ impl ViewCtx<'_> {
                 let title = elide(ui, &track.title, FontId::new(14.0, semibold()), t.text, text_w);
                 let (r, _) = ui.allocate_exact_size(title.size(), Sense::hover());
                 ui.painter().galley(r.min, title, t.text);
-                if let Some(artist) = &track.artist {
-                    let shown = elide(ui, artist, FontId::proportional(VALUE), t.accent, text_w).text().to_owned();
-                    if link(ui, &shown, FontId::proportional(VALUE), t.accent).clicked()
-                        && let Some(route) = Route::artist_of(track)
-                    {
-                        self.actions.push(Action::Go(route));
-                    }
+                if let Some(artist) = &track.artist
+                    && link_line(ui, artist, FontId::proportional(VALUE), t.accent, text_w).clicked()
+                    && let Some(route) = Route::artist_of(track)
+                {
+                    self.actions.push(Action::Go(route));
                 }
-                if let Some(al) = album {
-                    let shown = elide(ui, &al.name, FontId::proportional(VALUE), t.muted, text_w).text().to_owned();
-                    if link(ui, &shown, FontId::proportional(VALUE), t.muted).clicked() {
-                        self.ui.reveal = Some(track.id.clone());
-                        self.actions.push(Action::Go(Route::Album(al.id.clone())));
-                    }
+                if let Some(al) = album
+                    && link_line(ui, &al.name, FontId::proportional(VALUE), t.muted, text_w).clicked()
+                {
+                    self.ui.reveal = Some(track.id.clone());
+                    self.actions.push(Action::Go(Route::Album(al.id.clone())));
                 }
             });
         });
