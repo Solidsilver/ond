@@ -255,8 +255,10 @@ impl Worker {
             }
             In::Known(info) => {
                 if self.known.len() >= KNOWN_MAX && !self.known.contains_key(&info.track_id) {
-                    let keep = self.current.as_ref().map(|c| c.track_id.clone());
-                    self.known.retain(|id, _| Some(id) == keep.as_ref());
+                    // Keep the playing track's, which an engine restart shows again.
+                    let current = self.current.as_ref().map(|c| &c.track_id);
+                    let listen = self.listen.as_ref().map(|l| &l.track_id);
+                    self.known.retain(|id, _| Some(id) == current || Some(id) == listen);
                 }
                 // A late description of the current track (e.g. the album name arrived).
                 if self.current.as_ref().is_some_and(|c| c.track_id == info.track_id) {
@@ -278,6 +280,10 @@ impl Worker {
                 // The engine started the same track over (device switch, a seek
                 // it couldn't serve in place): the same listen carries on.
                 if restart && self.listen.as_ref().is_some_and(|l| l.track_id == track_id) {
+                    // The poller may have seen the engine stopped in between and cleared it.
+                    if self.current.as_ref().is_none_or(|c| c.track_id != track_id) {
+                        self.current = self.known.get(&track_id).cloned();
+                    }
                     self.publisher.reset();
                     return;
                 }
@@ -319,8 +325,11 @@ impl Worker {
         let pos = status.position_secs();
         let now = self.now();
         if state == State::Stopped {
+            // The listen stays. The engine passes through Stopped when it starts
+            // the same track over (a device switch, the queue changing at a
+            // boundary), and the restart carries the listen on; dropping it here
+            // would count the play again. Any real new start replaces it.
             self.current = None;
-            self.listen = None;
         }
         if let Some(l) = self.listen.as_mut() {
             l.set_duration(status.duration_secs());
@@ -464,28 +473,199 @@ mod tests {
         assert!(p.should("b", State::Playing, 1.0, 34.0));
     }
 
+    /// A worker with no client (plays it submits wait in its retry queue) over a
+    /// `Status` the test sets with `preview`. Its clock is moved by hand.
+    struct Rig {
+        w: Worker,
+        status: Arc<Status>,
+        _rt: tokio::runtime::Runtime,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Long enough that four minutes of it count, twice over.
+    const SONG_SECS: f64 = 600.0;
+
+    impl Rig {
+        fn new(scrobble: bool) -> Self {
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let status = Arc::new(Status::default());
+            let cfg = Config {
+                status: status.clone(),
+                rt: rt.handle().clone(),
+                art_dir: dir.path().join("art"),
+                retry_file: dir.path().join("scrobbles.json"),
+                scrobble,
+                remote: Arc::new(|_| {}),
+            };
+            let (tx, _rx) = channel();
+            Self { w: Worker::new(cfg, tx), status, _rt: rt, _dir: dir }
+        }
+
+        fn started(&mut self, id: &str, restart: bool) {
+            let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+            self.w.engine(audio::Event::TrackStarted { track_id: id.into(), token: 1, format, gapless: false, restart });
+        }
+
+        /// One look by the poller, `secs` after the last one.
+        fn look(&mut self, state: PlayState, pos: f64, secs: f64) {
+            self.status.preview(state, pos, SONG_SECS, 1.0);
+            self.w.clock = self.w.clock.checked_sub(Duration::from_secs_f64(secs)).expect("clock");
+            self.w.poll();
+        }
+
+        /// Plays from `from` for `secs`, looked at every second.
+        fn play(&mut self, from: f64, secs: u32) -> f64 {
+            self.look(PlayState::Playing, from, 0.0);
+            let mut pos = from;
+            for _ in 0..secs {
+                pos += 1.0;
+                self.look(PlayState::Playing, pos, 1.0);
+            }
+            pos
+        }
+
+        fn info(id: &str) -> Info {
+            Info { track_id: id.into(), title: id.into(), artist: None, album: None, duration_secs: Some(SONG_SECS), cover: None }
+        }
+    }
+
     #[test]
     fn an_engine_restart_keeps_the_listen() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config {
-            status: Arc::default(),
-            rt: rt.handle().clone(),
-            art_dir: dir.path().join("art"),
-            retry_file: dir.path().join("scrobbles.json"),
-            scrobble: false,
-            remote: Arc::new(|_| {}),
-        };
-        let (tx, _rx) = channel();
-        let mut w = Worker::new(cfg, tx);
-        let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
-        let started = |restart| audio::Event::TrackStarted { track_id: "a".into(), token: 1, format, gapless: false, restart };
-        w.engine(started(false));
-        let first = w.listen.as_ref().unwrap().started_ms;
+        let mut r = Rig::new(false);
+        r.started("a", false);
+        let first = r.w.listen.as_ref().unwrap().started_ms;
         std::thread::sleep(Duration::from_millis(5));
-        w.engine(started(true));
-        assert_eq!(w.listen.as_ref().unwrap().started_ms, first, "same listen after a restart");
-        w.engine(started(false));
-        assert_ne!(w.listen.as_ref().unwrap().started_ms, first, "a real new start is a new listen");
+        r.started("a", true);
+        assert_eq!(r.w.listen.as_ref().unwrap().started_ms, first, "same listen after a restart");
+        r.started("a", false);
+        assert_ne!(r.w.listen.as_ref().unwrap().started_ms, first, "a real new start is a new listen");
+    }
+
+    #[test]
+    fn a_stop_seen_during_an_engine_restart_does_not_scrobble_twice() {
+        // A device switch stops the engine, then starts the track again where it
+        // was; the poller can look in between.
+        let mut r = Rig::new(true);
+        r.w.handle(In::Known(Rig::info("a")));
+        r.started("a", false);
+        let first = r.w.listen.as_ref().unwrap().started_ms;
+        let pos = r.play(0.0, 245);
+        assert_eq!(r.w.retry.len(), 1, "four minutes count");
+        r.look(PlayState::Stopped, 0.0, 0.5);
+        std::thread::sleep(Duration::from_millis(5));
+        r.look(PlayState::Loading, 0.0, 0.5);
+        r.started("a", true);
+        assert_eq!(r.w.listen.as_ref().map(|l| l.started_ms), Some(first), "the same listen carries on");
+        assert_eq!(r.w.current.as_ref().map(|c| c.track_id.as_str()), Some("a"), "and the system still shows the track");
+        r.play(pos, 245);
+        assert_eq!(r.w.retry.len(), 1, "the play counted once");
+    }
+
+    #[test]
+    fn a_real_stop_then_the_same_track_again_is_a_new_listen() {
+        let mut r = Rig::new(true);
+        r.started("a", false);
+        r.play(0.0, 245);
+        assert_eq!(r.w.retry.len(), 1);
+        r.look(PlayState::Stopped, 0.0, 1.0);
+        assert!(r.w.current.is_none(), "a stop clears what the system shows");
+        std::thread::sleep(Duration::from_millis(5));
+        r.started("a", false);
+        r.play(0.0, 245);
+        assert_eq!(r.w.retry.len(), 2, "played again: counted again");
+    }
+
+    fn client() -> Client {
+        // Requests are spawned on the rig's runtime, which never runs them.
+        Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap()
+    }
+
+    fn pending(id: &str, time_ms: u64) -> PendingPlay {
+        PendingPlay { id: id.into(), time_ms }
+    }
+
+    fn answer(r: &mut Rig, play: PendingPlay, outcome: Outcome, from_retry: bool) {
+        r.w.handle(In::Submitted { play, outcome, from_retry });
+    }
+
+    #[test]
+    fn a_new_play_waits_behind_older_ones() {
+        let mut r = Rig::new(true);
+        r.w.retry.push(pending("old", 1));
+        r.w.handle(In::Client(client()));
+        r.w.flush_retries();
+        assert!(r.w.flushing, "the old play is being sent");
+        r.started("a", false);
+        r.play(0.0, 245);
+        let new = pending("a", r.w.listen.as_ref().unwrap().started_ms);
+        assert_eq!(r.w.retry.len(), 2, "queued, not sent ahead of the old one");
+        assert_eq!(r.w.retry.front(), Some(&pending("old", 1)));
+        answer(&mut r, pending("old", 1), Outcome::Done, true);
+        assert_eq!(r.w.retry.front(), Some(&new), "then it's sent");
+        assert!(r.w.flushing);
+        answer(&mut r, new, Outcome::Done, true);
+        assert!(r.w.retry.is_empty());
+        assert!(!r.w.flushing);
+    }
+
+    #[test]
+    fn a_play_goes_straight_out_when_nothing_waits() {
+        let mut r = Rig::new(true);
+        r.w.handle(In::Client(client()));
+        r.started("a", false);
+        r.play(0.0, 245);
+        assert!(r.w.retry.is_empty(), "sent, not queued");
+        assert!(!r.w.flushing);
+        // The server couldn't be reached: it waits, and so do retries.
+        let play = pending("a", r.w.listen.as_ref().unwrap().started_ms);
+        let before = Instant::now();
+        answer(&mut r, play.clone(), Outcome::Unreachable, false);
+        assert_eq!(r.w.retry.front(), Some(&play));
+        assert!(r.w.next_flush >= before + RETRY_EVERY);
+    }
+
+    #[test]
+    fn an_unreachable_server_is_retried_later() {
+        let mut r = Rig::new(true);
+        r.w.retry.push(pending("a", 1));
+        r.w.retry.push(pending("b", 2));
+        r.w.handle(In::Client(client()));
+        r.w.flush_retries();
+        let before = Instant::now();
+        answer(&mut r, pending("a", 1), Outcome::Unreachable, true);
+        assert!(!r.w.flushing, "nothing in flight");
+        assert!(r.w.next_flush >= before + RETRY_EVERY, "the next try waits");
+        assert_eq!(r.w.retry.len(), 2, "both kept, in order");
+        assert_eq!(r.w.retry.front(), Some(&pending("a", 1)));
+        // A refusal is final: dropped, and the rest carry on.
+        r.w.flush_retries();
+        answer(&mut r, pending("a", 1), Outcome::Refused, true);
+        assert_eq!(r.w.retry.front(), Some(&pending("b", 2)));
+        assert!(r.w.flushing);
+    }
+
+    #[test]
+    fn forgetting_descriptions_keeps_the_playing_track() {
+        let mut r = Rig::new(false);
+        r.w.handle(In::Known(Rig::info("a")));
+        r.started("a", false);
+        for i in 1..KNOWN_MAX {
+            r.w.handle(In::Known(Rig::info(&format!("t{i}"))));
+        }
+        assert_eq!(r.w.known.len(), KNOWN_MAX);
+        r.w.handle(In::Known(Rig::info("next")));
+        let mut kept: Vec<_> = r.w.known.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(kept, ["a", "next"]);
+        // Also while a restart is under way and nothing is shown.
+        r.look(PlayState::Stopped, 0.0, 0.5);
+        assert!(r.w.current.is_none());
+        for i in 1..KNOWN_MAX {
+            r.w.handle(In::Known(Rig::info(&format!("u{i}"))));
+        }
+        assert!(r.w.known.contains_key("a"));
+        r.started("a", true);
+        assert_eq!(r.w.current.as_ref().map(|c| c.track_id.as_str()), Some("a"));
     }
 }
