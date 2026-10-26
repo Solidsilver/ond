@@ -1044,6 +1044,39 @@ mod tests {
     }
 
     #[test]
+    fn a_device_buffer_larger_than_the_scratch_is_filled_in_chunks() {
+        // 10 stereo frames through a 3-frame scratch (3 + 3 + 3 + 1), with a
+        // track boundary inside the second chunk.
+        let src: Vec<f32> = (1..=20).map(|i| i as f32 / 32_768.0).collect();
+        let (_p, mut m, input) = ring(&src, true);
+        let mut input = input.with_source(Some(16), false);
+        m.push(at(8)).unwrap();
+        let status = bit_perfect_status();
+        let (mut out, mut scratch) = ([0i16; 20], [0.0f32; 6]);
+        let drained = fill_converted(&mut input, &mut out, &mut scratch, 2, RATE, &status, Some(16), &mut Tpdf::default());
+        assert_eq!(out.to_vec(), (1..=20).collect::<Vec<i16>>(), "every chunk in order, nothing repeated or lost");
+        assert_eq!(status.track_seq.load(Ordering::Relaxed), 1);
+        assert_eq!(status.frames_played.load(Ordering::Relaxed), 6, "frames since the boundary");
+        assert_eq!(status.underruns.load(Ordering::Relaxed), 0);
+        assert!(!drained, "the chunks after the end don't hide that this buffer has the last samples");
+        let drained = fill_converted(&mut input, &mut out, &mut scratch, 2, RATE, &status, Some(16), &mut Tpdf::default());
+        assert!(drained && out == [0; 20]);
+    }
+
+    #[test]
+    fn a_seek_fade_with_less_queued_than_its_length_fades_what_there_is() {
+        let status = Status::default();
+        // The fade is 4 frames at 1 kHz; only 2 are queued.
+        let (_p, _m, mut input) = ring(&[0.8; 4], false);
+        input.ctl.hold();
+        let mut out = [9.0f32; 16];
+        input.fill(&mut out, 2, RATE, &status);
+        assert_eq!(out[..4], [0.8, 0.8, 0.4, 0.4], "faded over the two frames there are");
+        assert!(out[4..].iter().all(|s| *s == 0.0));
+        assert!(input.samples.is_empty());
+    }
+
+    #[test]
     fn a_16_bit_cpal_device_gets_dither_not_truncation() {
         // A quarter of a 16-bit step, from a 24-bit source: truncation would
         // turn all of it into silence; dither keeps it, on average.

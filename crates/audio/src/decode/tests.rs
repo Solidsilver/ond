@@ -636,3 +636,58 @@ fn a_track_shorter_than_the_prebuffer_plays_out() {
     play_to_end(&s, &mut dev);
     assert_eq!(dev.played, a);
 }
+
+#[test]
+fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
+    const N: usize = MARKER_CAP + 4;
+    let dir = tempfile::tempdir().unwrap();
+    // 0.2 s each: more than the decoder lingers over (0.1 s) at a track's end
+    // when nothing follows, so it waits there for each next track to be named.
+    let tracks: Vec<Vec<i16>> = (0..N).map(|i| pcm(2 * 8_820, 100 + i as i64)).collect();
+    let srcs: Vec<TrackSource> = tracks.iter().enumerate().map(|(i, t)| file_source(&dir, &format!("t{i}"), t)).collect();
+    let status = bit_perfect_status();
+    let s = Session::start(srcs[0].clone(), None, config(30.0), status.clone(), None, None, Arc::default());
+    // Names the track after `k` once the decoder is on `k`.
+    let name_next = |k: usize| {
+        let deadline = Instant::now() + slack(Duration::from_secs(5));
+        while !(s.decoding() == k as u64 && s.set_next(k as u64, Some(srcs[k + 1].clone()))) {
+            assert!(Instant::now() < deadline, "the decoder never reached track {k}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    // Nothing plays yet. The first track opens the ring; each of the next
+    // MARKER_CAP leaves a boundary marker in it, which fills the marker ring.
+    for k in 0..=MARKER_CAP {
+        name_next(k);
+    }
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while s.decoding() != MARKER_CAP as u64 + 1 {
+        assert!(Instant::now() < deadline, "never took track {}", MARKER_CAP + 1);
+        thread::sleep(Duration::from_millis(1));
+    }
+    thread::sleep(Duration::from_millis(100));
+    // The next one waits for room: it hasn't been reported, and no marker was dropped.
+    let (input, mut seen) = wait_ring(&s);
+    seen.extend(std::iter::from_fn(|| s.try_msg()));
+    let reported = seen.iter().filter(|m| matches!(m, DecoderMsg::Track { .. })).count();
+    assert_eq!(reported, MARKER_CAP + 1, "{seen:?}");
+
+    // Playing frees the markers; the rest of the queue follows.
+    let mut dev = Device { input, status: status.clone(), played: Vec::new() };
+    let mut k = MARKER_CAP + 1;
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
+    loop {
+        assert!(Instant::now() < deadline, "playback stalled");
+        if k < N - 1 && s.decoding() == k as u64 && s.set_next(k as u64, Some(srcs[k + 1].clone())) {
+            k += 1;
+        }
+        let (drained, _) = dev.tick(512);
+        if drained && s.finished() {
+            break;
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    assert_eq!(status.track_seq.load(Ordering::Relaxed), N as u64 - 1, "every boundary crossed");
+    assert!(dev.played == tracks.concat(), "every track, in order, gaplessly");
+}
