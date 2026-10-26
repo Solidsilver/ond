@@ -336,6 +336,44 @@ fn strays_are_removed_on_open() {
 }
 
 #[test]
+fn copies_left_by_an_interrupted_move_are_removed_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let s = store(dir.path(), &rt);
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", 1)]);
+    drop(s);
+    for name in [".t.flac.moving", ".offline.json.moving", ".DS_Store", ".notes.moving.txt"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    // Even while strays are kept (a state file was set aside).
+    std::fs::write(dir.path().join(format!("{SET_ASIDE}1")), b"x").unwrap();
+    let _s = store(dir.path(), &rt);
+    assert!(!dir.path().join(".t.flac.moving").exists());
+    assert!(!dir.path().join(".offline.json.moving").exists());
+    assert!(dir.path().join(".DS_Store").exists(), "only the store's own temporary copies go");
+    assert!(dir.path().join(".notes.moving.txt").exists());
+}
+
+#[test]
+fn a_move_cut_short_finishes_when_run_again() {
+    let base = tempfile::tempdir().unwrap();
+    let (from, to) = (base.path().join("old"), base.path().join("new"));
+    std::fs::create_dir_all(from.join("0000abcd")).unwrap();
+    std::fs::write(from.join("0000abcd").join("t.flac"), b"music").unwrap();
+    std::fs::write(from.join("0000abcd").join(STATE_FILE), b"{}").unwrap();
+    // The first run copied part of a file and was stopped: the source is
+    // still whole, and a partial copy waits under its temporary name.
+    std::fs::create_dir_all(to.join("0000abcd")).unwrap();
+    std::fs::write(to.join("0000abcd").join(".t.flac.moving"), b"mu").unwrap();
+    // One left in the source by an earlier move into it isn't carried along.
+    std::fs::write(from.join("0000abcd").join(".x.flac.moving"), b"m").unwrap();
+    move_store(&from, &to).unwrap();
+    assert_eq!(std::fs::read(to.join("0000abcd").join("t.flac")).unwrap(), b"music");
+    assert!(!to.join("0000abcd").join(".x.flac.moving").exists());
+    assert!(!from.exists(), "the old folder goes once it's empty");
+}
+
+#[test]
 fn a_moved_store_opens_with_its_downloads() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();

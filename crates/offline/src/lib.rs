@@ -274,6 +274,7 @@ impl OfflineStore {
     /// starts the download workers on `rt`.
     pub fn open(cfg: OfflineConfig, rt: tokio::runtime::Handle, on_change: OnChange) -> io::Result<Self> {
         std::fs::create_dir_all(&cfg.dir)?;
+        remove_moving(&cfg.dir);
         let (mut pins, trusted) = load_pins(&cfg.dir);
         // A finished file that's gone (deleted by hand) downloads again.
         for s in pins.tracks.values_mut() {
@@ -1066,6 +1067,32 @@ fn remove_strays(dir: &Path, pins: &Pins) {
     }
 }
 
+/// Ends the temporary name a file is copied to by [`move_files`] (see [`moving_name`]).
+const MOVING: &str = ".moving";
+
+/// Where [`move_files`] copies `name` across volumes before renaming it into
+/// place, so a copy cut short never passes for the file.
+fn moving_name(name: &str) -> String {
+    format!(".{name}{MOVING}")
+}
+
+fn is_moving(name: &str) -> bool {
+    name.len() > 1 + MOVING.len() && name.starts_with('.') && name.ends_with(MOVING)
+}
+
+/// Deletes copies a move left unfinished (it quit or crashed mid-copy). The
+/// file they were copies of is still whole where it came from, so these are
+/// never needed, whether or not the pins are trusted.
+fn remove_moving(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        if is_moving(&e.file_name().to_string_lossy()) && e.file_type().is_ok_and(|t| t.is_file()) {
+            tracing::info!("offline: removing {}, left by a move cut short", e.path().display());
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 #[cfg(unix)]
 fn free_space(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
@@ -1128,12 +1155,17 @@ fn move_files(from: &Path, to: &Path, folders: bool) -> io::Result<()> {
         if !kind.is_file() {
             continue;
         }
+        if is_moving(&e.file_name().to_string_lossy()) {
+            // A copy cut short by an earlier move into `from`.
+            let _ = std::fs::remove_file(e.path());
+            continue;
+        }
         let dest = to.join(e.file_name());
         if dest.exists() {
             continue;
         }
         if std::fs::rename(e.path(), &dest).is_err() {
-            let tmp = to.join(format!(".{}.moving", e.file_name().to_string_lossy()));
+            let tmp = to.join(moving_name(&e.file_name().to_string_lossy()));
             std::fs::copy(e.path(), &tmp)?;
             std::fs::rename(&tmp, &dest)?;
             std::fs::remove_file(e.path())?;
