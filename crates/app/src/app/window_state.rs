@@ -178,13 +178,10 @@ impl OndApp {
                     ctx.request_repaint();
                 }
                 _ => {
-                    if self.ui.window.settling.take().is_some() {
-                        // Our own resize has landed: put presentation back to normal
-                        // (see `chrome::end_programmatic_resize`).
-                        crate::chrome::end_programmatic_resize();
-                        if let Some(t) = self.ui.window.switch_started.take() {
-                            tracing::debug!(target: "ond::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
-                        }
+                    if self.ui.window.settling.take().is_some()
+                        && let Some(t) = self.ui.window.switch_started.take()
+                    {
+                        tracing::debug!(target: "ond::window", elapsed_ms = t.elapsed().as_secs_f64() * 1000.0, size = ?g.size, "window mode switch settled");
                     }
                     // Mini is square; where the platform doesn't hold it so, snap back.
                     if square
