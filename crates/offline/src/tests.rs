@@ -270,13 +270,15 @@ fn unpinning_a_big_playlist_returns_at_once_and_cleans_up_behind() {
     let t = Instant::now();
     s.unpin(&Pin::Playlist("big".into()));
     assert!(t.elapsed() < slack(Duration::from_millis(200)), "unpin took {:?}", t.elapsed());
-    // Re-pinning before the deleter gets to a track keeps its file. The
-    // deleter has the big playlist's files ahead of this one in its queue.
-    s.unpin(&Pin::Track("keep".into()));
-    s.pin(Pin::Track("keep".into()), "K", vec![track("keep", 1)]);
+    // A track pinned again before the deleter gets to it keeps its file: as if
+    // it was unpinned and pinned again while the deleter had the big
+    // playlist's files ahead of it in its queue.
+    s.inner.delete(vec!["keep".into()]);
+    // Then one that does go, to know the deleter got past "keep".
+    std::fs::write(dir.path().join("last.flac"), b"x").unwrap();
+    s.inner.delete(vec!["last".into()]);
     let gone = |e: &std::fs::DirEntry| e.file_name() != "keep.flac" && e.file_name().to_string_lossy().ends_with(".flac");
     wait_for("the files to go", || !std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| gone(&e)));
-    thread::sleep(Duration::from_millis(100));
     assert!(dir.path().join("keep.flac").exists());
 }
 
@@ -592,6 +594,82 @@ fn a_track_pinned_again_while_its_files_are_being_deleted_downloads_after() {
     s.inner.deleted(&ids);
     wait_for("the download", || s.snapshot().is_done("t"));
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
+fn unpinning_mid_download_deletes_the_partial_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(2_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 0));
+    s.unpin(&Pin::Track("t".into()));
+    wait_for("the download to stop", || s.snapshot().active == 0);
+    wait_for("the partial file to go", || !dir.path().join("t.flac.part").exists());
+    assert!(!dir.path().join("t.flac").exists());
+    assert!(s.snapshot().tracks.is_empty());
+}
+
+#[test]
+fn a_pin_shrinking_on_the_server_mid_download_drops_the_track_it_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(2_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    let pin = Pin::Playlist("p".into());
+    s.pin(pin.clone(), "P", vec![track("a", body.len()), track("b", body.len())]);
+    // Two at a time: both are downloading.
+    wait_for("both downloads", || s.snapshot().active == 2);
+    s.update(&pin, "P", vec![track("a", body.len())]);
+    wait_for("b's partial file to go", || !dir.path().join("b.flac.part").exists() && s.snapshot().active <= 1);
+    assert!(s.snapshot().track("b").is_none());
+    wait_for("a", || s.snapshot().is_done("a"));
+    assert_eq!(s.pin_tracks(&pin).unwrap().1, ["a"]);
+    assert!(!dir.path().join("b.flac").exists());
+}
+
+#[test]
+fn extend_grows_a_pin_and_never_shrinks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let s = store(dir.path(), &rt);
+    let pin = Pin::Album("a".into());
+    s.pin(pin.clone(), "A", vec![track("1", 10), track("2", 10)]);
+    // A partial list (the library mid-sync) leaves the rest alone.
+    s.extend(&pin, vec![track("2", 10)]);
+    assert_eq!(s.pin_tracks(&pin).unwrap(), ("A".to_owned(), vec!["1".to_owned(), "2".to_owned()]));
+    s.extend(&pin, vec![track("3", 10), track("1", 10)]);
+    assert_eq!(s.pin_tracks(&pin).unwrap().1, ["1", "2", "3"]);
+    assert_eq!(s.snapshot().track("3"), Some(&TrackState::Queued));
+    // Only pins that exist grow.
+    s.extend(&Pin::Album("b".into()), vec![track("4", 10)]);
+    assert!(!s.is_pinned(&Pin::Album("b".into())));
+    assert!(s.snapshot().track("4").is_none());
+}
+
+#[test]
+fn the_limit_lets_unknown_sizes_through_only_until_it_is_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(10_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = OfflineStore::open(OfflineConfig { dir: dir.path().to_owned(), limit: Some(5_000) }, rt.handle().clone(), Arc::new(|| {})).unwrap();
+    s.set_source(Some(server.url()));
+    let unknown = |id: &str| TrackRef::new(id, Some("flac".into()), None);
+    // Nothing tells it this one won't fit.
+    s.pin(Pin::Track("1".into()), "1", vec![unknown("1")]);
+    wait_for("the first download", || s.snapshot().is_done("1"));
+    assert_eq!(s.snapshot().used_bytes, 10_000);
+    // Over the limit now: nothing more starts, whatever its size.
+    s.pin(Pin::Track("2".into()), "2", vec![unknown("2")]);
+    wait_for("the limit", || s.snapshot().limit_reached);
+    assert_eq!(s.snapshot().track("2"), Some(&TrackState::Queued));
+    assert_eq!(server.requests().len(), 1);
 }
 
 #[test]
