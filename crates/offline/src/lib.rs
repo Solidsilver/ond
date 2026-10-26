@@ -386,13 +386,29 @@ impl OfflineStore {
 
     /// Refreshes a pin's track list (the album or playlist changed on the
     /// server). Does nothing if it isn't pinned.
+    ///
+    /// A track not downloaded yet also takes the new suffix and size (the
+    /// file was replaced on the server), so it isn't checked against a stale
+    /// size, and one that failed is tried again now. A download already
+    /// running carries on as it was: it records what it got when it ends.
+    /// A finished file keeps its name and size.
     pub fn update(&self, pin: &Pin, label: impl Into<String>, tracks: Vec<TrackRef>) {
         let mut st = self.inner.lock();
         let Some(rec) = st.pins.record(pin) else { return };
         let same = rec.tracks.len() == tracks.len() && rec.tracks.iter().zip(&tracks).all(|(a, b)| a == &b.id);
         let label = label.into();
-        if same && rec.label == label {
+        let refreshed: Vec<String> = tracks
+            .iter()
+            .filter(|t| st.pins.tracks.get(&t.id).is_some_and(|s| s.done.is_none() && s.r != **t))
+            .map(|t| t.id.clone())
+            .collect();
+        if same && rec.label == label && refreshed.is_empty() {
             return;
+        }
+        for id in &refreshed {
+            if !st.active.contains_key(id) {
+                st.failures.remove(id);
+            }
         }
         let gone = st.pins.set(pin.clone(), label, tracks);
         self.inner.commit(st, gone);

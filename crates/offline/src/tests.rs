@@ -779,3 +779,45 @@ fn a_missing_state_file_beside_downloads_deletes_nothing() {
     drop(store(dir.path(), &rt));
     assert!(dir.path().join("t1.flac").exists());
 }
+
+#[test]
+fn a_pin_refreshed_with_a_new_size_downloads_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(30_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    let pin = Pin::Album("a".into());
+    // The server's file was replaced: the pinned size is stale, so every attempt fails.
+    s.pin(pin.clone(), "A", vec![track("t", body.len() + 1)]);
+    wait_for("a failed attempt", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
+    // The album, fetched again: same tracks, same name, the new size.
+    s.update(&pin, "A", vec![track("t", body.len())]);
+    assert_eq!(s.inner.lock().pins.tracks["t"].r.size, Some(body.len() as u64));
+    // Tried again at once, not after the failed attempt's backoff.
+    assert!(s.inner.lock().failures.is_empty());
+    wait_for("the download", || s.snapshot().is_done("t"));
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+    // A finished file keeps the name and size it was downloaded with.
+    s.update(&pin, "A", vec![TrackRef::new("t", Some("mp3".into()), Some(5))]);
+    assert_eq!(s.inner.lock().pins.tracks["t"].r, track("t", body.len()));
+}
+
+#[test]
+fn a_pin_refreshed_mid_download_leaves_the_download_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(1_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    let pin = Pin::Album("a".into());
+    s.pin(pin.clone(), "A", vec![track("t", body.len())]);
+    wait_for("the download to start", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { .. })));
+    s.update(&pin, "A", vec![TrackRef::new("t", Some("mp3".into()), Some(10))]);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    assert_eq!(server.requests().len(), 1, "one request, never cancelled");
+    assert_eq!(s.local_path("t").unwrap(), dir.path().join("t.flac"));
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
