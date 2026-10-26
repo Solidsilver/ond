@@ -12,7 +12,6 @@ use library::Track;
 use offline::OfflineStore;
 use subsonic::Client;
 
-/// Fisher–Yates with a small xorshift; good enough for a play order.
 /// Where queue items play from: a downloaded file first (instant, no
 /// network), else the server while it's reachable (original or transcoded).
 struct AppSources<'a> {

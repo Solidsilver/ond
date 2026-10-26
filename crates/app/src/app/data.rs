@@ -23,8 +23,9 @@ pub struct Data {
     /// Recently added, newest first (album ids from the server).
     pub newest: Vec<String>,
     pub playlists: Vec<subsonic::Playlist>,
-    /// Every stored track once, grouped by album and indexed by id, plus the
-    /// albums opened since (fresh from the server).
+    /// Every stored track once (`all`), grouped by album and indexed by id.
+    /// The grouping and the index also have the albums opened since (fresh
+    /// from the server); `all` doesn't.
     pub tracks: TrackSet,
     pub playlist_tracks: HashMap<String, Arc<Vec<Track>>>,
     /// Album ids crediting a person, from stored tracks.

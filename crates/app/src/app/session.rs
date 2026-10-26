@@ -128,7 +128,6 @@ impl OndApp {
         }
     }
 
-    /// The server's gone: browse what's stored, play what's downloaded.
     /// Another server or user signed in: what was shown came from the old one.
     /// The library database was cleared already; this drops the in-memory copy,
     /// the queue and the cached audio, which a sync then refills.
@@ -144,6 +143,7 @@ impl OndApp {
         self.cache.clear();
     }
 
+    /// The server's gone: browse what's stored, play what's downloaded.
     pub(super) fn set_offline(&mut self) {
         self.session.online = false;
         self.session.client = None;

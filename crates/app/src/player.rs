@@ -340,7 +340,6 @@ impl Player {
     }
 }
 
-/// Fisher–Yates with a clock-seeded xorshift (no need for a crypto RNG here).
 /// A change to the queue itself, from the queue column or its keys.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QueueEdit {
@@ -394,6 +393,7 @@ impl Player {
     }
 }
 
+/// Fisher–Yates with a clock-seeded xorshift (no need for a crypto RNG here).
 pub fn shuffle<T>(v: &mut [T]) {
     let mut s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.as_nanos() as u64) | 1;
     for i in (1..v.len()).rev() {

@@ -48,7 +48,9 @@ type Location = (String, usize);
 #[derive(Default)]
 pub struct TrackSet {
     /// Every stored track, grouped by album (the Songs view sorts these).
+    /// Albums fetched since (`set_album`) aren't in it.
     pub all: Arc<Vec<Track>>,
+    /// Each album's tracks: its run in `all`, or the list fetched since.
     pub by_album: HashMap<String, TrackSlice>,
     pub index: HashMap<String, Location>,
 }

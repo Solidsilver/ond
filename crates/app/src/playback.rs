@@ -1,5 +1,7 @@
 //! Normal-mode playback preferences: ReplayGain and streaming quality, plus the
-//! home-network check behind "transcode only when away".
+//! home-network check behind "transcode only when away". What they are and how
+//! they turn into the engine's settings; `output::Outputs` holds the ones in
+//! use (with the device and its mode) and saves changes to the preferences.
 
 use audio::replaygain::{AlbumPos, album_context};
 use audio::{GainConfig, GainMode, ReplayGain, Transcode};

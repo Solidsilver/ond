@@ -79,8 +79,6 @@ use window_state::{WindowState, title_bar_h};
 use session::LoginForm;
 pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
 
-
-
 pub use crate::player::QueueAction;
 
 /// A state change asked for by a view, a key or the menu bar, applied after
@@ -632,9 +630,6 @@ impl OndApp {
         self.ui.toasts.push(text.into(), false);
     }
 
-
-
-
     /// In the full window: shows the sidebar on `tab`, or back to Up Next when
     /// it's already showing that tab.
     fn toggle_side_tab(&mut self, tab: QueueTab) {
@@ -792,8 +787,6 @@ impl OndApp {
             _ => {}
         }
     }
-
-
 
     /// App-wide keys, from the key map in [`crate::keys`]. Views handle their
     /// own (track list, queue, palette); a sheet takes the keyboard while open
@@ -1185,7 +1178,6 @@ impl Drop for OndApp {
         self.engine.send(Command::Shutdown);
     }
 }
-
 
 /// The main window's HWND, for the media controls.
 #[cfg(windows)]
