@@ -121,6 +121,10 @@ pub struct Progress {
 }
 
 /// Lets a blocked read give up early (track change, seek, shutdown).
+///
+/// Called while the download's state lock is held, every 50 ms while an open
+/// or a read waits. Keep it to loading a flag: it must not block or call
+/// into the cache.
 pub type Abort = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Clone)]

@@ -297,6 +297,13 @@ fn relocation(st: &mut DlState, pos: u64, ranged: bool) -> Option<u64> {
     Some(w)
 }
 
+/// Resolves once the download is cancelled.
+///
+/// This shares `wake` with relocation requests, so while it runs (during a
+/// request's connect or a backoff) it can take the wake-up a reader sent. That
+/// loses nothing: the reader's offset stays in `wanted`, and the next response
+/// checks it after its first chunk, which `get_from` already holds when it
+/// returns. So a stalled response doesn't keep a reader waiting elsewhere.
 async fn cancelled(dl: &Download) {
     while !dl.is_cancelled() {
         dl.wake.notified().await;
