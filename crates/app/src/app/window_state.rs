@@ -35,6 +35,22 @@ impl Settle {
     }
 }
 
+/// A change to the window: its mode, the Player's lyrics drawer, its title
+/// bar, the queue column.
+pub enum WindowAction {
+    SetMode(WindowMode),
+    /// Into Mini, or back to where Mini was entered from.
+    ToggleMini,
+    /// The full window ↔ the player last used (Player or Mini).
+    TogglePlayer,
+    /// Open or close the Player's lyrics drawer.
+    SetLyricsDrawer(bool),
+    /// The system's title bar instead of our own window buttons (Linux).
+    SetSystemTitleBar(bool),
+    /// Show or hide the queue: the column, or in narrow windows the sheet.
+    ToggleQueue,
+}
+
 /// The window as last seen, and mode switches still settling.
 #[derive(Default)]
 pub struct WindowState {
@@ -56,6 +72,32 @@ pub struct WindowState {
 }
 
 impl OndApp {
+    pub(super) fn apply_window(&mut self, action: WindowAction) {
+        match action {
+            WindowAction::SetMode(mode) => self.set_mode(Some(mode)),
+            WindowAction::ToggleMini => self.set_mode(None),
+            WindowAction::TogglePlayer => {
+                let seen = self.ui.window.seen;
+                let plan = self.edit_windows(|w| w.toggle_player(seen));
+                self.follow_plan(plan);
+            }
+            WindowAction::SetLyricsDrawer(open) => {
+                let seen = self.ui.window.seen;
+                let plan = self.edit_windows(|w| w.set_lyrics(open, seen));
+                self.follow_plan(plan);
+            }
+            WindowAction::SetSystemTitleBar(on) => {
+                let plan = self.edit_windows(|w| {
+                    w.system_title_bar = on;
+                    w.plan()
+                });
+                plan.apply_frame(&self.ctx);
+            }
+            WindowAction::ToggleQueue if self.ui.queue_narrow => self.ui.queue_sheet = !self.ui.queue_sheet,
+            WindowAction::ToggleQueue => self.prefs.edit(|s| s.show_queue = !s.show_queue),
+        }
+    }
+
     /// Saves new column widths; defaults are stored as "not set".
     pub(super) fn set_columns(&self, c: layout::Columns) {
         self.prefs.edit(|s| {

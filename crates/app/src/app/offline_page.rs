@@ -2,6 +2,7 @@
 //! how much room it takes. Also the one-line download status shown on album
 //! and playlist pages.
 
+use super::OfflineAction;
 use super::browse::grid_metrics;
 use super::widgets::{Mark, danger, elide, link, secondary};
 use super::view_ctx::ViewCtx;
@@ -27,12 +28,12 @@ pub(super) fn storage_used(snap: &Snapshot) -> String {
 /// The storage limit's choices, as radio items in a menu.
 pub(super) fn limit_choices(ui: &mut Ui, current: Option<u64>, actions: &mut Vec<Action>) {
     if ui.radio(current.is_none(), "No limit").clicked() {
-        actions.push(Action::SetOfflineLimit(None));
+        actions.push(Action::Offline(OfflineAction::SetLimit(None)));
     }
     for gb in LIMITS {
         let bytes = gb * 1_000_000_000;
         if ui.radio(current == Some(bytes), format!("{gb} GB")).clicked() {
-            actions.push(Action::SetOfflineLimit(Some(bytes)));
+            actions.push(Action::Offline(OfflineAction::SetLimit(Some(bytes))));
         }
     }
 }
@@ -77,7 +78,7 @@ pub(super) fn set_aside_notice(ui: &mut Ui, snap: &Snapshot, actions: &mut Vec<A
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if danger(ui, "Delete").clicked() {
-                    actions.push(Action::RemoveSetAside);
+                    actions.push(Action::Offline(OfflineAction::RemoveSetAside));
                     confirming = false;
                 }
                 ui.add_space(4.0);
@@ -89,7 +90,7 @@ pub(super) fn set_aside_notice(ui: &mut Ui, snap: &Snapshot, actions: &mut Vec<A
             ui.horizontal(|ui| {
                 if a.unknown > 0 {
                     if secondary(ui, &format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
-                        actions.push(Action::RevealSetAside);
+                        actions.push(Action::Offline(OfflineAction::RevealSetAside));
                     }
                     ui.add_space(4.0);
                     if secondary(ui, "Remove them…").clicked() {
@@ -97,7 +98,7 @@ pub(super) fn set_aside_notice(ui: &mut Ui, snap: &Snapshot, actions: &mut Vec<A
                     }
                 } else if secondary(ui, "Dismiss").clicked() {
                     // Nothing to delete but the unreadable list itself.
-                    actions.push(Action::RemoveSetAside);
+                    actions.push(Action::Offline(OfflineAction::RemoveSetAside));
                 }
             });
             ui.add_space(6.0);
@@ -237,10 +238,10 @@ impl ViewCtx<'_> {
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new(self.downloads.base.display().to_string()).size(11.0).color(t.muted));
                 if ui.button(format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
-                    self.actions.push(Action::RevealOffline);
+                    self.actions.push(Action::Offline(OfflineAction::Reveal));
                 }
                 if ui.button("Change…").clicked() {
-                    self.actions.push(Action::MoveOffline);
+                    self.actions.push(Action::Offline(OfflineAction::Move));
                 }
             });
         });
@@ -254,12 +255,12 @@ impl ViewCtx<'_> {
             ui.add_space(10.0);
             let (label, pause) = if snap.paused { ("Resume", false) } else { ("Pause", true) };
             if link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
-                self.actions.push(Action::PauseDownloads(pause));
+                self.actions.push(Action::Offline(OfflineAction::Pause(pause)));
             }
             if snap.failed > 0 {
                 ui.add_space(10.0);
                 if link(ui, "Retry failed", FontId::proportional(12.0), t.accent).clicked() {
-                    self.actions.push(Action::RetryDownloads);
+                    self.actions.push(Action::Offline(OfflineAction::Retry));
                 }
             }
         });
@@ -339,7 +340,7 @@ impl ViewCtx<'_> {
         }
         resp.context_menu(|ui| {
             if ui.button("Remove download").clicked() {
-                self.actions.push(Action::Unpin(p.pin.clone()));
+                self.actions.push(Action::Offline(OfflineAction::Unpin(p.pin.clone())));
             }
         });
     }

@@ -3,6 +3,7 @@
 //! ReplayGain, streaming, per-device modes, downloads, sync, analysis, the
 //! account) lives here; the popovers keep only what's needed in the moment.
 
+use super::{AnalysisAction, OfflineAction, OutputAction, PrefsAction, WindowAction};
 use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, section, thin_slider, toggle};
 use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
@@ -108,46 +109,46 @@ impl OndApp {
             row(ui, "Theme", |ui| {
                 let mut theme = self.ui.prefs.theme;
                 if choice(ui, &ThemePref::ALL, &mut theme, Some(240.0), |p| p.label().into()) {
-                    self.actions.push(Action::SetTheme(theme));
+                    self.actions.push(Action::Prefs(PrefsAction::Theme(theme)));
                 }
             });
             row(ui, "Accent color", |ui| {
                 let mut accent = self.ui.prefs.accent;
                 if accent_swatches(ui, &mut accent) {
-                    self.actions.push(Action::SetAccent(accent));
+                    self.actions.push(Action::Prefs(PrefsAction::Accent(accent)));
                 }
             });
             ui.add_space(10.0);
             let mut adapt = self.ui.prefs.adapt_colors;
             if narrow_toggle(ui, &mut adapt, "Adapt colors to the album art").changed() {
-                self.actions.push(Action::SetAdaptColors(adapt));
+                self.actions.push(Action::Prefs(PrefsAction::AdaptColors(adapt)));
             }
             hint(ui, "The accent, the now-playing display and the Player take their colors from the playing album's cover, and an album's page from its own. Text keeps its contrast. Covers without much color use the accent color.");
         });
         group(ui, "Listening", |ui| {
             let mut scrobble = self.ui.prefs.scrobble;
             if narrow_toggle(ui, &mut scrobble, "Scrobble plays").changed() {
-                self.actions.push(Action::SetScrobble(scrobble));
+                self.actions.push(Action::Prefs(PrefsAction::Scrobble(scrobble)));
             }
             hint(ui, "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.");
             ui.add_space(10.0);
             let mut playing = self.ui.prefs.analyze_playing;
             if narrow_toggle(ui, &mut playing, "Analyze tracks as they play").changed() {
-                self.actions.push(Action::SetAnalyzePlaying(playing));
+                self.actions.push(Action::Analysis(AnalysisAction::AnalyzePlaying(playing)));
             }
             hint(ui, "Measures loudness and dynamic range once a track has downloaded for playback.");
         });
         group(ui, "Advanced", |ui| {
             let mut shown = self.ui.prefs.diagnostics_bar;
             if narrow_toggle(ui, &mut shown, "Show diagnostics bar").changed() {
-                self.actions.push(Action::SetDiagnostics(shown));
+                self.actions.push(Action::Prefs(PrefsAction::Diagnostics(shown)));
             }
             hint(ui, "Shows the signal path, buffer, downloads, sync and server timing in a thin bar along the bottom (⌥⌘I).");
             if crate::csd::SUPPORTED {
                 ui.add_space(10.0);
                 let mut system = self.ui.prefs.system_title_bar;
                 if narrow_toggle(ui, &mut system, "Use the system title bar").changed() {
-                    self.actions.push(Action::SetSystemTitleBar(system));
+                    self.actions.push(Action::Window(WindowAction::SetSystemTitleBar(system)));
                 }
                 hint(ui, "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.");
             }
@@ -191,7 +192,7 @@ impl OndApp {
             }
         });
         if p != before {
-            self.actions.push(Action::SetPlaybackPrefs(p));
+            self.actions.push(Action::Output(OutputAction::Playback(p)));
         }
     }
 
@@ -228,7 +229,7 @@ impl OndApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut m = *mode;
                         if choice(ui, &MODES, &mut m, None, mode_label) {
-                            self.actions.push(Action::SetDeviceMode(uid.clone(), m));
+                            self.actions.push(Action::Output(OutputAction::DeviceMode(uid.clone(), m)));
                         }
                     });
                 });
@@ -258,7 +259,7 @@ impl OndApp {
             });
             let mut paused = snap.paused;
             if narrow_toggle(ui, &mut paused, "Pause downloads").changed() {
-                self.actions.push(Action::PauseDownloads(paused));
+                self.actions.push(Action::Offline(OfflineAction::Pause(paused)));
             }
         });
         group(ui, "Location", |ui| {
@@ -269,11 +270,11 @@ impl OndApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if secondary(ui, &format!("Show in {}", crate::folder::FILE_MANAGER)).clicked() {
-                    self.actions.push(Action::RevealOffline);
+                    self.actions.push(Action::Offline(OfflineAction::Reveal));
                 }
                 ui.add_space(4.0);
                 if secondary(ui, "Change…").clicked() {
-                    self.actions.push(Action::MoveOffline);
+                    self.actions.push(Action::Offline(OfflineAction::Move));
                 }
             });
             ui.add_space(6.0);
@@ -301,7 +302,7 @@ impl OndApp {
             ui.horizontal(|ui| {
                 if self.sync.tracks {
                     if secondary(ui, "Stop").clicked() {
-                        self.bridge.cancel_sync();
+                        self.actions.push(Action::StopSync);
                     }
                 } else {
                     let can = self.session.client.is_some() && self.session.online;
@@ -336,11 +337,11 @@ impl OndApp {
             ui.horizontal(|ui| {
                 let (label, paused) = if p.paused { ("Resume", false) } else { ("Pause", true) };
                 if secondary(ui, label).clicked() {
-                    self.actions.push(Action::PauseAnalysis(paused));
+                    self.actions.push(Action::Analysis(AnalysisAction::Pause(paused)));
                 }
                 ui.add_space(4.0);
                 if secondary(ui, "Stop").clicked() {
-                    self.actions.push(Action::StopAnalysis);
+                    self.actions.push(Action::Analysis(AnalysisAction::Stop));
                 }
             });
         } else if self.session.client.is_some() && !self.data.tracks.all.is_empty() {
@@ -352,7 +353,7 @@ impl OndApp {
                 ui.label(egui::RichText::new(text).size(13.0).color(t.text));
                 ui.add_space(10.0);
                 if secondary(ui, "Analyze library").clicked() {
-                    self.actions.push(Action::AnalyzeLibrary);
+                    self.actions.push(Action::Analysis(AnalysisAction::Library));
                 }
             }
         } else {
@@ -400,7 +401,7 @@ impl OndApp {
             hint(ui, "None of these change the sound. Bit-perfect playback stays bit-perfect.");
         });
         if x != before {
-            self.actions.push(Action::SetExperimental(x));
+            self.actions.push(Action::Prefs(PrefsAction::Experimental(x)));
         }
     }
 

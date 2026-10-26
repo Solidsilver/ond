@@ -107,6 +107,18 @@ impl OndApp {
         self.sync.label = "reconnecting…".into();
     }
 
+    /// Measures the server's round trip again if the last reading is old
+    /// (and none is on its way).
+    pub(super) fn refresh_latency(&mut self) {
+        if self.session.online
+            && self.diagnostics.latency_stale()
+            && let Some(client) = self.session.client.clone()
+        {
+            self.diagnostics.latency_asked();
+            self.bridge.measure_latency(client);
+        }
+    }
+
     /// Something failed; if it was the network, find out whether the server is gone.
     pub(super) fn probe(&self) {
         if self.session.online

@@ -42,20 +42,19 @@ use crate::analyze;
 use crate::art::Art;
 use crate::bridge::{Bridge, Msg};
 use crate::favorites::{Favorites, StarKind};
-use crate::keys::Cmd;
+use crate::keys::{Cmd, EditCmd};
 use crate::nav::{Nav, Route};
 use crate::now_playing;
 use crate::output::Outputs;
-use crate::playback;
 use crate::player::{Player, QueueEdit};
 use crate::prefs::{Loaded, Prefs};
-use crate::queue::{EndAction, Source};
+use crate::queue::Source;
 use crate::settings::Paths;
 #[cfg(test)]
-use {crate::bridge::ListKey, offline::TrackRef, pins::track_ref, crate::search::SearchIndex, crate::settings::Settings, crate::tracks::TrackSet, library::Album};
-use crate::theme::{self, ThemePref, Tokens};
+use {crate::bridge::ListKey, offline::TrackRef, pins::track_ref, crate::search::SearchIndex, crate::settings::Settings, crate::theme::ThemePref, crate::tracks::TrackSet, library::Album};
+use crate::theme::{self, Tokens};
 use crate::window::WindowMode;
-use audio::{Command, EngineHandle, PlayState, PlaybackMode};
+use audio::{Command, EngineHandle, PlayState};
 use library::{Library, Track};
 use offline::Pin;
 use std::collections::HashMap;
@@ -66,13 +65,16 @@ use std::time::Duration;
 pub use commands::PlaylistAction;
 pub use dialogs::Overlay;
 pub use palette::Palette;
-pub use analyzing::Analysis;
+pub use analyzing::{Analysis, AnalysisAction};
 pub use data::{Data, SearchState, SyncState};
 use data::Pending;
-pub use pins::{Downloads, Keep};
+pub use pins::{Downloads, Keep, OfflineAction};
 use pins::playable;
+pub use playing::OutputAction;
+pub use prefs_view::PrefsAction;
 use prefs_view::PrefsView;
 pub use session::Session;
+pub use window_state::WindowAction;
 use window_state::WindowState;
 use session::LoginForm;
 pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
@@ -81,101 +83,77 @@ pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, 
 
 pub use crate::player::QueueAction;
 
-/// A state change requested by a view; applied after the frame is drawn.
+/// A state change asked for by a view, a key or the menu bar, applied after
+/// the frame is drawn (see `main_ui`). Changes that belong to one part of the
+/// app are grouped under it ([`WindowAction`], [`PrefsAction`],
+/// [`OutputAction`], [`OfflineAction`], [`AnalysisAction`], the queue's
+/// [`QueueEdit`]), and that part's module applies them.
 pub enum Action {
     Go(Route),
-    /// The Info tab wants a song's play count (asked once per song).
-    NeedSongStats(String),
-    /// A lyrics view wants a song's lyrics (asked once per song).
-    NeedLyrics(Box<Track>),
     Back,
     Forward,
     BackBy(usize),
-    Album(String, QueueAction),
-    Artist(String, QueueAction),
-    Playlist(String, QueueAction),
-    Tracks { tracks: Vec<Track>, source: Source, action: QueueAction },
-    JumpTo(u64),
-    Replay(u64),
-    Remove(u64),
-    Move(u64, usize),
-    /// One step earlier (-1) or later (+1).
-    MoveBy(u64, isize),
-    ClearQueue,
-    SetEnd(EndAction),
-    PlayPause,
-    Next,
-    Previous,
-    Seek(f64),
+    /// An album's page with one of its tracks selected (⌘L: the playing one).
+    Reveal { track: String, album: String },
     OpenPalette,
-    SetTheme(ThemePref),
-    /// The accent color used without (or instead of) the album art's.
-    SetAccent(theme::Accent),
-    /// Whether colors adapt to the album art.
-    SetAdaptColors(bool),
-    ToggleQueue,
-    SetMode(WindowMode),
-    /// Into Mini, or back to where Mini was entered from.
-    ToggleMini,
-    /// The full window ↔ the player last used (Player or Mini).
-    TogglePlayer,
+    /// Open the Settings window at a section.
+    OpenSettings(settings_page::Section),
+    /// Open a sheet (new playlist, rename, delete, shortcuts).
+    Overlay(Overlay),
+    /// Show the keyboard shortcuts in the full window, or close them again.
+    ToggleShortcuts,
+    /// Ask for a new playlist's name, in the full window.
+    NewPlaylist,
+    /// Open the visualizer, or close it (experimental; only while that's on).
+    ToggleVisualizer,
+    /// An Edit menu command, handed to egui as input so text fields get it.
+    Edit(EditCmd),
     /// Show the lyrics: the sidebar's Lyrics tab in the full window; in the
     /// Player, open or close its drawer; from Mini, the Player with it open.
     Lyrics,
     /// Show (or hide again) the playing song's details: the Info tab of the
     /// sidebar, or of the Player's queue; from Mini, the Player on it.
     Info,
-    /// Open or close the Player's lyrics drawer.
-    SetLyricsDrawer(bool),
-    SetScrobble(bool),
-    /// Show or hide the diagnostics bar.
-    SetDiagnostics(bool),
-    /// The system's title bar instead of our own window buttons (Linux).
-    SetSystemTitleBar(bool),
-    /// Turn experimental visuals on or off.
-    SetExperimental(crate::visuals::Experimental),
-    /// Open the Settings window at a section.
-    OpenSettings(settings_page::Section),
+    /// The Info tab wants a song's play count (asked once per song).
+    NeedSongStats(String),
+    /// A lyrics view wants a song's lyrics (asked once per song).
+    NeedLyrics(Box<Track>),
     /// Re-read the library from the server (albums, then tracks).
     SyncNow,
-    /// ReplayGain and streaming preferences.
-    SetPlaybackPrefs(playback::PlaybackPrefs),
-    /// Remember a device's mode (by UID); the device in use switches now.
-    SetDeviceMode(String, PlaybackMode),
-    /// Analyse these tracks (those without a current result) in the background.
-    Analyze(Vec<Track>),
-    AnalyzeLibrary,
-    PauseAnalysis(bool),
-    /// Stop and forget everything queued for analysis.
-    StopAnalysis,
-    SetAnalyzePlaying(bool),
+    /// Stop the track sync that's running.
+    StopSync,
+    /// Measure the server's round trip again, if the last reading is old.
+    MeasureLatency,
     /// Back to the login screen; the saved password is forgotten.
     SignOut,
-    /// Keep (true) or stop keeping something on this computer.
-    KeepOffline(Keep, bool),
-    /// Stop keeping a pin (from the Offline place, where tracks may not be loaded).
-    Unpin(Pin),
-    PauseDownloads(bool),
-    RetryDownloads,
-    /// Cap on offline storage in bytes; `None` is unlimited.
-    SetOfflineLimit(Option<u64>),
-    RevealOffline,
-    /// Show the open store's folder, where files kept after its list of
-    /// downloads couldn't be read are (see `offline::SetAside`).
-    RevealSetAside,
-    /// Delete those files and the unreadable list, so the folder is tidied again.
-    RemoveSetAside,
-    /// Pick a new folder for downloads (they move at the next launch).
-    MoveOffline,
+    Album(String, QueueAction),
+    Artist(String, QueueAction),
+    Playlist(String, QueueAction),
+    Tracks { tracks: Vec<Track>, source: Source, action: QueueAction },
+    /// A change to the queue itself: jump, replay, remove, move, clear, or
+    /// what happens at its end.
+    Queue(QueueEdit),
+    PlayPause,
+    Next,
+    Previous,
+    Seek(f64),
+    /// Window modes, the Player's lyrics drawer, the title bar, the queue column.
+    Window(WindowAction),
+    /// Appearance, scrobbling, the diagnostics bar and experiments.
+    Prefs(PrefsAction),
+    /// ReplayGain and streaming, device modes, volume, bit-perfect.
+    Output(OutputAction),
+    /// Downloads.
+    Offline(OfflineAction),
+    /// Library analysis.
+    Analysis(AnalysisAction),
     /// Love or unlove a song, album or artist. `track` / `name` keep the
     /// Favorites view current.
     ToggleStar { kind: StarKind, id: String, track: Option<Box<Track>>, name: Option<String> },
     /// Rate a song 1–5; 0 clears it.
     Rate(String, u8),
-    /// A key or menu-bar command.
+    /// A key or menu-bar command; applying it applies what it stands for.
     Command(Cmd),
-    /// Open a sheet (new playlist, rename, delete, shortcuts).
-    Overlay(Overlay),
     PlaylistEdit(PlaylistAction),
 }
 
@@ -669,10 +647,12 @@ impl OndApp {
         if self.ui.queue_narrow {
             self.ui.queue_sheet = true;
         } else if !show_queue {
-            self.actions.push(Action::ToggleQueue);
+            self.apply_window(WindowAction::ToggleQueue);
         }
     }
 
+    /// Applies one action. Most groups go to the part of the app they belong
+    /// to; an action never asks for another one later, it applies it at once.
     fn apply(&mut self, action: Action) {
         if self.ui.visualizer.is_some() && Self::leaves_visualizer(&action) {
             self.close_visualizer();
@@ -681,28 +661,8 @@ impl OndApp {
         if matches!(action, Action::Go(_) | Action::OpenPalette) {
             self.set_mode(Some(WindowMode::Full));
         }
-        if self.downloads.store.is_none() && Downloads::needs_store(&action) {
-            if self.downloads.opening {
-                self.downloads.deferred.push(action);
-            } else {
-                self.show_error("Downloads couldn't be opened. Restart Ond to try again.");
-            }
-            return;
-        }
         match action {
             Action::Go(route) => self.go(route),
-            Action::NeedLyrics(track) => {
-                if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
-                    self.lyrics.insert(track.id.clone(), crate::lyrics::Fetch::Loading);
-                    self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
-                }
-            }
-            Action::NeedSongStats(id) => {
-                if !self.song_stats.contains_key(&id) && self.session.client.is_some() {
-                    self.song_stats.insert(id.clone(), None);
-                    self.bridge.fetch_song_stats(self.session.client.clone(), id);
-                }
-            }
             Action::Back => {
                 self.ui.nav.back();
                 self.on_arrive();
@@ -715,45 +675,37 @@ impl OndApp {
                 self.ui.nav.back_by(n);
                 self.on_arrive();
             }
-            Action::Album(id, action) => self.play_album(id, action),
-            Action::Artist(name, action) => self.play_artist(name, action),
-            Action::Playlist(id, action) => self.play_playlist(id, action),
-            Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
-            Action::JumpTo(uid) => self.queue_edit(QueueEdit::JumpTo(uid)),
-            Action::Replay(uid) => self.queue_edit(QueueEdit::Replay(uid)),
-            Action::Remove(uid) => self.queue_edit(QueueEdit::Remove(uid)),
-            Action::Move(uid, to) => self.queue_edit(QueueEdit::Move(uid, to)),
-            Action::MoveBy(uid, delta) => self.queue_edit(QueueEdit::MoveBy(uid, delta)),
-            Action::ClearQueue => self.queue_edit(QueueEdit::Clear),
-            Action::SetEnd(end) => self.queue_edit(QueueEdit::SetEnd(end)),
-            Action::PlayPause => self.play_pause(),
-            Action::Next => self.next(),
-            Action::Previous => self.previous(),
-            Action::Seek(to) => self.seek(to),
+            Action::Reveal { track, album } => {
+                self.ui.reveal = Some(track);
+                self.apply(Action::Go(Route::Album(album)));
+            }
             Action::OpenPalette => {
                 if self.ui.palette.is_none() && self.search.index.is_some() {
                     self.ui.palette = Some(Palette::default());
                 }
             }
-            Action::SetTheme(pref) => {
-                theme::set_pref(&self.ctx, pref);
-                self.prefs.edit(|s| s.theme = pref);
+            Action::OpenSettings(section) => {
+                self.ui.settings_section = section;
+                self.set_mode(Some(WindowMode::Full));
+                self.ui.overlay = Some(Overlay::Settings);
             }
-            Action::SetAccent(accent) => self.prefs.edit(|s| s.accent = accent),
-            Action::SetAdaptColors(on) => self.prefs.edit(|s| s.adapt_colors = on),
-            Action::ToggleQueue if self.ui.queue_narrow => self.ui.queue_sheet = !self.ui.queue_sheet,
-            Action::ToggleQueue => self.prefs.edit(|s| s.show_queue = !s.show_queue),
-            Action::SignOut => self.sign_out(),
-            Action::SetMode(mode) => self.set_mode(Some(mode)),
-            Action::ToggleMini => self.set_mode(None),
-            Action::TogglePlayer => {
-                let seen = self.ui.window.seen;
-                let plan = self.edit_windows(|w| w.toggle_player(seen));
-                self.follow_plan(plan);
+            Action::Overlay(o) => self.ui.overlay = Some(o),
+            Action::ToggleShortcuts => {
+                self.set_mode(Some(WindowMode::Full));
+                self.ui.overlay = match self.ui.overlay {
+                    Some(Overlay::Shortcuts) => None,
+                    _ => Some(Overlay::Shortcuts),
+                };
             }
+            Action::NewPlaylist => {
+                self.set_mode(Some(WindowMode::Full));
+                self.ui.overlay = Some(Overlay::new_playlist(Vec::new()));
+            }
+            Action::ToggleVisualizer => self.toggle_visualizer(),
+            Action::Edit(e) => self.edit_input(e),
             Action::Lyrics => match self.prefs_now().mode {
                 WindowMode::Full => self.toggle_side_tab(QueueTab::Lyrics),
-                WindowMode::Player => self.actions.push(Action::SetLyricsDrawer(!self.prefs_now().lyrics_open)),
+                WindowMode::Player => self.apply_window(WindowAction::SetLyricsDrawer(!self.prefs_now().lyrics_open)),
                 WindowMode::Mini => {
                     self.edit_windows(|w| w.lyrics_open = true);
                     self.set_mode(Some(WindowMode::Player));
@@ -769,15 +721,17 @@ impl OndApp {
                     self.set_mode(Some(WindowMode::Player));
                 }
             },
-            Action::SetLyricsDrawer(open) => {
-                let seen = self.ui.window.seen;
-                let plan = self.edit_windows(|w| w.set_lyrics(open, seen));
-                self.follow_plan(plan);
+            Action::NeedLyrics(track) => {
+                if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
+                    self.lyrics.insert(track.id.clone(), crate::lyrics::Fetch::Loading);
+                    self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
+                }
             }
-            Action::OpenSettings(section) => {
-                self.ui.settings_section = section;
-                self.set_mode(Some(WindowMode::Full));
-                self.ui.overlay = Some(Overlay::Settings);
+            Action::NeedSongStats(id) => {
+                if !self.song_stats.contains_key(&id) && self.session.client.is_some() {
+                    self.song_stats.insert(id.clone(), None);
+                    self.bridge.fetch_song_stats(self.session.client.clone(), id);
+                }
             }
             Action::SyncNow => {
                 if let Some(client) = self.session.live().cloned()
@@ -786,45 +740,26 @@ impl OndApp {
                     self.bridge.sync_albums(client);
                 }
             }
-            Action::SetPlaybackPrefs(prefs) => self.output.set_prefs(prefs, &self.engine),
-            Action::SetDeviceMode(uid, mode) => {
-                if self.output.set_device_mode(&uid, mode, &self.engine) {
-                    self.bit_perfect = mode == PlaybackMode::BitPerfect;
-                }
-            }
-            Action::SetScrobble(on) => {
-                self.now_playing.set_scrobbling(on);
-                self.prefs.edit(|s| s.scrobble = on);
-            }
-            Action::SetDiagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
-            Action::SetExperimental(x) => self.prefs.edit(|s| s.experimental = x),
-            Action::SetSystemTitleBar(on) => {
-                let plan = self.edit_windows(|w| {
-                    w.system_title_bar = on;
-                    w.plan()
-                });
-                plan.apply_frame(&self.ctx);
-            }
-            Action::KeepOffline(what, on) => self.keep_offline(what, on),
-            Action::MoveOffline => self.choose_offline_folder(),
-            a @ (Action::Unpin(_)
-            | Action::PauseDownloads(_)
-            | Action::RetryDownloads
-            | Action::SetOfflineLimit(_)
-            | Action::RevealOffline
-            | Action::RevealSetAside
-            | Action::RemoveSetAside) => match self.downloads.apply(a, &self.prefs) {
-                Ok(Some(notice)) => self.show_notice(notice),
-                Ok(None) => {}
-                Err(e) => self.show_error(e),
-            },
-            Action::Analyze(tracks) => self.analyze(&tracks),
-            Action::AnalyzeLibrary => self.analyze_library(),
-            a @ (Action::PauseAnalysis(_) | Action::StopAnalysis | Action::SetAnalyzePlaying(_)) => self.analysis.apply(a, &self.prefs),
+            Action::StopSync => self.bridge.cancel_sync(),
+            Action::MeasureLatency => self.refresh_latency(),
+            Action::SignOut => self.sign_out(),
+            Action::Album(id, action) => self.play_album(id, action),
+            Action::Artist(name, action) => self.play_artist(name, action),
+            Action::Playlist(id, action) => self.play_playlist(id, action),
+            Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
+            Action::Queue(edit) => self.queue_edit(edit),
+            Action::PlayPause => self.play_pause(),
+            Action::Next => self.next(),
+            Action::Previous => self.previous(),
+            Action::Seek(to) => self.seek(to),
+            Action::Window(a) => self.apply_window(a),
+            Action::Prefs(a) => self.apply_prefs(a),
+            Action::Output(a) => self.apply_output(a),
+            Action::Offline(a) => self.apply_offline(a),
+            Action::Analysis(a) => self.apply_analysis(a),
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),
-            Action::Overlay(o) => self.ui.overlay = Some(o),
             Action::PlaylistEdit(edit) => self.playlist_action(edit),
         }
     }
@@ -926,15 +861,10 @@ impl OndApp {
                 WindowMode::Mini => None,
             });
         }
-        // Commands become actions; apply those in the same frame too (bounded,
-        // in case something keeps asking).
-        for _ in 0..4 {
-            if self.actions.is_empty() {
-                break;
-            }
-            for a in std::mem::take(&mut self.actions) {
-                self.apply(a);
-            }
+        // What the views, keys and menus asked for this frame. Applying an
+        // action never queues another, so one pass takes them all.
+        for a in std::mem::take(&mut self.actions) {
+            self.apply(a);
         }
         // A visual that moves with the music was drawn: the next frame comes
         // sooner than the usual clock, but only while something plays.
@@ -1217,14 +1147,8 @@ impl eframe::App for OndApp {
         }
         // The diagnostics bar keeps the server round trip fresh, but only while
         // something plays (idle stays idle).
-        if self.ui.prefs.diagnostics_bar
-            && self.session.online
-            && self.engine.status.state() == PlayState::Playing
-            && self.diagnostics.latency_stale()
-            && let Some(client) = self.session.client.clone()
-        {
-            self.diagnostics.latency_asked();
-            self.bridge.measure_latency(client);
+        if self.ui.prefs.diagnostics_bar && self.engine.status.state() == PlayState::Playing {
+            self.refresh_latency();
         }
         // Only the progress readout needs a clock; idle costs nothing. Buffering
         // animates the seek bar and spinner, so it ticks faster.
@@ -1616,8 +1540,8 @@ mod tests {
         // Album 12 isn't stored either: the play and the pin both wait, once each.
         app.apply(Action::Album("al-12".into(), QueueAction::Add));
         app.apply(Action::Album("al-12".into(), QueueAction::PlayNext));
-        app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
-        app.apply(Action::KeepOffline(Keep::Album("al-12".into()), true));
+        app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-12".into()), true)));
+        app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-12".into()), true)));
         assert_eq!(app.pending.len(), 1, "the newer action replaced the older");
         assert_eq!(app.downloads.pending_pins.len(), 1);
         // The load fails: both give up.
@@ -1767,15 +1691,15 @@ mod tests {
         app.apply(Action::Lyrics);
         assert_eq!(app.ui.queue_ui.tab, QueueTab::UpNext);
         // The artwork toggles to the Player (nothing used yet), where ⌥⌘L opens the drawer.
-        app.apply(Action::TogglePlayer);
+        app.apply(Action::Window(WindowAction::TogglePlayer));
         assert_eq!(app.prefs_now().mode, WindowMode::Player);
         app.apply(Action::Lyrics);
         frame(&ctx, &mut app, Vec::new());
         assert!(app.prefs_now().lyrics_open);
         // Mini, then back to full: the artwork now toggles to Mini.
-        app.apply(Action::ToggleMini);
-        app.apply(Action::SetMode(WindowMode::Full));
-        app.apply(Action::TogglePlayer);
+        app.apply(Action::Window(WindowAction::ToggleMini));
+        app.apply(Action::Window(WindowAction::SetMode(WindowMode::Full)));
+        app.apply(Action::Window(WindowAction::TogglePlayer));
         assert_eq!(app.prefs_now().mode, WindowMode::Mini);
         // Lyrics from Mini open the Player with its drawer.
         app.edit_windows(|w| w.lyrics_open = false);
@@ -1795,7 +1719,7 @@ mod tests {
         let want = id.to_owned();
         app.downloads.store().set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
         let t = app.data.tracks.all.iter().find(|t| t.id == id).unwrap().clone();
-        app.apply(Action::KeepOffline(Keep::Tracks(vec![t]), true));
+        app.apply(Action::Offline(OfflineAction::Keep(Keep::Tracks(vec![t]), true)));
         let start = std::time::Instant::now();
         while !app.downloads.store().snapshot().is_done(id) {
             assert!(start.elapsed() < Duration::from_secs(5), "download of {id}");
@@ -1886,8 +1810,8 @@ mod tests {
         assert!(app.downloads.store.is_none(), "opened on the UI thread");
         // Asked for while it opens: done once it's open.
         let t = app.data.tracks.all.iter().find(|t| t.id == "t-3").unwrap().clone();
-        app.apply(Action::KeepOffline(Keep::Tracks(vec![t]), true));
-        app.apply(Action::PauseDownloads(true));
+        app.apply(Action::Offline(OfflineAction::Keep(Keep::Tracks(vec![t]), true)));
+        app.apply(Action::Offline(OfflineAction::Pause(true)));
         store_opened(&mut app);
         let sam = login("sam").account_id().unwrap();
         assert!(app.downloads.store().dir().ends_with(format!("{sam:08x}")), "{}", app.downloads.store().dir().display());
@@ -2108,7 +2032,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, dir.path());
         // Album 5's tracks aren't loaded: the pin waits for them.
-        app.apply(Action::KeepOffline(Keep::Album("al-5".into()), true));
+        app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-5".into()), true)));
         assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
         let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
         app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });

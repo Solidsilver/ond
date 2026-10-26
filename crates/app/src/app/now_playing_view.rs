@@ -5,6 +5,7 @@
 //! lyrics view, smaller, is the full window's sidebar "Lyrics" tab. A quiet
 //! details strip folds out under the transport.
 
+use super::WindowAction;
 use super::view_ctx::ViewCtx;
 use super::widgets::{elide, heart_button, link, link_line};
 use super::seek::SeekStyle;
@@ -71,7 +72,7 @@ impl ViewCtx<'_> {
                     ui.painter().circle_filled(slot.center(), 13.0, scrim);
                 }
                 if icons::sized_button(ui, icon, label, vec2(28.0, 28.0), 12.0, Some(fg)).clicked() {
-                    self.actions.push(Action::SetMode(mode));
+                    self.actions.push(Action::Window(WindowAction::SetMode(mode)));
                 }
             }
         });
@@ -303,7 +304,7 @@ impl ViewCtx<'_> {
                         ui.painter().rect_filled(b.rect, 6.0, t.accent.gamma_multiply(0.12));
                     }
                     if b.clicked() {
-                        self.actions.push(Action::SetLyricsDrawer(!open));
+                        self.actions.push(Action::Window(WindowAction::SetLyricsDrawer(!open)));
                     }
                 });
             }
@@ -634,7 +635,7 @@ impl OndApp {
                         ui.label(egui::RichText::new("Lyrics").font(FontId::new(12.0, semibold())).color(t.muted));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if icons::sized_button(ui, Icon::Close, "Close lyrics (⌥⌘L)", vec2(22.0, 22.0), 9.0, Some(t.muted)).clicked() {
-                                self.actions.push(Action::SetLyricsDrawer(false));
+                                self.actions.push(Action::Window(WindowAction::SetLyricsDrawer(false)));
                             }
                         });
                     });

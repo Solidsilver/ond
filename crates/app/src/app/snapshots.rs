@@ -1147,7 +1147,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         let mut p = app.output.prefs().clone();
         p.replay_gain = crate::playback::RgMode::Auto;
         p.quality = crate::playback::QualityMode::Auto;
-        app.actions.push(Action::SetPlaybackPrefs(p));
+        app.actions.push(Action::Output(OutputAction::Playback(p)));
         app.actions.push(Action::OpenSettings(settings_page::Section::Playback));
     }
     s.shoot(h, "settings-playback-on");
@@ -1205,7 +1205,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "narrow-recent");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
-    app_mut(h).actions.push(Action::ToggleQueue);
+    app_mut(h).actions.push(Action::Window(WindowAction::ToggleQueue));
     s.shoot(h, "narrow-queue-sheet");
 
     reset(h, vec2(760.0, 640.0), Route::Albums);

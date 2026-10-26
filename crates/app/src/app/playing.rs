@@ -65,7 +65,36 @@ impl player::Sources for AppSources<'_> {
     }
 }
 
+/// A change to how audio is output.
+pub enum OutputAction {
+    /// ReplayGain and streaming preferences.
+    Playback(playback::PlaybackPrefs),
+    /// Remember a device's mode (by UID); the device in use switches now.
+    DeviceMode(String, PlaybackMode),
+    /// Software volume, 0..=1 (clamped).
+    Volume(f32),
+    /// Bit-perfect on the device in use, or back to normal.
+    ToggleBitPerfect,
+}
+
 impl OndApp {
+    pub(super) fn apply_output(&mut self, action: OutputAction) {
+        match action {
+            OutputAction::Playback(prefs) => self.output.set_prefs(prefs, &self.engine),
+            OutputAction::DeviceMode(uid, mode) => {
+                if self.output.set_device_mode(&uid, mode, &self.engine) {
+                    self.bit_perfect = mode == PlaybackMode::BitPerfect;
+                }
+            }
+            OutputAction::Volume(volume) => self.set_volume(volume),
+            OutputAction::ToggleBitPerfect => {
+                self.bit_perfect = !self.bit_perfect;
+                let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                self.output.set_mode_in_use(mode, &self.engine);
+            }
+        }
+    }
+
     /// A media key, Control Center or headphone command.
     pub(super) fn remote(&mut self, r: Remote) {
         if r == Remote::Raise {
@@ -165,7 +194,7 @@ impl OndApp {
     }
 
     /// Sets the volume now; the preference is saved once the change settles.
-    pub(super) fn set_volume(&mut self, volume: f32) {
+    fn set_volume(&mut self, volume: f32) {
         let volume = volume.clamp(0.0, 1.0);
         self.engine.send(Command::SetVolume(volume));
         self.prefs.edit(|s| s.volume = volume);

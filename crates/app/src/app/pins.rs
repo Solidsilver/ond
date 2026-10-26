@@ -22,6 +22,35 @@ pub enum Keep {
     Tracks(Vec<Track>),
 }
 
+/// A download action.
+pub enum OfflineAction {
+    /// Keep (true) or stop keeping something on this computer.
+    Keep(Keep, bool),
+    /// Stop keeping a pin (from the Offline place, where tracks may not be loaded).
+    Unpin(Pin),
+    Pause(bool),
+    Retry,
+    /// Cap on offline storage in bytes; `None` is unlimited.
+    SetLimit(Option<u64>),
+    /// Show the downloads folder.
+    Reveal,
+    /// Show the open store's folder, where files kept after its list of
+    /// downloads couldn't be read are (see `offline::SetAside`).
+    RevealSetAside,
+    /// Delete those files and the unreadable list, so the folder is tidied again.
+    RemoveSetAside,
+    /// Pick a new folder for downloads (they move at the next launch).
+    Move,
+}
+
+impl OfflineAction {
+    /// Needs the store: waits while it opens. (Not `RemoveSetAside`: the
+    /// store that opens may be another account's.)
+    fn needs_store(&self) -> bool {
+        matches!(self, OfflineAction::Keep(..) | OfflineAction::Unpin(_) | OfflineAction::Pause(_) | OfflineAction::Retry | OfflineAction::SetLimit(_))
+    }
+}
+
 /// Whether `track` can play right now: downloaded, or the server is there.
 pub(super) fn playable(session: &Session, downloads: &Downloads, track: &Track) -> bool {
     session.online || downloads.snap.is_done(&track.id)
@@ -47,7 +76,7 @@ pub struct Downloads {
     /// An open is under way.
     pub(super) opening: bool,
     /// Download actions taken while the store was opening, run once it's open.
-    pub(super) deferred: Vec<Action>,
+    pub(super) deferred: Vec<OfflineAction>,
     /// The notice showing the downloads folder's move, while it moves.
     moving: Option<String>,
     pub(super) open: OpenStore,
@@ -175,15 +204,6 @@ impl Downloads {
         Ok(true)
     }
 
-    /// Download actions that need the store: they wait while it opens.
-    /// (Not `RemoveSetAside`: the store that opens may be another account's.)
-    pub(super) fn needs_store(action: &Action) -> bool {
-        matches!(
-            action,
-            Action::KeepOffline(..) | Action::Unpin(_) | Action::PauseDownloads(_) | Action::RetryDownloads | Action::SetOfflineLimit(_)
-        )
-    }
-
     /// The finished file for track `id`, if there is one.
     pub fn local_path(&self, id: &str) -> Option<PathBuf> {
         self.store.as_ref()?.local_path(id)
@@ -203,27 +223,27 @@ impl Downloads {
     }
 
     /// Applies a download action. Returns a notice to show, or an error.
-    pub(super) fn apply(&mut self, action: Action, prefs: &Prefs) -> Result<Option<String>, String> {
+    pub(super) fn apply(&mut self, action: OfflineAction, prefs: &Prefs) -> Result<Option<String>, String> {
         let store = || self.store.clone().ok_or_else(|| "Downloads aren't open".to_owned());
         match action {
-            Action::Unpin(pin) => {
+            OfflineAction::Unpin(pin) => {
                 store()?.unpin(&pin);
                 self.refresh();
             }
-            Action::PauseDownloads(paused) => store()?.set_paused(paused),
-            Action::RetryDownloads => store()?.retry_failed(),
-            Action::SetOfflineLimit(bytes) => {
+            OfflineAction::Pause(paused) => store()?.set_paused(paused),
+            OfflineAction::Retry => store()?.retry_failed(),
+            OfflineAction::SetLimit(bytes) => {
                 store()?.set_limit(bytes);
                 prefs.edit(|s| s.offline_limit_gb = bytes.map(|b| b / 1_000_000_000));
             }
-            Action::RevealOffline => {
+            OfflineAction::Reveal => {
                 crate::folder::reveal(&self.base).map_err(|e| format!("open {}: {e}", self.base.display()))?;
             }
-            Action::RevealSetAside => {
+            OfflineAction::RevealSetAside => {
                 let store = store()?;
                 crate::folder::reveal(store.dir()).map_err(|e| format!("open {}: {e}", store.dir().display()))?;
             }
-            Action::RemoveSetAside => {
+            OfflineAction::RemoveSetAside => {
                 store()?.remove_set_aside();
                 self.refresh();
             }
@@ -259,6 +279,27 @@ pub fn track_ref(t: &Track) -> TrackRef {
 }
 
 impl OndApp {
+    /// Applies a download action. One that needs the store waits while it opens.
+    pub(super) fn apply_offline(&mut self, action: OfflineAction) {
+        if self.downloads.store.is_none() && action.needs_store() {
+            if self.downloads.opening {
+                self.downloads.deferred.push(action);
+            } else {
+                self.show_error("Downloads couldn't be opened. Restart Ond to try again.");
+            }
+            return;
+        }
+        match action {
+            OfflineAction::Keep(what, on) => self.keep_offline(what, on),
+            OfflineAction::Move => self.choose_offline_folder(),
+            other => match self.downloads.apply(other, &self.prefs) {
+                Ok(Some(notice)) => self.show_notice(notice),
+                Ok(None) => {}
+                Err(e) => self.show_error(e),
+            },
+        }
+    }
+
     /// A message about the offline store: it opened, or its folder moved.
     pub(super) fn offline_msg(&mut self, msg: Msg) {
         match msg {
@@ -273,7 +314,7 @@ impl OndApp {
                         self.connect_downloads(&client);
                     }
                     // Download actions taken while it opened.
-                    self.actions.append(&mut self.downloads.deferred);
+                    self.actions.extend(self.downloads.deferred.drain(..).map(Action::Offline));
                     if !self.session.online {
                         // What's downloaded can play again.
                         self.sync_next();
@@ -372,7 +413,7 @@ impl OndApp {
         }
     }
 
-    /// Runs only with the store open (see `apply`, which holds it back while one opens).
+    /// Runs only with the store open (see `apply_offline`, which holds it back while one opens).
     pub(super) fn keep_offline(&mut self, what: Keep, on: bool) {
         let Some(store) = self.downloads.store.clone() else { return };
         // An album or playlist is pinned whole, once its track list is known.

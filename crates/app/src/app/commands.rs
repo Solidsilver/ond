@@ -1,14 +1,13 @@
-//! What keys, the menu bar, hearts, ratings and playlist edits do. Views push
-//! [`Action`]s; these apply them.
+//! What keys and the menu bar do (each [`Cmd`] stands for an [`Action`]), and
+//! hearts, ratings and playlist edits.
 
-use super::{Action, OndApp, sidebar};
+use super::{Action, OndApp, OutputAction, PrefsAction, WindowAction, sidebar};
 use std::sync::Arc;
 use crate::bridge::PlaylistEdit;
 use crate::favorites::StarKind;
-use crate::keys::Cmd;
+use crate::keys::{Cmd, EditCmd};
 use crate::nav::Route;
 use crate::window::WindowMode;
-use audio::PlaybackMode;
 use library::Track;
 
 /// A change to a playlist, from a view.
@@ -39,80 +38,75 @@ const VOLUME_STEP: f32 = 0.1;
 /// How far ⌥⌘→ / ⌥⌘← skip.
 const SKIP_SECS: f64 = 10.0;
 
-impl OndApp {
-    pub(super) fn command(&mut self, cmd: Cmd) {
-        match cmd {
-            Cmd::PlayPause => self.actions.push(Action::PlayPause),
-            Cmd::Next => self.actions.push(Action::Next),
-            Cmd::Previous => self.actions.push(Action::Previous),
+impl Cmd {
+    /// What this key or menu command stands for, as things are now; `None`
+    /// when it has nothing to act on (seeking with nothing playing, say).
+    pub(super) fn action(self, app: &OndApp) -> Option<Action> {
+        let current = app.player.queue.current.as_ref().map(|c| &c.track);
+        Some(match self {
+            Cmd::PlayPause => Action::PlayPause,
+            Cmd::Next => Action::Next,
+            Cmd::Previous => Action::Previous,
             Cmd::VolumeUp | Cmd::VolumeDown => {
                 // Bit-perfect leaves volume to the DAC.
-                if !self.bit_perfect {
-                    let step = if cmd == Cmd::VolumeUp { VOLUME_STEP } else { -VOLUME_STEP };
-                    self.set_volume(self.prefs_now().volume + step);
+                if app.bit_perfect {
+                    return None;
                 }
+                let step = if self == Cmd::VolumeUp { VOLUME_STEP } else { -VOLUME_STEP };
+                Action::Output(OutputAction::Volume(app.prefs_now().volume + step))
             }
             Cmd::SeekForward | Cmd::SeekBack => {
-                if self.player.queue.current.is_some() {
-                    let by = if cmd == Cmd::SeekForward { SKIP_SECS } else { -SKIP_SECS };
-                    let end = self.duration_secs().unwrap_or(f64::MAX);
-                    self.actions.push(Action::Seek((self.position_secs() + by).clamp(0.0, end)));
-                }
+                current?;
+                let by = if self == Cmd::SeekForward { SKIP_SECS } else { -SKIP_SECS };
+                let end = app.duration_secs().unwrap_or(f64::MAX);
+                Action::Seek((app.position_secs() + by).clamp(0.0, end))
             }
             Cmd::Love => {
-                if let Some(t) = self.player.queue.current.as_ref().map(|c| c.track.clone()) {
-                    self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: t.id.clone(), track: Some(Box::new(t)), name: None });
-                }
+                let t = current?;
+                Action::ToggleStar { kind: StarKind::Song, id: t.id.clone(), track: Some(Box::new(t.clone())), name: None }
             }
             Cmd::Reveal => {
-                if let Some(t) = self.player.queue.current.as_ref().map(|c| c.track.clone()) {
-                    self.ui.reveal = Some(t.id.clone());
-                    self.actions.push(Action::Go(Route::Album(t.album_id)));
-                }
+                let t = current?;
+                Action::Reveal { track: t.id.clone(), album: t.album_id.clone() }
             }
-            Cmd::Search => self.actions.push(Action::OpenPalette),
-            Cmd::Back => self.actions.push(Action::Back),
-            Cmd::Forward => self.actions.push(Action::Forward),
-            Cmd::Place(n) => {
-                if let Some((_, route, _)) = sidebar::PLACES.get(usize::from(n)) {
-                    self.actions.push(Action::Go(route.clone()));
-                }
-            }
-            Cmd::ToggleQueue => self.actions.push(Action::ToggleQueue),
-            Cmd::Lyrics => self.actions.push(Action::Lyrics),
-            Cmd::Info => self.actions.push(Action::Info),
-            Cmd::TogglePlayer => self.actions.push(Action::TogglePlayer),
-            Cmd::Full => self.actions.push(Action::SetMode(WindowMode::Full)),
-            Cmd::Player => self.actions.push(Action::SetMode(WindowMode::Player)),
-            Cmd::Mini => self.actions.push(Action::SetMode(WindowMode::Mini)),
-            Cmd::ToggleMini => self.actions.push(Action::ToggleMini),
-            Cmd::Settings => self.actions.push(Action::OpenSettings(self.ui.settings_section)),
-            Cmd::Shortcuts => {
-                self.set_mode(Some(WindowMode::Full));
-                self.ui.overlay = match self.ui.overlay {
-                    Some(super::dialogs::Overlay::Shortcuts) => None,
-                    _ => Some(super::dialogs::Overlay::Shortcuts),
-                };
-            }
-            Cmd::NewPlaylist => {
-                self.set_mode(Some(WindowMode::Full));
-                self.ui.overlay = Some(super::dialogs::Overlay::new_playlist(Vec::new()));
-            }
-            Cmd::ToggleBitPerfect => {
-                self.bit_perfect = !self.bit_perfect;
-                let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                self.output.set_mode_in_use(mode, &self.engine);
-            }
-            Cmd::ToggleDiagnostics => self.actions.push(Action::SetDiagnostics(!self.prefs_now().diagnostics_bar)),
-            Cmd::Visualizer => self.toggle_visualizer(),
-            Cmd::Appearance(pref) => self.actions.push(Action::SetTheme(pref)),
-            Cmd::Edit(e) => {
-                // Handed to egui as input next frame, so the focused field gets it.
-                let events = e.events(clipboard_text);
-                self.ui.edit_input.extend(events);
-                self.ctx.request_repaint();
-            }
+            Cmd::Search => Action::OpenPalette,
+            Cmd::Back => Action::Back,
+            Cmd::Forward => Action::Forward,
+            Cmd::Place(n) => Action::Go(sidebar::PLACES.get(usize::from(n))?.1.clone()),
+            Cmd::ToggleQueue => Action::Window(WindowAction::ToggleQueue),
+            Cmd::Lyrics => Action::Lyrics,
+            Cmd::Info => Action::Info,
+            Cmd::TogglePlayer => Action::Window(WindowAction::TogglePlayer),
+            Cmd::Full => Action::Window(WindowAction::SetMode(WindowMode::Full)),
+            Cmd::Player => Action::Window(WindowAction::SetMode(WindowMode::Player)),
+            Cmd::Mini => Action::Window(WindowAction::SetMode(WindowMode::Mini)),
+            Cmd::ToggleMini => Action::Window(WindowAction::ToggleMini),
+            Cmd::Settings => Action::OpenSettings(app.ui.settings_section),
+            Cmd::Shortcuts => Action::ToggleShortcuts,
+            Cmd::NewPlaylist => Action::NewPlaylist,
+            Cmd::ToggleBitPerfect => Action::Output(OutputAction::ToggleBitPerfect),
+            Cmd::ToggleDiagnostics => Action::Prefs(PrefsAction::Diagnostics(!app.prefs_now().diagnostics_bar)),
+            Cmd::Visualizer => Action::ToggleVisualizer,
+            Cmd::Appearance(pref) => Action::Prefs(PrefsAction::Theme(pref)),
+            Cmd::Edit(e) => Action::Edit(e),
+        })
+    }
+}
+
+impl OndApp {
+    /// Applies a key or menu command now.
+    pub(super) fn command(&mut self, cmd: Cmd) {
+        if let Some(action) = cmd.action(self) {
+            self.apply(action);
         }
+    }
+
+    /// Hands an Edit menu command to egui as input next frame, so the
+    /// focused field pastes, copies or undoes as if the keys had reached it.
+    pub(super) fn edit_input(&mut self, e: EditCmd) {
+        let events = e.events(clipboard_text);
+        self.ui.edit_input.extend(events);
+        self.ctx.request_repaint();
     }
 
     /// Flips a heart now and tells the server; a refusal puts it back.

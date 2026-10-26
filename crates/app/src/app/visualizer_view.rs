@@ -7,7 +7,7 @@
 //! or with the painter where there's no wgpu renderer to hand.
 
 use super::widgets::elide_job;
-use super::{Action, OndApp};
+use super::{Action, OndApp, WindowAction};
 use crate::visuals::visualizer::{Dot, Input, Kind, Pick, Picture, Rng, Scene, caption_alpha, name_alpha};
 use crate::visuals::{EVERY_FRAME, gpu};
 use egui::{Align2, Color32, FontId, Galley, Key, Modifiers, Rect, Ui, pos2, vec2};
@@ -246,7 +246,13 @@ impl OndApp {
     pub(super) fn leaves_visualizer(action: &Action) -> bool {
         matches!(
             action,
-            Action::Go(_) | Action::OpenPalette | Action::SetMode(_) | Action::ToggleMini | Action::TogglePlayer | Action::OpenSettings(_) | Action::Overlay(_) | Action::Lyrics | Action::Info
+            Action::Go(_)
+                | Action::OpenPalette
+                | Action::Window(WindowAction::SetMode(_) | WindowAction::ToggleMini | WindowAction::TogglePlayer)
+                | Action::OpenSettings(_)
+                | Action::Overlay(_)
+                | Action::Lyrics
+                | Action::Info
         )
     }
 }

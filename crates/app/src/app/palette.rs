@@ -1,6 +1,7 @@
 //! ⌘K: search the library and act on a result without leaving the keyboard.
 //! ⏎ opens · ⌘⏎ plays · ⌥⏎ plays next · ⇧⏎ adds to the queue.
 
+use super::OfflineAction;
 use super::view_ctx::ViewCtx;
 use super::widgets::elide;
 use super::{Action, QueueAction};
@@ -147,7 +148,7 @@ impl ViewCtx<'_> {
                     Verb::Play => Action::Album(id, QueueAction::Play { start: 0 }),
                     Verb::PlayNext => Action::Album(id, QueueAction::PlayNext),
                     Verb::Add => Action::Album(id, QueueAction::Add),
-                    Verb::Download => Action::KeepOffline(super::Keep::Album(id), !kept),
+                    Verb::Download => Action::Offline(OfflineAction::Keep(super::Keep::Album(id), !kept)),
                 });
             }
             Hit::Track(i) => {
@@ -161,7 +162,7 @@ impl ViewCtx<'_> {
                     Verb::Add => self.play_from_album(&tr, QueueAction::Add),
                     Verb::Download => {
                         let kept = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
-                        self.actions.push(Action::KeepOffline(super::Keep::Tracks(vec![tr]), !kept));
+                        self.actions.push(Action::Offline(OfflineAction::Keep(super::Keep::Tracks(vec![tr]), !kept)));
                     }
                 }
             }

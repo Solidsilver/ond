@@ -2,12 +2,25 @@
 //! stored results, the background runner, and the library-wide run that
 //! resumes after a restart until it's done.
 
-use super::{Action, OndApp};
+use super::OndApp;
 use crate::analyze;
 use crate::bridge::Msg;
 use crate::prefs::Prefs;
 use library::Track;
 use std::collections::HashMap;
+
+/// A change to library analysis.
+pub enum AnalysisAction {
+    /// Analyse these tracks (those without a current result) in the background.
+    Tracks(Vec<Track>),
+    /// Analyse the whole library (resumed after a restart until it's done).
+    Library,
+    Pause(bool),
+    /// Stop and forget everything queued for analysis.
+    Stop,
+    /// Analyse each track as it plays.
+    AnalyzePlaying(bool),
+}
 
 /// Library analysis: stored results and the background runner.
 pub struct Analysis {
@@ -30,16 +43,16 @@ impl Analysis {
     }
 
     /// Applies the analysis actions that need only the runner and preferences.
-    pub(super) fn apply(&mut self, action: Action, prefs: &Prefs) {
+    pub(super) fn apply(&mut self, action: AnalysisAction, prefs: &Prefs) {
         match action {
-            Action::PauseAnalysis(paused) => self.runner.set_paused(paused),
-            Action::StopAnalysis => {
+            AnalysisAction::Pause(paused) => self.runner.set_paused(paused),
+            AnalysisAction::Stop => {
                 self.runner.clear();
                 self.runner.set_paused(false);
                 // A library-wide run isn't resumed at the next launch either.
                 prefs.edit(|s| s.analysis_resume = false);
             }
-            Action::SetAnalyzePlaying(on) => prefs.edit(|s| s.analyze_playing = on),
+            AnalysisAction::AnalyzePlaying(on) => prefs.edit(|s| s.analyze_playing = on),
             _ => unreachable!("not an analysis action"),
         }
     }
@@ -51,6 +64,14 @@ impl Analysis {
 }
 
 impl OndApp {
+    pub(super) fn apply_analysis(&mut self, action: AnalysisAction) {
+        match action {
+            AnalysisAction::Tracks(tracks) => self.analyze(&tracks),
+            AnalysisAction::Library => self.analyze_library(),
+            other => self.analysis.apply(other, &self.prefs),
+        }
+    }
+
     /// A result came in, or the stored ones were read.
     pub(super) fn analysis_msg(&mut self, msg: Msg) {
         match msg {

@@ -64,7 +64,38 @@ impl PrefsView {
     }
 }
 
+/// A change to an appearance or behaviour preference.
+pub enum PrefsAction {
+    Theme(ThemePref),
+    /// The accent color used without (or instead of) the album art's.
+    Accent(Accent),
+    /// Whether colors adapt to the album art.
+    AdaptColors(bool),
+    Scrobble(bool),
+    /// Show or hide the diagnostics bar.
+    Diagnostics(bool),
+    /// Turn experimental visuals on or off.
+    Experimental(Experimental),
+}
+
 impl OndApp {
+    pub(super) fn apply_prefs(&mut self, action: PrefsAction) {
+        match action {
+            PrefsAction::Theme(pref) => {
+                crate::theme::set_pref(&self.ctx, pref);
+                self.prefs.edit(|s| s.theme = pref);
+            }
+            PrefsAction::Accent(accent) => self.prefs.edit(|s| s.accent = accent),
+            PrefsAction::AdaptColors(on) => self.prefs.edit(|s| s.adapt_colors = on),
+            PrefsAction::Scrobble(on) => {
+                self.now_playing.set_scrobbling(on);
+                self.prefs.edit(|s| s.scrobble = on);
+            }
+            PrefsAction::Diagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
+            PrefsAction::Experimental(x) => self.prefs.edit(|s| s.experimental = x),
+        }
+    }
+
     /// The preferences as they are now (not as this frame started).
     pub(super) fn prefs_now(&self) -> PrefsView {
         PrefsView::read(&self.prefs)

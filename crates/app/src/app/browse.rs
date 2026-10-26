@@ -1,6 +1,7 @@
 //! The main view's router and the album-grid places: Recently Added, Albums,
 //! Artists, an artist's page, and albums by genre / year / label.
 
+use super::OfflineAction;
 use super::view_ctx::ViewCtx;
 use super::widgets::{Mark, choice, elide};
 use super::{Action, AlbumSort, Data, Keep, OndApp, QueueAction};
@@ -289,7 +290,7 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
         button = button.shortcut_text(crate::keys::shown(keys));
     }
     if ui.add(button).clicked() {
-        actions.push(Action::KeepOffline(what(), !kept));
+        actions.push(Action::Offline(OfflineAction::Keep(what(), !kept)));
     }
 }
 

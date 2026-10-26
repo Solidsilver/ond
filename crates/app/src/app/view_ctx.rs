@@ -1,8 +1,15 @@
 //! What a view gets to work with: the library, playback, downloads and the
 //! rest to read, the window's own state to change, and a list of [`Action`]s
-//! to ask for everything else. A view that takes a `ViewCtx` can't start a
-//! request or touch the engine behind the app's back; the app applies the
+//! to ask for everything else. A view that takes a `ViewCtx` doesn't start a
+//! request or change playback behind the app's back; the app applies the
 //! actions after the frame.
+//!
+//! Some views are still `OndApp` methods: the toolbar, the sidebar, Settings
+//! and the other sheets, the Player's and Mini's frames, and the visualizer.
+//! They ask for changes with actions too, with two exceptions: the output
+//! picker (`Outputs::picker_ui`, in the toolbar and the Player's status bar)
+//! keeps its own state and switches bit-perfect on the spot, and the
+//! visualizer saves the one it switches to (←/→) as it switches.
 
 use super::{Action, Analysis, Data, Downloads, OndApp, SearchState, Session, SongStats, SyncState, UiState, diagnostics};
 use crate::art::Art;

@@ -1,10 +1,11 @@
 //! The toolbar: transport on the left, the now-playing display centred on the
 //! window, output / volume / queue on the right.
 
+use super::WindowAction;
 use super::widgets::elide;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
-use super::{Action, OndApp};
+use super::{Action, OndApp, OutputAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -127,10 +128,10 @@ impl OndApp {
             ui.painter().rect_filled(queue_icon.rect, 6.0, t.accent.gamma_multiply(0.12));
         }
         if queue_icon.clicked() {
-            self.actions.push(Action::ToggleQueue);
+            self.actions.push(Action::Window(WindowAction::ToggleQueue));
         }
         if icons::sized_button(ui, Icon::MiniPlayer, "Mini player (⇧⌘M)", vec2(28.0, 28.0), 14.0, Some(t.muted)).clicked() {
-            self.actions.push(Action::ToggleMini);
+            self.actions.push(Action::Window(WindowAction::ToggleMini));
         }
         let mut volume = |ui: &mut Ui, width: f32| {
             let mut level = self.ui.prefs.volume;
@@ -139,7 +140,7 @@ impl OndApp {
                 .inner
                 .on_disabled_hover_text("In bit-perfect mode, use your DAC's or the system's volume");
             if resp.changed() {
-                self.set_volume(level);
+                self.actions.push(Action::Output(OutputAction::Volume(level)));
             }
         };
         if narrow {
@@ -221,7 +222,7 @@ impl ViewCtx<'_> {
         // rest of the display opens the album.
         let on_art = body.interact_pointer_pos().or(body.hover_pos()).is_some_and(|p| art.contains(p));
         if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() && !on_readout {
-            self.actions.push(if on_art { Action::TogglePlayer } else { Action::Go(Route::Album(item.track.album_id.clone())) });
+            self.actions.push(if on_art { Action::Window(WindowAction::TogglePlayer) } else { Action::Go(Route::Album(item.track.album_id.clone())) });
         }
         if on_art && body.hovered() {
             painter.rect_stroke(art.shrink(1.0), 6.0, egui::Stroke::new(1.5, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
