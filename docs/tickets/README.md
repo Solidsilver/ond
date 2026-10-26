@@ -26,6 +26,7 @@ Each ticket has: Problem (with `path:line` references; "Verified" means the lead
 | [018](018-audio-architecture-cleanups.md) | Audio: gapless across bit depths; dither single source; API tidy | audio | refactor | P3 |
 | [019](019-data-layer-robustness.md) | Data layer: lenient decoding, folding, resume validation, DR fidelity | data crates | enhancement | P3 |
 | [020](020-app-core-allocation-hotspots.md) | App core: allocation hot spots outside draw code | app | perf | P3 |
+| [021](021-offline-surface-set-aside-state.md) | Offline: tell the user when the state file was set aside and cleanup is off | offline/ui | enhancement | P3 |
 
 Suggested order: 001, 002 → 003, 004, 006, 007, 008, 009, 011 → 012 → 005, 010, 013, 014, 015 → 016 → 017, 018, 019, 020. Ticket 016 depends on 007/008/009 landing first; 017 after 012; 018 after 002–005.
 
