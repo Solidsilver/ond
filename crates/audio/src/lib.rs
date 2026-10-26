@@ -382,6 +382,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 ring: None,
                 next: None,
                 prefetched: None,
+                opening: None,
                 held_seek: None,
                 device_modes: HashMap::new(),
                 current_device: None,
@@ -439,6 +440,8 @@ struct Engine {
     next: Option<TrackSource>,
     /// Id of the track already handed to the cache's prefetch slot.
     prefetched: Option<String>,
+    /// The track the session started with: what ends if it never produces audio.
+    opening: Option<TrackSource>,
     /// A seek the output is holding for, until the decoder reports it done.
     held_seek: Option<Duration>,
     device_modes: HashMap<String, PlaybackMode>,
@@ -477,7 +480,11 @@ impl Engine {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Play(src) => self.start(src, None),
+            Command::Play(src) => {
+                // A new queue: whatever the old one had lined up doesn't follow this track.
+                self.forget_next();
+                self.start(src, None);
+            }
             Command::Pause => {
                 // Loading too: a pause pressed while a slow server answers must
                 // hold once the track opens (`open_ring` respects `paused`).
@@ -492,7 +499,10 @@ impl Engine {
                     self.status.set_state(PlayState::Playing);
                 }
             }
-            Command::Stop => self.stop(),
+            Command::Stop => {
+                self.forget_next();
+                self.stop();
+            }
             Command::SetVolume(v) => {
                 let was_full = self.status.volume() >= 1.0;
                 self.status.set_volume(v);
@@ -548,6 +558,7 @@ impl Engine {
         self.status.set_state(PlayState::Loading);
         self.status.paused.store(false, Ordering::Relaxed);
         let caps = self.backend.device_caps();
+        self.opening = Some(src.clone());
         let session = Session::start(
             src,
             start_at,
@@ -563,6 +574,7 @@ impl Engine {
 
     fn stop(&mut self) {
         self.held_seek = None;
+        self.opening = None;
         if let Some(s) = self.session.take() {
             s.cancel();
         }
@@ -618,21 +630,34 @@ impl Engine {
         if next.as_ref().map(|n| &n.id) != self.prefetched.as_ref() {
             self.prefetched = None;
         }
-        self.next = next.clone();
+        let before = std::mem::replace(&mut self.next, next.clone());
         let Some(session) = &self.session else { return };
-        match self.tracks.get(self.out_seq as usize + 1) {
-            // The decoder is still on the output's track: tell it what follows.
-            None => session.set_next(self.out_seq, next),
-            // It already moved on to the right track.
-            Some(t) if next.as_ref().is_some_and(|n| n.id == t.src.id && n.token == t.src.token) => {}
-            // It moved on to a track that's no longer next (the queue changed in the
-            // last few seconds of the track). Restart the current track where it is.
-            Some(_) => {
-                if let Some(resume) = self.take_position() {
-                    self.resume(resume);
-                }
-            }
+        let after = self.out_seq;
+        let queued = self.tracks.get(after as usize + 1).map(|t| &t.src);
+        // The decoder is still on the output's track (decoding it, or waiting at
+        // its end): it takes this as what follows. (A decoder that has exited
+        // takes nothing; `Ended` follows and the UI starts the next track itself.)
+        if queued.is_none() && session.set_next(after, next.clone()) {
+            return;
         }
+        // It moved on: to the track it has reported, or, until that track's first
+        // audio, to the one it was last told about.
+        let queued = queued.or(before.as_ref());
+        let same = |a: &TrackSource, b: &TrackSource| a.id == b.id && a.token == b.token;
+        if queued.zip(next.as_ref()).is_some_and(|(q, n)| same(q, n)) {
+            return;
+        }
+        // It moved on to a track that's no longer next (the queue changed in the
+        // last few seconds of the track). Restart the current track where it is.
+        if let Some(resume) = self.take_position() {
+            self.resume(resume);
+        }
+    }
+
+    /// The UI's next track no longer applies (a new queue, or stopped).
+    fn forget_next(&mut self) {
+        self.next = None;
+        self.prefetched = None;
     }
 
     /// The current track and position, if something is playing or paused.
@@ -834,10 +859,8 @@ impl Engine {
                     }
                     return;
                 }
-                DecoderMsg::Error { seq, message } => {
-                    let seq = seq.min(self.tracks.len().saturating_sub(1) as u64);
-                    let track_id = self.tracks.get(seq as usize).map(|t| t.src.id.clone());
-                    let _ = self.events.send(Event::Error { track_id, message });
+                DecoderMsg::Error { seq, track_id, message } => {
+                    let _ = self.events.send(Event::Error { track_id: Some(track_id), message });
                     // A later track failing lets the current one play out; anything else stops.
                     if self.ring.is_none() || seq <= self.out_seq {
                         self.stop();
@@ -858,22 +881,27 @@ impl Engine {
             return;
         }
 
-        // Track boundaries the callback has played past.
+        // Track boundaries the callback has played past. The decoder reports a
+        // track before queuing its audio, but the callback can cross into it
+        // between the messages being drained above and this load: such a track is
+        // announced on the next poll, once its report is in.
         let crossed = self.status.track_seq.load(Ordering::Acquire);
-        if self.out_seq < crossed {
-            while self.out_seq < crossed {
-                self.out_seq += 1;
-                // The UI names the new next once it hears about this track.
-                self.next = None;
-                self.prefetched = None;
-                self.announce(true);
-            }
+        let mut advanced = false;
+        while self.out_seq < crossed && (self.out_seq as usize + 1) < self.tracks.len() {
+            self.out_seq += 1;
+            advanced = true;
+            // The UI names the new next once it hears about this track.
+            self.forget_next();
+            self.announce(true);
+        }
+        if advanced {
             // Same device format, but the gain, transcode or channel layout may differ.
             self.report_signal_path();
         }
 
         if self.session.is_some() && finished && (self.ring.is_none() || self.backend.drained()) {
-            let ended = self.current().map(|t| (t.src.id.clone(), t.src.token));
+            // A session that never produced audio (an empty file) ends too, as its first track.
+            let ended = self.current().map(|t| &t.src).or(self.opening.as_ref()).map(|s| (s.id.clone(), s.token));
             self.stop();
             if let Some((track_id, token)) = ended {
                 let _ = self.events.send(Event::Ended { track_id, token });

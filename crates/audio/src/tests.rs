@@ -380,7 +380,8 @@ fn remembered_modes_win_over_device_defaults() {
 #[test]
 fn a_seek_after_the_decoder_has_finished_still_lands_and_ends() {
     let dir = tempfile::tempdir().unwrap();
-    // 16 s, all of it fits the buffer: the decoder is done long before the output.
+    // 16 s, all of it fits the buffer: the decoder is done long before the output
+    // (it waits at the end for a next track, so the seek lands in place).
     let a = pcm(2 * 44_100 * 16, 3);
     let backend = FakeBackend::new(caps(None, 192_000));
     let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 };
@@ -483,6 +484,109 @@ fn turning_the_volume_down_is_reported_as_dithered() {
     assert!(dithered(&engine), "software volume requantizes");
     engine.send(Command::SetVolume(1.0));
     assert!(!dithered(&engine));
+    engine.send(Command::Shutdown);
+}
+
+/// (track id, gapless, restart) of every `TrackStarted` in `seen`.
+fn starts(seen: &[Event]) -> Vec<(String, bool, bool)> {
+    seen.iter()
+        .filter_map(|e| match e {
+            Event::TrackStarted { track_id, gapless, restart, .. } => Some((track_id.clone(), *gapless, *restart)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_next_track_that_fails_to_open_lets_the_current_one_play_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100, 7);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    let missing = TrackSource { id: "gone".into(), url: format!("file://{}", dir.path().join("gone.wav").display()), ..Default::default() };
+    engine.send(Command::SetNext(Some(missing)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let errors: Vec<_> = seen.iter().filter_map(|e| if let Event::Error { track_id, .. } = e { Some(track_id.clone()) } else { None }).collect();
+    assert_eq!(errors, [Some("gone".to_owned())], "the error names the track that failed: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "a"), "{seen:?}");
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    assert!(out == a, "the current track played out: {} of {} samples", out.len(), a.len());
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_next_named_while_the_decoder_opens_the_old_one_is_honoured() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, c) = (pcm(2 * 44_100 * 3, 8), pcm(2 * 44_100, 9), pcm(2 * 44_100, 10));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    // B takes a while to open (a slow server): the decoder sits between A and B.
+    let b = file_source(&dir, "b", &b);
+    let slow_b = TrackSource { url: b.url.replacen("file://", "test-slow://", 1), ..b };
+    engine.send(Command::SetNext(Some(slow_b)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // All of A is decoded within a few ms; by now the decoder is opening B.
+    thread::sleep(Duration::from_millis(50));
+    engine.send(Command::SetNext(Some(file_source(&dir, "c", &c))));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let ids: Vec<_> = starts(&seen).into_iter().map(|(id, ..)| id).collect();
+    assert!(!ids.iter().any(|id| id == "b"), "B was replaced: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "c"), "C followed A: {seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_track_without_audio_still_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(FakeBackend::new(caps(None, 192_000))), None);
+    engine.send(Command::Play(TrackSource { token: 3, ..file_source(&dir, "empty", &[]) }));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, token: 3 }) if track_id == "empty"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn play_does_not_inherit_the_previous_queues_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, c) = (pcm(2 * 44_100 * 20, 11), pcm(2 * 4_410, 12), pcm(2 * 4_410, 13));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // A new queue whose only track is C: the UI has no next to name.
+    engine.send(Command::Stop);
+    engine.send(Command::Play(file_source(&dir, "c", &c)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("c".to_owned(), false, false)], "{seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "c"));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_short_track_waits_for_its_next_to_be_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, c) = (pcm(2 * 44_100 * 2, 14), pcm(2 * 44_100 * 3, 15), pcm(2 * 4_410, 16));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    // B fits the buffer whole: the decoder is done with it long before it plays.
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    // Like the UI: the track after B is named once B starts.
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { track_id, .. } if track_id == "b"));
+    engine.send(Command::SetNext(Some(file_source(&dir, "c", &c))));
+    let rest = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    let all: Vec<Event> = seen.into_iter().chain(rest).collect();
+    let started: Vec<_> = starts(&all).into_iter().map(|(id, gapless, _)| (id, gapless)).collect();
+    assert_eq!(started, [("a".to_owned(), false), ("b".to_owned(), true), ("c".to_owned(), true)], "{all:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+    let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
+    let expected: Vec<i16> = a.iter().chain(&b).chain(&c).copied().collect();
+    assert!(out == expected, "played {} samples, expected {}", out.len(), expected.len());
     engine.send(Command::Shutdown);
 }
 
