@@ -4,8 +4,16 @@
 //! Callers ask for art only while drawing something visible, so scrolled-away
 //! rows never cost a request. A miss paints a neutral tile of the same size
 //! (no layout shift) and the finished load triggers a single repaint.
+//!
+//! Loads are asked for again every frame they're drawn, and the [`Queue`] runs
+//! the most recently asked first. One that goes unasked for a couple of frames
+//! (scrolled past) is dropped before it starts, or its download aborted, so a
+//! fast scroll doesn't leave a backlog ahead of what's on screen now. Disk
+//! reads have their own slots and never wait behind downloads. Looks (for the
+//! playing and the open album, a cover or two) skip the queue and start at once.
 
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureOptions, Ui};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
@@ -23,6 +31,10 @@ const TEXTURE_BUDGET: usize = 192 * 1024 * 1024;
 const DISK_BUDGET: u64 = 512 * 1024 * 1024;
 /// Parallel downloads.
 const FETCHES: usize = 6;
+/// Parallel disk-cache reads (and their decodes).
+const READS: usize = 4;
+/// Frames a load may go unasked for before it's dropped.
+const KEEP_FRAMES: u64 = 2;
 
 pub fn bucket(px: f32) -> u32 {
     SIZES.iter().copied().find(|&s| s as f32 >= px).unwrap_or(SIZES[SIZES.len() - 1])
@@ -127,8 +139,134 @@ pub fn eviction_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, budget: u64) ->
     out
 }
 
-/// A finished load: the key, the cover's id and the image (`None`: no art).
-type Loaded = (Key, String, Option<ColorImage>);
+/// Where a load runs: the disk cache first, then the server on a miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    Disk,
+    Net,
+}
+
+impl Lane {
+    fn slots(self) -> usize {
+        match self {
+            Lane::Disk => READS,
+            Lane::Net => FETCHES,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Want {
+    /// The last frame it was asked for.
+    frame: u64,
+    /// Order of first asking; also the job's id.
+    job: u64,
+    /// Only prefetched (just past the viewport) in its last frame.
+    soon: bool,
+    lane: Lane,
+    running: bool,
+}
+
+/// Loads asked for and which run next: asked for most recently first, on
+/// screen before prefetch, then longest waiting. Pure bookkeeping; the caller
+/// starts the tasks and aborts the downloads `next_frame` reports.
+#[derive(Debug)]
+pub struct Queue<K> {
+    wants: HashMap<K, Want>,
+    frame: u64,
+    jobs: u64,
+}
+
+impl<K: Clone + Eq + Hash> Queue<K> {
+    pub fn new() -> Self {
+        Self { wants: HashMap::new(), frame: 0, jobs: 0 }
+    }
+
+    /// Notes `k` as wanted this frame (`soon`: only as a prefetch). True when
+    /// it wasn't already queued or running.
+    pub fn ask(&mut self, k: K, soon: bool) -> bool {
+        if let Some(w) = self.wants.get_mut(&k) {
+            w.soon = if w.frame == self.frame { w.soon && soon } else { soon };
+            w.frame = self.frame;
+            return false;
+        }
+        self.jobs += 1;
+        self.wants.insert(k, Want { frame: self.frame, job: self.jobs, soon, lane: Lane::Disk, running: false });
+        true
+    }
+
+    /// Starts a frame, dropping loads unasked for `KEEP_FRAMES` frames, and
+    /// returns the running downloads among them to abort. Running disk reads
+    /// are left to finish; they're quick.
+    pub fn next_frame(&mut self) -> Vec<K> {
+        self.frame += 1;
+        let frame = self.frame;
+        let mut abort = Vec::new();
+        self.wants.retain(|k, w| {
+            let keep = w.frame + KEEP_FRAMES >= frame || (w.running && w.lane == Lane::Disk);
+            if !keep && w.running {
+                abort.push(k.clone());
+            }
+            keep
+        });
+        abort
+    }
+
+    /// The next loads to run, best first, as many as their lanes have free
+    /// slots, now marked running.
+    pub fn start(&mut self) -> Vec<(K, u64, Lane)> {
+        let busy = |l: Lane| self.wants.values().filter(|w| w.running && w.lane == l).count();
+        let mut free = [Lane::Disk, Lane::Net].map(|l| l.slots().saturating_sub(busy(l)));
+        let mut ready: Vec<_> = self.wants.iter().filter(|(_, w)| !w.running).collect();
+        ready.sort_by_key(|(_, w)| (Reverse(w.frame), w.soon, w.job));
+        let mut out = Vec::new();
+        for (k, w) in ready {
+            let n = &mut free[w.lane as usize];
+            if *n > 0 {
+                *n -= 1;
+                out.push((k.clone(), w.job, w.lane));
+            }
+        }
+        for (k, _, _) in &out {
+            if let Some(w) = self.wants.get_mut(k) {
+                w.running = true;
+            }
+        }
+        out
+    }
+
+    /// Job `job` found nothing on disk: `k` queues for a download.
+    pub fn missed(&mut self, k: &K, job: u64) {
+        if let Some(w) = self.wants.get_mut(k)
+            && w.job == job
+        {
+            w.lane = Lane::Net;
+            w.running = false;
+        }
+    }
+
+    /// Job `job` finished, with art or without.
+    pub fn done(&mut self, k: &K, job: u64) {
+        if self.wants.get(k).is_some_and(|w| w.job == job) {
+            self.wants.remove(k);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn contains(&self, k: &K) -> bool {
+        self.wants.contains_key(k)
+    }
+}
+
+/// What a load reports: the art (`None`: there's none to be had), or that the
+/// disk cache missed and it needs a download.
+enum Outcome {
+    Image(Option<ColorImage>),
+    Miss,
+}
+
+/// A finished job: its key, its number in the queue and what it found.
+type Loaded = (Key, u64, Outcome);
 
 /// Covers whose [`Look`] is kept: enough that going back to a few album
 /// pages finds their colors at once.
@@ -167,14 +305,17 @@ pub struct Art {
     client: Option<Client>,
     /// Every cover id asked for, numbered (see [`Key`]).
     covers: HashMap<String, u32>,
+    /// The cover ids by number.
+    names: Vec<String>,
     textures: HashMap<Key, TextureHandle>,
     lru: Lru<Key>,
-    pending: HashSet<Key>,
+    queue: Queue<Key>,
+    /// Running downloads, by job, so a scrolled-past one can be aborted.
+    downloads: HashMap<Key, (u64, tokio::task::AbortHandle)>,
     /// Art the server doesn't have; not asked for again this session.
     missing: HashSet<Key>,
     tx: Sender<Loaded>,
     rx: Receiver<Loaded>,
-    permits: Arc<tokio::sync::Semaphore>,
     /// Looks by cover id, for the few covers lately asked about.
     looks: HashMap<String, Arc<Look>>,
     looks_lru: Lru<String>,
@@ -199,13 +340,14 @@ impl Art {
             dir,
             client: None,
             covers: HashMap::new(),
+            names: Vec::new(),
             textures: HashMap::new(),
             lru: Lru::new(TEXTURE_BUDGET),
-            pending: HashSet::new(),
+            queue: Queue::new(),
+            downloads: HashMap::new(),
             missing: HashSet::new(),
             tx,
             rx,
-            permits: Arc::new(tokio::sync::Semaphore::new(FETCHES)),
             looks: HashMap::new(),
             looks_lru: Lru::new(LOOKS),
             looks_pending: HashSet::new(),
@@ -231,19 +373,34 @@ impl Art {
         let next = self.covers.len() as u32;
         let cover = match self.covers.get(cover) {
             Some(&n) => n,
-            None => *self.covers.entry(cover.to_owned()).or_insert(next),
+            None => {
+                self.names.push(cover.to_owned());
+                *self.covers.entry(cover.to_owned()).or_insert(next)
+            }
         };
         Key { cover, size }
     }
 
-    /// Uploads finished loads (a few per frame). Call once per frame before
-    /// drawing.
+    /// Uploads finished loads (a few per frame), drops what's no longer drawn
+    /// and starts what's next. Call once per frame before drawing.
     pub fn poll(&mut self) {
         let mut uploads = 0;
         while uploads < UPLOADS_PER_FRAME
-            && let Ok((key, cover, image)) = self.rx.try_recv()
+            && let Ok((key, job, outcome)) = self.rx.try_recv()
         {
-            self.pending.remove(&key);
+            if self.downloads.get(&key).is_some_and(|d| d.0 == job) {
+                self.downloads.remove(&key);
+            }
+            let image = match outcome {
+                Outcome::Miss => {
+                    self.queue.missed(&key, job);
+                    continue;
+                }
+                Outcome::Image(image) => {
+                    self.queue.done(&key, job);
+                    image
+                }
+            };
             let Some(image) = image else {
                 self.missing.insert(key);
                 continue;
@@ -254,7 +411,7 @@ impl Art {
                 self.ctx.request_repaint();
             }
             let weight = image.width() * image.height() * 4;
-            let tex = self.ctx.load_texture(format!("art:{cover}:{}", key.size), image, TextureOptions::LINEAR);
+            let tex = self.ctx.load_texture(format!("art:{}:{}", self.names[key.cover as usize], key.size), image, TextureOptions::LINEAR);
             for gone in self.lru.insert(key, weight) {
                 self.textures.remove(&gone);
             }
@@ -273,10 +430,16 @@ impl Art {
             }
             self.looks.insert(cover, Arc::new(look));
         }
+        for key in self.queue.next_frame() {
+            if let Some((_, task)) = self.downloads.remove(&key) {
+                task.abort();
+            }
+        }
+        self.launch();
     }
 
     /// `cover`'s look, once worked out; the first ask starts that (in the
-    /// background) and returns `None` meanwhile.
+    /// background, ahead of the queue) and returns `None` meanwhile.
     pub fn look(&mut self, cover: &str) -> Option<Arc<Look>> {
         if let Some(l) = self.looks.get(cover) {
             self.looks_lru.touch(cover);
@@ -288,14 +451,11 @@ impl Art {
             let given = self.preloaded.get(cover).cloned();
             #[cfg(not(test))]
             let given: Option<ColorImage> = None;
-            let (client, dir, tx, ctx, permits) = (self.client.clone(), self.dir.clone(), self.look_tx.clone(), self.ctx.clone(), self.permits.clone());
+            let (client, dir, tx, ctx) = (self.client.clone(), self.dir.clone(), self.look_tx.clone(), self.ctx.clone());
             self.rt.spawn(async move {
                 let image = match given {
                     Some(i) => Some(i),
-                    None => match permits.acquire().await {
-                        Ok(_permit) => load(client.as_ref(), &dir, &key.0, key.1).await,
-                        Err(_) => None,
-                    },
+                    None => load(client.as_ref(), &dir, &key.0, key.1).await,
                 };
                 let look = tokio::task::spawn_blocking(move || LookParts::of(image.as_ref())).await.unwrap_or_default();
                 let _ = tx.send((key.0, look));
@@ -314,27 +474,62 @@ impl Art {
             self.lru.touch(&key);
             return Some(t.clone());
         }
-        self.request(key, cover);
+        self.request(key, false);
         SIZES.iter().rev().find_map(|&size| self.textures.get(&Key { size, ..key }).cloned())
     }
 
-    fn request(&mut self, key: Key, cover: &str) {
-        if self.pending.contains(&key) || self.missing.contains(&key) {
-            return;
+    /// Asks for `cover` at `points` wide before it's drawn (just past the
+    /// viewport); it loads after everything on screen.
+    pub fn prefetch(&mut self, cover: &str, points: f32) {
+        let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
+        if !self.textures.contains_key(&key) {
+            self.request(key, true);
         }
-        // No server: art already on disk still loads (offline browsing).
-        let client = self.client.clone();
-        self.pending.insert(key);
-        let cover = cover.to_owned();
-        let (tx, ctx, dir, permits) = (self.tx.clone(), self.ctx.clone(), self.dir.clone(), self.permits.clone());
-        self.rt.spawn(async move {
-            let image = match permits.acquire().await {
-                Ok(_permit) => load(client.as_ref(), &dir, &cover, key.size).await,
-                Err(_) => None,
-            };
-            let _ = tx.send((key, cover, image));
-            ctx.request_repaint();
-        });
+    }
+
+    fn request(&mut self, key: Key, soon: bool) {
+        if !self.missing.contains(&key) && self.queue.ask(key, soon) {
+            self.launch();
+        }
+    }
+
+    /// Spawns whatever the queue says runs next.
+    fn launch(&mut self) {
+        for (key, job, lane) in self.queue.start() {
+            let cover = self.names[key.cover as usize].clone();
+            let (tx, ctx, dir) = (self.tx.clone(), self.ctx.clone(), self.dir.clone());
+            match lane {
+                Lane::Disk => {
+                    // No server: art already on disk still loads (offline browsing).
+                    let online = self.client.is_some();
+                    self.rt.spawn(async move {
+                        let outcome = match read_cached(&dir, &cover, key.size).await {
+                            Some(bytes) => Outcome::Image(decode_off_thread(bytes, key.size).await),
+                            None if online => Outcome::Miss,
+                            None => Outcome::Image(None),
+                        };
+                        let _ = tx.send((key, job, outcome));
+                        ctx.request_repaint();
+                    });
+                }
+                Lane::Net => {
+                    let client = self.client.clone();
+                    let task = self.rt.spawn(async move {
+                        let bytes = match &client {
+                            Some(c) => fetch_cached(c, &dir, &cover, key.size).await,
+                            None => None,
+                        };
+                        let image = match bytes {
+                            Some(b) => decode_off_thread(b, key.size).await,
+                            None => None,
+                        };
+                        let _ = tx.send((key, job, Outcome::Image(image)));
+                        ctx.request_repaint();
+                    });
+                    self.downloads.insert(key, (job, task.abort_handle()));
+                }
+            }
+        }
     }
 
     /// Makes `image` the art for `cover` at every size, without a server.
@@ -388,17 +583,23 @@ pub fn cover_file(dir: &Path, cover: &str, size: u32) -> PathBuf {
 /// The cached file for `cover` at `size`, else the server's (cached on the
 /// way); `None` when neither has it, or there's no server to ask.
 async fn load(client: Option<&Client>, dir: &Path, cover: &str, size: u32) -> Option<ColorImage> {
-    let path = cover_file(dir, cover, size);
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(b) => {
-            // Mark as recently used for the disk budget.
-            let p = path.clone();
-            let _ = tokio::task::spawn_blocking(move || std::fs::File::options().write(true).open(p).and_then(|f| f.set_modified(SystemTime::now())))
-                .await;
-            b
-        }
-        Err(_) => fetch_cached(client?, dir, cover, size).await?,
+    let bytes = match read_cached(dir, cover, size).await {
+        Some(b) => b,
+        None => fetch_cached(client?, dir, cover, size).await?,
     };
+    decode_off_thread(bytes, size).await
+}
+
+/// The cached file for `cover` at `size`, if there is one.
+async fn read_cached(dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
+    let path = cover_file(dir, cover, size);
+    let bytes = tokio::fs::read(&path).await.ok()?;
+    // Mark as recently used for the disk budget, without waiting on it.
+    tokio::task::spawn_blocking(move || std::fs::File::options().write(true).open(path).and_then(|f| f.set_modified(SystemTime::now())));
+    Some(bytes)
+}
+
+async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<ColorImage> {
     tokio::task::spawn_blocking(move || decode(&bytes, size)).await.ok().flatten()
 }
 
@@ -516,6 +717,111 @@ mod tests {
         l.insert("a", 60);
         assert!(l.insert("a", 70).is_empty());
         assert_eq!(l.total(), 70);
+    }
+
+    /// Starts what's ready and returns just the keys, in order.
+    fn started<K: Clone + Eq + Hash>(q: &mut Queue<K>) -> Vec<K> {
+        q.start().into_iter().map(|(k, _, _)| k).collect()
+    }
+
+    #[test]
+    fn queue_runs_what_was_asked_last() {
+        let mut q = Queue::new();
+        for k in ["a", "b", "c", "d", "e", "f"] {
+            assert!(q.ask(k, false));
+        }
+        q.next_frame();
+        // Scrolled on: "g" is new, "a".."f" were last drawn a frame ago.
+        q.ask("g", false);
+        assert_eq!(started(&mut q), ["g", "a", "b", "c"]);
+        // All disk slots are busy.
+        assert!(started(&mut q).is_empty());
+        // Unasked for `KEEP_FRAMES` frames, the queued ones go; running reads finish.
+        for _ in 1..KEEP_FRAMES {
+            assert!(q.next_frame().is_empty());
+        }
+        assert!(q.contains(&"d"));
+        assert!(q.next_frame().is_empty());
+        assert!(!q.contains(&"d") && q.contains(&"a"));
+        // Drawn again, a dropped one is asked for afresh.
+        assert!(q.ask("d", false));
+    }
+
+    #[test]
+    fn queue_keeps_what_is_still_drawn() {
+        let mut q = Queue::new();
+        q.ask("a", false);
+        for _ in 0..10 {
+            q.next_frame();
+            assert!(!q.ask("a", false));
+        }
+        assert!(q.contains(&"a"));
+    }
+
+    #[test]
+    fn queue_aborts_scrolled_past_downloads() {
+        let mut q = Queue::new();
+        q.ask("a", false);
+        let [(_, job, Lane::Disk)] = q.start()[..] else { panic!() };
+        // Not on disk: it goes to the network lane.
+        q.missed(&"a", job);
+        assert_eq!(q.start(), [("a", job, Lane::Net)]);
+        for _ in 0..KEEP_FRAMES {
+            assert!(q.next_frame().is_empty());
+        }
+        assert_eq!(q.next_frame(), ["a"]);
+        assert!(q.ask("a", false));
+    }
+
+    #[test]
+    fn queue_lanes_have_their_own_slots() {
+        let mut q = Queue::new();
+        for i in 0..=FETCHES {
+            q.ask(i, false);
+        }
+        // Every read misses and waits for a download.
+        loop {
+            let reads: Vec<_> = q.start().into_iter().filter(|r| r.2 == Lane::Disk).collect();
+            if reads.is_empty() {
+                break;
+            }
+            for (k, job, _) in reads {
+                q.missed(&k, job);
+            }
+        }
+        // Downloads are full, one waiting...
+        assert!(q.start().is_empty());
+        // ...yet a disk read starts at once.
+        q.ask(100, false);
+        assert_eq!(started(&mut q), [100]);
+    }
+
+    #[test]
+    fn queue_puts_prefetch_after_the_screen() {
+        let mut q = Queue::new();
+        q.ask("ahead", true);
+        q.ask("seen", false);
+        q.ask("both", true);
+        q.ask("both", false);
+        assert_eq!(started(&mut q), ["seen", "both", "ahead"]);
+    }
+
+    #[test]
+    fn queue_ignores_reports_from_old_jobs() {
+        let mut q = Queue::new();
+        q.ask("a", false);
+        let [(_, old, _)] = q.start()[..] else { panic!() };
+        q.missed(&"a", old);
+        q.start();
+        for _ in 0..=KEEP_FRAMES {
+            q.next_frame();
+        }
+        // Dropped and asked for again; the old job's late report changes nothing.
+        q.ask("a", false);
+        q.done(&"a", old);
+        q.missed(&"a", old);
+        assert!(q.contains(&"a"));
+        assert_eq!(q.start()[0].2, Lane::Disk);
     }
 
     #[test]
