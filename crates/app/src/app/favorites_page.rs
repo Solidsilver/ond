@@ -58,9 +58,8 @@ impl ViewCtx<'_> {
                     }
                 });
                 ui.add_space(14.0);
-                super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("favorite-songs").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-                    self.track_list(ui, &v.songs, &favorites_source(), ListOpts { numbers: false, artist: true, playlist: None });
-                }));
+                let scroll = egui::ScrollArea::vertical().id_salt("favorite-songs").auto_shrink(false).content_margin(super::layout::gutter());
+                super::layout::into_gutter(ui, |ui| self.track_list_rows(ui, scroll, &v.songs, &favorites_source(), ListOpts { numbers: false, artist: true, playlist: None }));
             }
             FavTab::Albums => {
                 let ids: Vec<usize> = v.albums.iter().filter_map(|id| self.data.by_id.get(id).copied()).collect();
