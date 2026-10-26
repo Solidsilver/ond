@@ -37,7 +37,7 @@ pub mod tap;
 
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
-pub use output::{CpalBackend, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
+pub use output::{CpalBackend, Marker, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
 pub use dither::Tpdf;
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
@@ -52,6 +52,11 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+// The decoder can be at most `MARKER_CAP` tracks ahead of the output, and both
+// write and read the gain table by track number modulo `GAIN_SLOTS`: the table
+// must be larger, or the decoder could overwrite the gain of a track still playing.
+const _: () = assert!(output::MARKER_CAP < replaygain::GAIN_SLOTS);
 
 /// Start fetching the next track this long before the current one ends, even if
 /// the current download hasn't finished.
@@ -809,11 +814,13 @@ impl Engine {
         let resampled = device_rate != source.sample_rate;
         // Software volume changes samples too, outside bit-perfect mode.
         let volume = self.config.mode == PlaybackMode::Normal && self.status.volume() < 1.0;
-        let recomputed = matches!(channels, ChannelChange::Downmix { .. })
-            || matches!(gain, GainState::Applied(g) if g.linear != 1.0)
-            || volume;
-        let dithered = device_bits
-            .is_some_and(|b| b < 32 && (resampled || recomputed || source.bits_per_sample.is_none_or(|s| s > b)));
+        // The same rule the callback applies to what it plays.
+        let treatment = dither::Treatment {
+            processed: resampled || matches!(channels, ChannelChange::Downmix { .. }),
+            gained: matches!(gain, GainState::Applied(g) if g.linear != 1.0) || volume,
+            source_bits: source.bits_per_sample,
+        };
+        let dithered = dither::needs_dither(device_bits, treatment);
         let path = SignalPath {
             output: self.backend.name().to_owned(),
             source,

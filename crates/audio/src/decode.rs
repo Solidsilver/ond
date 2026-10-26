@@ -10,7 +10,7 @@
 //! the same device format, so one resampler carries across the boundary.
 
 use crate::channels::{ChannelChange, ChannelMap, output_channels};
-use crate::output::{RingCtl, RingInput, StreamFormat};
+use crate::output::{MARKER_CAP, Marker, RingCtl, RingInput, StreamFormat};
 use crate::replaygain::{GainConfig, ReplayGain, applied_gain, parse_tag_value};
 use crate::resample::StreamResampler;
 use crate::signal::{DeviceCaps, choose_rate};
@@ -281,12 +281,13 @@ impl Track {
 
 /// The ring being filled, and how many samples have gone into it.
 struct Out {
-    /// What the device plays: the output rate.
+    /// What the device plays: the output rate and channels. No bit depth:
+    /// the ring takes tracks of any depth.
     format: StreamFormat,
     /// The tracks' rate before resampling.
     src_rate: u32,
     samples: Producer<f32>,
-    markers: Producer<u64>,
+    markers: Producer<Marker>,
     done: Arc<AtomicBool>,
     ctl: Arc<RingCtl>,
     pushed: u64,
@@ -299,7 +300,6 @@ struct Out {
     rs_base: u64,
 }
 
-
 enum Seeked {
     /// Decoding resumes; drop decoded frames before this timestamp.
     To(Timestamp),
@@ -307,6 +307,25 @@ enum Seeked {
     Nothing,
     /// Past the end: finish the track.
     End,
+}
+
+/// What feeds a ring from a track: its rate and channel count before
+/// conversion, and whether those channels are mixed down.
+#[derive(Debug, Clone, Copy)]
+struct Feed {
+    rate: u32,
+    channels: u16,
+    downmixed: bool,
+}
+
+/// What [`Ctx::attach`] did with a starting track.
+enum Attached {
+    /// It carries on in the current ring, gaplessly.
+    Continued,
+    /// It starts a new ring (the device opens or reopens for it).
+    NewRing(RingInput),
+    /// Cancelled while waiting for the old ring to play out or for room.
+    Cancelled,
 }
 
 enum Push {
@@ -563,10 +582,11 @@ impl Ctx {
                 let cfg = *self.gain.lock().unwrap_or_else(|e| e.into_inner());
                 let linear = applied_gain(&cfg, &replay_gain, src.album_context).map_or(1.0, |g| g.linear);
                 self.publish(|s| s.gains.set(seq, linear));
-                let downmixed = matches!(change, ChannelChange::Downmix { .. });
-                match self.attach(output, rate, format.channels, downmixed, out) {
-                    Some(f) => fresh = f,
-                    None => return Ok(TrackEnd::Cancelled),
+                let feed = Feed { rate, channels: format.channels, downmixed: matches!(change, ChannelChange::Downmix { .. }) };
+                match self.attach(output, feed, out)? {
+                    Attached::Continued => {}
+                    Attached::NewRing(input) => fresh = Some(input),
+                    Attached::Cancelled => return Ok(TrackEnd::Cancelled),
                 }
                 let total_frames = t.total_frames.map(|f| t.to_output(f));
                 let _ = self.msgs.send(DecoderMsg::Track {
@@ -646,33 +666,33 @@ impl Ctx {
         }
     }
 
-    /// Hooks a starting track up to an output ring: continue the current one when
-    /// the format matches (gapless: just mark where the track begins), else let
-    /// it drain and make a new one. Returns the consumer side of a new ring, or
-    /// `None` if cancelled while draining.
-    fn attach(
-        &mut self,
-        format: StreamFormat,
-        src_rate: u32,
-        src_channels: u16,
-        downmixed: bool,
-        out: &mut Option<Out>,
-    ) -> Option<Option<RingInput>> {
+    /// Hooks a starting track up to an output ring: continue the current one
+    /// when the track fits it (gapless: just mark where the track begins),
+    /// else let it drain and make a new one.
+    ///
+    /// A ring is fixed by the rate and layout going in and coming out, not by
+    /// bit depth: each track's depth travels with its [`Marker`], so a 16-bit
+    /// track followed by a 24-bit one (or a lossy one by a lossless one) at
+    /// the same rate stays gapless.
+    fn attach(&mut self, output: StreamFormat, feed: Feed, out: &mut Option<Out>) -> Result<Attached, String> {
+        let format = StreamFormat { bits_per_sample: None, ..output };
         if let Some(o) = out.as_mut() {
-            if o.format == format && o.src_rate == src_rate && o.src_channels == src_channels {
+            if o.format == format && o.src_rate == feed.rate && o.src_channels == feed.channels {
                 // With a resampler carrying on, the next track starts where its first
                 // input frame lands in the output, which may still be inside the filter.
                 let at = match &o.resampler {
                     Some(r) => o.rs_base + r.out_pos(r.in_frames()) * format.channels as u64,
                     None => o.pushed,
                 };
-                while o.markers.push(at).is_err() {
+                // Full when the decoder is `MARKER_CAP` tracks ahead: wait for the output.
+                let marker = Marker { at, source_bits: output.bits_per_sample };
+                while o.markers.push(marker).is_err() {
                     if self.cancel.load(Ordering::Relaxed) {
-                        return None;
+                        return Ok(Attached::Cancelled);
                     }
                     thread::sleep(Duration::from_millis(2));
                 }
-                return Some(None);
+                return Ok(Attached::Continued);
             }
             // Different format: the device has to be reopened. Play the old ring out first.
             self.flush_resampler(o);
@@ -684,31 +704,25 @@ impl Ctx {
                 thread::sleep(Duration::from_millis(2));
             }
             if self.cancel.load(Ordering::Relaxed) {
-                return None;
+                return Ok(Attached::Cancelled);
             }
             // The engine zeroes the position when it reopens the device.
         }
-        let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
-        let (samples, consumer) = RingBuffer::new(cap.max(8192));
-        let (markers, marker_consumer) = RingBuffer::new(16);
-        let done = Arc::new(AtomicBool::new(false));
-        let ctl = Arc::new(RingCtl::default());
-        let resampler = if src_rate == format.sample_rate {
+        let resampler = if feed.rate == format.sample_rate {
             None
         } else {
-            match StreamResampler::new(src_rate, format.sample_rate, format.channels as usize) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    let (seq, track_id) = (self.at_seq.load(Ordering::Acquire), self.track_id.clone());
-                    let _ = self.msgs.send(DecoderMsg::Error { seq, track_id, message: e });
-                    return None;
-                }
-            }
+            Some(StreamResampler::new(feed.rate, format.sample_rate, format.channels as usize)?)
         };
+        let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
+        let (samples, consumer) = RingBuffer::new(cap.max(8192));
+        let (markers, marker_consumer) = RingBuffer::new(MARKER_CAP);
+        let done = Arc::new(AtomicBool::new(false));
+        let ctl = Arc::new(RingCtl::default());
         let input = RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone())
-            .with_source(format.bits_per_sample, resampler.is_some() || downmixed);
+            .with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
+        let (src_rate, src_channels) = (feed.rate, feed.channels);
         *out = Some(Out { format, src_rate, samples, markers, done, ctl, pushed: 0, src_channels, resampler, rs_base: 0 });
-        Some(Some(input))
+        Ok(Attached::NewRing(input))
     }
 
     /// Applies the newest pending seek: reposition the reader, reset the decoder,

@@ -6,21 +6,38 @@ const RATE: u32 = 44_100;
 
 /// Minimal 16-bit PCM WAV.
 pub(crate) fn wav(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    wav_of(1, 16, rate, channels, &data)
+}
+
+/// Minimal 24-bit PCM WAV (samples in the 24-bit range).
+pub(crate) fn wav24(rate: u32, channels: u16, samples: &[i32]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()[..3].to_vec()).collect();
+    wav_of(1, 24, rate, channels, &data)
+}
+
+/// Minimal 32-bit float WAV: a source without a bit depth, as a lossy one is.
+pub(crate) fn wav_float(rate: u32, channels: u16, samples: &[f32]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    wav_of(3, 32, rate, channels, &data)
+}
+
+fn wav_of(format_tag: u16, bits: u16, rate: u32, channels: u16, data: &[u8]) -> Vec<u8> {
+    let block = channels * bits / 8;
     let mut v = Vec::new();
     v.extend_from_slice(b"RIFF");
-    v.extend_from_slice(&(36 + data_len).to_le_bytes());
+    v.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
     v.extend_from_slice(b"WAVEfmt ");
     v.extend_from_slice(&16u32.to_le_bytes());
-    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&format_tag.to_le_bytes());
     v.extend_from_slice(&channels.to_le_bytes());
     v.extend_from_slice(&rate.to_le_bytes());
-    v.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
-    v.extend_from_slice(&(channels * 2).to_le_bytes());
-    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(&(rate * block as u32).to_le_bytes());
+    v.extend_from_slice(&block.to_le_bytes());
+    v.extend_from_slice(&bits.to_le_bytes());
     v.extend_from_slice(b"data");
-    v.extend_from_slice(&data_len.to_le_bytes());
-    samples.iter().for_each(|s| v.extend_from_slice(&s.to_le_bytes()));
+    v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    v.extend_from_slice(data);
     v
 }
 

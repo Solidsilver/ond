@@ -91,8 +91,11 @@ impl OutputBackend for FakeBackend {
         let (played, stop2) = (self.played.clone(), stop.clone());
         let channels = format.channels as usize;
         let (period, frames) = self.period;
+        // An integer device gets dither where needed, as through CoreAudio.
+        let device_bits = self.caps.active_bits;
         let handle = thread::spawn(move || {
             let mut buf = vec![0.0f32; frames * channels];
+            let mut dither = Tpdf::default();
             let mut rendered = false;
             loop {
                 // Like a real device, it plays a buffer during the period after
@@ -104,7 +107,7 @@ impl OutputBackend for FakeBackend {
                 if rendered {
                     played.lock().unwrap().extend(buf.iter().filter(|s| **s != 0.0));
                 }
-                if input.fill(&mut buf, channels, format.sample_rate, &status) {
+                if input.fill_for_device(&mut buf, channels, format.sample_rate, &status, device_bits, &mut dither) {
                     drained.store(true, Ordering::Release);
                 }
                 rendered = true;
@@ -899,4 +902,126 @@ fn an_underrun_rebuffers_and_resumes_where_it_left_off() {
     // Bit-perfect: no fades around the dropouts, so every sample arrives exactly once, in order.
     assert!(played_i16(&played) == a, "playback resumed where it ran dry each time");
     engine.send(Command::Shutdown);
+}
+
+/// 16-bit test samples at least 64 steps from silence: dithering never turns one into 0.
+fn loud(n: usize, salt: i64) -> Vec<i16> {
+    pcm(n, salt).into_iter().map(|s| if (s as i32).abs() < 64 { 1_000 } else { s }).collect()
+}
+
+fn source_of(dir: &tempfile::TempDir, name: &str, wav: Vec<u8>) -> TrackSource {
+    let path = dir.path().join(format!("{name}.wav"));
+    std::fs::write(&path, wav).unwrap();
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
+}
+
+/// A track at 44.1 kHz stereo of the given depth (`None`: float, no depth), and the samples the device should get.
+fn track_of_depth(dir: &tempfile::TempDir, name: &str, bits: Option<u32>, salt: i64) -> (TrackSource, Vec<f32>) {
+    use crate::decode::tests::{wav, wav_float, wav24};
+    let base = loud(2 * 44_100, salt);
+    match bits {
+        Some(16) => (source_of(dir, name, wav(44_100, 2, &base)), base.iter().map(|s| *s as f32 / 32_768.0).collect()),
+        // Off the 16-bit grid: the low byte is set.
+        Some(24) => {
+            let s: Vec<i32> = base.iter().map(|s| *s as i32 * 256 + 91).collect();
+            (source_of(dir, name, wav24(44_100, 2, &s)), s.iter().map(|s| *s as f32 / 8_388_608.0).collect())
+        }
+        None => {
+            let s: Vec<f32> = base.iter().map(|s| (*s as f32 + 0.37) / 32_768.0).collect();
+            (source_of(dir, name, wav_float(44_100, 2, &s)), s)
+        }
+        Some(b) => unreachable!("{b}-bit"),
+    }
+}
+
+/// About twice real time: a queue of 1 s tracks then leaves `play_queue`
+/// close to half a second to name each next track, even on a loaded machine.
+const UI_PACE: (Duration, usize) = (Duration::from_millis(5), 441);
+
+/// Plays `tracks` as one queue, naming each next track once the one before
+/// it starts (as the UI does). Returns every event up to the end.
+fn play_queue(mut backend: FakeBackend, tracks: &[TrackSource]) -> Vec<Event> {
+    backend.period = UI_PACE;
+    let engine = &spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::Play(tracks[0].clone()));
+    let mut seen = Vec::new();
+    for pair in tracks.windows(2) {
+        let id = pair[0].id.clone();
+        seen.extend(events_until(engine, |e| matches!(e, Event::TrackStarted { track_id, .. } if *track_id == id)));
+        engine.send(Command::SetNext(Some(pair[1].clone())));
+    }
+    seen.extend(events_until(engine, |e| matches!(e, Event::Ended { .. })));
+    engine.send(Command::Shutdown);
+    seen
+}
+
+/// Each `SignalPath` with the track that had started last.
+fn paths_by_track(seen: &[Event]) -> Vec<(String, SignalPath)> {
+    let mut current = String::new();
+    let mut paths = Vec::new();
+    for e in seen {
+        match e {
+            Event::TrackStarted { track_id, .. } => current.clone_from(track_id),
+            Event::SignalPath(p) => paths.push((current.clone(), p.clone())),
+            _ => {}
+        }
+    }
+    paths
+}
+
+#[test]
+fn tracks_of_different_depths_play_gaplessly_on_one_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let depths = [Some(16), Some(24), None, Some(16)];
+    let (tracks, expected): (Vec<_>, Vec<_>) =
+        depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 60 + i as i64)).unzip();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let seen = play_queue(backend, &tracks);
+
+    let started: Vec<_> = starts(&seen).into_iter().map(|(id, gapless, _)| (id, gapless)).collect();
+    assert_eq!(started, [("t0".into(), false), ("t1".into(), true), ("t2".into(), true), ("t3".into(), true)], "{seen:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 1, "16 → 24 → lossy → 16 bits without reopening the device");
+    // A float device takes every sample as it is.
+    let out = played.lock().unwrap().clone();
+    let expected: Vec<f32> = expected.concat();
+    assert_eq!(out.len(), expected.len());
+    assert!(out.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "every track bit for bit");
+    // Each track is described by its own depth.
+    let depth: Vec<_> = paths_by_track(&seen).into_iter().map(|(id, p)| (id, p.source.bits_per_sample)).collect();
+    assert_eq!(depth, [("t0".into(), Some(16)), ("t1".into(), Some(24)), ("t2".into(), None), ("t3".into(), Some(16))]);
+}
+
+#[test]
+fn on_a_16_bit_device_only_the_tracks_off_its_grid_are_dithered() {
+    let dir = tempfile::tempdir().unwrap();
+    let depths = [None, Some(16), Some(24), Some(16)];
+    let (tracks, sources): (Vec<_>, Vec<_>) =
+        depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 70 + i as i64)).unzip();
+    let device = DeviceCaps { active_bits: Some(16), ..caps(Some(16), 192_000) };
+    let backend = FakeBackend::new(device);
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let seen = play_queue(backend, &tracks);
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+
+    let out = played.lock().unwrap().clone();
+    assert_eq!(out.len(), sources.iter().map(Vec::len).sum::<usize>());
+    let mut at = 0;
+    for (i, (src, bits)) in sources.iter().zip(depths).enumerate() {
+        let part = &out[at..at + src.len()];
+        at += src.len();
+        let exact = part.iter().zip(src).all(|(a, b)| a.to_bits() == b.to_bits());
+        if bits == Some(16) {
+            assert!(exact, "t{i}: 16-bit reaches the 16-bit device untouched");
+        } else {
+            let on_grid = part.iter().all(|s| (*s * 32_768.0).fract() == 0.0);
+            let close = part.iter().zip(src).all(|(a, b)| (a - b).abs() <= 1.5 / 32_768.0);
+            assert!(!exact && on_grid && close, "t{i} ({bits:?}): dithered to 16 bits");
+        }
+    }
+    // And the signal path says so, track by track.
+    let dithered: Vec<_> = paths_by_track(&seen).into_iter().map(|(id, p)| (id, p.dithered)).collect();
+    assert_eq!(dithered, [("t0".into(), true), ("t1".into(), false), ("t2".into(), true), ("t3".into(), false)]);
+    let verdict = paths_by_track(&seen).into_iter().find(|(id, _)| id == "t2").unwrap().1.bit_perfect;
+    assert_eq!(verdict, BitPerfectStatus::Unavailable { reason: "device max 16/192, file is 24/44.1".into() });
 }
