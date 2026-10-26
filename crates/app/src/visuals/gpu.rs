@@ -433,8 +433,10 @@ impl Gpu {
         })
     }
 
-    /// The two pictures at `size`, made (black) when the size changes.
-    fn pictures(&mut self, device: &wgpu::Device, size: [u32; 2]) -> &mut Pictures {
+    /// Makes the two pictures at `size` (black) when the size changes, and
+    /// hands back the old ones: this frame's feedback pass reads the last
+    /// picture from them, scaled, so a resize doesn't blank the view.
+    fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) -> Option<Pictures> {
         if self.pictures.as_ref().is_none_or(|p| p.size != size) {
             let view = || {
                 device
@@ -463,9 +465,9 @@ impl Gpu {
                 })
             };
             let reads = [read(&views[0]), read(&views[1])];
-            self.pictures = Some(Pictures { size, views, reads, current: 0 });
+            return self.pictures.replace(Pictures { size, views, reads, current: 0 });
         }
-        self.pictures.as_mut().expect("just made")
+        None
     }
 }
 
@@ -493,8 +495,12 @@ impl CallbackTrait for VisualizerCallback {
         }
 
         let (feedback, dot, shade, buffer) = (gpu.feedback.clone(), gpu.dot.clone(), gpu.shade.clone(), gpu.dots.clone());
-        let pics = gpu.pictures(device, size);
+        let old = gpu.resize(device, size);
+        let Some(pics) = gpu.pictures.as_mut() else { return Vec::new() };
         let next = 1 - pics.current;
+        // What the feedback pass reads: the last picture, from the old pair
+        // just after a resize (sampled by position, so its size doesn't matter).
+        let last = old.as_ref().map_or(&pics.reads[pics.current], |o| &o.reads[o.current]);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("visualizer"),
@@ -506,7 +512,7 @@ impl CallbackTrait for VisualizerCallback {
                 })],
                 ..Default::default()
             });
-            pass.set_bind_group(0, &pics.reads[pics.current], &[]);
+            pass.set_bind_group(0, last, &[]);
             pass.set_pipeline(&feedback);
             pass.draw(0..3, 0..1);
             if total > 0 {

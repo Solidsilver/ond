@@ -1988,7 +1988,7 @@ impl OndApp {
         }
         self.shortcuts(&ctx);
         self.scroll_bars(&ctx);
-        if self.ui.visualizer.is_some() && !self.experimental().visualizer {
+        if self.ui.visualizer.is_some() && (!self.experimental().visualizer || self.visualizer_escaped(&ctx)) {
             self.close_visualizer();
         }
         if self.ui.visualizer.is_some() {

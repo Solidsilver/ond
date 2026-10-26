@@ -27,8 +27,17 @@ impl Overlay {
 
 const DIALOG_W: f32 = 340.0;
 
+/// Whether the open name dialog has focused its field yet. Cleared whenever
+/// no name dialog is up, however it closed, so the next one focuses again.
+fn name_focused_id() -> egui::Id {
+    egui::Id::unique("overlay-name-focused")
+}
+
 impl OndApp {
     pub(super) fn overlay_ui(&mut self, ctx: &egui::Context) {
+        if !matches!(self.ui.overlay, Some(Overlay::NewPlaylist { .. } | Overlay::Rename { .. })) {
+            ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));
+        }
         if matches!(self.ui.overlay, Some(Overlay::Settings)) {
             self.settings_window(ctx);
             return;
@@ -83,6 +92,7 @@ impl OndApp {
             done = Some(None);
         }
         if let Some(action) = done {
+            ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));
             self.ui.overlay = None;
             if let Some(a) = action {
                 self.actions.push(a);
@@ -110,10 +120,9 @@ fn name_dialog(ui: &mut egui::Ui, title: &str, sub: &str, name: &mut String, ver
             .background_color(t.field),
     );
     // Focus once; after that the user may tab away.
-    let focused_once = ui.scope_id().with("focused");
-    if !ui.data(|d| d.get_temp::<bool>(focused_once).unwrap_or(false)) {
+    if !ui.data(|d| d.get_temp::<bool>(name_focused_id()).unwrap_or(false)) {
         field.request_focus();
-        ui.data_mut(|d| d.insert_temp(focused_once, true));
+        ui.data_mut(|d| d.insert_temp(name_focused_id(), true));
     }
     let enter = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
     ui.add_space(18.0);
@@ -129,9 +138,6 @@ fn name_dialog(ui: &mut egui::Ui, title: &str, sub: &str, name: &mut String, ver
             }
         });
     });
-    if out.is_some() {
-        ui.data_mut(|d| d.remove::<bool>(focused_once));
-    }
     out
 }
 

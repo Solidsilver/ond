@@ -51,6 +51,11 @@ impl ViewCtx<'_> {
                 self.ui.seek_preview = None;
             }
         }
+        // A drag that ended somewhere else (the window changed mode under it)
+        // leaves no preview behind.
+        if self.ui.seek_preview.is_some() && !resp.dragged() && ui.ctx().dragged_id().is_none() {
+            self.ui.seek_preview = None;
+        }
         let painter = ui.painter();
         let grabbed = resp.hovered() || self.ui.seek_preview.is_some();
         let shown = self.ui.seek_preview.unwrap_or_else(|| self.position_secs());
@@ -86,9 +91,16 @@ impl ViewCtx<'_> {
     /// The elapsed and remaining times for a line showing `shown`: "2:21",
     /// "−4:02" (empty while the length isn't known).
     pub fn seek_times(&self, shown: f64) -> (String, String) {
-        let remaining = self.duration_secs().filter(|d| *d > 0.0).map(|d| format!("−{}", crate::fmt::clock((d - shown).max(0.0)))).unwrap_or_default();
-        (crate::fmt::clock(shown), remaining)
+        seek_times(shown, self.duration_secs())
     }
+}
+
+/// Elapsed and remaining in whole seconds that add up to the length as the
+/// lists show it (whole seconds too): "2:21" and "−4:02" for 6:23.
+fn seek_times(shown: f64, duration: Option<f64>) -> (String, String) {
+    let elapsed = shown.max(0.0).floor();
+    let remaining = duration.filter(|d| *d > 0.0).map(|d| format!("−{}", crate::fmt::clock((d.floor() - elapsed).max(0.0)))).unwrap_or_default();
+    (crate::fmt::clock(elapsed), remaining)
 }
 
 /// The waveform in place of the line: a bar per value, mirrored about the
@@ -105,4 +117,20 @@ fn paint_wave(painter: &egui::Painter, line: Rect, bars: &[f32], x: f32, s: &See
         mesh.add_colored_rect(Rect::from_min_max(pos2(cx - half_w, cy - h), pos2(cx + half_w, cy + h)), if cx <= x { s.fill } else { rest });
     }
     painter.add(egui::Shape::mesh(mesh));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_and_remaining_add_up_to_the_length() {
+        // 6:23 long, part-way through a second: 2:21 + 4:02.
+        assert_eq!(seek_times(141.6, Some(383.0)), ("2:21".to_owned(), "−4:02".to_owned()));
+        assert_eq!(seek_times(141.0, Some(383.0)), ("2:21".to_owned(), "−4:02".to_owned()));
+        // The engine's length can carry a fraction the lists don't show.
+        assert_eq!(seek_times(0.4, Some(383.47)), ("0:00".to_owned(), "−6:23".to_owned()));
+        assert_eq!(seek_times(383.2, Some(383.47)), ("6:23".to_owned(), "−0:00".to_owned()));
+        assert_eq!(seek_times(12.0, None), ("0:12".to_owned(), String::new()));
+    }
 }

@@ -459,11 +459,34 @@ impl ServerState {
                 painter.circle_filled(c, 3.2, t.ok);
             }
             ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
-            ServerState::Syncing { fraction: None, .. } | ServerState::Connecting { .. } => {
+            ServerState::Syncing { fraction: None, .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                ui.ctx().request_repaint_after(SPIN);
+            }
+            ServerState::Connecting { .. } => {
+                icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
+                // A connect that hangs past its timeout shouldn't keep the
+                // window drawing 20 times a second: the spinner stops.
+                let now = ui.input(|i| i.time);
+                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(connecting_since_id(), || now));
+                if now - since < CONNECT_SPIN_SECS {
+                    ui.ctx().request_repaint_after(SPIN);
+                }
             }
             ServerState::Offline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
         }
+        if !matches!(self, ServerState::Connecting { .. }) {
+            ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));
+        }
     }
+}
+
+/// The spinner's frame interval.
+const SPIN: std::time::Duration = std::time::Duration::from_millis(50);
+/// How long the Connecting spinner turns (the ping gives up after 10 s).
+const CONNECT_SPIN_SECS: f64 = 15.0;
+
+/// When the footer started showing Connecting.
+fn connecting_since_id() -> egui::Id {
+    egui::Id::unique("server-connecting-since")
 }

@@ -115,11 +115,19 @@ impl OndApp {
     }
 
     pub(super) fn close_visualizer(&mut self) {
-        if let Some(v) = self.ui.visualizer.take()
-            && v.fullscreen
-        {
+        let Some(v) = self.ui.visualizer.take() else { return };
+        if v.fullscreen {
             self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
+        // Closed after this frame was drawn (a menu, a command): draw the
+        // window again now, not at the next input.
+        self.ctx.request_repaint();
+    }
+
+    /// Esc was pressed in the open visualizer (and is taken). Asked before
+    /// the frame is drawn, so the window it closes to draws in this frame.
+    pub(super) fn visualizer_escaped(&self, ctx: &egui::Context) -> bool {
+        self.ui.visualizer.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
     }
 
     /// Switches to the next visualizer (`by` 1) or the previous one (-1), and
@@ -136,18 +144,7 @@ impl OndApp {
 
     pub(super) fn visualizer_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        let (esc, f, left, right) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::Escape),
-                i.consume_key(Modifiers::NONE, Key::F),
-                i.consume_key(Modifiers::NONE, Key::ArrowLeft),
-                i.consume_key(Modifiers::NONE, Key::ArrowRight),
-            )
-        });
-        if esc {
-            self.close_visualizer();
-            return;
-        }
+        let (f, left, right) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::F), i.consume_key(Modifiers::NONE, Key::ArrowLeft), i.consume_key(Modifiers::NONE, Key::ArrowRight)));
         if left != right {
             self.switch_visualizer(if right { 1 } else { -1 });
         }
