@@ -5,6 +5,7 @@
 use crate::art::Lru;
 use crate::memo::Memo;
 use analysis::Peaks;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +18,54 @@ const KEPT: usize = 32;
 const LOOK_EVERY: Duration = Duration::from_secs(1);
 
 type Done = (String, Option<Peaks>);
+
+/// How the waveform's bars look (Settings › Experimental): their ends, and
+/// how thick and how far apart, in half points (each rounds to whole pixels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Bars {
+    pub rounded: bool,
+    pub width: u8,
+    pub gap: u8,
+}
+
+impl Bars {
+    pub const WIDTHS: std::ops::RangeInclusive<u8> = 2..=8;
+    pub const GAPS: std::ops::RangeInclusive<u8> = 1..=6;
+
+    /// A bar's width and the gap after it, in points, kept in range.
+    pub fn width_pt(self) -> f32 {
+        f32::from(self.width.clamp(*Self::WIDTHS.start(), *Self::WIDTHS.end())) / 2.0
+    }
+
+    pub fn gap_pt(self) -> f32 {
+        f32::from(self.gap.clamp(*Self::GAPS.start(), *Self::GAPS.end())) / 2.0
+    }
+}
+
+impl Default for Bars {
+    /// 2 pt bars, 1 pt apart, square.
+    fn default() -> Self {
+        Self { rounded: false, width: 4, gap: 2 }
+    }
+}
+
+/// A made-up waveform of `n` bars (for previewing the bars' look): swells
+/// and dips with some grain, the same every time.
+pub fn sample(n: usize) -> Vec<f32> {
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    (0..n)
+        .map(|i| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let t = i as f32 / n.max(1) as f32;
+            let swell = 0.55 + 0.3 * (t * 9.0).sin() * (t * 2.3 + 0.4).sin();
+            let fade = (t * 12.0).min(1.0) * ((1.0 - t) * 10.0).min(1.0);
+            (swell * fade * (0.75 + 0.25 * (seed % 1000) as f32 / 1000.0)).clamp(0.0, 1.0)
+        })
+        .collect()
+}
 
 pub struct Waveforms {
     ctx: egui::Context,

@@ -8,7 +8,9 @@ use super::widgets::{MODES, choice, danger, menu_label, mode_label, secondary, s
 use super::{Action, OndApp};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
+use super::seek::{WaveGrid, paint_wave};
 use crate::visuals::visualizer::Pick;
+use crate::visuals::waveform::{self, Bars};
 use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
@@ -382,7 +384,7 @@ impl OndApp {
             hint(ui, "Shows the track's waveform in the seek bar of the Player and the now-playing display. Ond reads the whole file once in the background to draw it.");
             if x.waveform {
                 ui.add_space(10.0);
-                narrow_toggle(ui, &mut x.waveform_rounded, "Rounded bars");
+                waveform_bar_settings(ui, &mut x.waveform_bars);
             }
         });
         group(ui, "Live audio", |ui| {
@@ -558,6 +560,82 @@ fn db_row(ui: &mut Ui, label: &str, db: &mut f32, range: std::ops::RangeInclusiv
         let (r, _) = ui.allocate_exact_size(vec2(56.0, 18.0), Sense::hover());
         ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, readout, FontId::proportional(12.0), t.muted);
     });
+}
+
+/// The waveform's bars (their ends, thickness and spacing) beside a
+/// preview of them, or above it when the pane is narrow.
+fn waveform_bar_settings(ui: &mut Ui, bars: &mut Bars) {
+    const CONTROLS_W: f32 = 300.0;
+    let width = ui.available_width();
+    let wide = width >= CONTROLS_W + 16.0 + 160.0;
+    // Narrow, the sliders give up length so their readouts stay in the pane.
+    let slider = if wide { 116.0 } else { (width - LABEL_W - 64.0).clamp(48.0, 116.0) };
+    let controls = |ui: &mut Ui, bars: &mut Bars| {
+        row(ui, "Bars", |ui| {
+            choice(ui, &[false, true], &mut bars.rounded, None, |r| if r { "Rounded" } else { "Square" }.into());
+        });
+        step_row(ui, "Thickness", &mut bars.width, Bars::WIDTHS, slider, half_points);
+        step_row(ui, "Spacing", &mut bars.gap, Bars::GAPS, slider, half_points);
+    };
+    if wide {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(CONTROLS_W);
+                controls(ui, bars);
+            });
+            ui.add_space(16.0);
+            waveform_preview(ui, *bars, width - CONTROLS_W - 16.0);
+        });
+    } else {
+        controls(ui, bars);
+        ui.add_space(8.0);
+        waveform_preview(ui, *bars, width);
+    }
+    hint(ui, "The preview shows the seek bar in the Player, and below it the one in the now-playing display.");
+}
+
+/// A made-up waveform's bars as `look` draws them, at the Player's size and
+/// the now-playing display's, part played, `width` wide.
+fn waveform_preview(ui: &mut Ui, look: Bars, width: f32) {
+    let t = Tokens::of(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 96.0), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter();
+    painter.rect(rect, 8.0, t.bg, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+    let inner = rect.shrink2(vec2(14.0, 0.0));
+    for (y, wave_h, fill) in [(rect.top() + 36.0, 13.0, t.text), (rect.bottom() - 22.0, 4.0, t.muted)] {
+        let line = Rect::from_center_size(pos2(inner.center().x, y), vec2(inner.width(), 2.0));
+        let grid = WaveGrid::along(line, painter.pixels_per_point(), look);
+        paint_wave(painter, line, &grid, &waveform::sample(grid.n), line.left() + line.width() * 0.4, look.rounded, wave_h, fill);
+    }
+}
+
+/// A whole-number setting in `range` on a thin slider, with its value read
+/// out. The slider's own position is kept between frames, so the wheel and
+/// the arrow keys, which move it a little at a time, add up to a step.
+fn step_row(ui: &mut Ui, label: &str, value: &mut u8, range: std::ops::RangeInclusive<u8>, slider: f32, readout: fn(u8) -> String) {
+    let t = Tokens::of(ui);
+    let (lo, hi) = (*range.start(), *range.end());
+    let span = f32::from(hi - lo);
+    let at = (*value).clamp(lo, hi);
+    let snapped = |v: f32| lo + (v * span).round() as u8;
+    row(ui, label, |ui| {
+        let id = ui.scope_id().with(("step", label));
+        let mut v = ui.data(|d| d.get_temp::<f32>(id)).filter(|&v| snapped(v) == at).unwrap_or(f32::from(at - lo) / span);
+        if thin_slider(ui, &mut v, slider, label).changed() {
+            ui.data_mut(|d| d.insert_temp(id, v));
+            *value = snapped(v);
+        }
+        let (r, _) = ui.allocate_exact_size(vec2(44.0, 18.0), Sense::hover());
+        ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, readout((*value).clamp(lo, hi)), FontId::proportional(12.0), t.muted);
+    });
+}
+
+/// Half points as points: "1 pt", "1.5 pt".
+fn half_points(v: u8) -> String {
+    if v.is_multiple_of(2) { format!("{} pt", v / 2) } else { format!("{}.5 pt", v / 2) }
 }
 
 /// A switch row kept to a readable width, so the switch sits near its label.

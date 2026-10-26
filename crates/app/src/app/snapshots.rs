@@ -1431,7 +1431,7 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "x-waveform-player");
     experiment(h, |x| {
         x.waveform = true;
-        x.waveform_rounded = true;
+        x.waveform_bars = crate::visuals::waveform::Bars { rounded: true, width: 6, gap: 3 };
     });
     s.shoot(h, "x-waveform-rounded-player");
     reset(h, FULL, Route::Recent);
@@ -1441,6 +1441,17 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.hover_at(pos2(820.0, 41.0));
     h.run_steps(2);
     s.shoot(h, "x-waveform-lcd-hover");
+    // Its bars' settings, with their preview beside them, and under them
+    // where the window is narrow.
+    for (size, name) in [(FULL, "x-settings-waveform"), (vec2(560.0, 700.0), "x-settings-waveform-narrow")] {
+        reset(h, size, Route::Recent);
+        experiment(h, |x| {
+            x.waveform = true;
+            x.waveform_bars.rounded = true;
+        });
+        app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Experimental));
+        s.shoot(h, name);
+    }
 
     // Everything that's still on the page at once, in the Player.
     reset(h, player, Route::Recent);
