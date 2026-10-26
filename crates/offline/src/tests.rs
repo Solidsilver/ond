@@ -216,6 +216,24 @@ fn takes_complete_stream_cache_files_without_downloading() {
 }
 
 #[test]
+fn a_track_taken_from_the_stream_cache_leaves_no_partial_download_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(50_000);
+    std::fs::write(cache.path().join("t.flac"), &body).unwrap();
+    let s = store(dir.path(), &rt);
+    // Half downloaded earlier, then played to the end.
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    std::fs::write(dir.path().join("t.flac.part"), &body[..1000]).unwrap();
+    let cache_dir = cache.path().to_owned();
+    s.set_cache_lookup(Arc::new(move |r| Some(cache_dir.join(file_name(r)))));
+    wait_for("the promotion", || s.snapshot().is_done("t"));
+    assert!(!dir.path().join("t.flac.part").exists());
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
 fn unpinning_deletes_only_unshared_files() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();

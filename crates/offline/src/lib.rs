@@ -796,7 +796,10 @@ fn promote(src: &Path, size: Option<u64>, part: &Path, dest: &Path) -> io::Resul
         return Err(io::Error::other("cached file has the wrong size"));
     }
     let _ = std::fs::remove_file(dest);
-    if std::fs::hard_link(src, dest).is_err() {
+    if std::fs::hard_link(src, dest).is_ok() {
+        // A download started earlier isn't needed now.
+        let _ = std::fs::remove_file(part);
+    } else {
         std::fs::copy(src, part)?;
         std::fs::rename(part, dest)?;
     }
