@@ -68,6 +68,9 @@ type NextSlot = Arc<Mutex<Option<(u64, TrackSource)>>>;
 
 pub(crate) struct Session {
     cancel: Arc<AtomicBool>,
+    /// Taken by [`Session::cancel`] and around every write the decode thread
+    /// makes to the shared [`Status`]: see [`Ctx::publish`].
+    publish: Arc<Mutex<()>>,
     done: Arc<AtomicBool>,
     msgs: Receiver<DecoderMsg>,
     seeks: Sender<SeekReq>,
@@ -97,6 +100,7 @@ impl Session {
         gain: Arc<Mutex<GainConfig>>,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
+        let publish: Arc<Mutex<()>> = Arc::default();
         let done = Arc::new(AtomicBool::new(false));
         let seek_pending = Arc::new(AtomicBool::new(false));
         let next: NextSlot = Arc::default();
@@ -105,6 +109,7 @@ impl Session {
         let at_seq = Arc::new(AtomicU64::new(0));
         let session = Self {
             cancel: cancel.clone(),
+            publish: publish.clone(),
             done: done.clone(),
             msgs,
             seeks,
@@ -122,6 +127,7 @@ impl Session {
             cache,
             msgs: msg_tx,
             cancel,
+            publish,
             seek_pending,
             at_seq,
             track_id: String::new(),
@@ -191,8 +197,16 @@ impl Session {
         true
     }
 
-    /// Signals the thread to stop. It isn't joined: a blocked read notices within ~50 ms.
+    /// Signals the thread to stop. When this returns the thread no longer
+    /// writes to the shared [`Status`], so the next session can reset and use it.
+    ///
+    /// The thread isn't joined: it may still be finishing a read (a blocked
+    /// network read notices within ~50 ms) or decoding a packet, and waiting
+    /// for that would stall the engine on every Play and Stop. What it does
+    /// meanwhile only touches its own ring and channels, which nothing reads
+    /// any more.
     pub fn cancel(self) {
+        let _publishing = self.publish.lock().unwrap_or_else(|e| e.into_inner());
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -203,6 +217,7 @@ struct Ctx {
     cache: Option<StreamCache>,
     msgs: Sender<DecoderMsg>,
     cancel: Arc<AtomicBool>,
+    publish: Arc<Mutex<()>>,
     seek_pending: Arc<AtomicBool>,
     at_seq: Arc<AtomicU64>,
     /// Id of the track at `at_seq`, for error reports.
@@ -354,6 +369,26 @@ impl Ctx {
             o.done.store(true, Ordering::Release);
         }
         result
+    }
+
+    /// Writes to the shared [`Status`], unless the session has been cancelled.
+    ///
+    /// `Status` outlives sessions: after a Stop or a new Play the engine resets
+    /// it and the next session's thread starts writing to it (same sequence
+    /// numbers, same counters) while this one may still be running. Checking
+    /// `cancel` alone would leave a window between the check and the write;
+    /// under the lock [`Session::cancel`] takes, there is none.
+    fn publish(&self, write: impl FnOnce(&Status)) {
+        #[cfg(test)]
+        tests::stall(&self.track_id);
+        {
+            let _publishing = self.publish.lock().unwrap_or_else(|e| e.into_inner());
+            if !self.cancel.load(Ordering::Relaxed) {
+                write(&self.status);
+            }
+        }
+        #[cfg(test)]
+        tests::published(&self.track_id);
     }
 
     /// Pushes what's still inside the resampler (end of stream or format change).
@@ -527,7 +562,7 @@ impl Ctx {
                 let replay_gain = src.replay_gain.or(t.tag_gain);
                 let cfg = *self.gain.lock().unwrap_or_else(|e| e.into_inner());
                 let linear = applied_gain(&cfg, &replay_gain, src.album_context).map_or(1.0, |g| g.linear);
-                self.status.gains.set(seq, linear);
+                self.publish(|s| s.gains.set(seq, linear));
                 let downmixed = matches!(change, ChannelChange::Downmix { .. });
                 match self.attach(output, rate, format.channels, downmixed, out) {
                     Some(f) => fresh = f,
@@ -651,7 +686,7 @@ impl Ctx {
             if self.cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            self.status.frames_played.store(0, Ordering::Relaxed);
+            // The engine zeroes the position when it reopens the device.
         }
         let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
         let (samples, consumer) = RingBuffer::new(cap.max(8192));
@@ -745,7 +780,8 @@ impl Ctx {
             // The callback counts frames at the output rate. (Past the end of a
             // track that hasn't started, the next one starts its own count.)
             if started || matches!(outcome, Seeked::To(_)) {
-                self.status.frames_played.store(t.to_output(frames), Ordering::Relaxed);
+                let played = t.to_output(frames);
+                self.publish(|s| s.frames_played.store(played, Ordering::Relaxed));
             }
             let position_secs = if t.clock.rate == 0 { 0.0 } else { frames as f64 / t.clock.rate as f64 };
             let _ = self.msgs.send(DecoderMsg::Seeked { seq, position_secs });

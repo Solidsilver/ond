@@ -554,6 +554,37 @@ fn replay_gain_tags_are_read_by_standard_or_raw_key() {
     assert_eq!(rg, ReplayGain { track_gain: Some(-7.5), album_gain: Some(-8.25), track_peak: Some(0.988), album_peak: None });
 }
 
+/// Tracks whose id starts with `late` stall for this long before each write
+/// to the shared `Status`, cancelled or not: a decode thread descheduled at the
+/// worst moment.
+const LATE_STALL: Duration = Duration::from_millis(300);
+
+/// (track id, the write is over) for every stalled write so far, from all tests.
+static LATE: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+
+pub(crate) fn stall(track_id: &str) {
+    if track_id.starts_with("late") {
+        LATE.lock().unwrap().push((track_id.to_owned(), false));
+        thread::sleep(LATE_STALL);
+    }
+}
+
+pub(crate) fn published(track_id: &str) {
+    if track_id.starts_with("late") {
+        LATE.lock().unwrap().push((track_id.to_owned(), true));
+    }
+}
+
+/// Waits until track `id` (a `late…` one) has reached a write to `Status`
+/// (`over` false), or is past it (`over` true).
+pub(crate) fn wait_late(id: &str, over: bool) {
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    while !LATE.lock().unwrap().iter().any(|(t, o)| t == id && *o == over) {
+        assert!(Instant::now() < deadline, "{id} never got to its write");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
 pub(crate) fn slack(d: std::time::Duration) -> std::time::Duration {

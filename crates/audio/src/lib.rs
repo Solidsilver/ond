@@ -193,35 +193,58 @@ pub enum PlayState {
 }
 
 /// Lock-free snapshot the UI polls every frame.
+///
+/// Three threads write to it: the engine, the output callback and the
+/// session's decode thread. Each field says which. Two rules keep them apart:
+/// - The engine resets the callback's fields only while no callback runs
+///   (after [`OutputBackend::close`], which is synchronous).
+/// - The decoder writes only through `Ctx::publish` (in `decode.rs`), which
+///   does nothing once the session has been cancelled: a replaced decoder
+///   can't reach into its successor's state.
 #[derive(Debug, Default)]
 pub struct Status {
+    /// Engine.
     state: AtomicU8,
     /// Frames the device has actually consumed for the current track.
+    /// Callback (advances it, zeroes it at a gapless boundary); engine (zeroes
+    /// it on stop and when a format change reopens the device); decoder (sets
+    /// it where a seek landed: after the callback has flushed the ring and
+    /// before any new audio is queued, so the callback isn't counting then).
     pub(crate) frames_played: AtomicU64,
-    /// 0 when unknown (e.g. unseekable stream without a duration header).
+    /// 0 when unknown (e.g. unseekable stream without a duration header). Engine.
     pub(crate) total_frames: AtomicU64,
+    /// The output rate of the current track. Engine.
     pub(crate) sample_rate: AtomicU32,
+    /// Callback.
     pub(crate) underruns: AtomicU64,
     /// Decoded frames queued ahead of the output (the ring's fill), as of the
-    /// last callback.
+    /// last callback. Callback.
     pub(crate) buffered_frames: AtomicU64,
-    /// Bytes of the current track on disk, and its size (0 when unknown or local).
+    /// Bytes of the current track on disk, and its size (0 when unknown or
+    /// local). Engine.
     pub(crate) fetched_bytes: AtomicU64,
     pub(crate) total_bytes: AtomicU64,
     /// Playback is downloading: the current track (whatever its size, known or
-    /// not, as with a transcode) or the next one's prefetch isn't complete.
+    /// not, as with a transcode) or the next one's prefetch isn't complete. Engine.
     pub(crate) downloading: AtomicBool,
-    /// Track boundaries the output has crossed in this session (bumped by the callback).
+    /// Track boundaries the output has crossed in this session. Callback
+    /// (bumps it at each boundary); engine (sets it when a ring opens, resets it on stop).
     pub(crate) track_seq: AtomicU64,
+    /// Engine.
     volume_bits: AtomicU32,
+    /// Engine.
     pub(crate) paused: AtomicBool,
-    /// The callback is holding or prebuffering.
+    /// The callback is holding or prebuffering. Callback; engine (sets it the
+    /// moment it asks for a seek hold, clears it on stop).
     pub(crate) buffering: AtomicBool,
-    /// The current mode: read by the output callback (gain bypass).
+    /// The current mode: read by the output callback (gain bypass). Engine.
     pub(crate) bit_perfect: AtomicBool,
     /// ReplayGain per session track, read by the callback at each boundary.
+    /// Decoder (each track's, before its first sample is queued); engine (on a
+    /// settings change, when the decoder reports the track, and reset on stop).
     pub(crate) gains: TrackGains,
     /// A copy of what plays, for visuals; idle until something reads it.
+    /// Callback writes, the UI reads.
     pub tap: tap::Tap,
 }
 
@@ -576,10 +599,13 @@ impl Engine {
     fn stop(&mut self) {
         self.held_seek = None;
         self.opening = None;
+        // From here on the old decode thread leaves `Status` alone (it may
+        // still be winding down).
         if let Some(s) = self.session.take() {
             s.cancel();
         }
-        // Synchronous: no callback runs after this, so the counters below stay reset.
+        // Synchronous: no callback runs after this. With the decoder silenced
+        // too, the counters below stay reset.
         self.backend.close();
         self.ring = None;
         self.tracks.clear();
@@ -932,6 +958,11 @@ impl Engine {
         self.backend.close_for_reopen();
         self.out_seq = first_seq;
         self.status.track_seq.store(first_seq, Ordering::Release);
+        if reopened {
+            // The new ring starts on a new track. (A first ring keeps the
+            // position a session started at, set by the decoder's seek.)
+            self.status.frames_played.store(0, Ordering::Relaxed);
+        }
         self.status.sample_rate.store(format.sample_rate, Ordering::Relaxed);
         if !reopened && !self.status.paused.load(Ordering::Relaxed) {
             self.status.set_state(PlayState::Playing);

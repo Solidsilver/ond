@@ -1,7 +1,7 @@
 //! Engine-level tests with a fake device that runs the real callback on a thread.
 
 use super::*;
-use crate::decode::tests::{file_source, pcm, slack};
+use crate::decode::tests::{file_source, pcm, slack, wait_late};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -752,3 +752,86 @@ fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
     engine.send(Command::Shutdown);
 }
 
+
+/// Plays `src` paused (so its position stays at 0) and waits for it to open.
+fn play_paused(engine: &EngineHandle, src: TrackSource) {
+    let id = src.id.clone();
+    engine.send(Command::Play(src));
+    engine.send(Command::Pause);
+    events_until(engine, |e| matches!(e, Event::TrackStarted { track_id, .. } if *track_id == id));
+}
+
+#[test]
+fn a_replaced_decoder_cannot_overwrite_the_new_tracks_gain() {
+    use replaygain::db_to_linear;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::SetGain(GainConfig { mode: GainMode::Track, ..Default::default() }));
+    // The old track's decoder stalls just before publishing its gain...
+    let mut old = file_source(&dir, "late-gain", &pcm(2 * 44_100, 30));
+    old.replay_gain = ReplayGain { track_gain: Some(-12.0), ..Default::default() };
+    engine.send(Command::Play(old));
+    wait_late("late-gain", false);
+    // ...and the new track starts meanwhile, in the same slot.
+    let mut new = file_source(&dir, "b", &pcm(2 * 44_100 * 4, 31));
+    new.replay_gain = ReplayGain { track_gain: Some(-3.0), ..Default::default() };
+    play_paused(&engine, new);
+    wait_late("late-gain", true);
+    assert_eq!(engine.status.gains.get(0), db_to_linear(-3.0), "the new track keeps its own gain");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_decoder_stopped_while_loading_cannot_move_the_next_tracks_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    // A seek while loading: the decoder stalls just before publishing the new position.
+    engine.send(Command::Play(file_source(&dir, "late-seek", &pcm(2 * 44_100 * 10, 32))));
+    engine.send(Command::Seek(Duration::from_secs(5)));
+    wait_late("late-seek", false);
+    engine.send(Command::Stop);
+    play_paused(&engine, file_source(&dir, "b", &pcm(2 * 44_100 * 4, 33)));
+    wait_late("late-seek", true);
+    assert_eq!(engine.status.frames_played.load(Ordering::Relaxed), 0, "paused at the start of the new track");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn rapid_plays_settle_on_the_last_track_with_its_own_gain_and_position() {
+    use replaygain::db_to_linear;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::SetGain(GainConfig { mode: GainMode::Track, ..Default::default() }));
+    let tracks: Vec<TrackSource> = (0..4)
+        .map(|i| {
+            let mut t = file_source(&dir, &format!("t{i}"), &pcm(2 * 44_100 * 4, 40 + i));
+            t.replay_gain = ReplayGain { track_gain: Some(-2.0 * i as f32), ..Default::default() };
+            t
+        })
+        .collect();
+    for i in 0..40 {
+        engine.send(Command::Play(tracks[i % 3].clone()));
+        if i % 4 == 0 {
+            engine.send(Command::Seek(Duration::from_secs(2)));
+        }
+        if i % 7 == 0 {
+            engine.send(Command::Stop);
+        }
+        if i % 5 == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    play_paused(&engine, tracks[3].clone());
+    // Anything left over from the earlier sessions has had time to finish.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(engine.status.gains.get(0), db_to_linear(-6.0));
+    assert_eq!(engine.status.frames_played.load(Ordering::Relaxed), 0);
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    engine.send(Command::Resume);
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "t3"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
