@@ -324,9 +324,17 @@ impl ViewCtx<'_> {
         let (cols, tile) = grid_metrics(ui.available_width());
         let rows = ids.len().div_ceil(cols);
         super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("grid", route)).auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
-            for row in range {
-                let slice = &ids[row * cols..((row + 1) * cols).min(ids.len())];
-                self.grid_row(ui, slice, tile);
+            let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
+            for row in range.clone() {
+                self.grid_row(ui, row_ids(row), tile);
+            }
+            // The rows just above and below load next, after what's on screen.
+            for row in [range.start.checked_sub(1), Some(range.end).filter(|&r| r < rows)].into_iter().flatten() {
+                for &i in row_ids(row) {
+                    if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
+                        self.art.prefetch(cover, tile);
+                    }
+                }
             }
         }));
     }
