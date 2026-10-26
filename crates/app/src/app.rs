@@ -23,6 +23,7 @@ mod sidebar;
 mod songs;
 mod toasts;
 mod toolbar;
+mod track_row;
 mod view_ctx;
 mod visualizer_view;
 mod widgets;

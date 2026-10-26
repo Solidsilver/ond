@@ -4,8 +4,9 @@
 //! per-track measurements, folded away until asked for. Playlists reuse the
 //! track list.
 
+use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
-use super::widgets::{Mark, chip, elide, heart_button, link};
+use super::widgets::{chip, elide, heart_button, link};
 use super::{Action, DragTracks, Focus, Keep, Overlay, PlaylistAction, QueueAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -168,6 +169,8 @@ pub(super) struct ListOpts {
 /// A track row's height: a title alone, or a title over its artist.
 const ROW_H: f32 = 38.0;
 const ROW_H_ARTIST: f32 = 44.0;
+/// Room above a disc heading after the first.
+const DISC_GAP: f32 = 12.0;
 
 impl ListOpts {
     pub fn row_h(&self) -> f32 {
@@ -565,19 +568,19 @@ impl ViewCtx<'_> {
         for (i, tr) in tracks.iter().enumerate() {
             if discs > 1 && tr.disc != last_disc {
                 last_disc = tr.disc;
-                ui.add_space(if i == 0 { 0.0 } else { 12.0 });
+                ui.add_space(if i == 0 { 0.0 } else { DISC_GAP });
                 ui.label(egui::RichText::new(format!("Disc {}", tr.disc.unwrap_or(1))).font(FontId::new(12.0, semibold())).color(list.t.muted));
                 ui.add_space(4.0);
             }
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), opts.row_h()), Sense::click_and_drag());
+            let row = TrackRow::new(ui, opts.row_h(), Sense::click_and_drag());
             if self.take_reveal(tr, i) {
-                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                ui.scroll_to_rect(row.rect, Some(egui::Align::Center));
             } else if moved && self.ui.track_sel == Some(i) {
-                ui.scroll_to_rect(rect, None);
+                ui.scroll_to_rect(row.rect, None);
             }
             // Off screen: the space is kept, nothing else to do.
-            if ui.is_rect_visible(rect) {
-                drop_at = self.track_row(ui, &list, i, rect, resp).or(drop_at);
+            if ui.is_rect_visible(row.rect) {
+                drop_at = self.track_row(ui, &list, i, &row).or(drop_at);
             }
         }
         list.drop_line(ui, drop_at);
@@ -608,8 +611,8 @@ impl ViewCtx<'_> {
             }
             let mut drop_at = None;
             for i in range {
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
-                drop_at = self.track_row(ui, &list, i, rect, resp).or(drop_at);
+                let row = TrackRow::new(ui, h, Sense::click_and_drag());
+                drop_at = self.track_row(ui, &list, i, &row).or(drop_at);
             }
             list.drop_line(ui, drop_at);
         });
@@ -627,128 +630,154 @@ impl ViewCtx<'_> {
         true
     }
 
-    /// One row of a track list, at `rect`. Returns where a reorder drag over
-    /// it would land: (index to insert at, y of the line).
-    fn track_row(&mut self, ui: &mut Ui, list: &List, i: usize, rect: Rect, resp: egui::Response) -> Option<(usize, f32)> {
-        let (t, opts, tr) = (&list.t, list.opts, &list.tracks[i]);
+    /// The `i`th row of a track list. Returns where a reorder drag over it
+    /// would land: (index to insert at, y of the line).
+    fn track_row(&mut self, ui: &mut Ui, list: &List, i: usize, row: &TrackRow) -> Option<(usize, f32)> {
+        let tr = &list.tracks[i];
         let playing = list.current == Some(tr.id.as_str());
         let selected = self.ui.focus == Focus::Main && self.ui.track_sel == Some(i);
-        let hovered = resp.hovered() || resp.contains_pointer();
         let loved = self.favorites.is_on(StarKind::Song, &tr.id);
-        let mut drop_at = None;
-        // Drag: the selection's track (or this one) to a playlist; within
-        // one's own playlist, also to a new place in it.
-        // (Built only when the drag starts, the one frame egui takes it: a
-        // copy per row per frame adds up on long lists.)
-        if resp.drag_started() {
-            resp.dnd_set_drag_payload(DragTracks { tracks: vec![tr.clone()], from: opts.playlist.clone().map(|p| (p, i)) });
+        let drop_at = self.track_row_drag(ui, list, i, row);
+        if ui.is_rect_visible(row.rect) {
+            self.paint_track_row(ui, list, i, row, playing, selected, loved);
         }
-        if let Some(pid) = &opts.playlist {
-            if let Some(drag) = resp.dnd_hover_payload::<DragTracks>()
-                && drag.from.as_ref().is_some_and(|(p, _)| p == pid)
-                && let Some(p) = ui.ctx().pointer_hover_pos()
-            {
-                let below = p.y > rect.center().y;
-                drop_at = Some((if below { i + 1 } else { i }, if below { rect.bottom() } else { rect.top() }));
-            }
-            if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
-                && let Some((p, from)) = &drag.from
-                && p == pid
-                && let Some(pos) = ui.ctx().pointer_interact_pos()
-            {
-                let mut to = if pos.y > rect.center().y { i + 1 } else { i };
-                if to > *from {
-                    to -= 1;
-                }
-                self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.clone(), from: *from, to }));
-            }
-        }
-        if ui.is_rect_visible(rect) {
-            ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(t, selected, hovered));
-            let mut x = rect.left() + 10.0;
-            let cy = rect.center().y;
-            // Offline, what isn't downloaded is dimmed rather than hidden.
-            let available = self.playable(tr);
-            let color = super::widgets::track_color(t, playing, available);
-            if let Some(m) = Mark::of_track(self.downloads.snap.track(&tr.id)) {
-                super::widgets::mark(ui, pos2(rect.right() - 48.0, cy), 10.0, m);
-            }
-            if opts.numbers {
-                if playing {
-                    icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 12.0, cy), vec2(9.0, 9.0)), Icon::Play, t.accent);
-                } else {
-                    let n = tr.track.map(|n| n.to_string()).unwrap_or_default();
-                    ui.painter().text(pos2(x + 18.0, cy), egui::Align2::RIGHT_CENTER, n, FontId::proportional(12.0), t.muted);
-                }
-                x += 34.0;
-            } else if playing {
-                icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 4.0, cy), vec2(8.0, 8.0)), Icon::Play, t.accent);
-                x += 16.0;
-            }
-            let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
-            ui.painter().text(pos2(rect.right() - 10.0, cy), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
-            // The heart sits just left of the duration: always when loved,
-            // on hover otherwise.
-            let heart = Rect::from_center_size(pos2(rect.right() - 70.0, cy), vec2(24.0, 24.0));
-            if loved || hovered {
-                let label = if loved { "Unlove" } else { "Love" };
-                let hr = super::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
-                if hr.on_hover_text(label).clicked() {
-                    self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
-                }
-            }
-            let actions_w = if hovered { 150.0 } else { 0.0 };
-            let text_w = rect.right() - 86.0 - actions_w - x;
-            let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-            if opts.artist {
-                let title = elide(ui, &tr.title, title_font, color, text_w);
-                ui.painter().galley(pos2(x, cy - title.size().y), title, color);
-                let sub = elide(ui, tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted, text_w);
-                ui.painter().galley(pos2(x, cy + 1.0), sub, t.muted);
-            } else {
-                let title = elide(ui, &tr.title, title_font, color, text_w);
-                let title_w = title.size().x;
-                ui.painter().galley(pos2(x, cy - title.size().y / 2.0), title, color);
-                if hovered && !available {
-                    let g = ui.painter().layout_no_wrap("Not downloaded".into(), FontId::proportional(12.0), t.muted);
-                    if title_w + 10.0 + g.size().x < text_w {
-                        ui.painter().galley(pos2(x + title_w + 10.0, cy - g.size().y / 2.0), g, t.muted);
-                    }
-                }
-                // Composer, on hover only.
-                else if hovered && let Some(composer) = composer_of(tr) {
-                    let at = Rect::from_min_size(pos2(x + title_w + 10.0, cy - 8.0), vec2((text_w - title_w - 10.0).max(0.0), 16.0));
-                    if at.width() > 40.0 {
-                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                        child.spacing_mut().item_spacing.x = 0.0;
-                        child.label(egui::RichText::new("by ").size(12.0).color(t.muted));
-                        if link(&mut child, &composer, FontId::proportional(12.0), t.muted).clicked() {
-                            let id = tr.contributors.iter().find(|c| c.name == composer).and_then(|c| c.artist_id.clone());
-                            self.actions.push(Action::Go(Route::Artist { name: composer.clone(), id }));
-                        }
-                    }
-                }
-            }
-            if hovered {
-                let r = Rect::from_min_max(pos2(rect.right() - 86.0 - actions_w, rect.top()), pos2(rect.right() - 84.0, rect.bottom()));
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)));
-                child.spacing_mut().item_spacing.x = 4.0;
-                let more = icons::sized_button(&mut child, Icon::More, "More", vec2(24.0, 22.0), 11.0, Some(t.muted));
-                egui::Popup::menu(&more).show(|ui| self.track_row_menu(ui, tr, i, list.source, opts.playlist.as_deref()));
-                if child.add(egui::Button::new(egui::RichText::new("Play next").size(11.0)).corner_radius(11.0).stroke(egui::Stroke::new(1.0, t.hairline))).clicked() {
-                    self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: list.source.clone(), action: QueueAction::PlayNext });
-                }
-            }
-        }
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, format!("{}{}{}", tr.title, if loved { ", loved" } else { "" }, if playing { ", playing" } else { "" })));
+        row.describe(selected, || format!("{}{}{}", tr.title, if loved { ", loved" } else { "" }, if playing { ", playing" } else { "" }));
+        let resp = &row.resp;
         if resp.double_clicked() {
             self.actions.push(Action::Tracks { tracks: list.tracks.to_vec(), source: list.source.clone(), action: QueueAction::Play { start: i } });
         } else if resp.clicked() {
             self.ui.track_sel = Some(i);
             self.ui.focus = Focus::Main;
         }
-        resp.context_menu(|ui| self.track_row_menu(ui, tr, i, list.source, opts.playlist.as_deref()));
+        resp.context_menu(|ui| self.track_row_menu(ui, tr, i, list.source, list.opts.playlist.as_deref()));
         drop_at
+    }
+
+    /// Dragging the `i`th row: its track to a playlist; within one's own
+    /// playlist, also to a new place in it. Returns where a reorder dropped
+    /// on this row would land.
+    fn track_row_drag(&mut self, ui: &Ui, list: &List, i: usize, row: &TrackRow) -> Option<(usize, f32)> {
+        let (resp, rect, playlist) = (&row.resp, row.rect, &list.opts.playlist);
+        // Built only when the drag starts, the one frame egui takes it: a
+        // copy per row per frame adds up on long lists.
+        if resp.drag_started() {
+            resp.dnd_set_drag_payload(DragTracks { tracks: vec![list.tracks[i].clone()], from: playlist.clone().map(|p| (p, i)) });
+        }
+        let pid = playlist.as_ref()?;
+        let mut drop_at = None;
+        if let Some(drag) = resp.dnd_hover_payload::<DragTracks>()
+            && drag.from.as_ref().is_some_and(|(p, _)| p == pid)
+            && let Some(p) = ui.ctx().pointer_hover_pos()
+        {
+            let below = p.y > rect.center().y;
+            drop_at = Some((if below { i + 1 } else { i }, if below { rect.bottom() } else { rect.top() }));
+        }
+        if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
+            && let Some((p, from)) = &drag.from
+            && p == pid
+            && let Some(pos) = ui.ctx().pointer_interact_pos()
+        {
+            let mut to = if pos.y > rect.center().y { i + 1 } else { i };
+            if to > *from {
+                to -= 1;
+            }
+            self.actions.push(Action::PlaylistEdit(PlaylistAction::Move { id: pid.clone(), from: *from, to }));
+        }
+        drop_at
+    }
+
+    /// Draws the `i`th row: number or playing mark, title (and artist), and at
+    /// the right end the length, the download mark and the heart; on hover,
+    /// the composer (or why it can't play) and the actions.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_track_row(&mut self, ui: &mut Ui, list: &List, i: usize, row: &TrackRow, playing: bool, selected: bool, loved: bool) {
+        let (t, opts, tr) = (&list.t, list.opts, &list.tracks[i]);
+        let (rect, cy) = (row.rect, row.cy());
+        let hovered = row.pointer_on();
+        row.fill(ui, t, selected, hovered);
+        let mut x = rect.left() + col::INSET;
+        // Offline, what isn't downloaded is dimmed rather than hidden.
+        let available = self.playable(tr);
+        let color = super::widgets::track_color(t, playing, available);
+        row.mark(ui, rect.right() - col::MARK_FROM_RIGHT, self.downloads.snap.track(&tr.id));
+        if opts.numbers {
+            if playing {
+                let side = col::NUMBER_PLAYING;
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(x + col::NUMBER_PLAYING_X, cy), vec2(side, side)), Icon::Play, t.accent);
+            } else {
+                let n = tr.track.map(|n| n.to_string()).unwrap_or_default();
+                row.right_text(ui, x + col::NUMBER_RIGHT, n, FontId::proportional(12.0), t.muted);
+            }
+            x += col::NUMBER_W;
+        } else if playing {
+            x = row.playing(ui, t, x);
+        }
+        row.right_text(ui, rect.right() - col::INSET, length(tr), FontId::proportional(12.0), t.muted);
+        // The heart sits just left of the duration: always when loved,
+        // on hover otherwise.
+        let heart = Rect::from_center_size(pos2(rect.right() - col::HEART_FROM_RIGHT, cy), vec2(col::HEART_BOX, col::HEART_BOX));
+        if loved || hovered {
+            let label = if loved { "Unlove" } else { "Love" };
+            let hr = super::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
+            if hr.on_hover_text(label).clicked() {
+                self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
+            }
+        }
+        let actions_w = if hovered { col::ACTIONS_W } else { 0.0 };
+        let text_w = rect.right() - col::TEXT_FROM_RIGHT - actions_w - x;
+        let title_font = title_font(13.0, playing);
+        if opts.artist {
+            row.two_lines(ui, x, text_w, (&tr.title, title_font, color), (tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted));
+        } else {
+            let title_w = row.line(ui, x, text_w, &tr.title, title_font, color);
+            if hovered {
+                self.track_row_aside(ui, t, tr, row, x + title_w + col::GAP, text_w - title_w - col::GAP, available);
+            }
+        }
+        if hovered {
+            let r = Rect::from_min_max(pos2(rect.right() - col::TEXT_FROM_RIGHT - actions_w, rect.top()), pos2(rect.right() - col::ACTIONS_END, rect.bottom()));
+            self.track_row_actions(ui, t, list, i, r);
+        }
+    }
+
+    /// After a hovered title, in `width` from `x`: "Not downloaded" when it
+    /// can't play now, else its composer as a link.
+    #[allow(clippy::too_many_arguments)]
+    fn track_row_aside(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, row: &TrackRow, x: f32, width: f32, available: bool) {
+        let cy = row.cy();
+        if !available {
+            let g = ui.painter().layout_no_wrap("Not downloaded".into(), FontId::proportional(12.0), t.muted);
+            if g.size().x < width {
+                ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, t.muted);
+            }
+            return;
+        }
+        let Some(composer) = composer_of(tr) else { return };
+        let at = Rect::from_min_size(pos2(x, cy - 8.0), vec2(width.max(0.0), 16.0));
+        // Too little room for "by" and a name worth reading.
+        if at.width() <= 40.0 {
+            return;
+        }
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        child.spacing_mut().item_spacing.x = 0.0;
+        child.label(egui::RichText::new("by ").size(12.0).color(t.muted));
+        if link(&mut child, &composer, FontId::proportional(12.0), t.muted).clicked() {
+            let id = tr.contributors.iter().find(|c| c.name == composer).and_then(|c| c.artist_id.clone());
+            self.actions.push(Action::Go(Route::Artist { name: composer.clone(), id }));
+        }
+    }
+
+    /// A hovered row's buttons, right to left in `r`: ⋯ (the row's menu) and
+    /// Play Next.
+    fn track_row_actions(&mut self, ui: &mut Ui, t: &Tokens, list: &List, i: usize, r: Rect) {
+        let tr = &list.tracks[i];
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        child.spacing_mut().item_spacing.x = 4.0;
+        let more = icons::sized_button(&mut child, Icon::More, "More", vec2(24.0, 22.0), 11.0, Some(t.muted));
+        egui::Popup::menu(&more).show(|ui| self.track_row_menu(ui, tr, i, list.source, list.opts.playlist.as_deref()));
+        if child.add(egui::Button::new(egui::RichText::new("Play next").size(11.0)).corner_radius(11.0).stroke(egui::Stroke::new(1.0, t.hairline))).clicked() {
+            self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: list.source.clone(), action: QueueAction::PlayNext });
+        }
     }
 
     /// [`track_menu`](Self::track_menu), plus Remove from Playlist in the user's own.

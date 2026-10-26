@@ -4,10 +4,9 @@
 //! Rows act like the album page's: double-click (or ⏎) plays the track's
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
+use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
-use super::widgets::elide;
 use super::{Action, Focus, QueueAction};
-use crate::icons::{self, Icon};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
@@ -176,56 +175,54 @@ impl ViewCtx<'_> {
                     let top = ui.cursor().top() + (sel as f32 - range.start as f32) * ROW_H;
                     ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(ui.available_width(), ROW_H)), None);
                 }
-                for row in range {
-                    let tr = &tracks[order[row]];
-                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
-                    let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(row);
-                    let hovered = resp.hovered() || resp.contains_pointer();
-                    let playing = current == Some(tr.id.as_str());
-                    if ui.is_rect_visible(rect) {
-                        ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
-                        let c = columns(rect);
-                        let color = super::widgets::track_color(&t, playing, self.playable(tr));
-                        if let Some(m) = super::widgets::Mark::of_track(self.downloads.snap.track(&tr.id)) {
-                            super::widgets::mark(ui, pos2(c.time.left() + 10.0, rect.center().y), 10.0, m);
-                        }
-                        let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-                        let mut title_x = c.title.left() + 10.0;
-                        if playing {
-                            icons::paint(ui.painter(), Rect::from_center_size(pos2(title_x + 4.0, rect.center().y), vec2(8.0, 8.0)), Icon::Play, t.accent);
-                            title_x += 16.0;
-                        }
-                        let cell = |ui: &Ui, text: &str, x: f32, w: f32, font: FontId, color| {
-                            let g = elide(ui, text, font, color, w - 20.0);
-                            ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
-                        };
-                        cell(ui, &tr.title, title_x, c.title.right() - title_x + 10.0, title_font, color);
-                        cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + 10.0, c.artist.width(), FontId::proportional(13.0), t.muted);
-                        let album = data.album(&tr.album_id).map_or("", |a| a.name.as_str());
-                        cell(ui, album, c.album.left() + 10.0, c.album.width(), FontId::proportional(13.0), t.muted);
-                        let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
-                        ui.painter().text(pos2(c.time.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
-                        cell(ui, &crate::fmt::quality(tr), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
-                    }
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" })));
-                    if resp.double_clicked() {
-                        self.play_from_album(tr, QueueAction::Play { start: 0 });
-                    } else if resp.clicked() {
-                        self.ui.songs.selected = Some(row);
-                        self.ui.focus = Focus::Main;
-                    }
-                    resp.context_menu(|ui| {
-                        let source = self.album_source(&tr.album_id);
-                        if ui.button("Play").clicked() {
-                            self.play_from_album(tr, QueueAction::Play { start: 0 });
-                        }
-                        self.track_menu(ui, tr, &source);
-                        if ui.button("Go to album").clicked() {
-                            self.actions.push(Action::Go(crate::nav::Route::Album(tr.album_id.clone())));
-                        }
-                    });
+                for i in range {
+                    self.songs_row(ui, &t, &tracks[order[i]], i, current);
                 }
             })
+        });
+    }
+
+    /// The `i`th row in the sorted order: a cell per column.
+    fn songs_row(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, i: usize, current: Option<&str>) {
+        let row = TrackRow::new(ui, ROW_H, Sense::click());
+        let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(i);
+        let playing = current == Some(tr.id.as_str());
+        if ui.is_rect_visible(row.rect) {
+            row.fill(ui, t, selected, row.pointer_on());
+            let c = columns(row.rect);
+            let color = super::widgets::track_color(t, playing, self.playable(tr));
+            row.mark(ui, c.time.left() + col::INSET, self.downloads.snap.track(&tr.id));
+            let mut title_x = c.title.left() + col::INSET;
+            if playing {
+                title_x = row.playing(ui, t, title_x);
+            }
+            // A cell's text, inset at both ends.
+            let cell = |ui: &Ui, text: &str, x: f32, w: f32, font: FontId, color| {
+                row.line(ui, x, w - 2.0 * col::INSET, text, font, color);
+            };
+            cell(ui, &tr.title, title_x, c.title.right() - title_x + col::INSET, title_font(13.0, playing), color);
+            cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + col::INSET, c.artist.width(), FontId::proportional(13.0), t.muted);
+            let album = self.data.album(&tr.album_id).map_or("", |a| a.name.as_str());
+            cell(ui, album, c.album.left() + col::INSET, c.album.width(), FontId::proportional(13.0), t.muted);
+            row.right_text(ui, c.time.right() - col::INSET, length(tr), FontId::proportional(12.0), t.muted);
+            cell(ui, &crate::fmt::quality(tr), c.format.left() + col::INSET, c.format.width(), FontId::proportional(11.0), t.muted);
+        }
+        row.describe(selected, || format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" }));
+        if row.resp.double_clicked() {
+            self.play_from_album(tr, QueueAction::Play { start: 0 });
+        } else if row.resp.clicked() {
+            self.ui.songs.selected = Some(i);
+            self.ui.focus = Focus::Main;
+        }
+        row.resp.context_menu(|ui| {
+            let source = self.album_source(&tr.album_id);
+            if ui.button("Play").clicked() {
+                self.play_from_album(tr, QueueAction::Play { start: 0 });
+            }
+            self.track_menu(ui, tr, &source);
+            if ui.button("Go to album").clicked() {
+                self.actions.push(Action::Go(crate::nav::Route::Album(tr.album_id.clone())));
+            }
         });
     }
 
