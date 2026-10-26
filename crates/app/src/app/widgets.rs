@@ -228,13 +228,15 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
     let font = FontId::proportional(12.0);
     let widths = widths.to_vec();
     let size = vec2(widths.iter().sum::<f32>() + 4.0, 26.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    // Segments take their ids from the pill's own: two controls in one scope
+    // can share a label (ReplayGain and Streaming both have "Auto").
+    let (rect, pill) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().rect_filled(rect, 7.0, t.field);
     let mut x = rect.left() + 2.0;
     let mut clicked = None;
     for (i, (opt, w)) in options.iter().zip(widths).enumerate() {
         let r = Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(w, rect.height() - 4.0));
-        let resp = ui.interact(r, ui.scope_id().with(("seg", i, *opt)), Sense::click());
+        let resp = ui.interact(r, pill.id.with(("seg", i)), Sense::click());
         if i == selected {
             ui.painter().rect_filled(r, 5.0, t.bg);
         } else if resp.hovered() {
@@ -499,4 +501,28 @@ pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &st
             ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(body)).size(13.0).color(t.muted)).wrap());
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_controls_with_the_same_label_click_separately() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).build_ui_state(
+            |ui, picks: &mut (usize, usize)| {
+                choice(ui, &[0, 1, 2], &mut picks.0, Some(300.0), |i| ["Off", "Auto", "Album"][i].into());
+                choice(ui, &[0, 1, 2], &mut picks.1, Some(300.0), |i| ["Original", "Auto", "Transcoded"][i].into());
+            },
+            (0, 0),
+        );
+        h.run();
+        h.get_all_by_label("Auto").next().expect("the first control's Auto").click();
+        h.run();
+        assert_eq!(*h.state(), (1, 0));
+        h.get_all_by_label("Auto").nth(1).expect("the second control's Auto").click();
+        h.run();
+        assert_eq!(*h.state(), (1, 1));
+    }
 }
