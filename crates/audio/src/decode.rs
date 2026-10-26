@@ -10,7 +10,7 @@
 //! the same device format, so one resampler carries across the boundary.
 
 use crate::channels::{ChannelChange, ChannelMap, output_channels};
-use crate::output::{RingCtl, RingInput, StreamFormat};
+use crate::output::{MARKER_CAP, Marker, RingCtl, RingInput, StreamFormat};
 use crate::replaygain::{GainConfig, ReplayGain, applied_gain, parse_tag_value};
 use crate::resample::StreamResampler;
 use crate::signal::{DeviceCaps, choose_rate};
@@ -68,6 +68,9 @@ type NextSlot = Arc<Mutex<Option<(u64, TrackSource)>>>;
 
 pub(crate) struct Session {
     cancel: Arc<AtomicBool>,
+    /// Taken by [`Session::cancel`] and around every write the decode thread
+    /// makes to the shared [`Status`]: see [`Ctx::publish`].
+    publish: Arc<Mutex<()>>,
     done: Arc<AtomicBool>,
     msgs: Receiver<DecoderMsg>,
     seeks: Sender<SeekReq>,
@@ -97,6 +100,7 @@ impl Session {
         gain: Arc<Mutex<GainConfig>>,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
+        let publish: Arc<Mutex<()>> = Arc::default();
         let done = Arc::new(AtomicBool::new(false));
         let seek_pending = Arc::new(AtomicBool::new(false));
         let next: NextSlot = Arc::default();
@@ -105,6 +109,7 @@ impl Session {
         let at_seq = Arc::new(AtomicU64::new(0));
         let session = Self {
             cancel: cancel.clone(),
+            publish: publish.clone(),
             done: done.clone(),
             msgs,
             seeks,
@@ -122,6 +127,7 @@ impl Session {
             cache,
             msgs: msg_tx,
             cancel,
+            publish,
             seek_pending,
             at_seq,
             track_id: String::new(),
@@ -191,8 +197,16 @@ impl Session {
         true
     }
 
-    /// Signals the thread to stop. It isn't joined: a blocked read notices within ~50 ms.
+    /// Signals the thread to stop. When this returns the thread no longer
+    /// writes to the shared [`Status`], so the next session can reset and use it.
+    ///
+    /// The thread isn't joined: it may still be finishing a read (a blocked
+    /// network read notices within ~50 ms) or decoding a packet, and waiting
+    /// for that would stall the engine on every Play and Stop. What it does
+    /// meanwhile only touches its own ring and channels, which nothing reads
+    /// any more.
     pub fn cancel(self) {
+        let _publishing = self.publish.lock().unwrap_or_else(|e| e.into_inner());
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -203,6 +217,7 @@ struct Ctx {
     cache: Option<StreamCache>,
     msgs: Sender<DecoderMsg>,
     cancel: Arc<AtomicBool>,
+    publish: Arc<Mutex<()>>,
     seek_pending: Arc<AtomicBool>,
     at_seq: Arc<AtomicU64>,
     /// Id of the track at `at_seq`, for error reports.
@@ -247,7 +262,8 @@ struct Track {
     clock: Clock,
     total_frames: Option<u64>,
     bits: Option<u32>,
-    /// The rate the device plays this track at (set from the first packet; 0 before).
+    /// The rate the device plays this track at: from the codec parameters
+    /// until the first packet, then from its format.
     out_rate: u32,
     /// ReplayGain from the file's tags.
     tag_gain: ReplayGain,
@@ -266,12 +282,13 @@ impl Track {
 
 /// The ring being filled, and how many samples have gone into it.
 struct Out {
-    /// What the device plays: the output rate.
+    /// What the device plays: the output rate and channels. No bit depth:
+    /// the ring takes tracks of any depth.
     format: StreamFormat,
     /// The tracks' rate before resampling.
     src_rate: u32,
     samples: Producer<f32>,
-    markers: Producer<u64>,
+    markers: Producer<Marker>,
     done: Arc<AtomicBool>,
     ctl: Arc<RingCtl>,
     pushed: u64,
@@ -284,7 +301,6 @@ struct Out {
     rs_base: u64,
 }
 
-
 enum Seeked {
     /// Decoding resumes; drop decoded frames before this timestamp.
     To(Timestamp),
@@ -292,6 +308,56 @@ enum Seeked {
     Nothing,
     /// Past the end: finish the track.
     End,
+}
+
+/// Per-track reading state of [`Ctx::play`].
+#[derive(Default)]
+struct Packets {
+    /// The last packet's audio, interleaved, as decoded.
+    scratch: Vec<f32>,
+    /// Drop decoded audio before this timestamp (where a seek landed).
+    skip_until: Option<Timestamp>,
+    /// The track's rate and channel count as its first packet had them.
+    first_spec: Option<(u32, usize)>,
+    /// A packet in another format was skipped (and logged).
+    skipped_spec: bool,
+}
+
+/// The format of the audio a packet decoded to.
+#[derive(Debug, Clone, Copy)]
+struct Spec {
+    rate: u32,
+    channels: u16,
+    /// Speaker positions, when the stream names them.
+    positions: Option<u64>,
+}
+
+/// What [`Ctx::next_audio`] found.
+enum Next {
+    /// A packet's audio, in `Packets::scratch`.
+    Audio(Spec),
+    /// The end of the track (or a seek past it).
+    End,
+    Cancelled,
+}
+
+/// What feeds a ring from a track: its rate and channel count before
+/// conversion, and whether those channels are mixed down.
+#[derive(Debug, Clone, Copy)]
+struct Feed {
+    rate: u32,
+    channels: u16,
+    downmixed: bool,
+}
+
+/// What [`Ctx::attach`] did with a starting track.
+enum Attached {
+    /// It carries on in the current ring, gaplessly.
+    Continued,
+    /// It starts a new ring (the device opens or reopens for it).
+    NewRing(RingInput),
+    /// Cancelled while waiting for the old ring to play out or for room.
+    Cancelled,
 }
 
 enum Push {
@@ -356,6 +422,26 @@ impl Ctx {
         result
     }
 
+    /// Writes to the shared [`Status`], unless the session has been cancelled.
+    ///
+    /// `Status` outlives sessions: after a Stop or a new Play the engine resets
+    /// it and the next session's thread starts writing to it (same sequence
+    /// numbers, same counters) while this one may still be running. Checking
+    /// `cancel` alone would leave a window between the check and the write;
+    /// under the lock [`Session::cancel`] takes, there is none.
+    fn publish(&self, write: impl FnOnce(&Status)) {
+        #[cfg(test)]
+        tests::stall(&self.track_id);
+        {
+            let _publishing = self.publish.lock().unwrap_or_else(|e| e.into_inner());
+            if !self.cancel.load(Ordering::Relaxed) {
+                write(&self.status);
+            }
+        }
+        #[cfg(test)]
+        tests::published(&self.track_id);
+    }
+
     /// Pushes what's still inside the resampler (end of stream or format change).
     fn flush_resampler(&mut self, o: &mut Out) {
         let Some(r) = o.resampler.as_mut() else { return };
@@ -409,35 +495,67 @@ impl Ctx {
             clock: Clock { time_base, rate: params.sample_rate.unwrap_or(0) },
             total_frames,
             bits: params.bits_per_sample,
-            out_rate: choose_rate(
+            // From the codec parameters, so that a seek before the first packet
+            // (a restart at a position) lands at the right output frame; the
+            // first packet's own format confirms or corrects it.
+            out_rate: self.device_rate(
                 params.sample_rate.unwrap_or(0),
-                output_channels(params.channels.as_ref().map_or(2, |c| c.count() as u16), self.caps.as_ref()),
-                self.caps.as_ref(),
+                params.channels.as_ref().map_or(2, |c| c.count() as u16),
             ),
             tag_gain,
         })
     }
 
+    /// Decodes track `seq` into the ring (starting one if needed), applying
+    /// seeks as they come, until it ends or the session is cancelled.
     fn play(&mut self, seq: u64, src: &TrackSource, t: &mut Track, out: &mut Option<Out>) -> Result<TrackEnd, String> {
-        let mut scratch: Vec<f32> = Vec::new();
-        let mut skip_until: Option<Timestamp> = None;
-        let mut started = false;
-        let mut map = ChannelMap::Identity;
-        // The track's format as its first packet had it. A stream that changes
-        // rate or channels midway (chained Ogg, some MP3s) has those packets
-        // skipped: they'd be pushed into a ring set up for the first format.
-        let mut first_spec: Option<(u32, usize)> = None;
-        let mut skipped_spec = false;
-
+        let mut packets = Packets::default();
+        // Set up with the track's first audio.
+        let mut map: Option<ChannelMap> = None;
         loop {
-            if self.cancel.load(Ordering::Relaxed) {
+            let started = map.is_some();
+            let spec = match self.next_audio(seq, t, out.as_mut().filter(|_| started), &mut packets)? {
+                Next::Audio(spec) => spec,
+                Next::End => break,
+                Next::Cancelled => return Ok(TrackEnd::Cancelled),
+            };
+            let mut fresh = None;
+            if !started {
+                let (m, attached) = self.start_track(seq, src, t, spec, out)?;
+                map = Some(m);
+                match attached {
+                    Attached::Continued => {}
+                    Attached::NewRing(input) => fresh = Some(input),
+                    Attached::Cancelled => return Ok(TrackEnd::Cancelled),
+                }
+            }
+            let (Some(map), Some(o)) = (map.as_ref(), out.as_mut()) else { unreachable!("attach always leaves a ring") };
+            if let Push::Cancelled = self.queue(&packets.scratch, map, o) {
                 return Ok(TrackEnd::Cancelled);
             }
+            // A new ring goes to the engine once it holds some audio, so the device
+            // doesn't open onto an empty buffer.
+            if let Some(input) = fresh {
+                self.msgs.send(DecoderMsg::Ring { format: o.format, input, first_seq: seq }).map_err(|_| "engine gone")?;
+            }
+        }
+        Ok(if map.is_some() { TrackEnd::Eof } else { TrackEnd::Empty })
+    }
+
+    /// Reads and decodes until a packet yields audio (left in
+    /// `packets.scratch`), handling seeks, the end of the track (waiting there
+    /// for a next one, see [`linger`](Self::linger)) and cancels on the way.
+    /// `out` is the ring once the track has started.
+    fn next_audio(&mut self, seq: u64, t: &mut Track, mut out: Option<&mut Out>, packets: &mut Packets) -> Result<Next, String> {
+        loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Ok(Next::Cancelled);
+            }
             if self.seek_pending.load(Ordering::Acquire) {
-                match self.seek(seq, t, out.as_mut().filter(|_| started)) {
-                    Seeked::To(ts) => skip_until = Some(ts),
+                match self.seek(seq, t, out.as_deref_mut()) {
+                    Seeked::To(ts) => packets.skip_until = Some(ts),
                     Seeked::Nothing => {}
-                    Seeked::End => break,
+                    Seeked::End => return Ok(Next::End),
                 }
                 continue;
             }
@@ -445,22 +563,21 @@ impl Ctx {
                 Ok(Some(p)) => p,
                 // A seek that came in as the track ran out is still applied.
                 Ok(None) if self.seek_pending.load(Ordering::Acquire) => continue,
-                Ok(None) if self.linger(seq, out.as_ref().filter(|_| started)) => continue,
-                Ok(None) => break,
+                Ok(None) if self.linger(seq, out.as_deref()) => continue,
+                Ok(None) => return Ok(Next::End),
                 // The read was interrupted for a seek or cancel; the loop head handles both.
                 Err(_) if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) => continue,
                 Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    if self.linger(seq, out.as_ref().filter(|_| started)) {
+                    if self.linger(seq, out.as_deref()) {
                         continue;
                     }
-                    break;
+                    return Ok(Next::End);
                 }
                 Err(e) => return Err(format!("read: {e}")),
             };
             if packet.track_id != t.track_id {
                 continue;
             }
-            let pts = packet.pts;
             let buf = match t.decoder.decode(&packet) {
                 Ok(b) => b,
                 // A corrupt frame: skip it rather than abort the track.
@@ -477,104 +594,114 @@ impl Ctx {
                 _ => None,
             };
             let rate = spec.rate();
-            match first_spec {
-                None => first_spec = Some((rate, channels)),
+            // A stream that changes rate or channels midway (chained Ogg, some
+            // MP3s) has those packets skipped: they'd be pushed into a ring set
+            // up for the first format.
+            match packets.first_spec {
+                None => packets.first_spec = Some((rate, channels)),
                 Some(first) if first != (rate, channels) => {
-                    if !skipped_spec {
-                        skipped_spec = true;
+                    if !packets.skipped_spec {
+                        packets.skipped_spec = true;
                         tracing::warn!("format changed mid-stream ({}/{} → {rate}/{channels}); skipping those packets", first.0, first.1);
                     }
                     continue;
                 }
                 Some(_) => {}
             }
+            let scratch = &mut packets.scratch;
             scratch.resize(buf.samples_interleaved(), 0.0);
-            buf.copy_to_slice_interleaved(&mut scratch);
+            buf.copy_to_slice_interleaved(&mut *scratch);
             if t.clock.rate == 0 {
                 t.clock.rate = rate;
             }
-            trim_padding(&mut scratch, channels, &packet, t.clock);
+            trim_padding(scratch, channels, &packet, t.clock);
 
             // An accurate seek lands on the packet containing the target: drop the frames before it.
-            if let Some(target) = skip_until {
-                if pts < target {
-                    let skip = t.clock.frames(target.get() - pts.get()) as usize * channels;
+            if let Some(target) = packets.skip_until {
+                if packet.pts < target {
+                    let skip = t.clock.frames(target.get() - packet.pts.get()) as usize * channels;
                     scratch.drain(..skip.min(scratch.len()));
                     if scratch.is_empty() {
                         continue;
                     }
                 }
-                skip_until = None;
+                packets.skip_until = None;
             }
-            if scratch.is_empty() {
-                continue;
-            }
-
-            let mut fresh = None;
-            if !started {
-                started = true;
-                let format = StreamFormat { sample_rate: rate, channels: channels as u16, bits_per_sample: t.bits };
-                let out_channels = output_channels(format.channels, self.caps.as_ref());
-                let (m, change) = ChannelMap::new(format.channels, positions, out_channels);
-                map = m;
-                let output = StreamFormat {
-                    sample_rate: choose_rate(rate, out_channels, self.caps.as_ref()),
-                    channels: out_channels,
-                    ..format
-                };
-                t.out_rate = output.sample_rate;
-                // The gain must be in place before the boundary marker goes in.
-                let replay_gain = src.replay_gain.or(t.tag_gain);
-                let cfg = *self.gain.lock().unwrap_or_else(|e| e.into_inner());
-                let linear = applied_gain(&cfg, &replay_gain, src.album_context).map_or(1.0, |g| g.linear);
-                self.status.gains.set(seq, linear);
-                let downmixed = matches!(change, ChannelChange::Downmix { .. });
-                match self.attach(output, rate, format.channels, downmixed, out) {
-                    Some(f) => fresh = f,
-                    None => return Ok(TrackEnd::Cancelled),
-                }
-                let total_frames = t.total_frames.map(|f| t.to_output(f));
-                let _ = self.msgs.send(DecoderMsg::Track {
-                    seq,
-                    src: src.clone(),
-                    format,
-                    output,
-                    total_frames,
-                    replay_gain,
-                    channels: change,
-                });
-            }
-            let mapped = if map.is_identity() {
-                &mut scratch
-            } else {
-                map.apply(&scratch, &mut self.mapped);
-                &mut self.mapped
-            };
-            let Some(o) = out.as_mut() else { unreachable!("attach always leaves a ring") };
-            let data = match o.resampler.as_mut() {
-                Some(r) => {
-                    self.resampled.clear();
-                    r.process(mapped, &mut self.resampled);
-                    &self.resampled
-                }
-                None => &*mapped,
-            };
-            let frame = o.format.channels as usize;
-            match push_all(&mut o.samples, data, frame, &mut o.pushed, &self.cancel, &self.seek_pending) {
-                // Interrupted: the rest of the packet is dropped. The seek that
-                // interrupted normally flushes the ring; when it turns out to be
-                // nothing to do (stale flag) the output skips that bit of audio,
-                // but stays on whole frames.
-                Push::Done | Push::Interrupted => {}
-                Push::Cancelled => return Ok(TrackEnd::Cancelled),
-            }
-            // A new ring goes to the engine once it holds some audio, so the device
-            // doesn't open onto an empty buffer.
-            if let Some(input) = fresh {
-                self.msgs.send(DecoderMsg::Ring { format: o.format, input, first_seq: seq }).map_err(|_| "engine gone")?;
+            if !scratch.is_empty() {
+                return Ok(Next::Audio(Spec { rate, channels: channels as u16, positions }));
             }
         }
-        Ok(if started { TrackEnd::Eof } else { TrackEnd::Empty })
+    }
+
+    /// Sets track `seq` up from its first audio: the channel mapping, the
+    /// output format, its ReplayGain, its place in a ring, and the report to
+    /// the engine.
+    fn start_track(
+        &mut self,
+        seq: u64,
+        src: &TrackSource,
+        t: &mut Track,
+        spec: Spec,
+        out: &mut Option<Out>,
+    ) -> Result<(ChannelMap, Attached), String> {
+        let format = StreamFormat { sample_rate: spec.rate, channels: spec.channels, bits_per_sample: t.bits };
+        let out_channels = output_channels(format.channels, self.caps.as_ref());
+        let (map, change) = ChannelMap::new(format.channels, spec.positions, out_channels);
+        // What the first packet says wins over the codec parameters `open` went by.
+        t.out_rate = self.device_rate(spec.rate, spec.channels);
+        let output = StreamFormat { sample_rate: t.out_rate, channels: out_channels, ..format };
+        // The gain must be in place before the boundary marker goes in.
+        let replay_gain = src.replay_gain.or(t.tag_gain);
+        let cfg = *self.gain.lock().unwrap_or_else(|e| e.into_inner());
+        let linear = applied_gain(&cfg, &replay_gain, src.album_context).map_or(1.0, |g| g.linear);
+        self.publish(|s| s.gains.set(seq, linear));
+        let feed = Feed { rate: spec.rate, channels: spec.channels, downmixed: matches!(change, ChannelChange::Downmix { .. }) };
+        let attached = self.attach(output, feed, out)?;
+        if !matches!(attached, Attached::Cancelled) {
+            let total_frames = t.total_frames.map(|f| t.to_output(f));
+            let _ = self.msgs.send(DecoderMsg::Track {
+                seq,
+                src: src.clone(),
+                format,
+                output,
+                total_frames,
+                replay_gain,
+                channels: change,
+            });
+        }
+        Ok((map, attached))
+    }
+
+    /// The rate the device runs at for a source at `rate` with `channels`.
+    fn device_rate(&self, rate: u32, channels: u16) -> u32 {
+        choose_rate(rate, output_channels(channels, self.caps.as_ref()), self.caps.as_ref())
+    }
+
+    /// Maps, resamples and pushes one packet's audio into the ring.
+    fn queue(&mut self, samples: &[f32], map: &ChannelMap, o: &mut Out) -> Push {
+        let mapped = if map.is_identity() {
+            samples
+        } else {
+            map.apply(samples, &mut self.mapped);
+            &self.mapped
+        };
+        let data = match o.resampler.as_mut() {
+            Some(r) => {
+                self.resampled.clear();
+                r.process(mapped, &mut self.resampled);
+                &self.resampled
+            }
+            None => mapped,
+        };
+        let frame = o.format.channels as usize;
+        match push_all(&mut o.samples, data, frame, &mut o.pushed, &self.cancel, &self.seek_pending) {
+            // Interrupted: the rest of the packet is dropped. The seek that
+            // interrupted normally flushes the ring; when it turns out to be
+            // nothing to do (stale flag) the output skips that bit of audio,
+            // but stays on whole frames.
+            Push::Done | Push::Interrupted => Push::Done,
+            Push::Cancelled => Push::Cancelled,
+        }
     }
 
     /// At the end of track `seq` with nothing lined up after it, waits while the
@@ -611,33 +738,33 @@ impl Ctx {
         }
     }
 
-    /// Hooks a starting track up to an output ring: continue the current one when
-    /// the format matches (gapless: just mark where the track begins), else let
-    /// it drain and make a new one. Returns the consumer side of a new ring, or
-    /// `None` if cancelled while draining.
-    fn attach(
-        &mut self,
-        format: StreamFormat,
-        src_rate: u32,
-        src_channels: u16,
-        downmixed: bool,
-        out: &mut Option<Out>,
-    ) -> Option<Option<RingInput>> {
+    /// Hooks a starting track up to an output ring: continue the current one
+    /// when the track fits it (gapless: just mark where the track begins),
+    /// else let it drain and make a new one.
+    ///
+    /// A ring is fixed by the rate and layout going in and coming out, not by
+    /// bit depth: each track's depth travels with its [`Marker`], so a 16-bit
+    /// track followed by a 24-bit one (or a lossy one by a lossless one) at
+    /// the same rate stays gapless.
+    fn attach(&mut self, output: StreamFormat, feed: Feed, out: &mut Option<Out>) -> Result<Attached, String> {
+        let format = StreamFormat { bits_per_sample: None, ..output };
         if let Some(o) = out.as_mut() {
-            if o.format == format && o.src_rate == src_rate && o.src_channels == src_channels {
+            if o.format == format && o.src_rate == feed.rate && o.src_channels == feed.channels {
                 // With a resampler carrying on, the next track starts where its first
                 // input frame lands in the output, which may still be inside the filter.
                 let at = match &o.resampler {
                     Some(r) => o.rs_base + r.out_pos(r.in_frames()) * format.channels as u64,
                     None => o.pushed,
                 };
-                while o.markers.push(at).is_err() {
+                // Full when the decoder is `MARKER_CAP` tracks ahead: wait for the output.
+                let marker = Marker { at, source_bits: output.bits_per_sample };
+                while o.markers.push(marker).is_err() {
                     if self.cancel.load(Ordering::Relaxed) {
-                        return None;
+                        return Ok(Attached::Cancelled);
                     }
                     thread::sleep(Duration::from_millis(2));
                 }
-                return Some(None);
+                return Ok(Attached::Continued);
             }
             // Different format: the device has to be reopened. Play the old ring out first.
             self.flush_resampler(o);
@@ -649,31 +776,25 @@ impl Ctx {
                 thread::sleep(Duration::from_millis(2));
             }
             if self.cancel.load(Ordering::Relaxed) {
-                return None;
+                return Ok(Attached::Cancelled);
             }
-            self.status.frames_played.store(0, Ordering::Relaxed);
+            // The engine zeroes the position when it reopens the device.
         }
-        let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
-        let (samples, consumer) = RingBuffer::new(cap.max(8192));
-        let (markers, marker_consumer) = RingBuffer::new(16);
-        let done = Arc::new(AtomicBool::new(false));
-        let ctl = Arc::new(RingCtl::default());
-        let resampler = if src_rate == format.sample_rate {
+        let resampler = if feed.rate == format.sample_rate {
             None
         } else {
-            match StreamResampler::new(src_rate, format.sample_rate, format.channels as usize) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    let (seq, track_id) = (self.at_seq.load(Ordering::Acquire), self.track_id.clone());
-                    let _ = self.msgs.send(DecoderMsg::Error { seq, track_id, message: e });
-                    return None;
-                }
-            }
+            Some(StreamResampler::new(feed.rate, format.sample_rate, format.channels as usize)?)
         };
+        let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
+        let (samples, consumer) = RingBuffer::new(cap.max(8192));
+        let (markers, marker_consumer) = RingBuffer::new(MARKER_CAP);
+        let done = Arc::new(AtomicBool::new(false));
+        let ctl = Arc::new(RingCtl::default());
         let input = RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone())
-            .with_source(format.bits_per_sample, resampler.is_some() || downmixed);
+            .with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
+        let (src_rate, src_channels) = (feed.rate, feed.channels);
         *out = Some(Out { format, src_rate, samples, markers, done, ctl, pushed: 0, src_channels, resampler, rs_base: 0 });
-        Some(Some(input))
+        Ok(Attached::NewRing(input))
     }
 
     /// Applies the newest pending seek: reposition the reader, reset the decoder,
@@ -745,7 +866,8 @@ impl Ctx {
             // The callback counts frames at the output rate. (Past the end of a
             // track that hasn't started, the next one starts its own count.)
             if started || matches!(outcome, Seeked::To(_)) {
-                self.status.frames_played.store(t.to_output(frames), Ordering::Relaxed);
+                let played = t.to_output(frames);
+                self.publish(|s| s.frames_played.store(played, Ordering::Relaxed));
             }
             let position_secs = if t.clock.rate == 0 { 0.0 } else { frames as f64 / t.clock.rate as f64 };
             let _ = self.msgs.send(DecoderMsg::Seeked { seq, position_secs });

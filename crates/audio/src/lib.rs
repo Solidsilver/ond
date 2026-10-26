@@ -37,7 +37,7 @@ pub mod tap;
 
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
-pub use output::{CpalBackend, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
+pub use output::{CpalBackend, Marker, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
 pub use dither::Tpdf;
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
@@ -51,7 +51,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+// The decoder can be at most `MARKER_CAP` tracks ahead of the output, and both
+// write and read the gain table by track number modulo `GAIN_SLOTS`: the table
+// must be larger, or the decoder could overwrite the gain of a track still playing.
+const _: () = assert!(output::MARKER_CAP < replaygain::GAIN_SLOTS);
 
 /// Start fetching the next track this long before the current one ends, even if
 /// the current download hasn't finished.
@@ -193,35 +198,58 @@ pub enum PlayState {
 }
 
 /// Lock-free snapshot the UI polls every frame.
+///
+/// Three threads write to it: the engine, the output callback and the
+/// session's decode thread. Each field says which. Two rules keep them apart:
+/// - The engine resets the callback's fields only while no callback runs
+///   (after [`OutputBackend::close`], which is synchronous).
+/// - The decoder writes only through `Ctx::publish` (in `decode.rs`), which
+///   does nothing once the session has been cancelled: a replaced decoder
+///   can't reach into its successor's state.
 #[derive(Debug, Default)]
 pub struct Status {
+    /// Engine.
     state: AtomicU8,
     /// Frames the device has actually consumed for the current track.
+    /// Callback (advances it, zeroes it at a gapless boundary); engine (zeroes
+    /// it on stop and when a format change reopens the device); decoder (sets
+    /// it where a seek landed: after the callback has flushed the ring and
+    /// before any new audio is queued, so the callback isn't counting then).
     pub(crate) frames_played: AtomicU64,
-    /// 0 when unknown (e.g. unseekable stream without a duration header).
+    /// 0 when unknown (e.g. unseekable stream without a duration header). Engine.
     pub(crate) total_frames: AtomicU64,
+    /// The output rate of the current track. Engine.
     pub(crate) sample_rate: AtomicU32,
+    /// Callback.
     pub(crate) underruns: AtomicU64,
     /// Decoded frames queued ahead of the output (the ring's fill), as of the
-    /// last callback.
+    /// last callback. Callback.
     pub(crate) buffered_frames: AtomicU64,
-    /// Bytes of the current track on disk, and its size (0 when unknown or local).
+    /// Bytes of the current track on disk, and its size (0 when unknown or
+    /// local). Engine.
     pub(crate) fetched_bytes: AtomicU64,
     pub(crate) total_bytes: AtomicU64,
     /// Playback is downloading: the current track (whatever its size, known or
-    /// not, as with a transcode) or the next one's prefetch isn't complete.
+    /// not, as with a transcode) or the next one's prefetch isn't complete. Engine.
     pub(crate) downloading: AtomicBool,
-    /// Track boundaries the output has crossed in this session (bumped by the callback).
+    /// Track boundaries the output has crossed in this session. Callback
+    /// (bumps it at each boundary); engine (sets it when a ring opens, resets it on stop).
     pub(crate) track_seq: AtomicU64,
+    /// Engine.
     volume_bits: AtomicU32,
+    /// Engine.
     pub(crate) paused: AtomicBool,
-    /// The callback is holding or prebuffering.
+    /// The callback is holding or prebuffering. Callback; engine (sets it the
+    /// moment it asks for a seek hold, clears it on stop).
     pub(crate) buffering: AtomicBool,
-    /// The current mode: read by the output callback (gain bypass).
+    /// The current mode: read by the output callback (gain bypass). Engine.
     pub(crate) bit_perfect: AtomicBool,
     /// ReplayGain per session track, read by the callback at each boundary.
+    /// Decoder (each track's, before its first sample is queued); engine (on a
+    /// settings change, when the decoder reports the track, and reset on stop).
     pub(crate) gains: TrackGains,
     /// A copy of what plays, for visuals; idle until something reads it.
+    /// Callback writes, the UI reads.
     pub tap: tap::Tap,
 }
 
@@ -315,6 +343,9 @@ impl Status {
 
 /// How often the engine checks on playback while something is happening.
 const TICK: Duration = Duration::from_millis(10);
+/// The longest a format change waits for the old stream's last buffer to play
+/// (normally one device period).
+const REOPEN_DRAIN_WAIT: Duration = Duration::from_millis(250);
 /// The longest it sleeps while stopped or paused (it still notices devices
 /// coming and going). A command always wakes it at once.
 const IDLE_TICK: Duration = Duration::from_millis(250);
@@ -576,10 +607,13 @@ impl Engine {
     fn stop(&mut self) {
         self.held_seek = None;
         self.opening = None;
+        // From here on the old decode thread leaves `Status` alone (it may
+        // still be winding down).
         if let Some(s) = self.session.take() {
             s.cancel();
         }
-        // Synchronous: no callback runs after this, so the counters below stay reset.
+        // Synchronous: no callback runs after this. With the decoder silenced
+        // too, the counters below stay reset.
         self.backend.close();
         self.ring = None;
         self.tracks.clear();
@@ -780,11 +814,13 @@ impl Engine {
         let resampled = device_rate != source.sample_rate;
         // Software volume changes samples too, outside bit-perfect mode.
         let volume = self.config.mode == PlaybackMode::Normal && self.status.volume() < 1.0;
-        let recomputed = matches!(channels, ChannelChange::Downmix { .. })
-            || matches!(gain, GainState::Applied(g) if g.linear != 1.0)
-            || volume;
-        let dithered = device_bits
-            .is_some_and(|b| b < 32 && (resampled || recomputed || source.bits_per_sample.is_none_or(|s| s > b)));
+        // The same rule the callback applies to what it plays.
+        let treatment = dither::Treatment {
+            processed: resampled || matches!(channels, ChannelChange::Downmix { .. }),
+            gained: matches!(gain, GainState::Applied(g) if g.linear != 1.0) || volume,
+            source_bits: source.bits_per_sample,
+        };
+        let dithered = dither::needs_dither(device_bits, treatment);
         let path = SignalPath {
             output: self.backend.name().to_owned(),
             source,
@@ -927,11 +963,29 @@ impl Engine {
     fn open_ring(&mut self, format: StreamFormat, input: RingInput, first_seq: u64) -> bool {
         let ctl = input.ctl.clone();
         let reopened = self.ring.is_some();
+        if reopened {
+            // The decoder only sends a new ring once the old one is empty, but
+            // the device may not have played the callback's last buffer yet:
+            // closing now would cut the end of the old track. (Bounded: a pause
+            // pressed just now keeps the callback from reporting it.)
+            let deadline = Instant::now() + REOPEN_DRAIN_WAIT;
+            while !self.backend.drained() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
         // Close first so the old callback can't touch the counters set below.
         // (The device itself may stay claimed: it's reopened right away.)
         self.backend.close_for_reopen();
         self.out_seq = first_seq;
         self.status.track_seq.store(first_seq, Ordering::Release);
+        if reopened {
+            // The new ring starts on a new track. (A first ring keeps the
+            // position a session started at, set by the decoder's seek.)
+            self.status.frames_played.store(0, Ordering::Relaxed);
+            // As at a gapless boundary: the track that was next is playing
+            // now, and the UI names the new next once it hears about it.
+            self.forget_next();
+        }
         self.status.sample_rate.store(format.sample_rate, Ordering::Relaxed);
         if !reopened && !self.status.paused.load(Ordering::Relaxed) {
             self.status.set_state(PlayState::Playing);

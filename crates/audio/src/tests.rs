@@ -1,7 +1,7 @@
 //! Engine-level tests with a fake device that runs the real callback on a thread.
 
 use super::*;
-use crate::decode::tests::{file_source, pcm, slack};
+use crate::decode::tests::{file_source, pcm, slack, wait_late};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -19,6 +19,8 @@ struct FakeBackend {
     /// The device the open stream plays on: like CoreAudio, a stream stays on
     /// its device when the default moves.
     open_dev: Option<String>,
+    /// How long the device takes to play one buffer, and its size in frames.
+    period: (Duration, usize),
 }
 
 impl FakeBackend {
@@ -33,6 +35,7 @@ impl FakeBackend {
             device_events: Arc::default(),
             selected: None,
             open_dev: None,
+            period: (Duration::from_millis(1), 512),
         }
     }
 
@@ -87,14 +90,27 @@ impl OutputBackend for FakeBackend {
         self.drained = drained.clone();
         let (played, stop2) = (self.played.clone(), stop.clone());
         let channels = format.channels as usize;
+        let (period, frames) = self.period;
+        // An integer device gets dither where needed, as through CoreAudio.
+        let device_bits = self.caps.active_bits;
         let handle = thread::spawn(move || {
-            let mut buf = vec![0.0f32; 512 * channels];
-            while !stop2.load(Ordering::Relaxed) {
-                if input.fill(&mut buf, channels, format.sample_rate, &status) {
+            let mut buf = vec![0.0f32; frames * channels];
+            let mut dither = Tpdf::default();
+            let mut rendered = false;
+            loop {
+                // Like a real device, it plays a buffer during the period after
+                // the callback filled it: stopped meanwhile, that buffer is lost.
+                thread::sleep(period);
+                if stop2.load(Ordering::Relaxed) {
+                    break;
+                }
+                if rendered {
+                    played.lock().unwrap().extend(buf.iter().filter(|s| **s != 0.0));
+                }
+                if input.fill_for_device(&mut buf, channels, format.sample_rate, &status, device_bits, &mut dither) {
                     drained.store(true, Ordering::Release);
                 }
-                played.lock().unwrap().extend(buf.iter().filter(|s| **s != 0.0));
-                thread::sleep(Duration::from_millis(1));
+                rendered = true;
             }
         });
         self.stop = Some((stop, handle));
@@ -752,3 +768,260 @@ fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
     engine.send(Command::Shutdown);
 }
 
+
+/// Plays `src` paused (so its position stays at 0) and waits for it to open.
+fn play_paused(engine: &EngineHandle, src: TrackSource) {
+    let id = src.id.clone();
+    engine.send(Command::Play(src));
+    engine.send(Command::Pause);
+    events_until(engine, |e| matches!(e, Event::TrackStarted { track_id, .. } if *track_id == id));
+}
+
+#[test]
+fn a_replaced_decoder_cannot_overwrite_the_new_tracks_gain() {
+    use replaygain::db_to_linear;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::SetGain(GainConfig { mode: GainMode::Track, ..Default::default() }));
+    // The old track's decoder stalls just before publishing its gain...
+    let mut old = file_source(&dir, "late-gain", &pcm(2 * 44_100, 30));
+    old.replay_gain = ReplayGain { track_gain: Some(-12.0), ..Default::default() };
+    engine.send(Command::Play(old));
+    wait_late("late-gain", false);
+    // ...and the new track starts meanwhile, in the same slot.
+    let mut new = file_source(&dir, "b", &pcm(2 * 44_100 * 4, 31));
+    new.replay_gain = ReplayGain { track_gain: Some(-3.0), ..Default::default() };
+    play_paused(&engine, new);
+    wait_late("late-gain", true);
+    assert_eq!(engine.status.gains.get(0), db_to_linear(-3.0), "the new track keeps its own gain");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_decoder_stopped_while_loading_cannot_move_the_next_tracks_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    // A seek while loading: the decoder stalls just before publishing the new position.
+    engine.send(Command::Play(file_source(&dir, "late-seek", &pcm(2 * 44_100 * 10, 32))));
+    engine.send(Command::Seek(Duration::from_secs(5)));
+    wait_late("late-seek", false);
+    engine.send(Command::Stop);
+    play_paused(&engine, file_source(&dir, "b", &pcm(2 * 44_100 * 4, 33)));
+    wait_late("late-seek", true);
+    assert_eq!(engine.status.frames_played.load(Ordering::Relaxed), 0, "paused at the start of the new track");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn rapid_plays_settle_on_the_last_track_with_its_own_gain_and_position() {
+    use replaygain::db_to_linear;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::SetGain(GainConfig { mode: GainMode::Track, ..Default::default() }));
+    let tracks: Vec<TrackSource> = (0..4)
+        .map(|i| {
+            let mut t = file_source(&dir, &format!("t{i}"), &pcm(2 * 44_100 * 4, 40 + i));
+            t.replay_gain = ReplayGain { track_gain: Some(-2.0 * i as f32), ..Default::default() };
+            t
+        })
+        .collect();
+    for i in 0..40 {
+        engine.send(Command::Play(tracks[i % 3].clone()));
+        if i % 4 == 0 {
+            engine.send(Command::Seek(Duration::from_secs(2)));
+        }
+        if i % 7 == 0 {
+            engine.send(Command::Stop);
+        }
+        if i % 5 == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    play_paused(&engine, tracks[3].clone());
+    // Anything left over from the earlier sessions has had time to finish.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(engine.status.gains.get(0), db_to_linear(-6.0));
+    assert_eq!(engine.status.frames_played.load(Ordering::Relaxed), 0);
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    engine.send(Command::Resume);
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "t3"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+fn source_at(dir: &tempfile::TempDir, name: &str, rate: u32, samples: &[i16]) -> TrackSource {
+    let path = dir.path().join(format!("{name}.wav"));
+    std::fs::write(&path, crate::decode::tests::wav(rate, 2, samples)).unwrap();
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
+}
+
+fn played_i16(played: &Mutex<Vec<f32>>) -> Vec<i16> {
+    played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect()
+}
+
+#[test]
+fn a_format_change_and_the_queue_end_play_out_to_the_last_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 22_050, 35), pcm(2 * 14_400, 36));
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    // A device with long periods (slower than the engine's tick), at about 3x real time.
+    backend.period = (Duration::from_millis(30), 4_096);
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::Play(source_at(&dir, "a", 44_100, &a)));
+    engine.send(Command::SetNext(Some(source_at(&dir, "b", 48_000, &b))));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("a".to_owned(), false, false), ("b".to_owned(), false, false)], "{seen:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 2, "the device reopened at 48 kHz");
+    let out = played_i16(&played);
+    assert_eq!(out.len(), a.len() + b.len(), "nothing cut off: {} of A, then B", a.len());
+    let expected: Vec<i16> = a.iter().chain(&b).copied().collect();
+    assert!(out == expected, "A to its last sample, then all of B");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn an_underrun_rebuffers_and_resumes_where_it_left_off() {
+    use crate::decode::tests::{slow_server, wav};
+    let a = pcm(2 * 44_100 * 4, 37);
+    // The server sends ~3x real time; the fake device plays ~10x.
+    let url = slow_server(wav(44_100, 2, &a));
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(streamcache::CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), Some(cache));
+    engine.send(Command::Play(TrackSource { id: "net".into(), url, suffix: Some("wav".into()), ..Default::default() }));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "net"), "{seen:?}");
+    assert!(engine.status.underruns() > 0, "the device outran the download");
+    // Bit-perfect: no fades around the dropouts, so every sample arrives exactly once, in order.
+    assert!(played_i16(&played) == a, "playback resumed where it ran dry each time");
+    engine.send(Command::Shutdown);
+}
+
+/// 16-bit test samples at least 64 steps from silence: dithering never turns one into 0.
+fn loud(n: usize, salt: i64) -> Vec<i16> {
+    pcm(n, salt).into_iter().map(|s| if (s as i32).abs() < 64 { 1_000 } else { s }).collect()
+}
+
+fn source_of(dir: &tempfile::TempDir, name: &str, wav: Vec<u8>) -> TrackSource {
+    let path = dir.path().join(format!("{name}.wav"));
+    std::fs::write(&path, wav).unwrap();
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
+}
+
+/// A track at 44.1 kHz stereo of the given depth (`None`: float, no depth), and the samples the device should get.
+fn track_of_depth(dir: &tempfile::TempDir, name: &str, bits: Option<u32>, salt: i64) -> (TrackSource, Vec<f32>) {
+    use crate::decode::tests::{wav, wav_float, wav24};
+    let base = loud(2 * 44_100, salt);
+    match bits {
+        Some(16) => (source_of(dir, name, wav(44_100, 2, &base)), base.iter().map(|s| *s as f32 / 32_768.0).collect()),
+        // Off the 16-bit grid: the low byte is set.
+        Some(24) => {
+            let s: Vec<i32> = base.iter().map(|s| *s as i32 * 256 + 91).collect();
+            (source_of(dir, name, wav24(44_100, 2, &s)), s.iter().map(|s| *s as f32 / 8_388_608.0).collect())
+        }
+        None => {
+            let s: Vec<f32> = base.iter().map(|s| (*s as f32 + 0.37) / 32_768.0).collect();
+            (source_of(dir, name, wav_float(44_100, 2, &s)), s)
+        }
+        Some(b) => unreachable!("{b}-bit"),
+    }
+}
+
+/// About twice real time: a queue of 1 s tracks then leaves `play_queue`
+/// close to half a second to name each next track, even on a loaded machine.
+const UI_PACE: (Duration, usize) = (Duration::from_millis(5), 441);
+
+/// Plays `tracks` as one queue, naming each next track once the one before
+/// it starts (as the UI does). Returns every event up to the end.
+fn play_queue(mut backend: FakeBackend, tracks: &[TrackSource]) -> Vec<Event> {
+    backend.period = UI_PACE;
+    let engine = &spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::Play(tracks[0].clone()));
+    let mut seen = Vec::new();
+    for pair in tracks.windows(2) {
+        let id = pair[0].id.clone();
+        seen.extend(events_until(engine, |e| matches!(e, Event::TrackStarted { track_id, .. } if *track_id == id)));
+        engine.send(Command::SetNext(Some(pair[1].clone())));
+    }
+    seen.extend(events_until(engine, |e| matches!(e, Event::Ended { .. })));
+    engine.send(Command::Shutdown);
+    seen
+}
+
+/// Each `SignalPath` with the track that had started last.
+fn paths_by_track(seen: &[Event]) -> Vec<(String, SignalPath)> {
+    let mut current = String::new();
+    let mut paths = Vec::new();
+    for e in seen {
+        match e {
+            Event::TrackStarted { track_id, .. } => current.clone_from(track_id),
+            Event::SignalPath(p) => paths.push((current.clone(), p.clone())),
+            _ => {}
+        }
+    }
+    paths
+}
+
+#[test]
+fn tracks_of_different_depths_play_gaplessly_on_one_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let depths = [Some(16), Some(24), None, Some(16)];
+    let (tracks, expected): (Vec<_>, Vec<_>) =
+        depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 60 + i as i64)).unzip();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let seen = play_queue(backend, &tracks);
+
+    let started: Vec<_> = starts(&seen).into_iter().map(|(id, gapless, _)| (id, gapless)).collect();
+    assert_eq!(started, [("t0".into(), false), ("t1".into(), true), ("t2".into(), true), ("t3".into(), true)], "{seen:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 1, "16 → 24 → lossy → 16 bits without reopening the device");
+    // A float device takes every sample as it is.
+    let out = played.lock().unwrap().clone();
+    let expected: Vec<f32> = expected.concat();
+    assert_eq!(out.len(), expected.len());
+    assert!(out.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "every track bit for bit");
+    // Each track is described by its own depth.
+    let depth: Vec<_> = paths_by_track(&seen).into_iter().map(|(id, p)| (id, p.source.bits_per_sample)).collect();
+    assert_eq!(depth, [("t0".into(), Some(16)), ("t1".into(), Some(24)), ("t2".into(), None), ("t3".into(), Some(16))]);
+}
+
+#[test]
+fn on_a_16_bit_device_only_the_tracks_off_its_grid_are_dithered() {
+    let dir = tempfile::tempdir().unwrap();
+    let depths = [None, Some(16), Some(24), Some(16)];
+    let (tracks, sources): (Vec<_>, Vec<_>) =
+        depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 70 + i as i64)).unzip();
+    let device = DeviceCaps { active_bits: Some(16), ..caps(Some(16), 192_000) };
+    let backend = FakeBackend::new(device);
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let seen = play_queue(backend, &tracks);
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+
+    let out = played.lock().unwrap().clone();
+    assert_eq!(out.len(), sources.iter().map(Vec::len).sum::<usize>());
+    let mut at = 0;
+    for (i, (src, bits)) in sources.iter().zip(depths).enumerate() {
+        let part = &out[at..at + src.len()];
+        at += src.len();
+        let exact = part.iter().zip(src).all(|(a, b)| a.to_bits() == b.to_bits());
+        if bits == Some(16) {
+            assert!(exact, "t{i}: 16-bit reaches the 16-bit device untouched");
+        } else {
+            let on_grid = part.iter().all(|s| (*s * 32_768.0).fract() == 0.0);
+            let close = part.iter().zip(src).all(|(a, b)| (a - b).abs() <= 1.5 / 32_768.0);
+            assert!(!exact && on_grid && close, "t{i} ({bits:?}): dithered to 16 bits");
+        }
+    }
+    // And the signal path says so, track by track.
+    let dithered: Vec<_> = paths_by_track(&seen).into_iter().map(|(id, p)| (id, p.dithered)).collect();
+    assert_eq!(dithered, [("t0".into(), true), ("t1".into(), false), ("t2".into(), true), ("t3".into(), false)]);
+    let verdict = paths_by_track(&seen).into_iter().find(|(id, _)| id == "t2").unwrap().1.bit_perfect;
+    assert_eq!(verdict, BitPerfectStatus::Unavailable { reason: "device max 16/192, file is 24/44.1".into() });
+}
