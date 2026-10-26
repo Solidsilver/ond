@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
+use streamcache::disk::{PartFile, blocking};
 use streamcache::fetch::{self, FetchError};
 use tokio::sync::Notify;
 
@@ -278,6 +279,7 @@ impl OfflineStore {
     /// starts the download workers on `rt`.
     pub fn open(cfg: OfflineConfig, rt: tokio::runtime::Handle, on_change: OnChange) -> io::Result<Self> {
         std::fs::create_dir_all(&cfg.dir)?;
+        remove_moving(&cfg.dir);
         let (mut pins, trusted) = load_pins(&cfg.dir);
         // A finished file that's gone (deleted by hand) downloads again.
         for s in pins.tracks.values_mut() {
@@ -601,7 +603,10 @@ impl Inner {
                 blocked_by_limit = true;
                 continue;
             }
-            let from_cache = st.cache.as_ref().and_then(|c| c(&r)).filter(|p| p.is_file());
+            // Not checked on disk here, under the lock: a cached copy that's
+            // gone fails to promote and the job downloads instead (or, with
+            // no server, fails and backs off like any download).
+            let from_cache = st.cache.as_ref().and_then(|c| c(&r));
             let url = st.url.as_ref().map(|u| u(id));
             if from_cache.is_none() && url.is_none() {
                 continue;
@@ -796,9 +801,10 @@ async fn run(inner: &Inner, job: &Job) -> Result<u64, JobError> {
     download(inner, job, url).await
 }
 
-/// Runs disk work that may block (copies, fsync, renames) on tokio's blocking pool.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
-    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| Err(io::Error::other(e)))
+/// Deletes `path` (if it's there) on the blocking pool.
+async fn remove_file(path: &Path) {
+    let path = path.to_owned();
+    let _ = blocking(move || std::fs::remove_file(path)).await;
 }
 
 /// Takes a complete stream-cache file: a hard link where possible (same
@@ -819,8 +825,10 @@ fn promote(src: &Path, size: Option<u64>, part: &Path, dest: &Path) -> io::Resul
     Ok(len)
 }
 
+/// Every touch of the disk here runs on the blocking pool (see [`blocking`]).
 async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> {
-    let mut have = std::fs::metadata(&job.part).map_or(0, |m| m.len());
+    let part = job.part.clone();
+    let mut have = blocking(move || std::fs::metadata(part)).await.map_or(0, |m| m.len());
     if job.r.size.is_some_and(|s| have > s) {
         have = 0;
     }
@@ -850,13 +858,13 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
             return Ok(None);
         }
         Err(FetchError::RangeNotSatisfiable) => {
-            let _ = std::fs::remove_file(&job.part);
+            remove_file(&job.part).await;
             return Err(JobError::Failed("server rejected the resume; starting over".into()));
         }
         Err(FetchError::BadRange(e)) => {
             // The server answered the resume from somewhere else: the partial
             // file can't be trusted to line up. Start over.
-            let _ = std::fs::remove_file(&job.part);
+            remove_file(&job.part).await;
             return Err(JobError::Failed(e));
         }
         Err(e) => return Err(JobError::Failed(e.to_string())),
@@ -871,11 +879,14 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
         if job.r.size.is_some_and(|s| body.total != Some(s)) {
             return Ok(None);
         }
-        tail = read_tail(&job.part, overlap)?;
+        let part = job.part.clone();
+        tail = streamcache::disk::blocking(move || read_tail(&part, overlap)).await?;
         expect = &tail;
     }
     let total = body.total;
-    let mut file = std::fs::OpenOptions::new().create(true).write(true).append(have > 0).truncate(have == 0).open(&job.part)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).append(have > 0).truncate(have == 0);
+    let file = PartFile::open(options, job.part.clone()).await?;
     let mut last_note = Instant::now();
     inner.progress(&job.r.id, have, total, true);
     loop {
@@ -885,28 +896,29 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
         let chunk = match body.chunk().await {
             Ok(Some(c)) => c,
             Ok(None) => break,
-            Err(e) => {
-                let _ = file.flush();
-                return Err(JobError::Failed(e.to_string()));
-            }
+            Err(e) => return Err(JobError::Failed(e.to_string())),
         };
-        let mut chunk = &chunk[..];
+        let mut chunk = chunk;
         if !expect.is_empty() {
             let n = expect.len().min(chunk.len());
             if chunk[..n] != expect[..n] {
                 return Ok(None);
             }
-            (expect, chunk) = (&expect[n..], &chunk[n..]);
+            expect = &expect[n..];
+            chunk = chunk.slice(n..);
         }
-        file.write_all(chunk)?;
-        have += chunk.len() as u64;
+        let n = chunk.len() as u64;
+        if n > 0 {
+            file.write(chunk).await?;
+        }
+        have += n;
         let note = last_note.elapsed() >= PROGRESS_EVERY;
         if note {
             last_note = Instant::now();
         }
         inner.progress(&job.r.id, have, total, note);
     }
-    blocking(move || file.sync_all()).await?;
+    file.sync_all().await?;
     if let Some(t) = total
         && have != t
     {
@@ -933,7 +945,7 @@ async fn finish(job: &Job, have: u64) -> Result<u64, JobError> {
     if let Some(expected) = job.r.size
         && have != expected
     {
-        let _ = std::fs::remove_file(&job.part);
+        remove_file(&job.part).await;
         return Err(JobError::Failed(format!("size mismatch: got {have} bytes, server said {expected}")));
     }
     let (part, dest) = (job.part.clone(), job.dest.clone());
@@ -1116,6 +1128,32 @@ fn remove_strays(dir: &Path, pins: &Pins) {
     }
 }
 
+/// Ends the temporary name a file is copied to by [`move_files`] (see [`moving_name`]).
+const MOVING: &str = ".moving";
+
+/// Where [`move_files`] copies `name` across volumes before renaming it into
+/// place, so a copy cut short never passes for the file.
+fn moving_name(name: &str) -> String {
+    format!(".{name}{MOVING}")
+}
+
+fn is_moving(name: &str) -> bool {
+    name.len() > 1 + MOVING.len() && name.starts_with('.') && name.ends_with(MOVING)
+}
+
+/// Deletes copies a move left unfinished (it quit or crashed mid-copy). The
+/// file they were copies of is still whole where it came from, so these are
+/// never needed, whether or not the pins are trusted.
+fn remove_moving(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        if is_moving(&e.file_name().to_string_lossy()) && e.file_type().is_ok_and(|t| t.is_file()) {
+            tracing::info!("offline: removing {}, left by a move cut short", e.path().display());
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 #[cfg(unix)]
 fn free_space(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
@@ -1141,14 +1179,50 @@ fn free_space(dir: &Path) -> Option<u64> {
     (ok != 0).then_some(available)
 }
 
+/// How far [`move_store_with`] has got, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MoveProgress {
+    pub done: u64,
+    pub total: u64,
+}
+
 /// Moves a store's files from `from` to `to` (run before opening it at `to`),
 /// including the per-account stores in folders under it. Renames where it can,
 /// copies across volumes. Files already at `to` win.
+///
+/// Stopping it anywhere (quitting, a crash) loses nothing, and running it again
+/// finishes the job: a copy is made under a temporary name (see
+/// [`moving_name`]) and renamed into place before the original goes, and a file
+/// found at both ends with the same size is one whose copy was done.
 pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
+    move_store_with(from, to, &mut |_| {})
+}
+
+/// [`move_store`], telling `progress` after each file. It can take a while
+/// across volumes: run it off the UI thread.
+pub fn move_store_with(from: &Path, to: &Path, progress: &mut dyn FnMut(MoveProgress)) -> io::Result<()> {
     if from == to || !from.is_dir() {
         return Ok(());
     }
-    move_files(from, to, true)
+    let mut at = MoveProgress { done: 0, total: tree_size(from) };
+    progress(at);
+    move_files(from, to, true, &mut |bytes| {
+        at.done += bytes;
+        progress(at);
+    })
+}
+
+/// Bytes in the files under `dir`.
+fn tree_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => tree_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The folder for `account`'s downloads under the downloads folder `base`.
@@ -1159,35 +1233,50 @@ pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
 pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
     let dir = base.join(format!("{account:08x}"));
     if base.join(STATE_FILE).is_file() && !dir.join(STATE_FILE).exists() {
-        move_files(base, &dir, false)?;
+        move_files(base, &dir, false, &mut |_| {})?;
     }
     Ok(dir)
 }
 
-fn move_files(from: &Path, to: &Path, folders: bool) -> io::Result<()> {
+/// Moves the files in `from` (with `folders`, the folders in it too) to `to`,
+/// calling `moved` with each file's size once it's dealt with.
+fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64)) -> io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let kind = e.file_type()?;
         if kind.is_dir() {
             if folders {
-                move_files(&e.path(), &to.join(e.file_name()), true)?;
+                move_files(&e.path(), &to.join(e.file_name()), true, moved)?;
             }
             continue;
         }
         if !kind.is_file() {
             continue;
         }
+        let len = e.metadata()?.len();
+        if is_moving(&e.file_name().to_string_lossy()) {
+            // A copy cut short by an earlier move into `from`.
+            let _ = std::fs::remove_file(e.path());
+            moved(len);
+            continue;
+        }
         let dest = to.join(e.file_name());
-        if dest.exists() {
+        if let Ok(there) = dest.symlink_metadata() {
+            if there.is_file() && there.len() == len {
+                // Copied, but the move stopped before the original went.
+                std::fs::remove_file(e.path())?;
+            }
+            moved(len);
             continue;
         }
         if std::fs::rename(e.path(), &dest).is_err() {
-            let tmp = to.join(format!(".{}.moving", e.file_name().to_string_lossy()));
+            let tmp = to.join(moving_name(&e.file_name().to_string_lossy()));
             std::fs::copy(e.path(), &tmp)?;
             std::fs::rename(&tmp, &dest)?;
             std::fs::remove_file(e.path())?;
         }
+        moved(len);
     }
     // Leaves `from` behind only if something else is in it.
     let _ = std::fs::remove_dir(from);

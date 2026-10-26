@@ -57,6 +57,15 @@ impl Toasts {
         }
     }
 
+    /// Puts `text` in place of the message `old` if that's still showing (a
+    /// progress notice moving on), else adds it.
+    pub fn replace(&mut self, old: Option<&str>, text: String, error: bool) {
+        match self.items.iter_mut().find(|t| Some(t.text.as_str()) == old) {
+            Some(t) => *t = Toast { id: t.id, text, error, until: None },
+            None => self.push(text, error),
+        }
+    }
+
     /// Draws the stack bottom-centre over `within`, oldest on top.
     pub fn ui(&mut self, ctx: &egui::Context, within: Rect) {
         if self.items.is_empty() {

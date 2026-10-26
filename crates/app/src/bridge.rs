@@ -63,6 +63,13 @@ pub enum Msg {
     Remote(crate::now_playing::Remote),
     /// A folder chosen to keep offline downloads in.
     OfflineFolder(std::path::PathBuf),
+    /// An offline store opened off the UI thread, for the open numbered
+    /// `generation` (a newer one may have replaced it since).
+    OfflineStore { generation: u64, store: Result<offline::OfflineStore, String> },
+    /// The downloads folder is moving: how far it got.
+    OfflineMoving(offline::MoveProgress),
+    /// The move finished, or stopped (it's tried again at the next start).
+    OfflineMoved(Result<(), String>),
     /// `getStarred2`: everything loved, and the ratings seen with it.
     Starred { starred: Starred, ratings: Vec<(String, u8)> },
     /// A track's lyrics arrived (`None`: the server has none).
@@ -127,6 +134,9 @@ fn song_meta(songs: &[subsonic::Song]) -> UserMeta {
 
 /// Wakes the UI so it reads what was sent (a repaint, in the app).
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
+
+/// The [`Bridge::after_previous`] chain offline store jobs run on.
+const OFFLINE_JOBS: &str = "offline";
 
 #[derive(Clone)]
 pub struct Bridge {
@@ -287,6 +297,18 @@ impl Bridge {
                 this.send(Msg::Artists(a));
             }
             this.load_all_tracks();
+        });
+    }
+
+    /// Runs `job` on the blocking pool after every job queued here before it
+    /// has finished: opening, closing and moving offline stores. One at a time
+    /// and in order, so a store is never opened on a folder whose previous
+    /// store is still shutting down (or still moving in). `job` delivers its
+    /// own results through the bridge it's given.
+    pub fn offline_job(&self, job: impl FnOnce(&Bridge) + Send + 'static) {
+        let this = self.clone();
+        self.after_previous(OFFLINE_JOBS.into(), async move {
+            let _ = tokio::task::spawn_blocking(move || job(&this)).await;
         });
     }
 
@@ -1020,6 +1042,26 @@ mod tests {
             }
         });
         assert_eq!(*order.lock().unwrap(), [3, 1, 2]);
+    }
+
+    #[test]
+    fn offline_jobs_run_one_after_another_off_the_async_workers() {
+        let (rt, bridge, rx) = rig(&[]);
+        let (gate_tx, gate) = std::sync::mpsc::channel::<()>();
+        // The first holds its blocking thread (closing a store, say) until let go.
+        bridge.offline_job(move |b| {
+            let _ = gate.recv();
+            b.post(Msg::Error("first".into()));
+        });
+        bridge.offline_job(|b| b.post(Msg::Error("second".into())));
+        let mut got = Vec::new();
+        rt.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
+        got.extend(rx.try_iter());
+        assert!(got.is_empty(), "the second waits for the first");
+        gate_tx.send(()).unwrap();
+        until(&rt, &rx, &mut got, |m| m.len() == 2);
+        let texts: Vec<&str> = got.iter().map(|m| if let Msg::Error(e) = m { e.as_str() } else { "" }).collect();
+        assert_eq!(texts, ["first", "second"]);
     }
 
     #[test]
