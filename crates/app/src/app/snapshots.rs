@@ -2483,3 +2483,45 @@ fn a_long_playlist_reorders_reveals_and_follows_the_keys() {
     assert!(h.query_by_label(&label(2030)).is_some(), "↓ kept the selection in view");
     *h.state_mut() = None;
 }
+
+/// Dragging the toolbar's volume slider sets the volume and leaves the
+/// window where it is.
+#[test]
+fn dragging_the_volume_slider_doesnt_move_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    h.run_steps(2);
+
+    let rect = h.get_by_label("Volume").rect();
+    app_mut(&mut h).prefs.edit(|s| s.volume = 0.0);
+    h.run_steps(2);
+    let (from, to) = (rect.left_center() + vec2(6.0, 0.0), rect.right_center() - vec2(6.0, 0.0));
+    let mut seen = Vec::new();
+    for e in [
+        egui::Event::PointerMoved(from),
+        egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+        egui::Event::PointerMoved(from + vec2(10.0, 0.0)),
+        egui::Event::PointerMoved(to),
+        egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+    ] {
+        h.event(e);
+        h.step();
+        seen.extend(h.output().viewport_output.values().flat_map(|v| v.commands.clone()));
+    }
+    assert!(!seen.contains(&egui::ViewportCommand::StartDrag), "the window stays put: {seen:?}");
+    assert!(app_mut(&mut h).prefs_now().volume > 0.9, "the volume follows the drag");
+}

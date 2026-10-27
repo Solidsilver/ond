@@ -124,6 +124,7 @@ mod mac {
         if window.titleVisibility() != NSWindowTitleVisibility::Hidden {
             window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         }
+        keep_drags_in_content(&window);
         let buttons: Vec<Retained<objc2_app_kit::NSButton>> =
             [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton].into_iter().filter_map(|k| window.standardWindowButton(k)).collect();
         let hide = bar.height.is_none();
@@ -156,6 +157,28 @@ mod mac {
                 b.setFrameOrigin(want);
             }
         }
+    }
+
+    /// AppKit moves the window on a drag that starts in the title bar over a
+    /// view that isn't opaque, as winit's isn't, so dragging the volume
+    /// slider (which the title bar overlaps) moved the window too. The
+    /// toolbar starts window drags itself from its empty parts; the content
+    /// view says no, once.
+    fn keep_drags_in_content(window: &NSWindow) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        let Some(view) = window.contentView() else { return };
+        ONCE.call_once(|| {
+            extern "C-unwind" fn no(_: &AnyObject, _: objc2::runtime::Sel) -> objc2::runtime::Bool {
+                objc2::runtime::Bool::NO
+            }
+            let types = std::ffi::CString::new(format!("{}@:", <objc2::runtime::Bool as objc2::encode::Encode>::ENCODING)).unwrap();
+            // SAFETY: adds a method winit's view class doesn't define (its
+            // NSView one is inherited), with the matching signature.
+            unsafe {
+                let imp: objc2::runtime::Imp = std::mem::transmute(no as extern "C-unwind" fn(&AnyObject, objc2::runtime::Sel) -> objc2::runtime::Bool);
+                objc2::ffi::class_addMethod(std::ptr::from_ref(view.class()).cast_mut(), objc2::sel!(mouseDownCanMoveWindow), imp, types.as_ptr());
+            }
+        });
     }
 
     /// Zoom, minimise or nothing, as the user set it for title bars.
