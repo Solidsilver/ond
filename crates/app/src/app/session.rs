@@ -191,6 +191,7 @@ impl OndApp {
 
     pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
         let Some(form) = self.login.as_mut() else { return };
+        let locked = (self.prefs.managed("server"), self.prefs.managed("username"));
         let mut submit = false;
         let t = Tokens::of(ui);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
@@ -219,9 +220,15 @@ impl OndApp {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     let mut enter = false;
                     ui.add_enabled_ui(!form.busy, |ui| {
-                        let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool| {
-                            ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
-                            let r = ui.add(
+                        let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool, locked: bool| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
+                                if locked {
+                                    ui.label(egui::RichText::new(crate::managed::LOCKED).size(11.0).color(t.muted));
+                                }
+                            });
+                            let r = ui.add_enabled(
+                                !locked,
                                 egui::TextEdit::singleline(text)
                                     .hint_text(hint)
                                     .password(password)
@@ -231,12 +238,12 @@ impl OndApp {
                             );
                             r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
                         };
-                        enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false);
+                        enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false, locked.0);
                         ui.label(egui::RichText::new("Your Navidrome address, for example https://music.example.com").size(11.0).color(t.muted));
                         ui.add_space(10.0);
-                        enter |= field(ui, "Username", &mut form.username, "", false);
+                        enter |= field(ui, "Username", &mut form.username, "", false, locked.1);
                         ui.add_space(10.0);
-                        enter |= field(ui, "Password", &mut form.password, "", true);
+                        enter |= field(ui, "Password", &mut form.password, "", true, false);
                     });
                     ui.add_space(18.0);
                     let label = if form.busy { "Connecting…" } else { "Connect" };

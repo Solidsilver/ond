@@ -3,6 +3,7 @@
 //! written shortly after the last change in a burst (a dragged slider is one
 //! write, not one per frame), and on the way out.
 
+use crate::managed::Managed;
 use crate::settings::Settings;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -31,6 +32,17 @@ struct Shared {
     state: Mutex<State>,
     wake: Condvar,
     path: PathBuf,
+    overlay: Overlay,
+}
+
+/// The managed settings (see [`crate::managed`]) and what they lie over.
+struct Overlay {
+    managed: Managed,
+    /// The user's own settings as read, for the values saved under managed ones.
+    users: serde_json::Value,
+    /// The user's own downloads folder (`None`: the default) when a managed
+    /// one replaced it at start-up.
+    offline_was: Option<Option<PathBuf>>,
 }
 
 struct State {
@@ -50,7 +62,8 @@ struct Handle {
 }
 
 impl Prefs {
-    /// Reads the settings file at `path`. An unreadable file is moved aside
+    /// Reads the settings file at `path`, with the managed settings beside it
+    /// (see [`crate::managed`]) over it. An unreadable file is moved aside
     /// (never silently overwritten) and the defaults used instead.
     pub fn open(path: impl Into<PathBuf>) -> (Self, Loaded) {
         let path = path.into();
@@ -68,11 +81,28 @@ impl Prefs {
                 }
             },
         };
-        (Self::with(settings, path), loaded)
+        let mut managed = Managed::read(&path);
+        let mut users = serde_json::to_value(&settings).unwrap_or_default();
+        managed.check(&users);
+        let adopted = managed.adopt(&mut users);
+        let mut settings: Settings = serde_json::from_value(users.clone()).unwrap_or(settings);
+        // Another server or user: sign in to it, with the form filled in.
+        if adopted.iter().any(|(key, _)| key == "server" || key == "username") {
+            settings.signed_out = true;
+        }
+        managed.apply(&mut settings);
+        let offline_was = adopted.iter().find(|(key, _)| key == "offline_dir").map(|(_, old)| serde_json::from_value(old.clone()).ok().flatten());
+        let prefs = Self::with(settings, path, Overlay { managed, users, offline_was });
+        if !adopted.is_empty() {
+            // Saved with what was adopted.
+            prefs.lock().revision += 1;
+            prefs.handle.shared.wake.notify_all();
+        }
+        (prefs, loaded)
     }
 
-    fn with(settings: Settings, path: PathBuf) -> Self {
-        let shared = Arc::new(Shared { state: Mutex::new(State { settings, revision: 0, written: 0, closing: false }), wake: Condvar::new(), path });
+    fn with(settings: Settings, path: PathBuf, overlay: Overlay) -> Self {
+        let shared = Arc::new(Shared { state: Mutex::new(State { settings, revision: 0, written: 0, closing: false }), wake: Condvar::new(), path, overlay });
         let writer_shared = shared.clone();
         let writer = std::thread::Builder::new().name("settings-writer".into()).spawn(move || writer_loop(&writer_shared)).ok();
         Self { handle: Arc::new(Handle { shared, writer: Mutex::new(writer) }) }
@@ -99,6 +129,8 @@ impl Prefs {
         let mut state = self.lock();
         let before = state.settings.clone();
         change(&mut state.settings);
+        // Whatever asked, managed settings stay as they're set.
+        self.handle.shared.overlay.managed.apply(&mut state.settings);
         if state.settings == before {
             return;
         }
@@ -119,6 +151,18 @@ impl Prefs {
     /// Whether an account was ever saved (else the login form starts empty).
     pub fn has_login(&self) -> bool {
         self.get(|s| !s.server.is_empty())
+    }
+
+    /// Whether a setting (dotted, like `playback.kbps`) is managed, so its
+    /// control is locked.
+    pub fn managed(&self, path: &str) -> bool {
+        self.handle.shared.overlay.managed.has(path)
+    }
+
+    /// The user's own downloads folder (`None`: the default) when a managed
+    /// one replaced it at start-up, so the downloads move there.
+    pub fn offline_dir_was(&self) -> Option<Option<PathBuf>> {
+        self.handle.shared.overlay.offline_was.clone()
     }
 
     /// Writes now if anything changed (quitting, tests).
@@ -177,15 +221,18 @@ fn flush(shared: &Shared) {
         state.written = state.revision;
         state.settings.clone()
     };
-    write(&shared.path, &snapshot);
+    write(&shared.path, &snapshot, &shared.overlay);
 }
 
-fn write(path: &Path, settings: &Settings) {
+/// Writes `settings`, with the user's own values where managed ones lie over them.
+fn write(path: &Path, settings: &Settings, overlay: &Overlay) {
     let result = (|| -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        replace_file(path, &path.with_extension("json.tmp"), &serde_json::to_vec_pretty(settings)?)?;
+        let mut v = serde_json::to_value(settings)?;
+        overlay.managed.restore(&mut v, &overlay.users);
+        replace_file(path, &path.with_extension("json.tmp"), &serde_json::to_vec_pretty(&v)?)?;
         Ok(())
     })();
     if let Err(e) = result {
@@ -398,5 +445,52 @@ mod tests {
         }
         prefs.flush();
         assert_eq!(read(&path).device_modes.len(), 80);
+    }
+
+    #[test]
+    fn a_managed_setting_comes_and_goes_without_losing_the_users_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let managed = dir.path().join("managed.json");
+        std::fs::write(&path, r#"{ "server": "", "username": "", "theme": "light" }"#).unwrap();
+        std::fs::write(&managed, r#"{ "theme": "dark", "volume": 0.1 }"#).unwrap();
+        {
+            let (prefs, _) = Prefs::open(&path);
+            assert_eq!(prefs.get(|s| s.theme), ThemePref::Dark);
+            assert!(prefs.managed("theme") && !prefs.managed("volume"));
+            prefs.edit(|s| s.theme = ThemePref::System);
+            assert_eq!(prefs.get(|s| s.theme), ThemePref::Dark, "edits can't change it");
+            assert_eq!(prefs.get(|s| s.volume), 1.0, "the volume isn't taken from managed.json");
+            prefs.edit(|s| s.volume = 0.5);
+            prefs.flush();
+        }
+        assert_eq!(read(&path).theme, ThemePref::Light, "the file keeps the user's own");
+        std::fs::remove_file(&managed).unwrap();
+        let (prefs, _) = Prefs::open(&path);
+        assert_eq!(prefs.get(|s| (s.theme, s.volume)), (ThemePref::Light, 0.5));
+        assert!(!prefs.managed("theme"));
+    }
+
+    #[test]
+    fn a_managed_server_asks_to_sign_in_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{ "server": "https://old.example.com", "username": "me" }"#).unwrap();
+        std::fs::write(dir.path().join("managed.json"), r#"{ "server": "https://music.example.com", "offline_dir": "/data/music" }"#).unwrap();
+        let (prefs, _) = Prefs::open(&path);
+        let s = prefs.snapshot();
+        assert_eq!((s.server.as_str(), s.username.as_str(), s.signed_out), ("https://music.example.com", "me", true));
+        assert_eq!(s.offline_dir.as_deref(), Some(Path::new("/data/music/Ond Offline")));
+        assert_eq!(prefs.offline_dir_was(), Some(None), "it was the default folder");
+        drop(prefs);
+        let saved = read(&path);
+        assert_eq!((saved.server.as_str(), saved.signed_out), ("https://music.example.com", true), "adopted, so saved");
+        // Signed in, the next start is as usual.
+        let (prefs, _) = Prefs::open(&path);
+        prefs.set_login("https://music.example.com", "me");
+        drop(prefs);
+        let (prefs, _) = Prefs::open(&path);
+        assert!(!prefs.get(|s| s.signed_out));
+        assert_eq!(prefs.offline_dir_was(), None, "already moved");
     }
 }

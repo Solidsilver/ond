@@ -618,6 +618,27 @@ fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
 }
 
 #[test]
+fn a_downloads_folder_set_in_managed_json_moves_the_downloads_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, chosen) = (dir.path().join("old"), dir.path().join("music"));
+    let account = Settings { server: "http://music.local".into(), username: "luke".into(), signed_out: true, ..Default::default() };
+    let store = old.join(format!("{:08x}", account.account_id().unwrap()));
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("t-2.flac"), b"fLaC").unwrap();
+    let saved = Settings { offline_dir: Some(old.clone()), ..account };
+    std::fs::write(dir.path().join("settings.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
+    std::fs::write(dir.path().join("managed.json"), serde_json::json!({ "offline_dir": chosen }).to_string()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    store_opened(&mut app);
+    // A folder of Ond's own inside the one set, as when picked in Settings.
+    let new = chosen.join("Ond Offline").join(store.file_name().unwrap());
+    assert_eq!(app.downloads.store().dir(), new);
+    assert!(new.join("t-2.flac").exists());
+    assert!(!old.exists());
+}
+
+#[test]
 fn downloads_moved_to_another_folder_move_in_the_background() {
     let dir = tempfile::tempdir().unwrap();
     let (old, new) = (dir.path().join("old"), dir.path().join("new"));

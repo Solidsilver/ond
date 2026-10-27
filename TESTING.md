@@ -54,6 +54,12 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 - [ ] Segoe UI is the UI font; Japanese titles render.
 - [ ] Folder picker, "Show in File Explorer", offline free-space figure.
 
+## Home Manager
+- [ ] `programs.ond.settings` with a theme, ReplayGain and an output device mode, then `home-manager switch`: `managed.json` appears next to `settings.json` (`~/.config/ond/`, or `~/Library/Application Support/dev.solidsilver.ond/` on macOS). Ond shows those rows greyed with "Set in your Nix config"; the menu, ⇧⌘B and the output picker can't change them; everything else still can.
+- [ ] Remove one from the config, switch, restart Ond: it's back to what was picked in the app before.
+- [ ] Set `server` and `username` for a server you're not signed in to: Ond opens on the sign-in form with both filled in and locked; after signing in, the next start connects as usual.
+- [ ] Set `offline_dir` to another folder, restart: downloads move into `Ond Offline` inside it, and nothing else in that folder is touched.
+
 ## Server features
 - [ ] Navidrome "now playing" shows the track; play count increments once after half the track (or 4 min).
 - [ ] Hearts and ratings show up in the Navidrome web UI; quick repeated toggles end in the right state.

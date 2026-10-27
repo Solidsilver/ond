@@ -1,7 +1,7 @@
 //! The preferences a frame draws with, copied out once at its start instead
 //! of locking the preferences for each one as it's needed.
 
-use super::{OndApp, layout};
+use super::{Action, OndApp, layout};
 use crate::prefs::Prefs;
 use crate::theme::{Accent, ThemePref};
 use crate::visuals::Experimental;
@@ -109,6 +109,33 @@ pub enum PrefsAction {
 }
 
 impl OndApp {
+    /// Whether `action` would change a setting set in managed.json. Settings
+    /// shows those controls locked; this stops menus and shortcuts too.
+    pub(super) fn locked(&self, action: &Action) -> bool {
+        use super::{AnalysisAction, OfflineAction, WindowAction};
+        let path = match action {
+            Action::Prefs(p) => match p {
+                PrefsAction::Theme(_) => "theme",
+                PrefsAction::Accent(_) => "accent",
+                PrefsAction::AdaptColors(_) => "adapt_colors",
+                PrefsAction::Backdrop(_) => "backdrop",
+                PrefsAction::Waveform(_) => "waveform",
+                PrefsAction::AlphaRail(_) => "alpha_rail",
+                PrefsAction::ArtistPhotos(_) => "artist_photos",
+                PrefsAction::Scrobble(_) => "scrobble",
+                PrefsAction::Diagnostics(_) => "diagnostics_bar",
+                // Partly managed groups: the managed parts are put back.
+                PrefsAction::WaveformBars(_) | PrefsAction::Experimental(_) | PrefsAction::AlbumView(_) | PrefsAction::ArtistView(_) => return false,
+            },
+            Action::Window(WindowAction::SetSystemTitleBar(_)) => "window.system_title_bar",
+            Action::Analysis(AnalysisAction::AnalyzePlaying(_)) => "analyze_playing",
+            Action::Offline(OfflineAction::SetLimit(_)) => "offline_limit_gb",
+            Action::Offline(OfflineAction::Move) => "offline_dir",
+            _ => return false,
+        };
+        self.prefs.managed(path)
+    }
+
     pub(super) fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
             PrefsAction::Theme(pref) => {

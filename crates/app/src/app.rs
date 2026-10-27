@@ -312,6 +312,14 @@ impl OndApp {
         if let Loaded::Unreadable { aside } = loaded {
             notices.push(format!("Your settings couldn't be read, so Ond reset them. Sign in again. The old file is at {}.", aside.display()));
         }
+        // A downloads folder set in managed.json replaced the user's own: the
+        // downloads move there, as when one is picked in Settings.
+        if let Some(was) = prefs.offline_dir_was() {
+            let (from, to) = prefs.get(|s| (was.unwrap_or_else(|| paths.offline.clone()), s.offline_dir.clone().unwrap_or_else(|| paths.offline.clone())));
+            if from != to && from.exists() && prefs.get(|s| s.offline_move_from.is_none()) {
+                prefs.edit(|s| s.offline_move_from = Some(from));
+            }
+        }
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         let mut cache_cfg = streamcache::CacheConfig::new(&paths.stream_cache);
@@ -492,6 +500,9 @@ impl OndApp {
     /// Applies one action. Most groups go to the part of the app they belong
     /// to; an action never asks for another one later, it applies it at once.
     fn apply(&mut self, action: Action) {
+        if self.locked(&action) {
+            return;
+        }
         if self.ui.visualizer.is_some() && Self::leaves_visualizer(&action) {
             self.close_visualizer();
         }

@@ -122,6 +122,9 @@ impl Outputs {
     /// Remembers `mode` for device `uid`; the engine switches now when that's
     /// the device in use. Returns whether it is (the caller updates its flag).
     pub fn set_device_mode(&mut self, uid: &str, mode: PlaybackMode, engine: &EngineHandle) -> bool {
+        if self.mode_locked(Some(uid)) {
+            return false;
+        }
         let in_use = self.current.as_deref() == Some(uid);
         self.remember(uid, mode, engine);
         if in_use {
@@ -133,6 +136,9 @@ impl Outputs {
     /// Switches the device in use to `mode` now, remembering it for that device
     /// (following the system default, there's no device to remember it for).
     pub fn set_mode_in_use(&mut self, mode: PlaybackMode, engine: &EngineHandle) {
+        if self.mode_locked(self.current.as_deref()) {
+            return;
+        }
         engine.send(Command::SetMode(mode));
         if let Some(uid) = self.current.clone() {
             self.remember(&uid, mode, engine);
@@ -165,8 +171,21 @@ impl Outputs {
         None
     }
 
+    /// Whether the mode of device `uid` (the one in use) is set in managed.json.
+    pub fn mode_locked(&self, uid: Option<&str>) -> bool {
+        uid.is_some_and(|uid| self.prefs.managed(&format!("device_modes.{uid}")))
+    }
+
+    /// Whether the device to play through is set in managed.json.
+    pub fn device_locked(&self) -> bool {
+        self.prefs.managed("output_device")
+    }
+
     /// Plays through the device `uid` (the system default for `None`) and remembers it.
     pub fn choose(&mut self, uid: Option<String>, engine: &EngineHandle) {
+        if self.device_locked() {
+            return;
+        }
         engine.send(Command::SelectDevice(uid.clone()));
         self.prefs.edit(|s| s.output_device = uid);
     }
@@ -224,30 +243,27 @@ impl Outputs {
             ui.add_space(4.0);
         }
         let follows_default = self.devices.iter().find(|d| d.is_default).map(|d| d.name.clone()).unwrap_or_else(|| "default".into());
-        if device_row(ui, &format!("System default ({follows_default})"), None, self.current.is_none()).clicked() {
-            self.choose(None, engine);
-            ui.close();
+        let device_locked = self.device_locked();
+        if device_locked {
+            locked_note(ui);
         }
-        for d in self.devices.clone() {
-            let mode = mode_name(self.device_mode(&d));
-            let selected = Some(&d.uid) == self.current.as_ref();
-            let caps = d.capability_line();
-            let sub = if caps.is_empty() { mode.to_owned() } else { format!("{caps} · {mode}") };
-            if device_row(ui, &d.name, Some(&sub), selected).clicked() {
-                self.choose(Some(d.uid.clone()), engine);
-                ui.close();
-            }
-        }
+        ui.add_enabled_ui(!device_locked, |ui| self.device_rows(ui, engine, &follows_default));
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let mut mode = if *bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-            if crate::app::choice(ui, &crate::app::MODES, &mut mode, Some(POPUP_W - 16.0), crate::app::mode_label) {
-                *bit_perfect = mode == PlaybackMode::BitPerfect;
-                self.set_mode_in_use(mode, engine);
-            }
+        let mode_locked = self.mode_locked(self.current.as_deref());
+        if mode_locked {
+            locked_note(ui);
+        }
+        ui.add_enabled_ui(!mode_locked, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let mut mode = if *bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                if crate::app::choice(ui, &crate::app::MODES, &mut mode, Some(POPUP_W - 16.0), crate::app::mode_label) {
+                    *bit_perfect = mode == PlaybackMode::BitPerfect;
+                    self.set_mode_in_use(mode, engine);
+                }
+            });
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -270,6 +286,24 @@ impl Outputs {
             }
         });
         ui.add_space(4.0);
+    }
+
+    /// The system default, then each device; a click plays through it.
+    fn device_rows(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, follows_default: &str) {
+        if device_row(ui, &format!("System default ({follows_default})"), None, self.current.is_none()).clicked() {
+            self.choose(None, engine);
+            ui.close();
+        }
+        for d in self.devices.clone() {
+            let mode = mode_name(self.device_mode(&d));
+            let selected = Some(&d.uid) == self.current.as_ref();
+            let caps = d.capability_line();
+            let sub = if caps.is_empty() { mode.to_owned() } else { format!("{caps} · {mode}") };
+            if device_row(ui, &d.name, Some(&sub), selected).clicked() {
+                self.choose(Some(d.uid.clone()), engine);
+                ui.close();
+            }
+        }
     }
 
     fn dot_color(&self, ui: &egui::Ui) -> egui::Color32 {
@@ -466,4 +500,14 @@ fn mode_name(mode: PlaybackMode) -> &'static str {
 
 fn engine_modes(saved: &HashMap<String, DeviceMode>) -> HashMap<String, PlaybackMode> {
     saved.iter().map(|(uid, &m)| (uid.clone(), m.into())).collect()
+}
+
+/// Above a part of the popup set in managed.json, which can't be changed here.
+fn locked_note(ui: &mut egui::Ui) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(crate::managed::LOCKED).size(11.0).color(t.muted));
+    });
+    ui.add_space(4.0);
 }
