@@ -3,41 +3,48 @@
 //! it. "Up next" grows it into the Player (see `now_playing_view`), whose
 //! bottom status line lives here too.
 
+use super::WindowAction;
 use super::widgets::elide;
 use super::seek::SeekStyle;
 use super::{Action, OndApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
+use crate::visuals::backdrop::Blurred;
+use crate::visuals::over_art::{self, OnArt};
 use crate::window::WindowMode;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, ViewportCommand, pos2, vec2};
-use library::Track;
 
-/// Text and icons drawn over artwork, whatever the theme.
-const ON_ART: Color32 = Color32::from_rgb(0xE8, 0xE9, 0xEC);
+/// Text and icons drawn over artwork on a scrim, whatever the theme.
+const ON_ART: Color32 = over_art::LIGHT;
 const ON_ART_MUTED: Color32 = Color32::from_rgb(0xC9, 0xCC, 0xD2);
+
+/// Mini's hover panel over the foot of the artwork: its height; the seek
+/// line's centre below the top of its text; the transport row's centre above
+/// its bottom (both inside its padding).
+const PANEL_H: f32 = 112.0;
+const PANEL_SEEK_Y: f32 = 46.0;
+const PANEL_TRANSPORT_Y: f32 = 15.0;
 
 pub(super) fn scrim() -> Color32 {
     Color32::from_rgba_unmultiplied(12, 13, 15, 204)
 }
 
-/// Buttons over artwork: light icons, a faint light hover.
-pub(super) fn on_art(ui: &mut Ui) {
-    let w = &mut ui.visuals_mut().widgets;
-    w.hovered.weak_bg_fill = Color32::from_white_alpha(28);
-    w.active.weak_bg_fill = Color32::from_white_alpha(44);
-    w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+/// What part of the cover filling `whole` lies under `part`, from the
+/// cover's blurred copy: its darkest and brightest colors. `None` until the
+/// cover's look is worked out.
+fn under(blurred: Option<&Blurred>, part: Rect, whole: Rect) -> Option<[Color32; 2]> {
+    let crop = crate::art::crop_uv(whole.width() / whole.height().max(1.0));
+    blurred.map(|b| over_art::region(&b.image, over_art::uv_of(part, whole, crop)))
 }
 
 impl OndApp {
-    fn cover_of(&self, track: &Track) -> Option<String> {
-        self.data.cover_for(track).map(str::to_owned)
-    }
-
     pub(super) fn mini_ui(&mut self, ui: &mut Ui) {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
             let rect = ui.max_rect();
-            let cover = self.player.queue.current.as_ref().and_then(|i| self.cover_of(&i.track));
-            self.art.paint(ui, rect, cover.as_deref(), 0.0);
+            let cover = self.player.queue.current.as_ref().and_then(|i| self.data.cover_for(&i.track));
+            self.art.paint(ui, rect, cover, 0.0);
+            // What's under the controls drawn over the cover, so they can read on it.
+            let blurred = cover.and_then(|c| self.art.look(c)).and_then(|l| l.backdrop.clone());
             if self.player.queue.current.is_none() {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), ON_ART_MUTED);
             }
@@ -47,7 +54,7 @@ impl OndApp {
                 ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
             }
             if body.double_clicked() {
-                self.actions.push(Action::ToggleMini);
+                self.actions.push(Action::Window(WindowAction::ToggleMini));
             }
             let shown = ui.ctx().animate_bool_with_time(ui.scope_id().with("mini-hover"), ui.rect_contains_pointer(rect), 0.15);
             // At rest: a thin line inset from the edges, just to show where the
@@ -57,23 +64,44 @@ impl OndApp {
                 let line = Rect::from_min_max(pos2(rect.left() + 12.0, rect.bottom() - 9.0), pos2(rect.right() - 12.0, rect.bottom() - 7.0));
                 let frac = self.duration_secs().filter(|d| *d > 0.0).map_or(0.0, |d| (self.position_secs() / d).clamp(0.0, 1.0) as f32);
                 let fade = 1.0 - shown;
-                ui.painter().rect_filled(line, 1.0, Color32::from_white_alpha(46).gamma_multiply(fade));
-                ui.painter().rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * frac, line.bottom())), 1.0, ON_ART.gamma_multiply(0.9 * fade));
+                let on = under(blurred.as_ref(), line.expand(4.0), rect).map_or(OnArt::plain(ON_ART), |u| OnArt::pick(u, ON_ART, over_art::GRAPHIC));
+                if let Some(scrim) = on.scrim {
+                    ui.painter().rect_filled(line.expand2(vec2(5.0, 3.0)), 4.0, scrim.gamma_multiply(fade));
+                }
+                ui.painter().rect_filled(line, 1.0, on.fg.gamma_multiply(0.22 * fade));
+                ui.painter().rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * frac, line.bottom())), 1.0, on.fg.gamma_multiply(0.9 * fade));
             }
             if shown > 0.0 {
-                self.mini_overlay(ui, rect, shown);
+                self.mini_overlay(ui, rect, shown, blurred.as_ref());
             }
         });
     }
 
     /// Over the bottom of the art: title, a seek bar with the times beside it,
-    /// and the transport. In the top corners: the Player and the full window.
-    fn mini_overlay(&mut self, ui: &mut Ui, rect: Rect, alpha: f32) {
+    /// and the transport, on a scrim (or a frosted strip of the backdrop). In
+    /// the top corners: the Player and the full window, in colors that read
+    /// on what's under them (`blurred`: the cover's blurred copy, once known).
+    fn mini_overlay(&mut self, ui: &mut Ui, rect: Rect, alpha: f32, blurred: Option<&Blurred>) {
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
         ui.multiply_opacity(alpha);
-        on_art(&mut ui);
-        let panel = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 112.0), rect.max);
-        ui.painter().rect_filled(panel, 0.0, scrim());
+        OnArt::plain(ON_ART).apply(&mut ui);
+        let panel = Rect::from_min_max(pos2(rect.left(), rect.bottom() - PANEL_H), rect.max);
+        let layers = self.backdrop_layers(ui.ctx());
+        if layers.is_empty() {
+            ui.painter().rect_filled(panel, 0.0, scrim());
+        } else {
+            // Frosted: the blurred cover under the panel, lined up with the
+            // artwork it covers, then only as much scrim as the text needs.
+            let uv = Rect::from_min_max(pos2(0.0, (panel.top() - rect.top()) / rect.height()), pos2(1.0, 1.0));
+            let wash = scrim().to_opaque();
+            let mut alpha: f32 = 0.0;
+            for l in &layers {
+                ui.painter().add(egui::epaint::RectShape::filled(panel, 0.0, Color32::WHITE.gamma_multiply(l.opacity)).with_texture(l.blurred.texture.id(), uv));
+                alpha = alpha.max(crate::visuals::backdrop::wash_alpha(l.blurred.extremes, wash, ON_ART, ON_ART_MUTED));
+            }
+            ui.painter().rect_filled(panel, 0.0, wash.gamma_multiply(alpha));
+        }
+
         let inner = panel.shrink2(vec2(14.0, 10.0));
         if let Some(item) = &self.player.queue.current {
             let title = elide(&ui, &item.track.title, FontId::new(13.0, semibold()), ON_ART, inner.width());
@@ -83,7 +111,7 @@ impl OndApp {
             ui.painter().galley(pos2(inner.left(), inner.top() + title_h + 1.0), artist, ON_ART_MUTED);
         }
         // The seek bar, inset from every edge, with the times at its ends.
-        let seek_y = inner.top() + 46.0;
+        let seek_y = inner.top() + PANEL_SEEK_Y;
         if self.player.queue.current.is_some() {
             let font = FontId::proportional(10.0);
             let time_w = ui.painter().layout_no_wrap("−88:88".into(), font.clone(), ON_ART_MUTED).size().x;
@@ -98,6 +126,7 @@ impl OndApp {
                 grow: 1.0,
                 knob: ON_ART,
                 knob_r: 5.0,
+                wave_h: 0.0,
             };
             let mut v = self.view();
             let (shown, _) = v.seek_line(&mut ui, bar, bar.expand2(vec2(4.0, 7.0)), "mini-seek", &style);
@@ -105,17 +134,22 @@ impl OndApp {
             ui.painter().text(pos2(bar.left() - 8.0, seek_y), egui::Align2::RIGHT_CENTER, elapsed, font.clone(), ON_ART_MUTED);
             ui.painter().text(pos2(bar.right() + 8.0, seek_y), egui::Align2::LEFT_CENTER, remaining, font, ON_ART_MUTED);
         }
-        let row = Rect::from_center_size(pos2(inner.center().x, inner.bottom() - 15.0), vec2(120.0, 32.0));
+        let row = Rect::from_center_size(pos2(inner.center().x, inner.bottom() - PANEL_TRANSPORT_Y), vec2(120.0, 32.0));
         ui.scope_builder(UiBuilder::new().max_rect(row).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, Some(ON_ART)));
         let corner = |at: egui::Pos2| Rect::from_center_size(at, vec2(26.0, 26.0));
         for (r, icon, label, mode) in [
             (corner(rect.left_top() + vec2(19.0, 19.0)), Icon::Player, "Player (⌥⌘2)", WindowMode::Player),
             (corner(rect.right_top() + vec2(-19.0, 19.0)), Icon::Expand, "Full window (⌥⌘1)", WindowMode::Full),
         ] {
-            ui.painter().circle_filled(r.center(), 13.0, scrim());
+            // Until the cover's look is known: the dark disc that suits any cover.
+            let on = under(blurred, r, rect).map_or(OnArt { fg: ON_ART, scrim: Some(scrim()) }, |u| OnArt::pick(u, ON_ART, over_art::ICON));
+            if let Some(scrim) = on.scrim {
+                ui.painter().circle_filled(r.center(), 13.0, scrim);
+            }
             let mut b = ui.new_child(UiBuilder::new().max_rect(r));
-            if icons::sized_button(&mut b, icon, label, r.size(), 10.0, Some(ON_ART)).clicked() {
-                self.actions.push(Action::SetMode(mode));
+            on.apply(&mut b);
+            if icons::sized_button(&mut b, icon, label, r.size(), 10.0, Some(on.fg)).clicked() {
+                self.actions.push(Action::Window(WindowAction::SetMode(mode)));
             }
         }
     }

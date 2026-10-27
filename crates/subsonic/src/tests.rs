@@ -262,3 +262,169 @@ fn error_replies_are_recognised_as_json_or_xml() {
     assert_eq!(crate::error_text(json), "Not found");
     assert_eq!(crate::error_text(xml), "Not found");
 }
+
+#[test]
+fn one_malformed_song_is_skipped_not_the_page() {
+    // s-2 has no title; s-3's numbers come as strings and floats, as some
+    // servers send them; s-4's are out of range or junk.
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "searchResult3":{"song":[
+        {"id":"s-1","title":"Peace Piece","track":1},
+        {"id":"s-2","track":2},
+        {"id":"s-3","title":"Strings","track":"3","discNumber":"1","year":"1961","duration":402.6,"bitRate":"1411","size":"12345"},
+        {"id":"s-4","title":"Junk","track":-1,"year":"unknown","userRating":300,"replayGain":"loud","contributors":[{"role":"composer"}]}
+      ]}}}"#;
+    let (_, p): (_, SearchResult3Payload) = parse_response(json).unwrap();
+    let songs = p.search_result3.song;
+    assert_eq!(songs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s-1", "s-3", "s-4"]);
+    let s = &songs[1];
+    assert_eq!((s.track, s.disc_number, s.year, s.duration, s.bit_rate, s.size), (Some(3), Some(1), Some(1961), Some(403), Some(1411), Some(12345)));
+    let s = &songs[2];
+    assert_eq!((s.track, s.year, s.user_rating), (None, None, None));
+    assert_eq!(s.replay_gain, None);
+    assert!(s.contributors.is_empty(), "a contributor without an artist is dropped, not the song");
+}
+
+#[test]
+fn malformed_items_are_skipped_in_every_list() {
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "albumList2":{"album":[{"id":"al-1","name":"Fine","songCount":"12","duration":2700.0},{"name":"No id"},{"id":"al-3","name":"Also fine"}]}}}"#;
+    let (_, p): (_, AlbumList2Payload) = parse_response(json).unwrap();
+    let albums = p.album_list2.album;
+    assert_eq!(albums.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["al-1", "al-3"]);
+    assert_eq!((albums[0].song_count, albums[0].duration), (12, 2700));
+
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "album":{"id":"al-9","name":"Album","song":[{"id":"s-1","title":"One"},{"id":7,"title":"Numeric id"},{"id":"s-3","title":"Three"}]}}}"#;
+    let (_, p): (_, AlbumPayload) = parse_response(json).unwrap();
+    assert_eq!(p.album.song.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s-1", "s-3"]);
+
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "playlist":{"id":"pl-1","name":"Mix","entry":[{"title":"No id"},{"id":"s-2","title":"Two"}]}}}"#;
+    let (_, p): (_, PlaylistPayload) = parse_response(json).unwrap();
+    assert_eq!(p.playlist.entry.len(), 1);
+
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "artists":{"index":[{"name":"A","artist":[{"id":"ar-1","name":"Air"},{"id":"ar-2"}]},{"name":"B","artist":"oops"}]}}}"#;
+    let (_, p): (_, ArtistsPayload) = parse_response(json).unwrap();
+    assert_eq!(p.artists.index.iter().flat_map(|i| &i.artist).count(), 1);
+}
+
+#[test]
+fn lists_take_null_and_a_lone_object() {
+    // Servers that convert from XML send a one-item list as the item itself.
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+      "album":{"id":"al-9","name":"Single","song":{"id":"s-1","title":"Only"},"genres":null}}}"#;
+    let (_, p): (_, AlbumPayload) = parse_response(json).unwrap();
+    assert_eq!(p.album.song.len(), 1);
+    assert!(p.album.album.genres.is_empty());
+}
+
+#[test]
+fn a_reply_missing_what_was_asked_for_still_fails() {
+    // Leniency is per list item: a reply without the payload, or a single
+    // song without an id, is wrong.
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#;
+    assert!(matches!(parse_response::<AlbumPayload>(json), Err(Error::Decode(_))));
+    let json = br#"{"subsonic-response":{"status":"ok","version":"1.16.1","song":{"title":"No id"}}}"#;
+    assert!(matches!(parse_response::<SongPayload>(json), Err(Error::Decode(_))));
+}
+
+#[test]
+fn failed_status_without_an_error_object() {
+    let json = br#"{"subsonic-response":{"status":"failed","version":"1.16.1"}}"#;
+    match parse_response::<serde_json::Value>(json) {
+        Err(Error::Api { code, message }) => assert_eq!((code, message.as_str()), (-1, "unknown error")),
+        other => panic!("expected api error, got {other:?}"),
+    }
+}
+
+#[test]
+fn server_addresses() {
+    let creds = || Credentials::new("joe", "pw");
+    // A query string or fragment on the address is dropped, not sent along.
+    let c = Client::new("https://music.example.com/nd?theme=dark#x", creds()).unwrap();
+    let url = c.endpoint("ping", &[]);
+    assert_eq!(url.path(), "/nd/rest/ping");
+    assert!(!url.query().unwrap().contains("theme"));
+    assert_eq!(url.fragment(), None);
+    // No scheme: "host:port" would parse with the host as its scheme.
+    for bad in ["music.example.com", "music.example.com:4533", "localhost:4533/nd", "ftp://music.example.com", "mailto:joe@example.com"] {
+        assert!(matches!(Client::new(bad, creds()), Err(Error::Url(_))), "{bad} accepted");
+    }
+}
+
+/// Serves one connection on a local port: reads the request, then hands the
+/// stream to `respond`. Returns the base URL.
+fn serve_once(respond: impl FnOnce(std::net::TcpStream) + Send + 'static) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut req = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => req.extend_from_slice(&buf[..n]),
+            }
+        }
+        respond(stream);
+    });
+    format!("http://{addr}/")
+}
+
+fn reply(status: &str, content_type: &str, body: &str) -> impl FnOnce(std::net::TcpStream) + Send + 'static {
+    let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    move |mut s| {
+        use std::io::Write;
+        let _ = s.write_all(response.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn http_errors_keep_the_servers_message() {
+    let cases = [
+        ("503 Service Unavailable", "text/html", "<html><head><title>503 Service\n Unavailable</title></head><body>nginx</body></html>", "503 Service Unavailable"),
+        ("401 Unauthorized", "application/json", r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}"#, "Wrong username or password"),
+        ("500 Internal Server Error", "text/plain", "database is locked\nstack trace...", "database is locked"),
+    ];
+    for (status, ct, body, said) in cases {
+        let base = serve_once(reply(status, ct, body));
+        let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+        match c.ping().await {
+            Err(Error::Http(h)) => {
+                assert_eq!(h.message(), Some(said));
+                assert_eq!(h.status().map(|s| s.as_u16()), status[..3].parse().ok());
+                let shown = Error::Http(h).to_string();
+                assert!(shown.contains(said) && !shown.contains("t="), "{shown}");
+            }
+            other => panic!("expected an http error, got {other:?}"),
+        }
+    }
+    // An empty body: nothing to add.
+    let base = serve_once(reply("502 Bad Gateway", "text/html", ""));
+    let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+    assert!(matches!(c.ping().await, Err(Error::Http(h)) if h.message().is_none()));
+}
+
+#[tokio::test]
+async fn a_call_that_trickles_times_out() {
+    // Headers, then a byte at a time, forever: the read timeout never fires,
+    // so only the call's total timeout can end it.
+    let base = serve_once(|mut s| {
+        use std::io::Write;
+        if s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n").is_err() {
+            return;
+        }
+        while s.write_all(b" ").and_then(|()| s.flush()).is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
+    let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap().with_call_timeout(std::time::Duration::from_millis(300));
+    match c.ping().await {
+        Err(Error::Http(h)) => assert!(h.is_timeout(), "{h:?}"),
+        other => panic!("expected a timeout, got {other:?}"),
+    }
+}

@@ -254,9 +254,11 @@ fn album_summary_averages_dr_and_energy() {
 
 #[test]
 fn records_round_trip_and_stamps_track_the_file() {
-    let r = Record { stamp: stamp(Some(10), Some("flac"), Some(24), Some(96_000)), analysis: fake(9.0, -14.0, 60.0, vec![]) };
+    let r = Record { stamp: stamp(Some(10), Some("flac"), Some(24), Some(96_000), Some(240)), analysis: fake(9.0, -14.0, 60.0, vec![]) };
     assert_eq!(Record::decode(&r.encode()), Some(r.clone()));
-    assert_ne!(r.stamp, stamp(Some(11), Some("flac"), Some(24), Some(96_000)));
+    assert_ne!(r.stamp, stamp(Some(11), Some("flac"), Some(24), Some(96_000), Some(240)));
+    // Same size and format, another length: another file.
+    assert_ne!(r.stamp, stamp(Some(10), Some("flac"), Some(24), Some(96_000), Some(241)));
     assert!(r.stamp.starts_with(&format!("v{ANALYSIS_VERSION}:")));
 }
 
@@ -298,4 +300,150 @@ fn decodes_a_24_bit_wav_and_finds_the_padding() {
     assert!((a.duration_secs - 5.0).abs() < 0.01);
     assert!(kinds(&a).contains(&&VerdictKind::PaddedBits { bits: 24, effective: 16 }));
     assert!(analyze(Box::new(std::io::Cursor::new(wav)), Some("wav"), &|| true).is_err());
+}
+
+/// `compute_dr14` from dr14_t.meter (simon-r/dr14_t.meter, dr14tmeter/compute_dr14.py),
+/// ported line for line on whole per-channel signals, as the reference the
+/// streaming meter is checked against.
+fn dr14_reference(channels: &[Vec<f32>], rate: u32) -> f64 {
+    let delta = if rate == 44_100 { 60 } else { 0 };
+    let block = 3 * (rate + delta) as usize;
+    let n = channels[0].len();
+    let seg_cnt = n / block + 1;
+    let stats = |blk: &[f32], len: usize| {
+        let sq: f64 = blk.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        ((2.0 * sq / len as f64).sqrt(), blk.iter().fold(0.0f64, |m, &s| m.max(f64::from(s.abs()))))
+    };
+    let mut drs = Vec::new();
+    for ch in channels {
+        let (mut rms, mut peaks) = (vec![0.0; seg_cnt], vec![0.0; seg_cnt]);
+        for i in 0..seg_cnt - 1 {
+            (rms[i], peaks[i]) = stats(&ch[i * block..(i + 1) * block], block);
+        }
+        let cur = (seg_cnt - 1) * block;
+        if cur < n {
+            // "the last block leaves out the last sample"
+            (rms[seg_cnt - 1], peaks[seg_cnt - 1]) = stats(&ch[cur..n - 1], n - 1 - cur);
+        }
+        rms.sort_by(f64::total_cmp);
+        peaks.sort_by(f64::total_cmp);
+        let n_blk = ((seg_cnt as f64 * 0.2).floor() as usize).max(1);
+        let rms_sum: f64 = rms[seg_cnt - n_blk..].iter().map(|r| r * r).sum();
+        // Python's peaks[seg_cnt - 2] wraps to the last row for one block.
+        let second = peaks[(seg_cnt + peaks.len() - 2) % peaks.len()];
+        let dr = -20.0 * ((rms_sum / n_blk as f64).sqrt() / second).log10();
+        drs.push(if rms_sum < 1e-12 || dr.abs() > 24.0 { 0.0 } else { dr });
+    }
+    drs.iter().sum::<f64>() / drs.len() as f64
+}
+
+fn dr_meter(channels: &[Vec<f32>], rate: u32) -> f64 {
+    let mut m = crate::dr::DrMeter::new(rate, channels.len());
+    let frames: Vec<f32> = (0..channels[0].len()).flat_map(|i| channels.iter().map(move |c| c[i])).collect();
+    for chunk in frames.chunks(4096 * channels.len()) {
+        m.push(chunk);
+    }
+    m.finish().unwrap()
+}
+
+/// Noise whose level changes every second, with a few loud clicks: every
+/// block is different, so which blocks count shows in the result.
+fn uneven(rate: u32, secs: f64, seed: u64) -> Vec<f32> {
+    let mut rng = Rng(seed);
+    let len = (f64::from(rate) * secs) as usize;
+    let mut level = 0.1;
+    (0..len)
+        .map(|i| {
+            if i % rate as usize == 0 {
+                level = 0.02 + 0.3 * rng.next();
+            }
+            let click = i % (rate as usize * 2) == rate as usize / 3;
+            if click { 0.9 * (rng.next() * 0.5 + 0.5) as f32 } else { (level * (rng.next() * 2.0 - 1.0)) as f32 }
+        })
+        .collect()
+}
+
+#[test]
+fn dr_matches_the_dr14_reference() {
+    // Long with a partial last block, under 9 s (two blocks and a bit), under
+    // one block, an exact number of blocks; at 44.1 kHz (stretched blocks)
+    // and 48 kHz.
+    for (rate, secs) in [(44_100, 31.7), (44_100, 7.0), (44_100, 2.0), (48_000, 12.0), (48_000, 20.5), (44_100, 9.0144)] {
+        let chans = [uneven(rate, secs, 7), uneven(rate, secs, 11)];
+        let (ours, reference) = (dr_meter(&chans, rate), dr14_reference(&chans, rate));
+        assert!((ours - reference).abs() < 0.02, "{rate} Hz, {secs} s: {ours} vs reference {reference}");
+    }
+}
+
+#[test]
+fn dr_counts_a_loud_trailing_partial_block() {
+    // Quiet for 30 s, then a loud last second with two clicks: the trailing
+    // partial block holds the loudest RMS and so sets the DR.
+    let rate = 48_000;
+    let mut s = sine(rate, 31.0, 1000.0, 0.01);
+    for (i, x) in s.iter_mut().enumerate().skip(rate as usize * 30) {
+        *x = (0.5 * (std::f64::consts::TAU * 1000.0 * i as f64 / f64::from(rate)).sin()) as f32;
+    }
+    s[rate as usize * 2] = 1.0;
+    s[rate as usize * 30 + 100] = 1.0;
+    let chans = [s.clone(), s];
+    let dr = dr_meter(&chans, rate);
+    // 11 blocks, so the loudest 2 count: the partial one (RMS 0.5) and a quiet
+    // one (0.01). The second-highest peak is the partial block's click, 1.0.
+    // Without the partial block this would be 0.01 over 0.01: DR 0.
+    let expected = -20.0 * ((0.5f64 * 0.5 + 0.01 * 0.01) / 2.0).sqrt().log10();
+    assert!((dr - expected).abs() < 0.05, "{dr} vs {expected}");
+    assert!((dr - dr14_reference(&chans, rate)).abs() < 0.02);
+}
+
+#[test]
+fn dr_of_more_than_two_channels_averages_them_all() {
+    let rate = 48_000;
+    let chans = [uneven(rate, 20.0, 3), uneven(rate, 20.0, 5), sine(rate, 20.0, 440.0, 1.0)];
+    let (ours, reference) = (dr_meter(&chans, rate), dr14_reference(&chans, rate));
+    assert!((ours - reference).abs() < 0.02, "{ours} vs {reference}");
+    // The full-scale sine's channel reads 0 and pulls the mean down.
+    let two = dr_meter(&chans[..2], rate);
+    assert!((ours - two * 2.0 / 3.0).abs() < 0.05, "{ours} vs {two}");
+}
+
+#[test]
+fn a_gradual_rolloff_at_a_high_rate_is_not_called_upsampled() {
+    // A native 96 kHz capture of a source that fades out above 16 kHz at
+    // 15 dB per kHz: deep, but nothing like a resampler's brickwall.
+    let n = shaped_noise(96_000, 15.0, -20.0, |hz| 10f64.powf(-(hz - 16_000.0).max(0.0) / 1000.0 * 15.0 / 20.0));
+    let a = run(96_000, Some(24), &n);
+    assert!(!a.verdicts.iter().any(|v| matches!(v.kind, VerdictKind::Upsampled { .. })), "{:?}", a.verdicts);
+}
+
+#[test]
+fn a_cutoff_near_20k_mentions_early_digital_recordings() {
+    let v = Verdict { kind: VerdictKind::LossySource { cutoff_hz: 20_000 }, confidence: Confidence::Medium };
+    assert!(v.evidence().contains("early digital"), "{}", v.evidence());
+    let v = Verdict { kind: VerdictKind::LossySource { cutoff_hz: 16_000 }, confidence: Confidence::High };
+    assert!(!v.evidence().contains("early digital"));
+}
+
+#[test]
+fn album_summary_with_mixed_verdicts() {
+    let up = |c| Verdict { kind: VerdictKind::Upsampled { from_hz: 44_100, cutoff_hz: 21_000 }, confidence: c };
+    let lossy = Verdict { kind: VerdictKind::LossySource { cutoff_hz: 16_000 }, confidence: Confidence::High };
+    let padded = Verdict { kind: VerdictKind::PaddedBits { bits: 24, effective: 16 }, confidence: Confidence::High };
+    let a = fake(8.0, -10.0, 100.0, vec![up(Confidence::Medium), padded.clone()]);
+    let b = fake(8.0, -10.0, 100.0, vec![up(Confidence::High)]);
+    let c = fake(8.0, -10.0, 100.0, vec![lossy.clone()]);
+    let d = fake(8.0, -10.0, 100.0, vec![padded.clone()]);
+    // Upsampled and padded each on half the tracks: the first to reach the
+    // top count wins, labelled with its most confident example.
+    let s = summarize(&[&a, &b, &c, &d], 4);
+    let (v, n) = s.verdict.unwrap();
+    assert_eq!(n, 2);
+    assert!(v.same_kind(&up(Confidence::High)) || v.same_kind(&padded), "{v:?}");
+    if v.same_kind(&up(Confidence::High)) {
+        assert_eq!(v.confidence, Confidence::High);
+    }
+    // Each kind on under half the tracks: nothing.
+    let e = fake(8.0, -10.0, 100.0, vec![]);
+    let s = summarize(&[&b, &c, &e, &e, &e], 5);
+    assert_eq!(s.verdict, None);
 }

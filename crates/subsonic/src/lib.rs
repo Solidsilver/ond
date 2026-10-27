@@ -5,6 +5,7 @@
 //! `subsonic-response` envelope before the payload is decoded.
 
 mod auth;
+mod lenient;
 mod model;
 
 pub use auth::{Credentials, Token};
@@ -19,9 +20,9 @@ pub const CLIENT_NAME: &str = "ond";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The request failed. The URL is stripped: it carries the auth token.
+    /// The request failed, or the server answered with an HTTP error status.
     #[error("http: {0}")]
-    Http(reqwest::Error),
+    Http(HttpError),
     #[error("invalid server url: {0}")]
     Url(#[from] url::ParseError),
     #[error("malformed response: {0}")]
@@ -32,10 +33,81 @@ pub enum Error {
 
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
-        // reqwest appends " for url (...)" to its messages, and every request
-        // URL carries `u`, `t` and `s`: never let that reach a toast or a log.
-        Error::Http(e.without_url())
+        Error::Http(HttpError { source: e.without_url(), message: None })
     }
+}
+
+/// A failed request: what reqwest reports, plus what the server said in the
+/// body of an HTTP error status (a Subsonic error message, an error page's
+/// title, or the first line of a plain-text body). Derefs to the
+/// [`reqwest::Error`], so `is_timeout()`, `status()` and the like work on it.
+#[derive(Debug)]
+pub struct HttpError {
+    /// Without its URL: reqwest appends " for url (...)" to its messages, and
+    /// every request URL carries `u`, `t` and `s`, which must never reach a
+    /// toast or a log.
+    source: reqwest::Error,
+    message: Option<String>,
+}
+
+impl HttpError {
+    /// What the server said along with an HTTP error status, if anything.
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+}
+
+impl std::ops::Deref for HttpError {
+    type Target = reqwest::Error;
+    fn deref(&self) -> &reqwest::Error {
+        &self.source
+    }
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(m) => write!(f, "{}: {m}", self.source),
+            None => self.source.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for HttpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Turns an HTTP error status into [`Error::Http`] carrying what the server
+/// said in the body; passes a success through.
+async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response> {
+    let Err(e) = resp.error_for_status_ref() else { return Ok(resp) };
+    let source = e.without_url();
+    let body = resp.bytes().await.unwrap_or_default();
+    Err(Error::Http(HttpError { source, message: status_text(&body) }))
+}
+
+/// The readable part of an HTTP error body: a Subsonic error's message, an
+/// HTML page's `<title>`, or the first line of anything else, at most 200
+/// characters. `None` when the body says nothing.
+fn status_text(body: &[u8]) -> Option<String> {
+    let found = if let Err(Error::Api { message, .. }) = parse_response::<serde_json::Value>(body) {
+        message
+    } else {
+        let text = String::from_utf8_lossy(&body[..body.len().min(4096)]);
+        let text = text.trim();
+        if text.starts_with('<') {
+            let lower = text.to_ascii_lowercase();
+            let start = lower.find("<title>")? + "<title>".len();
+            let end = lower[start..].find("</title>").map_or(text.len(), |i| start + i);
+            text[start..end].to_owned()
+        } else {
+            text.lines().next().unwrap_or_default().to_owned()
+        }
+    };
+    let found: String = found.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
+    (!found.is_empty()).then_some(found)
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -45,17 +117,30 @@ pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Give up on a response that stops sending for this long (half-open
 /// connections would otherwise hang a request forever).
 pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Give up on an API call (or a cover) that hasn't finished in this long, even
+/// if it's still trickling in. Streams have no such limit: they take as long
+/// as the file does.
+pub const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct Client {
     base: Url,
     creds: Credentials,
     http: reqwest::Client,
+    call_timeout: std::time::Duration,
 }
 
 impl Client {
     pub fn new(server: &str, creds: Credentials) -> Result<Self> {
         let mut base = Url::parse(server)?;
+        // "music.example.com:4533" parses, with "music.example.com" as its
+        // scheme, but no path can be joined onto it.
+        if !matches!(base.scheme(), "http" | "https") || base.cannot_be_a_base() {
+            return Err(Error::Url(url::ParseError::RelativeUrlWithoutBase));
+        }
+        // A query or fragment on the address means nothing to the API.
+        base.set_query(None);
+        base.set_fragment(None);
         // Url::join replaces the last path segment unless the base ends in '/'.
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
@@ -65,7 +150,13 @@ impl Client {
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .build()?;
-        Ok(Self { base, creds, http })
+        Ok(Self { base, creds, http, call_timeout: CALL_TIMEOUT })
+    }
+
+    /// Replaces [`CALL_TIMEOUT`] for this client.
+    pub fn with_call_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.call_timeout = timeout;
+        self
     }
 
     pub fn username(&self) -> &str {
@@ -109,14 +200,8 @@ impl Client {
     }
 
     async fn call<T: DeserializeOwned>(&self, method: &str, params: &[(&str, &str)]) -> Result<(ServerInfo, T)> {
-        let bytes = self
-            .http
-            .get(self.endpoint(method, params))
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let resp = self.http.get(self.endpoint(method, params)).timeout(self.call_timeout).send().await?;
+        let bytes = check_status(resp).await?.bytes().await?;
         parse_response(&bytes)
     }
 
@@ -150,7 +235,8 @@ impl Client {
 
     /// Cover art bytes as the server sends them (usually JPEG), scaled server-side to `size` px.
     pub async fn cover_art(&self, cover_id: &str, size: Option<u32>) -> Result<Vec<u8>> {
-        let resp = self.http.get(self.cover_art_url(cover_id, size)).send().await?.error_for_status()?;
+        let resp = self.http.get(self.cover_art_url(cover_id, size)).timeout(self.call_timeout).send().await?;
+        let resp = check_status(resp).await?;
         let kind = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = resp.bytes().await?;
         // Errors come back as an envelope rather than an image.

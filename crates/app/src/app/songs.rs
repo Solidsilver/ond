@@ -4,12 +4,12 @@
 //! Rows act like the album page's: double-click (or ⏎) plays the track's
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
+use super::table::Head;
+use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
-use super::widgets::elide;
 use super::{Action, Focus, QueueAction};
-use crate::icons::{self, Icon};
 use crate::queue::Source;
-use crate::theme::{Tokens, semibold};
+use crate::theme::Tokens;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use crate::memo::Memo;
 use library::{Track, fold};
@@ -21,6 +21,9 @@ const ROW_H: f32 = 32.0;
 const TIME_W: f32 = 56.0;
 const FORMAT_W: f32 = 96.0;
 
+/// A Songs column, to sort by. Sorted by artist at first (not by title, the
+/// first column): ties fall back to album order, so the list starts out as
+/// each artist's albums, intact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Column {
     Title,
@@ -40,7 +43,12 @@ pub struct SongsView {
     keys: Memo<(u64, u64), SortKeys>,
     /// Indices into `Data::tracks.all`, sorted; per versions and sort.
     order: Memo<(u64, u64, Column, bool), Vec<usize>>,
+    /// Where each letter starts in that order, for the alphabet rail.
+    marks: Memo<(u64, u64, Column, bool), super::alpha::Marks>,
     pub selected: Option<usize>,
+    /// The keys just moved the selection: bring it into view, once (every
+    /// frame would pin it there and fight the scroll wheel).
+    scroll_to_selected: bool,
 }
 
 /// Each track's text folded for sorting (case and accents ignored), computed
@@ -97,15 +105,36 @@ pub fn sort_with(tracks: &[Track], keys: &SortKeys, by: Column, descending: bool
 }
 
 impl ViewCtx<'_> {
-    pub(super) fn songs_order(&mut self) -> Arc<Vec<usize>> {
+    fn sort_keys(&mut self) -> Arc<SortKeys> {
         let data = &self.data;
-        let versions = (data.tracks_version, data.version);
-        let keys = self.ui.songs.keys.get(versions, || {
+        self.ui.songs.keys.get((data.tracks_version, data.version), || {
             let names = |id: &str| data.album(id).map(|a| a.name.clone()).unwrap_or_default();
             SortKeys::new(&data.tracks.all, &names)
-        });
+        })
+    }
+
+    pub(super) fn songs_order(&mut self) -> Arc<Vec<usize>> {
+        let keys = self.sort_keys();
+        let data = &self.data;
         let (sort, descending) = (self.ui.songs.sort, self.ui.songs.descending);
-        self.ui.songs.order.get((versions.0, versions.1, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
+        self.ui.songs.order.get((data.tracks_version, data.version, sort, descending), || sort_with(&data.tracks.all, &keys, sort, descending))
+    }
+
+    /// Where each letter starts in `order`, sorted by a name column; `None`
+    /// sorted by time or format, or with the rail off.
+    fn songs_marks(&mut self, order: &[usize]) -> Option<Arc<super::alpha::Marks>> {
+        let (sort, descending) = (self.ui.songs.sort, self.ui.songs.descending);
+        if !self.ui.prefs.alpha_rail || matches!(sort, Column::Time | Column::Format) {
+            return None;
+        }
+        let keys = self.sort_keys();
+        let column = match sort {
+            Column::Title => &keys.title,
+            Column::Album => &keys.album,
+            _ => &keys.artist,
+        };
+        let key = (self.data.tracks_version, self.data.version, sort, descending);
+        Some(self.ui.songs.marks.get(key, || super::alpha::Marks::new(order.iter().map(|&i| column[i].as_str()))))
     }
 
     pub(super) fn songs_page(&mut self, ui: &mut Ui) {
@@ -122,98 +151,100 @@ impl ViewCtx<'_> {
             return;
         }
         let order = self.songs_order();
+        let marks = self.songs_marks(&order);
         self.songs_keys(ui, &order);
 
-        // Header.
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
-        let cols = columns(head);
-        for (col, label, rect, right) in [
-            (Column::Title, "Title", cols.title, false),
-            (Column::Artist, "Artist", cols.artist, false),
-            (Column::Album, "Album", cols.album, false),
-            (Column::Time, "Time", cols.time, true),
-            (Column::Format, "Format", cols.format, false),
-        ] {
-            let resp = ui.interact(rect, ui.scope_id().with(("songs-col", label)), Sense::click());
-            let on = self.ui.songs.sort == col;
-            let color = if on || resp.hovered() { t.text } else { t.muted };
-            let font = FontId::new(11.0, semibold());
-            let (anchor, x) = if right { (egui::Align2::RIGHT_CENTER, rect.right() - 10.0) } else { (egui::Align2::LEFT_CENTER, rect.left() + 10.0) };
-            let text_rect = ui.painter().text(pos2(x, rect.center().y), anchor, label, font, color);
-            if on {
-                let cx = if right { text_rect.left() - 8.0 } else { text_rect.right() + 8.0 };
-                sort_arrow(ui, pos2(cx, rect.center().y), self.ui.songs.descending, color);
-            }
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, format!("Sort by {label}")));
-            if resp.clicked() {
-                if on {
-                    self.ui.songs.descending = !self.ui.songs.descending;
-                } else {
-                    self.ui.songs.sort = col;
-                    self.ui.songs.descending = false;
-                }
-            }
-        }
-        ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, t.hairline));
+        // Header, over the columns (clear of the alphabet rail).
+        let rail_w = if marks.is_some() { super::alpha::RAIL_W } else { 0.0 };
+        let (head_rect, _) = ui.allocate_exact_size(vec2(ui.available_width() - rail_w, super::table::HEAD_H), Sense::hover());
+        let cols = columns(head_rect);
+        let head = |label, rect, right, col| Head { label, rect, right, sorts: Some(col) };
+        let heads = [
+            head("Title", cols.title, false, Column::Title),
+            head("Artist", cols.artist, false, Column::Artist),
+            head("Album", cols.album, false, Column::Album),
+            head("Time", cols.time, true, Column::Time),
+            head("Format", cols.format, false, Column::Format),
+        ];
+        super::table::header(ui, head_rect, "songs-col", &heads, &mut self.ui.songs.sort, &mut self.ui.songs.descending);
 
-        let tracks = self.data.tracks.all.clone();
-        let current = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, ROW_H, order.len(), |ui, range| {
+        // Borrowed from the library and player, not from `self`, so rows can
+        // take `&mut self`.
+        let (data, player) = (self.data, self.player);
+        let tracks = &data.tracks.all;
+        let current = player.queue.current.as_ref().map(|c| c.track.id.as_str());
+        super::layout::into_gutter(ui, |ui| {
+            // Rows sit flush: the scroll area places them by the same height.
             ui.spacing_mut().item_spacing.y = 0.0;
-            for row in range {
-                let tr = &tracks[order[row]];
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
-                let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(row);
-                if selected {
-                    resp.scroll_to_me(None);
-                }
-                let hovered = resp.hovered() || resp.contains_pointer();
-                let playing = current.as_deref() == Some(tr.id.as_str());
-                if ui.is_rect_visible(rect) {
-                    ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, selected, hovered));
-                    let c = columns(rect);
-                    let color = super::widgets::track_color(&t, playing, self.playable(tr));
-                    if let Some(m) = super::widgets::Mark::of_track(self.downloads.snap.track(&tr.id)) {
-                        super::widgets::mark(ui, pos2(c.time.left() + 10.0, rect.center().y), 10.0, m);
-                    }
-                    let title_font = if playing { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-                    let mut title_x = c.title.left() + 10.0;
-                    if playing {
-                        icons::paint(ui.painter(), Rect::from_center_size(pos2(title_x + 4.0, rect.center().y), vec2(8.0, 8.0)), Icon::Play, t.accent);
-                        title_x += 16.0;
-                    }
-                    let cell = |ui: &Ui, text: &str, x: f32, w: f32, font: FontId, color| {
-                        let g = elide(ui, text, font, color, w - 20.0);
-                        ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
-                    };
-                    cell(ui, &tr.title, title_x, c.title.right() - title_x + 10.0, title_font, color);
-                    cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + 10.0, c.artist.width(), FontId::proportional(13.0), t.muted);
-                    let album = self.data.album(&tr.album_id).map(|a| a.name.clone()).unwrap_or_default();
-                    cell(ui, &album, c.album.left() + 10.0, c.album.width(), FontId::proportional(13.0), t.muted);
-                    let dur = tr.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default();
-                    ui.painter().text(pos2(c.time.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, dur, FontId::proportional(12.0), t.muted);
-                    cell(ui, &crate::fmt::quality(tr), c.format.left() + 10.0, c.format.width(), FontId::proportional(11.0), t.muted);
-                }
-                let label = format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" });
-                resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
-                if resp.double_clicked() {
-                    self.play_from_album(tr, QueueAction::Play { start: 0 });
-                } else if resp.clicked() {
-                    self.ui.songs.selected = Some(row);
-                    self.ui.focus = Focus::Main;
-                }
-                let source = self.album_source(&tr.album_id);
-                resp.context_menu(|ui| {
-                    if ui.button("Play").clicked() {
-                        self.play_from_album(tr, QueueAction::Play { start: 0 });
-                    }
-                    self.track_menu(ui, tr, &source);
-                    if ui.button("Go to album").clicked() {
-                        self.actions.push(Action::Go(crate::nav::Route::Album(tr.album_id.clone())));
-                    }
-                });
+            let area = ui.available_rect_before_wrap();
+            let mut scroll = egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false);
+            scroll = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() });
+            if let Some(y) = super::alpha::take_jump(ui, "songs") {
+                scroll = scroll.vertical_scroll_offset(y);
             }
-        }));
+            let mut top = 0;
+            let out = scroll.show_rows(ui, ROW_H, order.len(), |ui, range| {
+                top = range.start;
+                // The keys moved the selection: bring its row into view, once. It
+                // may be off screen (and not laid out), so place it by its index.
+                if std::mem::take(&mut self.ui.songs.scroll_to_selected)
+                    && let Some(sel) = self.ui.songs.selected
+                {
+                    let top = ui.cursor().top() + (sel as f32 - range.start as f32) * ROW_H;
+                    ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(ui.available_width(), ROW_H)), None);
+                }
+                for i in range {
+                    self.songs_row(ui, &t, &tracks[order[i]], i, current);
+                }
+            });
+            if let Some(marks) = marks {
+                super::alpha::rail(ui, "songs", area, &out, &marks, top, |i| i, ROW_H);
+            }
+        });
+    }
+
+    /// The `i`th row in the sorted order: a cell per column.
+    fn songs_row(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, i: usize, current: Option<&str>) {
+        let row = TrackRow::new(ui, ROW_H, Sense::click());
+        let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(i);
+        let playing = current == Some(tr.id.as_str());
+        if ui.is_rect_visible(row.rect) {
+            row.fill(ui, t, selected, row.pointer_on());
+            let c = columns(row.rect);
+            let color = super::widgets::track_color(t, playing, self.playable(tr));
+            row.mark(ui, c.time.left() + col::INSET, self.downloads.snap.track(&tr.id));
+            let mut title_x = c.title.left() + col::INSET;
+            if playing {
+                title_x = row.playing(ui, t, title_x);
+            }
+            // A cell's text, inset at both ends.
+            let cell = |ui: &Ui, text: &str, x: f32, w: f32, font: FontId, color| {
+                row.line(ui, x, w - 2.0 * col::INSET, text, font, color);
+            };
+            cell(ui, &tr.title, title_x, c.title.right() - title_x + col::INSET, title_font(13.0, playing), color);
+            cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + col::INSET, c.artist.width(), FontId::proportional(13.0), t.muted);
+            let album = self.data.album(&tr.album_id).map_or("", |a| a.name.as_str());
+            cell(ui, album, c.album.left() + col::INSET, c.album.width(), FontId::proportional(13.0), t.muted);
+            row.right_text(ui, c.time.right() - col::INSET, length(tr), FontId::proportional(12.0), t.muted);
+            cell(ui, &crate::fmt::quality(tr), c.format.left() + col::INSET, c.format.width(), FontId::proportional(11.0), t.muted);
+        }
+        row.describe(selected, || format!("{}, {}{}", tr.title, tr.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" }));
+        if row.resp.double_clicked() {
+            self.play_from_album(tr, QueueAction::Play { start: 0 });
+        } else if row.resp.clicked() {
+            self.ui.songs.selected = Some(i);
+            self.ui.focus = Focus::Main;
+        }
+        row.resp.context_menu(|ui| {
+            let source = self.album_source(&tr.album_id);
+            if ui.button("Play").clicked() {
+                self.play_from_album(tr, QueueAction::Play { start: 0 });
+            }
+            self.track_menu(ui, tr, &source);
+            if ui.button("Go to album").clicked() {
+                self.actions.push(Action::Go(crate::nav::Route::Album(tr.album_id.clone())));
+            }
+        });
     }
 
     /// ↑/↓ select, ⏎ play, ⌥⏎ play next, ⇧⏎ add.
@@ -222,17 +253,24 @@ impl ViewCtx<'_> {
             return;
         }
         let Some(k) = self.list_keys(ui, Focus::Main, false, false) else { return };
-        self.ui.songs.selected = k.step(self.ui.songs.selected, order.len());
+        if k.up || k.down {
+            self.ui.songs.selected = k.step(self.ui.songs.selected, order.len());
+            self.ui.songs.scroll_to_selected = true;
+        }
+        if !(k.enter || k.play_next || k.add) {
+            return;
+        }
         let Some(sel) = self.ui.songs.selected.filter(|s| *s < order.len()) else { return };
-        let tr = self.data.tracks.all[order[sel]].clone();
+        let data = self.data;
+        let tr = &data.tracks.all[order[sel]];
         if k.enter {
-            self.play_from_album(&tr, QueueAction::Play { start: 0 });
+            self.play_from_album(tr, QueueAction::Play { start: 0 });
         }
         if k.play_next {
-            self.play_from_album(&tr, QueueAction::PlayNext);
+            self.play_from_album(tr, QueueAction::PlayNext);
         }
         if k.add {
-            self.play_from_album(&tr, QueueAction::Add);
+            self.play_from_album(tr, QueueAction::Add);
         }
     }
 }
@@ -257,16 +295,6 @@ fn columns(row: Rect) -> Columns {
     let time = col(album.right(), TIME_W);
     let format = col(time.right(), FORMAT_W);
     Columns { title, artist, album, time, format }
-}
-
-fn sort_arrow(ui: &Ui, at: egui::Pos2, descending: bool, color: egui::Color32) {
-    let (w, h) = (3.5, 2.5);
-    let pts = if descending {
-        vec![pos2(at.x - w, at.y - h), pos2(at.x + w, at.y - h), pos2(at.x, at.y + h)]
-    } else {
-        vec![pos2(at.x - w, at.y + h), pos2(at.x + w, at.y + h), pos2(at.x, at.y - h)]
-    };
-    ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
 
 impl ViewCtx<'_> {

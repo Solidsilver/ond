@@ -7,6 +7,28 @@
 //! in the device's format, so the OS's own float → integer conversion is exact
 //! and adds no truncation distortion.
 
+/// What a stretch of audio went through on its way to the device: enough to
+/// tell whether it is still on the device's integer grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Treatment {
+    /// The decoder recomputed the samples (resampled or downmixed).
+    pub processed: bool,
+    /// Scaled by a gain other than unity (volume, ReplayGain, a fade).
+    pub gained: bool,
+    /// The source's bit depth; `None` for lossy (or float) sources.
+    pub source_bits: Option<u32>,
+}
+
+/// The one rule for "dithered", used by the realtime callback (per stretch of
+/// output) and by the engine's [`SignalPath`](crate::SignalPath) report:
+/// samples are requantized with dither when the device takes integers
+/// narrower than 32 bits (`device_bits`; `None` is a float device) and the
+/// samples may be off its grid: recomputed, gained, or from a deeper or
+/// depthless source. A bit-perfect signal never is.
+pub(crate) fn needs_dither(device_bits: Option<u32>, t: Treatment) -> bool {
+    device_bits.is_some_and(|d| d < 32 && (t.processed || t.gained || t.source_bits.is_none_or(|s| s > d)))
+}
+
 /// Triangular-PDF dither source. Realtime-safe: no allocation, no locks.
 #[derive(Debug, Clone)]
 pub struct Tpdf {
@@ -56,6 +78,19 @@ mod tests {
     fn on_grid(s: f32, bits: u32) -> bool {
         let v = s as f64 * (1u64 << (bits - 1)) as f64;
         v == v.round()
+    }
+
+    #[test]
+    fn dither_is_for_integer_devices_and_off_grid_samples_only() {
+        let exact = Treatment { processed: false, gained: false, source_bits: Some(16) };
+        assert!(!needs_dither(None, Treatment { processed: true, ..exact }), "float devices take anything");
+        assert!(!needs_dither(Some(32), Treatment { gained: true, ..exact }), "32-bit integers are finer than f32");
+        assert!(!needs_dither(Some(16), exact) && !needs_dither(Some(24), exact));
+        assert!(needs_dither(Some(16), Treatment { processed: true, ..exact }));
+        assert!(needs_dither(Some(24), Treatment { gained: true, ..exact }));
+        let hi_res = Treatment { source_bits: Some(24), ..exact };
+        assert!(needs_dither(Some(16), hi_res) && !needs_dither(Some(24), hi_res));
+        assert!(needs_dither(Some(24), Treatment { source_bits: None, ..exact }), "a lossy source has no grid");
     }
 
     #[test]

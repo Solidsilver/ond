@@ -7,6 +7,15 @@ use std::path::{Path, PathBuf};
 /// The Keychain service, the same as the bundle id.
 const KEYRING_SERVICE: &str = "dev.solidsilver.ond";
 
+/// How a page of albums or artists lays them out: tiles, or a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewMode {
+    #[default]
+    Grid,
+    List,
+}
+
 /// How a device plays, as remembered per device. Saved as "normal" /
 /// "bit-perfect", as earlier builds wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +59,32 @@ pub struct Settings {
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
+    /// The accent color, used whenever the album art doesn't give one.
+    #[serde(default, deserialize_with = "crate::theme::lenient_accent")]
+    pub accent: crate::theme::Accent,
+    /// Colors adapt to the album art: the accent, the now-playing display and
+    /// the Player take the playing cover's, and an album's page its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adapt_colors: bool,
+    /// A blurred copy of the cover behind the Player and Mini.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub backdrop: bool,
+    /// The track's waveform as the seek bar, and how its bars look.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waveform: bool,
+    #[serde(default)]
+    pub waveform_bars: crate::visuals::waveform::Bars,
+    /// Letters beside long lists sorted by name, to jump along them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alpha_rail: bool,
+    /// Artists' photos from the server in the Artists list.
+    #[serde(default = "yes")]
+    pub artist_photos: bool,
+    /// Grid or list, for the pages of albums and for Artists.
+    #[serde(default)]
+    pub album_view: ViewMode,
+    #[serde(default)]
+    pub artist_view: ViewMode,
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
@@ -92,6 +127,9 @@ pub struct Settings {
     /// Software volume, 0..=1 (unused in bit-perfect mode).
     #[serde(default = "full")]
     pub volume: f32,
+    /// Experimental visuals (Settings › Experimental), all off by default.
+    #[serde(default, skip_serializing_if = "crate::visuals::Experimental::all_off")]
+    pub experimental: crate::visuals::Experimental,
 }
 
 fn yes() -> bool {
@@ -111,6 +149,15 @@ impl Default for Settings {
             output_device: None,
             device_modes: Default::default(),
             theme: Default::default(),
+            accent: Default::default(),
+            adapt_colors: false,
+            backdrop: false,
+            waveform: false,
+            waveform_bars: Default::default(),
+            alpha_rail: false,
+            artist_photos: true,
+            album_view: ViewMode::Grid,
+            artist_view: ViewMode::Grid,
             show_queue: true,
             window: Default::default(),
             scrobble: true,
@@ -125,8 +172,16 @@ impl Default for Settings {
             sidebar_width: None,
             queue_width: None,
             volume: 1.0,
+            experimental: Default::default(),
         }
     }
+}
+
+/// Where downloads go for a folder the user picked: always a folder of
+/// Ond's own inside it, since the store tidies away files it doesn't know,
+/// and those must never be the user's.
+pub fn offline_folder(chosen: PathBuf) -> PathBuf {
+    if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") }
 }
 
 pub struct Paths {
@@ -159,6 +214,14 @@ impl Paths {
 }
 
 impl Settings {
+    /// Carries settings from older builds over to where they live now.
+    pub fn migrate(&mut self) {
+        // "Colors from the album art" grew out of Experimental into a setting.
+        if std::mem::take(&mut self.experimental.art_colors) {
+            self.adapt_colors = true;
+        }
+    }
+
     /// Reads the settings file without changing anything (the window's first
     /// size, before the app starts). `None` when missing or unreadable.
     pub fn read(path: &Path) -> Option<Self> {
@@ -219,6 +282,45 @@ mod tests {
         assert_eq!(login("", "luke").account_id(), None);
         // Fixed across builds: downloads live in a folder named after it.
         assert_eq!(login("http://localhost:4533", "admin").account_id(), Some(0x5cd1_2c42));
+    }
+
+    #[test]
+    fn colors_are_saved_and_read_back() {
+        use crate::theme::Accent;
+        let s = Settings::default();
+        assert_eq!((s.accent, s.adapt_colors), (Accent::Blue, false), "the design's own blue, not adapting");
+        for accent in [Accent::Teal, Accent::Custom([12, 200, 99])] {
+            let s = Settings { accent, adapt_colors: true, ..Default::default() };
+            let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+            assert_eq!((back.accent, back.adapt_colors), (accent, true));
+        }
+        // An older file has neither; a newer one may name a preset this build lacks.
+        let old: Settings = serde_json::from_str(r#"{"server": "", "username": ""}"#).unwrap();
+        assert_eq!((old.accent, old.adapt_colors), (Accent::Blue, false));
+        let newer: Settings = serde_json::from_str(r#"{"server": "", "username": "", "accent": "chartreuse", "theme": "dark"}"#).unwrap();
+        assert_eq!(newer.accent, Accent::Blue);
+        assert_eq!(newer.theme, crate::theme::ThemePref::Dark, "the rest still reads");
+    }
+
+    #[test]
+    fn the_experimental_art_colors_switch_becomes_the_setting() {
+        let mut s: Settings = serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"art_colors": true, "backdrop": true}}"#).unwrap();
+        s.migrate();
+        assert!(s.adapt_colors);
+        assert!(!s.experimental.art_colors);
+        let saved = serde_json::to_string(&s).unwrap();
+        assert!(!saved.contains("art_colors"), "{saved}");
+    }
+
+    #[test]
+    fn appearance_switches_start_off_and_experiments_that_moved_start_over() {
+        let fresh = Settings::default();
+        assert!(!fresh.backdrop && !fresh.waveform && !fresh.adapt_colors && !fresh.alpha_rail && fresh.experimental.all_off());
+        // An experiment's switch isn't carried over when the feature moves
+        // out of Experimental: the old key is dropped, the rest still reads.
+        let mut s: Settings = serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"backdrop": true, "waveform": true, "spectrum": true}}"#).unwrap();
+        s.migrate();
+        assert!(!s.backdrop && !s.waveform && s.experimental.spectrum);
     }
 
     #[cfg(target_os = "macos")]

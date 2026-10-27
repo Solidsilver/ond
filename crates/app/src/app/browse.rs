@@ -1,9 +1,11 @@
 //! The main view's router and the album-grid places: Recently Added, Albums,
 //! Artists, an artist's page, and albums by genre / year / label.
 
+use super::OfflineAction;
 use super::view_ctx::ViewCtx;
-use super::widgets::{Mark, choice, elide};
-use super::{Action, AlbumSort, Data, Keep, OndApp, QueueAction};
+use super::widgets::{Mark, choice, elide, view_picker};
+use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
+use crate::settings::ViewMode;
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
@@ -11,10 +13,12 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
 
 const TILE_MIN: f32 = 160.0;
-const GAP_X: f32 = 20.0;
-const GAP_Y: f32 = 24.0;
+pub(super) const GAP_X: f32 = 20.0;
+pub(super) const GAP_Y: f32 = 24.0;
 /// Title + artist lines under the art.
-const LABEL_H: f32 = 40.0;
+pub(super) const LABEL_H: f32 = 40.0;
+/// The photo beside an artist page's name.
+const ARTIST_PHOTO: f32 = 96.0;
 
 /// Short name for a place, for breadcrumbs.
 pub fn route_label(route: &Route, data: &Data) -> String {
@@ -32,8 +36,9 @@ pub fn route_label(route: &Route, data: &Data) -> String {
     }
 }
 
-/// Indices into `data.albums` for a grid place, in display order.
-pub fn grid_ids(route: &Route, sort: AlbumSort, data: &Data) -> Vec<usize> {
+/// Indices into `data.albums` for a grid place, in display order (Albums'
+/// turned around when `descending`).
+pub fn grid_ids(route: &Route, sort: AlbumSort, descending: bool, data: &Data) -> Vec<usize> {
     let albums = &data.albums;
     let mut ids: Vec<usize> = match route {
         Route::Recent => {
@@ -73,6 +78,9 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, data: &Data) -> Vec<usize> {
         AlbumSort::Year => ids.sort_by_key(|&i| (albums[i].year.unwrap_or(i32::MAX), albums[i].name.to_lowercase())),
         AlbumSort::Added => ids.sort_by(|&a, &b| albums[b].created.cmp(&albums[a].created)),
     }
+    if descending && *route == Route::Albums {
+        ids.reverse();
+    }
     ids
 }
 
@@ -81,39 +89,54 @@ impl OndApp {
         self.trail_bar(ui);
         let route = self.ui.nav.current().clone();
         match &route {
-            Route::Recent => {
-                self.view().heading(ui, "Recently added", None);
-                self.view().grid_place(ui, &route);
-            }
-            Route::Albums => {
-                let n = self.data.albums.len();
-                ui.horizontal(|ui| {
-                    self.view().heading(ui, "Albums", Some(format!("{n}")));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Right-to-left layout: the pill itself still reads left to right.
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            choice(ui, &AlbumSort::ALL, &mut self.ui.sort, None, |s| s.label().into());
-                        });
-                    });
-                });
-                self.view().grid_place(ui, &route);
-            }
+            Route::Recent | Route::Albums | Route::Filter { .. } => self.albums_place(ui, &route),
             Route::Artists => self.view().artists_page(ui),
             Route::Songs => self.view().songs_page(ui),
             Route::Artist { name, .. } => self.artist_page(ui, &route, name),
             Route::Album(id) => self.view().album_page(ui, id),
             Route::Playlist { id, name } => self.view().playlist_page(ui, id, name),
             Route::Favorites => self.view().favorites_page(ui),
+            Route::Offline => self.view().offline_page(ui),
+        }
+    }
+
+    /// A page of albums (Albums, Recently added, a genre, year or label): its
+    /// heading, the sort (Albums only) and the grid/list picker, then the
+    /// albums as tiles or as a table.
+    fn albums_place(&mut self, ui: &mut Ui, route: &Route) {
+        let (title, sub) = match route {
+            Route::Albums => ("Albums".to_owned(), Some(self.data.albums.len().to_string())),
             Route::Filter { kind, value } => {
                 let what = match kind {
                     FilterKind::Genre => "Genre",
                     FilterKind::Year => "Year",
                     FilterKind::Label => "Label",
                 };
-                self.view().heading(ui, value, Some(what.to_owned()));
-                self.view().grid_place(ui, &route);
+                (value.clone(), Some(what.to_owned()))
             }
-            Route::Offline => self.view().offline_page(ui),
+            _ => ("Recently added".to_owned(), None),
+        };
+        let mut view = self.ui.prefs.album_view;
+        ui.horizontal(|ui| {
+            self.view().heading(ui, &title, sub);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if view_picker(ui, &mut view) {
+                    self.actions.push(Action::Prefs(PrefsAction::AlbumView(view)));
+                }
+                if *route == Route::Albums {
+                    ui.add_space(8.0);
+                    // Right-to-left layout: the pill itself still reads left to right.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if choice(ui, &AlbumSort::ALL, &mut self.ui.sort, None, |s| s.label().into()) {
+                            self.ui.sort_desc = false;
+                        }
+                    });
+                }
+            });
+        });
+        match view {
+            ViewMode::Grid => self.view().grid_place(ui, route),
+            ViewMode::List => self.view().album_list(ui, route),
         }
     }
 
@@ -167,26 +190,21 @@ impl OndApp {
             1 => Some("1 album".to_owned()),
             n => Some(format!("{n} albums")),
         };
-        self.view().heading(ui, name, sub);
-        if !own.is_empty() {
-            ui.horizontal(|ui| {
-                if super::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
-                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::Play { start: 0 }));
-                }
-                ui.add_space(4.0);
-                if super::widgets::secondary(ui, "Play next").clicked() {
-                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::PlayNext));
-                }
-                // Only artists the server knows by id can be loved.
-                if let Route::Artist { id: Some(id), .. } = route {
-                    let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
-                    if super::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
-                        self.actions.push(Action::ToggleStar { kind: crate::favorites::StarKind::Artist, id: id.clone(), track: None, name: Some(name.to_owned()) });
-                    }
-                }
-            });
-            ui.add_space(14.0);
-        }
+        let id = match route {
+            Route::Artist { id, .. } => id.as_deref(),
+            _ => None,
+        };
+        // Only artists the server has a photo id for get one (or their initial).
+        let photo = self.ui.prefs.artist_photos.then(|| self.search.index.as_ref()?.artist(id, name)?.cover.clone()).flatten();
+        ui.horizontal(|ui| {
+            if let Some(cover) = &photo {
+                let (rect, _) = ui.allocate_exact_size(vec2(ARTIST_PHOTO, ARTIST_PHOTO), Sense::hover());
+                super::artists::avatar(&mut self.art, ui, &t, rect, Some(cover), name);
+                ui.add_space(14.0);
+            }
+            ui.vertical(|ui| self.artist_header(ui, route, name, sub, !own.is_empty()));
+        });
+        ui.add_space(14.0);
         let (cols, tile) = grid_metrics(ui.available_width());
         super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
             for chunk in own.chunks(cols) {
@@ -205,6 +223,30 @@ impl OndApp {
                 ui.label(egui::RichText::new(text).color(t.muted));
             }
         }));
+    }
+
+    /// The artist's name and album count, and (when they have albums) the
+    /// buttons to play them and love them.
+    fn artist_header(&mut self, ui: &mut Ui, route: &Route, name: &str, sub: Option<String>, albums: bool) {
+        self.view().heading(ui, name, sub);
+        if albums {
+            ui.horizontal(|ui| {
+                if super::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
+                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::Play { start: 0 }));
+                }
+                ui.add_space(4.0);
+                if super::widgets::secondary(ui, "Play next").clicked() {
+                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::PlayNext));
+                }
+                // Only artists the server knows by id can be loved.
+                if let Route::Artist { id: Some(id), .. } = route {
+                    let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
+                    if super::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
+                        self.actions.push(Action::ToggleStar { kind: crate::favorites::StarKind::Artist, id: id.clone(), track: None, name: Some(name.to_owned()) });
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -279,8 +321,9 @@ pub fn play_shuffle(ui: &mut Ui) -> Option<QueueAction> {
     picked
 }
 
-/// "Make available offline" / "Remove download", with the key that does it
-/// where there is one.
+/// The menu item that keeps something offline: "Make available offline" /
+/// "Remove download" (`kept`), with the key that does it where there is one.
+/// `what` names it as a [`Keep`], built only when clicked.
 pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl FnOnce() -> Keep, actions: &mut Vec<Action>) {
     let label = if kept { "Remove download" } else { "Make available offline" };
     let mut button = egui::Button::new(label);
@@ -288,7 +331,7 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
         button = button.shortcut_text(crate::keys::shown(keys));
     }
     if ui.add(button).clicked() {
-        actions.push(Action::KeepOffline(what(), !kept));
+        actions.push(Action::Offline(OfflineAction::Keep(what(), !kept)));
     }
 }
 
@@ -306,8 +349,8 @@ impl ViewCtx<'_> {
     }
 
     pub(super) fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
-        let (sort, data) = (self.ui.sort, &self.data);
-        self.ui.grid.get((route.clone(), sort, data.version), || grid_ids(route, sort, data))
+        let (sort, desc, data) = (self.ui.sort, self.ui.sort_desc, &self.data);
+        self.ui.grid.get((route.clone(), sort, desc, data.version), || grid_ids(route, sort, desc, data))
     }
 
     /// A full-height, virtualized grid: only visible rows are laid out, so only
@@ -319,22 +362,71 @@ impl ViewCtx<'_> {
             ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
             return;
         }
-        let (cols, tile) = grid_metrics(ui.available_width());
+        let marks = self.grid_marks(route);
+        let margin = if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() };
+        let (cols, tile) = grid_metrics(ui.available_width() - f32::from(margin.right) + super::layout::GUTTER);
         let rows = ids.len().div_ceil(cols);
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("grid", format!("{route:?}"))).auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, tile + LABEL_H + GAP_Y, rows, |ui, range| {
-            for row in range {
-                let slice = &ids[row * cols..((row + 1) * cols).min(ids.len())];
-                self.grid_row(ui, slice, tile);
+        let row_h = tile + LABEL_H + GAP_Y;
+        super::layout::into_gutter(ui, |ui| {
+            let area = ui.available_rect_before_wrap();
+            let row_spacing = ui.spacing().item_spacing.y;
+            let mut top = 0;
+            let mut scroll = egui::ScrollArea::vertical().id_salt(("grid", route)).auto_shrink(false).content_margin(margin);
+            if let Some(y) = super::alpha::take_jump(ui, ("grid", route)) {
+                scroll = scroll.vertical_scroll_offset(y);
             }
-        }));
+            let out = scroll.show_rows(ui, row_h, rows, |ui, range| {
+                top = range.start * cols;
+                let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
+                for row in range.clone() {
+                    self.grid_row(ui, row_ids(row), tile);
+                }
+                // The rows just above and below load next, after what's on screen.
+                for row in [range.start.checked_sub(1), Some(range.end).filter(|&r| r < rows)].into_iter().flatten() {
+                    for &i in row_ids(row) {
+                        if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
+                            self.art.prefetch(cover, tile);
+                        }
+                    }
+                }
+            });
+            if let Some(marks) = marks {
+                super::alpha::rail(ui, ("grid", route), area, &out, &marks, top, |i| i / cols, row_h + row_spacing);
+            }
+        });
+    }
+
+    /// Where each letter starts in a grid sorted by name (albums by artist or
+    /// by title), for the alphabet rail; `None` for one sorted otherwise, or
+    /// with the rail off.
+    pub(super) fn grid_marks(&mut self, route: &Route) -> Option<Arc<super::alpha::Marks>> {
+        if !self.ui.prefs.alpha_rail {
+            return None;
+        }
+        let sort = match route {
+            Route::Albums => self.ui.sort,
+            Route::Filter { .. } => AlbumSort::Artist,
+            _ => return None,
+        };
+        let by_title = match sort {
+            AlbumSort::Artist => false,
+            AlbumSort::Title => true,
+            _ => return None,
+        };
+        let ids = self.cached_grid(route);
+        let albums = &self.data.albums;
+        Some(self.ui.grid_marks.get((route.clone(), sort, self.ui.sort_desc, self.data.version), || {
+            super::alpha::Marks::new(ids.iter().map(|&i| if by_title { albums[i].name.as_str() } else { albums[i].artist.as_deref().unwrap_or("") }))
+        }))
     }
 
     /// One grid row of tiles, followed by the row gap.
     pub(super) fn grid_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32) {
+        let t = Tokens::of(ui);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = GAP_X;
             for &i in ids {
-                self.album_tile(ui, i, tile);
+                self.album_tile(ui, &t, i, tile);
             }
         });
         ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
@@ -342,22 +434,22 @@ impl ViewCtx<'_> {
 
     /// Cover, title and artist. Click opens; double-click or the hover play
     /// button plays; right-click has the queue actions.
-    pub(super) fn album_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32) {
-        let t = Tokens::of(ui);
+    pub(super) fn album_tile(&mut self, ui: &mut Ui, t: &Tokens, idx: usize, tile: f32) {
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
-        let album = &self.data.albums[idx];
-        let id = album.id.clone();
+        // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
+        let data = self.data;
+        let album = &data.albums[idx];
+        let id = album.id.as_str();
+        let pin = self.album_pin(id);
         if ui.is_rect_visible(rect) {
             let art = Rect::from_min_size(rect.min, vec2(tile, tile));
-            let cover = album.cover_art.clone();
-            let (name, artist) = (album.name.clone(), album.artist.clone().unwrap_or_default());
-            self.art.paint(ui, art, cover.as_deref(), 6.0);
+            self.art.paint(ui, art, album.cover_art.as_deref(), 6.0);
             // Only albums kept offline carry a mark; nothing otherwise.
-            let mark = Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Album(id.clone())));
+            let mark = Mark::of_pin(pin);
             let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
-            let title = elide(ui, &name, FontId::proportional(13.0), t.text, tile);
+            let title = elide(ui, &album.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
-            let sub = elide(ui, &artist, FontId::proportional(12.0), t.muted, tile - mark_w);
+            let sub = elide(ui, album.artist.as_deref().unwrap_or_default(), FontId::proportional(12.0), t.muted, tile - mark_w);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
             if let Some(m) = mark {
                 super::widgets::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
@@ -365,7 +457,7 @@ impl ViewCtx<'_> {
             // The button sits on the tile, so with the pointer on it the tile
             // itself doesn't read as hovered: it's there whenever either is.
             let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
-            let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", &id)), Sense::click());
+            let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", id)), Sense::click());
             if resp.hovered() || play_resp.hovered() {
                 let fill = if play_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
                 let fg = if play_resp.hovered() { t.on_accent } else { t.text };
@@ -373,64 +465,32 @@ impl ViewCtx<'_> {
                 icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(1.0, 0.0), vec2(12.0, 12.0)), Icon::Play, fg);
                 play_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Play album"));
                 if play_resp.clicked() {
-                    self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
+                    self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
                     return;
                 }
             }
         }
-        let album = &self.data.albums[idx];
-        let label = format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist"));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        let artist = album.artist.clone();
-        let artist_ref = album.artist_ref.clone();
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist"))));
         if resp.double_clicked() {
-            self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 }));
+            self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
         } else if resp.clicked() {
-            self.actions.push(Action::Go(Route::Album(id.clone())));
+            self.actions.push(Action::Go(Route::Album(id.to_owned())));
         }
-        let kept = self.downloads.snap.pin(&offline::Pin::Album(id.clone())).is_some();
-        resp.context_menu(|ui| {
-            collection_menu(ui, &Collection::Album(id.clone()), true, kept, None, self.actions);
-            if let Some(name) = artist {
-                ui.separator();
-                if ui.button(format!("Go to {name}")).clicked() {
-                    self.actions.push(Action::Go(Route::Artist { name, id: artist_ref }));
-                }
-            }
-        });
+        let kept = pin.is_some();
+        resp.context_menu(|ui| self.album_menu(ui, album, kept));
     }
 
-    pub(super) fn artists_page(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
-        let Some(index) = &self.search.index else {
-            self.heading(ui, "Artists", None);
-            ui.label(egui::RichText::new("Loading your library…").color(t.muted));
-            return;
-        };
-        // The server's artists (with ids) once synced, else album-artist names.
-        let artists = Arc::clone(&index.artists);
-        self.heading(ui, "Artists", Some(artists.len().to_string()));
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false).content_margin(super::layout::gutter()).show_rows(ui, 32.0, artists.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for a in &artists[range] {
-                let (name, id, n) = (&a.name, &a.id, &a.albums);
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
-                if resp.hovered() {
-                    ui.painter().rect_filled(rect, 6.0, t.hover);
-                }
-                let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 100.0);
-                ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
-                let count = crate::fmt::plural(*n, "album");
-                ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, count, FontId::proportional(12.0), t.muted);
-                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-                if resp.clicked() {
-                    let id = id.clone().or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name)).and_then(|a| a.artist_ref.clone()));
-                    self.actions.push(Action::Go(Route::Artist { name: name.clone(), id }));
-                }
-                resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(name.clone()), true, false, None, self.actions));
+    /// An album's right-click menu, on its tile or its row.
+    pub(super) fn album_menu(&mut self, ui: &mut Ui, album: &library::Album, kept: bool) {
+        collection_menu(ui, &Collection::Album(album.id.clone()), true, kept, None, self.actions);
+        if let Some(name) = &album.artist {
+            ui.separator();
+            if ui.button(format!("Go to {name}")).clicked() {
+                self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: album.artist_ref.clone() }));
             }
-        }));
+        }
     }
+
 }
 
 #[cfg(test)]
@@ -474,24 +534,24 @@ mod tests {
     #[test]
     fn recent_prefers_server_order_then_created() {
         let mut d = data();
-        assert_eq!(names(&d, &grid_ids(&Route::Recent, AlbumSort::Artist, &d)), ["Portrait in Jazz", "Explorations", "Kind of Blue"]);
+        assert_eq!(names(&d, &grid_ids(&Route::Recent, AlbumSort::Artist, false, &d)), ["Portrait in Jazz", "Explorations", "Kind of Blue"]);
         d.newest = vec!["b".into(), "missing".into(), "a".into()];
-        assert_eq!(names(&d, &grid_ids(&Route::Recent, AlbumSort::Artist, &d)), ["Kind of Blue", "Portrait in Jazz"]);
+        assert_eq!(names(&d, &grid_ids(&Route::Recent, AlbumSort::Artist, false, &d)), ["Kind of Blue", "Portrait in Jazz"]);
     }
 
     #[test]
     fn sorts_and_filters() {
         let d = data();
-        assert_eq!(names(&d, &grid_ids(&Route::Albums, AlbumSort::Title, &d)), ["Explorations", "Kind of Blue", "Portrait in Jazz"]);
-        assert_eq!(names(&d, &grid_ids(&Route::Albums, AlbumSort::Year, &d))[0], "Kind of Blue");
+        assert_eq!(names(&d, &grid_ids(&Route::Albums, AlbumSort::Title, false, &d)), ["Explorations", "Kind of Blue", "Portrait in Jazz"]);
+        assert_eq!(names(&d, &grid_ids(&Route::Albums, AlbumSort::Year, false, &d))[0], "Kind of Blue");
         let artist = Route::Artist { name: "Bill Evans".into(), id: None };
-        assert_eq!(names(&d, &grid_ids(&artist, AlbumSort::Title, &d)), ["Portrait in Jazz", "Explorations"]);
+        assert_eq!(names(&d, &grid_ids(&artist, AlbumSort::Title, false, &d)), ["Portrait in Jazz", "Explorations"]);
         let year = Route::Filter { kind: FilterKind::Year, value: "1959".into() };
-        assert_eq!(names(&d, &grid_ids(&year, AlbumSort::Artist, &d)), ["Kind of Blue"]);
+        assert_eq!(names(&d, &grid_ids(&year, AlbumSort::Artist, false, &d)), ["Kind of Blue"]);
         let genre = Route::Filter { kind: FilterKind::Genre, value: "jazz".into() };
-        assert_eq!(grid_ids(&genre, AlbumSort::Artist, &d).len(), 3);
+        assert_eq!(grid_ids(&genre, AlbumSort::Artist, false, &d).len(), 3);
         let label = Route::Filter { kind: FilterKind::Label, value: "Blue Note".into() };
-        assert!(grid_ids(&label, AlbumSort::Artist, &d).is_empty());
+        assert!(grid_ids(&label, AlbumSort::Artist, false, &d).is_empty());
     }
 
     #[test]

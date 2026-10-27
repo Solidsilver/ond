@@ -5,6 +5,7 @@
 //! lyrics view, smaller, is the full window's sidebar "Lyrics" tab. A quiet
 //! details strip folds out under the transport.
 
+use super::WindowAction;
 use super::view_ctx::ViewCtx;
 use super::widgets::{elide, heart_button, link, link_line};
 use super::seek::SeekStyle;
@@ -14,6 +15,7 @@ use crate::icons::{self, Icon};
 use crate::lyrics::{self, Fetch, Lyrics};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
+use crate::visuals::over_art::OnArt;
 use crate::window::WindowMode;
 use audio::PlayState;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -21,6 +23,12 @@ use library::Track;
 
 /// Height of everything under the artwork in the player column.
 const BELOW_ART_H: f32 = 272.0;
+/// The compact player block (no room for the big artwork): the artwork's
+/// side beside the title, and the gap between them.
+const COMPACT_ART: f32 = 88.0;
+const COMPACT_ART_GAP: f32 = 8.0;
+/// Room the waveform seek bar adds, when that's on.
+const WAVE_EXTRA: f32 = 16.0;
 /// Room the open details strip takes.
 const DETAILS_H: f32 = 110.0;
 /// The queue keeps at least this much of the Player window.
@@ -32,11 +40,12 @@ const SIDEBAR_LYRIC: f32 = 15.5;
 pub const PLAYER_BAR_H: f32 = 40.0;
 
 impl ViewCtx<'_> {
-
     /// The Player's top bar, which is also its title bar: the traffic lights
-    /// on the left (macOS), Mini and Full window on the right. Its empty part
-    /// moves the window; a double-click zooms it.
-    pub(super) fn player_bar(&mut self, ui: &mut Ui) {
+    /// on the left (macOS), Full window and Mini on the right (and on Linux
+    /// the window's own buttons). Its empty part moves the window; a
+    /// double-click zooms it. `on_art`: how to draw the buttons over the
+    /// blurred backdrop, when that's behind the bar.
+    pub(super) fn player_bar(&mut self, ui: &mut Ui, on_art: Option<OnArt>) {
         let t = Tokens::of(ui);
         let rect = ui.max_rect();
         let bg = ui.interact(rect, ui.scope_id().with("player-titlebar"), Sense::click_and_drag());
@@ -46,22 +55,31 @@ impl ViewCtx<'_> {
         if bg.double_clicked() {
             crate::chrome::title_double_click(ui.ctx());
         }
-        crate::csd::set_bar(ui.ctx(), rect);
+        crate::csd::set_bar(ui.ctx(), rect, on_art);
+        let fg = on_art.map_or(t.muted, |o| o.fg);
         let mut right = rect.shrink2(vec2(10.0, 0.0));
         // Our own window buttons (Linux) take the very end.
         right.max.x -= crate::csd::reserved(ui.ctx(), crate::csd::Side::Right);
         ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            if let Some(o) = on_art {
+                o.apply(ui);
+            }
             for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⇧⌘M)", WindowMode::Mini)] {
-                if icons::sized_button(ui, icon, label, vec2(28.0, 28.0), 12.0, Some(t.muted)).clicked() {
-                    self.actions.push(Action::SetMode(mode));
+                let r = ui.available_rect_before_wrap();
+                let slot = Rect::from_min_max(pos2(r.right() - 28.0, r.center().y - 14.0), pos2(r.right(), r.center().y + 14.0));
+                if let Some(scrim) = on_art.and_then(|o| o.scrim) {
+                    ui.painter().circle_filled(slot.center(), 13.0, scrim);
+                }
+                if icons::sized_button(ui, icon, label, vec2(28.0, 28.0), 12.0, Some(fg)).clicked() {
+                    self.actions.push(Action::Window(WindowAction::SetMode(mode)));
                 }
             }
         });
     }
 
-    /// Asks the server for `track`'s lyrics the first time something shows them.
-    /// Asks for `track`'s lyrics the first time a lyrics view needs them.
+    /// Asks the server for `track`'s lyrics the first time a lyrics view
+    /// needs them.
     pub(super) fn ensure_lyrics(&mut self, track: &Track) {
         if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
             self.actions.push(Action::NeedLyrics(Box::new(track.clone())));
@@ -76,17 +94,16 @@ impl ViewCtx<'_> {
             ui.add_space(8.0);
             ui.label(egui::RichText::new(text).size(12.5).color(t.muted));
         };
-        let Some(track) = self.player.queue.current.as_ref().map(|c| c.track.clone()) else {
+        // Borrowed from the player and the lyrics, not from `self`, so drawing
+        // can take `&mut self`.
+        let (player, fetched) = (self.player, self.lyrics);
+        let Some(track) = player.queue.current.as_ref().map(|c| &c.track) else {
             note(ui, "Nothing playing.");
             return;
         };
-        self.ensure_lyrics(&track);
-        match self.lyrics.get(&track.id) {
-            Some(Fetch::Done(Some(l))) => {
-                let l = l.clone();
-                let bg = t.panel;
-                self.lyrics_block(ui, &track, &l, size, bg);
-            }
+        self.ensure_lyrics(track);
+        match fetched.get(&track.id) {
+            Some(Fetch::Done(Some(l))) => self.lyrics_block(ui, track, l, size, t.panel),
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
             _ if self.session.client.is_none() => note(ui, "Lyrics load when the server is connected."),
             _ => note(ui, "No lyrics for this song."),
@@ -104,14 +121,30 @@ impl ViewCtx<'_> {
     /// details row a lyrics toggle.
     pub(super) fn player_block(&mut self, ui: &mut Ui, track: &Track, side: Option<f32>, window: bool) {
         let width = ui.available_width();
-        let album = self.data.album(&track.album_id).cloned();
-        let cover = self.data.cover_for(track).map(str::to_owned);
+        let data = self.data;
+        let album = data.album(&track.album_id);
+        let cover = data.cover_for(track);
         let art = |this: &mut Self, ui: &mut Ui, side: f32| {
             let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
             let dark = ui.visuals().dark_mode;
             let shadow = egui::Shadow { offset: [0, (side / 40.0) as i8], blur: (side / 14.0).min(28.0) as u8, spread: 0, color: Color32::from_black_alpha(if dark { 110 } else { 46 }) };
             ui.painter().add(shadow.as_shape(art, 8));
-            this.art.paint(ui, art, cover.as_deref(), if side < 120.0 { 6.0 } else { 8.0 });
+            this.art.paint(ui, art, cover, if side < 120.0 { 6.0 } else { 8.0 });
+            // The live spectrum along the foot of the artwork (experimental).
+            if side >= 120.0
+                && this.ui.prefs.experimental.spectrum
+                && let Some(f) = this.listen(ui)
+            {
+                let inset = (side * 0.05).round();
+                let area = Rect::from_min_max(pos2(art.left() + inset, art.bottom() - side * 0.2), pos2(art.right() - inset, art.bottom() - inset * 0.6));
+                let n = ((area.width() / 9.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
+                // Light bars over a dark foot of the cover, dark over a light one;
+                // see-through either way (a meter, not a control).
+                let under = cover.and_then(|c| this.art.look(c)).and_then(|l| l.backdrop.clone());
+                let uv = |b: &crate::visuals::backdrop::Blurred| crate::visuals::over_art::region(&b.image, crate::visuals::over_art::uv_of(area, art, crate::art::crop_uv(1.0)));
+                let on = under.map_or(OnArt::plain(Color32::WHITE), |b| OnArt::pick(uv(&b), Color32::WHITE, crate::visuals::over_art::GRAPHIC));
+                crate::visuals::paint_bars(ui.painter(), area, &crate::visuals::spectrum::grouped(&f.bands, n), on.fg.gamma_multiply(0.47));
+            }
         };
 
         let compact = side.is_none();
@@ -121,12 +154,12 @@ impl ViewCtx<'_> {
         }
         ui.horizontal(|ui| {
             if compact {
-                art(self, ui, 88.0);
-                ui.add_space(8.0);
+                art(self, ui, COMPACT_ART);
+                ui.add_space(COMPACT_ART_GAP);
             }
             ui.vertical(|ui| {
                 ui.add_space(if compact { 18.0 } else { 0.0 });
-                self.title_links(ui, track, album.as_ref(), if compact { width - 96.0 } else { width });
+                self.title_links(ui, track, album, if compact { width - (COMPACT_ART + COMPACT_ART_GAP) } else { width });
             });
         });
         ui.add_space(if compact { 12.0 } else { 18.0 });
@@ -187,7 +220,10 @@ impl ViewCtx<'_> {
     /// elapsed and remaining underneath.
     pub(super) fn big_seek(&mut self, ui: &mut Ui, width: f32) {
         let t = Tokens::of(ui);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, 16.0), Sense::hover());
+        // The waveform needs the room; the layout keeps it while that's on,
+        // so nothing moves when the waveform arrives.
+        let wave = self.ui.prefs.waveform;
+        let (rect, _) = ui.allocate_exact_size(vec2(width, if wave { 16.0 + WAVE_EXTRA } else { 16.0 }), Sense::hover());
         let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
         let style = SeekStyle {
             track: t.hairline,
@@ -199,6 +235,7 @@ impl ViewCtx<'_> {
             grow: 0.0,
             knob: t.text,
             knob_r: 6.0,
+            wave_h: if wave { 13.0 } else { 0.0 },
         };
         let (shown, _) = self.seek_line(ui, bar, rect, "player-seek", &style);
         let (elapsed, remaining) = self.seek_times(shown);
@@ -259,7 +296,7 @@ impl ViewCtx<'_> {
             }
             if lyrics_toggle {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let open = self.lyrics_drawer();
+                    let open = self.ui.prefs.lyrics_open;
                     let color = if open { t.accent } else { t.muted };
                     let label = if open { "Hide lyrics (⌥⌘L)" } else { "Show lyrics (⌥⌘L)" };
                     let b = icons::sized_button(ui, Icon::Lyrics, label, vec2(28.0, 24.0), 14.0, Some(color));
@@ -267,7 +304,7 @@ impl ViewCtx<'_> {
                         ui.painter().rect_filled(b.rect, 6.0, t.accent.gamma_multiply(0.12));
                     }
                     if b.clicked() {
-                        self.actions.push(Action::SetLyricsDrawer(!open));
+                        self.actions.push(Action::Window(WindowAction::SetLyricsDrawer(!open)));
                     }
                 });
             }
@@ -306,7 +343,7 @@ impl ViewCtx<'_> {
 
         match l {
             Lyrics::Synced(lines) => {
-                let rows = lyrics::rows_synced(lines);
+                let rows = self.ui.memos.lyrics.get(lyrics_key(track, lines.as_ptr() as usize, lines.len(), true), || lyrics::rows_synced(lines));
                 let cur = lyrics::current(lines, pos_ms);
                 // The line last followed, and the pass it was seen on: a stale
                 // entry (the view was closed meanwhile) re-places it on reopening.
@@ -319,7 +356,7 @@ impl ViewCtx<'_> {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.add_space((view_h * 0.3).max(24.0));
                     let mut first = true;
-                    for row in &rows {
+                    for row in rows.iter() {
                         match row {
                             lyrics::Row::Section(s) => section_label(ui, s, size, !first),
                             lyrics::Row::Break => ui.add_space((size * 0.8).round()),
@@ -345,8 +382,7 @@ impl ViewCtx<'_> {
                                     ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
                                 }
                                 ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
-                                let label = format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0));
-                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0))));
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     seek_to = Some(lines[i].start_ms as f64 / 1000.0);
                                 }
@@ -388,7 +424,7 @@ impl ViewCtx<'_> {
                 }
             }
             Lyrics::Plain(lines) => {
-                let rows = lyrics::rows_plain(lines);
+                let rows = self.ui.memos.lyrics.get(lyrics_key(track, lines.as_ptr() as usize, lines.len(), false), || lyrics::rows_plain(lines));
                 let font = FontId::proportional(size);
                 egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -397,7 +433,7 @@ impl ViewCtx<'_> {
                         .on_hover_text("These lyrics have no timing, so they can't follow the music");
                     ui.add_space((size * 1.0).round());
                     let mut first = true;
-                    for row in &rows {
+                    for row in rows.iter() {
                         match row {
                             lyrics::Row::Section(s) => section_label(ui, s, size, !first),
                             lyrics::Row::Break => ui.add_space((size * 0.8).round()),
@@ -434,6 +470,14 @@ impl ViewCtx<'_> {
     }
 }
 
+/// The lyrics rows' memo key: the track, the lines' address and count (a
+/// fetch replaces them), and whether they're synced.
+pub(super) type LyricsKey = (u64, usize, usize, bool);
+
+fn lyrics_key(track: &Track, lines: usize, len: usize, synced: bool) -> LyricsKey {
+    (super::view_ctx::hash_str(&track.id), lines, len, synced)
+}
+
 /// Soft fades at the top and bottom of a scrolling column, so lines dissolve
 /// into the page instead of being cut.
 fn edge_fades(ui: &Ui, rect: Rect, bg: Color32, h: f32, top_too: bool) {
@@ -452,6 +496,43 @@ fn edge_fades(ui: &Ui, rect: Rect, bg: Color32, h: f32, top_too: bool) {
         mesh.add_triangle(1, 3, 2);
         ui.painter().add(egui::Shape::mesh(mesh));
     }
+}
+
+/// How strongly the backdrop is washed out under the Player's text: enough
+/// for `text` and `muted` to read over every part of every layer.
+fn backdrop_wash(layers: &[crate::visuals::backdrop::Layer], wash: Color32, text: Color32, muted: Color32) -> f32 {
+    layers.iter().map(|l| crate::visuals::backdrop::wash_alpha(l.blurred.extremes, wash, text, muted)).fold(0.0, f32::max)
+}
+
+/// The wash around the artwork, where only the window buttons sit (they
+/// pick their own colors for what's under them; see `over_art`).
+fn light_wash(alpha: f32) -> f32 {
+    alpha.min(0.4)
+}
+
+/// The blurred cover `layers` (oldest first) filling `rect`, under a wash of
+/// `wash`: light around the artwork (down to `art_bottom`), then by
+/// `text_top` at `alpha`, the strength the text needs.
+fn backdrop_shape(rect: Rect, layers: &[crate::visuals::backdrop::Layer], wash: Color32, alpha: f32, art_bottom: f32, text_top: f32) -> egui::Shape {
+    let uv = crate::art::crop_uv(rect.width() / rect.height().max(1.0));
+    let mut shapes = Vec::new();
+    for l in layers {
+        shapes.push(egui::epaint::RectShape::filled(rect, 0.0, Color32::WHITE.gamma_multiply(l.opacity)).with_texture(l.blurred.texture.id(), uv).into());
+    }
+    let light = light_wash(alpha);
+    let mut mesh = egui::Mesh::default();
+    for (y, a) in [(rect.top(), light), (art_bottom.min(text_top), light), (text_top, alpha), (rect.bottom(), alpha)] {
+        let c = wash.gamma_multiply(a);
+        mesh.colored_vertex(pos2(rect.left(), y), c);
+        mesh.colored_vertex(pos2(rect.right(), y), c);
+    }
+    for k in 0..3 {
+        let i = 2 * k;
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i + 1, i + 3, i + 2);
+    }
+    shapes.push(egui::Shape::mesh(mesh));
+    egui::Shape::Vec(shapes)
 }
 
 /// A lyric line laid out at `width` with comfortable leading (1.45×), so
@@ -493,17 +574,58 @@ fn details_rows(track: &Track, signal: Option<String>, analysis: Option<&analysi
     rows
 }
 
+impl ViewCtx<'_> {
+    /// The Player's artwork, title, seek bar and controls for what's playing,
+    /// or an empty sleeve.
+    fn player_main(&mut self, ui: &mut Ui, side: f32) {
+        let player = self.player;
+        match player.queue.current.as_ref().map(|c| &c.track) {
+            Some(track) => {
+                self.ensure_lyrics(track);
+                self.player_block(ui, track, Some(side), true);
+            }
+            None => {
+                let t = Tokens::of(ui);
+                ui.vertical_centered(|ui| {
+                    let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+                    self.art.paint(ui, art, None, 8.0);
+                    ui.add_space(16.0);
+                    ui.label(egui::RichText::new("Not playing").size(14.0).color(t.muted));
+                });
+            }
+        }
+    }
+}
+
 impl OndApp {
     pub(super) fn player_ui(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
+        // The background, tinted from the album art when that's on, or the
+        // blurred cover under a wash of it.
+        let mut stage = crate::theme::tint_of(ui).map_or(t.bg, |x| x.stage);
+        let layers = self.backdrop_layers(ui.ctx());
+        let window = ui.max_rect();
+        // Drawn under everything, once the artwork's place is known.
+        let under = ui.painter().clone();
+        let backdrop = (!layers.is_empty()).then(|| under.add(egui::Shape::Noop));
+        let wash = stage;
+        let alpha = backdrop_wash(&layers, wash, t.text, t.muted);
+        // The window buttons over the backdrop: colors for what's under them.
+        let bar = Rect::from_min_size(window.min, vec2(window.width(), PLAYER_BAR_H));
+        let crop = crate::art::crop_uv(window.width() / window.height().max(1.0));
+        let bar_art = crate::visuals::backdrop::seen(&layers, crate::visuals::over_art::uv_of(bar, window, crop), wash, light_wash(alpha))
+            .map(|under| OnArt::pick(under, t.muted, crate::visuals::over_art::ICON));
+        if backdrop.is_some() {
+            stage = Color32::TRANSPARENT;
+        }
         egui::Panel::top("player-bar")
             .exact_size(PLAYER_BAR_H)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(t.bg))
-            .show(ui, |ui| self.view().player_bar(ui));
+            .frame(egui::Frame::new().fill(stage))
+            .show(ui, |ui| self.view().player_bar(ui, bar_art));
         self.player_status_bar(ui);
-        if self.lyrics_drawer() {
+        if self.ui.prefs.lyrics_open {
             egui::Panel::right("lyrics-drawer")
                 .exact_size(crate::window::DRAWER_W)
                 .resizable(false)
@@ -513,7 +635,7 @@ impl OndApp {
                         ui.label(egui::RichText::new("Lyrics").font(FontId::new(12.0, semibold())).color(t.muted));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if icons::sized_button(ui, Icon::Close, "Close lyrics (⌥⌘L)", vec2(22.0, 22.0), 9.0, Some(t.muted)).clicked() {
-                                self.actions.push(Action::SetLyricsDrawer(false));
+                                self.actions.push(Action::Window(WindowAction::SetLyricsDrawer(false)));
                             }
                         });
                     });
@@ -522,25 +644,19 @@ impl OndApp {
                 });
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
+            .frame(egui::Frame::new().fill(stage).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
             .show(ui, |ui| {
                 let full = ui.available_rect_before_wrap();
-                let below = BELOW_ART_H + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
+                let wave = if self.ui.prefs.waveform { WAVE_EXTRA } else { 0.0 };
+                let below = BELOW_ART_H + wave + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
+
                 let side = full.width().min(full.height() - below).max(120.0).floor();
-                match self.player.queue.current.as_ref().map(|c| c.track.clone()) {
-                    Some(track) => {
-                        self.view().ensure_lyrics(&track);
-                        self.view().player_block(ui, &track, Some(side), true);
-                    }
-                    None => {
-                        ui.vertical_centered(|ui| {
-                            let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-                            self.art.paint(ui, art, None, 8.0);
-                            ui.add_space(16.0);
-                            ui.label(egui::RichText::new("Not playing").size(14.0).color(t.muted));
-                        });
-                    }
+                if let Some(slot) = backdrop {
+                    let art_bottom = full.top() + if self.player.queue.current.is_some() { side } else { 0.0 };
+                    under.set(slot, backdrop_shape(window, &layers, wash, alpha, art_bottom - side * 0.2, art_bottom + 18.0));
                 }
+
+                self.view().player_main(ui, side);
                 ui.add_space(8.0);
                 let top = ui.cursor().top();
                 ui.painter().hline(full.x_range(), top, egui::Stroke::new(1.0, t.hairline));

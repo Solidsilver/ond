@@ -3,7 +3,8 @@
 //!
 //! [`OfflineStore`] keeps the pins (see [`pins`]) in `offline.json` next to the
 //! files and runs a small download queue on the tokio runtime: two at a time,
-//! resumed with `Range` after an interruption or a restart, retried with
+//! resumed with `Range` after an interruption or a restart (when the server's
+//! file is provably still the same, see [`RESUME_OVERLAP`]), retried with
 //! backoff, and checked against the size the server reported. A track that's
 //! already complete in the stream cache is hard-linked (or copied) instead of
 //! downloaded again.
@@ -23,16 +24,23 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
+use streamcache::disk::{PartFile, blocking};
 use streamcache::fetch::{self, FetchError};
 use tokio::sync::Notify;
 
 const STATE_FILE: &str = "offline.json";
+/// A state file that failed to load, kept under this prefix; see [`load_pins`].
+const SET_ASIDE: &str = "offline.json.bad-";
 /// Downloads running at once.
 const CONCURRENCY: usize = 2;
 /// Failed attempts before a track waits for a manual retry or a reconnect.
 const MAX_ATTEMPTS: u32 = 6;
 /// Progress repaints at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
+/// A resume asks for this much of what the `.part` already holds again, and
+/// appends only if those bytes match: proof that the server's file is still
+/// the one the partial download came from.
+const RESUME_OVERLAP: u64 = 64 * 1024;
 
 /// Makes the stream URL for a track id. The store holds one only while the
 /// server is reachable (see [`OfflineStore::set_source`]).
@@ -111,6 +119,25 @@ pub struct Snapshot {
     pub queued: usize,
     pub active: usize,
     pub failed: usize,
+    /// A state file that couldn't be read was set aside, so files the pins
+    /// don't name are kept (see [`load_pins`]); `None` normally.
+    pub set_aside: Option<SetAside>,
+}
+
+/// The state file couldn't be read and was set aside: the downloads it named
+/// are no longer listed, and their files stay in the folder (no cleanup)
+/// until [`OfflineStore::remove_set_aside`] or the user deletes the
+/// `offline.json.bad-*` file.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SetAside {
+    /// The set-aside state files.
+    pub files: Vec<PathBuf>,
+    /// Files in the folder that the pins don't name.
+    pub unknown: usize,
+    /// Their bytes.
+    pub unknown_bytes: u64,
+    /// [`OfflineStore::remove_set_aside`] is under way.
+    pub removing: bool,
 }
 
 impl Snapshot {
@@ -132,15 +159,33 @@ impl Snapshot {
     }
 }
 
+/// A handle to the store; copies share it. The store shuts down when the last
+/// copy is dropped (see [`Owner`]).
 #[derive(Clone)]
 pub struct OfflineStore {
     inner: Arc<Inner>,
+    _owner: Arc<Owner>,
 }
 
-impl Drop for OfflineStore {
-    /// Waits for queued saves to reach the disk, so reopening (or moving) the
-    /// store right after sees them.
+/// Held only by the [`OfflineStore`] handles, so its drop is the last handle's.
+/// The workers hold [`Inner`] but not this.
+struct Owner {
+    inner: Arc<Inner>,
+    workers: Vec<tokio::task::AbortHandle>,
+}
+
+impl Drop for Owner {
+    /// Stops the store: running downloads stop (their partial files stay for
+    /// next time), the workers end, and nothing it does afterwards reaches the
+    /// disk, so a store opened on the same folder (switching back to this
+    /// account) is the only one writing there. Then waits for saves already
+    /// queued to reach the disk, so reopening (or moving) the store right after
+    /// sees them.
     fn drop(&mut self) {
+        self.inner.close();
+        for w in &self.workers {
+            w.abort();
+        }
         self.inner.flush.wait_for(self.inner.flush.requested.load(Ordering::Acquire), Duration::from_secs(5));
     }
 }
@@ -159,7 +204,7 @@ struct Inner {
     on_change: OnChange,
     /// Track ids whose files should go, deleted on a thread of their own so an
     /// unpin never waits on the disk (or holds the state lock while it does).
-    doomed: Mutex<Sender<Vec<String>>>,
+    doomed: Mutex<Sender<Chore>>,
     /// Pins to write, saved on a thread of their own for the same reason.
     saves: Mutex<Sender<Save>>,
     flush: Arc<Flush>,
@@ -207,6 +252,35 @@ struct State {
     free: Option<(Instant, Option<u64>)>,
     /// Bumped by every change to `pins` that needs saving.
     pins_revision: u64,
+    /// The last handle is gone: nothing more is claimed, saved or deleted.
+    closed: bool,
+    /// Tracks whose files the deleter is removing right now. One pinned again
+    /// meanwhile isn't downloaded until it's done, so the delete can't unlink
+    /// the new partial file.
+    deleting: HashSet<String>,
+    /// A state file was set aside (see [`load_pins`]); `None` normally.
+    set_aside: Option<Aside>,
+    /// File names [`Inner::sweep`] is deleting right now: a track pinned
+    /// again meanwhile whose file has one of them waits until it's done.
+    sweeping: HashSet<String>,
+}
+
+/// What [`State::set_aside`] keeps.
+struct Aside {
+    /// The `offline.json.bad-*` files.
+    files: Vec<PathBuf>,
+    /// The files in the folder the pins didn't name at open, with their
+    /// sizes. Those pinned since are left out when counting.
+    strays: Vec<(String, u64)>,
+    removing: bool,
+}
+
+/// Work for the deleter thread.
+enum Chore {
+    /// Delete these tracks' files.
+    Delete(Vec<String>),
+    /// [`Inner::sweep`].
+    Sweep,
 }
 
 struct Active {
@@ -247,20 +321,21 @@ impl OfflineStore {
     /// starts the download workers on `rt`.
     pub fn open(cfg: OfflineConfig, rt: tokio::runtime::Handle, on_change: OnChange) -> io::Result<Self> {
         std::fs::create_dir_all(&cfg.dir)?;
-        let mut pins: Pins = match std::fs::read(cfg.dir.join(STATE_FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                tracing::warn!("offline state unreadable, starting empty: {e}");
-                Pins::default()
-            }),
-            Err(_) => Pins::default(),
-        };
+        remove_moving(&cfg.dir);
+        let (mut pins, trusted) = load_pins(&cfg.dir);
         // A finished file that's gone (deleted by hand) downloads again.
         for s in pins.tracks.values_mut() {
             if s.done.is_some() && !cfg.dir.join(file_name(&s.r)).is_file() {
                 s.done = None;
             }
         }
-        remove_strays(&cfg.dir, &pins);
+        let set_aside = if trusted {
+            remove_strays(&cfg.dir, &pins);
+            None
+        } else {
+            tracing::warn!("offline: keeping files the pins don't know in {}, while a {SET_ASIDE}* file is there", cfg.dir.display());
+            Some(Aside { files: set_aside_files(&cfg.dir), strays: strays(&cfg.dir, &pins), removing: false })
+        };
         let (doomed, doomed_rx) = std::sync::mpsc::channel();
         let (saves, saves_rx) = std::sync::mpsc::channel();
         let flush = Arc::new(Flush::default());
@@ -285,6 +360,10 @@ impl OfflineStore {
                 snapshot: Arc::new(Snapshot::default()),
                 free: None,
                 pins_revision: 0,
+                closed: false,
+                deleting: HashSet::new(),
+                set_aside,
+                sweeping: HashSet::new(),
             }),
         });
         {
@@ -292,10 +371,14 @@ impl OfflineStore {
             let snap = inner.build_snapshot(&mut st);
             st.snapshot = Arc::new(snap);
         }
-        for _ in 0..CONCURRENCY {
-            let inner = inner.clone();
-            rt.spawn(async move { worker(inner).await });
-        }
+        let workers = (0..CONCURRENCY)
+            .map(|_| {
+                let inner = inner.clone();
+                rt.spawn(async move { worker(inner).await }).abort_handle()
+            })
+            .collect();
+        // From here on, an early return drops this and stops the workers.
+        let owner = Arc::new(Owner { inner: inner.clone(), workers });
         let (weak, dir) = (Arc::downgrade(&inner), inner.dir.clone());
         std::thread::Builder::new()
             .name("offline-delete".into())
@@ -306,7 +389,7 @@ impl OfflineStore {
             .name("offline-save".into())
             .spawn(move || saver(dir, saves_rx, flush))
             .map_err(io::Error::other)?;
-        Ok(Self { inner })
+        Ok(Self { inner, _owner: owner })
     }
 
     pub fn dir(&self) -> &Path {
@@ -349,13 +432,29 @@ impl OfflineStore {
 
     /// Refreshes a pin's track list (the album or playlist changed on the
     /// server). Does nothing if it isn't pinned.
+    ///
+    /// A track not downloaded yet also takes the new suffix and size (the
+    /// file was replaced on the server), so it isn't checked against a stale
+    /// size, and one that failed is tried again now. A download already
+    /// running carries on as it was: it records what it got when it ends.
+    /// A finished file keeps its name and size.
     pub fn update(&self, pin: &Pin, label: impl Into<String>, tracks: Vec<TrackRef>) {
         let mut st = self.inner.lock();
         let Some(rec) = st.pins.record(pin) else { return };
         let same = rec.tracks.len() == tracks.len() && rec.tracks.iter().zip(&tracks).all(|(a, b)| a == &b.id);
         let label = label.into();
-        if same && rec.label == label {
+        let refreshed: Vec<String> = tracks
+            .iter()
+            .filter(|t| st.pins.tracks.get(&t.id).is_some_and(|s| s.done.is_none() && s.r != **t))
+            .map(|t| t.id.clone())
+            .collect();
+        if same && rec.label == label && refreshed.is_empty() {
             return;
+        }
+        for id in &refreshed {
+            if !st.active.contains_key(id) {
+                st.failures.remove(id);
+            }
         }
         let gone = st.pins.set(pin.clone(), label, tracks);
         self.inner.commit(st, gone);
@@ -440,6 +539,21 @@ impl OfflineStore {
         self.inner.changed(st);
     }
 
+    /// After a state file was set aside (see [`Snapshot::set_aside`]): deletes
+    /// the files in the folder the pins don't name, then the set-aside state
+    /// files, which turns cleanup back on. Runs in the background; the
+    /// snapshot says when it's done. Does nothing if nothing was set aside.
+    pub fn remove_set_aside(&self) {
+        let mut st = self.inner.lock();
+        let Some(aside) = st.set_aside.as_mut() else { return };
+        if aside.removing {
+            return;
+        }
+        aside.removing = true;
+        self.inner.changed(st);
+        let _ = self.inner.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(Chore::Sweep);
+    }
+
     /// The current state; cheap to call every frame.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         let mut st = self.inner.lock();
@@ -454,6 +568,20 @@ impl OfflineStore {
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Shuts the store down (the last handle went): running downloads are
+    /// cancelled and idle workers woken to end. Taken under the state lock, so
+    /// a commit is either before it (and its save already counted in
+    /// `flush.requested`) or doesn't happen.
+    fn close(&self) {
+        let mut st = self.lock();
+        st.closed = true;
+        for a in st.active.values() {
+            a.cancel.store(true, Ordering::Relaxed);
+        }
+        drop(st);
+        self.wake.notify_waiters();
     }
 
     /// Bumps the version, wakes the workers and tells the UI.
@@ -502,7 +630,7 @@ impl Inner {
 
     fn delete(&self, ids: Vec<String>) {
         if !ids.is_empty() {
-            let _ = self.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(ids);
+            let _ = self.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(Chore::Delete(ids));
         }
     }
 
@@ -518,12 +646,14 @@ impl Inner {
         }
     }
 
-    /// Picks the next track to fetch and marks it active. Also returns when the
-    /// earliest backoff ends, for the idle wait.
-    fn claim(&self) -> (Option<Job>, Option<Instant>) {
+    /// Picks the next track to fetch and marks it active.
+    fn claim(&self) -> Next {
         let mut st = self.lock();
+        if st.closed {
+            return Next::Stop;
+        }
         if st.pins.paused {
-            return (None, None);
+            return Next::Wait(None);
         }
         let now = Instant::now();
         let mut due: Option<Instant> = None;
@@ -531,8 +661,14 @@ impl Inner {
         let used = st.pins.used() + st.active.values().map(|a| a.total.unwrap_or(0)).sum::<u64>();
         let mut pick = None;
         for id in st.pins.pending() {
-            if st.active.contains_key(id) {
+            if st.active.contains_key(id) || st.deleting.contains(id) {
                 continue;
+            }
+            if !st.sweeping.is_empty() {
+                let name = file_name(&st.pins.tracks[id].r);
+                if st.sweeping.contains(&name) || st.sweeping.contains(&format!("{name}.part")) {
+                    continue;
+                }
             }
             if let Some(f) = st.failures.get(id) {
                 if f.attempts >= MAX_ATTEMPTS {
@@ -550,7 +686,10 @@ impl Inner {
                 blocked_by_limit = true;
                 continue;
             }
-            let from_cache = st.cache.as_ref().and_then(|c| c(&r)).filter(|p| p.is_file());
+            // Not checked on disk here, under the lock: a cached copy that's
+            // gone fails to promote and the job downloads instead (or, with
+            // no server, fails and backs off like any download).
+            let from_cache = st.cache.as_ref().and_then(|c| c(&r));
             let url = st.url.as_ref().map(|u| u(id));
             if from_cache.is_none() && url.is_none() {
                 continue;
@@ -562,7 +701,7 @@ impl Inner {
             st.limit_reached = blocked_by_limit;
             st.version += 1;
         }
-        let Some((r, url, from_cache)) = pick else { return (None, due) };
+        let Some((r, url, from_cache)) = pick else { return Next::Wait(due) };
         let cancel = Arc::new(AtomicBool::new(false));
         st.active.insert(r.id.clone(), Active { cancel: cancel.clone(), done: 0, total: r.size });
         st.version += 1;
@@ -570,7 +709,7 @@ impl Inner {
         let job = Job { part: self.dir.join(format!("{name}.part")), dest: self.dir.join(name), r, url, from_cache, cancel };
         drop(st);
         (self.on_change)();
-        (Some(job), due)
+        Next::Job(job)
     }
 
     fn progress(&self, id: &str, done: u64, total: Option<u64>, note: bool) {
@@ -589,6 +728,11 @@ impl Inner {
     fn complete(&self, job: Job, result: Result<u64, JobError>) {
         let mut st = self.lock();
         st.active.remove(&job.r.id);
+        if st.closed {
+            // Whatever it got to stays on disk for the next store here to
+            // find; this one records nothing more.
+            return;
+        }
         if !st.pins.tracks.contains_key(&job.r.id) {
             // Unpinned while downloading.
             self.changed(st);
@@ -598,6 +742,9 @@ impl Inner {
             Ok(size) => {
                 st.failures.remove(&job.r.id);
                 if let Some(s) = st.pins.tracks.get_mut(&job.r.id) {
+                    // What was downloaded, under the name it got: a re-pin since
+                    // may have brought another suffix or size.
+                    s.r = job.r.clone();
                     s.done = Some(size);
                 }
                 return self.commit(st, Vec::new());
@@ -673,6 +820,12 @@ impl Inner {
                 free
             }
         };
+        let set_aside = st.set_aside.as_ref().map(|a| {
+            // Rare and short-lived, so the names are worked out each time.
+            let known = known_names(&st.pins);
+            let unknown: Vec<u64> = a.strays.iter().filter(|(n, _)| !known.contains(n)).map(|&(_, len)| len).collect();
+            SetAside { files: a.files.clone(), unknown: unknown.len(), unknown_bytes: unknown.iter().sum(), removing: a.removing }
+        });
         Snapshot {
             version: st.version,
             tracks,
@@ -686,22 +839,37 @@ impl Inner {
             queued,
             active: st.active.len(),
             failed,
+            set_aside,
         }
     }
 }
 
+/// What a worker does next.
+enum Next {
+    Job(Job),
+    /// Nothing to do until woken, or until a backoff ends (when there's one).
+    Wait(Option<Instant>),
+    /// The store shut down.
+    Stop,
+}
+
+/// Downloads one track after another until the store shuts down (and is also
+/// aborted then, so a download in flight stops at once).
 async fn worker(inner: Arc<Inner>) {
     loop {
         // Registered before looking, so a change in between still wakes us.
         let notified = inner.wake.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let (job, due) = inner.claim();
-        if let Some(job) = job {
-            let result = run(&inner, &job).await;
-            inner.complete(job, result);
-            continue;
-        }
+        let due = match inner.claim() {
+            Next::Job(job) => {
+                let result = run(&inner, &job).await;
+                inner.complete(job, result);
+                continue;
+            }
+            Next::Wait(due) => due,
+            Next::Stop => return,
+        };
         let wait = due.map_or(Duration::from_secs(60), |d| d.saturating_duration_since(Instant::now()));
         tokio::select! {
             _ = &mut notified => {}
@@ -723,9 +891,10 @@ async fn run(inner: &Inner, job: &Job) -> Result<u64, JobError> {
     download(inner, job, url).await
 }
 
-/// Runs disk work that may block (copies, fsync, renames) on tokio's blocking pool.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
-    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| Err(io::Error::other(e)))
+/// Deletes `path` (if it's there) on the blocking pool.
+async fn remove_file(path: &Path) {
+    let path = path.to_owned();
+    let _ = blocking(move || std::fs::remove_file(path)).await;
 }
 
 /// Takes a complete stream-cache file: a hard link where possible (same
@@ -736,39 +905,78 @@ fn promote(src: &Path, size: Option<u64>, part: &Path, dest: &Path) -> io::Resul
         return Err(io::Error::other("cached file has the wrong size"));
     }
     let _ = std::fs::remove_file(dest);
-    if std::fs::hard_link(src, dest).is_err() {
+    if std::fs::hard_link(src, dest).is_ok() {
+        // A download started earlier isn't needed now.
+        let _ = std::fs::remove_file(part);
+    } else {
         std::fs::copy(src, part)?;
         std::fs::rename(part, dest)?;
     }
     Ok(len)
 }
 
+/// Every touch of the disk here runs on the blocking pool (see [`blocking`]).
 async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> {
-    let mut have = std::fs::metadata(&job.part).map_or(0, |m| m.len());
+    let part = job.part.clone();
+    let mut have = blocking(move || std::fs::metadata(part)).await.map_or(0, |m| m.len());
     if job.r.size.is_some_and(|s| have > s) {
         have = 0;
     }
-    let mut body = match fetch::get_from(&inner.http, url, (have > 0).then_some(have)).await {
+    loop {
+        match fetch_into_part(inner, job, url, have).await? {
+            Some(have) => return finish(job, have).await,
+            // Never twice: from byte 0 there's nothing to match.
+            None => {
+                tracing::info!("offline: {} changed on the server since its partial download; starting over", job.r.id);
+                have = 0;
+            }
+        }
+    }
+}
+
+/// Downloads into the `.part`, resuming after its first `have` bytes when the
+/// server proves it's the same file: its size matches the pin's, and the last
+/// [`RESUME_OVERLAP`] bytes of the `.part`, asked for again, match. Returns
+/// the bytes now in the `.part`, or `None` when the resume didn't line up
+/// (start over from 0).
+async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> Result<Option<u64>, JobError> {
+    let overlap = have.min(RESUME_OVERLAP);
+    let mut body = match fetch::get_from(&inner.http, url, (have > 0).then(|| have - overlap)).await {
         Ok(b) => b,
-        Err(FetchError::RangeNotSatisfiable) if have > 0 && job.r.size == Some(have) => return finish(job, have).await,
+        Err(FetchError::RangeNotSatisfiable) if have > 0 => {
+            // Even the overlap lies past the end: the file shrank.
+            return Ok(None);
+        }
         Err(FetchError::RangeNotSatisfiable) => {
-            let _ = std::fs::remove_file(&job.part);
+            remove_file(&job.part).await;
             return Err(JobError::Failed("server rejected the resume; starting over".into()));
         }
         Err(FetchError::BadRange(e)) => {
             // The server answered the resume from somewhere else: the partial
             // file can't be trusted to line up. Start over.
-            let _ = std::fs::remove_file(&job.part);
+            remove_file(&job.part).await;
             return Err(JobError::Failed(e));
         }
         Err(e) => return Err(JobError::Failed(e.to_string())),
     };
+    // What the resumed body must start with.
+    let mut expect: &[u8] = &[];
+    let tail;
     if !body.ranged {
         // The server ignored the range (or there was none): start over.
         have = 0;
+    } else if have > 0 {
+        if job.r.size.is_some_and(|s| body.total != Some(s)) {
+            return Ok(None);
+        }
+        let part = job.part.clone();
+        tail = streamcache::disk::blocking(move || read_tail(&part, overlap)).await?;
+        expect = &tail;
     }
     let total = body.total;
-    let mut file = std::fs::OpenOptions::new().create(true).write(true).append(have > 0).truncate(have == 0).open(&job.part)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).append(have > 0).truncate(have == 0);
+    let file = PartFile::open(options, job.part.clone()).await?;
     let mut last_note = Instant::now();
     inner.progress(&job.r.id, have, total, true);
     loop {
@@ -778,26 +986,48 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
         let chunk = match body.chunk().await {
             Ok(Some(c)) => c,
             Ok(None) => break,
-            Err(e) => {
-                let _ = file.flush();
-                return Err(JobError::Failed(e.to_string()));
-            }
+            Err(e) => return Err(JobError::Failed(e.to_string())),
         };
-        file.write_all(&chunk)?;
-        have += chunk.len() as u64;
+        let mut chunk = chunk;
+        if !expect.is_empty() {
+            let n = expect.len().min(chunk.len());
+            if chunk[..n] != expect[..n] {
+                return Ok(None);
+            }
+            expect = &expect[n..];
+            chunk = chunk.slice(n..);
+        }
+        let n = chunk.len() as u64;
+        if n > 0 {
+            file.write(chunk).await?;
+        }
+        have += n;
         let note = last_note.elapsed() >= PROGRESS_EVERY;
         if note {
             last_note = Instant::now();
         }
         inner.progress(&job.r.id, have, total, note);
     }
-    blocking(move || file.sync_all()).await?;
+    file.sync_all().await?;
     if let Some(t) = total
         && have != t
     {
         return Err(JobError::Failed(format!("incomplete: {have} of {t} bytes")));
     }
-    finish(job, have).await
+    if !expect.is_empty() {
+        return Err(JobError::Failed("the resume ended before it could be checked".into()));
+    }
+    Ok(Some(have))
+}
+
+/// The last `len` bytes of `path`.
+fn read_tail(path: &Path, len: u64) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::End(-(len as i64)))?;
+    let mut buf = Vec::with_capacity(len as usize);
+    f.take(len).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// Checks the size and moves the finished `.part` into place.
@@ -805,7 +1035,7 @@ async fn finish(job: &Job, have: u64) -> Result<u64, JobError> {
     if let Some(expected) = job.r.size
         && have != expected
     {
-        let _ = std::fs::remove_file(&job.part);
+        remove_file(&job.part).await;
         return Err(JobError::Failed(format!("size mismatch: got {have} bytes, server said {expected}")));
     }
     let (part, dest) = (job.part.clone(), job.dest.clone());
@@ -824,9 +1054,18 @@ pub fn file_name(r: &TrackRef) -> String {
 
 /// The saver thread: writes the newest pins handed to it, skipping any that a
 /// newer one superseded while it was busy, until the store goes away.
+///
+/// Saves can arrive out of order (two commits race to hand theirs over once
+/// the state lock is released), so one older than a save already seen is
+/// dropped rather than written over it.
 fn saver(dir: PathBuf, saves: Receiver<Save>, flush: Arc<Flush>) {
+    let mut newest = 0;
     while let Ok(first) = saves.recv() {
         let save = saves.try_iter().fold(first, |a, b| if b.revision > a.revision { b } else { a });
+        if save.revision < newest {
+            continue;
+        }
+        newest = save.revision;
         let write = || -> io::Result<()> {
             let tmp = dir.join(format!("{STATE_FILE}.tmp"));
             let mut f = std::fs::File::create(&tmp)?;
@@ -843,18 +1082,110 @@ fn saver(dir: PathBuf, saves: Receiver<Save>, flush: Arc<Flush>) {
 
 /// The deleter thread: removes the files of tracks no pin needs any more, one
 /// batch at a time, until the store goes away.
-fn deleter(store: Weak<Inner>, dir: PathBuf, batches: Receiver<Vec<String>>) {
-    while let Ok(mut ids) = batches.recv() {
+fn deleter(store: Weak<Inner>, dir: PathBuf, chores: Receiver<Chore>) {
+    while let Ok(first) = chores.recv() {
         // Anything else that piled up goes in the same directory scan.
-        ids.extend(batches.try_iter().flatten());
-        let Some(inner) = store.upgrade() else { return };
-        // Pinned again since (or downloading again): its files stay.
-        ids.retain(|id| {
-            let st = inner.lock();
-            !st.pins.tracks.contains_key(id) && !st.active.contains_key(id)
-        });
-        drop(inner);
-        remove_files(&dir, &ids);
+        let (mut ids, mut sweep) = (Vec::new(), false);
+        for chore in std::iter::once(first).chain(chores.try_iter()) {
+            match chore {
+                Chore::Delete(batch) => ids.extend(batch),
+                Chore::Sweep => sweep = true,
+            }
+        }
+        if !ids.is_empty() {
+            let Some(inner) = store.upgrade() else { return };
+            if !inner.deleting(&mut ids) {
+                return;
+            }
+            drop(inner);
+            remove_files(&dir, &ids);
+            let Some(inner) = store.upgrade() else { return };
+            inner.deleted(&ids);
+        }
+        if sweep {
+            let Some(inner) = store.upgrade() else { return };
+            if !inner.sweep() {
+                return;
+            }
+        }
+    }
+}
+
+impl Inner {
+    /// [`OfflineStore::remove_set_aside`], on the deleter thread: deletes the
+    /// files the pins don't name, then the set-aside state files. A track
+    /// pinned meanwhile whose file is among them waits until they're gone
+    /// (see [`State::sweeping`]). False once the store has shut down.
+    fn sweep(&self) -> bool {
+        let found = listing(&self.dir);
+        let doomed: Vec<String> = {
+            let mut st = self.lock();
+            if st.closed {
+                return false;
+            }
+            let known = known_names(&st.pins);
+            let doomed: Vec<String> = found.into_iter().map(|(name, _)| name).filter(|n| !known.contains(n)).collect();
+            st.sweeping = doomed.iter().cloned().collect();
+            doomed
+        };
+        for name in &doomed {
+            tracing::info!("offline: removing {name}, which the pins don't name");
+            if let Err(e) = std::fs::remove_file(self.dir.join(name))
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                tracing::warn!("offline: removing {name}: {e}");
+            }
+        }
+        // Last, so cleanup only comes back on once the files are gone.
+        for f in set_aside_files(&self.dir) {
+            if let Err(e) = std::fs::remove_file(&f) {
+                tracing::warn!("offline: removing {}: {e}", f.display());
+            }
+        }
+        let left = set_aside_files(&self.dir);
+        let strays = if left.is_empty() { Vec::new() } else { listing(&self.dir) };
+        let mut st = self.lock();
+        st.sweeping.clear();
+        st.set_aside = if left.is_empty() {
+            None
+        } else {
+            let known = known_names(&st.pins);
+            Some(Aside { files: left, strays: strays.into_iter().filter(|(n, _)| !known.contains(n)).collect(), removing: false })
+        };
+        let closed = st.closed;
+        self.changed(st);
+        !closed
+    }
+
+    /// Before the deleter removes the files of `ids`: drops those pinned again
+    /// since (or downloading again), whose files stay, and holds back new
+    /// downloads of the rest until [`deleted`](Self::deleted). False once the
+    /// store has shut down: a store opened here since owns the folder, and
+    /// what's left over is a stray to it.
+    fn deleting(&self, ids: &mut Vec<String>) -> bool {
+        let mut st = self.lock();
+        if st.closed {
+            return false;
+        }
+        ids.retain(|id| !st.pins.tracks.contains_key(id) && !st.active.contains_key(id));
+        st.deleting.extend(ids.iter().cloned());
+        true
+    }
+
+    /// The files of `ids` are gone: any pinned again meanwhile can download.
+    fn deleted(&self, ids: &[String]) {
+        let mut st = self.lock();
+        for id in ids {
+            st.deleting.remove(id);
+        }
+        if let Some(aside) = st.set_aside.as_mut() {
+            // A file that was unknown at open, pinned and then unpinned, is gone now.
+            let stems: HashSet<String> = ids.iter().map(|id| streamcache::escape_id(id)).collect();
+            aside.strays.retain(|(name, _)| !stems.contains(stem(name)));
+        }
+        if ids.iter().any(|id| st.pins.tracks.contains_key(id)) {
+            self.changed(st);
+        }
     }
 }
 
@@ -869,29 +1200,143 @@ fn remove_files(dir: &Path, ids: &[String]) {
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
-        // `<stem>`, `<stem>.<suffix>` or `<stem>.<suffix>.part`: escaped ids never contain '.'.
-        let stem = name.split('.').next().unwrap_or(name);
-        if stems.contains(stem) {
+        if stems.contains(stem(name)) {
             let _ = std::fs::remove_file(e.path());
         }
     }
 }
 
-/// Removes files nothing refers to (a crash between unpin and delete).
+/// Reads the pins. Also says whether they can be trusted to name every
+/// download, so files they don't know may be removed as strays.
+///
+/// A state file that can't be read or parsed (a torn write, a permissions
+/// problem, a format change), or one missing beside downloads, may have named
+/// files that are still here. It's moved aside as `offline.json.bad-<ms>` (or a
+/// note is left under that name when there's nothing to move), and as long as
+/// such a file is in the folder no stray is removed, in this session or any
+/// later one: deleting gigabytes of downloads is never the way to recover.
+fn load_pins(dir: &Path) -> (Pins, bool) {
+    let path = dir.join(STATE_FILE);
+    let problem = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(pins) => return (pins, !has_set_aside(dir)),
+            Err(e) => format!("can't be parsed: {e}"),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if !has_downloads(dir) {
+                return (Pins::default(), !has_set_aside(dir));
+            }
+            "is missing, but downloads are here".to_owned()
+        }
+        Err(e) => format!("can't be read: {e}"),
+    };
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let aside = dir.join(format!("{SET_ASIDE}{millis}"));
+    let moved = path.symlink_metadata().is_ok() && std::fs::rename(&path, &aside).is_ok();
+    if !moved {
+        let note = format!("{STATE_FILE} {problem}. Files here that the pins don't name are kept until this file is deleted.\n");
+        if let Err(e) = std::fs::write(&aside, note) {
+            tracing::warn!("offline: noting the lost state at {}: {e}", aside.display());
+        }
+    }
+    tracing::warn!("offline: {} {problem}; starting with no pins and keeping every file (see {})", path.display(), aside.display());
+    (Pins::default(), false)
+}
+
+/// A state file that failed to load was set aside in `dir`.
+fn has_set_aside(dir: &Path) -> bool {
+    std::fs::read_dir(dir).map_or(true, |entries| entries.flatten().any(|e| e.file_name().to_string_lossy().starts_with(SET_ASIDE)))
+}
+
+/// `dir` holds files other than the store's own bookkeeping.
+fn has_downloads(dir: &Path) -> bool {
+    std::fs::read_dir(dir).map_or(true, |entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with(STATE_FILE) && !name.starts_with('.') && e.file_type().is_ok_and(|t| t.is_file())
+        })
+    })
+}
+
+/// The set-aside state files in `dir` (see [`load_pins`]), oldest first.
+fn set_aside_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(SET_ASIDE)).map(|e| e.path()).collect();
+    files.sort();
+    files
+}
+
+/// The names of every file the pins account for, finished or partial.
+fn known_names(pins: &Pins) -> HashSet<String> {
+    pins.tracks
+        .values()
+        .flat_map(|s| {
+            let n = file_name(&s.r);
+            [format!("{n}.part"), n]
+        })
+        .collect()
+}
+
+/// A download's file name up to the first '.': `<stem>`, `<stem>.<suffix>`
+/// or `<stem>.<suffix>.part`, as escaped ids never contain '.'.
+fn stem(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+/// The files in `dir` that could be downloads (not the store's own
+/// bookkeeping or hidden files), with their sizes.
+fn listing(dir: &Path) -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with(STATE_FILE) || name.starts_with('.') {
+                return None;
+            }
+            let meta = std::fs::metadata(e.path()).ok().filter(std::fs::Metadata::is_file)?;
+            Some((name, meta.len()))
+        })
+        .collect()
+}
+
+/// The files in `dir` the pins don't name, with their sizes.
+fn strays(dir: &Path, pins: &Pins) -> Vec<(String, u64)> {
+    let known = known_names(pins);
+    listing(dir).into_iter().filter(|(name, _)| !known.contains(name)).collect()
+}
+
+/// Removes files nothing refers to (a crash between unpin and delete). Only
+/// with pins that [`load_pins`] trusts.
 fn remove_strays(dir: &Path, pins: &Pins) {
-    let known: std::collections::HashSet<String> = pins.tracks.values().flat_map(|s| {
-        let n = file_name(&s.r);
-        [format!("{n}.part"), n]
-    }).collect();
+    for (name, _) in strays(dir, pins) {
+        tracing::info!("offline: removing stray {name}");
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+}
+
+/// Ends the temporary name a file is copied to by [`move_files`] (see [`moving_name`]).
+const MOVING: &str = ".moving";
+
+/// Where [`move_files`] copies `name` across volumes before renaming it into
+/// place, so a copy cut short never passes for the file.
+fn moving_name(name: &str) -> String {
+    format!(".{name}{MOVING}")
+}
+
+fn is_moving(name: &str) -> bool {
+    name.len() > 1 + MOVING.len() && name.starts_with('.') && name.ends_with(MOVING)
+}
+
+/// Deletes copies a move left unfinished (it quit or crashed mid-copy). The
+/// file they were copies of is still whole where it came from, so these are
+/// never needed, whether or not the pins are trusted.
+fn remove_moving(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
-        let name = e.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.starts_with(STATE_FILE) || name.starts_with('.') || !e.path().is_file() {
-            continue;
-        }
-        if !known.contains(name) {
-            tracing::info!("offline: removing stray {name}");
+        if is_moving(&e.file_name().to_string_lossy()) && e.file_type().is_ok_and(|t| t.is_file()) {
+            tracing::info!("offline: removing {}, left by a move cut short", e.path().display());
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -922,14 +1367,50 @@ fn free_space(dir: &Path) -> Option<u64> {
     (ok != 0).then_some(available)
 }
 
+/// How far [`move_store_with`] has got, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MoveProgress {
+    pub done: u64,
+    pub total: u64,
+}
+
 /// Moves a store's files from `from` to `to` (run before opening it at `to`),
 /// including the per-account stores in folders under it. Renames where it can,
 /// copies across volumes. Files already at `to` win.
+///
+/// Stopping it anywhere (quitting, a crash) loses nothing, and running it again
+/// finishes the job: a copy is made under a temporary name (see
+/// [`moving_name`]) and renamed into place before the original goes, and a file
+/// found at both ends with the same size is one whose copy was done.
 pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
+    move_store_with(from, to, &mut |_| {})
+}
+
+/// [`move_store`], telling `progress` after each file. It can take a while
+/// across volumes: run it off the UI thread.
+pub fn move_store_with(from: &Path, to: &Path, progress: &mut dyn FnMut(MoveProgress)) -> io::Result<()> {
     if from == to || !from.is_dir() {
         return Ok(());
     }
-    move_files(from, to, true)
+    let mut at = MoveProgress { done: 0, total: tree_size(from) };
+    progress(at);
+    move_files(from, to, true, &mut |bytes| {
+        at.done += bytes;
+        progress(at);
+    })
+}
+
+/// Bytes in the files under `dir`.
+fn tree_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => tree_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The folder for `account`'s downloads under the downloads folder `base`.
@@ -940,35 +1421,50 @@ pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
 pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
     let dir = base.join(format!("{account:08x}"));
     if base.join(STATE_FILE).is_file() && !dir.join(STATE_FILE).exists() {
-        move_files(base, &dir, false)?;
+        move_files(base, &dir, false, &mut |_| {})?;
     }
     Ok(dir)
 }
 
-fn move_files(from: &Path, to: &Path, folders: bool) -> io::Result<()> {
+/// Moves the files in `from` (with `folders`, the folders in it too) to `to`,
+/// calling `moved` with each file's size once it's dealt with.
+fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64)) -> io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let kind = e.file_type()?;
         if kind.is_dir() {
             if folders {
-                move_files(&e.path(), &to.join(e.file_name()), true)?;
+                move_files(&e.path(), &to.join(e.file_name()), true, moved)?;
             }
             continue;
         }
         if !kind.is_file() {
             continue;
         }
+        let len = e.metadata()?.len();
+        if is_moving(&e.file_name().to_string_lossy()) {
+            // A copy cut short by an earlier move into `from`.
+            let _ = std::fs::remove_file(e.path());
+            moved(len);
+            continue;
+        }
         let dest = to.join(e.file_name());
-        if dest.exists() {
+        if let Ok(there) = dest.symlink_metadata() {
+            if there.is_file() && there.len() == len {
+                // Copied, but the move stopped before the original went.
+                std::fs::remove_file(e.path())?;
+            }
+            moved(len);
             continue;
         }
         if std::fs::rename(e.path(), &dest).is_err() {
-            let tmp = to.join(format!(".{}.moving", e.file_name().to_string_lossy()));
+            let tmp = to.join(moving_name(&e.file_name().to_string_lossy()));
             std::fs::copy(e.path(), &tmp)?;
             std::fs::rename(&tmp, &dest)?;
             std::fs::remove_file(e.path())?;
         }
+        moved(len);
     }
     // Leaves `from` behind only if something else is in it.
     let _ = std::fs::remove_dir(from);

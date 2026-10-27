@@ -27,12 +27,23 @@ impl Overlay {
 
 const DIALOG_W: f32 = 340.0;
 
+/// Whether the open name dialog has focused its field yet. Cleared whenever
+/// no name dialog is up, however it closed, so the next one focuses again.
+fn name_focused_id() -> egui::Id {
+    egui::Id::unique("overlay-name-focused")
+}
+
 impl OndApp {
     pub(super) fn overlay_ui(&mut self, ctx: &egui::Context) {
+        if !matches!(self.ui.overlay, Some(Overlay::NewPlaylist { .. } | Overlay::Rename { .. })) {
+            ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));
+        }
         if matches!(self.ui.overlay, Some(Overlay::Settings)) {
             self.settings_window(ctx);
             return;
         }
+        // Experimental keys are listed only while their experiment is on.
+        let visualizer = self.ui.prefs.experimental.visualizer;
         let Some(overlay) = self.ui.overlay.as_mut() else { return };
         let id = egui::Id::unique("overlay");
         let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(20)).corner_radius(12);
@@ -40,7 +51,9 @@ impl OndApp {
         let modal = egui::Modal::new(id).frame(frame).show(ctx, |ui| {
             let t = Tokens::of(ui);
             match overlay {
-                Overlay::Shortcuts | Overlay::Settings => shortcuts_ui(ui),
+                Overlay::Shortcuts => shortcuts_ui(ui, visualizer),
+                // Drawn by `settings_window` above, which returns first.
+                Overlay::Settings => {}
                 Overlay::NewPlaylist { name, tracks } => {
                     let what = match tracks.len() {
                         0 => String::new(),
@@ -81,6 +94,7 @@ impl OndApp {
             done = Some(None);
         }
         if let Some(action) = done {
+            ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));
             self.ui.overlay = None;
             if let Some(a) = action {
                 self.actions.push(a);
@@ -108,10 +122,9 @@ fn name_dialog(ui: &mut egui::Ui, title: &str, sub: &str, name: &mut String, ver
             .background_color(t.field),
     );
     // Focus once; after that the user may tab away.
-    let focused_once = ui.scope_id().with("focused");
-    if !ui.data(|d| d.get_temp::<bool>(focused_once).unwrap_or(false)) {
+    if !ui.data(|d| d.get_temp::<bool>(name_focused_id()).unwrap_or(false)) {
         field.request_focus();
-        ui.data_mut(|d| d.insert_temp(focused_once, true));
+        ui.data_mut(|d| d.insert_temp(name_focused_id(), true));
     }
     let enter = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
     ui.add_space(18.0);
@@ -127,16 +140,13 @@ fn name_dialog(ui: &mut egui::Ui, title: &str, sub: &str, name: &mut String, ver
             }
         });
     });
-    if out.is_some() {
-        ui.data_mut(|d| d.remove::<bool>(focused_once));
-    }
     out
 }
 
 /// The key map, grouped into two or three balanced columns (three when the
 /// window is wide). Rows with the same label merge their keys. It's sized to
 /// fit; only a really short window scrolls, with a soft fade at the bottom.
-fn shortcuts_ui(ui: &mut egui::Ui) {
+fn shortcuts_ui(ui: &mut egui::Ui, visualizer: bool) {
     let t = Tokens::of(ui);
     const COL_W: f32 = 260.0;
     const GAP: f32 = 32.0;
@@ -151,7 +161,7 @@ fn shortcuts_ui(ui: &mut egui::Ui) {
         });
     });
     ui.add_space(16.0);
-    let columns = balance(&GROUPS, cols);
+    let columns = columns_of(cols);
     let column = |ui: &mut egui::Ui, groups: &[&str]| {
         ui.vertical(|ui| {
             ui.set_width(COL_W);
@@ -161,10 +171,10 @@ fn shortcuts_ui(ui: &mut egui::Ui) {
                 }
                 ui.label(egui::RichText::new(*group).font(FontId::new(11.0, semibold())).color(t.muted));
                 ui.add_space(6.0);
-                for (label, keys) in rows(group) {
+                for (label, keys) in group_rows(group).iter().filter(|(l, _)| visualizer || *l != "Visualizer") {
                     ui.horizontal(|ui| {
                         ui.set_height(ROW_H);
-                        ui.label(egui::RichText::new(label).size(13.0).color(t.text));
+                        ui.label(egui::RichText::new(*label).size(13.0).color(t.text));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             for k in keys.iter().rev() {
@@ -212,7 +222,21 @@ const ROW_H: f32 = 22.0;
 
 /// A group's height in the list: its rows plus header and gap.
 fn group_height(group: &str) -> f32 {
-    rows(group).len() as f32 * (ROW_H + 8.0) + 44.0
+    group_rows(group).len() as f32 * (ROW_H + 8.0) + 44.0
+}
+
+/// A group's rows, worked out once (the key map is fixed).
+fn group_rows(group: &str) -> &'static [(&'static str, Vec<&'static str>)] {
+    type Rows = Vec<(&'static str, Vec<&'static str>)>;
+    static ALL: std::sync::OnceLock<Vec<(&'static str, Rows)>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| GROUPS.iter().map(|g| (*g, rows(g))).collect()).iter().find(|(g, _)| *g == group).map_or(&[], |(_, r)| r.as_slice())
+}
+
+/// The groups split into two or three columns, worked out once each.
+fn columns_of(cols: usize) -> &'static [Vec<&'static str>] {
+    static SPLITS: std::sync::OnceLock<[Vec<Vec<&'static str>>; 2]> = std::sync::OnceLock::new();
+    let [two, three] = SPLITS.get_or_init(|| [balance(&GROUPS, 2), balance(&GROUPS, 3)]);
+    if cols >= 3 { three } else { two }
 }
 
 /// Splits `groups` (in order) into `cols` columns of roughly equal height.

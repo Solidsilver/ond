@@ -22,6 +22,8 @@ pub struct Edge {
     pub cutoff_hz: u32,
     /// Level just below the cutoff minus level just above it.
     pub drop_db: f64,
+    /// The drop across the edge's middle 800 Hz: how steep it is.
+    pub sharp_db: f64,
 }
 
 pub struct Spectrum {
@@ -109,7 +111,10 @@ impl Spectrum {
         };
         let below = mean(cutoff - 1500.0, cutoff - 500.0)?;
         let above = mean(cutoff + 300.0, cutoff + 1300.0)?;
-        Some(Edge { cutoff_hz: ((cutoff / 10.0).round() * 10.0) as u32, drop_db: below - above })
+        // The same across a narrow span: only a filter's brickwall falls far
+        // within it, a natural rolloff can't.
+        let sharp = mean(cutoff - 600.0, cutoff - 200.0)? - mean(cutoff + 200.0, cutoff + 600.0)?;
+        Some(Edge { cutoff_hz: ((cutoff / 10.0).round() * 10.0) as u32, drop_db: below - above, sharp_db: sharp })
     }
 }
 

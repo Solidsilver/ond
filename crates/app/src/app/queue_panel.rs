@@ -4,6 +4,8 @@
 //! The same column can show the playing track's lyrics (in the full window)
 //! or its details instead (Up Next · History · Lyrics · Info).
 
+use super::QueueEdit;
+use super::track_row::{TrackRow, col, length};
 use super::view_ctx::ViewCtx;
 use super::widgets::{choice, elide};
 use super::{Action, Focus, QueueTab};
@@ -17,6 +19,15 @@ const FOLD_OVER: usize = 8;
 /// Rows drawn at most; the rest are summarised.
 const MAX_ROWS: usize = 300;
 const ROW_H: f32 = 44.0;
+/// A group heading: its height; the icon's centre and the name's start, in
+/// from the left; the chevron's centre and the count's right edge, in from
+/// the right; and the width the name leaves for the icon, count and chevron.
+const GROUP_H: f32 = 26.0;
+const GROUP_ICON_X: f32 = 14.0;
+const GROUP_NAME_X: f32 = 26.0;
+const GROUP_CHEVRON_FROM_RIGHT: f32 = 12.0;
+const GROUP_COUNT_FROM_RIGHT: f32 = 22.0;
+const GROUP_NAME_CLEAR: f32 = 80.0;
 
 fn group_icon(s: &Source) -> Icon {
     match s {
@@ -72,20 +83,22 @@ impl ViewCtx<'_> {
             });
         }
         ui.add_space(6.0);
-        match self.ui.queue_ui.tab {
+        let history = match self.ui.queue_ui.tab {
             QueueTab::Lyrics => return self.sidebar_lyrics(ui),
             // The Player already shows the song large right above.
             QueueTab::Info => return self.sidebar_info(ui, lyrics_tab),
-            QueueTab::UpNext | QueueTab::History => {}
-        }
+            QueueTab::UpNext => false,
+            QueueTab::History => true,
+        };
 
         let footer_h = 40.0;
         let list_h = (ui.available_height() - footer_h).max(60.0);
         egui::ScrollArea::vertical().id_salt("queue").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            match self.ui.queue_ui.tab {
-                QueueTab::UpNext => self.up_next(ui, now, remaining),
-                QueueTab::History | QueueTab::Lyrics | QueueTab::Info => self.history(ui),
+            if history {
+                self.history(ui);
+            } else {
+                self.up_next(ui, now, remaining);
             }
         });
         self.queue_keys(ui);
@@ -106,13 +119,13 @@ impl ViewCtx<'_> {
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
                 });
                 if end != self.player.queue.end {
-                    self.actions.push(Action::SetEnd(end));
+                    self.actions.push(Action::Queue(QueueEdit::SetEnd(end)));
                 }
                 if !self.player.queue.upcoming.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
                         if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text("Remove everything up next").clicked() {
-                            self.actions.push(Action::ClearQueue);
+                            self.actions.push(Action::Queue(QueueEdit::Clear));
                         }
                     });
                 }
@@ -132,42 +145,43 @@ impl ViewCtx<'_> {
             });
             return;
         }
-        let starts = start_offsets(remaining, &self.player.queue.upcoming);
-        let groups = self.player.queue.groups();
+        // Borrowed from the player, not from `self`, so rows can take `&mut self`.
+        let queue = &self.player.queue;
+        let starts = start_offsets(remaining, &queue.upcoming);
         let mut drawn = 0;
-        for (gi, g) in groups.iter().enumerate() {
-            let key = g.source.key();
-            let foldable = g.len > FOLD_OVER && gi > 0;
+        for (gi, g) in queue.groups().enumerate() {
+            let source = g.source;
+            let len = g.len;
+            let key = source.key();
+            let foldable = len > FOLD_OVER && gi > 0;
             let open = *self.ui.queue_ui.open.get(&key).unwrap_or(&!foldable);
             // Group header: icon + name, and a count with a chevron when it folds.
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), GROUP_H), Sense::click());
             if ui.is_rect_visible(rect) {
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, 5.0, t.hover);
                 }
-                icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(10.0, 10.0)), group_icon(&g.source), t.muted);
-                let name = elide(ui, g.source.label(), FontId::new(11.5, semibold()), t.muted, rect.width() - 80.0);
-                ui.painter().galley(pos2(rect.left() + 26.0, rect.center().y - name.size().y / 2.0), name, t.muted);
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + GROUP_ICON_X, rect.center().y), vec2(10.0, 10.0)), group_icon(source), t.muted);
+                let name = elide(ui, source.label(), FontId::new(11.5, semibold()), t.muted, rect.width() - GROUP_NAME_CLEAR);
+                ui.painter().galley(pos2(rect.left() + GROUP_NAME_X, rect.center().y - name.size().y / 2.0), name, t.muted);
                 let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
-                icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(8.0, 8.0)), chevron, t.muted);
-                ui.painter().text(pos2(rect.right() - 22.0, rect.center().y), egui::Align2::RIGHT_CENTER, g.len.to_string(), FontId::proportional(11.0), t.muted);
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - GROUP_CHEVRON_FROM_RIGHT, rect.center().y), vec2(8.0, 8.0)), chevron, t.muted);
+                ui.painter().text(pos2(rect.right() - GROUP_COUNT_FROM_RIGHT, rect.center().y), egui::Align2::RIGHT_CENTER, len.to_string(), FontId::proportional(11.0), t.muted);
             }
-            let label = format!("{}, {} tracks, {}", g.source.label(), g.len, if open { "expanded" } else { "collapsed" });
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, &label));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, format!("{}, {len} tracks, {}", source.label(), if open { "expanded" } else { "collapsed" })));
             if resp.clicked() {
                 self.ui.queue_ui.open.insert(key, !open);
             }
             if !open {
                 continue;
             }
-            for (i, start) in starts.iter().enumerate().skip(g.start).take(g.len) {
+            for (i, start) in starts.iter().enumerate().skip(g.start).take(len) {
                 if drawn == MAX_ROWS {
-                    let more = self.player.queue.upcoming.len() - i;
+                    let more = queue.upcoming.len() - i;
                     ui.label(egui::RichText::new(format!("and {more} more")).size(11.0).color(t.muted));
                     return;
                 }
-                let item = self.player.queue.upcoming[i].clone();
-                self.queue_row(ui, &item, Some(i), Some(clock_label(now, *start)));
+                self.queue_row(ui, &t, &queue.upcoming[i], Some(i), Some((now, *start)));
                 drawn += 1;
             }
             ui.add_space(4.0);
@@ -181,45 +195,44 @@ impl ViewCtx<'_> {
             ui.vertical_centered(|ui| ui.label(egui::RichText::new("Nothing played yet").color(t.muted)));
             return;
         }
-        let items: Vec<Item> = self.player.queue.history.iter().rev().take(MAX_ROWS).cloned().collect();
-        for item in &items {
-            self.queue_row(ui, item, None, None);
+        let history = &self.player.queue.history;
+        for item in history.iter().rev().take(MAX_ROWS) {
+            self.queue_row(ui, &t, item, None, None);
         }
     }
 
-    /// One queue item. `index` is its place in `upcoming` (None in history).
-    /// Drag to reorder; double-click plays; right-click has the actions.
-    pub(super) fn queue_row(&mut self, ui: &mut Ui, item: &Item, index: Option<usize>, starts_at: Option<String>) {
-        let t = Tokens::of(ui);
+    /// One queue item, in the list's colors `t`. `index` is its place in
+    /// `upcoming` (None in history); `starts` is (now, seconds until it
+    /// starts), shown on hover. Drag to reorder; double-click plays;
+    /// right-click has the actions.
+    pub(super) fn queue_row(&mut self, ui: &mut Ui, t: &Tokens, item: &Item, index: Option<usize>, starts: Option<(chrono::NaiveTime, f64)>) {
         let sense = if index.is_some() { Sense::click_and_drag() } else { Sense::click() };
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
+        let row = TrackRow::new(ui, ROW_H, sense);
+        let (rect, resp) = (row.rect, &row.resp);
         let selected = self.ui.queue_ui.selected == Some(item.uid);
         if ui.is_rect_visible(rect) {
             // A selection the keyboard isn't on reads as a hover.
             let focused = selected && self.ui.focus == Focus::Queue;
-            ui.painter().rect_filled(rect, 6.0, super::widgets::row_fill(&t, focused, resp.hovered() || selected));
-            let art = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 16.0), vec2(32.0, 32.0));
-            let cover = self.data.cover_for(&item.track).map(str::to_owned);
-            self.art.paint(ui, art, cover.as_deref(), 3.0);
+            row.fill(ui, t, focused, resp.hovered() || selected);
+            let art = Rect::from_min_size(pos2(rect.left() + col::ART_INSET, row.cy() - col::ART / 2.0), vec2(col::ART, col::ART));
+            let data = self.data;
+            self.art.paint(ui, art, data.cover_for(&item.track), col::ART_RADIUS);
             // Offline, songs that aren't downloaded will be skipped: say so on hover, dim them otherwise.
             let available = self.playable(&item.track);
-            let right = match (&starts_at, resp.hovered()) {
+            let right = match (starts, resp.hovered()) {
                 (_, true) if !available => "not downloaded".to_owned(),
-                (Some(at), true) => format!("at {at}"),
-                _ => item.track.duration_secs.map(|d| crate::fmt::clock(f64::from(d))).unwrap_or_default(),
+                (Some((now, offset)), true) => format!("at {}", clock_label(now, offset)),
+                _ => length(&item.track),
             };
+            // The length (or start time) at the right end; the text takes the rest.
             let right_g = ui.painter().layout_no_wrap(right, FontId::proportional(11.0), t.muted);
-            let text_w = rect.right() - 10.0 - right_g.size().x - 8.0 - (art.right() + 10.0);
-            ui.painter().galley(pos2(rect.right() - 10.0 - right_g.size().x, rect.center().y - right_g.size().y / 2.0), right_g, t.muted);
-            let x = art.right() + 10.0;
-            let color = super::widgets::track_color(&t, false, available);
-            let title = elide(ui, &item.track.title, FontId::proportional(12.5), color, text_w);
-            ui.painter().galley(pos2(x, rect.center().y - title.size().y), title, color);
-            let sub = elide(ui, item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted, text_w);
-            ui.painter().galley(pos2(x, rect.center().y + 1.0), sub, t.muted);
+            let x = art.right() + col::INSET;
+            let text_w = rect.right() - col::INSET - right_g.size().x - col::RIGHT_GAP - x;
+            ui.painter().galley(pos2(rect.right() - col::INSET - right_g.size().x, row.cy() - right_g.size().y / 2.0), right_g, t.muted);
+            let color = super::widgets::track_color(t, false, available);
+            row.two_lines(ui, x, text_w, (&item.track.title, FontId::proportional(12.5), color), (item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted));
         }
-        let label = format!("{} by {}", item.track.title, item.track.artist.as_deref().unwrap_or("unknown artist"));
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
+        row.describe(selected, || format!("{} by {}", item.track.title, item.track.artist.as_deref().unwrap_or("unknown artist")));
 
         if let Some(index) = index {
             // Reordering by drag and drop.
@@ -238,7 +251,7 @@ impl ViewCtx<'_> {
                 if from < to {
                     to -= 1;
                 }
-                self.actions.push(Action::Move(*uid, to));
+                self.actions.push(Action::Queue(QueueEdit::Move(*uid, to)));
             }
         }
         if resp.clicked() {
@@ -246,21 +259,21 @@ impl ViewCtx<'_> {
             self.ui.focus = Focus::Queue;
         }
         if resp.double_clicked() {
-            self.actions.push(if index.is_some() { Action::JumpTo(item.uid) } else { Action::Replay(item.uid) });
+            self.actions.push(if index.is_some() { Action::Queue(QueueEdit::JumpTo(item.uid)) } else { Action::Queue(QueueEdit::Replay(item.uid)) });
         }
         resp.context_menu(|ui| {
             if index.is_some() {
                 if ui.button("Play now").clicked() {
-                    self.actions.push(Action::JumpTo(item.uid));
+                    self.actions.push(Action::Queue(QueueEdit::JumpTo(item.uid)));
                 }
                 if ui.button("Move to top").clicked() {
-                    self.actions.push(Action::Move(item.uid, 0));
+                    self.actions.push(Action::Queue(QueueEdit::Move(item.uid, 0)));
                 }
                 if ui.button("Remove").clicked() {
-                    self.actions.push(Action::Remove(item.uid));
+                    self.actions.push(Action::Queue(QueueEdit::Remove(item.uid)));
                 }
             } else if ui.button("Play again").clicked() {
-                self.actions.push(Action::Replay(item.uid));
+                self.actions.push(Action::Queue(QueueEdit::Replay(item.uid)));
             }
             ui.separator();
             if ui.button("Go to album").clicked() {
@@ -278,16 +291,16 @@ impl ViewCtx<'_> {
             self.ui.queue_ui.selected = Some(self.player.queue.upcoming[to].uid);
         }
         if k.move_up {
-            self.actions.push(Action::MoveBy(uid, -1));
+            self.actions.push(Action::Queue(QueueEdit::MoveBy(uid, -1)));
         }
         if k.move_down {
-            self.actions.push(Action::MoveBy(uid, 1));
+            self.actions.push(Action::Queue(QueueEdit::MoveBy(uid, 1)));
         }
         if k.remove {
-            self.actions.push(Action::Remove(uid));
+            self.actions.push(Action::Queue(QueueEdit::Remove(uid)));
         }
         if k.enter {
-            self.actions.push(Action::JumpTo(uid));
+            self.actions.push(Action::Queue(QueueEdit::JumpTo(uid)));
         }
         if k.escape {
             self.ui.queue_ui.selected = None;

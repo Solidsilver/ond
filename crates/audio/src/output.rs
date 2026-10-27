@@ -6,7 +6,7 @@
 //! mode and integer formats; see [`crate::default_backend`].
 
 use crate::device::{DeviceEvent, DeviceInfo};
-use crate::dither::Tpdf;
+use crate::dither::{Tpdf, Treatment, needs_dither};
 use crate::signal::{DeviceCaps, RateRange};
 use crate::{PlaybackMode, Status};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -69,7 +69,7 @@ impl RingCtl {
         self.hold_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    fn holding(&self) -> bool {
+    pub(crate) fn holding(&self) -> bool {
         self.hold_gen.load(Ordering::Acquire) > self.released_gen.load(Ordering::Acquire)
     }
 
@@ -84,13 +84,30 @@ impl RingCtl {
     }
 }
 
+/// Where the next track begins in a ring, and what the callback needs to know
+/// about it from its first sample on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Marker {
+    /// Sample position (since the ring started or was last flushed).
+    pub at: u64,
+    /// The track's bit depth, when it has one: tracks of different depths
+    /// share a ring (it only needs the same rate and layout), and whether
+    /// one needs dither depends on its own depth.
+    pub source_bits: Option<u32>,
+}
+
+/// Track boundaries a ring can hold at once. The decoder waits for room once
+/// it is this many tracks ahead of the output. (Must stay below
+/// [`crate::replaygain::GAIN_SLOTS`]: the gain table is indexed by track number
+/// modulo its size, so the decoder may not get a whole table ahead.)
+pub(crate) const MARKER_CAP: usize = 16;
+
 /// What a backend reads from: interleaved f32 samples, track-boundary markers
 /// and the state the realtime callback keeps between calls.
 pub struct RingInput {
     pub samples: Consumer<f32>,
-    /// Sample positions (since the ring started or was last flushed) where the
-    /// next track begins. Pushed by the decoder when it continues gaplessly.
-    pub markers: Consumer<u64>,
+    /// Where the next tracks begin. Pushed by the decoder when it continues gaplessly.
+    pub markers: Consumer<Marker>,
     /// Set by the decoder after its last push; starvation after this is the end, not an underrun.
     pub input_done: Arc<AtomicBool>,
     pub ctl: Arc<RingCtl>,
@@ -105,10 +122,12 @@ pub struct RingInput {
     buffering: bool,
     /// Hold generation whose fade-out has been played.
     faded: u64,
-    /// Bit depth of the source, when it has one (lossy codecs don't).
+    /// Bit depth of the track playing, when it has one (lossy codecs don't).
+    /// Set from each track's [`Marker`] as the output crosses into it.
     source_bits: Option<u32>,
-    /// The decoder resamples this ring's audio.
-    resampled: bool,
+    /// The decoder recomputes this ring's samples (resamples or downmixes):
+    /// the same for every track in it.
+    processed: bool,
 }
 
 impl std::fmt::Debug for RingInput {
@@ -118,7 +137,7 @@ impl std::fmt::Debug for RingInput {
 }
 
 impl RingInput {
-    pub fn new(samples: Consumer<f32>, markers: Consumer<u64>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
+    pub fn new(samples: Consumer<f32>, markers: Consumer<Marker>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
         Self {
             samples,
             markers,
@@ -130,30 +149,34 @@ impl RingInput {
             buffering: true,
             faded: 0,
             source_bits: None,
-            resampled: false,
+            processed: false,
         }
     }
 
-    /// Describes what's in the ring, for the dither decision. `processed` means
-    /// the decoder recomputed samples (resampled or downmixed).
-    pub fn with_source(mut self, bits: Option<u32>, processed: bool) -> Self {
-        self.source_bits = bits;
-        self.resampled = processed;
+    /// Describes what's in the ring, for the dither decision: the first
+    /// track's bit depth (later tracks bring theirs in their [`Marker`]), and
+    /// whether the decoder recomputes the samples (resamples or downmixes).
+    pub fn with_source(mut self, first_bits: Option<u32>, processed: bool) -> Self {
+        self.source_bits = first_bits;
+        self.processed = processed;
         self
     }
 
-    /// Whether samples may be off a `device_bits`-bit integer grid and need
-    /// requantizing: resampled or downmixed, under a gain other than unity
-    /// (volume or ReplayGain), or from a deeper (or lossy) source. A
-    /// bit-perfect signal never needs it.
+    /// Whether what plays now may be off a `device_bits`-bit integer grid and
+    /// need requantizing (see [`needs_dither`](crate::dither::needs_dither)).
     pub fn needs_dither(&self, device_bits: u32) -> bool {
-        self.resampled || self.gain * self.rg != 1.0 || self.source_bits.is_none_or(|b| b > device_bits)
+        needs_dither(Some(device_bits), self.treatment(self.gain * self.rg != 1.0))
+    }
+
+    fn treatment(&self, gained: bool) -> Treatment {
+        Treatment { processed: self.processed, gained, source_bits: self.source_bits }
     }
 
     /// The realtime path for an integer device seen through a float stream:
-    /// [`fill`](Self::fill), then requantize with TPDF dither to `device_bits`
-    /// when [`needs_dither`](Self::needs_dither). With `device_bits` `None`
-    /// (float device) samples pass through untouched.
+    /// [`fill`](Self::fill), requantizing with TPDF dither to `device_bits`
+    /// each stretch that needs it (a gain ramp, a track of another depth:
+    /// one buffer can hold both kinds). With `device_bits` `None` (float
+    /// device) samples pass through untouched.
     pub fn fill_for_device(
         &mut self,
         out: &mut [f32],
@@ -163,14 +186,13 @@ impl RingInput {
         device_bits: Option<u32>,
         dither: &mut Tpdf,
     ) -> bool {
-        let drained = self.fill(out, channels, rate, status);
-        if let Some(bits) = device_bits
-            && bits < 32
-            && self.needs_dither(bits)
-        {
-            dither.quantize(out, bits);
-        }
-        drained
+        self.fill_with(out, channels, rate, status, |stretch, treatment| {
+            if let Some(bits) = device_bits
+                && needs_dither(device_bits, treatment)
+            {
+                dither.quantize(stretch, bits);
+            }
+        })
     }
 
     /// Drops everything queued if a flush was requested. Realtime-safe.
@@ -196,11 +218,33 @@ impl RingInput {
 
     /// The realtime path: copy what's available, split at track boundaries,
     /// apply volume and ReplayGain (Normal mode only), pad with silence, update atomics.
-    /// Returns whether everything has been played out (input done, ring empty).
+    ///
+    /// Returns whether everything has been played out: the input is done and
+    /// this call had nothing left to write. (The call that writes the last
+    /// samples returns false: the device has yet to play that buffer, and
+    /// closing it now would cut them off.)
     pub fn fill<T>(&mut self, out: &mut [T], channels: usize, rate: u32, status: &Status) -> bool
     where
         T: SizedSample + FromSample<f32>,
     {
+        self.fill_with(out, channels, rate, status, |_, _| {})
+    }
+
+    /// [`fill`](Self::fill), handing each stretch of audio it writes to
+    /// `written_to` with what was done to it (silence is left out).
+    fn fill_with<T>(
+        &mut self,
+        out: &mut [T],
+        channels: usize,
+        rate: u32,
+        status: &Status,
+        mut written_to: impl FnMut(&mut [T], Treatment),
+    ) -> bool
+    where
+        T: SizedSample + FromSample<f32>,
+    {
+        // A device reporting no channels gets mono rather than a division by zero.
+        let channels = channels.max(1);
         let silence = T::EQUILIBRIUM;
         let bit_perfect = status.bit_perfect.load(Ordering::Relaxed);
         // Before the pause check, so a seek while paused doesn't wait for resume.
@@ -215,6 +259,7 @@ impl RingInput {
                 if !bit_perfect && !status.paused.load(Ordering::Relaxed) {
                     let frames = ((SEEK_FADE_SECS * rate as f32) as usize).max(1);
                     start = self.fade_out(out, channels, frames);
+                    written_to(&mut out[..start], self.treatment(true));
                 }
             }
             self.discard();
@@ -229,10 +274,9 @@ impl RingInput {
         }
 
         let done = self.input_done.load(Ordering::Acquire);
-        status.buffered_frames.store((self.samples.slots() / channels.max(1)) as u64, Ordering::Relaxed);
+        status.buffered_frames.store((self.samples.slots() / channels) as u64, Ordering::Relaxed);
         if self.buffering {
-            let channels_u = channels.max(1);
-            let target = ((PREBUFFER_SECS * rate as f32) as usize * channels_u).min(self.samples.buffer().capacity() / 2);
+            let target = ((PREBUFFER_SECS * rate as f32) as usize * channels).min(self.samples.buffer().capacity() / 2);
             if self.samples.slots() >= target || done {
                 self.buffering = false;
                 // Fade in from silence (Normal mode); bit-perfect starts on the exact sample.
@@ -250,13 +294,15 @@ impl RingInput {
 
         let target = if bit_perfect { 1.0 } else { status.volume() };
         let step = 1.0 / (GAIN_RAMP_SECS * rate.max(1) as f32);
+        let tap = status.tap.active();
         let avail = self.samples.slots().min(out.len());
         let avail = avail - avail % channels;
         let mut written = 0;
         while written < avail {
             let until = match self.markers.peek() {
-                Ok(&m) if m <= self.pos => {
+                Ok(m) if m.at <= self.pos => {
                     // The next track's first sample is about to play.
+                    self.source_bits = m.source_bits;
                     let _ = self.markers.pop();
                     status.frames_played.store(0, Ordering::Relaxed);
                     let seq = status.track_seq.fetch_add(1, Ordering::AcqRel) + 1;
@@ -266,7 +312,7 @@ impl RingInput {
                     }
                     continue;
                 }
-                Ok(&m) => (m - self.pos) as usize,
+                Ok(m) => (m.at - self.pos) as usize,
                 Err(_) => usize::MAX,
             };
             let rg_target =
@@ -274,9 +320,17 @@ impl RingInput {
             let n = (avail - written).min(until);
             let Ok(chunk) = self.samples.read_chunk(n) else { break };
             let (a, b) = chunk.as_slices();
+            if tap {
+                // A read-only copy for visuals; what reaches the device is untouched.
+                status.tap.write(a, b, channels, rate);
+            }
+            let unity_before = self.gain * self.rg == 1.0;
             let gains = Gains { vol: &mut self.gain, vol_target: target, rg: &mut self.rg, rg_target, step };
             apply_gain(&mut out[written..written + n], a, b, channels, gains);
             chunk.commit_all();
+            // Gained if any of it was: a ramp may have ended on unity inside it.
+            let gained = !unity_before || self.gain * self.rg != 1.0;
+            written_to(&mut out[written..written + n], self.treatment(gained));
             written += n;
             self.pos += n as u64;
             status.frames_played.fetch_add((n / channels) as u64, Ordering::Relaxed);
@@ -284,8 +338,10 @@ impl RingInput {
         out[written..].fill(silence);
 
         if written < out.len() {
-            if done {
-                return self.samples.is_empty();
+            // Loaded again: the decoder may have queued its last samples and
+            // finished after `done` was read above. That's the end, not a dropout.
+            if done || self.input_done.load(Ordering::Acquire) {
+                return written == 0 && self.samples.slots() < channels;
             }
             // Ran dry mid-track: count it once and rebuild the prebuffer before resuming.
             status.underruns.fetch_add(1, Ordering::Relaxed);
@@ -367,9 +423,16 @@ pub trait OutputBackend: Send {
     fn devices(&mut self) -> Vec<DeviceInfo> {
         Vec::new()
     }
-    /// The device playback goes to (or would go to).
+    /// The device playback goes to: the open stream's, else the one a new
+    /// `open` would use.
     fn current_device(&mut self) -> Option<DeviceInfo> {
         None
+    }
+    /// The device a new `open` would use: the selected one if it's plugged in,
+    /// else the system default. Differs from [`current_device`](Self::current_device)
+    /// when the default has moved while a stream stays on its device.
+    fn target_device(&mut self) -> Option<DeviceInfo> {
+        self.current_device()
     }
     /// Picks a device by UID; `None` follows the system default. Takes effect at the next `open`.
     fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
@@ -395,6 +458,12 @@ pub trait OutputBackend: Send {
     fn drained(&self) -> bool;
     /// Stops the stream. When this returns, the callback will not run again.
     fn close(&mut self);
+    /// Stops the stream like [`close`](Self::close) because another `open`
+    /// follows at once (the format changed): a backend may keep the device
+    /// claimed (exclusive access) across the two.
+    fn close_for_reopen(&mut self) {
+        self.close();
+    }
 }
 
 /// cpal on the default output device. On macOS cpal sets the device's nominal
@@ -593,10 +662,11 @@ where
     if device_bits.is_none() || scratch.is_empty() {
         return input.fill(out, channels, rate, status);
     }
-    let mut drained = false;
+    // Played out only if no part of this buffer had audio left to play.
+    let mut drained = true;
     for chunk in out.chunks_mut(scratch.len()) {
         let buf = &mut scratch[..chunk.len()];
-        drained = input.fill_for_device(buf, channels, rate, status, device_bits, dither);
+        drained &= input.fill_for_device(buf, channels, rate, status, device_bits, dither);
         for (o, s) in chunk.iter_mut().zip(buf.iter()) {
             *o = T::from_sample(*s);
         }
@@ -612,13 +682,18 @@ mod tests {
 
     /// A ring with `samples` queued. Prebuffering is skipped (the ring is small),
     /// unless the test turns it back on.
-    fn ring(samples: &[f32], done: bool) -> (rtrb::Producer<f32>, rtrb::Producer<u64>, RingInput) {
+    fn ring(samples: &[f32], done: bool) -> (rtrb::Producer<f32>, rtrb::Producer<Marker>, RingInput) {
         let (mut p, c) = rtrb::RingBuffer::new(64);
         p.push_entire_slice(samples).unwrap();
         let (m, mc) = rtrb::RingBuffer::new(4);
         let mut input = RingInput::new(c, mc, Arc::new(AtomicBool::new(done)), Arc::default());
         input.buffering = false;
         (p, m, input)
+    }
+
+    /// A boundary at sample `n`, to a 16-bit track.
+    fn at(n: u64) -> Marker {
+        Marker { at: n, source_bits: Some(16) }
     }
 
     fn bit_perfect_status() -> Status {
@@ -642,12 +717,54 @@ mod tests {
     }
 
     #[test]
+    fn the_tap_copies_what_plays_without_changing_it() {
+        let samples: Vec<f32> = (0..32).map(|i| (i as f32 * 0.37).sin() * 0.8).collect();
+        for bit_perfect in [true, false] {
+            let play = |tap: bool| {
+                let status = Status::default();
+                status.bit_perfect.store(bit_perfect, Ordering::Relaxed);
+                status.set_volume(0.5);
+                status.tap.set_active(tap);
+                let (_p, _m, mut input) = ring(&samples, false);
+                let mut out = [0.0f32; 32];
+                input.fill(&mut out, 2, RATE, &status);
+                let mut copy = [0.0f32; 16];
+                let (written, _) = status.tap.read(&mut copy);
+                (out, written, copy)
+            };
+            let (plain, none, _) = play(false);
+            let (tapped, written, copy) = play(true);
+            assert_eq!(plain.map(f32::to_bits), tapped.map(f32::to_bits), "the device gets the same samples, bit for bit");
+            assert_eq!((none, written), (0, 16), "off, the tap is skipped; on, it sees every frame");
+            // Mono, before the volume.
+            for (i, c) in copy.iter().enumerate() {
+                assert!((c - (samples[2 * i] + samples[2 * i + 1]) / 2.0).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
     fn starvation_after_input_done_is_drain_not_underrun() {
         let status = bit_perfect_status();
         let (_p, _m, mut input) = ring(&[0.5, 0.5], true);
         let mut out = [0.0f32; 4];
-        assert!(input.fill(&mut out, 2, RATE, &status));
+        assert!(!input.fill(&mut out, 2, RATE, &status), "this buffer carries the last frame: not played yet");
+        assert_eq!(out, [0.5, 0.5, 0.0, 0.0]);
+        assert!(input.fill(&mut out, 2, RATE, &status), "a whole callback with nothing left: played out");
         assert_eq!(status.underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_device_without_channels_gets_silence_not_a_panic() {
+        let status = Status::default();
+        status.set_volume(0.5);
+        let (_p, mut m, mut input) = ring(&[0.5; 8], true);
+        m.push(at(3)).unwrap();
+        let mut out = [9.0f32; 6];
+        input.fill(&mut out, 0, RATE, &status);
+        input.ctl.hold();
+        input.fill(&mut out, 0, RATE, &status);
+        assert!(out.iter().all(|s| s.abs() <= 0.5));
     }
 
     #[test]
@@ -678,7 +795,7 @@ mod tests {
         let status = bit_perfect_status();
         // Track A is 3 stereo frames, B starts at sample 6.
         let (_p, mut m, mut input) = ring(&[1., 1., 2., 2., 3., 3., 4., 4., 5., 5.], false);
-        m.push(6).unwrap();
+        m.push(at(6)).unwrap();
         let mut out = [0.0f32; 4];
         input.fill(&mut out, 2, RATE, &status);
         assert_eq!((status.track_seq.load(Ordering::Relaxed), status.frames_played.load(Ordering::Relaxed)), (0, 2));
@@ -741,7 +858,7 @@ mod tests {
         // Track A: 3 stereo frames, B starts at sample 6. All samples 0.8.
         let (_p, mut m, mut input) = ring(&[0.8; 12], false);
         input.rg = 0.5; // as set when A's prebuffer finished
-        m.push(6).unwrap();
+        m.push(at(6)).unwrap();
         let mut out = [0.0f32; 12];
         input.fill(&mut out, 2, RATE, &status);
         assert_eq!(&out[..6], &[0.4; 6], "A at its gain");
@@ -783,7 +900,7 @@ mod tests {
         status.gains.set(1, 0.2);
         let src: Vec<f32> = (0..32).map(|i| (i as f32 * 0.123_456_7).sin()).collect();
         let (_p, mut m, mut input) = ring(&src, false);
-        m.push(16).unwrap();
+        m.push(at(16)).unwrap();
         let mut out = [0.0f32; 32];
         input.fill(&mut out, 2, RATE, &status);
         assert_eq!(out.map(f32::to_bits).to_vec(), src.iter().map(|s| s.to_bits()).collect::<Vec<_>>());
@@ -875,6 +992,88 @@ mod tests {
         assert!(input.needs_dither(16) && !input.needs_dither(24));
         input.fill_for_device(&mut out, 2, RATE, &status, None, &mut dither);
         assert_eq!(out.map(f32::to_bits).to_vec(), off.iter().map(|s| s.to_bits()).collect::<Vec<_>>());
+    }
+
+    fn on_grid(s: &[f32], bits: u32) -> bool {
+        s.iter().all(|v| (*v * (1u32 << (bits - 1)) as f32).fract() == 0.0)
+    }
+
+    #[test]
+    fn a_volume_ramp_that_reaches_unity_mid_buffer_is_dithered_all_the_way() {
+        let status = Status::default();
+        status.set_volume(1.0);
+        // A 16-bit source on a 16-bit device, still gliding up from half volume.
+        let src: Vec<f32> = (0..64).map(|i| (i as f32 * 977.0 - 30_000.0) / 32_768.0).collect();
+        let (_p, _m, input) = ring(&src, false);
+        let mut input = input.with_source(Some(16), false);
+        input.gain = 0.5;
+        let mut out = [0.0f32; 40];
+        input.fill_for_device(&mut out, 1, RATE, &status, Some(16), &mut Tpdf::default());
+        assert_eq!(input.gain, 1.0, "the ramp ended inside this buffer");
+        assert!(on_grid(&out, 16), "the ramped part is requantized too: {out:?}");
+        // From here on the signal is untouched.
+        let mut out = [0.0f32; 24];
+        input.fill_for_device(&mut out, 1, RATE, &status, Some(16), &mut Tpdf::default());
+        assert_eq!(out.map(f32::to_bits).to_vec(), src[40..].iter().map(|s| s.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn each_track_in_a_ring_is_dithered_by_its_own_depth() {
+        let status = bit_perfect_status();
+        // 16-bit audio (on the grid), then from sample 16 a 24-bit track (off it).
+        let a: Vec<f32> = (0..16).map(|i| (i as f32 * 977.0 - 7_000.0) / 32_768.0).collect();
+        let b: Vec<f32> = (0..16).map(|i| (i as f32 * 0.031_7).sin() * 0.5 + 0.1 / 32_768.0).collect();
+        let joined: Vec<f32> = a.iter().chain(&b).copied().collect();
+        for (first, then) in [(Some(16), Some(24)), (Some(24), Some(16)), (None, Some(16))] {
+            let (_p, mut m, input) = ring(&joined, false);
+            let mut input = input.with_source(first, false);
+            m.push(Marker { at: 16, source_bits: then }).unwrap();
+            // One device buffer holds the end of one and the start of the other.
+            let mut out = [0.0f32; 32];
+            input.fill_for_device(&mut out, 2, RATE, &status, Some(16), &mut Tpdf::default());
+            let (out_a, out_b) = out.split_at(16);
+            for (part, src, bits) in [(out_a, &a, first), (out_b, &b, then)] {
+                let exact = part.iter().zip(src).all(|(o, s)| o.to_bits() == s.to_bits());
+                if bits == Some(16) {
+                    assert!(exact, "{first:?} → {then:?}: the 16-bit track reaches the device untouched");
+                } else {
+                    assert!(!exact && on_grid(part, 16), "{first:?} → {then:?}: the {bits:?}-bit track is dithered");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_buffer_larger_than_the_scratch_is_filled_in_chunks() {
+        // 10 stereo frames through a 3-frame scratch (3 + 3 + 3 + 1), with a
+        // track boundary inside the second chunk.
+        let src: Vec<f32> = (1..=20).map(|i| i as f32 / 32_768.0).collect();
+        let (_p, mut m, input) = ring(&src, true);
+        let mut input = input.with_source(Some(16), false);
+        m.push(at(8)).unwrap();
+        let status = bit_perfect_status();
+        let (mut out, mut scratch) = ([0i16; 20], [0.0f32; 6]);
+        let drained = fill_converted(&mut input, &mut out, &mut scratch, 2, RATE, &status, Some(16), &mut Tpdf::default());
+        assert_eq!(out.to_vec(), (1..=20).collect::<Vec<i16>>(), "every chunk in order, nothing repeated or lost");
+        assert_eq!(status.track_seq.load(Ordering::Relaxed), 1);
+        assert_eq!(status.frames_played.load(Ordering::Relaxed), 6, "frames since the boundary");
+        assert_eq!(status.underruns.load(Ordering::Relaxed), 0);
+        assert!(!drained, "the chunks after the end don't hide that this buffer has the last samples");
+        let drained = fill_converted(&mut input, &mut out, &mut scratch, 2, RATE, &status, Some(16), &mut Tpdf::default());
+        assert!(drained && out == [0; 20]);
+    }
+
+    #[test]
+    fn a_seek_fade_with_less_queued_than_its_length_fades_what_there_is() {
+        let status = Status::default();
+        // The fade is 4 frames at 1 kHz; only 2 are queued.
+        let (_p, _m, mut input) = ring(&[0.8; 4], false);
+        input.ctl.hold();
+        let mut out = [9.0f32; 16];
+        input.fill(&mut out, 2, RATE, &status);
+        assert_eq!(out[..4], [0.8, 0.8, 0.4, 0.4], "faded over the two frames there are");
+        assert!(out[4..].iter().all(|s| *s == 0.0));
+        assert!(input.samples.is_empty());
     }
 
     #[test]

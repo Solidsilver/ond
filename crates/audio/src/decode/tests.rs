@@ -6,21 +6,38 @@ const RATE: u32 = 44_100;
 
 /// Minimal 16-bit PCM WAV.
 pub(crate) fn wav(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    wav_of(1, 16, rate, channels, &data)
+}
+
+/// Minimal 24-bit PCM WAV (samples in the 24-bit range).
+pub(crate) fn wav24(rate: u32, channels: u16, samples: &[i32]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()[..3].to_vec()).collect();
+    wav_of(1, 24, rate, channels, &data)
+}
+
+/// Minimal 32-bit float WAV: a source without a bit depth, as a lossy one is.
+pub(crate) fn wav_float(rate: u32, channels: u16, samples: &[f32]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    wav_of(3, 32, rate, channels, &data)
+}
+
+fn wav_of(format_tag: u16, bits: u16, rate: u32, channels: u16, data: &[u8]) -> Vec<u8> {
+    let block = channels * bits / 8;
     let mut v = Vec::new();
     v.extend_from_slice(b"RIFF");
-    v.extend_from_slice(&(36 + data_len).to_le_bytes());
+    v.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
     v.extend_from_slice(b"WAVEfmt ");
     v.extend_from_slice(&16u32.to_le_bytes());
-    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&format_tag.to_le_bytes());
     v.extend_from_slice(&channels.to_le_bytes());
     v.extend_from_slice(&rate.to_le_bytes());
-    v.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
-    v.extend_from_slice(&(channels * 2).to_le_bytes());
-    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(&(rate * block as u32).to_le_bytes());
+    v.extend_from_slice(&block.to_le_bytes());
+    v.extend_from_slice(&bits.to_le_bytes());
     v.extend_from_slice(b"data");
-    v.extend_from_slice(&data_len.to_le_bytes());
-    samples.iter().for_each(|s| v.extend_from_slice(&s.to_le_bytes()));
+    v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    v.extend_from_slice(data);
     v
 }
 
@@ -39,6 +56,31 @@ pub(crate) fn file_source(dir: &tempfile::TempDir, name: &str, samples: &[i16]) 
     let path = dir.path().join(format!("{name}.wav"));
     std::fs::write(&path, wav(RATE, 2, samples)).unwrap();
     TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some("wav".into()), ..Default::default() }
+}
+
+/// A file that can only be read forward (`test-unseekable://` sources).
+pub(crate) struct Unseekable(pub std::fs::File);
+
+impl Read for Unseekable {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Seek for Unseekable {
+    fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unseekable"))
+    }
+}
+
+impl MediaSource for Unseekable {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
 }
 
 fn config(buffer_secs: f32) -> EngineConfig {
@@ -529,8 +571,123 @@ fn replay_gain_tags_are_read_by_standard_or_raw_key() {
     assert_eq!(rg, ReplayGain { track_gain: Some(-7.5), album_gain: Some(-8.25), track_peak: Some(0.988), album_peak: None });
 }
 
+/// Tracks whose id starts with `late` stall for this long before each write
+/// to the shared `Status`, cancelled or not: a decode thread descheduled at the
+/// worst moment.
+const LATE_STALL: Duration = Duration::from_millis(300);
+
+/// (track id, the write is over) for every stalled write so far, from all tests.
+static LATE: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+
+pub(crate) fn stall(track_id: &str) {
+    if track_id.starts_with("late") {
+        LATE.lock().unwrap().push((track_id.to_owned(), false));
+        thread::sleep(LATE_STALL);
+    }
+}
+
+pub(crate) fn published(track_id: &str) {
+    if track_id.starts_with("late") {
+        LATE.lock().unwrap().push((track_id.to_owned(), true));
+    }
+}
+
+/// Waits until track `id` (a `late…` one) has reached a write to `Status`
+/// (`over` false), or is past it (`over` true).
+pub(crate) fn wait_late(id: &str, over: bool) {
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    while !LATE.lock().unwrap().iter().any(|(t, o)| t == id && *o == over) {
+        assert!(Instant::now() < deadline, "{id} never got to its write");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
 pub(crate) fn slack(d: std::time::Duration) -> std::time::Duration {
     if std::env::var_os("CI").is_some() { d * 10 } else { d }
+}
+
+#[test]
+fn a_seek_interrupts_a_push_on_a_frame_boundary() {
+    let (mut p, c) = RingBuffer::new(16);
+    let (cancel, seek) = (AtomicBool::new(false), AtomicBool::new(true));
+    // Half a stereo frame is in: the other half goes in before the push gives way.
+    let mut pushed = 3;
+    assert!(matches!(push_all(&mut p, &[0.5; 8], 2, &mut pushed, &cancel, &seek), Push::Interrupted));
+    assert_eq!((pushed, c.slots()), (4, 1));
+    assert!(matches!(push_all(&mut p, &[0.5; 8], 2, &mut pushed, &cancel, &seek), Push::Interrupted));
+    assert_eq!(pushed, 4, "on a boundary it stops at once");
+    seek.store(false, Ordering::Relaxed);
+    assert!(matches!(push_all(&mut p, &[0.5; 8], 2, &mut pushed, &cancel, &seek), Push::Done));
+    assert_eq!(pushed, 12);
+}
+
+#[test]
+fn a_track_shorter_than_the_prebuffer_plays_out() {
+    // 0.25 s: more than the decoder waits at the end for a next track to be
+    // named (0.1 s), less than the output prebuffers (0.4 s) before it plays.
+    let a = pcm(RATE as usize / 4 * 2, 5);
+    let dir = tempfile::tempdir().unwrap();
+    let status = bit_perfect_status();
+    let s = Session::start(file_source(&dir, "a", &a), None, config(1.0), status.clone(), None, None, Arc::default());
+    let (input, _) = wait_ring(&s);
+    let mut dev = Device { input, status, played: Vec::new() };
+    play_to_end(&s, &mut dev);
+    assert_eq!(dev.played, a);
+}
+
+#[test]
+fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
+    const N: usize = MARKER_CAP + 4;
+    let dir = tempfile::tempdir().unwrap();
+    // 0.2 s each: more than the decoder lingers over (0.1 s) at a track's end
+    // when nothing follows, so it waits there for each next track to be named.
+    let tracks: Vec<Vec<i16>> = (0..N).map(|i| pcm(2 * 8_820, 100 + i as i64)).collect();
+    let srcs: Vec<TrackSource> = tracks.iter().enumerate().map(|(i, t)| file_source(&dir, &format!("t{i}"), t)).collect();
+    let status = bit_perfect_status();
+    let s = Session::start(srcs[0].clone(), None, config(30.0), status.clone(), None, None, Arc::default());
+    // Names the track after `k` once the decoder is on `k`.
+    let name_next = |k: usize| {
+        let deadline = Instant::now() + slack(Duration::from_secs(5));
+        while !(s.decoding() == k as u64 && s.set_next(k as u64, Some(srcs[k + 1].clone()))) {
+            assert!(Instant::now() < deadline, "the decoder never reached track {k}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    // Nothing plays yet. The first track opens the ring; each of the next
+    // MARKER_CAP leaves a boundary marker in it, which fills the marker ring.
+    for k in 0..=MARKER_CAP {
+        name_next(k);
+    }
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while s.decoding() != MARKER_CAP as u64 + 1 {
+        assert!(Instant::now() < deadline, "never took track {}", MARKER_CAP + 1);
+        thread::sleep(Duration::from_millis(1));
+    }
+    thread::sleep(Duration::from_millis(100));
+    // The next one waits for room: it hasn't been reported, and no marker was dropped.
+    let (input, mut seen) = wait_ring(&s);
+    seen.extend(std::iter::from_fn(|| s.try_msg()));
+    let reported = seen.iter().filter(|m| matches!(m, DecoderMsg::Track { .. })).count();
+    assert_eq!(reported, MARKER_CAP + 1, "{seen:?}");
+
+    // Playing frees the markers; the rest of the queue follows.
+    let mut dev = Device { input, status: status.clone(), played: Vec::new() };
+    let mut k = MARKER_CAP + 1;
+    let deadline = Instant::now() + slack(Duration::from_secs(20));
+    loop {
+        assert!(Instant::now() < deadline, "playback stalled");
+        if k < N - 1 && s.decoding() == k as u64 && s.set_next(k as u64, Some(srcs[k + 1].clone())) {
+            k += 1;
+        }
+        let (drained, _) = dev.tick(512);
+        if drained && s.finished() {
+            break;
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    assert_eq!(status.track_seq.load(Ordering::Relaxed), N as u64 - 1, "every boundary crossed");
+    assert!(dev.played == tracks.concat(), "every track, in order, gaplessly");
 }

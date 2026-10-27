@@ -229,6 +229,40 @@ fn cover(i: usize) -> ColorImage {
     ColorImage::new([N, N], pixels)
 }
 
+/// A near-white cover (a pale, nearly blank sleeve with a faint emboss and
+/// a small grey title): the hardest case for anything drawn over artwork.
+fn white_cover() -> ColorImage {
+    const N: usize = 256;
+    let mut pixels = Vec::with_capacity(N * N);
+    for y in 0..N {
+        for x in 0..N {
+            let t = (x + y) as f32 / (2 * N) as f32;
+            let mut px = Color32::from_rgb(250, 249, 246).lerp_to_gamma(Color32::from_rgb(236, 236, 231), t);
+            let d = ((x as f32 - 128.0).powi(2) + (y as f32 - 120.0).powi(2)).sqrt();
+            if (60.0..63.0).contains(&d) {
+                px = px.lerp_to_gamma(Color32::from_rgb(222, 222, 218), 0.6);
+            }
+            if (200..206).contains(&y) && (88..168).contains(&x) {
+                px = Color32::from_rgb(196, 196, 192);
+            }
+            pixels.push(px);
+        }
+    }
+    ColorImage::new([N, N], pixels)
+}
+
+/// The cover id of [`white_cover`].
+const WHITE: &str = "white-cover";
+
+/// Plays a few songs whose cover is [`white_cover`].
+fn play_white(app: &mut OndApp) {
+    let mut songs = filler(13, 4);
+    for t in &mut songs {
+        t.cover_art = Some(WHITE.into());
+    }
+    app.player.queue.play_now(songs, 1, Source::Album { id: album_id(13), name: ALBUMS[13].0.into() });
+}
+
 fn devices() -> audio::Event {
     let caps = |name: &str, bits, max, post: Option<&str>| DeviceCaps {
         name: name.into(),
@@ -304,6 +338,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     for i in 0..ALBUMS.len() {
         app.art.preload(&album_id(i), cover(i));
     }
+    app.art.preload(WHITE, white_cover());
     app.data.newest = albums.iter().map(|a| a.id.clone()).collect();
     app.data.set_albums(albums);
     app.rebuild_search();
@@ -407,6 +442,16 @@ struct Shooter {
 impl Shooter {
     fn shoot(&self, h: &mut Harness<'_, Option<OndApp>>, scene: &str) {
         h.run_steps(4);
+        self.shoot_now(h, scene);
+    }
+
+    /// Renders the frame as it is, without letting anything settle first
+    /// (for the middle of a fade).
+    fn shoot_now(&self, h: &mut Harness<'_, Option<OndApp>>, scene: &str) {
+        // SNAPSHOTS=settings renders only the scenes with "settings" in their name.
+        if std::env::var("SNAPSHOTS").is_ok_and(|only| !scene.contains(&only)) {
+            return;
+        }
         match h.render() {
             Ok(img) => {
                 let path = self.out.join(format!("{scene}-{}.png", self.theme));
@@ -453,12 +498,136 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     app.output.handle(&signal());
     app.set_columns(super::layout::Columns::default());
     app.ui.album_details_open = false;
+    app.prefs.edit(|s| {
+        s.experimental = Default::default();
+        s.adapt_colors = false;
+        s.accent = Default::default();
+        s.album_view = Default::default();
+        s.artist_view = Default::default();
+    });
+    app.ui.tint = Default::default();
+    app.ui.page_tint = Default::default();
+    app.ui.page_tints = None;
     app.ui.nav = Nav::default();
     app.ui.nav.go(route);
     app.on_arrive();
     fill_queue(app);
+    h.ctx.data_mut(|d| d.remove::<crate::visuals::colors::Tints>(crate::visuals::colors::id()));
     // Settle layout (measured header heights etc.) before anything is hovered.
     h.run_steps(3);
+}
+
+/// Colors adapt to the album art.
+fn adapt(h: &mut Harness<'_, Option<OndApp>>) {
+    app_mut(h).prefs.edit(|s| s.adapt_colors = true);
+}
+
+/// Turns on the experimental visuals `on` sets (the rest stay off).
+fn experiment(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::visuals::Experimental)) {
+    let mut x = crate::visuals::Experimental::default();
+    on(&mut x);
+    looks(h, |s| s.experimental = x);
+}
+
+/// Turns the visuals that can be turned on (Appearance's and Experimental's)
+/// off, then `on` the ones a scene shows.
+fn looks(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::settings::Settings)) {
+    app_mut(h).prefs.edit(|s| {
+        s.backdrop = false;
+        s.waveform = false;
+        s.waveform_bars = Default::default();
+        s.alpha_rail = false;
+        s.experimental = Default::default();
+        on(s);
+    });
+}
+
+/// Waits for the playing cover's look and the album page's (worked out in
+/// the background), then lets the colors finish easing in.
+fn settle_look(h: &mut Harness<'_, Option<OndApp>>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        h.step();
+        let app = app_mut(h);
+        let cover = app.player.queue.current.as_ref().and_then(|c| app.data.cover_for(&c.track).map(str::to_owned));
+        let page = app.page_cover().flatten();
+        if [cover, page].into_iter().flatten().all(|c| app.art.look(&c).is_some()) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the cover's look never arrived");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.run_steps(6);
+}
+
+/// A made-up waveform for the playing track: a quiet intro, verses and
+/// louder choruses, a break, and a fade at the end, with some grain.
+fn fixture_waveform(app: &mut OndApp) {
+    let Some(item) = app.player.queue.current.as_ref() else { return };
+    let secs = item.track.duration_secs.unwrap_or(240) as usize;
+    let n = secs * analysis::peaks::PEAKS_PER_SEC as usize;
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let values = (0..n)
+        .map(|i| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let t = i as f32 / n as f32;
+            let section = match t {
+                t if t < 0.08 => 0.25 + 2.0 * t,
+                t if t < 0.55 => if ((t * 9.0) as u32).is_multiple_of(2) { 0.55 } else { 0.85 },
+                t if t < 0.62 => 0.3,
+                t if t < 0.9 => if ((t * 11.0) as u32).is_multiple_of(2) { 0.65 } else { 0.95 },
+                t => 0.95 * (1.0 - t) * 10.0,
+            };
+            let grain = 0.7 + 0.3 * (seed % 1000) as f32 / 1000.0;
+            (section * grain * 255.0).clamp(0.0, 255.0) as u8
+        })
+        .collect();
+    let id = item.track.id.clone();
+    app.waveforms.insert(id, analysis::Peaks { values });
+}
+
+/// Stands in for the output callback: hands the audio tap `frames` of made-up
+/// music, as if they had just played: a chord that moves every two seconds,
+/// a soft kick on the beat and a little noise. Deterministic: where it is in
+/// the progression follows how much the tap has been given.
+fn feed_tap(app: &OndApp, frames: usize) {
+    const RATE: u32 = 44_100;
+    let tap = &app.engine.status.tap;
+    let (start, _) = tap.read(&mut []);
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ start;
+    let tones = [(55.0, 0.35), (110.0, 0.3), (220.0, 0.22), (330.0, 0.16), (440.0, 0.12), (660.0, 0.06), (1320.0, 0.03), (2640.0, 0.015), (5280.0, 0.006)];
+    let mono: Vec<f32> = (0..frames)
+        .map(|i| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let n = start + i as u64;
+            let t = n as f32 / RATE as f32;
+            let root = [1.0, 4.0 / 3.0, 3.0 / 2.0, 6.0 / 5.0][(n / (2 * RATE as u64)) as usize % 4];
+            let beat = (t * 2.0).fract();
+            // A kick drum, its pitch dropping from about 130 Hz to 50.
+            let since = beat / 2.0;
+            let kick = 0.9 * (-since * 14.0).exp() * (std::f32::consts::TAU * (50.0 * since + 3.2 * (1.0 - (-since * 25.0).exp()))).sin();
+            let noise = ((seed % 2000) as f32 / 1000.0 - 1.0) * (0.002 + 0.02 * (-((t * 4.0).fract()) * 30.0).exp());
+            tones.iter().map(|(hz, a)| a * (std::f32::consts::TAU * hz * root * t).sin()).sum::<f32>() * 0.8 + kick + noise
+        })
+        .collect();
+    tap.write(&mono, &[], 1, RATE);
+}
+
+/// Steps `n` frames with fresh audio in the tap before each.
+fn steps_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) {
+    for _ in 0..n {
+        feed_tap(app_mut(h), 4096);
+        h.step();
+    }
+}
+
+/// Plays Kind of Blue instead (another cover than the fixture's).
+fn play_blue(app: &mut OndApp) {
+    app.player.queue.play_now(kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
 }
 
 /// Hovers the first widget labelled `label` inside `area`, if any.
@@ -708,6 +877,25 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).ui.sort = AlbumSort::Year;
     s.shoot(h, "albums-by-year");
 
+    // The alphabet rail, held on a letter partway down: the grid jumps there.
+    // (By title: the fixture's albums aren't stored in artist order, as the
+    // library's are.)
+    reset(h, FULL, Route::Albums);
+    app_mut(h).ui.sort = AlbumSort::Title;
+    looks(h, |s| s.alpha_rail = true);
+    h.run_steps(2);
+    let rail = h.get_by_label("Jump to letter").rect();
+    let at = pos2(rail.center().x, rail.top() + rail.height() * 0.6);
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(4);
+    s.shoot_now(h, "albums-alpha-held");
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    looks(h, |_| ());
+    h.run_steps(2);
+    assert!(h.query_by_label("Jump to letter").is_none(), "switched off: no rail");
+
     reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: None });
     s.shoot(h, "artist");
 
@@ -770,10 +958,10 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).ui.queue_ui.tab = QueueTab::Info;
     h.run_steps(3);
     s.shoot(h, "info-long");
-    { let mut c = app_mut(h).columns(); c.right = super::layout::RIGHT_MIN; app_mut(h).set_columns(c); }
+    { let mut c = app_mut(h).prefs_now().columns; c.right = super::layout::RIGHT_MIN; app_mut(h).set_columns(c); }
     h.run_steps(3);
     s.shoot(h, "info-long-min");
-    { let mut c = app_mut(h).columns(); c.right = super::layout::RIGHT_DEFAULT; app_mut(h).set_columns(c); }
+    { let mut c = app_mut(h).prefs_now().columns; c.right = super::layout::RIGHT_DEFAULT; app_mut(h).set_columns(c); }
     app_mut(h).player.queue.current = saved;
     info_fixture(app_mut(h));
     h.run_steps(3);
@@ -971,6 +1159,19 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
     s.shoot(h, "settings-general-diagnostics");
 
+    // Another accent color: everything accented takes it, in either theme.
+    reset(h, FULL, Route::Album(album_id(0)));
+    app_mut(h).prefs.edit(|s| s.accent = theme::Accent::Teal);
+    s.shoot(h, "accent-teal-album");
+    // The user's own (a bright yellow, darkened or lightened to read), and the picker.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).prefs.edit(|s| s.accent = theme::Accent::Custom([0xF5, 0xC5, 0x18]));
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Appearance));
+    h.run_steps(2);
+    h.get_by_label("Custom color…").click();
+    s.shoot(h, "settings-accent-picker");
+    egui::Popup::close_all(&h.ctx);
+
     for section in settings_page::Section::ALL {
         reset(h, FULL, Route::Recent);
         app_mut(h).actions.push(Action::OpenSettings(section));
@@ -984,7 +1185,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         let mut p = app.output.prefs().clone();
         p.replay_gain = crate::playback::RgMode::Auto;
         p.quality = crate::playback::QualityMode::Auto;
-        app.actions.push(Action::SetPlaybackPrefs(p));
+        app.actions.push(Action::Output(OutputAction::Playback(p)));
         app.actions.push(Action::OpenSettings(settings_page::Section::Playback));
     }
     s.shoot(h, "settings-playback-on");
@@ -993,7 +1194,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), url: String::new(), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
+        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
         app.analysis.runner.enqueue(jobs);
         app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
@@ -1015,8 +1216,65 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Offline);
     s.shoot(h, "offline-empty");
 
+    // The list of downloads couldn't be read: a made-up snapshot, with the
+    // store out of the way so it isn't refreshed over.
+    reset(h, FULL, Route::Offline);
+    let store = app_mut(h).downloads.store.take();
+    app_mut(h).downloads.snap = Arc::new(set_aside_snapshot(&app_mut(h).downloads.snap));
+    s.shoot(h, "offline-set-aside");
+    if !click_label(h, "Remove them", egui::Rect::EVERYTHING) {
+        eprintln!("  (Remove them not found by label)");
+    }
+    s.shoot(h, "offline-set-aside-confirm");
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Offline));
+    s.shoot(h, "settings-offline-set-aside");
+    let app = app_mut(h);
+    app.downloads.store = store;
+    app.downloads.refresh();
+
     reset(h, FULL, Route::Artists);
     s.shoot(h, "artists");
+    // Albums as a table, sorted by year the other way round (as a click on
+    // its header twice leaves it).
+    reset(h, FULL, Route::Albums);
+    let app = app_mut(h);
+    app.prefs.edit(|s| s.album_view = crate::settings::ViewMode::List);
+    (app.ui.sort, app.ui.sort_desc) = (AlbumSort::Year, true);
+    h.run_steps(2);
+    s.shoot(h, "albums-list");
+    let app = app_mut(h);
+    (app.ui.sort, app.ui.sort_desc) = (AlbumSort::Artist, false);
+    reset(h, FULL, Route::Artists);
+    // The server's artists, with photos: most have one, two get the server's
+    // stand-in (the same picture for both), so they show their initial.
+    let app = app_mut(h);
+    let mut names: Vec<&str> = ALBUMS.iter().map(|a| a.1).collect();
+    names.sort_unstable();
+    names.dedup();
+    let artists = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let photo = format!("ar-{i}");
+            app.art.preload(&photo, if i % 5 == 3 { white_cover() } else { cover(i + 11) });
+            library::Artist { id: format!("ar-{i}"), name: (*name).into(), sort: None, album_count: 2, cover_art: Some(photo) }
+        })
+        .collect();
+    app.data.artists = Arc::new(artists);
+    app.rebuild_search();
+    s.shoot(h, "artists-photos");
+    app_mut(h).prefs.edit(|s| s.artist_view = crate::settings::ViewMode::List);
+    h.run_steps(2);
+    s.shoot(h, "artists-list");
+    // An artist's page: their photo beside the name, its colors on the page.
+    let bill = names.iter().position(|n| *n == "Bill Evans").unwrap();
+    reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: Some(format!("ar-{bill}")) });
+    adapt(h);
+    settle_look(h);
+    s.shoot(h, "artist-photo");
+    let app = app_mut(h);
+    app.data.artists = Arc::default();
+    app.rebuild_search();
 
     reset(h, FULL, Route::Playlist { id: "pl-4".into(), name: "Car".into() });
     app_mut(h).data.playlist_tracks.insert("pl-4".into(), Arc::default());
@@ -1026,7 +1284,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "narrow-recent");
 
     reset(h, vec2(900.0, 700.0), Route::Recent);
-    app_mut(h).actions.push(Action::ToggleQueue);
+    app_mut(h).actions.push(Action::Window(WindowAction::ToggleQueue));
     s.shoot(h, "narrow-queue-sheet");
 
     reset(h, vec2(760.0, 640.0), Route::Albums);
@@ -1043,6 +1301,17 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.run_steps(6);
     s.shoot(h, "mini-hover");
 
+    // Mini on a near-white cover: the progress line and the corner buttons
+    // turn dark to read on it.
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    play_white(app_mut(h));
+    settle_look(h);
+    s.shoot(h, "mini-white");
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "mini-white-hover");
+
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
@@ -1050,6 +1319,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.engine.status.preview(PlayState::Stopped, 0.0, 0.0, 0.0);
     }
     s.shoot(h, "empty-queue");
+
+    experimental_scenes(h, s);
 
 
     // No status bar: the signal path lives in the now-playing display.
@@ -1111,6 +1382,11 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).show_notice("Added 6 songs to Late night, low volume");
     s.shoot(h, "toasts");
 
+    // A device that came back: offered, with a button, until clicked away.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).handle_engine(audio::Event::DeviceReturned { uid: "hp".into(), name: "Technics EAH-AZ100".into() });
+    s.shoot(h, "toast-device-back");
+
     reset(h, vec2(380.0, 880.0), Route::Recent);
     {
         let app = app_mut(h);
@@ -1137,14 +1413,280 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "login-busy");
 }
 
+/// The experimental visuals, each on its own.
+fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    let player = vec2(380.0, 880.0);
+    // Colors from the album art: the Player, the now-playing display and the
+    // accent (links, the selected tab), for a warm cover and a cool one.
+    for (blue, name) in [(false, "x-colors"), (true, "x-colors-alt")] {
+        reset(h, player, Route::Recent);
+        app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+        if blue {
+            play_blue(app_mut(h));
+        }
+        adapt(h);
+        settle_look(h);
+        s.shoot(h, &format!("{name}-player"));
+        reset(h, FULL, Route::Album(album_id(if blue { 1 } else { 0 })));
+        if blue {
+            play_blue(app_mut(h));
+        }
+        adapt(h);
+        settle_look(h);
+        s.shoot(h, &format!("{name}-full"));
+    }
+
+    // An album page in its own album's colors while another album plays:
+    // the now-playing display, the transport and the queue keep the playing one's.
+    reset(h, FULL, Route::Album(album_id(20)));
+    adapt(h);
+    settle_look(h);
+    s.shoot(h, "colors-album-page");
+
+    // Blurred artwork: behind the Player (alone, and with the art's colors),
+    // under Mini's controls, and halfway through the fade to the next cover.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    looks(h, |s| s.backdrop = true);
+    settle_look(h);
+    s.shoot(h, "x-backdrop-player");
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    play_blue(app_mut(h));
+    looks(h, |s| s.backdrop = true);
+    adapt(h);
+    settle_look(h);
+    s.shoot(h, "x-backdrop-colors-player");
+    // The next cover arrives: two steps (half a second) into the fade.
+    {
+        let app = app_mut(h);
+        app.player.queue.play_now(vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.art.look(&album_id(0)).is_none() {
+            assert!(std::time::Instant::now() < deadline, "the next cover's look never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+            app.art.poll();
+        }
+    }
+    h.run_steps(2);
+    s.shoot_now(h, "x-backdrop-crossfade");
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    looks(h, |s| s.backdrop = true);
+    settle_look(h);
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "x-backdrop-mini-hover");
+
+    // A near-white cover behind the Player: the window buttons (and on Linux
+    // the window's own) turn dark to read on it; then Mini's corner buttons.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    play_white(app_mut(h));
+    looks(h, |s| s.backdrop = true);
+    settle_look(h);
+    s.shoot(h, "x-backdrop-white-player");
+    crate::csd::preview(&h.ctx, true);
+    crate::csd::set_window(&h.ctx, true, true);
+    s.shoot(h, "x-backdrop-white-linux-player");
+    crate::csd::preview(&h.ctx, false);
+    crate::csd::set_window(&h.ctx, false, false);
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    play_white(app_mut(h));
+    looks(h, |s| s.backdrop = true);
+    settle_look(h);
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "x-backdrop-white-mini-hover");
+
+    // The waveform seek bar: in the Player and the now-playing display, with
+    // the pointer on it, and before its peaks are ready (the plain line).
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    looks(h, |s| s.waveform = true);
+    s.shoot(h, "x-waveform-loading-player");
+    fixture_waveform(app_mut(h));
+    s.shoot(h, "x-waveform-player");
+    looks(h, |s| {
+        s.waveform = true;
+        s.waveform_bars = crate::visuals::waveform::Bars { rounded: true, width: 6, gap: 3 };
+    });
+    s.shoot(h, "x-waveform-rounded-player");
+    reset(h, FULL, Route::Recent);
+    looks(h, |s| s.waveform = true);
+    fixture_waveform(app_mut(h));
+    s.shoot(h, "x-waveform-full");
+    h.hover_at(pos2(820.0, 41.0));
+    h.run_steps(2);
+    s.shoot(h, "x-waveform-lcd-hover");
+    // Its bars' settings under their preview, scrolled down to them, and in a
+    // narrow window with the controls beside or under their names.
+    for (size, name) in [(FULL, "x-settings-waveform"), (vec2(560.0, 700.0), "x-settings-waveform-narrow")] {
+        reset(h, size, Route::Recent);
+        looks(h, |s| {
+            s.waveform = true;
+            s.waveform_bars.rounded = true;
+        });
+        app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Appearance));
+        h.run_steps(2);
+        wheel(h, pos2(size.x * 0.65, size.y * 0.5), -600.0, 10);
+        s.shoot(h, name);
+    }
+
+    // Everything that's still on the page at once, in the Player.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    looks(h, |s| {
+        s.backdrop = true;
+        s.waveform = true;
+    });
+    adapt(h);
+    fixture_waveform(app_mut(h));
+    settle_look(h);
+    s.shoot(h, "x-together-player");
+
+    // The live spectrum: along the foot of the Player's artwork, and faint
+    // behind the now-playing display's text.
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    experiment(h, |x| x.spectrum = true);
+    steps_with_audio(h, 4);
+    s.shoot_now(h, "x-spectrum-player");
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| x.spectrum = true);
+    steps_with_audio(h, 4);
+    s.shoot_now(h, "x-spectrum-full");
+    reset(h, FULL, Route::Recent);
+    looks(h, |s| {
+        s.experimental.spectrum = true;
+        s.waveform = true;
+    });
+    adapt(h);
+    fixture_waveform(app_mut(h));
+    settle_look(h);
+    steps_with_audio(h, 4);
+    s.shoot_now(h, "x-spectrum-colors-full");
+
+    let frames = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
+        for _ in 0..n {
+            // At 60 frames a second, as the app draws it.
+            let t = h.ctx.input(|i| i.time) + 1.0 / 60.0;
+            h.input_mut().time = Some(t);
+            feed_tap(app_mut(h), 4096);
+            h.step();
+            // Each render is one GPU frame: the feedback builds up across them.
+            let _ = h.render();
+        }
+    };
+    visualizer_scenes(h, s);
+    let wide = vec2(1280.0, 800.0);
+    // The spectrogram in the Info tab, full window and Player, after a few
+    // seconds of the fixture chord.
+    for (size, player, name) in [(FULL, false, "x-spectrogram-full"), (player, true, "x-spectrogram-player")] {
+        reset(h, size, Route::Recent);
+        if player {
+            app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+        }
+        app_mut(h).ui.queue_ui.tab = QueueTab::Info;
+        app_mut(h).ui.spectrogram.clear();
+        experiment(h, |x| x.spectrogram = true);
+        frames(h, 150);
+        s.shoot_now(h, name);
+    }
+    // What a GPU frame costs with the visualizer against the ordinary window,
+    // rendered offscreen and read back (the read-back is in both).
+    let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {
+        frames(h, 5);
+        let t = std::time::Instant::now();
+        frames(h, 30);
+        t.elapsed().as_secs_f64() * 1000.0 / 30.0
+    };
+    reset(h, wide, Route::Recent);
+    let plain = render_ms(h);
+    experiment(h, |x| x.visualizer = true);
+    app_mut(h).toggle_visualizer();
+    let vis = render_ms(h);
+    app_mut(h).close_visualizer();
+    println!("  render + read-back per frame at {}x{} px: window {plain:.2} ms, visualizer {vis:.2} ms", wide.x * 2.0, wide.y * 2.0);
+    // The shortcut list shows the visualizer's key only while it's on.
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| x.visualizer = true);
+    app_mut(h).ui.overlay = Some(Overlay::Shortcuts);
+    s.shoot(h, "x-visualizer-shortcuts");
+}
+
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]
 fn snapshots() {
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, scenes);
+}
+
+/// Only the visualizers (they look the same in either theme):
+///
+/// ```sh
+/// cargo test -p ond-player --release visualizer_snapshots -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "renders PNGs for review; run with --ignored"]
+fn visualizer_snapshots() {
+    shoot_scenes(&[(egui::Theme::Dark, "dark")], None, visualizer_scenes);
+}
+
+/// Settings with some set in managed.json (as the Home Manager module writes
+/// it): their rows and the output picker locked, and the sign-in form.
+#[test]
+#[ignore = "renders PNGs for review; run with --ignored"]
+fn managed_snapshots() {
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], Some(MANAGED), managed_scenes);
+}
+
+/// A managed.json for the scenes and tests: a little from each section.
+const MANAGED: &str = r#"{
+  "server": "https://music.example.com",
+  "username": "demo",
+  "scrobble": false,
+  "accent": "teal",
+  "alpha_rail": true,
+  "waveform": true,
+  "waveform_bars": { "width": 4 },
+  "playback": { "replay_gain": "album", "kbps": 192 },
+  "device_modes": { "umc": "bit-perfect" },
+  "output_device": "umc",
+  "offline_limit_gb": 50,
+  "experimental": { "visualizer": true },
+  "volume": 0.2
+}"#;
+
+fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    for section in [settings_page::Section::General, settings_page::Section::Appearance, settings_page::Section::Playback, settings_page::Section::Output, settings_page::Section::Offline, settings_page::Section::Experimental] {
+        reset(h, FULL, Route::Recent);
+        app_mut(h).actions.push(Action::OpenSettings(section));
+        s.shoot(h, &format!("managed-settings-{}", section.label().to_lowercase()));
+    }
+    reset(h, FULL, Route::Recent);
+    h.run_steps(2);
+    h.get_by_label("Output: UMC22").click();
+    s.shoot(h, "managed-output-picker");
+    egui::Popup::close_all(&h.ctx);
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(super::session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
+    s.shoot(h, "managed-sign-in");
+    app_mut(h).login = None;
+}
+
+/// Renders `scenes` in each of `themes`, offscreen through wgpu, into
+/// `target/snapshots`, with `managed` as managed.json when given.
+fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, scenes: fn(&mut Harness<'_, Option<OndApp>>, &Shooter)) {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
     std::fs::create_dir_all(&out).unwrap();
     let out = out.canonicalize().unwrap();
-    for (theme, name) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
+    for &(theme, name) in themes {
         let dir = tempfile::tempdir().unwrap();
+        // Our own render state (the harness's default one, made here), so the
+        // app knows what it renders to, for the visualizer's pipelines.
+        let rs = egui_kittest::wgpu::create_render_state(egui_kittest::wgpu::default_wgpu_setup(), eframe::egui_wgpu::RendererOptions::PREDICTABLE);
+        let target = crate::visuals::gpu::Target::new(rs.target_format, &rs.adapter);
         let mut h = Harness::builder()
             .with_size(FULL)
             .with_pixels_per_point(2.0)
@@ -1152,7 +1694,7 @@ fn snapshots() {
             .with_accessibility_check(false)
             .allow_missing_glyphs()
             .with_os(egui::os::OperatingSystem::Mac)
-            .wgpu()
+            .renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(rs))
             .build_ui_state(
                 |ui, app: &mut Option<OndApp>| {
                     if let Some(app) = app {
@@ -1161,21 +1703,133 @@ fn snapshots() {
                         } else {
                             app.main_ui(ui);
                         }
-                        traffic_lights(ui.ctx(), app.title_bar_h());
+                        traffic_lights(ui.ctx(), title_bar_h(app.prefs_now().mode));
                     }
                 },
                 None,
             );
         let ctx = h.ctx.clone();
-        let app = populated(&ctx, dir.path());
+        if let Some(json) = managed {
+            std::fs::write(dir.path().join("managed.json"), json).unwrap();
+        }
+        let mut app = populated(&ctx, dir.path());
+        app.gpu = Some(target);
         // `build` installs the theme with the saved (system) preference.
         theme::set_pref(&ctx, if theme == egui::Theme::Dark { ThemePref::Dark } else { ThemePref::Light });
         *h.state_mut() = Some(app);
-        println!("{name}:");
+        println!("{name} ({:?} pictures):", target.offscreen);
         scenes(&mut h, &Shooter { out: out.clone(), theme: name });
         // Drop the app (and its engine/runtime) before the next theme.
         *h.state_mut() = None;
     }
+}
+
+/// The visualizers, each fed the fixture's music in real time at 60 frames a
+/// second from a fixed seed: Flow as it opens (its name, the key hint and the
+/// track's caption showing), each a few seconds in, Flow at other seeds and
+/// later (other fields, shapes and colour maps), Particles in another album's
+/// colors, a switch with →, and the painter versions.
+fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    use crate::visuals::visualizer::{Kind, Pick};
+    let frames = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
+        for _ in 0..n {
+            let t = h.ctx.input(|i| i.time) + 1.0 / 60.0;
+            h.input_mut().time = Some(t);
+            feed_tap(app_mut(h), 44_100 / 60);
+            h.step();
+            // Each render is one GPU frame: the feedback builds up across them.
+            let _ = h.render();
+        }
+    };
+    let open = |h: &mut Harness<'_, Option<OndApp>>, kind: Kind, seed: u64, blue: bool| {
+        reset(h, vec2(1280.0, 800.0), Route::Recent);
+        if blue {
+            play_blue(app_mut(h));
+        }
+        experiment(h, |x| {
+            x.visualizer = true;
+            x.visualizer_pick = Pick::of(kind);
+        });
+        settle_look(h);
+        feed_tap(app_mut(h), 4096);
+        app_mut(h).toggle_visualizer();
+        let v = app_mut(h).ui.visualizer.as_mut().expect("open");
+        v.fixed_step = Some(1.0 / 60.0);
+        v.reseed(seed);
+    };
+    // The choice in Settings › Experimental, scrolled down to it.
+    reset(h, FULL, Route::Recent);
+    experiment(h, |x| x.visualizer = true);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Experimental));
+    h.run_steps(2);
+    h.hover_at(pos2(FULL.x / 2.0, FULL.y / 2.0));
+    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -600.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
+    h.run_steps(30);
+    s.shoot(h, "x-settings-visualizer");
+    open(h, Kind::Flow, 1, false);
+    frames(h, 75);
+    s.shoot_now(h, "x-visualizer-title");
+    for kind in Kind::ALL {
+        open(h, kind, 1, false);
+        frames(h, 360);
+        s.shoot_now(h, &format!("x-visualizer-{}", kind.label().to_lowercase()));
+    }
+    for (seed, n) in [(2, 900), (3, 1500), (4, 2400)] {
+        open(h, Kind::Flow, seed, false);
+        frames(h, n);
+        s.shoot_now(h, &format!("x-visualizer-flow-{seed}"));
+    }
+    for kind in [Kind::Particles, Kind::Ribbons] {
+        open(h, kind, 5, true);
+        frames(h, 360);
+        s.shoot_now(h, &format!("x-visualizer-{}-alt", kind.label().to_lowercase()));
+    }
+    // The 8-bit pictures used where the adapter has no half-float targets.
+    let gpu = app_mut(h).gpu;
+    app_mut(h).gpu = gpu.map(|g| crate::visuals::gpu::Target::plain(g.format));
+    open(h, Kind::Flow, 2, false);
+    frames(h, 900);
+    s.shoot_now(h, "x-visualizer-flow-8bit");
+    app_mut(h).close_visualizer();
+    app_mut(h).gpu = gpu;
+    // Each of Flow's fields, with each shape and colour map along the way.
+    for field in 0..8 {
+        open(h, Kind::Flow, 6, false);
+        app_mut(h).ui.visualizer.as_mut().and_then(|v| v.scene().flow()).expect("flow").hold(field, field, field);
+        frames(h, 240);
+        s.shoot_now(h, &format!("x-visualizer-flow-field-{field}"));
+    }
+    // → from Flow: Particles, its name fading in, and kept as the choice.
+    open(h, Kind::Flow, 1, false);
+    frames(h, 300);
+    h.key_press(egui::Key::ArrowRight);
+    frames(h, 40);
+    s.shoot_now(h, "x-visualizer-switched");
+    assert_eq!(app_mut(h).prefs_now().experimental.visualizer_pick, Pick::Particles);
+    app_mut(h).close_visualizer();
+    // What a GPU frame costs with each, rendered offscreen and read back (the
+    // read-back is in all of them), against the ordinary window.
+    let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {
+        frames(h, 5);
+        let t = std::time::Instant::now();
+        frames(h, 30);
+        t.elapsed().as_secs_f64() * 1000.0 / 30.0
+    };
+    reset(h, vec2(1280.0, 800.0), Route::Recent);
+    println!("  render + read-back per frame at 2560x1600 px: window {:.2} ms", render_ms(h));
+    for kind in Kind::ALL {
+        open(h, kind, 1, false);
+        println!("    {}: {:.2} ms", kind.label(), render_ms(h));
+        app_mut(h).close_visualizer();
+    }
+    let gpu = app_mut(h).gpu.take();
+    for kind in Kind::ALL {
+        open(h, kind, 1, false);
+        frames(h, 300);
+        s.shoot_now(h, &format!("x-visualizer-{}-painter", kind.label().to_lowercase()));
+        app_mut(h).close_visualizer();
+    }
+    app_mut(h).gpu = gpu;
 }
 
 /// A song with long credits and a long ReplayGain line in the Info tab, then a
@@ -1199,7 +1853,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     let check = |h: &mut Harness<'_, Option<OndApp>>, what: &str| {
-        let right = app_mut(h).columns().right;
+        let right = app_mut(h).prefs_now().columns.right;
         let column = egui::Rect::from_x_y_ranges(FULL.x - right..=FULL.x, 0.0..=FULL.y);
         for label in ["Up next", "Info", "Elisha A. Hoffman", "Anthony Johnson Showalter"] {
             for n in h.query_all_by_label_contains(label) {
@@ -1213,7 +1867,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
     };
     for right in [super::layout::RIGHT_DEFAULT, super::layout::RIGHT_MIN] {
         reset(&mut h, FULL, Route::Album(album_id(0)));
-        { let mut c = app_mut(&mut h).columns(); c.right = right; app_mut(&mut h).set_columns(c); }
+        { let mut c = app_mut(&mut h).prefs_now().columns; c.right = right; app_mut(&mut h).set_columns(c); }
         let saved = long_info(app_mut(&mut h));
         app_mut(&mut h).ui.queue_ui.tab = QueueTab::Info;
         h.run_steps(4);
@@ -1256,7 +1910,7 @@ fn column_edges_drag_and_persist() {
     h.run_steps(1);
     h.drop_at(edge + vec2(60.0, 0.0));
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).columns().left, super::layout::LEFT_DEFAULT + 60.0);
+    assert_eq!(app_mut(&mut h).prefs_now().columns.left, super::layout::LEFT_DEFAULT + 60.0);
     // The queue's edge, dragged far out, stops at its limit.
     let q = pos2(FULL.x - 8.0 - super::layout::RIGHT_DEFAULT, 400.0);
     h.drag_at(q);
@@ -1265,7 +1919,7 @@ fn column_edges_drag_and_persist() {
     h.run_steps(1);
     h.drop_at(q - vec2(600.0, 0.0));
     h.run_steps(2);
-    let c = app_mut(&mut h).columns();
+    let c = app_mut(&mut h).prefs_now().columns;
     assert_eq!(c.right, c.right_limit(FULL.x));
     // Saved when let go, and restored from there.
     app_mut(&mut h).prefs.flush();
@@ -1277,6 +1931,49 @@ fn column_edges_drag_and_persist() {
 
 #[cfg(test)]
 mod perf;
+
+/// A live visual asks for frames, and has the engine copy what plays, only
+/// while it's on screen and something plays; otherwise the app's own pace
+/// (nothing sooner than its clock) and the tap off.
+#[test]
+fn live_visuals_ask_for_frames_only_while_playing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let soon = |h: &mut Harness<'_, Option<OndApp>>| h.output().viewport_output.values().any(|v| v.repaint_delay <= Duration::from_millis(50));
+    reset(&mut h, FULL, Route::Recent);
+    h.run_steps(3);
+    assert!(!soon(&mut h), "every switch off: no extra frames");
+    assert!(!app_mut(&mut h).engine.status.tap.active());
+    experiment(&mut h, |x| x.spectrum = true);
+    steps_with_audio(&mut h, 3);
+    assert!(soon(&mut h), "the spectrum on screen while playing wants frames");
+    assert!(app_mut(&mut h).engine.status.tap.active(), "and the tap is on");
+    app_mut(&mut h).engine.status.preview(PlayState::Paused, 141.0, 383.0, 0.72);
+    h.run_steps(3);
+    assert!(!soon(&mut h), "paused: no extra frames");
+    assert!(!app_mut(&mut h).engine.status.tap.active(), "and the tap is off");
+    // Playing again, but in a view without it (Mini shows no spectrum).
+    app_mut(&mut h).engine.status.preview(PlayState::Playing, 141.0, 383.0, 0.72);
+    app_mut(&mut h).edit_windows(|w| w.mode = WindowMode::Mini);
+    h.set_size(vec2(280.0, 280.0));
+    h.run_steps(3);
+    assert!(!soon(&mut h), "not on screen: no extra frames");
+    assert!(!app_mut(&mut h).engine.status.tap.active());
+    *h.state_mut() = None;
+}
 
 #[test]
 fn the_now_playing_heart_toggles_both_ways() {
@@ -1391,7 +2088,7 @@ fn a_long_album_name_doesnt_push_the_player_down() {
         let app = app_mut(&mut h);
         let id = app.player.queue.current.as_ref().unwrap().track.album_id.clone();
         let i = app.data.by_id[&id];
-        app.data.albums[i].name = "The Complete Recordings at the Village Vanguard, Including Alternate Takes and Rehearsals".into();
+        Arc::make_mut(&mut app.data.albums)[i].name = "The Complete Recordings at the Village Vanguard, Including Alternate Takes and Rehearsals".into();
     }
     h.run_steps(3);
     assert_eq!(h.get_by_label("Details").rect().min.y, before.min.y, "everything below the title stays put");
@@ -1484,7 +2181,7 @@ fn our_window_frame_leaves_the_content_working() {
 
     h.get_by_label(&crate::keys::shown("Mini player (⇧⌘M)")).click();
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).window_mode(), WindowMode::Mini, "the toolbar's Mini button switches");
+    assert_eq!(app_mut(&mut h).prefs_now().mode, WindowMode::Mini, "the toolbar's Mini button switches");
 
     h.set_size(vec2(280.0, 280.0));
     h.hover_at(pos2(140.0, 140.0));
@@ -1552,4 +2249,530 @@ fn list_keys_stay_with_an_open_sheet() {
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).player.queue.upcoming.len(), len - 1, "⌫ works once the sheet is closed");
     *h.state_mut() = None;
+}
+
+/// `snap` as it would be after the list of downloads couldn't be read.
+fn set_aside_snapshot(snap: &offline::Snapshot) -> offline::Snapshot {
+    let aside = offline::SetAside { files: vec![PathBuf::from("offline.json.bad-1761400000000")], unknown: 214, unknown_bytes: 6_480_000_000, removing: false };
+    offline::Snapshot { set_aside: Some(aside), version: snap.version + 1, ..snap.clone() }
+}
+
+/// After the list of downloads couldn't be read, the Offline page says so;
+/// "Remove them" asks first, then deletes the files the list doesn't name
+/// and the unreadable list, and the notice goes.
+#[test]
+fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    let app = app_mut(&mut h);
+    let store = app.downloads.store.take().expect("the store opens at start");
+    let folder = store.dir().to_owned();
+    drop(store);
+    std::fs::write(folder.join("offline.json"), b"{\"pins\": [tor").unwrap();
+    std::fs::write(folder.join("lost.flac"), vec![0u8; 3000]).unwrap();
+    app.downloads.store = Some((app.downloads.open)(folder.clone(), None).unwrap());
+    app.downloads.refresh();
+    let bad = || std::fs::read_dir(&folder).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("offline.json.bad-")).count();
+    assert_eq!(bad(), 1);
+
+    reset(&mut h, FULL, Route::Offline);
+    h.get_by_label("Ond couldn't read its list of downloads");
+    h.get_by_label("1 file (3.0 KB) it no longer knows is kept in the downloads folder.");
+    h.get_by_label("Remove them…").click();
+    h.run_steps(2);
+    assert!(folder.join("lost.flac").exists(), "nothing deleted before the answer");
+    h.get_by_label("Delete").click();
+    h.run_steps(2);
+    let start = std::time::Instant::now();
+    while app_mut(&mut h).downloads.snap.set_aside.is_some() {
+        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for the removal");
+        std::thread::sleep(Duration::from_millis(10));
+        app_mut(&mut h).downloads.refresh();
+    }
+    h.run_steps(2);
+    assert!(!folder.join("lost.flac").exists());
+    assert_eq!(bad(), 0);
+    assert!(h.query_by_label("Ond couldn't read its list of downloads").is_none(), "the notice goes");
+    *h.state_mut() = None;
+}
+
+/// The full window with the fixture library, for the behaviour tests below.
+fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir));
+    h
+}
+
+/// Scrolls the wheel by `dy` points over `at`, a little at a time.
+fn wheel(h: &mut Harness<'_, Option<OndApp>>, at: Pos2, dy: f32, steps: usize) {
+    h.hover_at(at);
+    h.step();
+    for _ in 0..steps {
+        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, dy / steps as f32), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
+        h.run_steps(3);
+    }
+    h.run_steps(10);
+}
+
+/// A key going down, alone, so the next step is the frame that sees it.
+fn key_down(h: &Harness<'_, Option<OndApp>>, key: egui::Key) {
+    h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+}
+
+/// Holding the alphabet rail's last letter takes the album grid to the end,
+/// and its first back to the start.
+#[test]
+fn the_alphabet_rail_jumps_the_grid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Albums);
+    app_mut(&mut h).ui.sort = AlbumSort::Title;
+    looks(&mut h, |s| s.alpha_rail = true);
+    h.run_steps(2);
+    let label = |h: &mut Harness<'_, Option<OndApp>>, last: bool| {
+        let albums = &app_mut(h).data.albums;
+        let pick = |a: &&library::Album| a.name.to_lowercase();
+        let a = if last { albums.iter().max_by_key(pick) } else { albums.iter().min_by_key(pick) }.unwrap();
+        format!("{} by {}", a.name, a.artist.as_deref().unwrap_or("Unknown artist"))
+    };
+    let (first, last) = (label(&mut h, false), label(&mut h, true));
+    assert!(h.query_by_label(&first).is_some() && h.query_by_label(&last).is_none(), "the grid starts at the top");
+    let hold = |h: &mut Harness<'_, Option<OndApp>>, frac: f32| {
+        let rail = h.get_by_label("Jump to letter").rect();
+        let at = pos2(rail.center().x, rail.top() + rail.height() * frac);
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run_steps(4);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+    };
+    hold(&mut h, 0.98);
+    assert!(h.query_by_label(&last).is_some() && h.query_by_label(&first).is_none(), "the last letter shows the end");
+    hold(&mut h, 0.02);
+    assert!(h.query_by_label(&first).is_some(), "the first letter goes back to the start");
+    *h.state_mut() = None;
+}
+
+/// The Songs view keeps the keyboard selection in view when the keys move
+/// it, but the wheel can still scroll it away.
+#[test]
+fn songs_selection_scrolls_away_with_the_wheel() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Songs);
+    app_mut(&mut h).ui.focus = Focus::Main;
+    let row_label = |h: &mut Harness<'_, Option<OndApp>>, row: usize| {
+        let app = app_mut(h);
+        let order = app.view().songs_order();
+        let t = &app.data.tracks.all[order[row]];
+        let playing = app.player.queue.current.as_ref().is_some_and(|c| c.track.id == t.id);
+        format!("{}, {}{}", t.title, t.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" })
+    };
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.songs.selected, Some(0));
+    let first = row_label(&mut h, 0);
+    assert!(h.query_by_label(&first).is_some(), "the selected row shows");
+
+    // Small wheel steps: each leaves the row part-cut for a frame or two.
+    wheel(&mut h, pos2(FULL.x * 0.4, FULL.y * 0.6), -400.0, 50);
+    assert_eq!(app_mut(&mut h).ui.songs.selected, Some(0), "the selection stays");
+    assert!(h.query_by_label(&first).is_none(), "the wheel scrolled the selected row away");
+
+    // ↓ brings the new selection back into view.
+    let second = row_label(&mut h, 1);
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(40);
+    assert_eq!(app_mut(&mut h).ui.songs.selected, Some(1));
+    assert!(h.query_by_label(&second).is_some(), "↓ scrolled to the selection");
+    *h.state_mut() = None;
+}
+
+/// The playlist name field takes the keyboard each time the dialog opens,
+/// however the last one was closed.
+#[test]
+fn name_dialog_focuses_its_field_after_esc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let focused = |h: &Harness<'_, Option<OndApp>>| h.ctx.memory(|m| m.focused().is_some());
+    for round in 0..3 {
+        app_mut(&mut h).ui.overlay = Some(Overlay::new_playlist(Vec::new()));
+        h.run_steps(3);
+        assert!(focused(&h), "round {round}: the name field has the keyboard");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(app_mut(&mut h).ui.overlay.is_none(), "round {round}: Esc closed the dialog");
+    }
+    *h.state_mut() = None;
+}
+
+/// Esc leaves the visualizer for the window in the same frame (no blank one
+/// in between).
+#[test]
+fn esc_from_the_visualizer_draws_the_window_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    experiment(&mut h, |x| x.visualizer = true);
+    app_mut(&mut h).toggle_visualizer();
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Visualizer:").is_some(), "the visualizer is open");
+    key_down(&h, egui::Key::Escape);
+    h.step();
+    assert!(app_mut(&mut h).ui.visualizer.is_none(), "Esc closed it");
+    assert!(h.query_by_label_contains("Now playing:").is_some(), "the window drew in the frame Esc closed it");
+    *h.state_mut() = None;
+}
+
+/// A click on the seek line seeks to where it was clicked; a preview left
+/// by a drag that ended elsewhere doesn't stick.
+#[test]
+fn seek_line_click_seeks_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    h.get_by_label("Position").click();
+    h.run_steps(2);
+    let to = app_mut(&mut h).player.pending_seek.expect("the click seeked");
+    assert!((to - 383.0 / 2.0).abs() < 2.0, "seeked to the middle of 383 s, got {to}");
+
+    // A screen reader hears the position and the length.
+    {
+        use egui_kittest::kittest::NodeT;
+        let node = h.get_by_label("Position").accesskit_node();
+        assert_eq!(node.min_numeric_value(), Some(0.0));
+        assert_eq!(node.max_numeric_value(), Some(383.0));
+        assert!(node.numeric_value().is_some_and(|v| (0.0..=383.0).contains(&v)), "a position: {:?}", node.numeric_value());
+        assert!(node.value().is_some_and(|v| v.ends_with(" of 6:23")), "spoken as a time: {:?}", node.value());
+    }
+
+    // A drag in another window mode that never ended here.
+    app_mut(&mut h).ui.seek_preview = Some(10.0);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.seek_preview, None, "the stale preview went");
+    *h.state_mut() = None;
+}
+
+/// A playlist of `n` songs, "Long song 0" onwards, owned by the user.
+fn long_playlist(app: &mut OndApp, id: &str, n: usize) {
+    let tracks: Vec<Track> = (0..n)
+        .map(|k| {
+            let mut t = filler(20, 1).remove(0);
+            t.id = format!("long-{k}");
+            t.title = format!("Long song {k}");
+            t
+        })
+        .collect();
+    app.data.playlists.push(subsonic::Playlist { id: id.into(), name: "Long".into(), song_count: n as u32, duration: 0, cover_art: None, owner: None });
+    app.data.playlist_tracks.insert(id.into(), Arc::new(tracks));
+}
+
+/// A long playlist lays out only the rows on screen, and still reorders by
+/// dragging, brings a song far down it into view when asked (as "Go to
+/// album" does), and keeps the keyboard selection in view.
+#[test]
+fn a_long_playlist_reorders_reveals_and_follows_the_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    let id = "pl-long";
+    long_playlist(app_mut(&mut h), id, 3000);
+    reset(&mut h, FULL, Route::Playlist { id: id.into(), name: "Long".into() });
+    let label = |k: usize| format!("Long song {k}");
+    assert!(h.query_by_label(&label(0)).is_some(), "the first rows show");
+    assert!(h.query_by_label(&label(2000)).is_none(), "rows off screen aren't laid out");
+
+    // Drag the first song onto the lower half of the third: it lands after it.
+    let (from, onto) = (h.get_by_label(&label(0)).rect(), h.get_by_label(&label(2)).rect());
+    let (a, b) = (from.center(), pos2(onto.center().x, onto.center().y + onto.height() / 4.0));
+    h.hover_at(a);
+    h.run_steps(1);
+    h.drag_at(a);
+    h.run_steps(1);
+    for k in 1..=6 {
+        h.hover_at(a + (b - a) * (k as f32 / 6.0));
+        h.run_steps(1);
+    }
+    h.drop_at(b);
+    h.run_steps(2);
+    let order: Vec<String> = app_mut(&mut h).data.playlist_tracks[id].iter().take(4).map(|t| t.id.clone()).collect();
+    assert_eq!(order, ["long-1", "long-2", "long-0", "long-3"], "the dragged song moved to just below the third");
+
+    // Revealed: selected and scrolled to, though it was never laid out.
+    h.remove_cursor();
+    app_mut(&mut h).ui.reveal = Some("long-2000".into());
+    h.run_steps(10);
+    assert_eq!(app_mut(&mut h).ui.track_sel, Some(2000));
+    assert!(app_mut(&mut h).ui.reveal.is_none(), "the reveal was used up");
+    assert!(h.query_by_label(&label(2000)).is_some(), "scrolled to the revealed song");
+    assert!(h.query_by_label(&label(0)).is_none());
+
+    // The keys move the selection and bring it along.
+    for _ in 0..30 {
+        h.key_press(egui::Key::ArrowDown);
+        h.run_steps(1);
+    }
+    h.run_steps(10);
+    assert_eq!(app_mut(&mut h).ui.track_sel, Some(2030));
+    assert!(h.query_by_label(&label(2030)).is_some(), "↓ kept the selection in view");
+    *h.state_mut() = None;
+}
+
+/// Dragging the toolbar's volume slider sets the volume and leaves the
+/// window where it is.
+#[test]
+fn dragging_the_volume_slider_doesnt_move_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder()
+        .with_size(FULL)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    h.run_steps(2);
+
+    let rect = h.get_by_label("Volume").rect();
+    app_mut(&mut h).prefs.edit(|s| s.volume = 0.0);
+    h.run_steps(2);
+    let (from, to) = (rect.left_center() + vec2(6.0, 0.0), rect.right_center() - vec2(6.0, 0.0));
+    let mut seen = Vec::new();
+    for e in [
+        egui::Event::PointerMoved(from),
+        egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+        egui::Event::PointerMoved(from + vec2(10.0, 0.0)),
+        egui::Event::PointerMoved(to),
+        egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+    ] {
+        h.event(e);
+        h.step();
+        seen.extend(h.output().viewport_output.values().flat_map(|v| v.commands.clone()));
+    }
+    assert!(!seen.contains(&egui::ViewportCommand::StartDrag), "the window stays put: {seen:?}");
+    assert!(app_mut(&mut h).prefs_now().volume > 0.9, "the volume follows the drag");
+}
+
+/// Settings set in managed.json stay as set: the actions that would change
+/// them do nothing, and the settings file keeps the user's own values.
+#[test]
+fn managed_settings_cant_be_changed_in_the_app() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("settings.json"), r#"{ "server": "https://music.example.com", "username": "demo", "scrobble": true, "accent": "rose", "alpha_rail": false }"#).unwrap();
+    std::fs::write(dir.path().join("managed.json"), MANAGED).unwrap();
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    let app = app_mut(&mut h);
+    let s = app.prefs_now();
+    assert!(!s.scrobble && s.alpha_rail && s.accent == theme::Accent::Teal, "managed values apply");
+    assert_eq!(s.volume, 1.0, "the volume isn't a managed setting");
+    app.actions.push(Action::Prefs(PrefsAction::Scrobble(true)));
+    app.actions.push(Action::Prefs(PrefsAction::AlphaRail(false)));
+    app.actions.push(Action::Prefs(PrefsAction::Theme(ThemePref::Dark)));
+    app.actions.push(Action::Output(OutputAction::ToggleBitPerfect));
+    app.actions.push(Action::Output(OutputAction::SelectDevice("spk".into())));
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    let s = app.prefs_now();
+    assert!(!s.scrobble && s.alpha_rail, "locked: unchanged");
+    assert_eq!(s.theme, ThemePref::Dark, "what isn't managed still changes");
+    let saved = app.prefs.snapshot();
+    assert_eq!(saved.device_modes.get("umc"), Some(&crate::settings::DeviceMode::BitPerfect));
+    assert_eq!(saved.output_device.as_deref(), Some("umc"));
+    app.prefs.flush();
+    let file = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+    let file: serde_json::Value = serde_json::from_str(&file).unwrap();
+    assert_eq!((&file["scrobble"], &file["accent"]), (&serde_json::json!(true), &serde_json::json!("rose")), "the user's own values are kept: {file}");
+    assert!(file.get("alpha_rail").is_none(), "and off, as theirs was (not written when off): {file}");
+    assert_eq!(file["theme"], "dark");
+}
+
+/// The README's screenshots, light and dark, into `target/snapshots`:
+///
+/// ```sh
+/// cargo test -p ond-player --release readme_snapshots -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "renders PNGs for review; run with --ignored"]
+fn readme_snapshots() {
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, readme_scenes);
+}
+
+fn readme_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    let app = app_mut(h);
+    for i in 0..ALBUMS.len() {
+        app.art.preload(&album_id(i), sleeve(i));
+    }
+    reset(h, FULL, Route::Recent);
+    s.shoot(h, "readme-library");
+    reset(h, FULL, Route::Album(album_id(0)));
+    s.shoot(h, "readme-album");
+}
+
+/// A made-up record sleeve, in one of eight styles by `i` (rings, color
+/// fields, a grid, ridgelines, a horizon, halftone, overlapping circles,
+/// stripes) and colors from `i`, for screenshots that look like a library
+/// without showing anyone's real artwork.
+fn sleeve(i: usize) -> ColorImage {
+    const N: usize = 512;
+    type Rgb = [f32; 3];
+    let base = (i as f32 * 0.137 + 0.05).fract();
+    let hsv = |dh: f32, s: f32, v: f32| -> Rgb {
+        let c = Color32::from(egui::ecolor::Hsva::new((base + dh).rem_euclid(1.0), s, v, 1.0));
+        [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0]
+    };
+    let mix = |a: Rgb, b: Rgb, t: f32| -> Rgb {
+        let t = t.clamp(0.0, 1.0);
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    };
+    // An edge `w` pixels soft: 1 inside (`d` < 0), 0 outside.
+    let inside = |d: f32, w: f32| (0.5 - d / w).clamp(0.0, 1.0);
+    let hash = |x: usize, y: usize, k: usize| -> f32 {
+        let mut n = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ (k as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+        n ^= n >> 29;
+        n = n.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        n ^= n >> 32;
+        (n % 10_000) as f32 / 10_000.0
+    };
+    let n = N as f32;
+    // Neighbours in a row of four, and the album under each, differ.
+    let style = (i * 3 + i / 8) % 8;
+    let paper = hsv(0.08, 0.12, 0.93);
+    let ink = hsv(0.0, 0.7, 0.75);
+    let dark = hsv(0.55, 0.45, 0.16);
+    let pixel = |x: usize, y: usize| -> Rgb {
+        let (fx, fy) = (x as f32, y as f32);
+        let (u, v) = (fx / n, fy / n);
+        match style {
+            // Concentric rings off centre.
+            0 => {
+                let d = ((fx - n * 0.62).powi(2) + (fy - n * 0.44).powi(2)).sqrt();
+                const BAND: f32 = 34.0;
+                let band = (d / BAND).floor() as usize;
+                let ring = if band.is_multiple_of(2) { hsv(0.0, 0.55, 0.88) } else { hsv(0.1, 0.45, 0.55) };
+                mix(dark, ring, (1.15 - d / (n * 0.8)).clamp(0.0, 1.0))
+            }
+            // Soft color fields, stacked.
+            1 => {
+                let bg = hsv(0.02, 0.55, 0.42);
+                let field = |c: Rgb, top: f32, bottom: f32, px: Rgb| {
+                    let d = (u - 0.5).abs().max(((v - (top + bottom) / 2.0).abs()) - (bottom - top) / 2.0 + 0.4) - 0.4;
+                    mix(px, c, inside(d * n, 14.0))
+                };
+                let px = field(hsv(0.06, 0.5, 0.82), 0.1, 0.45, bg);
+                field(hsv(-0.04, 0.5, 0.28), 0.55, 0.9, px)
+            }
+            // A grid of tinted squares.
+            2 => {
+                let cells = 4.0;
+                let (cx, cy) = ((u * cells).floor() as usize, (v * cells).floor() as usize);
+                let (lx, ly) = ((u * cells).fract(), (v * cells).fract());
+                let pick = hash(cx, cy, i);
+                let c = if pick < 0.3 { ink } else if pick < 0.55 { hsv(0.5, 0.35, 0.55) } else if pick < 0.8 { hsv(0.12, 0.45, 0.88) } else { dark };
+                let gap = 0.025;
+                if lx < gap || ly < gap || lx > 1.0 - gap || ly > 1.0 - gap { paper } else { c }
+            }
+            // Ridgelines, each hiding the ones behind it.
+            3 => {
+                let lines = 36;
+                let ridge = |k: usize| {
+                    let y0 = n * 0.18 + k as f32 * n * 0.019;
+                    let bump = (-((u - 0.5) / 0.16).powi(2)).exp();
+                    let wobble = ((u * 23.0 + k as f32 * 1.7).sin() + (u * 41.0 + k as f32 * 0.9).sin() * 0.6) * 0.5 + 0.5;
+                    y0 - bump * wobble * n * (0.06 + 0.05 * hash(k, 0, i))
+                };
+                let black = [0.04, 0.04, 0.05];
+                for k in (0..lines).rev() {
+                    let ry = ridge(k);
+                    if ry - 1.5 <= fy {
+                        return mix(black, [0.92, 0.92, 0.9], inside((fy - ry).abs() - 1.0, 1.2));
+                    }
+                }
+                black
+            }
+            // A low sun over water.
+            4 => {
+                let horizon = 0.62;
+                let sky = mix(hsv(0.62, 0.45, 0.35), hsv(0.02, 0.55, 0.95), (v / horizon).powf(1.6));
+                let sun = ((fx - n * 0.5).powi(2) + (fy - n * (horizon - 0.17)).powi(2)).sqrt() - n * 0.09;
+                if v < horizon {
+                    mix(sky, hsv(0.1, 0.3, 1.0), inside(sun, 2.0))
+                } else {
+                    let depth = (v - horizon) / (1.0 - horizon);
+                    let sea = mix(hsv(0.6, 0.45, 0.32), hsv(0.62, 0.5, 0.12), depth);
+                    // Broken streaks under the sun, wider further out.
+                    let row = (fy / 5.0).floor() as usize;
+                    let half = 0.03 + 0.1 * depth * hash(row, 1, i);
+                    let shift = (hash(row, 2, i) - 0.5) * 0.06;
+                    let streak = ((fy % 5.0) < 2.0 && (u - 0.5 - shift).abs() < half) as u8 as f32;
+                    mix(sea, hsv(0.08, 0.35, 0.95), streak * (0.8 - depth * 0.5))
+                }
+            }
+            // Halftone dots growing along a diagonal.
+            5 => {
+                let cell = 16.0;
+                let (cx, cy) = ((fx / cell).floor() * cell + cell / 2.0, (fy / cell).floor() * cell + cell / 2.0);
+                let r = cell * 0.48 * ((cx + cy) / (2.0 * n)).powf(1.3);
+                let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() - r;
+                mix(paper, ink, inside(d, 1.2))
+            }
+            // Overlapping circles, multiplied.
+            6 => {
+                let mut px = hsv(0.1, 0.1, 0.95);
+                for (k, (cx, cy, dh)) in [(0.38, 0.4, 0.0), (0.62, 0.42, 0.33), (0.5, 0.63, 0.66)].into_iter().enumerate() {
+                    let d = ((u - cx).powi(2) + (v - cy).powi(2)).sqrt() - 0.24;
+                    let c = hsv(dh + k as f32 * 0.01, 0.55, 0.95);
+                    let t = inside(d * n, 1.5);
+                    px = [px[0] * (1.0 - t + t * c[0]), px[1] * (1.0 - t + t * c[1]), px[2] * (1.0 - t + t * c[2])];
+                }
+                px
+            }
+            // Diagonal stripes behind a solid disc.
+            _ => {
+                let stripe = ((u + v) * 9.0).fract() < 0.5;
+                let bg = if stripe { hsv(0.0, 0.55, 0.8) } else { hsv(0.0, 0.5, 0.6) };
+                let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt() - 0.27;
+                mix(bg, dark, inside(d * n, 1.5))
+            }
+        }
+    };
+    let mut pixels = Vec::with_capacity(N * N);
+    for y in 0..N {
+        for x in 0..N {
+            let [r, g, b] = pixel(x, y);
+            // A little grain, as printed sleeves have.
+            let grain = (hash(x, y, 99) - 0.5) * 0.035;
+            let to = |c: f32| ((c + grain).clamp(0.0, 1.0) * 255.0).round() as u8;
+            pixels.push(Color32::from_rgb(to(r), to(g), to(b)));
+        }
+    }
+    ColorImage::new([N, N], pixels)
 }

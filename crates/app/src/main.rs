@@ -18,6 +18,7 @@ mod fmt;
 mod icons;
 mod keys;
 mod lyrics;
+mod managed;
 mod memo;
 mod menu;
 mod momentum;
@@ -35,13 +36,21 @@ mod settings;
 mod sync;
 mod theme;
 mod tracks;
+mod visuals;
 mod window;
 
 fn main() -> eframe::Result {
     init_logging();
 
     // Reopen in the mode (and place) the app was left in.
-    let windows = settings::Paths::resolve().ok().and_then(|p| settings::Settings::read(&p.config_file)).map(|s| s.window).unwrap_or_default();
+    let windows = settings::Paths::resolve()
+        .ok()
+        .map(|p| {
+            let mut s = settings::Settings::read(&p.config_file).unwrap_or_default();
+            managed::Managed::lay_over(&p.config_file, &mut s);
+            s.window
+        })
+        .unwrap_or_default();
     let options = eframe::NativeOptions {
         // The app id names the window for Wayland and X11 desktops, which match it
         // to `dev.solidsilver.ond.desktop` for the dock and taskbar icon.

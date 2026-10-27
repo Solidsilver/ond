@@ -64,7 +64,6 @@ pub enum Icon {
     Help,
 }
 
-/// The heart's outline, top notch first, clockwise, in icon units (−1..1).
 /// A five-point star's outline, top point first, in icon units (−1..1):
 /// points and inner corners alternate.
 fn star_points() -> [(f32, f32); 10] {
@@ -227,9 +226,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Note => {
-            painter.line_segment([p(0.25, 0.45), p(0.25, -0.8)], line);
-            painter.add(Shape::line(vec![p(0.25, -0.8), p(0.7, -0.6), p(0.7, -0.3), p(0.25, -0.45)], line));
-            painter.circle_filled(p(-0.1, 0.5), r * 0.33, color);
+            // Filled, so it holds up large (an empty playlist's cover): a round
+            // head, the stem rising from its right edge, a flag sloping down.
+            let (head, top, right) = (0.42, -0.95, 0.66);
+            let stem = (r * 0.2).max(1.2) / r;
+            let x = -0.21 + head;
+            painter.circle_filled(p(-0.21, 0.53), r * head, color);
+            painter.rect_filled(Rect::from_min_max(p(x - stem, top), p(x, 0.53)), 0.0, color);
+            painter.add(tri(vec![p(x - stem, top), p(right, top + 0.22), p(right, top + 0.56), p(x - stem, top + 0.34)]));
         }
         Icon::Lyrics => {
             painter.add(Shape::line(

@@ -19,11 +19,12 @@ use streamcache::{CacheKey, StreamCache};
 /// Audio seconds analysed per wall-clock second, assumed until measured.
 const ASSUMED_SPEED: f64 = 20.0;
 
-/// One track to analyse.
+/// One track to analyse. Its stream URL is made only when it's fetched (see
+/// [`Runner::set_server`]): making one per track for a whole library on the UI
+/// thread is a noticeable stall.
 #[derive(Debug, Clone)]
 pub struct Job {
     pub track_id: String,
-    pub url: String,
     pub suffix: Option<String>,
     pub stamp: String,
     pub secs: f64,
@@ -33,13 +34,12 @@ pub struct Job {
 
 /// The stamp a track's stored analysis must carry to still be current.
 pub fn stamp_of(t: &Track) -> String {
-    analysis::stamp(t.size, t.suffix.as_deref(), t.bit_depth, t.sample_rate)
+    analysis::stamp(t.size, t.suffix.as_deref(), t.bit_depth, t.sample_rate, t.duration_secs)
 }
 
-pub fn job_for(t: &Track, url: String, local: Option<std::path::PathBuf>) -> Job {
+pub fn job_for(t: &Track, local: Option<std::path::PathBuf>) -> Job {
     Job {
         track_id: t.id.clone(),
-        url,
         suffix: t.suffix.clone(),
         stamp: stamp_of(t),
         secs: f64::from(t.duration_secs.unwrap_or(0)),
@@ -69,11 +69,20 @@ impl Progress {
     }
 }
 
+/// A track's stream URL on the signed-in server.
+pub type StreamUrl = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 #[derive(Default)]
 struct State {
     queue: VecDeque<Job>,
     queued: HashSet<String>,
+    /// Audio seconds in `queue`, kept as jobs come and go so progress (read
+    /// every frame during a run) doesn't walk the whole queue.
+    queued_secs: f64,
     current: Option<Job>,
+    /// Where tracks without a downloaded copy are fetched from; `None` once
+    /// signed out.
+    server: Option<StreamUrl>,
     paused: bool,
     waiting: bool,
     done: usize,
@@ -84,9 +93,26 @@ struct State {
 }
 
 impl State {
+    fn push_back(&mut self, job: Job) {
+        self.queued_secs += job.secs;
+        self.queue.push_back(job);
+    }
+
+    fn push_front(&mut self, job: Job) {
+        self.queued_secs += job.secs;
+        self.queue.push_front(job);
+    }
+
+    fn pop_front(&mut self) -> Option<Job> {
+        let job = self.queue.pop_front()?;
+        self.queued.remove(&job.track_id);
+        self.queued_secs = if self.queue.is_empty() { 0.0 } else { self.queued_secs - job.secs };
+        Some(job)
+    }
+
     fn progress(&self) -> Progress {
         let waiting = self.queue.len() + usize::from(self.current.is_some());
-        let remaining_secs = self.queue.iter().chain(&self.current).map(|j| j.secs).sum::<f64>();
+        let remaining_secs = self.queued_secs.max(0.0) + self.current.as_ref().map_or(0.0, |j| j.secs);
         let speed = if self.wall_secs > 5.0 { self.audio_secs / self.wall_secs } else { ASSUMED_SPEED };
         Progress {
             done: self.done,
@@ -155,15 +181,22 @@ impl Runner {
         }
         let mut added = 0;
         for job in jobs {
-            let running = st.current.as_ref().is_some_and(|c| c.track_id == job.track_id);
+            // A cleared job still stopping counts as gone: it isn't re-queued when it stops.
+            let running = st.current.as_ref().is_some_and(|c| c.track_id == job.track_id && !c.stamp.is_empty());
             if !running && st.queued.insert(job.track_id.clone()) {
-                st.queue.push_back(job);
+                st.push_back(job);
                 added += 1;
             }
         }
         drop(st);
         self.shared.wake.notify_all();
         added
+    }
+
+    /// Where tracks without a downloaded copy are fetched from (`None`: signed
+    /// out; such tracks fail).
+    pub fn set_server(&self, server: Option<StreamUrl>) {
+        self.shared.lock().server = server;
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -176,6 +209,7 @@ impl Runner {
         let mut st = self.shared.lock();
         st.queue.clear();
         st.queued.clear();
+        st.queued_secs = 0.0;
         st.done = 0;
         st.failed = 0;
         if let Some(job) = st.current.as_mut() {
@@ -214,7 +248,7 @@ impl Drop for Runner {
 /// throttles its disk and network. Linux: nice 19 (the lowest priority), for this
 /// thread only. Windows: background mode, which lowers its CPU, disk and
 /// memory priority.
-fn lower_priority() {
+pub(crate) fn lower_priority() {
     #[cfg(target_os = "macos")]
     // SAFETY: only changes the calling thread's QoS class.
     unsafe {
@@ -242,7 +276,7 @@ fn playback_busy(status: &Status) -> bool {
 fn run(shared: &Shared, cfg: &Config) {
     loop {
         // Next job, once not paused and playback doesn't need the bandwidth.
-        let job = {
+        let (job, server) = {
             let mut st = shared.lock();
             loop {
                 if shared.quit.load(Ordering::Relaxed) {
@@ -259,10 +293,10 @@ fn run(shared: &Shared, cfg: &Config) {
                 }
                 st = shared.wake.wait_timeout(st, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
             }
-            let job = st.queue.pop_front().expect("checked non-empty");
-            st.queued.remove(&job.track_id);
+            let job = st.pop_front().expect("checked non-empty");
             st.current = Some(job.clone());
-            job
+            let server = st.server.clone();
+            (job, server)
         };
         (cfg.on_progress)();
 
@@ -274,7 +308,8 @@ fn run(shared: &Shared, cfg: &Config) {
             }
         };
         // A panic on one odd file fails that job; the worker carries on.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_job(&job, cfg, &stop)))
+        let url = || server.as_ref().map(|f| f(&job.track_id));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_job(&job, url, cfg, &stop)))
             .unwrap_or_else(|p| Err(analysis::AnalyzeError::Failed(format!("crashed: {}", panic_text(&*p)))));
 
         let mut st = shared.lock();
@@ -294,7 +329,7 @@ fn run(shared: &Shared, cfg: &Config) {
             Err(analysis::AnalyzeError::Cancelled) => {
                 // Paused (or quitting): try again first when resumed, unless cleared.
                 if !cleared && !shared.quit.load(Ordering::Relaxed) && st.queued.insert(job.track_id.clone()) {
-                    st.queue.push_front(job);
+                    st.push_front(job);
                 }
             }
             Err(analysis::AnalyzeError::Failed(e)) => {
@@ -323,7 +358,9 @@ fn analyze_local(job: &Job, stop: &(dyn Fn() -> bool + Sync)) -> Option<Result<T
     Some(analysis::analyze_reader(file, len, job.suffix.as_deref(), stop))
 }
 
-fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Result<TrackAnalysis, analysis::AnalyzeError> {
+/// Analyses `job`: its downloaded copy if it has one, else fetched from
+/// `url()` (`None`: signed out).
+fn analyze_job(job: &Job, url: impl FnOnce() -> Option<String>, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Result<TrackAnalysis, analysis::AnalyzeError> {
     #[cfg(test)]
     if job.track_id == "test-panic" {
         panic!("odd file");
@@ -332,6 +369,7 @@ fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Res
     if let Some(out) = analyze_local(job, stop) {
         return out;
     }
+    let Some(url) = url() else { return Err(analysis::AnalyzeError::Failed("not signed in".into())) };
     let key = CacheKey::original(job.track_id.clone(), job.suffix.clone());
     let cached = cfg.playback.progress(&key).is_some_and(|p| p.complete);
     let cache = if cached { &cfg.playback } else { &cfg.scratch };
@@ -353,19 +391,19 @@ fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Res
         s
     };
     // Opening blocks until the server answers, and reads block on the download:
-    // a watcher turns a stop into the flag both of them poll.
-    let done = AtomicBool::new(false);
+    // a watcher turns a stop into the flag both of them poll. It looks every
+    // 100 ms (playback needing the network has no signal of its own) and is
+    // woken at once when the job ends, so the next one needn't wait for it.
+    let done = (Mutex::new(false), Condvar::new());
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                if check() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
+            let mut finished = done.0.lock().unwrap_or_else(|e| e.into_inner());
+            while !*finished && !check() {
+                finished = done.1.wait_timeout(finished, Duration::from_millis(100)).unwrap_or_else(|e| e.into_inner()).0;
             }
         });
         let out = (|| {
-            let source = cache.open(&key, &job.url, abort.clone()).map_err(|e| {
+            let source = cache.open(&key, &url, abort.clone()).map_err(|e| {
                 if halt.load(Ordering::Relaxed) {
                     analysis::AnalyzeError::Cancelled
                 } else {
@@ -375,7 +413,8 @@ fn analyze_job(job: &Job, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Res
             let len = source.byte_len();
             analysis::analyze_reader(source, len, job.suffix.as_deref(), &|| halt.load(Ordering::Relaxed))
         })();
-        done.store(true, Ordering::Relaxed);
+        *done.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        done.1.notify_all();
         out
     })
 }
@@ -385,7 +424,7 @@ mod tests {
     use super::*;
 
     fn job(id: &str, secs: f64) -> Job {
-        Job { track_id: id.into(), url: String::new(), suffix: None, stamp: "s".into(), secs, local: None }
+        Job { track_id: id.into(), suffix: None, stamp: "s".into(), secs, local: None }
     }
 
     #[test]
@@ -426,7 +465,8 @@ mod tests {
     #[test]
     fn progress_counts_queue_and_estimates_time() {
         let mut st = State::default();
-        st.queue.extend([job("a", 100.0), job("b", 300.0)]);
+        st.push_back(job("a", 100.0));
+        st.push_back(job("b", 300.0));
         st.done = 2;
         let p = st.progress();
         assert_eq!((p.done, p.total), (2, 4));
@@ -437,8 +477,39 @@ mod tests {
         st.audio_secs = 600.0;
         st.wall_secs = 10.0;
         assert!((st.progress().eta_secs - 400.0 / 60.0).abs() < 1e-9);
-        st.queue.clear();
+        // Kept as jobs come and go: the running one still counts.
+        st.current = st.pop_front();
+        assert_eq!(st.progress().remaining_secs, 400.0);
+        st.current = None;
+        assert_eq!(st.progress().remaining_secs, 300.0);
+        st.push_front(job("a", 100.0));
+        assert_eq!(st.progress().remaining_secs, 400.0);
+        while st.pop_front().is_some() {}
+        assert_eq!(st.progress().remaining_secs, 0.0);
         assert!(!st.progress().active());
+    }
+
+    /// A runner with no worker: the queue only changes when the test changes it.
+    fn idle_runner() -> Runner {
+        Runner { shared: Arc::new(Shared { state: Mutex::default(), wake: Condvar::new(), quit: AtomicBool::new(false) }) }
+    }
+
+    #[test]
+    fn a_cleared_job_can_be_queued_again_while_it_stops() {
+        let runner = idle_runner();
+        runner.enqueue([job("a", 10.0), job("b", 20.0)]);
+        // The worker takes a.
+        {
+            let mut st = runner.shared.lock();
+            st.current = st.pop_front();
+        }
+        assert_eq!(runner.enqueue([job("a", 10.0)]), 0, "already running");
+        runner.clear();
+        assert_eq!(runner.progress().remaining_secs, 10.0, "only the one still stopping");
+        // Queued again before the worker noticed: it isn't lost.
+        assert_eq!(runner.enqueue([job("a", 10.0), job("b", 20.0)]), 2);
+        assert_eq!(runner.pending(["a", "b"]), 2);
+        assert_eq!(runner.progress().remaining_secs, 40.0);
     }
 
     #[test]
@@ -482,8 +553,7 @@ mod tests {
             on_result: Arc::new(|_, _| {}),
             on_progress: Arc::new(|| {}),
         };
-        let mut j = job("t", 10.0);
-        j.url = url;
+        let j = job("t", 10.0);
         // Playback starts buffering while our download runs.
         let flip = status.clone();
         std::thread::spawn(move || {
@@ -491,7 +561,7 @@ mod tests {
             flip.preview(audio::PlayState::Buffering, 0.0, 100.0, 0.0);
         });
         let t = Instant::now();
-        let out = analyze_job(&j, &cfg, &|| false);
+        let out = analyze_job(&j, || Some(url), &cfg, &|| false);
         assert!(matches!(out, Err(analysis::AnalyzeError::Cancelled)), "{out:?}");
         assert!(t.elapsed() < Duration::from_secs(2), "gave way after {:?}", t.elapsed());
     }

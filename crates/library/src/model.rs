@@ -8,9 +8,30 @@ pub type Album = AlbumV3;
 pub type Track = TrackV3;
 
 /// Sort-key normalization: case- and accent-insensitive, so "Björk" sorts with
-/// "Bjork" and "bill evans" with "Bill Evans".
+/// "Bjork" and "bill evans" with "Bill Evans". Letters that Unicode doesn't
+/// decompose (ø, ł, ß, æ, ...) are spelled out, so "Øystein" sorts with the
+/// O's rather than after Z.
+///
+/// Stored index keys are made with this: when it changes, bump
+/// `SCHEMA_VERSION` and rebuild the indexes in `migrate`.
 pub fn fold(s: &str) -> String {
-    s.trim().nfkd().filter(|c| !is_combining_mark(*c)).flat_map(char::to_lowercase).collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.trim().nfkd().filter(|c| !is_combining_mark(*c)).flat_map(char::to_lowercase) {
+        match c {
+            'ø' => out.push('o'),
+            'ł' => out.push('l'),
+            'ß' => out.push_str("ss"),
+            'æ' => out.push_str("ae"),
+            'œ' => out.push_str("oe"),
+            'đ' | 'ð' => out.push('d'),
+            'þ' => out.push_str("th"),
+            'ħ' => out.push('h'),
+            'ŧ' => out.push('t'),
+            'ı' => out.push('i'),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

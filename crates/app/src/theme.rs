@@ -28,6 +28,76 @@ impl ThemePref {
     }
 }
 
+/// The accent color (Settings › Appearance): one of a few presets, chosen for
+/// each theme, or the user's own, held to the theme's contrast.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Accent {
+    /// The design's own blue.
+    #[default]
+    Blue,
+    Teal,
+    Green,
+    Amber,
+    Red,
+    Rose,
+    Violet,
+    Graphite,
+    /// Any color, as picked (sRGB).
+    Custom([u8; 3]),
+}
+
+impl Accent {
+    pub const PRESETS: [Accent; 8] = [Accent::Blue, Accent::Teal, Accent::Green, Accent::Amber, Accent::Red, Accent::Rose, Accent::Violet, Accent::Graphite];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Accent::Blue => "Blue",
+            Accent::Teal => "Teal",
+            Accent::Green => "Green",
+            Accent::Amber => "Amber",
+            Accent::Red => "Red",
+            Accent::Rose => "Rose",
+            Accent::Violet => "Violet",
+            Accent::Graphite => "Graphite",
+            Accent::Custom(_) => "Custom",
+        }
+    }
+
+    /// The accent and the text on it, in the light or `dark` theme. Each
+    /// preset has a color per theme, all at 5:1 or more on every surface;
+    /// the user's own is kept if it reads at 4.5:1 on all of them, else
+    /// darkened (light) or lightened (dark) just until it does.
+    pub fn colors(self, dark: bool) -> (Color32, Color32) {
+        let t = if dark { Tokens::DARK } else { Tokens::LIGHT };
+        let pair = |light: u32, dark_: u32| hex(if dark { dark_ } else { light });
+        let accent = match self {
+            Accent::Blue => return (t.accent, t.on_accent),
+            Accent::Teal => pair(0x1E6E68, 0x6CC4BA),
+            Accent::Green => pair(0x2E6E3E, 0x84C990),
+            Accent::Amber => pair(0x8A5300, 0xE2B05E),
+            Accent::Red => pair(0xA8352C, 0xEE9A8E),
+            Accent::Rose => pair(0x9C3A62, 0xE79AB9),
+            Accent::Violet => pair(0x5E4A9E, 0xB3A2EC),
+            Accent::Graphite => pair(0x4E4F55, 0xB9BAC2),
+            Accent::Custom([r, g, b]) => {
+                match crate::visuals::colors::held_accent(Color32::from_rgb(r, g, b), &[t.bg, t.sidebar, t.panel, t.field], dark) {
+                    Some(c) => c,
+                    None => return (t.accent, t.on_accent),
+                }
+            }
+        };
+        (accent, crate::visuals::colors::on_accent(accent, &t).unwrap_or(t.on_accent))
+    }
+}
+
+/// Reads a saved accent; one this build doesn't know (a newer preset, say)
+/// reads as the default rather than making the whole settings file unreadable.
+pub fn lenient_accent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Accent, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Tokens {
     pub bg: Color32,
@@ -94,13 +164,69 @@ impl Tokens {
     };
 
     pub fn of(ui: &egui::Ui) -> Tokens {
-        if ui.visuals().dark_mode { Self::DARK } else { Self::LIGHT }
+        Self::themed(ui.ctx(), ui.visuals().dark_mode)
     }
 
     /// For code that has a context but no `Ui` (overlays).
     pub fn of_ctx(ctx: &Context) -> Tokens {
-        if ctx.global_style().visuals.dark_mode { Self::DARK } else { Self::LIGHT }
+        Self::themed(ctx, ctx.global_style().visuals.dark_mode)
     }
+
+    /// The theme's tokens, with the accent in use: the user's, or the album
+    /// art's when colors adapt to it (see [`crate::visuals::colors`]).
+    fn themed(ctx: &Context, dark: bool) -> Tokens {
+        let base = if dark { Self::DARK } else { Self::LIGHT };
+        match tint(ctx, dark) {
+            Some(t) => t.apply(base),
+            None => base,
+        }
+    }
+}
+
+/// The tint in use (the chosen accent, or the album art's colors); `None`
+/// before the app's first frame, which means the theme's own.
+pub fn tint(ctx: &Context, dark: bool) -> Option<crate::visuals::colors::Tint> {
+    ctx.data(|d| d.get_temp::<crate::visuals::colors::Tints>(crate::visuals::colors::id())).map(|t| t.of(dark))
+}
+
+/// [`tint`] for the theme `ui` is drawn in.
+pub fn tint_of(ui: &egui::Ui) -> Option<crate::visuals::colors::Tint> {
+    tint(ui.ctx(), ui.visuals().dark_mode)
+}
+
+/// Sets the tint [`Tokens::of`] finds from here on.
+pub fn set_tints(ctx: &Context, tints: crate::visuals::colors::Tints) {
+    ctx.data_mut(|d| d.insert_temp(crate::visuals::colors::id(), tints));
+}
+
+/// Runs `draw` with `tints` in use, then puts back what was there: an album
+/// page in its own album's colors, inside a window in the playing one's.
+pub fn with_tints<R>(ctx: &Context, tints: Option<crate::visuals::colors::Tints>, draw: impl FnOnce() -> R) -> R {
+    let Some(tints) = tints else { return draw() };
+    let id = crate::visuals::colors::id();
+    let outer = ctx.data(|d| d.get_temp::<crate::visuals::colors::Tints>(id));
+    set_tints(ctx, tints);
+    let r = draw();
+    match outer {
+        Some(t) => set_tints(ctx, t),
+        None => ctx.data_mut(|d| d.remove::<crate::visuals::colors::Tints>(id)),
+    }
+    r
+}
+
+/// egui's own accent-colored bits (links, text selection) in the chosen
+/// accent. The album art's colors don't reach these; they ease too often.
+pub fn set_accent(ctx: &Context, accent: Accent) {
+    for (theme, dark) in [(Theme::Light, false), (Theme::Dark, true)] {
+        let (a, _) = accent.colors(dark);
+        ctx.style_mut_of(theme, |s| accent_visuals(&mut s.visuals, a, dark));
+    }
+}
+
+fn accent_visuals(v: &mut egui::Visuals, accent: Color32, dark: bool) {
+    v.hyperlink_color = accent;
+    v.selection.bg_fill = accent.gamma_multiply(if dark { 0.45 } else { 0.22 });
+    v.selection.stroke = egui::Stroke::new(1.0, accent);
 }
 
 /// Semibold text in the UI font (the system font's weight axis when loaded).
@@ -160,11 +286,9 @@ fn visuals(theme: Theme, t: &Tokens) -> egui::Visuals {
     v.window_fill = t.bg;
     v.extreme_bg_color = t.field;
     v.faint_bg_color = t.panel;
-    v.hyperlink_color = t.accent;
     v.warn_fg_color = t.warn;
     v.error_fg_color = t.danger;
-    v.selection.bg_fill = t.accent.gamma_multiply(if theme == Theme::Dark { 0.45 } else { 0.22 });
-    v.selection.stroke = egui::Stroke::new(1.0, t.accent);
+    accent_visuals(&mut v, t.accent, theme == Theme::Dark);
     v.window_stroke = egui::Stroke::new(1.0, t.hairline);
     v.window_corner_radius = egui::CornerRadius::same(10);
     v.menu_corner_radius = egui::CornerRadius::same(8);
@@ -189,7 +313,8 @@ fn visuals(theme: Theme, t: &Tokens) -> egui::Visuals {
 
 /// Uses the system UI font (SF, Segoe UI, or whatever fontconfig calls
 /// sans-serif) and a CJK fallback when they're there, ahead of egui's bundled
-/// fonts.
+/// fonts. Characters none of them has (emoji in a playlist's name) are found
+/// among the system's fonts by eframe (its `system_fonts` feature).
 fn install_fonts(ctx: &Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut semibold_family = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
@@ -254,8 +379,9 @@ fn system_fonts() -> SystemFonts {
     let ui = std::fs::read("/System/Library/Fonts/SFNS.ttf").ok().map(|bytes| variable(bytes, 590.0));
     // SF has no CJK. Hiragino Sans covers kanji, kana and most common hanzi in
     // ~8 MB a weight; the Chinese and Korean system fonts are 20–55 MB each,
-    // too much to hold in memory for the odd title. Colour emoji is a bitmap
-    // font egui can't draw, so it's left out.
+    // too much to hold in memory for the odd title. Emoji (and any other
+    // script these miss) come from eframe's system font fallback, which loads
+    // a font only once some text needs it.
     let dir = std::path::Path::new("/System/Library/Fonts");
     let cjk = pair(&dir.join("ヒラギノ角ゴシック W3.ttc"), &dir.join("ヒラギノ角ゴシック W6.ttc"));
     SystemFonts { ui, cjk }

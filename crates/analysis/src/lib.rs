@@ -13,18 +13,28 @@
 
 mod decode;
 mod dr;
+pub mod peaks;
 mod spectrum;
 
 #[cfg(test)]
 mod tests;
 
-pub use decode::{AnalyzeError, analyze, analyze_reader};
+pub use decode::{AnalyzeError, analyze, analyze_reader, peaks, peaks_reader};
+pub use peaks::{PeakMeter, Peaks};
+
 
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};
 
 /// Bumped when an algorithm changes, so stored results are redone.
-pub const ANALYSIS_VERSION: u16 = 1;
+/// v2: DR as dr14_t.meter computes it (trailing partial block, 44.1 kHz block
+/// size); "upsampled" needs a sharp edge.
+pub const ANALYSIS_VERSION: u16 = 2;
+
+/// The least drop across a cutoff's middle 800 Hz (see `spectrum::Edge`) that
+/// reads as a filter's brickwall: about 45 dB per kHz. Natural rolloffs are
+/// far gentler; resampler and ADC filters far steeper.
+const SHARP_EDGE_DB: f64 = 25.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Confidence {
@@ -70,6 +80,10 @@ impl Verdict {
                 "No content above {} kHz, where a native high-rate recording would have some. Likely upsampled from {} kHz.",
                 khz(*cutoff_hz),
                 khz(*from_hz)
+            ),
+            VerdictKind::LossySource { cutoff_hz } if *cutoff_hz >= 19_500 => format!(
+                "Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy, though some early digital recordings stop there too.",
+                khz(*cutoff_hz)
             ),
             VerdictKind::LossySource { cutoff_hz } => format!(
                 "Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy.",
@@ -134,14 +148,17 @@ impl Record {
     }
 }
 
-/// Identifies a file version: a changed file (or a newer algorithm) gets a new stamp.
-pub fn stamp(size: Option<u64>, suffix: Option<&str>, bits: Option<u32>, rate: Option<u32>) -> String {
+/// Identifies a file version: a changed file (or a newer algorithm) gets a new
+/// stamp. The server gives no modification time, so a file replaced by one of
+/// the same size, format and length (to the second) keeps its stamp.
+pub fn stamp(size: Option<u64>, suffix: Option<&str>, bits: Option<u32>, rate: Option<u32>, duration_secs: Option<u32>) -> String {
     format!(
-        "v{ANALYSIS_VERSION}:{}:{}:{}:{}",
+        "v{ANALYSIS_VERSION}:{}:{}:{}:{}:{}",
         size.unwrap_or(0),
         suffix.unwrap_or(""),
         bits.unwrap_or(0),
-        rate.unwrap_or(0)
+        rate.unwrap_or(0),
+        duration_secs.unwrap_or(0)
     )
 }
 
@@ -287,7 +304,10 @@ impl Analyzer {
         if let Some(edge) = edge {
             let lossless = self.bits.is_some();
             let nyquist = self.rate / 2;
-            if self.rate >= 88_200 && edge.cutoff_hz <= 24_500 && edge.drop_db >= 20.0 {
+            // A resampler's brickwall, not just a deep drop: a native high-rate
+            // capture of a source that rolls off (tape, old masters) can fall
+            // as far, only more gradually.
+            if self.rate >= 88_200 && edge.cutoff_hz <= 24_500 && edge.drop_db >= 20.0 && edge.sharp_db >= SHARP_EDGE_DB {
                 let from_hz = if edge.cutoff_hz <= 22_600 { 44_100 } else { 48_000 };
                 let confidence = if edge.drop_db >= 40.0 { Confidence::High } else { Confidence::Medium };
                 verdicts.push(Verdict { kind: VerdictKind::Upsampled { from_hz, cutoff_hz: edge.cutoff_hz }, confidence });

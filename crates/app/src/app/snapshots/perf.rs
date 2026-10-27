@@ -1,5 +1,5 @@
-//! Frame-time budget on a large library: 2,000 albums, 25,000 tracks and a
-//! 500-item queue. Headless (no GPU): it times egui's layout and
+//! Frame-time budget on a large library: 2,000 albums, 25,000 tracks, a
+//! 500-item queue and a 20,000-song playlist. Headless (no GPU): it times egui's layout and
 //! tessellation of the real views, which is the CPU cost per frame.
 //!
 //! `cargo test -p ond-player --release perf -- --ignored --nocapture`
@@ -11,6 +11,7 @@ const ALBUMS_N: usize = 2_000;
 const TRACKS_N: usize = 25_000;
 const QUEUE_N: usize = 500;
 const PINS_N: usize = 2_000;
+const PLAYLIST_N: usize = 20_000;
 
 fn big_library(app: &mut OndApp) {
     let albums: Vec<Album> = (0..ALBUMS_N)
@@ -163,9 +164,9 @@ fn perf() {
     {
         let app = app_mut(&mut h);
         let pins = app.data.tracks.all.iter().take(PINS_N).map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect();
-        app.downloads.store.pin_many(pins);
-        app.downloads.store.set_paused(true);
-        app.downloads.snap = app.downloads.store.snapshot();
+        app.downloads.store().pin_many(pins);
+        app.downloads.store().set_paused(true);
+        app.downloads.snap = app.downloads.store().snapshot();
     }
     scene(&mut h, Route::Offline);
     results.push((format!("offline, {PINS_N} song pins"), time_frames(&mut h, 60)));
@@ -179,11 +180,34 @@ fn perf() {
     scene(&mut h, Route::Favorites);
     results.push((format!("favorites, {PINS_N} songs"), time_frames(&mut h, 60)));
 
+    // A 20,000-song playlist of the user's own, scrolled part-way down
+    // with a row hovered (its heart and actions showing).
+    {
+        let app = app_mut(&mut h);
+        let songs: Vec<Track> = app.data.tracks.all.iter().take(PLAYLIST_N).cloned().collect();
+        app.data.playlists.push(subsonic::Playlist { id: "big-pl".into(), name: "Everything".into(), song_count: PLAYLIST_N as u32, duration: 0, cover_art: None, owner: None });
+        app.data.playlist_tracks.insert("big-pl".into(), Arc::new(songs));
+    }
+    scene(&mut h, Route::Playlist { id: "big-pl".into(), name: "Everything".into() });
+    h.hover_at(pos2(700.0, 500.0));
+    for _ in 0..20 {
+        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -20_000.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
+        h.step();
+    }
+    results.push((format!("playlist, {PLAYLIST_N} songs"), time_frames(&mut h, 60)));
+    // Sanity: the frames drew the list's rows (the queue's are "… by …"),
+    // scrolled away from the top.
+    let first = app_mut(&mut h).data.tracks.all[0].title.clone();
+    let rows: Vec<String> = h.query_all_by_label_contains(" part ").map(|n| format!("{n:?}")).filter(|l| l.contains("ListBoxOption") && !l.contains(" by ")).map(|l| l.chars().take(80).collect()).take(2).collect();
+    println!("  playlist rows on screen, e.g. {rows:?}");
+    assert!(!rows.is_empty(), "playlist view drew no rows");
+    assert!(h.query_by_label(&first).is_none(), "the playlist scrolled");
+
     // What a sync costs the UI thread: the messages carrying the library, then
     // the once-per-batch rebuild of derived data (the search index).
     let (albums, tracks) = {
         let app = app_mut(&mut h);
-        (app.data.albums.clone(), app.data.tracks.all.to_vec())
+        (app.data.albums.to_vec(), app.data.tracks.all.to_vec())
     };
     let mut sync_ui = Vec::new();
     for _ in 0..5 {
@@ -221,6 +245,8 @@ fn perf() {
     println!("  unanalysed() per call: {:.2} ms", ms(unanalysed));
     println!("  sync messages + rebuild on the UI thread: median {:.2} ms", ms(sync_ui[2]));
 
+    experimental_costs(&mut h);
+
     // Idle: nothing playing, nothing hovered, nothing animating. After the
     // frames settle, nothing should ask for another one.
     reset(&mut h, FULL, Route::Albums);
@@ -241,6 +267,89 @@ fn perf() {
     assert!(!idle_repaint, "idle frames keep asking for repaints");
 }
 
+/// Each experimental visual's frame cost (and the album art's colors'): the
+/// same scenes with it off, then on.
+fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
+    type Switch = fn(&mut crate::settings::Settings);
+    let features: [(&str, Switch); 4] = [
+        ("colors from the art", |s| s.adapt_colors = true),
+        ("blurred artwork", |s| s.backdrop = true),
+        ("waveform seek bar", |s| s.waveform = true),
+        ("live spectrum", |s| s.experimental.spectrum = true),
+    ];
+    println!("experimental visuals, mean frame time off → on:");
+    for (name, on) in features {
+        for (scene, player) in [("full window", false), ("Player", true)] {
+            let setup = |h: &mut Harness<'_, Option<OndApp>>| {
+                reset(h, if player { vec2(380.0, 880.0) } else { FULL }, Route::Recent);
+                if player {
+                    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+                }
+            };
+            setup(h);
+            let off = time_with_audio(h, 60);
+            setup(h);
+            app_mut(h).prefs.edit(on);
+            fixture_waveform(app_mut(h));
+            settle_look(h);
+            let with = time_with_audio(h, 60);
+            println!("  {name:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
+        }
+    }
+    // The spectrogram, with the Info tab showing.
+    for (scene, player) in [("full window", false), ("Player", true)] {
+        let setup = |h: &mut Harness<'_, Option<OndApp>>| {
+            reset(h, if player { vec2(380.0, 880.0) } else { FULL }, Route::Recent);
+            if player {
+                app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+            }
+            app_mut(h).ui.queue_ui.tab = QueueTab::Info;
+        };
+        setup(h);
+        let off = time_with_audio(h, 60);
+        setup(h);
+        experiment(h, |x| x.spectrogram = true);
+        let with = time_with_audio(h, 60);
+        println!("  {:<22} {scene:<12} {:>6.3} ms → {:>6.3} ms", "spectrogram in Info", ms(off), ms(with));
+    }
+    // The visualizer, full window: each one's CPU side (the scene and the
+    // paint callback; the GPU work isn't timed here) and the painter version.
+    use crate::visuals::visualizer::{Kind, Pick};
+    let target = Some(crate::visuals::gpu::Target::plain(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8Unorm));
+    for (scene, kind, gpu) in Kind::ALL.map(|k| (format!("{}, GPU (CPU side)", k.label()), k, target)).into_iter().chain(Kind::ALL.map(|k| (format!("{}, painter", k.label()), k, None))) {
+        reset(h, FULL, Route::Recent);
+        let off = time_with_audio(h, 60);
+        reset(h, FULL, Route::Recent);
+        experiment(h, |x| {
+            x.visualizer = true;
+            x.visualizer_pick = Pick::of(kind);
+        });
+        let app = app_mut(h);
+        app.gpu = gpu;
+        app.toggle_visualizer();
+        let with = time_with_audio(h, 60);
+        app_mut(h).close_visualizer();
+        app_mut(h).gpu = None;
+        println!("  {scene:<35} {:>6.3} ms → {:>6.3} ms", ms(off), ms(with));
+    }
+    reset(h, FULL, Route::Recent);
+}
+
+/// Mean time of `n` frames, each with fresh audio in the tap as if playing
+/// (the copy itself is the output callback's cost, not the frame's).
+fn time_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) -> Duration {
+    steps_with_audio(h, 5);
+    let mut total = Duration::ZERO;
+    for _ in 0..n {
+        feed_tap(app_mut(h), 1024);
+        let t = Instant::now();
+        h.step();
+        total += t.elapsed();
+    }
+    total / n as u32
+}
+
 fn ms(d: Duration) -> f64 {
+
     d.as_secs_f64() * 1000.0
 }

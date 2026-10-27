@@ -1,9 +1,10 @@
 //! Left column: search (opens the palette), library places, playlists, and
 //! settings. In narrow windows it collapses to a rail of icons.
 
+use super::view_ctx::ViewCtx;
 use super::{Action, DragTracks, OndApp, PlaylistAction};
 use crate::icons::{self, Icon};
-use crate::nav::Route;
+use crate::nav::{Nav, Route};
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
@@ -39,10 +40,10 @@ impl OndApp {
         }
         ui.add_space(18.0);
 
-        let active = self.sidebar_active();
+        let active = active_place(&self.ui.nav);
         self.section(ui, "Library");
-        for (label, route, _) in PLACES {
-            let on = active.as_ref() == Some(&route);
+        for (i, (label, route, _)) in PLACES.into_iter().enumerate() {
+            let on = active == Some(i);
             let is_offline = route == Route::Offline;
             let resp = self.place(ui, label, on);
             if resp.clicked() {
@@ -62,47 +63,14 @@ impl OndApp {
             ui.label(egui::RichText::new("Playlists").font(FontId::new(11.0, semibold())).color(t.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::sized_button(ui, Icon::Plus, "New Playlist (⌘N)", vec2(20.0, 18.0), 9.0, Some(t.muted)).clicked() {
-                    self.actions.push(Action::Command(crate::keys::Cmd::NewPlaylist));
+                    self.actions.push(Action::NewPlaylist);
                 }
             });
         });
         ui.add_space(4.0);
         let bottom_h = 34.0;
         let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
-        egui::ScrollArea::vertical().id_salt("playlists").max_height((ui.available_height() - bottom_h).max(40.0)).show(ui, |ui| {
-            if self.data.playlists.is_empty() {
-                ui.label(egui::RichText::new("  None yet").small().color(t.muted));
-            }
-            for p in self.data.playlists.clone() {
-                let route = Route::Playlist { id: p.id.clone(), name: p.name.clone() };
-                let on = active.as_ref() == Some(&route);
-                let mine = self.view().owns(&p);
-                let resp = self.place(ui, &p.name, on);
-                // A drop target for songs dragged from any list.
-                if mine && dragging {
-                    let over = resp.dnd_hover_payload::<DragTracks>().is_some_and(|d| d.from.as_ref().is_none_or(|(from, _)| *from != p.id));
-                    if over {
-                        ui.painter().rect_stroke(resp.rect, 6.0, egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
-                    }
-                    if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
-                        && drag.from.as_ref().is_none_or(|(from, _)| *from != p.id)
-                    {
-                        self.actions.push(Action::PlaylistEdit(PlaylistAction::Add { id: p.id.clone(), tracks: drag.tracks.clone() }));
-                    }
-                }
-                if resp.clicked() {
-                    self.actions.push(Action::Go(route));
-                }
-                resp.context_menu(|ui| {
-                    let kept = self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
-                    super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, &mut self.actions);
-                    if mine {
-                        ui.separator();
-                        self.view().playlist_edit_items(ui, &p.id, &p.name);
-                    }
-                });
-            }
-        });
+        egui::ScrollArea::vertical().id_salt("playlists").max_height((ui.available_height() - bottom_h).max(40.0)).show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
 
         // The footer: the server's state on the left (click for details and
         // Sign out), keyboard shortcuts and Settings on the right.
@@ -125,14 +93,14 @@ impl OndApp {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.y = 4.0;
         let size = vec2(32.0, 32.0);
-        let active = self.sidebar_active();
+        let active = active_place(&self.ui.nav);
         ui.vertical_centered(|ui| {
             if icons::sized_button(ui, Icon::Search, "Search (⌘K)", size, 14.0, Some(t.muted)).clicked() {
                 self.actions.push(Action::OpenPalette);
             }
             ui.add_space(12.0);
-            for (label, route, icon) in PLACES {
-                let on = active.as_ref() == Some(&route);
+            for (i, (label, route, icon)) in PLACES.into_iter().enumerate() {
+                let on = active == Some(i);
                 let resp = icons::sized_button(ui, icon, label, size, 15.0, Some(if on { t.text } else { t.muted }));
                 if on {
                     ui.painter().rect_filled(resp.rect, 6.0, t.selected);
@@ -149,7 +117,7 @@ impl OndApp {
                 if self.data.playlists.is_empty() {
                     ui.weak("No playlists yet");
                 }
-                for p in self.data.playlists.clone() {
+                for p in &self.data.playlists {
                     if ui.button(&p.name).clicked() {
                         self.actions.push(Action::Go(Route::Playlist { id: p.id.clone(), name: p.name.clone() }));
                     }
@@ -175,12 +143,13 @@ impl OndApp {
         }
         let glyph = egui::pos2(rect.left() + 12.0, rect.center().y);
         state.paint_glyph(ui, glyph);
-        let g = crate::app::elide_text(ui, &state.label(), FontId::proportional(11.5), t.muted, rect.width() - 30.0);
+        let g = crate::app::elide_text(ui, state.label(), FontId::proportional(11.5), t.muted, rect.width() - 30.0);
         ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, t.muted);
         self.server_popover(&resp, &state);
-        let tip = state.tooltip();
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &tip));
-        resp.on_hover_text(tip);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, state.tooltip()));
+        resp.on_hover_ui(|ui| {
+            ui.label(state.tooltip());
+        });
     }
 
     /// The rail's version: just the glyph, the words in a tooltip; same popover.
@@ -192,9 +161,11 @@ impl OndApp {
         }
         state.paint_glyph(ui, rect.center());
         self.server_popover(&resp, &state);
-        let tip = format!("{}\n{}", state.label(), state.tooltip());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &tip));
-        resp.on_hover_text(tip);
+        let tip = || format!("{}\n{}", state.label(), state.tooltip());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip()));
+        resp.on_hover_ui(|ui| {
+            ui.label(tip());
+        });
     }
 
     fn server_state(&self) -> ServerState {
@@ -233,12 +204,8 @@ impl OndApp {
             ui.set_width(250.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             // Opening the popover refreshes the round trip if it's old.
-            if self.session.online
-                && self.diagnostics.latency_stale()
-                && let Some(c) = self.session.client.clone()
-            {
-                self.diagnostics.latency_asked();
-                self.bridge.measure_latency(c);
+            if self.session.online && self.diagnostics.latency_stale() {
+                self.actions.push(Action::MeasureLatency);
             }
             let (server, user) = self.session.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
             ui.add_space(6.0);
@@ -293,7 +260,7 @@ impl OndApp {
                     ui.add_space(8.0);
                     if super::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
                         if self.sync.tracks {
-                            self.bridge.cancel_sync();
+                            self.actions.push(Action::StopSync);
                         } else {
                             self.actions.push(Action::SyncNow);
                             ui.close();
@@ -325,7 +292,7 @@ impl OndApp {
         let t = Tokens::of(ui);
         let button = icons::sized_button(ui, Icon::Help, "Keyboard shortcuts (⌘/)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
         if button.clicked() {
-            self.actions.push(Action::Command(crate::keys::Cmd::Shortcuts));
+            self.actions.push(Action::ToggleShortcuts);
         }
     }
 
@@ -340,14 +307,6 @@ impl OndApp {
     }
 
     /// The sidebar entry the current place belongs to.
-    fn sidebar_active(&self) -> Option<Route> {
-        let current = self.ui.nav.current();
-        if current.is_root() {
-            return Some(current.clone());
-        }
-        self.ui.nav.trail().first().filter(|r| r.is_root()).map(|r| (*r).clone())
-    }
-
     fn section(&self, ui: &mut Ui, text: &str) {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -358,25 +317,96 @@ impl OndApp {
     }
 
     pub(super) fn place(&self, ui: &mut Ui, label: &str, on: bool) -> egui::Response {
-        let t = Tokens::of(ui);
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-        if ui.is_rect_visible(rect) {
-            let fill = if on {
-                t.selected
-            } else if resp.hovered() {
-                t.hover
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            ui.painter().rect_filled(rect, 6.0, fill);
-            let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-            let g = super::widgets::elide(ui, label, font, t.text, rect.width() - 16.0);
-            ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, t.text);
-        }
-        let label = label.to_owned();
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, &label));
-        resp
+        place(ui, label, on)
     }
+}
+
+impl ViewCtx<'_> {
+    /// The playlists under the places: a row each, a drop target for songs
+    /// (`dragging`: songs are being dragged), and a menu.
+    fn sidebar_playlists(&mut self, ui: &mut Ui, dragging: bool) {
+        let t = Tokens::of(ui);
+        // Borrowed from the library, not from `self`, so rows can take `&mut self`.
+        let data = self.data;
+        if data.playlists.is_empty() {
+            ui.label(egui::RichText::new("  None yet").small().color(t.muted));
+        }
+        let active = match active_route(&self.ui.nav) {
+            Some(Route::Playlist { id, .. }) => data.playlists.iter().position(|p| p.id == *id),
+            _ => None,
+        };
+        for (i, p) in data.playlists.iter().enumerate() {
+            let mine = owns(self.session, p);
+            let resp = place(ui, &p.name, active == Some(i));
+            // A drop target for songs dragged from any list.
+            if mine && dragging {
+                let over = resp.dnd_hover_payload::<DragTracks>().is_some_and(|d| d.from.as_ref().is_none_or(|(from, _)| *from != p.id));
+                if over {
+                    ui.painter().rect_stroke(resp.rect, 6.0, egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
+                }
+                if let Some(drag) = resp.dnd_release_payload::<DragTracks>()
+                    && drag.from.as_ref().is_none_or(|(from, _)| *from != p.id)
+                {
+                    self.actions.push(Action::PlaylistEdit(PlaylistAction::Add { id: p.id.clone(), tracks: drag.tracks.clone() }));
+                }
+            }
+            if resp.clicked() {
+                self.actions.push(Action::Go(Route::Playlist { id: p.id.clone(), name: p.name.clone() }));
+            }
+            resp.context_menu(|ui| {
+                let kept = self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
+                super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, self.actions);
+                if mine {
+                    ui.separator();
+                    self.playlist_edit_items(ui, &p.id, &p.name);
+                }
+            });
+        }
+    }
+}
+
+/// The root place the page belongs to: itself, or where its trail started.
+fn active_route(nav: &Nav) -> Option<&Route> {
+    let current = nav.current();
+    if current.is_root() {
+        return Some(current);
+    }
+    nav.trail().first().copied().filter(|r| r.is_root())
+}
+
+/// Which of [`PLACES`] the page belongs to.
+fn active_place(nav: &Nav) -> Option<usize> {
+    let active = active_route(nav)?;
+    PLACES.iter().position(|(_, r, _)| r == active)
+}
+
+/// Playlists the user can change (others' public ones are read-only).
+pub(super) fn owns(session: &super::Session, p: &subsonic::Playlist) -> bool {
+    match (&p.owner, &session.client) {
+        (Some(owner), Some(c)) => owner == c.username(),
+        _ => true,
+    }
+}
+
+/// A place in the sidebar: its name, highlighted when `on`.
+fn place(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if on {
+            t.selected
+        } else if resp.hovered() {
+            t.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, 6.0, fill);
+        let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
+        let g = super::widgets::elide(ui, label, font, t.text, rect.width() - 16.0);
+        ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, t.text);
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, label));
+    resp
 }
 
 
@@ -432,12 +462,12 @@ impl ServerState {
     }
 
     /// What the footer says.
-    fn label(&self) -> String {
+    fn label(&self) -> &str {
         match self {
-            ServerState::Connected { host } => host.clone(),
-            ServerState::Syncing { label, .. } => label.clone(),
-            ServerState::Offline { .. } => "Offline".into(),
-            ServerState::Connecting { .. } => "Connecting…".into(),
+            ServerState::Connected { host } => host,
+            ServerState::Syncing { label, .. } => label,
+            ServerState::Offline { .. } => "Offline",
+            ServerState::Connecting { .. } => "Connecting…",
         }
     }
 
@@ -459,11 +489,34 @@ impl ServerState {
                 painter.circle_filled(c, 3.2, t.ok);
             }
             ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
-            ServerState::Syncing { fraction: None, .. } | ServerState::Connecting { .. } => {
+            ServerState::Syncing { fraction: None, .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                ui.ctx().request_repaint_after(SPIN);
+            }
+            ServerState::Connecting { .. } => {
+                icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
+                // A connect that hangs past its timeout shouldn't keep the
+                // window drawing 20 times a second: the spinner stops.
+                let now = ui.input(|i| i.time);
+                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(connecting_since_id(), || now));
+                if now - since < CONNECT_SPIN_SECS {
+                    ui.ctx().request_repaint_after(SPIN);
+                }
             }
             ServerState::Offline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
         }
+        if !matches!(self, ServerState::Connecting { .. }) {
+            ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));
+        }
     }
+}
+
+/// The spinner's frame interval.
+const SPIN: std::time::Duration = std::time::Duration::from_millis(50);
+/// How long the Connecting spinner turns (the ping gives up after 10 s).
+const CONNECT_SPIN_SECS: f64 = 15.0;
+
+/// When the footer started showing Connecting.
+fn connecting_since_id() -> egui::Id {
+    egui::Id::unique("server-connecting-since")
 }

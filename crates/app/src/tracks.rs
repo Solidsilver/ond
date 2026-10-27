@@ -40,17 +40,25 @@ impl std::fmt::Debug for TrackSlice {
     }
 }
 
-/// Where a track is: its album and its place in that album's list.
-type Location = (String, usize);
+/// Where a track is: its album's slot (see [`TrackSet::slot`]) and its place
+/// in that album's list. A number rather than the album's id, so the index
+/// holds one string per track (its own id), not two.
+type Location = (u32, usize);
 
 /// The library's tracks, grouped by album and indexed by id. Building one walks
 /// every track, so the bridge does it off the UI thread.
 #[derive(Default)]
 pub struct TrackSet {
     /// Every stored track, grouped by album (the Songs view sorts these).
+    /// Albums fetched since (`set_album`) aren't in it.
     pub all: Arc<Vec<Track>>,
+    /// Each album's tracks: its run in `all`, or the list fetched since.
     pub by_album: HashMap<String, TrackSlice>,
-    pub index: HashMap<String, Location>,
+    index: HashMap<String, Location>,
+    /// Album ids by slot, and each album's slot: `index` refers to albums by
+    /// slot. Slots are never reused, so a stale entry can't point elsewhere.
+    album_ids: Vec<String>,
+    slots: HashMap<String, u32>,
 }
 
 impl TrackSet {
@@ -76,7 +84,7 @@ impl TrackSet {
             by_album.insert(id.clone(), slice);
             start = i;
         }
-        let mut set = Self { all, by_album, index: HashMap::new() };
+        let mut set = Self { all, by_album, ..Self::default() };
         set.index.reserve(set.all.len());
         let albums: Vec<String> = set.by_album.keys().cloned().collect();
         for album in albums {
@@ -88,8 +96,9 @@ impl TrackSet {
     /// Replaces one album's tracks (fresh from the server).
     pub fn set_album(&mut self, album_id: &str, tracks: Vec<Track>) {
         if let Some(old) = self.by_album.get(album_id) {
+            let slot = self.slots.get(album_id).copied();
             for t in old.iter() {
-                if self.index.get(&t.id).is_some_and(|(a, _)| a == album_id) {
+                if self.index.get(&t.id).is_some_and(|(a, _)| Some(*a) == slot) {
                     self.index.remove(&t.id);
                 }
             }
@@ -98,10 +107,25 @@ impl TrackSet {
         self.index_album(album_id);
     }
 
+    /// `album_id`'s slot, given one the first time it's asked for.
+    fn slot(&mut self, album_id: &str) -> u32 {
+        if let Some(&slot) = self.slots.get(album_id) {
+            return slot;
+        }
+        let slot = u32::try_from(self.album_ids.len()).expect("fewer than 4 billion albums");
+        self.album_ids.push(album_id.to_owned());
+        self.slots.insert(album_id.to_owned(), slot);
+        slot
+    }
+
     fn index_album(&mut self, album_id: &str) {
-        let Some(slice) = self.by_album.get(album_id) else { return };
-        for (i, t) in slice.iter().enumerate() {
-            self.index.insert(t.id.clone(), (album_id.to_owned(), i));
+        if !self.by_album.contains_key(album_id) {
+            return;
+        }
+        let slot = self.slot(album_id);
+        let tracks = &self.by_album[album_id];
+        for (i, t) in tracks.iter().enumerate() {
+            self.index.insert(t.id.clone(), (slot, i));
         }
     }
 
@@ -112,8 +136,8 @@ impl TrackSet {
 
     /// A track by id, stored or fetched since.
     pub fn track(&self, id: &str) -> Option<&Track> {
-        let (album, i) = self.index.get(id)?;
-        self.by_album.get(album)?.get(*i)
+        let &(slot, i) = self.index.get(id)?;
+        self.by_album.get(self.album_ids.get(slot as usize)?)?.get(i)
     }
 }
 
@@ -165,6 +189,20 @@ mod tests {
         assert_eq!(set.by_album["a"].iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["1", "3"]);
         assert_eq!(set.track("3").map(|t| t.id.as_str()), Some("3"));
         assert_eq!(set.track("2").map(|t| t.album_id.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn a_track_moved_to_another_album_is_found_there() {
+        let mut set = TrackSet::new(vec![t("1", "a"), t("2", "a"), t("3", "b")]);
+        set.set_album("b", vec![t("3", "b"), t("2", "b")]);
+        // Album a's fresh list no longer has 2; it stays found in b.
+        set.set_album("a", vec![t("1", "a")]);
+        assert_eq!(set.track("2").map(|t| t.album_id.as_str()), Some("b"));
+        assert_eq!(set.track("1").map(|t| t.album_id.as_str()), Some("a"));
+        // A new album gets a slot of its own.
+        set.set_album("c", vec![t("9", "c")]);
+        assert_eq!(set.track("9").map(|t| t.album_id.as_str()), Some("c"));
+        assert_eq!(set.track("3").map(|t| t.album_id.as_str()), Some("b"));
     }
 
     #[test]

@@ -12,7 +12,8 @@
 //! of this off.
 
 use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
-use std::sync::RwLock;
+use crate::visuals::over_art::OnArt;
+use std::sync::OnceLock;
 
 /// Whether this platform draws its own window controls.
 pub const SUPPORTED: bool = cfg!(all(unix, not(target_os = "macos")));
@@ -136,21 +137,23 @@ pub fn reserved(ctx: &Context, side: Side) -> f32 {
 }
 
 /// The desktop's button layout. Read once, in the background; until it
-/// arrives (or when there's no portal) a guess from the desktop's name.
-pub fn layout() -> Layout {
-    static READ: RwLock<Option<Layout>> = RwLock::new(None);
+/// arrives (or when there's no portal) a guess from the desktop's name (also
+/// worked out once: this is asked a few times a frame).
+pub fn layout() -> &'static Layout {
+    static READ: OnceLock<Layout> = OnceLock::new();
+    static GUESS: OnceLock<Layout> = OnceLock::new();
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         static ASK: std::sync::Once = std::sync::Once::new();
         ASK.call_once(|| {
             let _ = std::thread::Builder::new().name("button-layout".into()).spawn(|| {
                 if let Some(s) = portal::button_layout() {
-                    *READ.write().unwrap_or_else(|e| e.into_inner()) = Some(Layout::parse(&s));
+                    let _ = READ.set(Layout::parse(&s));
                 }
             });
         });
     }
-    READ.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(fallback)
+    READ.get().unwrap_or_else(|| GUESS.get_or_init(fallback))
 }
 
 /// GNOME shows only close; KDE and most others all three.
@@ -159,10 +162,20 @@ fn fallback() -> Layout {
     Layout::parse(if desktop.contains("gnome") { "appmenu:close" } else { ":minimize,maximize,close" })
 }
 
+/// This frame's title bar, as it recorded itself.
+#[derive(Debug, Clone, Copy)]
+struct Bar {
+    rect: Rect,
+    /// How to draw over the artwork behind the bar, when there is some
+    /// (the Player's blurred backdrop); `None` over the theme's own colors.
+    on_art: Option<OnArt>,
+}
+
 /// Where this frame's title bar is: the toolbar or the Player's top bar
-/// records itself, and [`overlay`] centres the buttons in it.
-pub fn set_bar(ctx: &Context, bar: Rect) {
-    ctx.data_mut(|d| d.insert_temp(bar_id(), Some(bar)));
+/// records itself, and [`overlay`] centres the buttons in it. `on_art`: the
+/// colors for what's under the bar when that's artwork.
+pub fn set_bar(ctx: &Context, bar: Rect, on_art: Option<OnArt>) {
+    ctx.data_mut(|d| d.insert_temp(bar_id(), Some(Bar { rect: bar, on_art })));
 }
 
 fn bar_id() -> Id {
@@ -180,7 +193,7 @@ pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
     }
     let screen = ctx.content_rect();
     let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().fullscreen.unwrap_or(false)));
-    let bar = ctx.data_mut(|d| d.remove_temp::<Option<Rect>>(bar_id())).flatten();
+    let bar = ctx.data_mut(|d| d.remove_temp::<Option<Bar>>(bar_id())).flatten();
     // One foreground layer over the window. Its widgets take the pointer only
     // at their own exact rects (an `Area` remembers its size, and could grow
     // over the content).
@@ -190,16 +203,17 @@ pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
         && active(ctx)
     {
         let layout = layout();
-        let y = bar.map_or(screen.top() + h / 2.0, |b| b.center().y);
+        let y = bar.map_or(screen.top() + h / 2.0, |b| b.rect.center().y);
+        let on_art = bar.and_then(|b| b.on_art);
         let ui = &mut ui;
         // Right: the last button nearest the edge. Left: the first.
         for (i, &b) in layout.right.iter().rev().enumerate() {
             let x = screen.right() - EDGE - BUTTON / 2.0 - i as f32 * (BUTTON + GAP);
-            button(ui, b, pos2(x, y), maximized);
+            button(ui, b, pos2(x, y), maximized, on_art);
         }
         for (i, &b) in layout.left.iter().enumerate() {
             let x = screen.left() + EDGE + BUTTON / 2.0 + i as f32 * (BUTTON + GAP);
-            button(ui, b, pos2(x, y), maximized);
+            button(ui, b, pos2(x, y), maximized, on_art);
         }
     }
     if s.frameless && !maximized && !fullscreen {
@@ -207,20 +221,36 @@ pub fn overlay(ctx: &Context, fallback_h: Option<f32>) {
     }
 }
 
-fn button(ui: &mut egui::Ui, b: Button, center: Pos2, maximized: bool) {
+/// One button: a disc in the theme's colors, or over artwork (`on_art`) a
+/// faint one in the foreground's own tone, on a scrim if it needs one.
+fn button(ui: &mut egui::Ui, b: Button, center: Pos2, maximized: bool, on_art: Option<OnArt>) {
     let rect = Rect::from_center_size(center, Vec2::splat(BUTTON));
     let resp = ui.interact(rect, Id::unique(("window-button", b as u8)), Sense::click());
     let t = crate::theme::Tokens::of(ui);
-    let fill = if resp.is_pointer_button_down_on() {
-        t.hairline
-    } else if resp.hovered() {
-        t.selected
-    } else {
-        t.hover
-    };
+    let (pressed, hovered) = (resp.is_pointer_button_down_on(), resp.hovered());
     let p = ui.painter();
-    p.circle_filled(rect.center(), BUTTON / 2.0, fill);
-    let stroke = Stroke::new(1.4, t.text);
+    let fg = match on_art {
+        Some(o) => {
+            if let Some(scrim) = o.scrim {
+                p.circle_filled(rect.center(), BUTTON / 2.0, scrim);
+            }
+            let fill = if pressed || hovered { o.hover(pressed) } else { o.fg.gamma_multiply(0.08) };
+            p.circle_filled(rect.center(), BUTTON / 2.0, fill);
+            o.fg
+        }
+        None => {
+            let fill = if pressed {
+                t.hairline
+            } else if hovered {
+                t.selected
+            } else {
+                t.hover
+            };
+            p.circle_filled(rect.center(), BUTTON / 2.0, fill);
+            t.text
+        }
+    };
+    let stroke = Stroke::new(1.4, fg);
     let c = rect.center();
     let s = 4.0;
     match b {

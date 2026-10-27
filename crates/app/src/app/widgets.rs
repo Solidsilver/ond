@@ -1,16 +1,29 @@
 //! Small shared pieces: elided text, quiet links, the accent button, a
 //! segmented control, a thin slider, a switch and a menu label.
 
+use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align2, Color32, FontId, Galley, Rect, Response, Sense, Ui, vec2};
 use std::sync::Arc;
 
-/// One line of text cut to `width` with an ellipsis.
+/// One line of text cut to `width` with an ellipsis. The one way the app
+/// shortens a name to fit: lists, headers, the display, the visualizer's
+/// caption (through [`elide_job`]) and [`link_line`].
 pub fn elide(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
+    ui.painter().layout_job(elide_job(text, font, color, width))
+}
+
+/// The layout [`elide`] lays out, for a painter without a `Ui`.
+pub fn elide_job(text: &str, font: FontId, color: Color32, width: f32) -> LayoutJob {
     let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    ui.painter().layout_job(job)
+    job.wrap = elide_wrap(width);
+    job
+}
+
+/// One row of at most `width`, cut anywhere, ending in an ellipsis.
+fn elide_wrap(width: f32) -> TextWrapping {
+    TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') }
 }
 
 /// Text that reads as plain until hovered, then underlines: links where they
@@ -26,8 +39,7 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
 /// A link kept to one line of at most `width`, cut with an ellipsis; the whole
 /// text shows on hover when it was cut.
 pub fn link_line(ui: &mut Ui, text: &str, font: FontId, color: Color32, width: f32) -> Response {
-    let wrap = TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let resp = link_with(ui, text, font.clone(), color, wrap);
+    let resp = link_with(ui, text, font.clone(), color, elide_wrap(width));
     let whole = ui.painter().layout_no_wrap(text.to_owned(), font, color).size().x;
     if whole > resp.rect.width() + 0.5 { resp.on_hover_text(text) } else { resp }
 }
@@ -154,6 +166,13 @@ pub fn secondary(ui: &mut Ui, text: &str) -> Response {
     filled(ui, None, text, Fill { text: t.accent, rest: t.field, hover: t.selected, pad: 28.0 })
 }
 
+/// [`secondary`] for something that can't be taken back (Sign out): red
+/// text, the same quiet fill.
+pub fn secondary_danger(ui: &mut Ui, text: &str) -> Response {
+    let t = Tokens::of(ui);
+    filled(ui, None, text, Fill { text: t.danger, rest: t.field, hover: t.selected, pad: 28.0 })
+}
+
 /// Mutually exclusive choices in a pill (Up Next / History, sort order).
 /// Returns the index clicked, if any.
 pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize> {
@@ -192,6 +211,34 @@ pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, all: &[T], current: &mut T, widt
     }
 }
 
+/// Grid or list: an icon for each in a segmented pill. Writes the pick into
+/// `current` and says whether it changed.
+pub fn view_picker(ui: &mut Ui, current: &mut crate::settings::ViewMode) -> bool {
+    use crate::settings::ViewMode;
+    let t = Tokens::of(ui);
+    let seg = vec2(30.0, 22.0);
+    let (rect, pill) = ui.allocate_exact_size(vec2(seg.x * 2.0 + 4.0, 26.0), Sense::hover());
+    ui.painter().rect_filled(rect, 7.0, t.field);
+    let mut changed = false;
+    for (i, (mode, icon, label)) in [(ViewMode::Grid, Icon::Grid, "Grid"), (ViewMode::List, Icon::List, "List")].into_iter().enumerate() {
+        let r = Rect::from_min_size(egui::pos2(rect.left() + 2.0 + seg.x * i as f32, rect.top() + 2.0), seg);
+        let resp = ui.interact(r, pill.id.with(("view", i)), Sense::click());
+        let on = *current == mode;
+        if on {
+            ui.painter().rect_filled(r, 5.0, t.bg);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r, 5.0, t.hover);
+        }
+        icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(13.0, 13.0)), icon, if on { t.text } else { t.muted });
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, label));
+        if resp.on_hover_text(label).clicked() && !on {
+            *current = mode;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Segment widths for labels of `natural` width: comfortable padding when it
 /// fits in `room`, tighter padding next, and finally the room shared out (the
 /// labels then elide) — the control never grows past its column.
@@ -217,13 +264,15 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
     let font = FontId::proportional(12.0);
     let widths = widths.to_vec();
     let size = vec2(widths.iter().sum::<f32>() + 4.0, 26.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    // Segments take their ids from the pill's own: two controls in one scope
+    // can share a label (ReplayGain and Streaming both have "Auto").
+    let (rect, pill) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().rect_filled(rect, 7.0, t.field);
     let mut x = rect.left() + 2.0;
     let mut clicked = None;
     for (i, (opt, w)) in options.iter().zip(widths).enumerate() {
         let r = Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(w, rect.height() - 4.0));
-        let resp = ui.interact(r, ui.scope_id().with(("seg", i, *opt)), Sense::click());
+        let resp = ui.interact(r, pill.id.with(("seg", i)), Sense::click());
         if i == selected {
             ui.painter().rect_filled(r, 5.0, t.bg);
         } else if resp.hovered() {
@@ -431,17 +480,17 @@ pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Res
     resp
 }
 
-/// An on/off switch with its label on the left, the row filling the width.
-pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+/// An on/off switch on its own; `label` names it for accessibility (the
+/// row it sits in shows the name).
+pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let t = Tokens::of(ui);
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
     }
     if ui.is_rect_visible(rect) {
-        ui.painter().text(egui::pos2(rect.left(), rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
-        let sw = Rect::from_min_size(egui::pos2(rect.right() - 30.0, rect.center().y - 9.0), vec2(30.0, 18.0));
+        let sw = Rect::from_center_size(rect.center(), vec2(30.0, 18.0));
         let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
         let track = if *on { t.accent } else { t.selected };
         ui.painter().rect_filled(sw, 9.0, track);
@@ -488,4 +537,28 @@ pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &st
             ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(body)).size(13.0).color(t.muted)).wrap());
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_controls_with_the_same_label_click_separately() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).build_ui_state(
+            |ui, picks: &mut (usize, usize)| {
+                choice(ui, &[0, 1, 2], &mut picks.0, Some(300.0), |i| ["Off", "Auto", "Album"][i].into());
+                choice(ui, &[0, 1, 2], &mut picks.1, Some(300.0), |i| ["Original", "Auto", "Transcoded"][i].into());
+            },
+            (0, 0),
+        );
+        h.run();
+        h.get_all_by_label("Auto").next().expect("the first control's Auto").click();
+        h.run();
+        assert_eq!(*h.state(), (1, 0));
+        h.get_all_by_label("Auto").nth(1).expect("the second control's Auto").click();
+        h.run();
+        assert_eq!(*h.state(), (1, 1));
+    }
 }

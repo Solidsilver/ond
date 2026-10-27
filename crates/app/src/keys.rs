@@ -43,6 +43,8 @@ pub enum Cmd {
     ToggleBitPerfect,
     /// The diagnostics bar along the bottom.
     ToggleDiagnostics,
+    /// The full-window visualizer (experimental; does nothing while that's off).
+    Visualizer,
     /// System / Light / Dark (menu only).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Appearance(crate::theme::ThemePref),
@@ -155,6 +157,7 @@ pub static BINDINGS: &[Binding] = &[
     b("Window", "Mini player", "⌥⌘3", CMD_ALT, Key::Num3, false, Cmd::Mini),
     b("Window", "Mini player on / off", "⇧⌘M", CMD_SHIFT, Key::M, false, Cmd::ToggleMini),
     b("Window", "Diagnostics bar on / off", "⌥⌘I", CMD_ALT, Key::I, false, Cmd::ToggleDiagnostics),
+    b("Window", "Visualizer", "⌘T", CMD, Key::T, false, Cmd::Visualizer),
     b("Window", "Settings", "⌘,", CMD, Key::Comma, false, Cmd::Settings),
     b("Window", "Keyboard shortcuts", "⌘/", CMD, Key::Slash, false, Cmd::Shortcuts),
     b("Window", "Keyboard shortcuts", "?", SHIFT, Key::Questionmark, true, Cmd::Shortcuts),

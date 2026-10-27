@@ -6,29 +6,21 @@ I wanted a client that treats playback quality as the main feature and stays out
 
 Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/library-dark.png">
+  <img alt="Ond's main window: the sidebar, a grid of recently added albums, the now-playing display in the toolbar and the queue on the right" src="docs/images/library-light.png">
+</picture>
+
 ## What it does
 
-### Playback
+- **Bit-perfect playback on macOS.** Ond takes exclusive access to the device and switches its sample rate to match each file. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither. Linux plays through PipeWire (or ALSA), Windows through WASAPI.
+- **Gapless**, and seeking into parts of a track that haven't downloaded yet.
+- **A local copy of your library.** Browsing and search (⌘K) don't wait on the server, and offline downloads keep playing when it's unreachable.
+- **Library analysis.** Loudness, dynamic range, and a check for files that claim to be hi-res but were upsampled or made from lossy sources.
+- **Three window modes.** Full is the whole library, Player has large artwork with the queue and lyrics, and Mini is a small square that stays on top.
+- **Keyboard first.** Shortcuts for nearly everything; ⌘/ (Ctrl+/ on Linux and Windows) lists them. Media keys and the system's now-playing controls work on all three platforms.
 
-- Bit-perfect output through CoreAudio on macOS. Ond takes exclusive access to the device and switches its sample rate to match each file. It shows a green dot only when every condition holds, and it says why when it can't.
-- Normal mode for everyday listening, with ReplayGain (track, album, or automatic), a sinc resampler and TPDF dither when a file needs converting for your device.
-- PipeWire output on Linux (ALSA where PipeWire isn't running), WASAPI on Windows.
-- Gapless playback, and seeking into parts of a track that haven't downloaded yet.
-
-### Library
-
-- A local copy of your library, so browsing and the ⌘K palette search are instant.
-- Offline downloads for albums, playlists and tracks. When the server is unreachable, the app keeps working with what's on disk.
-- Library analysis: loudness (EBU R128), dynamic range, and a check for files that claim to be hi-res but were upsampled or made from lossy sources.
-- Credits as links, synced lyrics, favorites, ratings and playlist editing.
-
-### Windows and keys
-
-- Three window modes. Full is the whole library. Player has large artwork with the queue below and lyrics in a drawer. Mini is a small square that stays on top.
-- A queue that shows where each track came from and when it will start.
-- Keyboard shortcuts for nearly everything. Press ⌘/ (Ctrl+/ on Linux and Windows) to see them all.
-- Media keys and the system's now-playing controls: Control Center on macOS, the GNOME and KDE media controls (MPRIS, which also reaches phones through KDE Connect and GSConnect) on Linux, and the media flyout on Windows. Play counts and scrobbles go through Navidrome.
-- An optional diagnostics bar (⌥⌘I, or Ctrl+Alt+I on Linux and Windows) with the signal path, buffer, download speed and server latency in one line.
+The covers in the screenshot are made up.
 
 ## Install
 
@@ -61,13 +53,9 @@ Ond needs PipeWire's library (`libpipewire-0.3`), which every current desktop di
 
 ### Nix and NixOS
 
-The repository is a flake. To try it without installing:
+The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/v0.3.0`.
 
-```sh
-nix run github:Solidsilver/ond
-```
-
-To install it into your profile, `nix profile install github:Solidsilver/ond`. In a NixOS or home-manager config, add the flake as an input and either use `ond.packages.${system}.default` directly or apply `ond.overlays.default` and use `pkgs.ond`. Pin a release with `github:Solidsilver/ond/v0.2.0`.
+With Home Manager, the flake's module installs Ond and can set any of its settings. Settings set there are locked in the app, and the rest stay editable. It works on macOS too, for the app bundle. [docs/home-manager.md](docs/home-manager.md) has the setup and every setting.
 
 ### Windows
 
@@ -145,6 +133,8 @@ The UI tests can render every screen to PNG without a server, which is how most 
 cargo test -p ond-player --release snapshots -- --ignored --nocapture
 # images land in target/snapshots/
 ```
+
+The screenshot in this README comes from the `readme_snapshots` test, resized to 1920 pixels wide into `docs/images/`.
 
 Some things need real hardware or a real server. [TESTING.md](TESTING.md) lists them.
 

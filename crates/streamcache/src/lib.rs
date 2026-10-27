@@ -18,6 +18,7 @@
 //! with [`file_name`], so pinning a track that's complete here can hard-link
 //! it instead of downloading it again.
 
+pub mod disk;
 mod download;
 pub mod fetch;
 mod ranges;
@@ -121,6 +122,10 @@ pub struct Progress {
 }
 
 /// Lets a blocked read give up early (track change, seek, shutdown).
+///
+/// Called while the download's state lock is held, every 50 ms while an open
+/// or a read waits. Keep it to loading a flag: it must not block or call
+/// into the cache.
 pub type Abort = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Clone)]
@@ -259,9 +264,13 @@ impl StreamCache {
     }
 
     /// Cancels every download and the prefetch. Completed files stay.
+    ///
+    /// The cancelled downloads leave the index at once, so an `open` right
+    /// after starts afresh instead of attaching to one that's winding down.
+    /// Readers still holding them fail their next blocked read.
     pub fn cancel_all(&self) {
         self.clear_prefetch();
-        for dl in self.inner.lock_index().active.values() {
+        for (_, dl) in self.inner.lock_index().active.drain() {
             dl.cancel();
         }
     }
@@ -330,9 +339,12 @@ impl Inner {
     }
 
     /// Returns the active download for `name`, starting one if needed, with one more holder.
+    ///
+    /// Cancelling a download takes it out of `active` under the same lock, so
+    /// one found here is live; a cancelled one is replaced all the same.
     fn acquire(self: &Arc<Self>, name: &str, url: &str) -> Arc<Download> {
         let mut idx = self.lock_index();
-        if let Some(dl) = idx.active.get(name) {
+        if let Some(dl) = idx.active.get(name).filter(|dl| !dl.is_cancelled()) {
             dl.holders.fetch_add(1, Ordering::Relaxed);
             return dl.clone();
         }
@@ -366,14 +378,16 @@ impl Inner {
     }
 
     fn finish(&self, dl: &Arc<Download>, result: Result<u64, String>) {
-        let result = result.and_then(|len| {
-            std::fs::rename(&dl.part_path, &dl.final_path).map_err(|e| format!("cache file: {e}"))?;
-            Ok(len)
-        });
         let mut idx = self.lock_index();
         if idx.active.get(&dl.name).is_some_and(|a| Arc::ptr_eq(a, dl)) {
             idx.active.remove(&dl.name);
         }
+        // Renamed under the index lock, like `remove` moves files away, so a
+        // late delete of an evicted copy can't land on this one.
+        let result = result.and_then(|len| {
+            std::fs::rename(&dl.part_path, &dl.final_path).map_err(|e| format!("cache file: {e}"))?;
+            Ok(len)
+        });
         match result {
             Ok(len) => {
                 let old = idx.complete.insert(dl.name.clone(), Entry { size: len, last_used: SystemTime::now() });
@@ -419,11 +433,32 @@ impl Inner {
     /// Deletes evicted files. Open handles keep working: unlinking an open file
     /// is fine on every platform we target (std opens with FILE_SHARE_DELETE on
     /// Windows).
+    ///
+    /// This runs after the index let the victims go, so a victim may have been
+    /// downloaded again since: if it's back in the index, the file is the new
+    /// copy and stays. Otherwise it's moved to a `.part` name (swept at startup
+    /// if the delete doesn't happen) under the index lock, the same lock
+    /// `finish` renames under, and deleted after.
     fn remove(&self, victims: Vec<String>) {
         for victim in victims {
-            if let Err(e) = std::fs::remove_file(self.cfg.dir.join(&victim))
-                && e.kind() != io::ErrorKind::NotFound
-            {
+            let doomed = {
+                let idx = self.lock_index();
+                if idx.complete.contains_key(&victim) {
+                    continue;
+                }
+                let doomed =
+                    self.cfg.dir.join(format!("{victim}.{}.part", self.seq.fetch_add(1, Ordering::Relaxed)));
+                match std::fs::rename(self.cfg.dir.join(&victim), &doomed) {
+                    Ok(()) => doomed,
+                    Err(e) => {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            tracing::warn!("evict {victim}: {e}");
+                        }
+                        continue;
+                    }
+                }
+            };
+            if let Err(e) = std::fs::remove_file(&doomed) {
                 tracing::warn!("evict {victim}: {e}");
             }
         }
@@ -491,7 +526,10 @@ impl Read for StreamReader {
         let dl = &self.hold.dl;
         let mut st = dl.lock();
         loop {
-            if let Some(len) = st.len
+            // The length can arrive late (a stream that didn't declare one) or
+            // shrink (one that declared more than it has).
+            self.len = st.len.or(self.len);
+            if let Some(len) = self.len
                 && self.pos >= len
             {
                 return Ok(0);
@@ -519,8 +557,6 @@ impl Read for StreamReader {
                 dl.wake.notify_one();
             }
             st = dl.cond.wait_timeout(st, POLL).unwrap_or_else(|e| e.into_inner()).0;
-            // A length may have arrived with the first bytes of an unknown-length stream.
-            self.len = self.len.or(st.len);
         }
     }
 }
@@ -530,7 +566,7 @@ impl Seek for StreamReader {
         let target = match to {
             SeekFrom::Start(n) => Some(n),
             SeekFrom::Current(d) => self.pos.checked_add_signed(d),
-            SeekFrom::End(d) => match self.len.or(self.hold.dl.lock().len) {
+            SeekFrom::End(d) => match self.hold.dl.lock().len.or(self.len) {
                 Some(len) => len.checked_add_signed(d),
                 None => return Err(io::Error::new(io::ErrorKind::Unsupported, "length unknown")),
             },
