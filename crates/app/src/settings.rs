@@ -7,6 +7,15 @@ use std::path::{Path, PathBuf};
 /// The Keychain service, the same as the bundle id.
 const KEYRING_SERVICE: &str = "dev.solidsilver.ond";
 
+/// How a page of albums or artists lays them out: tiles, or a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewMode {
+    #[default]
+    Grid,
+    List,
+}
+
 /// How a device plays, as remembered per device. Saved as "normal" /
 /// "bit-perfect", as earlier builds wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +80,11 @@ pub struct Settings {
     /// Artists' photos from the server in the Artists list.
     #[serde(default = "yes")]
     pub artist_photos: bool,
+    /// Grid or list, for the pages of albums and for Artists.
+    #[serde(default)]
+    pub album_view: ViewMode,
+    #[serde(default)]
+    pub artist_view: ViewMode,
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
@@ -142,6 +156,8 @@ impl Default for Settings {
             waveform_bars: Default::default(),
             alpha_rail: false,
             artist_photos: true,
+            album_view: ViewMode::Grid,
+            artist_view: ViewMode::Grid,
             show_queue: true,
             window: Default::default(),
             scrobble: true,

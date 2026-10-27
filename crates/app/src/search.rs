@@ -29,6 +29,8 @@ pub struct ArtistEntry {
     pub cover: Option<String>,
     /// The first and last years of their albums in the library.
     pub years: Option<(i32, i32)>,
+    /// The genre most of their albums have.
+    pub genre: Option<String>,
 }
 
 pub struct AlbumEntry {
@@ -164,18 +166,27 @@ impl SearchIndex {
     /// `artists` are the server's artist entities; when there are none yet
     /// (older server, not synced), artists are derived from album artists.
     pub fn new(albums: &[Album], artists: &[Artist], tracks: &[Track]) -> Self {
-        // Each artist's span of years, by id and by name: the albums an
-        // artist's page shows (see `Album::has_artist`).
+        // Each artist's span of years and their albums' genres, by id and by
+        // name: the albums an artist's page shows (see `Album::has_artist`).
         let mut years: HashMap<&str, (i32, i32)> = HashMap::new();
+        let mut genres: HashMap<&str, HashMap<&str, u32>> = HashMap::new();
         for a in albums {
-            let Some(year) = a.year.filter(|&y| y > 0) else { continue };
             let ids = a.artist_ref.iter().chain(a.artists.iter().filter_map(|l| l.id.as_ref()));
             let names = a.artist.iter().chain(a.artists.iter().map(|l| &l.name));
+            let year = a.year.filter(|&y| y > 0);
+            let album_genres = a.all_genres();
             for key in ids.chain(names) {
-                let span = years.entry(key.as_str()).or_insert((year, year));
-                *span = (span.0.min(year), span.1.max(year));
+                if let Some(year) = year {
+                    let span = years.entry(key.as_str()).or_insert((year, year));
+                    *span = (span.0.min(year), span.1.max(year));
+                }
+                for &g in &album_genres {
+                    *genres.entry(key.as_str()).or_default().entry(g).or_default() += 1;
+                }
             }
         }
+        // The most common, the first met among equals.
+        let genre = |key: &str| genres.get(key).and_then(|counts| counts.iter().max_by_key(|&(g, n)| (*n, std::cmp::Reverse(*g))).map(|(g, _)| (*g).to_owned()));
         let artists: Vec<ArtistEntry> = if artists.is_empty() {
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
             for a in albums {
@@ -183,7 +194,7 @@ impl SearchIndex {
                     *counts.entry(artist).or_default() += 1;
                 }
             }
-            counts.into_iter().map(|(name, albums)| ArtistEntry { id: None, name: name.to_owned(), sort: name.to_owned(), albums, cover: None, years: years.get(name).copied() }).collect()
+            counts.into_iter().map(|(name, albums)| ArtistEntry { id: None, name: name.to_owned(), sort: name.to_owned(), albums, cover: None, years: years.get(name).copied(), genre: genre(name) }).collect()
         } else {
             artists
                 .iter()
@@ -194,6 +205,7 @@ impl SearchIndex {
                     albums: a.album_count as usize,
                     cover: a.cover_art.clone(),
                     years: years.get(a.id.as_str()).or_else(|| years.get(a.name.as_str())).copied(),
+                    genre: genre(&a.id).or_else(|| genre(&a.name)),
                 })
                 .collect()
         };

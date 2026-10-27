@@ -9,6 +9,17 @@ pub fn clock(secs: f64) -> String {
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
+/// A day from an ISO date ("2024-01-02", or with a time after it) as the
+/// lists show it: "Jan 2, 2024". Anything else as it is.
+pub fn date(iso: &str) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let mut parts = iso.get(..10).unwrap_or(iso).splitn(3, '-').map(str::parse::<u32>);
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(y)), Some(Ok(m @ 1..=12)), Some(Ok(d))) => format!("{} {d}, {y}", MONTHS[m as usize - 1]),
+        _ => iso.to_owned(),
+    }
+}
+
 /// How long a list plays: "41 min", "1 hr 12 min" (minutes rounded up).
 pub fn span(secs: u32) -> String {
     let mins = secs.div_ceil(60);
@@ -210,6 +221,14 @@ mod tests {
         assert_eq!(about(20.0), "under a minute");
         assert_eq!(about(25.0 * 60.0), "about 25 min");
         assert_eq!(about(3.0 * 3600.0), "about 3 hr");
+    }
+
+    #[test]
+    fn dates() {
+        assert_eq!(date("2024-01-02T10:00:00Z"), "Jan 2, 2024");
+        assert_eq!(date("1999-12-31"), "Dec 31, 1999");
+        assert_eq!(date("sometime"), "sometime");
+        assert_eq!(date("2024-13-01"), "2024-13-01");
     }
 
     #[test]
