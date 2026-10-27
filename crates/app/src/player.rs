@@ -351,6 +351,8 @@ pub enum QueueEdit {
     MoveBy(u64, isize),
     Clear,
     SetEnd(crate::queue::EndAction),
+    /// Brings what the user added, split into groups, together.
+    GatherAdded,
 }
 
 impl Player {
@@ -388,6 +390,7 @@ impl Player {
             }
             QueueEdit::Clear => q.clear(),
             QueueEdit::SetEnd(end) => q.end = end,
+            QueueEdit::GatherAdded => q.gather_added(),
         }
         self.sync_next(cx);
     }

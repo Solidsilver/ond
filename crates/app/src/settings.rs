@@ -127,6 +127,10 @@ pub struct Settings {
     /// Software volume, 0..=1 (unused in bit-perfect mode).
     #[serde(default = "full")]
     pub volume: f32,
+    /// Where "play next" and "add to queue" put tracks, and what playing
+    /// something new does with them.
+    #[serde(default)]
+    pub queue: crate::queue::QueuePrefs,
     /// Experimental visuals (Settings › Experimental), all off by default.
     #[serde(default, skip_serializing_if = "crate::visuals::Experimental::all_off")]
     pub experimental: crate::visuals::Experimental,
@@ -172,6 +176,7 @@ impl Default for Settings {
             sidebar_width: None,
             queue_width: None,
             volume: 1.0,
+            queue: Default::default(),
             experimental: Default::default(),
         }
     }

@@ -121,10 +121,14 @@ impl ViewCtx<'_> {
                 if end != self.player.queue.end {
                     self.actions.push(Action::Queue(QueueEdit::SetEnd(end)));
                 }
-                if !self.player.queue.upcoming.is_empty() {
+                if self.player.queue.can_clear() {
+                    let hint = match self.player.queue.prefs.clear {
+                        crate::queue::ClearWhat::Everything => "Remove everything up next",
+                        crate::queue::ClearWhat::Added => "Remove the tracks you added",
+                    };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text("Remove everything up next").clicked() {
+                        if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text(hint).clicked() {
                             self.actions.push(Action::Queue(QueueEdit::Clear));
                         }
                     });
@@ -148,6 +152,7 @@ impl ViewCtx<'_> {
         // Borrowed from the player, not from `self`, so rows can take `&mut self`.
         let queue = &self.player.queue;
         let starts = start_offsets(remaining, &queue.upcoming);
+        let split = queue.added_is_split();
         let mut drawn = 0;
         for (gi, g) in queue.groups().enumerate() {
             let source = g.source;
@@ -171,6 +176,13 @@ impl ViewCtx<'_> {
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, format!("{}, {len} tracks, {}", source.label(), if open { "expanded" } else { "collapsed" })));
             if resp.clicked() {
                 self.ui.queue_ui.open.insert(key, !open);
+            }
+            if split && *source == Source::Added {
+                resp.context_menu(|ui| {
+                    if ui.button("Bring together").on_hover_text("Everything you added, in one group").clicked() {
+                        self.actions.push(Action::Queue(QueueEdit::GatherAdded));
+                    }
+                });
             }
             if !open {
                 continue;

@@ -273,8 +273,8 @@ fn palette_opens_searches_and_queues() {
     app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
     assert_eq!(app.player.queue.upcoming.len(), before + 3);
     assert!(app.pending.is_empty());
-    // Played next: right after what the user already chose to play next.
-    assert_eq!(app.player.queue.upcoming[2].track.id, "x-1");
+    // Played next: at the top of the queue.
+    assert_eq!(app.player.queue.upcoming[0].track.id, "x-1");
 }
 
 /// Handles what the bridge sends until `done` says so (or 3 s pass).
@@ -952,4 +952,40 @@ fn a_lost_device_is_a_notice_and_its_return_an_offer_until_playing_there() {
     assert!(app.ui.toasts.texts().contains(&"DAC is back"));
     app.handle_engine(audio::Event::Devices { devices: list(), current: Some("dac".into()) });
     assert!(!app.ui.toasts.texts().contains(&"DAC is back"));
+}
+
+#[test]
+fn playing_something_new_can_ask_about_what_you_added() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.player.queue.prefs.on_play = crate::queue::OnPlay::Ask;
+    let added = app.player.queue.added_count();
+    assert!(added > 0, "the fixture queue has tracks the user added");
+    let current = app.player.queue.current.as_ref().map(|c| c.uid);
+    let new: Vec<Track> = (1..=3).map(|n| track(&format!("new-{n}"), "al-9", n)).collect();
+    let source = Source::Album { id: "al-9".into(), name: "Album 9".into() };
+
+    // Asks first; nothing plays yet.
+    app.queue_tracks(new.clone(), source.clone(), QueueAction::Play { start: 0 });
+    assert!(matches!(app.ui.overlay, Some(Overlay::KeepAdded { added: n, .. }) if n == added));
+    assert_eq!(app.player.queue.current.as_ref().map(|c| c.uid), current);
+
+    // Keep: the new album plays, what was added waits after it. (Offline,
+    // nothing here is downloaded, so everything is skipped through to
+    // history, in the order it would have played.)
+    let added_ids: Vec<String> = app.player.queue.upcoming.iter().filter(|i| i.source == Source::Added).map(|i| i.track.id.clone()).collect();
+    let played = |app: &OndApp, n: usize| -> Vec<String> { app.player.queue.history.iter().rev().take(n).rev().map(|i| i.track.id.clone()).collect() };
+    app.ui.overlay = None;
+    app.apply(Action::TracksAnswered { tracks: new.clone(), source: source.clone(), action: QueueAction::Play { start: 0 }, keep: true });
+    let mut expect: Vec<String> = vec!["new-1".into(), "new-2".into(), "new-3".into()];
+    expect.extend(added_ids);
+    assert_eq!(played(&app, expect.len()), expect);
+    assert_eq!(app.player.queue.prefs.on_play, crate::queue::OnPlay::Ask, "the answer is for this time only");
+
+    // Clear: only the new album plays.
+    app.player.queue.add(vec![track("z", "al-0", 1)]);
+    app.apply(Action::TracksAnswered { tracks: new, source, action: QueueAction::Play { start: 0 }, keep: false });
+    assert_eq!(played(&app, 4)[1..], ["new-1", "new-2", "new-3"]);
+    assert_eq!(app.player.queue.added_count(), 0);
 }

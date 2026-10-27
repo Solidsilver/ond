@@ -1,6 +1,6 @@
-//! Sheets over the window: naming a playlist, confirming a delete, the
-//! keyboard shortcut list (⌘/) and settings (⌘,). One at a time; Esc or a
-//! click outside closes it.
+//! Sheets over the window: naming a playlist, confirming a delete, asking
+//! whether to keep the tracks you added, the keyboard shortcut list (⌘/) and
+//! settings (⌘,). One at a time; Esc or a click outside closes it.
 
 use super::commands::PlaylistAction;
 use super::widgets::{danger, primary, secondary};
@@ -17,6 +17,9 @@ pub enum Overlay {
     NewPlaylist { name: String, tracks: Vec<Track> },
     Rename { id: String, name: String },
     Delete { id: String, name: String },
+    /// Playing something new while the user has added tracks: keep them or
+    /// clear them? (Settings › Queue › Playing something new: Ask.)
+    KeepAdded { tracks: Vec<Track>, source: crate::queue::Source, action: super::QueueAction, added: usize },
 }
 
 impl Overlay {
@@ -67,6 +70,31 @@ impl OndApp {
                 Overlay::Rename { id, name } => {
                     if let Some(ok) = name_dialog(ui, "Rename playlist", "", name, "Rename") {
                         done = Some(ok.then(|| Action::PlaylistEdit(PlaylistAction::Rename { id: id.clone(), name: name.clone() })));
+                    }
+                }
+                Overlay::KeepAdded { tracks, source, action, added } => {
+                    ui.set_width(DIALOG_W);
+                    let what = if *added == 1 { "the track you added".to_owned() } else { format!("the {added} tracks you added") };
+                    ui.label(egui::RichText::new("Keep what you added?").font(FontId::new(15.0, semibold())).color(t.text));
+                    ui.add_space(6.0);
+                    ui.add(egui::Label::new(egui::RichText::new(format!("Keep {what} to play after this, or clear them from the queue."))
+                        .size(12.0).color(t.muted)).wrap());
+                    ui.add_space(18.0);
+                    let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                    let mut answer = None;
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if primary(ui, None, "Keep").clicked() || enter {
+                                answer = Some(true);
+                            }
+                            ui.add_space(4.0);
+                            if secondary(ui, "Clear").clicked() {
+                                answer = Some(false);
+                            }
+                        });
+                    });
+                    if let Some(keep) = answer {
+                        done = Some(Some(Action::TracksAnswered { tracks: std::mem::take(tracks), source: source.clone(), action: *action, keep }));
                     }
                 }
                 Overlay::Delete { id, name } => {

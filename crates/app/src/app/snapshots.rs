@@ -429,7 +429,7 @@ fn fill_queue(app: &mut OndApp) {
     q.play_next(vec![filler(23, 1).remove(0), kind_of_blue().remove(2)]);
     let playlist = Source::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() };
     for (k, t) in filler(20, 9).into_iter().enumerate() {
-        q.upcoming.push(Item { uid: 10_000 + k as u64, track: t, source: playlist.clone() });
+        q.upcoming.push(Item { uid: 10_000 + k as u64, track: t, source: playlist.clone(), next: false });
     }
     app.engine.status.preview(PlayState::Playing, 141.0, 383.0, 0.72);
 }
@@ -1112,6 +1112,11 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).ui.overlay = Some(Overlay::Delete { id: "pl-0".into(), name: "Late night, low volume".into() });
     s.shoot(h, "delete-playlist");
 
+    // Settings › Queue › Playing something new: Ask.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).ui.overlay = Some(Overlay::KeepAdded { tracks: vanguard(), source: crate::queue::Source::Added, action: QueueAction::Play { start: 0 }, added: 2 });
+    s.shoot(h, "keep-added");
+
     // The sidebar footer: server status (click for details), shortcuts, settings.
     reset(h, FULL, Route::Recent);
     let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 900.0));
@@ -1177,6 +1182,16 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app_mut(h).actions.push(Action::OpenSettings(section));
         s.shoot(h, &format!("settings-{}", section.label().to_lowercase()));
     }
+
+    // A queue set up by hand: no preset matches, so Custom shows.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        let q = crate::queue::QueuePrefs { on_play: crate::queue::OnPlay::KeepBefore, ..Default::default() };
+        app.actions.push(Action::Prefs(PrefsAction::Queue(q)));
+        app.actions.push(Action::OpenSettings(settings_page::Section::Queue));
+    }
+    s.shoot(h, "settings-queue-custom");
 
     // Playback with ReplayGain and a transcode on, so every control shows.
     reset(h, FULL, Route::Recent);

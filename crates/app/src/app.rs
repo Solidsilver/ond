@@ -165,6 +165,9 @@ pub enum Action {
     Artist(String, QueueAction),
     Playlist(String, QueueAction),
     Tracks { tracks: Vec<Track>, source: Source, action: QueueAction },
+    /// The same, once the user said whether to keep the tracks they added
+    /// (Settings › Queue › Playing something new: Ask).
+    TracksAnswered { tracks: Vec<Track>, source: Source, action: QueueAction, keep: bool },
     /// A change to the queue itself: jump, replay, remove, move, clear, or
     /// what happens at its end.
     Queue(QueueEdit),
@@ -383,6 +386,8 @@ impl OndApp {
         };
 
         let shown = PrefsView::read(&prefs);
+        let mut player = Player::default();
+        player.queue.prefs = prefs.get(|s| s.queue);
         Ok(Self {
             _rt: AppRuntime(Some(rt)),
             ctx: ctx.clone(),
@@ -397,7 +402,7 @@ impl OndApp {
             pending: Vec::new(),
             art,
             cache: app_cache,
-            player: Player::default(),
+            player,
             output,
             ui: UiState::new(notices, shown),
             bit_perfect: false,
@@ -598,6 +603,7 @@ impl OndApp {
             Action::Artist(name, action) => self.play_artist(name, action),
             Action::Playlist(id, action) => self.play_playlist(id, action),
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
+            Action::TracksAnswered { tracks, source, action, keep } => self.queue_tracks_answered(tracks, source, action, keep),
             Action::Queue(edit) => self.queue_edit(edit),
             Action::PlayPause => self.play_pause(),
             Action::Next => self.next(),
