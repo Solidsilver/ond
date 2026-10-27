@@ -38,3 +38,8 @@ preview = []
 # PipeWire's own API where it's running (cpal falls back to ALSA otherwise).
 # Builds against libpipewire-0.3, which every current desktop distro ships.
 cpal = { version = "0.18.2", features = ["pipewire"] }
+# Bit-perfect mode: the card's hw: device directly (already under cpal), once
+# the sound server has let go of it (D-Bus device reservation).
+alsa = "0.11.0"
+libc = "0.2"
+zbus = { version = "5.19.0", default-features = false, features = ["blocking-api", "async-io"] }

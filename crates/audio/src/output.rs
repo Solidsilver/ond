@@ -454,6 +454,12 @@ pub trait OutputBackend: Send {
     fn set_match_rate(&mut self, on: bool) {
         let _ = on;
     }
+    /// The open stream no longer fits the mode and the backend can't switch it
+    /// in place (ALSA: exclusive hardware vs. the sound server): the engine
+    /// starts the track over where it is.
+    fn wants_reopen(&mut self) -> bool {
+        false
+    }
     /// What the current output device can do, if the backend can tell. Used to
     /// judge whether bit-perfect playback is possible for a file.
     fn device_caps(&mut self) -> Option<DeviceCaps>;
@@ -479,12 +485,44 @@ pub struct CpalBackend {
     name: String,
     ctl: Option<(Sender<()>, JoinHandle<()>)>,
     drained: Arc<AtomicBool>,
+    /// An ALSA card to play through instead of the default output: the
+    /// output the sound server (PipeWire) has for it, when there is one.
+    card: Option<u32>,
 }
 
 impl Default for CpalBackend {
     fn default() -> Self {
-        Self { name: "cpal".into(), ctl: None, drained: Arc::new(AtomicBool::new(false)) }
+        Self { name: "cpal".into(), ctl: None, drained: Arc::new(AtomicBool::new(false)), card: None }
     }
+}
+
+impl CpalBackend {
+    /// Plays through ALSA card `card` (by index) from the next `open`, or the
+    /// default output with `None`. A card the sound server doesn't offer falls
+    /// back to the default.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn route_to_card(&mut self, card: Option<u32>) {
+        self.card = card;
+    }
+}
+
+/// The output device for `card` (see [`CpalBackend::route_to_card`]), else the default.
+fn output_device(card: Option<u32>) -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    let routed = card.and_then(|card| {
+        host.output_devices()
+            .ok()?
+            .find(|d| d.description().ok().and_then(|desc| desc.address().and_then(alsa_card_of)) == Some(card))
+    });
+    routed.or_else(|| host.default_output_device())
+}
+
+/// The ALSA card index in a device path like PipeWire's `api.alsa.path`:
+/// `front:1`, `hw:1,0`, `hdmi:1,2`, `surround51:CARD=1`.
+pub(crate) fn alsa_card_of(path: &str) -> Option<u32> {
+    let args = path.split_once(':')?.1;
+    let first = args.split(',').next()?;
+    first.strip_prefix("CARD=").unwrap_or(first).parse().ok()
 }
 
 impl OutputBackend for CpalBackend {
@@ -493,7 +531,7 @@ impl OutputBackend for CpalBackend {
     }
 
     fn device_caps(&mut self) -> Option<DeviceCaps> {
-        let device = cpal::default_host().default_output_device()?;
+        let device = output_device(self.card)?;
         let name = device.description().map(|d| d.name().to_owned()).unwrap_or_else(|_| "default".into());
         let mut configs = Vec::new();
         let mut any_float = false;
@@ -532,9 +570,10 @@ impl OutputBackend for CpalBackend {
         let (ready_tx, ready_rx) = bounded(1);
         // cpal streams are !Send on some platforms, so each lives on its own thread
         // until told to close.
+        let card = self.card;
         let handle = thread::Builder::new()
             .name("audio-output".into())
-            .spawn(move || match start_stream(format, input, status, drained) {
+            .spawn(move || match start_stream(format, input, status, drained, card) {
                 Ok((stream, device)) => {
                     let _ = ready_tx.send(Ok(device));
                     let _ = ctl_rx.recv();
@@ -580,9 +619,10 @@ fn start_stream(
     input: RingInput,
     status: Arc<Status>,
     drained: Arc<AtomicBool>,
+    card: Option<u32>,
 ) -> Result<(cpal::Stream, String), OutputError> {
     let dev_err = |e: cpal::Error| OutputError::Device(e.to_string());
-    let device = cpal::default_host().default_output_device().ok_or(OutputError::NoDevice)?;
+    let device = output_device(card).ok_or(OutputError::NoDevice)?;
     let device_name = device.description().map(|d| d.name().to_owned()).unwrap_or_else(|_| "default".into());
 
     let range = device

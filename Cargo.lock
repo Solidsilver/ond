@@ -484,6 +484,7 @@ dependencies = [
 name = "audio"
 version = "0.3.0"
 dependencies = [
+ "alsa",
  "coreaudio-rs",
  "cpal",
  "crossbeam-channel",
@@ -499,6 +500,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "zbus",
 ]
 
 [[package]]

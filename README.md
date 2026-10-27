@@ -13,7 +13,7 @@ Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
 ## What it does
 
-- **Bit-perfect playback on macOS.** Ond takes exclusive access to the device and switches its sample rate to match each file. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither. Linux plays through PipeWire (or ALSA), Windows through WASAPI.
+- **Bit-perfect playback on macOS and Linux.** Ond takes exclusive access to the device and switches its sample rate to match each file. On Linux it asks PipeWire (or PulseAudio, or JACK) to let go of the sound card first, and gives it back a few seconds after playback stops. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither, and plays through PipeWire (or ALSA) on Linux. Windows plays through WASAPI.
 - **Gapless**, and seeking into parts of a track that haven't downloaded yet.
 - **A local copy of your library.** Browsing and search (⌘K) don't wait on the server, and offline downloads keep playing when it's unreachable.
 - **Library analysis.** Loudness, dynamic range, and a check for files that claim to be hi-res but were upsampled or made from lossy sources.
@@ -115,7 +115,7 @@ The workspace has seven crates:
 | `library` | Local library mirror in redb, with hand-written indexes and migrations |
 | `streamcache` | Download cache that playback can read and seek while it fills |
 | `offline` | Pinned downloads |
-| `audio` | Decoding, the playback engine, resampling, dither, CoreAudio and cpal (PipeWire, ALSA, WASAPI) output |
+| `audio` | Decoding, the playback engine, resampling, dither, CoreAudio, ALSA and cpal (PipeWire, ALSA, WASAPI) output |
 | `analysis` | Loudness, dynamic range and fake hi-res detection |
 
 None of the crates are published to crates.io.

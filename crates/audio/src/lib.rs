@@ -24,6 +24,8 @@
 //! hands it the remembered per-device modes and is told what happened.
 
 mod channels;
+#[cfg(target_os = "linux")]
+pub mod alsa;
 #[cfg(target_os = "macos")]
 pub mod coreaudio;
 mod decode;
@@ -368,14 +370,20 @@ fn secs(frames: u64, rate: u32) -> f64 {
 }
 
 /// The best output for this platform: native CoreAudio on macOS (device choice,
-/// rate switching, exclusive mode), cpal elsewhere or if CoreAudio can't start.
+/// rate switching, exclusive mode), ALSA on Linux (device choice, exclusive
+/// hardware access in bit-perfect mode, the sound server otherwise), cpal
+/// elsewhere or if CoreAudio can't start.
 pub fn default_backend() -> Box<dyn OutputBackend> {
     #[cfg(target_os = "macos")]
     match coreaudio::CoreAudioBackend::new() {
         Ok(b) => return Box::new(b),
         Err(e) => tracing::warn!("CoreAudio output unavailable ({e}); using cpal"),
     }
-    Box::new(CpalBackend::default())
+    #[cfg(target_os = "linux")]
+    let backend: Box<dyn OutputBackend> = Box::new(self::alsa::AlsaBackend::new());
+    #[cfg(not(target_os = "linux"))]
+    let backend: Box<dyn OutputBackend> = Box::new(CpalBackend::default());
+    backend
 }
 
 /// Cloneable handle to a running engine.
@@ -616,7 +624,7 @@ impl Engine {
             return;
         };
         let caps = self.backend.device_caps();
-        if choose_rate(file_rate, channels, caps.as_ref()) == rate {
+        if choose_rate(file_rate, channels, caps.as_ref()) == rate && !self.backend.wants_reopen() {
             return;
         }
         if let Some(at) = self.take_position() {
