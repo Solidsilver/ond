@@ -24,6 +24,11 @@ const RIGHT_W: f32 = 370.0;
 const LCD_MAX_W: f32 = 540.0;
 const LCD_MIN_W: f32 = 200.0;
 const LCD_H: f32 = 44.0;
+/// The display's seek line, up from its bottom edge.
+const LCD_SEEK_INSET: f32 = 7.5;
+/// How far the display's waveform reaches above its seek line, and its knob.
+const LCD_WAVE_H: f32 = 4.0;
+const LCD_KNOB_R: f32 = 3.5;
 /// Below this window width the toolbar tightens up.
 const NARROW_W: f32 = 900.0;
 
@@ -192,7 +197,10 @@ impl ViewCtx<'_> {
         let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
         let col_left = art.right() + 10.0;
 
-        let sub_text = lcd_titles(ui, &painter, &t, rect, col_left..=col_right, &item.track, album);
+        // The titles keep clear of the seek line's knob, or the waveform's bars.
+        let reach = if self.ui.prefs.waveform { LCD_WAVE_H } else { LCD_KNOB_R };
+        let floor = rect.bottom() - LCD_SEEK_INSET - reach - 1.0;
+        let sub_text = lcd_titles(ui, &painter, &t, rect.with_max_y(floor), col_left..=col_right, &item.track, album);
         let strip_resp = self.lcd_seek(ui, &painter, &t, rect, col_left..=col_right);
 
         let hovering = body.hovered() || strip_resp.hovered() || self.ui.seek_preview.is_some();
@@ -256,7 +264,7 @@ impl ViewCtx<'_> {
         let time_font = FontId::proportional(9.5);
         // Sized for the widest time, so the line doesn't shift as digits change.
         let time_w = painter.layout_no_wrap("−88:88".into(), time_font.clone(), t.muted).size().x;
-        let line_y = rect.bottom() - 7.5;
+        let line_y = rect.bottom() - LCD_SEEK_INSET;
         let bar_left = col_left + time_w + 6.0;
         let bar = Rect::from_min_max(pos2(bar_left, line_y - 1.0), pos2((col_right - time_w - 6.0).max(bar_left + 20.0), line_y + 1.0));
         let strip = Rect::from_min_max(pos2(bar.left() - 4.0, line_y - 6.0), pos2(bar.right() + 4.0, rect.bottom()));
@@ -269,8 +277,8 @@ impl ViewCtx<'_> {
             radius: 1.0,
             grow: 0.5,
             knob: t.text,
-            knob_r: 3.5,
-            wave_h: 4.0,
+            knob_r: LCD_KNOB_R,
+            wave_h: LCD_WAVE_H,
         };
         let (shown, strip_resp) = self.seek_line(ui, bar, strip, "lcd-seek", &style);
         let (elapsed, remaining) = self.seek_times(shown);
@@ -282,7 +290,8 @@ impl ViewCtx<'_> {
 
 /// The display's title over "artist · album": centred on the display when
 /// the same margin fits on both sides, else centred in the middle column
-/// (`cols`, left to right). Returns the second line's text.
+/// (`cols`, left to right), within `rect` (the display down to the seek
+/// line). Returns the second line's text.
 fn lcd_titles(ui: &Ui, painter: &egui::Painter, t: &Tokens, rect: Rect, cols: std::ops::RangeInclusive<f32>, track: &library::Track, album: Option<&library::Album>) -> String {
     let (col_left, col_right) = (*cols.start(), *cols.end());
     let reserve = (col_left - rect.left()).max(rect.right() - col_right);
@@ -296,16 +305,39 @@ fn lcd_titles(ui: &Ui, painter: &egui::Painter, t: &Tokens, rect: Rect, cols: st
         _ => String::new(),
     };
     let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
-    let y0 = rect.top() + 4.0;
-    let title_h = title.size().y;
+    let (y0, sub_y) = lcd_title_rows(rect.top(), rect.bottom(), title.size().y, sub.size().y);
     painter.galley(pos2(center_x - title.size().x / 2.0, y0), title, t.text);
-    painter.galley(pos2(center_x - sub.size().x / 2.0, y0 + title_h), sub, t.muted);
+    painter.galley(pos2(center_x - sub.size().x / 2.0, sub_y), sub, t.muted);
     sub_text
+}
+
+/// Where the display's two lines start, `title_h` and `sub_h` tall, from
+/// `top`: 4 below it, unless that runs past `floor`. Then they move up, as
+/// far as 1 below the top, and the second line moves up under the title by
+/// up to 2 (into the title's descender room). Taller fonts need it (Linux's
+/// UI font is about a tenth taller than macOS's).
+fn lcd_title_rows(top: f32, floor: f32, title_h: f32, sub_h: f32) -> (f32, f32) {
+    let over = top + 4.0 + title_h + sub_h - floor;
+    let lift = over.clamp(0.0, 3.0);
+    let tuck = (over - lift).clamp(0.0, 2.0);
+    let y0 = top + 4.0 - lift;
+    (y0, y0 + title_h - tuck)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_titles_move_up_only_as_far_as_they_need() {
+        // macOS's font fits as it is.
+        assert_eq!(lcd_title_rows(0.0, 32.0, 15.0, 13.0), (4.0, 19.0));
+        // A taller one goes up first, then tucks the second line in.
+        assert_eq!(lcd_title_rows(0.0, 31.5, 17.0, 15.0), (1.0, 16.5));
+        // Never past the top.
+        let (y0, sub_y) = lcd_title_rows(0.0, 20.0, 17.0, 15.0);
+        assert_eq!((y0, sub_y), (1.0, 16.0));
+    }
 
     fn full(w: f32) -> Rect {
         Rect::from_min_size(pos2(12.0, 0.0), vec2(w - 24.0, 52.0))
