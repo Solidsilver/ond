@@ -142,7 +142,7 @@ impl OndApp {
                 self.actions.push(Action::Prefs(PrefsAction::Accent(accent)));
             }
             let mut adapt = self.ui.prefs.adapt_colors;
-            if switch_row(ui, "Adapt colors to the album art", "The accent, the Player and the now-playing display follow the playing album's cover, and an album's page follows its own.", &mut adapt) {
+            if switch_row(ui, "Adapt colors to the album art", "The accent, the Player and the now-playing display follow the playing album's cover, and an album's or artist's page follows its own art.", &mut adapt) {
                 self.actions.push(Action::Prefs(PrefsAction::AdaptColors(adapt)));
             }
         });
@@ -169,6 +169,10 @@ impl OndApp {
             let mut on = self.ui.prefs.alpha_rail;
             if switch_row(ui, "Alphabet rail", "Letters beside Albums, Artists and Songs when they're sorted by name. Click or drag along them to jump.", &mut on) {
                 self.actions.push(Action::Prefs(PrefsAction::AlphaRail(on)));
+            }
+            let mut on = self.ui.prefs.artist_photos;
+            if switch_row(ui, "Artist photos", "Each artist's photo from the server beside their name in Artists, or their initial when the server has none.", &mut on) {
+                self.actions.push(Action::Prefs(PrefsAction::ArtistPhotos(on)));
             }
         });
     }

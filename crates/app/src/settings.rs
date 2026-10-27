@@ -68,6 +68,9 @@ pub struct Settings {
     /// Letters beside long lists sorted by name, to jump along them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub alpha_rail: bool,
+    /// Artists' photos from the server in the Artists list.
+    #[serde(default = "yes")]
+    pub artist_photos: bool,
     /// Whether the queue column is open.
     #[serde(default = "yes")]
     pub show_queue: bool,
@@ -138,6 +141,7 @@ impl Default for Settings {
             waveform: false,
             waveform_bars: Default::default(),
             alpha_rail: false,
+            artist_photos: true,
             show_queue: true,
             window: Default::default(),
             scrobble: true,

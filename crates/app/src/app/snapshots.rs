@@ -1232,6 +1232,33 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Artists);
     s.shoot(h, "artists");
+    // The server's artists, with photos: most have one, two get the server's
+    // stand-in (the same picture for both), so they show their initial.
+    let app = app_mut(h);
+    let mut names: Vec<&str> = ALBUMS.iter().map(|a| a.1).collect();
+    names.sort_unstable();
+    names.dedup();
+    let artists = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let photo = format!("ar-{i}");
+            app.art.preload(&photo, if i % 5 == 3 { white_cover() } else { cover(i + 11) });
+            library::Artist { id: format!("ar-{i}"), name: (*name).into(), sort: None, album_count: 2, cover_art: Some(photo) }
+        })
+        .collect();
+    app.data.artists = Arc::new(artists);
+    app.rebuild_search();
+    s.shoot(h, "artists-photos");
+    // An artist's page: their photo beside the name, its colors on the page.
+    let bill = names.iter().position(|n| *n == "Bill Evans").unwrap();
+    reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: Some(format!("ar-{bill}")) });
+    adapt(h);
+    settle_look(h);
+    s.shoot(h, "artist-photo");
+    let app = app_mut(h);
+    app.data.artists = Arc::default();
+    app.rebuild_search();
 
     reset(h, FULL, Route::Playlist { id: "pl-4".into(), name: "Car".into() });
     app_mut(h).data.playlist_tracks.insert("pl-4".into(), Arc::default());

@@ -16,6 +16,13 @@ const GAP_X: f32 = 20.0;
 const GAP_Y: f32 = 24.0;
 /// Title + artist lines under the art.
 const LABEL_H: f32 = 40.0;
+/// A row of the Artists list, and the photo in it.
+const ARTIST_ROW: f32 = 52.0;
+const AVATAR: f32 = 36.0;
+/// The photo beside an artist page's name.
+const ARTIST_PHOTO: f32 = 96.0;
+/// Rows past either end of the Artists list whose photos load ahead.
+const PREFETCH_ROWS: usize = 8;
 
 /// Short name for a place, for breadcrumbs.
 pub fn route_label(route: &Route, data: &Data) -> String {
@@ -168,26 +175,21 @@ impl OndApp {
             1 => Some("1 album".to_owned()),
             n => Some(format!("{n} albums")),
         };
-        self.view().heading(ui, name, sub);
-        if !own.is_empty() {
-            ui.horizontal(|ui| {
-                if super::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
-                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::Play { start: 0 }));
-                }
-                ui.add_space(4.0);
-                if super::widgets::secondary(ui, "Play next").clicked() {
-                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::PlayNext));
-                }
-                // Only artists the server knows by id can be loved.
-                if let Route::Artist { id: Some(id), .. } = route {
-                    let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
-                    if super::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
-                        self.actions.push(Action::ToggleStar { kind: crate::favorites::StarKind::Artist, id: id.clone(), track: None, name: Some(name.to_owned()) });
-                    }
-                }
-            });
-            ui.add_space(14.0);
-        }
+        let id = match route {
+            Route::Artist { id, .. } => id.as_deref(),
+            _ => None,
+        };
+        // Only artists the server has a photo id for get one (or their initial).
+        let photo = self.ui.prefs.artist_photos.then(|| self.search.index.as_ref()?.artist(id, name)?.cover.clone()).flatten();
+        ui.horizontal(|ui| {
+            if let Some(cover) = &photo {
+                let (rect, _) = ui.allocate_exact_size(vec2(ARTIST_PHOTO, ARTIST_PHOTO), Sense::hover());
+                avatar(&mut self.art, ui, &t, rect, Some(cover), name);
+                ui.add_space(14.0);
+            }
+            ui.vertical(|ui| self.artist_header(ui, route, name, sub, !own.is_empty()));
+        });
+        ui.add_space(14.0);
         let (cols, tile) = grid_metrics(ui.available_width());
         super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
             for chunk in own.chunks(cols) {
@@ -206,6 +208,30 @@ impl OndApp {
                 ui.label(egui::RichText::new(text).color(t.muted));
             }
         }));
+    }
+
+    /// The artist's name and album count, and (when they have albums) the
+    /// buttons to play them and love them.
+    fn artist_header(&mut self, ui: &mut Ui, route: &Route, name: &str, sub: Option<String>, albums: bool) {
+        self.view().heading(ui, name, sub);
+        if albums {
+            ui.horizontal(|ui| {
+                if super::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
+                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::Play { start: 0 }));
+                }
+                ui.add_space(4.0);
+                if super::widgets::secondary(ui, "Play next").clicked() {
+                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::PlayNext));
+                }
+                // Only artists the server knows by id can be loved.
+                if let Route::Artist { id: Some(id), .. } = route {
+                    let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
+                    if super::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
+                        self.actions.push(Action::ToggleStar { kind: crate::favorites::StarKind::Artist, id: id.clone(), track: None, name: Some(name.to_owned()) });
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -458,27 +484,49 @@ impl ViewCtx<'_> {
         let artists = Arc::clone(&index.artists);
         self.heading(ui, "Artists", Some(artists.len().to_string()));
         let marks = self.ui.prefs.alpha_rail.then(|| self.ui.artist_marks.get(Arc::as_ptr(&artists) as usize, || super::alpha::Marks::new(artists.iter().map(|a| a.sort.as_str()))));
+        let photos = self.ui.prefs.artist_photos;
+        let row = if photos { ARTIST_ROW } else { ARTIST_ROW - 8.0 };
         super::layout::into_gutter(ui, |ui| {
             let area = ui.available_rect_before_wrap();
-            let row_h = 32.0 + ui.spacing().item_spacing.y;
+            let row_h = row + ui.spacing().item_spacing.y;
             let mut top = 0;
             let mut scroll = egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false);
             if let Some(y) = super::alpha::take_jump(ui, "artists") {
                 scroll = scroll.vertical_scroll_offset(y);
             }
-            let out = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() }).show_rows(ui, 32.0, artists.len(), |ui, range| {
+            let out = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() }).show_rows(ui, row, artists.len(), |ui, range| {
             top = range.start;
             ui.spacing_mut().item_spacing.y = 0.0;
-            for a in &artists[range] {
-                let (name, id, n) = (&a.name, &a.id, &a.albums);
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
-                if resp.hovered() {
-                    ui.painter().rect_filled(rect, 6.0, t.hover);
+            if photos {
+                // The photos just past either end, so scrolling finds them loaded.
+                let near = range.start.saturating_sub(PREFETCH_ROWS)..range.start;
+                for cover in artists[near].iter().chain(artists.iter().skip(range.end).take(PREFETCH_ROWS)).filter_map(|a| a.cover.as_deref()) {
+                    self.art.prefetch(cover, AVATAR);
                 }
-                let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 100.0);
-                ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
-                let count = crate::fmt::plural(*n, "album");
-                ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, count, FontId::proportional(12.0), t.muted);
+            }
+            for a in &artists[range] {
+                let (name, id) = (&a.name, &a.id);
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(rect, 8.0, t.hover);
+                }
+                let mut x = rect.left() + 10.0;
+                if photos {
+                    let face = Rect::from_center_size(pos2(x + AVATAR / 2.0, rect.center().y), vec2(AVATAR, AVATAR));
+                    avatar(self.art, ui, &t, face, a.cover.as_deref(), name);
+                    x = face.right() + 12.0;
+                }
+                let width = rect.right() - 10.0 - x;
+                let g = elide(ui, name, FontId::proportional(14.0), t.text, width);
+                ui.painter().galley(pos2(x, rect.center().y - g.size().y + 1.0), g, t.text);
+                let mut sub = crate::fmt::plural(a.albums, "album");
+                match a.years {
+                    Some((from, to)) if from == to => sub.push_str(&format!(" · {from}")),
+                    Some((from, to)) => sub.push_str(&format!(" · {from}–{to}")),
+                    None => {}
+                }
+                let g = elide(ui, &sub, FontId::proportional(12.0), t.muted, width);
+                ui.painter().galley(pos2(x, rect.center().y + 2.0), g, t.muted);
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
                 if resp.clicked() {
                     let id = id.clone().or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name)).and_then(|a| a.artist_ref.clone()));
@@ -491,6 +539,23 @@ impl ViewCtx<'_> {
                 super::alpha::rail(ui, "artists", area, &out, &marks, top, |i| i, row_h);
             }
         });
+    }
+}
+
+/// An artist's photo in a circle, or their initial when the server has no
+/// photo of them (or it's still loading).
+fn avatar(art: &mut crate::art::Art, ui: &Ui, t: &Tokens, rect: Rect, cover: Option<&str>, name: &str) {
+    let radius = egui::CornerRadius::same((rect.width() / 2.0) as u8);
+    match cover.and_then(|c| art.portrait(c, rect.width())) {
+        Some(tex) => {
+            let photo = egui::epaint::RectShape::filled(rect, radius, egui::Color32::WHITE).with_texture(tex.id(), crate::art::crop_uv(1.0));
+            ui.painter().add(photo);
+        }
+        None => {
+            ui.painter().rect_filled(rect, radius, t.placeholder);
+            let initial = name.chars().find(|c| c.is_alphanumeric()).map_or('#', |c| c.to_uppercase().next().unwrap_or(c));
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, initial, FontId::new(rect.width() * 0.42, semibold()), t.muted);
+        }
     }
 }
 

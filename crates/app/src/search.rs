@@ -11,7 +11,7 @@
 use library::{Album, Artist, Track, fold};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32String};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Results shown per group.
@@ -25,6 +25,10 @@ pub struct ArtistEntry {
     /// What the list is sorted by: the server's sort name, else the name.
     pub sort: String,
     pub albums: usize,
+    /// The server's photo of them, if it has an id for one.
+    pub cover: Option<String>,
+    /// The first and last years of their albums in the library.
+    pub years: Option<(i32, i32)>,
 }
 
 pub struct AlbumEntry {
@@ -160,6 +164,18 @@ impl SearchIndex {
     /// `artists` are the server's artist entities; when there are none yet
     /// (older server, not synced), artists are derived from album artists.
     pub fn new(albums: &[Album], artists: &[Artist], tracks: &[Track]) -> Self {
+        // Each artist's span of years, by id and by name: the albums an
+        // artist's page shows (see `Album::has_artist`).
+        let mut years: HashMap<&str, (i32, i32)> = HashMap::new();
+        for a in albums {
+            let Some(year) = a.year.filter(|&y| y > 0) else { continue };
+            let ids = a.artist_ref.iter().chain(a.artists.iter().filter_map(|l| l.id.as_ref()));
+            let names = a.artist.iter().chain(a.artists.iter().map(|l| &l.name));
+            for key in ids.chain(names) {
+                let span = years.entry(key.as_str()).or_insert((year, year));
+                *span = (span.0.min(year), span.1.max(year));
+            }
+        }
         let artists: Vec<ArtistEntry> = if artists.is_empty() {
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
             for a in albums {
@@ -167,11 +183,21 @@ impl SearchIndex {
                     *counts.entry(artist).or_default() += 1;
                 }
             }
-            counts.into_iter().map(|(name, albums)| ArtistEntry { id: None, name: name.to_owned(), sort: name.to_owned(), albums }).collect()
+            counts.into_iter().map(|(name, albums)| ArtistEntry { id: None, name: name.to_owned(), sort: name.to_owned(), albums, cover: None, years: years.get(name).copied() }).collect()
         } else {
-            artists.iter().map(|a| ArtistEntry { id: Some(a.id.clone()), name: a.name.clone(), sort: a.sort.clone().unwrap_or_else(|| a.name.clone()), albums: a.album_count as usize }).collect()
+            artists
+                .iter()
+                .map(|a| ArtistEntry {
+                    id: Some(a.id.clone()),
+                    name: a.name.clone(),
+                    sort: a.sort.clone().unwrap_or_else(|| a.name.clone()),
+                    albums: a.album_count as usize,
+                    cover: a.cover_art.clone(),
+                    years: years.get(a.id.as_str()).or_else(|| years.get(a.name.as_str())).copied(),
+                })
+                .collect()
         };
-        let album_names: std::collections::HashMap<&str, &str> = albums.iter().map(|a| (a.id.as_str(), a.name.as_str())).collect();
+        let album_names: HashMap<&str, &str> = albums.iter().map(|a| (a.id.as_str(), a.name.as_str())).collect();
         let albums: Vec<AlbumEntry> = albums
             .iter()
             .map(|a| AlbumEntry { id: a.id.clone(), title: a.name.clone(), artist: a.artist.clone().unwrap_or_default(), year: a.year })
@@ -192,6 +218,14 @@ impl SearchIndex {
         // Title first: track searches are mostly by title.
         let track_hay = tracks.iter().map(|t| Hay::new(&format!("{} — {} — {}", t.title, t.artist, t.album))).collect();
         Self { artists: Arc::new(artists), albums, tracks, artist_hay, album_hay, track_hay, matcher: Matcher::new(Config::DEFAULT) }
+    }
+
+    /// The artist an artist page is about: by id when it has one, else by name.
+    pub fn artist(&self, id: Option<&str>, name: &str) -> Option<&ArtistEntry> {
+        match id {
+            Some(id) => self.artists.iter().find(|a| a.id.as_deref() == Some(id)),
+            None => self.artists.iter().find(|a| a.name == name),
+        }
     }
 
     pub fn search(&mut self, query: &str) -> Results {
@@ -338,6 +372,20 @@ mod tests {
         let real = SearchIndex::new(&[], &[artist("ar-1", "Johannes Motschmann", 3), artist("ar-2", "David Panzl", 1)], &[]);
         assert_eq!(real.artists.len(), 2);
         assert_eq!(real.artists[0].id.as_deref(), Some("ar-1"));
+    }
+
+    #[test]
+    fn artists_carry_their_photo_and_the_years_of_their_albums() {
+        let dated = |id: &str, artist_id: &str, year: i32| Album { year: Some(year), artist_ref: Some(artist_id.into()), ..album(id, "Someone", "Record") };
+        let mut photo = artist("ar-1", "Andrew Bird", 3);
+        photo.cover_art = Some("ar-1".into());
+        let idx = SearchIndex::new(&[dated("1", "ar-1", 2005), dated("2", "ar-1", 2002), dated("3", "ar-2", 1999)], &[photo, artist("ar-3", "Nobody", 0)], &[]);
+        assert_eq!(idx.artists[0].cover.as_deref(), Some("ar-1"));
+        assert_eq!(idx.artists[0].years, Some((2002, 2005)), "by id, whatever the albums' display artist");
+        assert_eq!(idx.artists[1].years, None);
+        // Without the server's artists, by name.
+        let named = SearchIndex::new(&[Album { year: Some(1971), ..album("1", "Can", "Tago Mago") }], &[], &[]);
+        assert_eq!(named.artists[0].years, Some((1971, 1971)));
     }
 
     #[test]
