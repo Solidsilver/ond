@@ -309,7 +309,8 @@ mod tests {
         // Saved, adopted settings stay as they now are.
         let mut saved = users.clone();
         m.restore(&mut saved, &users);
-        assert_eq!(saved["offline_dir"], "/data/music/Ond Offline", "a folder of Ond's own inside it, as when picked in Settings");
+        let dir = saved["offline_dir"].as_str().unwrap();
+        assert_eq!(Path::new(dir), Path::new("/data/music/Ond Offline"), "a folder of Ond's own inside it, as when picked in Settings");
         assert!(m.adopt(&mut users).is_empty(), "nothing changes the second time");
     }
 }
