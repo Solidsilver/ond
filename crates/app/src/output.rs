@@ -130,8 +130,12 @@ impl Outputs {
         (&self.devices, self.current.as_deref())
     }
 
-    /// The mode `d` plays in: remembered, else its kind's default.
+    /// The mode `d` plays in: remembered, else its kind's default. Always
+    /// Normal where bit-perfect can't mean anything.
     pub fn device_mode(&self, d: &DeviceInfo) -> PlaybackMode {
+        if !d.can_bit_perfect() {
+            return PlaybackMode::Normal;
+        }
         self.prefs.get(|s| s.device_modes.get(&d.uid).map(|&m| m.into())).unwrap_or_else(|| d.default_mode())
     }
 
@@ -187,6 +191,11 @@ impl Outputs {
         None
     }
 
+    /// Whether the device in use can play bit-perfect (see `DeviceInfo::can_bit_perfect`).
+    pub fn in_use_can_bit_perfect(&self) -> bool {
+        self.devices.iter().find(|d| Some(&d.uid) == self.current.as_ref()).is_some_and(DeviceInfo::can_bit_perfect)
+    }
+
     /// Whether the mode of device `uid` (the one in use) is set in managed.json.
     pub fn mode_locked(&self, uid: Option<&str>) -> bool {
         uid.is_some_and(|uid| self.prefs.managed(&format!("device_modes.{uid}")))
@@ -206,8 +215,8 @@ impl Outputs {
         self.prefs.edit(|s| s.output_device = uid);
     }
 
-    /// The output chip: device name with a status dot. Its popup lists devices
-    /// and holds the bit-perfect switch for the device in use.
+    /// The output chip: device name with a status dot. Its popup lists devices,
+    /// each that can play bit-perfect with its own switch for it.
     /// Returns true when "Playback settings…" was chosen in the popup.
     pub fn picker_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool) -> bool {
         let current = self.devices.iter().find(|d| Some(&d.uid) == self.current.as_ref());
@@ -238,7 +247,7 @@ impl Outputs {
         std::mem::take(&mut self.wants_settings)
     }
 
-    /// What's playing through what, the devices, and the mode for the one in use.
+    /// What's playing through what, and the devices.
     fn popup_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool) {
         let t = Tokens::of(ui);
         ui.set_width(POPUP_W);
@@ -263,34 +272,17 @@ impl Outputs {
         if device_locked {
             locked_note(ui);
         }
-        ui.add_enabled_ui(!device_locked, |ui| self.device_rows(ui, engine, &follows_default));
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(8.0);
-        let mode_locked = self.mode_locked(self.current.as_deref());
-        if mode_locked {
-            locked_note(ui);
-        }
-        ui.add_enabled_ui(!mode_locked, |ui| {
+        self.device_rows(ui, engine, &follows_default, device_locked, bit_perfect);
+        if self.devices.iter().any(DeviceInfo::can_bit_perfect) {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                let mut mode = if *bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                if crate::app::choice(ui, &crate::app::MODES, &mut mode, Some(POPUP_W - 16.0), crate::app::mode_label) {
-                    *bit_perfect = mode == PlaybackMode::BitPerfect;
-                    self.set_mode_in_use(mode, engine);
-                }
+                let why = "Bit-perfect sends samples untouched and keeps other apps off the device while Ond plays. Use the device's own volume.";
+                ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
             });
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let why = if *bit_perfect {
-                "Samples reach the device untouched. Use your DAC's or the system's volume."
-            } else {
-                "Ond can change the volume, apply ReplayGain and resample."
-            };
-            ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
-        });
+        }
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(2.0);
@@ -304,20 +296,47 @@ impl Outputs {
         ui.add_space(4.0);
     }
 
-    /// The system default, then each device; a click plays through it.
-    fn device_rows(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, follows_default: &str) {
-        if device_row(ui, &format!("System default ({follows_default})"), None, self.current.is_none()).clicked() {
+    /// The system default, then each device; a click plays through it. A
+    /// device that can play bit-perfect has a switch for it, which sets its
+    /// mode without choosing it (the one in use switches at once).
+    fn device_rows(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, follows_default: &str, locked: bool, bit_perfect: &mut bool) {
+        let t = Tokens::of(ui);
+        let rows = ui.add_enabled_ui(!locked, |ui| device_row(ui, &format!("System default ({follows_default})"), None, self.current.is_none(), 0.0));
+        if rows.inner.clicked() {
             self.choose(None, engine);
             ui.close();
         }
         for d in self.devices.clone() {
-            let mode = mode_name(self.device_mode(&d));
             let selected = Some(&d.uid) == self.current.as_ref();
-            let caps = d.capability_line();
-            let sub = if caps.is_empty() { mode.to_owned() } else { format!("{caps} · {mode}") };
-            if device_row(ui, &d.name, Some(&sub), selected).clicked() {
+            let sub = d.capability_line();
+            let switchable = d.can_bit_perfect();
+            let row = ui.add_enabled_ui(!locked, |ui| device_row(ui, &d.name, Some(&sub), selected, if switchable { SWITCH_W } else { 0.0 })).inner;
+            if row.clicked() {
                 self.choose(Some(d.uid.clone()), engine);
                 ui.close();
+            }
+            if !switchable {
+                continue;
+            }
+            // "Bit-perfect" and its switch, at the right of the row's first line.
+            let area = egui::Rect::from_min_max(egui::pos2(row.rect.right() - SWITCH_W, row.rect.top() + 2.0), egui::pos2(row.rect.right() - 6.0, row.rect.top() + 28.0));
+            let mode_locked = self.mode_locked(Some(&d.uid));
+            let mut on = self.device_mode(&d) == PlaybackMode::BitPerfect;
+            let changed = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+                    ui.add_enabled_ui(!mode_locked, |ui| {
+                        let resp = crate::app::switch(ui, &mut on, &format!("Bit-perfect on {}", d.name));
+                        ui.label(egui::RichText::new("Bit-perfect").size(11.0).color(if on { t.text } else { t.muted }));
+                        resp.changed()
+                    })
+                    .inner
+                })
+                .inner;
+            if changed {
+                let mode = if on { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                if self.set_device_mode(&d.uid, mode, engine) {
+                    *bit_perfect = on;
+                }
             }
         }
     }
@@ -470,7 +489,11 @@ fn summary_ui(ui: &mut egui::Ui, path: &SignalPath, size: f32, strong: bool) -> 
 
 /// One row of the device list: a check for the device in use, its name, and
 /// a muted capability line under it. The whole row is the target.
-fn device_row(ui: &mut egui::Ui, name: &str, sub: Option<&str>, selected: bool) -> egui::Response {
+/// Room at the right of a device row for "Bit-perfect" and its switch.
+const SWITCH_W: f32 = 100.0;
+
+/// A device in the picker. `trailing` keeps room at the right for a control.
+fn device_row(ui: &mut egui::Ui, name: &str, sub: Option<&str>, selected: bool, trailing: f32) -> egui::Response {
     let t = Tokens::of(ui);
     let h = if sub.is_some() { 40.0 } else { 30.0 };
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
@@ -483,7 +506,7 @@ fn device_row(ui: &mut egui::Ui, name: &str, sub: Option<&str>, selected: bool) 
             icons::paint(ui.painter(), c, Icon::Check, t.accent);
         }
         let x = rect.left() + 30.0;
-        let w = rect.right() - x - 8.0;
+        let w = rect.right() - x - 8.0 - trailing;
         let font = if selected { egui::FontId::new(13.0, crate::theme::semibold()) } else { egui::FontId::proportional(13.0) };
         let g = crate::app::elide_text(ui, name, font, t.text, w);
         ui.painter().galley(egui::pos2(x, rect.top() + 15.0 - g.size().y / 2.0), g, t.text);
@@ -505,13 +528,6 @@ fn hover_text(p: &SignalPath) -> String {
         BitPerfectStatus::Unavailable { reason } => format!("Not bit-perfect: {reason}"),
     };
     format!("{}\n{verdict}", p.output)
-}
-
-fn mode_name(mode: PlaybackMode) -> &'static str {
-    match mode {
-        PlaybackMode::Normal => "normal",
-        PlaybackMode::BitPerfect => "bit-perfect",
-    }
 }
 
 fn engine_modes(saved: &HashMap<String, DeviceMode>) -> HashMap<String, PlaybackMode> {

@@ -163,6 +163,8 @@ impl AlsaBackend {
 
     fn info(&self, pcm: &Pcm, default_card: Option<u32>) -> DeviceInfo {
         let mut caps = self.known_caps(pcm);
+        // A hardware device always takes integer samples.
+        caps.integer = true;
         match &self.out {
             Some(Out::Exclusive { stream, uid }) if *uid == pcm.uid => {
                 caps.exclusive = true;

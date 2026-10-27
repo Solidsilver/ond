@@ -269,13 +269,15 @@ fn devices() -> audio::Event {
         configs: vec![RateRange { channels: 2, min: 44_100, max }],
         max_bits: Some(bits),
         post_processed: post.map(Into::into),
+        integer: true,
         ..Default::default()
     };
     let dev = |uid: &str, name: &str, kind, caps, is_default| DeviceInfo { uid: uid.into(), name: name.into(), kind, caps, is_default };
     audio::Event::Devices {
         devices: vec![
             dev("spk", "MacBook Pro Speakers", DeviceKind::BuiltInSpeakers, caps("MacBook Pro Speakers", 24, 96_000, Some("macOS speaker processing")), true),
-            dev("hp", "External Headphones", DeviceKind::BuiltInHeadphones, caps("External Headphones", 24, 96_000, None), false),
+            // A Mac's headphone jack is float-only.
+            dev("hp", "External Headphones", DeviceKind::BuiltInHeadphones, DeviceCaps { integer: false, ..caps("External Headphones", 24, 96_000, None) }, false),
             dev("umc", "UMC22", DeviceKind::Usb, caps("UMC22", 16, 48_000, None), false),
         ],
         current: Some("umc".into()),

@@ -208,22 +208,27 @@ impl OndApp {
 
     fn output_settings(&mut self, ui: &mut Ui) {
         let (devices, current) = self.output.devices();
-        let rows: Vec<(String, String, String, PlaybackMode, bool)> = devices
+        let rows: Vec<(String, String, String, PlaybackMode, bool, bool)> = devices
             .iter()
-            .map(|d| (d.uid.clone(), d.name.clone(), d.capability_line(), self.output.device_mode(d), current == Some(d.uid.as_str())))
+            .map(|d| (d.uid.clone(), d.name.clone(), d.capability_line(), self.output.device_mode(d), current == Some(d.uid.as_str()), d.can_bit_perfect()))
             .collect();
         group(ui, "Devices", |ui| {
             if rows.is_empty() {
                 setting(ui, "No output devices found", "", |_| ());
             }
-            for (uid, name, caps, mode, in_use) in &rows {
+            for (uid, name, caps, mode, in_use, can) in &rows {
                 let mut m = *mode;
                 let head = Head { label: name, tag: in_use.then_some("in use"), hint: caps, path: false };
+                if !can {
+                    // Bit-perfect can't mean anything here: no choice to make.
+                    row_with(ui, head, |_| ());
+                    continue;
+                }
                 if managed(ui, self.output.mode_locked(Some(uid)), |ui| row_with(ui, head, |ui| choice(ui, &MODES, &mut m, None, mode_label))) {
                     self.actions.push(Action::Output(OutputAction::DeviceMode(uid.clone(), m)));
                 }
             }
-            note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched, so use the device's own volume.");
+            note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched, so use the device's own volume. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices always play Normal.");
         });
         if cfg!(target_os = "macos") {
             group(ui, "Normal mode", |ui| {

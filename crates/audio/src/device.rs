@@ -36,6 +36,14 @@ impl DeviceInfo {
         PlaybackMode::Normal
     }
 
+    /// Whether bit-perfect can mean anything here: a device that takes integer
+    /// samples, not one macOS processes (speakers), compresses (Bluetooth,
+    /// AirPlay) or that's software (virtual devices, meeting apps' drivers).
+    pub fn can_bit_perfect(&self) -> bool {
+        self.caps.integer
+            && !matches!(self.kind, DeviceKind::BuiltInSpeakers | DeviceKind::Bluetooth | DeviceKind::AirPlay | DeviceKind::Virtual)
+    }
+
     /// A terse capability line for the picker: "up to 24/96", "AirPlay".
     pub fn capability_line(&self) -> String {
         let limit = self.caps.max_rate().map(|r| format!("up to {}", describe(self.caps.max_bits, r)));
@@ -73,9 +81,21 @@ mod tests {
             uid: "x".into(),
             name: "x".into(),
             kind,
-            caps: DeviceCaps { configs: vec![RateRange { channels: 2, min: 44_100, max }], max_bits: bits, ..Default::default() },
+            caps: DeviceCaps { configs: vec![RateRange { channels: 2, min: 44_100, max }], max_bits: bits, integer: true, ..Default::default() },
             is_default: false,
         }
+    }
+
+    #[test]
+    fn bit_perfect_is_offered_where_it_can_mean_something() {
+        assert!(info(DeviceKind::Usb, 192_000, Some(24)).can_bit_perfect());
+        assert!(info(DeviceKind::Hdmi, 96_000, Some(24)).can_bit_perfect());
+        for kind in [DeviceKind::BuiltInSpeakers, DeviceKind::Bluetooth, DeviceKind::AirPlay, DeviceKind::Virtual] {
+            assert!(!info(kind, 96_000, Some(24)).can_bit_perfect(), "{kind:?}");
+        }
+        let mut jack = info(DeviceKind::BuiltInHeadphones, 96_000, Some(24));
+        jack.caps.integer = false;
+        assert!(!jack.can_bit_perfect(), "a float-only headphone jack can't be verified");
     }
 
     #[test]

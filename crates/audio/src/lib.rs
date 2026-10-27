@@ -575,7 +575,12 @@ impl Engine {
                 }
                 self.report_signal_path();
             }
-            Command::SetMode(m) => self.apply_mode(m),
+            Command::SetMode(m) => {
+                // Bit-perfect only where it can mean something (see `DeviceInfo::can_bit_perfect`).
+                let in_use = self.current_device.as_ref().and_then(|uid| self.known.iter().find(|d| &d.uid == uid));
+                let m = if in_use.is_some_and(|d| !d.can_bit_perfect()) { PlaybackMode::Normal } else { m };
+                self.apply_mode(m);
+            }
             Command::Seek(to) => self.seek(to),
             Command::SetNext(next) => self.set_next(next),
             Command::SelectDevice(uid) => match self.backend.select_device(uid.as_deref()) {
@@ -785,6 +790,7 @@ impl Engine {
         self.current_device = info.as_ref().map(|d| d.uid.clone());
         let unpicked = |d: &DeviceInfo| if fallback { PlaybackMode::Normal } else { d.default_mode() };
         let mode = match &info {
+            Some(d) if !d.can_bit_perfect() => PlaybackMode::Normal,
             Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or_else(|| unpicked(d)),
             None if fallback => PlaybackMode::Normal,
             None => self.config.mode,

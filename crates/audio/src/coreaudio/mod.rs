@@ -424,6 +424,7 @@ fn caps_of(dev: hal::Id, kind: DeviceKind) -> DeviceCaps {
         nominal_rate: hal::nominal_rate(dev).map(|r| r.round() as u32),
         active_bits: active.filter(hal::is_int).map(|f| f.mBitsPerChannel),
         post_processed: (kind == DeviceKind::BuiltInSpeakers).then(|| "macOS speaker processing".into()),
+        integer: int_bits.is_some(),
     }
 }
 

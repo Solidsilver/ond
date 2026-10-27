@@ -47,6 +47,9 @@ pub struct DeviceCaps {
     pub active_bits: Option<u32>,
     /// The OS processes this output after us (e.g. built-in speaker EQ), so it can never be verified.
     pub post_processed: Option<String>,
+    /// Some format takes integer samples: without one, bit-perfect can't be
+    /// verified (a Mac's headphone jack is float-only).
+    pub integer: bool,
 }
 
 impl DeviceCaps {

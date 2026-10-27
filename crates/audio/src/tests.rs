@@ -158,6 +158,7 @@ fn caps(max_bits: Option<u32>, max_rate: u32) -> DeviceCaps {
         max_bits,
         exclusive: false,
         shared_reason: Some("shared mode (fake)".into()),
+        integer: true,
         ..Default::default()
     }
 }
@@ -488,10 +489,10 @@ fn a_lost_device_falls_back_in_its_remembered_mode() {
     let a = pcm(2 * 44_100 * 20, 24);
     let backend = FakeBackend::new(caps(Some(24), 192_000));
     let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
-    *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
+    *devices.lock().unwrap() = vec![device("tv", "TV", DeviceKind::Hdmi), device("dac", "DAC", DeviceKind::Usb)];
     let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
-    // The user plays the speakers bit-perfect, the DAC in Normal.
-    engine.send(Command::DeviceModes(HashMap::from([("spk".to_owned(), PlaybackMode::BitPerfect), ("dac".to_owned(), PlaybackMode::Normal)])));
+    // The user plays the TV bit-perfect, the DAC in Normal.
+    engine.send(Command::DeviceModes(HashMap::from([("tv".to_owned(), PlaybackMode::BitPerfect), ("dac".to_owned(), PlaybackMode::Normal)])));
     engine.send(Command::SelectDevice(Some("dac".into())));
     engine.send(Command::Play(file_source(&dir, "a", &a)));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
@@ -500,7 +501,7 @@ fn a_lost_device_falls_back_in_its_remembered_mode() {
     events.lock().unwrap().push(DeviceEvent::ListChanged);
     let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
     assert!(seen.iter().any(|e| matches!(e, Event::DeviceLost { name } if name == "DAC")));
-    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, device: Some(d) } if d == "spk")), "{seen:?}");
+    assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, device: Some(d) } if d == "tv")), "{seen:?}");
     assert_eq!(engine.status.mode(), PlaybackMode::BitPerfect);
     engine.send(Command::Shutdown);
 }
@@ -530,12 +531,29 @@ fn a_device_that_blinks_out_and_back_as_the_default_is_not_offered() {
 }
 
 #[test]
-fn remembered_modes_win_over_device_defaults() {
+fn bit_perfect_is_refused_where_it_cant_mean_anything() {
     let backend = FakeBackend::new(caps(Some(24), 192_000));
     *backend.devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
     let engine = spawn(EngineConfig::default(), Box::new(backend), None);
-    engine.send(Command::DeviceModes(HashMap::from([("dac".to_owned(), PlaybackMode::Normal), ("spk".to_owned(), PlaybackMode::BitPerfect)])));
+    // Remembered from before (or set in managed.json): the speakers still play Normal.
+    engine.send(Command::DeviceModes(HashMap::from([("spk".to_owned(), PlaybackMode::BitPerfect)])));
     engine.send(Command::SelectDevice(Some("spk".into())));
+    events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert_eq!(engine.status.mode(), PlaybackMode::Normal);
+    engine.send(Command::SetMode(PlaybackMode::BitPerfect));
+    engine.send(Command::RefreshDevices);
+    events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert_eq!(engine.status.mode(), PlaybackMode::Normal, "asked for directly, too");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn remembered_modes_win_over_device_defaults() {
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    *backend.devices.lock().unwrap() = vec![device("tv", "TV", DeviceKind::Hdmi), device("dac", "DAC", DeviceKind::Usb)];
+    let engine = spawn(EngineConfig::default(), Box::new(backend), None);
+    engine.send(Command::DeviceModes(HashMap::from([("dac".to_owned(), PlaybackMode::Normal), ("tv".to_owned(), PlaybackMode::BitPerfect)])));
+    engine.send(Command::SelectDevice(Some("tv".into())));
     let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
     assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, .. })));
     engine.send(Command::SelectDevice(Some("dac".into())));

@@ -90,7 +90,7 @@ impl OndApp {
                 }
             }
             OutputAction::Volume(volume) => self.set_volume(volume),
-            OutputAction::ToggleBitPerfect if self.output.mode_locked(self.output.devices().1) => {}
+            OutputAction::ToggleBitPerfect if self.output.mode_locked(self.output.devices().1) || !self.output.in_use_can_bit_perfect() => {}
             OutputAction::ToggleBitPerfect => {
                 self.bit_perfect = !self.bit_perfect;
                 let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
