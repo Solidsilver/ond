@@ -79,6 +79,17 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | `playback.format` | `"aac"`, `"mp3"` | `"aac"` |
 | `playback.kbps` | `128`, `192`, `256`, `320` | `256` |
 
+### Queue
+
+| Setting | Values | Default |
+|---|---|---|
+| `queue.play_next` | `"top"` (the top of the queue), `"after-next"` (after earlier play-nexts) | `"top"` |
+| `queue.add` | `"end"` (the end of the queue), `"before-source"` (after what you added, before the album or playlist) | `"end"` |
+| `queue.on_play` | What playing something new does with what you added: `"keep-after"`, `"keep-before"`, `"clear"`, `"ask"` | `"keep-after"` |
+| `queue.clear` | What Clear removes: `"everything"`, `"added"` (only what you added) | `"everything"` |
+
+The presets in Settings › Queue set all four: Apple Music is `top`, `end`, `ask`, `everything`; Spotify is `after-next`, `before-source`, `keep-before`, `added`.
+
 ### Output
 
 | Setting | Values | Default |
