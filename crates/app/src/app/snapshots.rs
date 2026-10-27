@@ -278,6 +278,7 @@ fn devices() -> audio::Event {
             dev("spk", "MacBook Pro Speakers", DeviceKind::BuiltInSpeakers, caps("MacBook Pro Speakers", 24, 96_000, Some("macOS speaker processing")), true),
             // A Mac's headphone jack is float-only.
             dev("hp", "External Headphones", DeviceKind::BuiltInHeadphones, DeviceCaps { integer: false, ..caps("External Headphones", 24, 96_000, None) }, false),
+            dev("tv", "LG TV", DeviceKind::Hdmi, caps("LG TV", 24, 192_000, None), false),
             dev("umc", "UMC22", DeviceKind::Usb, caps("UMC22", 16, 48_000, None), false),
         ],
         current: Some("umc".into()),

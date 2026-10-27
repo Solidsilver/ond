@@ -322,16 +322,14 @@ impl Outputs {
             let area = egui::Rect::from_min_max(egui::pos2(row.rect.right() - SWITCH_W, row.rect.top() + 2.0), egui::pos2(row.rect.right() - 6.0, row.rect.top() + 28.0));
             let mode_locked = self.mode_locked(Some(&d.uid));
             let mut on = self.device_mode(&d) == PlaybackMode::BitPerfect;
-            let changed = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-                    ui.add_enabled_ui(!mode_locked, |ui| {
-                        let resp = crate::app::switch(ui, &mut on, &format!("Bit-perfect on {}", d.name));
-                        ui.label(egui::RichText::new("Bit-perfect").size(11.0).color(if on { t.text } else { t.muted }));
-                        resp.changed()
-                    })
-                    .inner
-                })
-                .inner;
+            // A child laid over the row: it takes no room of its own in the list.
+            let mut over = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            over.add_enabled(!mode_locked, |ui: &mut egui::Ui| -> egui::Response {
+                let resp = crate::app::switch(ui, &mut on, &format!("Bit-perfect on {}", d.name));
+                ui.label(egui::RichText::new("Bit-perfect").size(11.0).color(if on { t.text } else { t.muted }));
+                resp
+            });
+            let changed = on != (self.device_mode(&d) == PlaybackMode::BitPerfect);
             if changed {
                 let mode = if on { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
                 if self.set_device_mode(&d.uid, mode, engine) {
