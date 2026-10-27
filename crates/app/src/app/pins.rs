@@ -254,9 +254,7 @@ impl Downloads {
 
     /// Moves downloads into `chosen` at the next start. Returns the notice to show.
     pub(super) fn move_to(&self, chosen: PathBuf, prefs: &Prefs) -> Option<String> {
-        // Always a folder of our own inside the chosen one: the store tidies
-        // files it doesn't know, which must never be the user's.
-        let dir = if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") };
+        let dir = crate::settings::offline_folder(chosen);
         if dir == self.base {
             return None;
         }

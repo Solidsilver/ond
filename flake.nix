@@ -30,6 +30,11 @@
         ond = final.callPackage ./nix/package.nix { };
       };
 
+      # `programs.ond` for Home Manager: installs Ond and sets any of its
+      # settings (see nix/hm-module.nix and the README).
+      homeModules.default = import ./nix/hm-module.nix { inherit self; };
+      homeManagerModules.default = self.homeModules.default;
+
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
           # The package's build inputs (ALSA, PipeWire, pkg-config, libclang).
@@ -61,6 +66,9 @@
         pkgs:
         lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ond = self.packages.${pkgs.stdenv.hostPlatform.system}.ond;
+        }
+        // {
+          hm-module = import ./nix/hm-module-check.nix { inherit pkgs self; };
         }
       );
 

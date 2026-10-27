@@ -67,7 +67,9 @@ The repository is a flake. To try it without installing:
 nix run github:Solidsilver/ond
 ```
 
-To install it into your profile, `nix profile install github:Solidsilver/ond`. In a NixOS or home-manager config, add the flake as an input and either use `ond.packages.${system}.default` directly or apply `ond.overlays.default` and use `pkgs.ond`. Pin a release with `github:Solidsilver/ond/v0.2.0`.
+To install it into your profile, `nix profile install github:Solidsilver/ond`. In a NixOS config, add the flake as an input and either use `ond.packages.${system}.default` directly or apply `ond.overlays.default` and use `pkgs.ond`. Pin a release with `github:Solidsilver/ond/v0.2.0`.
+
+With Home Manager, the flake's module installs Ond and can set any of its settings. Settings set this way are locked in the app, and the rest stay editable there. It works on macOS too, for the app bundle. [docs/home-manager.md](docs/home-manager.md) has the setup and every setting.
 
 ### Windows
 

@@ -177,6 +177,13 @@ impl Default for Settings {
     }
 }
 
+/// Where downloads go for a folder the user picked: always a folder of
+/// Ond's own inside it, since the store tidies away files it doesn't know,
+/// and those must never be the user's.
+pub fn offline_folder(chosen: PathBuf) -> PathBuf {
+    if chosen.file_name().is_some_and(|n| n == "Ond Offline") { chosen } else { chosen.join("Ond Offline") }
+}
+
 pub struct Paths {
     pub config_file: PathBuf,
     pub library_db: PathBuf,

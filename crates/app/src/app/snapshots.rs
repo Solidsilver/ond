@@ -1619,7 +1619,7 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]
 fn snapshots() {
-    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], scenes);
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, scenes);
 }
 
 /// Only the visualizers (they look the same in either theme):
@@ -1630,11 +1630,54 @@ fn snapshots() {
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]
 fn visualizer_snapshots() {
-    shoot_scenes(&[(egui::Theme::Dark, "dark")], visualizer_scenes);
+    shoot_scenes(&[(egui::Theme::Dark, "dark")], None, visualizer_scenes);
 }
 
-/// Renders `scenes` in each of `themes`, offscreen through wgpu, into `target/snapshots`.
-fn shoot_scenes(themes: &[(egui::Theme, &'static str)], scenes: fn(&mut Harness<'_, Option<OndApp>>, &Shooter)) {
+/// Settings with some set in managed.json (as the Home Manager module writes
+/// it): their rows and the output picker locked, and the sign-in form.
+#[test]
+#[ignore = "renders PNGs for review; run with --ignored"]
+fn managed_snapshots() {
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], Some(MANAGED), managed_scenes);
+}
+
+/// A managed.json for the scenes and tests: a little from each section.
+const MANAGED: &str = r#"{
+  "server": "https://music.example.com",
+  "username": "demo",
+  "scrobble": false,
+  "accent": "teal",
+  "alpha_rail": true,
+  "waveform": true,
+  "waveform_bars": { "width": 4 },
+  "playback": { "replay_gain": "album", "kbps": 192 },
+  "device_modes": { "umc": "bit-perfect" },
+  "output_device": "umc",
+  "offline_limit_gb": 50,
+  "experimental": { "visualizer": true },
+  "volume": 0.2
+}"#;
+
+fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    for section in [settings_page::Section::General, settings_page::Section::Appearance, settings_page::Section::Playback, settings_page::Section::Output, settings_page::Section::Offline, settings_page::Section::Experimental] {
+        reset(h, FULL, Route::Recent);
+        app_mut(h).actions.push(Action::OpenSettings(section));
+        s.shoot(h, &format!("managed-settings-{}", section.label().to_lowercase()));
+    }
+    reset(h, FULL, Route::Recent);
+    h.run_steps(2);
+    h.get_by_label("Output: UMC22").click();
+    s.shoot(h, "managed-output-picker");
+    egui::Popup::close_all(&h.ctx);
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(super::session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
+    s.shoot(h, "managed-sign-in");
+    app_mut(h).login = None;
+}
+
+/// Renders `scenes` in each of `themes`, offscreen through wgpu, into
+/// `target/snapshots`, with `managed` as managed.json when given.
+fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, scenes: fn(&mut Harness<'_, Option<OndApp>>, &Shooter)) {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
     std::fs::create_dir_all(&out).unwrap();
     let out = out.canonicalize().unwrap();
@@ -1666,6 +1709,9 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], scenes: fn(&mut Harness<
                 None,
             );
         let ctx = h.ctx.clone();
+        if let Some(json) = managed {
+            std::fs::write(dir.path().join("managed.json"), json).unwrap();
+        }
         let mut app = populated(&ctx, dir.path());
         app.gpu = Some(target);
         // `build` installs the theme with the saved (system) preference.
@@ -2524,4 +2570,47 @@ fn dragging_the_volume_slider_doesnt_move_the_window() {
     }
     assert!(!seen.contains(&egui::ViewportCommand::StartDrag), "the window stays put: {seen:?}");
     assert!(app_mut(&mut h).prefs_now().volume > 0.9, "the volume follows the drag");
+}
+
+/// Settings set in managed.json stay as set: the actions that would change
+/// them do nothing, and the settings file keeps the user's own values.
+#[test]
+fn managed_settings_cant_be_changed_in_the_app() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("settings.json"), r#"{ "server": "https://music.example.com", "username": "demo", "scrobble": true, "accent": "rose", "alpha_rail": false }"#).unwrap();
+    std::fs::write(dir.path().join("managed.json"), MANAGED).unwrap();
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    reset(&mut h, FULL, Route::Recent);
+    let app = app_mut(&mut h);
+    let s = app.prefs_now();
+    assert!(!s.scrobble && s.alpha_rail && s.accent == theme::Accent::Teal, "managed values apply");
+    assert_eq!(s.volume, 1.0, "the volume isn't a managed setting");
+    app.actions.push(Action::Prefs(PrefsAction::Scrobble(true)));
+    app.actions.push(Action::Prefs(PrefsAction::AlphaRail(false)));
+    app.actions.push(Action::Prefs(PrefsAction::Theme(ThemePref::Dark)));
+    app.actions.push(Action::Output(OutputAction::ToggleBitPerfect));
+    app.actions.push(Action::Output(OutputAction::SelectDevice("spk".into())));
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    let s = app.prefs_now();
+    assert!(!s.scrobble && s.alpha_rail, "locked: unchanged");
+    assert_eq!(s.theme, ThemePref::Dark, "what isn't managed still changes");
+    let saved = app.prefs.snapshot();
+    assert_eq!(saved.device_modes.get("umc"), Some(&crate::settings::DeviceMode::BitPerfect));
+    assert_eq!(saved.output_device.as_deref(), Some("umc"));
+    app.prefs.flush();
+    let file = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+    let file: serde_json::Value = serde_json::from_str(&file).unwrap();
+    assert_eq!((&file["scrobble"], &file["accent"]), (&serde_json::json!(true), &serde_json::json!("rose")), "the user's own values are kept: {file}");
+    assert!(file.get("alpha_rail").is_none(), "and off, as theirs was (not written when off): {file}");
+    assert_eq!(file["theme"], "dark");
 }
