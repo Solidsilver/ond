@@ -449,6 +449,11 @@ pub trait OutputBackend: Send {
     fn set_mode(&mut self, mode: PlaybackMode) {
         let _ = mode;
     }
+    /// Whether Normal mode switches the device to each song's rate (and an
+    /// integer format), as bit-perfect does, or leaves it as the system has it.
+    fn set_match_rate(&mut self, on: bool) {
+        let _ = on;
+    }
     /// What the current output device can do, if the backend can tell. Used to
     /// judge whether bit-perfect playback is possible for a file.
     fn device_caps(&mut self) -> Option<DeviceCaps>;

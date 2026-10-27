@@ -21,6 +21,17 @@ struct FakeBackend {
     open_dev: Option<String>,
     /// How long the device takes to play one buffer, and its size in frames.
     period: (Duration, usize),
+    /// Like CoreAudio not matching the song's rate: only this rate is on offer.
+    own_rate: Option<u32>,
+    /// Set when the backend is dropped (the engine let go of the device).
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for FakeBackend {
+    fn drop(&mut self) {
+        self.close();
+        self.dropped.store(true, Ordering::Release);
+    }
 }
 
 impl FakeBackend {
@@ -36,6 +47,8 @@ impl FakeBackend {
             selected: None,
             open_dev: None,
             period: (Duration::from_millis(1), 512),
+            own_rate: None,
+            dropped: Arc::default(),
         }
     }
 
@@ -53,7 +66,15 @@ impl OutputBackend for FakeBackend {
     }
 
     fn device_caps(&mut self) -> Option<DeviceCaps> {
-        Some(self.caps.clone())
+        let mut caps = self.caps.clone();
+        if let Some(rate) = self.own_rate {
+            caps.configs = caps.configs.iter().map(|c| RateRange { min: rate, max: rate, ..*c }).collect();
+        }
+        Some(caps)
+    }
+
+    fn set_match_rate(&mut self, on: bool) {
+        self.own_rate = (!on).then_some(48_000);
     }
 
     fn devices(&mut self) -> Vec<DeviceInfo> {
@@ -242,6 +263,47 @@ fn signal_path_is_honest_and_follows_mode_switches_mid_track() {
 }
 
 #[test]
+fn leaving_the_device_at_its_rate_restarts_the_track_resampled_and_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(4 * 44_100 * 2, 0);
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(FakeBackend::new(caps(Some(24), 96_000))), None);
+    engine.send(Command::MatchRate(true));
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    let rate = |seen: &[Event]| {
+        seen.iter().rev().find_map(|e| match e {
+            Event::SignalPath(p) => Some((p.device_rate, p.resampled)),
+            _ => None,
+        })
+    };
+    let seen = events_until(&engine, |e| matches!(e, Event::SignalPath(_)));
+    assert_eq!(rate(&seen), Some((44_100, false)), "matching: the device runs at the song's rate");
+
+    engine.send(Command::MatchRate(false));
+    let seen = events_until(&engine, |e| matches!(e, Event::SignalPath(p) if p.device_rate == 48_000));
+    assert_eq!(rate(&seen), Some((48_000, true)), "left alone: resampled to the device's rate");
+    assert!(seen.iter().any(|e| matches!(e, Event::TrackStarted { restart: true, .. })), "the same track carries on");
+
+    engine.send(Command::MatchRate(true));
+    let seen = events_until(&engine, |e| matches!(e, Event::SignalPath(p) if p.device_rate == 44_100));
+    assert_eq!(rate(&seen), Some((44_100, false)));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn shutdown_waits_for_the_output_to_let_go() {
+    let backend = FakeBackend::new(caps(Some(16), 48_000));
+    let dropped = backend.dropped.clone();
+    let engine = spawn(EngineConfig::default(), Box::new(backend), None);
+    engine.shutdown(slack(Duration::from_secs(5)));
+    assert!(dropped.load(Ordering::Acquire), "the backend (and its device) is released before shutdown returns");
+    // Again, after it's gone: returns at once.
+    let t = Instant::now();
+    engine.shutdown(Duration::from_secs(5));
+    assert!(t.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
 fn hi_res_on_a_16_48_device_is_resampled_and_reported_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hr.wav");
@@ -360,7 +422,8 @@ fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
     *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
     let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
 
-    // Picking the DAC applies its default mode (bit-perfect: it's a wired DAC).
+    // Picking the DAC applies the mode the user picked for it.
+    engine.send(Command::DeviceModes(HashMap::from([("dac".to_owned(), PlaybackMode::BitPerfect)])));
     engine.send(Command::SelectDevice(Some("dac".into())));
     let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
     assert!(seen.iter().any(|e| matches!(e, Event::ModeChanged { mode: PlaybackMode::BitPerfect, device: Some(d) } if d == "dac")));

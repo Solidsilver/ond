@@ -76,6 +76,8 @@ pub enum OutputAction {
     ToggleBitPerfect,
     /// Play through this device (by UID), e.g. one that came back.
     SelectDevice(String),
+    /// Normal mode switches the device to each song's sample rate.
+    MatchRate(bool),
 }
 
 impl OndApp {
@@ -95,6 +97,7 @@ impl OndApp {
                 self.output.set_mode_in_use(mode, &self.engine);
             }
             OutputAction::SelectDevice(uid) => self.output.choose(Some(uid), &self.engine),
+            OutputAction::MatchRate(on) => self.output.set_match_rate(on, &self.engine),
         }
     }
 

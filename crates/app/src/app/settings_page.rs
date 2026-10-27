@@ -223,8 +223,17 @@ impl OndApp {
                     self.actions.push(Action::Output(OutputAction::DeviceMode(uid.clone(), m)));
                 }
             }
-            note(ui, "New devices start in Normal for speakers, Bluetooth and AirPlay, and in Bit-perfect for DACs and headphones. Bit-perfect sends samples untouched, so use the device's own volume.");
+            note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched, so use the device's own volume.");
         });
+        if cfg!(target_os = "macos") {
+            group(ui, "Normal mode", |ui| {
+                let mut on = self.output.match_rate();
+                if managed(ui, self.prefs.managed("output_match_rate"), |ui| switch_row(ui, "Match each song's sample rate", "Switches the device to the song's rate, as bit-perfect does, while other apps keep sharing it. Off, the device stays as macOS has it and Ond converts the rate.", &mut on)) {
+                    self.actions.push(Action::Output(OutputAction::MatchRate(on)));
+                }
+                note(ui, "A few seconds after playback stops, Ond puts the device back the way it found it.");
+            });
+        }
     }
 
     fn offline_settings(&mut self, ui: &mut Ui) {

@@ -29,16 +29,11 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-    /// The mode a device starts in until the user picks one: Normal where
-    /// bit-perfect can't mean anything (speaker DSP, lossy wireless links),
-    /// bit-perfect for DACs, headphone jacks and other wired outputs.
+    /// The mode a device starts in until the user picks one: always Normal.
+    /// Bit-perfect takes the device away from every other app (system sounds
+    /// included), so it's something to choose, never a surprise.
     pub fn default_mode(&self) -> PlaybackMode {
-        match self.kind {
-            DeviceKind::BuiltInSpeakers | DeviceKind::Bluetooth | DeviceKind::AirPlay | DeviceKind::Virtual => {
-                PlaybackMode::Normal
-            }
-            _ => PlaybackMode::BitPerfect,
-        }
+        PlaybackMode::Normal
     }
 
     /// A terse capability line for the picker: "up to 24/96", "AirPlay".
@@ -89,8 +84,7 @@ mod tests {
         assert_eq!(speakers.default_mode(), PlaybackMode::Normal);
         assert_eq!(speakers.capability_line(), "up to 24/96 · macOS processing");
         let umc = info(DeviceKind::Usb, 48_000, Some(16));
-        assert_eq!(umc.default_mode(), PlaybackMode::BitPerfect);
+        assert_eq!(umc.default_mode(), PlaybackMode::Normal, "bit-perfect is opt-in, even for a DAC");
         assert_eq!(umc.capability_line(), "up to 16/48");
-        assert_eq!(info(DeviceKind::BuiltInHeadphones, 96_000, Some(24)).default_mode(), PlaybackMode::BitPerfect);
     }
 }

@@ -84,7 +84,8 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | Setting | Values | Default |
 |---|---|---|
 | `output_device` | A device ID to play through; leave it out to follow the system default | |
-| `device_modes.<device ID>` | `"normal"` or `"bit-perfect"` for that device | Bit-perfect for DACs and headphones, normal for the rest |
+| `device_modes.<device ID>` | `"normal"` or `"bit-perfect"` for that device | `"normal"` |
+| `output_match_rate` | `true` switches the device to each song's sample rate in normal mode; `false` leaves it as the system has it (macOS only) | `false` |
 
 Device IDs come from the system (CoreAudio's device UID on macOS) and aren't shown in the app. To find one, pick the device, or its mode in Settings › Output, in Ond once, then look in `settings.json` under `output_device` or `device_modes`.
 

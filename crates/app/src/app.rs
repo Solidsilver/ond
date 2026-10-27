@@ -906,13 +906,18 @@ impl eframe::App for OndApp {
             self.edit_windows(|w| w.remember(g));
         }
         self.prefs.flush();
+        // Before the process exits: the output puts the device back the way it found it.
+        self.engine.shutdown(ENGINE_SHUTDOWN);
     }
 }
+
+/// How long quitting waits for the audio engine to let go of the device.
+const ENGINE_SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Drop for OndApp {
     fn drop(&mut self) {
         self.bridge.cancel_sync();
-        self.engine.send(Command::Shutdown);
+        self.engine.shutdown(ENGINE_SHUTDOWN);
     }
 }
 

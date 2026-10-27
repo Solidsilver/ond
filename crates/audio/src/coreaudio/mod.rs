@@ -2,11 +2,17 @@
 //!
 //! On top of what cpal does, this backend:
 //! - lets the user pick a device (by UID) instead of always following the default;
-//! - switches the device's nominal rate to the ring's rate and waits for the
-//!   HAL to confirm before starting;
-//! - picks the widest integer physical format at that rate;
+//! - in bit-perfect mode (and in Normal mode when asked to match the song's
+//!   rate), switches the device's nominal rate to the ring's rate and waits for
+//!   the HAL to confirm before starting, and picks the widest integer physical
+//!   format at that rate; otherwise leaves the device exactly as macOS has it
+//!   and reports only its current rate, so the decoder resamples to it;
 //! - takes hog (exclusive) mode in bit-perfect mode, and releases it on mode
 //!   change, close and drop;
+//! - puts every device it changed back the way it found it: the format at
+//!   once when letting go of exclusive access (a non-mixable format left behind
+//!   locks every other app out of the device), the rate and format once the
+//!   player has been idle a few seconds, on a device switch and on drop;
 //! - reports enough state for [`assess`](crate::assess) to call a path `Verified`.
 //!
 //! The render callback asks the AUHAL for 32-bit float, interleaved, at the
@@ -30,16 +36,32 @@ use crate::{PlaybackMode, Status};
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
 use coreaudio::audio_unit::render_callback::{self, data};
 use coreaudio::audio_unit::{AudioUnit, Element, IOType, SampleFormat, Scope};
+use objc2_core_audio_types::AudioStreamBasicDescription;
 use objc2_core_audio::{
     kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeAirPlay, kAudioDeviceTransportTypeBluetooth,
     kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeBuiltIn, kAudioDeviceTransportTypeDisplayPort,
     kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeUSB, kAudioDeviceTransportTypeVirtual,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 /// `kAudioOutputUnitProperty_CurrentDevice`.
 const CURRENT_DEVICE: u32 = 2000;
+
+/// How long the player stays idle before devices get their own rate and
+/// format back. Starting the next track within it doesn't flip the device
+/// back and forth.
+const IDLE_RESTORE: Duration = Duration::from_secs(5);
+
+/// A device as it was before we first changed it.
+#[derive(Clone, Copy)]
+struct Original {
+    rate: Option<f64>,
+    stream: Option<hal::Id>,
+    format: Option<AudioStreamBasicDescription>,
+}
 
 /// The stream that's playing.
 struct Open {
@@ -68,6 +90,12 @@ pub struct CoreAudioBackend {
     open: Option<Open>,
     /// Device we hold in hog mode.
     hogged: Option<hal::Id>,
+    /// Normal mode switches the device to the song's rate (true) or leaves it be.
+    match_rate: bool,
+    /// Devices we've changed, as they were before.
+    originals: HashMap<hal::Id, Original>,
+    /// Nothing has played since then: devices go back once it's long enough ago.
+    idle_since: Option<Instant>,
     drained: Arc<AtomicBool>,
     devices_changed: Arc<AtomicBool>,
     default_changed: Arc<AtomicBool>,
@@ -85,12 +113,24 @@ impl CoreAudioBackend {
         let (d, f) = (devices_changed.clone(), default_changed.clone());
         let listeners =
             hal::watch_system(move || d.store(true, Ordering::Release), move || f.store(true, Ordering::Release));
+        // An earlier run that crashed (or anything else) may have left a device
+        // in a format no one can share: nobody holds it now, so fix it.
+        for dev in hal::output_devices().into_iter().filter(|d| hal::hog_pid(*d) == -1) {
+            match hal::make_mixable(dev) {
+                Ok(true) => tracing::info!("{}: was left in an exclusive-only format; made it shareable", hal::name(dev)),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("{}: exclusive-only format: {e}", hal::name(dev)),
+            }
+        }
         Ok(Self {
             name: "CoreAudio".into(),
             selected: None,
             mode: PlaybackMode::Normal,
             open: None,
             hogged: None,
+            match_rate: false,
+            originals: HashMap::new(),
+            idle_since: None,
             drained: Arc::new(AtomicBool::new(false)),
             devices_changed,
             default_changed,
@@ -109,11 +149,58 @@ impl CoreAudioBackend {
     }
 
     fn release_hog(&mut self) {
-        if let Some(dev) = self.hogged.take()
-            && let Err(e) = hal::set_hog(dev, false)
-        {
+        let Some(dev) = self.hogged.take() else { return };
+        // While we still hold it: a format only we could use would lock everyone else out.
+        if let Err(e) = hal::make_mixable(dev) {
+            tracing::warn!("making {} shareable: {e}", hal::name(dev));
+        }
+        if let Err(e) = hal::set_hog(dev, false) {
             tracing::warn!("releasing exclusive access: {e}");
         }
+    }
+
+    /// Notes how `dev` is set up, before the first change we make to it.
+    fn remember(&mut self, dev: hal::Id) {
+        self.originals.entry(dev).or_insert_with(|| {
+            let stream = hal::output_streams(dev).first().copied();
+            Original { rate: hal::nominal_rate(dev), stream, format: stream.and_then(hal::physical_format) }
+        });
+    }
+
+    /// Puts `dev`'s format and rate back the way we found them. Not while we
+    /// hold it exclusively, and never into a format nobody can share.
+    fn restore(&mut self, dev: hal::Id) {
+        let Some(o) = self.originals.remove(&dev) else { return };
+        if let (Some(stream), Some(format)) = (o.stream, o.format)
+            && hal::is_mixable(&format)
+            && let Err(e) = hal::set_physical_format(stream, &format)
+        {
+            tracing::warn!("restoring {}'s format: {e}", hal::name(dev));
+        }
+        if let Some(rate) = o.rate
+            && let Err(e) = hal::set_nominal_rate(dev, rate.round() as u32)
+        {
+            tracing::warn!("restoring {}'s rate: {e}", hal::name(dev));
+        }
+    }
+
+    /// Restores every device we changed, except the one `keep`.
+    fn restore_all(&mut self, keep: Option<hal::Id>) {
+        let devs: Vec<hal::Id> = self.originals.keys().copied().filter(|d| Some(*d) != keep).collect();
+        for dev in devs {
+            self.restore(dev);
+        }
+    }
+
+    /// Normal mode, leaving the device at its own rate and format.
+    fn leaves_device_alone(&self) -> bool {
+        self.mode == PlaybackMode::Normal && !self.match_rate
+    }
+
+    /// Who, other than us, holds `dev` exclusively.
+    fn held_by_other(dev: hal::Id) -> Option<String> {
+        let pid = hal::hog_pid(dev);
+        (pid != -1 && pid != hal::own_pid()).then(|| hal::process_name(pid).unwrap_or_else(|| format!("another app ({pid})")))
     }
 
     fn take_hog(&mut self, dev: hal::Id) -> bool {
@@ -165,11 +252,26 @@ impl CoreAudioBackend {
         fn err(what: &'static str) -> impl Fn(coreaudio::Error) -> String {
             move |e| format!("{what}: {e}")
         }
-        hal::set_nominal_rate(dev, format.sample_rate)?;
-        let active_bits = self.set_integer_format(dev, format.sample_rate, format.channels);
+        if let Some(holder) = Self::held_by_other(dev) {
+            return Err(format!("{holder} is using {} exclusively", hal::name(dev)));
+        }
+        let active_bits = if self.leaves_device_alone() {
+            // The unit converts to whatever rate the device is at.
+            hal::output_streams(dev).first().copied().and_then(hal::physical_format).filter(hal::is_int).map(|f| f.mBitsPerChannel)
+        } else {
+            self.remember(dev);
+            hal::set_nominal_rate(dev, format.sample_rate)?;
+            self.set_integer_format(dev, format.sample_rate, format.channels)
+        };
 
         let mut unit = AudioUnit::new_uninitialized(IOType::HalOutput).map_err(err("audio unit"))?;
-        unit.set_property(CURRENT_DEVICE, Scope::Global, Element::Output, Some(&dev)).map_err(err("select device"))?;
+        if let Err(e) = unit.set_property(CURRENT_DEVICE, Scope::Global, Element::Output, Some(&dev)) {
+            // A device stuck in a format only one app may use refuses the unit: unstick it and try once more.
+            if self.hogged == Some(dev) || !hal::make_mixable(dev).unwrap_or(false) {
+                return Err(format!("select device: {e}"));
+            }
+            unit.set_property(CURRENT_DEVICE, Scope::Global, Element::Output, Some(&dev)).map_err(err("select device"))?;
+        }
         let client = coreaudio::audio_unit::StreamFormat {
             sample_rate: format.sample_rate as f64,
             sample_format: SampleFormat::F32,
@@ -207,7 +309,8 @@ impl CoreAudioBackend {
         let kind = kind_of(dev);
         let mut caps = caps_of(dev, kind);
         caps.exclusive = self.hogged == Some(dev) && hal::hog_pid(dev) == hal::own_pid();
-        caps.shared_reason = (!caps.exclusive).then(|| "shared mode".into());
+        caps.shared_reason = (!caps.exclusive)
+            .then(|| Self::held_by_other(dev).map_or_else(|| "shared mode".into(), |holder| format!("{holder} has the device")));
         if let Some(open) = self.open.as_ref().filter(|o| o.dev == dev) {
             caps.active_bits = open.active_bits;
         }
@@ -218,7 +321,7 @@ impl CoreAudioBackend {
 impl Drop for CoreAudioBackend {
     fn drop(&mut self) {
         self.close();
-        self.release_hog();
+        self.restore_all(None);
     }
 }
 
@@ -331,12 +434,16 @@ impl OutputBackend for CoreAudioBackend {
     /// A UID that isn't plugged in is kept: playback uses the default until it appears.
     fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
         self.close();
-        self.release_hog();
+        self.restore_all(None);
         self.selected = uid.map(str::to_owned);
         Ok(())
     }
 
     fn poll_device_events(&mut self) -> Vec<DeviceEvent> {
+        if self.open.is_none() && self.idle_since.is_some_and(|t| t.elapsed() >= IDLE_RESTORE) {
+            self.idle_since = None;
+            self.restore_all(None);
+        }
         let mut events = Vec::new();
         if self.devices_changed.swap(false, Ordering::AcqRel) {
             events.push(DeviceEvent::ListChanged);
@@ -371,6 +478,10 @@ impl OutputBackend for CoreAudioBackend {
             }
             PlaybackMode::Normal => {
                 self.release_hog();
+                if !self.match_rate {
+                    // The unit converts until the engine restarts the track at the device's own rate.
+                    self.restore(dev);
+                }
                 // The format we had exclusively may not survive sharing: dither to what's in effect.
                 let stream = hal::output_streams(dev).first().copied();
                 let bits = stream.and_then(hal::physical_format).filter(hal::is_int).map(|f| f.mBitsPerChannel);
@@ -382,15 +493,38 @@ impl OutputBackend for CoreAudioBackend {
         }
     }
 
+    /// Leaving the device alone, its current rate is the only one on offer.
     fn device_caps(&mut self) -> Option<DeviceCaps> {
-        self.current_device().map(|d| d.caps)
+        let mut caps = self.current_device()?.caps;
+        if self.leaves_device_alone()
+            && let Some(rate) = caps.nominal_rate
+        {
+            let at: Vec<RateRange> =
+                caps.configs.iter().filter(|c| c.min <= rate && rate <= c.max).map(|c| RateRange { min: rate, max: rate, ..*c }).collect();
+            if !at.is_empty() {
+                caps.configs = at;
+            }
+        }
+        Some(caps)
+    }
+
+    fn set_match_rate(&mut self, on: bool) {
+        self.match_rate = on;
+        if self.leaves_device_alone() {
+            // As in a mode change: the engine restarts the track at the device's own rate.
+            let keep = self.hogged;
+            self.restore_all(keep);
+        }
     }
 
     fn open(&mut self, format: StreamFormat, input: RingInput, status: Arc<Status>) -> Result<(), OutputError> {
         // Exclusive access carries over when it's the same device in the same mode.
         self.stop_unit();
+        self.idle_since = None;
         self.drained = Arc::new(AtomicBool::new(false));
         let dev = self.resolve().ok_or(OutputError::NoDevice)?;
+        // Playback moved on from any other device we changed.
+        self.restore_all(Some(dev));
         // The engine's mode flag is the source of truth when a stream opens.
         if status.bit_perfect.load(Ordering::Relaxed) {
             self.mode = PlaybackMode::BitPerfect;
@@ -421,6 +555,7 @@ impl OutputBackend for CoreAudioBackend {
     fn close(&mut self) {
         self.stop_unit();
         self.release_hog();
+        self.idle_since = Some(Instant::now());
     }
 
     /// Keeps exclusive access for the `open` that follows: releasing and
@@ -521,25 +656,40 @@ mod tests {
     }
 
     /// Needs real hardware: plays 1 s of silence bit-perfectly on the default
-    /// device and prints the verdict. Run with `--ignored --nocapture`.
+    /// device (or the one named in `OND_TEST_DEVICE`, by UID), prints the
+    /// verdict, and checks the device ends up as it was. `OND_TEST_RATE` picks
+    /// the rate (44100 by default). Run with `--ignored --nocapture`.
     #[test]
     #[ignore = "needs audio hardware"]
     fn bit_perfect_on_the_default_device() {
         let mut b = CoreAudioBackend::new().unwrap();
+        if let Ok(uid) = std::env::var("OND_TEST_DEVICE") {
+            b.select_device(Some(&uid)).unwrap();
+        }
+        let rate: u32 = std::env::var("OND_TEST_RATE").ok().and_then(|r| r.parse().ok()).unwrap_or(44_100);
+        let dev = b.resolve().unwrap();
+        let stream = hal::output_streams(dev)[0];
+        let before = (hal::nominal_rate(dev), hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel)));
         b.set_mode(PlaybackMode::BitPerfect);
-        let format = StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
-        let (mut p, c) = rtrb::RingBuffer::new(44_100 * 2);
-        p.push_entire_slice(&vec![0.0f32; 44_100 * 2]).unwrap();
+        let format = StreamFormat { sample_rate: rate, channels: 2, bits_per_sample: Some(16) };
+        let (mut p, c) = rtrb::RingBuffer::new(rate as usize * 2);
+        p.push_entire_slice(&vec![0.0f32; rate as usize * 2]).unwrap();
         let (_m, mc) = rtrb::RingBuffer::new(4);
         let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(16), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         b.open(format, input, status).unwrap();
         let caps = b.device_caps().unwrap();
-        println!("{}: {:?}", b.name(), crate::assess(PlaybackMode::BitPerfect, &format, 44_100, Some(&caps)));
+        let during = hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel));
+        println!("{}: {:?}\nduring {during:?}", b.name(), crate::assess(PlaybackMode::BitPerfect, &format, rate, Some(&caps)));
         std::thread::sleep(std::time::Duration::from_secs(1));
         b.close();
         assert!(b.hogged.is_none(), "closing (playback stopped) releases exclusive access");
+        assert!(hal::physical_format(stream).is_some_and(|f| hal::is_mixable(&f)), "nothing exclusive-only left behind");
         b.set_mode(PlaybackMode::Normal);
+        drop(b);
+        let after = (hal::nominal_rate(dev), hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel)));
+        println!("before {before:?}\nafter  {after:?}");
+        assert_eq!(after, before, "the device is back the way it was");
     }
 }

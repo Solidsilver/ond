@@ -155,6 +155,10 @@ pub enum Command {
     /// The modes the user picked per device UID. A device not listed gets
     /// [`DeviceInfo::default_mode`] when playback moves to it.
     DeviceModes(HashMap<String, PlaybackMode>),
+    /// Normal mode switches the device to each song's rate (true), or leaves
+    /// the device at its own rate and resamples to it (false, the default).
+    /// The current track carries on from where it was.
+    MatchRate(bool),
     /// Ask for an [`Event::Devices`].
     RefreshDevices,
     Shutdown,
@@ -380,12 +384,22 @@ pub struct EngineHandle {
     commands: Sender<Command>,
     pub events: Receiver<Event>,
     pub status: Arc<Status>,
+    /// Disconnects once the engine thread has finished, output closed.
+    finished: Receiver<()>,
 }
 
 impl EngineHandle {
     pub fn send(&self, cmd: Command) {
         // The engine only goes away on Shutdown; a send after that is a no-op.
         let _ = self.commands.send(cmd);
+    }
+
+    /// Stops the engine and waits (up to `wait`) for it to let go of the
+    /// output: the backend puts the device back the way it found it, which
+    /// can't happen once the process has exited. Calling it again returns at once.
+    pub fn shutdown(&self, wait: Duration) {
+        self.send(Command::Shutdown);
+        let _ = self.finished.recv_timeout(wait);
     }
 }
 
@@ -398,6 +412,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
     status.set_volume(1.0);
     status.bit_perfect.store(config.mode == PlaybackMode::BitPerfect, Ordering::Relaxed);
     let st = status.clone();
+    let (finished_tx, finished) = crossbeam_channel::bounded::<()>(0);
     thread::Builder::new()
         .name("audio-engine".into())
         .spawn(move || {
@@ -422,10 +437,12 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 lost: None,
                 restarting: false,
             }
-            .run(cmd_rx)
+            .run(cmd_rx);
+            // The engine (and its backend) is gone: the device is released.
+            drop(finished_tx);
         })
         .expect("spawn audio engine thread");
-    EngineHandle { commands: cmd_tx, events: ev_rx, status }
+    EngineHandle { commands: cmd_tx, events: ev_rx, status, finished }
 }
 
 /// A track the current session's decoder has started, by session sequence number.
@@ -567,6 +584,11 @@ impl Engine {
                 }
             },
             Command::DeviceModes(modes) => self.device_modes = modes,
+            Command::MatchRate(on) => {
+                self.backend.set_match_rate(on);
+                self.follow_rate();
+                self.report_signal_path();
+            }
             Command::RefreshDevices => {
                 self.known = self.backend.devices();
                 self.current_device = self.backend.current_device().map(|d| d.uid);
@@ -580,7 +602,27 @@ impl Engine {
         self.config.mode = m;
         self.status.bit_perfect.store(m == PlaybackMode::BitPerfect, Ordering::Relaxed);
         self.backend.set_mode(m);
+        self.follow_rate();
         self.report_signal_path();
+    }
+
+    /// The rates the device offers can change with the mode (Normal can leave
+    /// the device at its own rate): when the current track would now run at a
+    /// different rate, start it over from where it is.
+    fn follow_rate(&mut self) {
+        let Some((file_rate, channels, rate)) =
+            self.ring.as_ref().zip(self.current()).map(|(r, t)| (t.format.sample_rate, r.format.channels, r.format.sample_rate))
+        else {
+            return;
+        };
+        let caps = self.backend.device_caps();
+        if choose_rate(file_rate, channels, caps.as_ref()) == rate {
+            return;
+        }
+        if let Some(at) = self.take_position() {
+            self.stop();
+            self.resume(at);
+        }
     }
 
     /// Starts a new session at `src`, optionally from `start_at`.

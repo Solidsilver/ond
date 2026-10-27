@@ -39,6 +39,7 @@ const ALLOWED: &[&str] = &[
     "playback.kbps",
     "output_device",
     "device_modes.*",
+    "output_match_rate",
     "stream_cache_mb",
     "offline_dir",
     "offline_limit_gb",

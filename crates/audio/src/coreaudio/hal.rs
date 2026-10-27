@@ -244,6 +244,42 @@ pub fn set_hog(dev: Id, take: bool) -> Result<bool> {
     Ok(hog_pid(dev) == me)
 }
 
+/// The name of process `pid`, to say who holds a device.
+pub fn process_name(pid: i32) -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: proc_name writes at most `buf.len()` bytes and returns how many.
+    let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+/// A non-mixable format is only usable by the process holding the device:
+/// left on a device nobody holds, macOS can't play anything through it. This
+/// switches the device's first output stream to the closest mixable integer
+/// (else float) format at the rate it's at. Returns whether it changed anything.
+/// Call it while holding the device, or when nobody does.
+pub fn make_mixable(dev: Id) -> Result<bool> {
+    let Some(stream) = output_streams(dev).first().copied() else { return Ok(false) };
+    let Some(current) = physical_format(stream) else { return Ok(false) };
+    if !is_lpcm(&current) || is_mixable(&current) {
+        return Ok(false);
+    }
+    let rate = current.mSampleRate;
+    let best = physical_formats(stream)
+        .into_iter()
+        .filter(|f| {
+            let r = &f.mSampleRateRange;
+            r.mMinimum - 0.5 <= rate && rate <= r.mMaximum + 0.5 || (f.mFormat.mSampleRate - rate).abs() < 0.5
+        })
+        .map(|f| f.mFormat)
+        .filter(|f| is_lpcm(f) && is_mixable(f) && f.mChannelsPerFrame == current.mChannelsPerFrame)
+        // Same bit depth first, then integer over float, then the widest.
+        .max_by_key(|f| (f.mBitsPerChannel == current.mBitsPerChannel, is_int(f), f.mBitsPerChannel));
+    let Some(mut format) = best else { return Err("no mixable format to switch to".into()) };
+    format.mSampleRate = rate;
+    set_physical_format(stream, &format)?;
+    Ok(true)
+}
+
 type Callback = Box<dyn FnMut() + Send>;
 
 /// What a listener registration points the HAL at. Never freed once

@@ -56,6 +56,10 @@ pub struct Settings {
     /// Playback mode the user picked per device UID.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub device_modes: std::collections::HashMap<String, DeviceMode>,
+    /// Normal mode switches the device to each song's sample rate. Off, the
+    /// device stays as the system has it and Ond converts the rate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_match_rate: bool,
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
@@ -148,6 +152,7 @@ impl Default for Settings {
             stream_cache_mb: None,
             output_device: None,
             device_modes: Default::default(),
+            output_match_rate: false,
             theme: Default::default(),
             accent: Default::default(),
             adapt_colors: false,

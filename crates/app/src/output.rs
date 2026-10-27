@@ -54,8 +54,10 @@ impl Outputs {
     /// Restores the saved device and per-device modes into a fresh engine. The
     /// engine answers with the device's mode (`ModeChanged`) and the device list.
     pub fn restore(engine: &EngineHandle, prefs: Prefs) -> Self {
-        let (modes, device, playback) = prefs.get(|s| (engine_modes(&s.device_modes), s.output_device.clone(), s.playback.clone()));
+        let (modes, device, playback, match_rate) =
+            prefs.get(|s| (engine_modes(&s.device_modes), s.output_device.clone(), s.playback.clone(), s.output_match_rate));
         engine.send(Command::DeviceModes(modes));
+        engine.send(Command::MatchRate(match_rate));
         engine.send(Command::SelectDevice(device));
         engine.send(Command::RefreshDevices);
         engine.send(Command::SetGain(playback.gain_config()));
@@ -107,6 +109,20 @@ impl Outputs {
             engine.send(Command::SetGain(prefs.gain_config()));
         }
         self.prefs.edit(|s| s.playback = prefs);
+    }
+
+    /// Whether Normal mode switches the device to each song's sample rate.
+    pub fn match_rate(&self) -> bool {
+        self.prefs.get(|s| s.output_match_rate)
+    }
+
+    /// Saves the choice and tells the engine, which carries on at the new rate.
+    pub fn set_match_rate(&mut self, on: bool, engine: &EngineHandle) {
+        if self.prefs.managed("output_match_rate") || on == self.match_rate() {
+            return;
+        }
+        self.prefs.edit(|s| s.output_match_rate = on);
+        engine.send(Command::MatchRate(on));
     }
 
     /// The devices macOS reports, and which one is in use (`None`: following the default).
