@@ -76,6 +76,28 @@ impl AlbumSort {
     }
 }
 
+/// What Artists is sorted by: names A to Z, the most albums first, or the
+/// earliest first album first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ArtistSort {
+    #[default]
+    Name,
+    Albums,
+    Year,
+}
+
+impl ArtistSort {
+    pub const ALL: [ArtistSort; 3] = [ArtistSort::Name, ArtistSort::Albums, ArtistSort::Year];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ArtistSort::Name => "Name",
+            ArtistSort::Albums => "Albums",
+            ArtistSort::Year => "Year",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct QueueUi {
     pub tab: QueueTab,
@@ -89,13 +111,20 @@ pub struct QueueUi {
 /// library data or playback state.
 pub struct UiState {
     pub nav: Nav,
+    /// How Albums is sorted, and whether that order is turned around (by
+    /// clicking its column's header in the list).
     pub sort: AlbumSort,
+    pub sort_desc: bool,
     /// The album list for the current view, cached by (route, sort, data version).
-    pub grid: crate::memo::Memo<(Route, AlbumSort, u64), Vec<usize>>,
-    /// Where each letter starts in that list, and in the Artists list (by
-    /// the list's address), for the alphabet rail.
-    pub grid_marks: crate::memo::Memo<(Route, AlbumSort, u64), super::alpha::Marks>,
-    pub artist_marks: crate::memo::Memo<usize, super::alpha::Marks>,
+    pub grid: crate::memo::Memo<(Route, AlbumSort, bool, u64), Vec<usize>>,
+    /// Where each letter starts in that list, for the alphabet rail.
+    pub grid_marks: crate::memo::Memo<(Route, AlbumSort, bool, u64), super::alpha::Marks>,
+    /// How Artists is sorted, the order that gives (by the artists' list's
+    /// address), and where each letter starts in it.
+    pub artist_sort: ArtistSort,
+    pub artist_desc: bool,
+    pub artist_order: crate::memo::Memo<(usize, ArtistSort, bool), Vec<usize>>,
+    pub artist_marks: crate::memo::Memo<(usize, bool), super::alpha::Marks>,
     /// The album page's "Album details" is unfolded (for this session).
     pub album_details_open: bool,
     /// Narrow windows: the queue opens as a sheet over the content instead.
@@ -167,8 +196,12 @@ impl UiState {
             prefs,
             nav: Nav::default(),
             sort: AlbumSort::default(),
+            sort_desc: false,
             grid: Default::default(),
             grid_marks: Default::default(),
+            artist_sort: ArtistSort::default(),
+            artist_desc: false,
+            artist_order: Default::default(),
             artist_marks: Default::default(),
             album_details_open: false,
             queue_sheet: false,

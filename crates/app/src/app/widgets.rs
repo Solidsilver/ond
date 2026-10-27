@@ -1,6 +1,7 @@
 //! Small shared pieces: elided text, quiet links, the accent button, a
 //! segmented control, a thin slider, a switch and a menu label.
 
+use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align2, Color32, FontId, Galley, Rect, Response, Sense, Ui, vec2};
@@ -208,6 +209,34 @@ pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, all: &[T], current: &mut T, widt
         }
         _ => false,
     }
+}
+
+/// Grid or list: an icon for each in a segmented pill. Writes the pick into
+/// `current` and says whether it changed.
+pub fn view_picker(ui: &mut Ui, current: &mut crate::settings::ViewMode) -> bool {
+    use crate::settings::ViewMode;
+    let t = Tokens::of(ui);
+    let seg = vec2(30.0, 22.0);
+    let (rect, pill) = ui.allocate_exact_size(vec2(seg.x * 2.0 + 4.0, 26.0), Sense::hover());
+    ui.painter().rect_filled(rect, 7.0, t.field);
+    let mut changed = false;
+    for (i, (mode, icon, label)) in [(ViewMode::Grid, Icon::Grid, "Grid"), (ViewMode::List, Icon::List, "List")].into_iter().enumerate() {
+        let r = Rect::from_min_size(egui::pos2(rect.left() + 2.0 + seg.x * i as f32, rect.top() + 2.0), seg);
+        let resp = ui.interact(r, pill.id.with(("view", i)), Sense::click());
+        let on = *current == mode;
+        if on {
+            ui.painter().rect_filled(r, 5.0, t.bg);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r, 5.0, t.hover);
+        }
+        icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(13.0, 13.0)), icon, if on { t.text } else { t.muted });
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, label));
+        if resp.on_hover_text(label).clicked() && !on {
+            *current = mode;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Segment widths for labels of `natural` width: comfortable padding when it

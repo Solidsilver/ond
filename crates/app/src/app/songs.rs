@@ -4,11 +4,12 @@
 //! Rows act like the album page's: double-click (or ⏎) plays the track's
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
+use super::table::Head;
 use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
 use super::{Action, Focus, QueueAction};
 use crate::queue::Source;
-use crate::theme::{Tokens, semibold};
+use crate::theme::Tokens;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use crate::memo::Memo;
 use library::{Track, fold};
@@ -155,36 +156,17 @@ impl ViewCtx<'_> {
 
         // Header, over the columns (clear of the alphabet rail).
         let rail_w = if marks.is_some() { super::alpha::RAIL_W } else { 0.0 };
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width() - rail_w, 26.0), Sense::hover());
-        let cols = columns(head);
-        for (col, label, rect, right) in [
-            (Column::Title, "Title", cols.title, false),
-            (Column::Artist, "Artist", cols.artist, false),
-            (Column::Album, "Album", cols.album, false),
-            (Column::Time, "Time", cols.time, true),
-            (Column::Format, "Format", cols.format, false),
-        ] {
-            let resp = ui.interact(rect, ui.scope_id().with(("songs-col", label)), Sense::click());
-            let on = self.ui.songs.sort == col;
-            let color = if on || resp.hovered() { t.text } else { t.muted };
-            let font = FontId::new(11.0, semibold());
-            let (anchor, x) = if right { (egui::Align2::RIGHT_CENTER, rect.right() - 10.0) } else { (egui::Align2::LEFT_CENTER, rect.left() + 10.0) };
-            let text_rect = ui.painter().text(pos2(x, rect.center().y), anchor, label, font, color);
-            if on {
-                let cx = if right { text_rect.left() - 8.0 } else { text_rect.right() + 8.0 };
-                sort_arrow(ui, pos2(cx, rect.center().y), self.ui.songs.descending, color);
-            }
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, format!("Sort by {label}")));
-            if resp.clicked() {
-                if on {
-                    self.ui.songs.descending = !self.ui.songs.descending;
-                } else {
-                    self.ui.songs.sort = col;
-                    self.ui.songs.descending = false;
-                }
-            }
-        }
-        ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, t.hairline));
+        let (head_rect, _) = ui.allocate_exact_size(vec2(ui.available_width() - rail_w, super::table::HEAD_H), Sense::hover());
+        let cols = columns(head_rect);
+        let head = |label, rect, right, col| Head { label, rect, right, sorts: Some(col) };
+        let heads = [
+            head("Title", cols.title, false, Column::Title),
+            head("Artist", cols.artist, false, Column::Artist),
+            head("Album", cols.album, false, Column::Album),
+            head("Time", cols.time, true, Column::Time),
+            head("Format", cols.format, false, Column::Format),
+        ];
+        super::table::header(ui, head_rect, "songs-col", &heads, &mut self.ui.songs.sort, &mut self.ui.songs.descending);
 
         // Borrowed from the library and player, not from `self`, so rows can
         // take `&mut self`.
@@ -313,16 +295,6 @@ fn columns(row: Rect) -> Columns {
     let time = col(album.right(), TIME_W);
     let format = col(time.right(), FORMAT_W);
     Columns { title, artist, album, time, format }
-}
-
-fn sort_arrow(ui: &Ui, at: egui::Pos2, descending: bool, color: egui::Color32) {
-    let (w, h) = (3.5, 2.5);
-    let pts = if descending {
-        vec![pos2(at.x - w, at.y - h), pos2(at.x + w, at.y - h), pos2(at.x, at.y + h)]
-    } else {
-        vec![pos2(at.x - w, at.y + h), pos2(at.x + w, at.y + h), pos2(at.x, at.y - h)]
-    };
-    ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
 
 impl ViewCtx<'_> {

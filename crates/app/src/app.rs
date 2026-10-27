@@ -35,8 +35,10 @@ mod view_ctx;
 mod window_state;
 
 // Views and their pieces.
+mod album_list;
 mod album_page;
 mod alpha;
+mod artists;
 mod browse;
 mod compact;
 mod diagnostics;
@@ -52,6 +54,7 @@ mod seek;
 mod settings_page;
 mod sidebar;
 mod songs;
+mod table;
 mod toasts;
 mod toolbar;
 mod track_row;
@@ -101,7 +104,7 @@ pub use pins::{Downloads, Keep, OfflineAction};
 pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
-pub use ui_state::{AlbumSort, DragTracks, Focus, QueueTab, SongStats, UiState};
+pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, SongStats, UiState};
 pub use window_state::WindowAction;
 pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
 

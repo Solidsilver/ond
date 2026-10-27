@@ -502,6 +502,8 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
         s.experimental = Default::default();
         s.adapt_colors = false;
         s.accent = Default::default();
+        s.album_view = Default::default();
+        s.artist_view = Default::default();
     });
     app.ui.tint = Default::default();
     app.ui.page_tint = Default::default();
@@ -1232,6 +1234,17 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Artists);
     s.shoot(h, "artists");
+    // Albums as a table, sorted by year the other way round (as a click on
+    // its header twice leaves it).
+    reset(h, FULL, Route::Albums);
+    let app = app_mut(h);
+    app.prefs.edit(|s| s.album_view = crate::settings::ViewMode::List);
+    (app.ui.sort, app.ui.sort_desc) = (AlbumSort::Year, true);
+    h.run_steps(2);
+    s.shoot(h, "albums-list");
+    let app = app_mut(h);
+    (app.ui.sort, app.ui.sort_desc) = (AlbumSort::Artist, false);
+    reset(h, FULL, Route::Artists);
     // The server's artists, with photos: most have one, two get the server's
     // stand-in (the same picture for both), so they show their initial.
     let app = app_mut(h);
@@ -1250,6 +1263,9 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app.data.artists = Arc::new(artists);
     app.rebuild_search();
     s.shoot(h, "artists-photos");
+    app_mut(h).prefs.edit(|s| s.artist_view = crate::settings::ViewMode::List);
+    h.run_steps(2);
+    s.shoot(h, "artists-list");
     // An artist's page: their photo beside the name, its colors on the page.
     let bill = names.iter().position(|n| *n == "Bill Evans").unwrap();
     reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: Some(format!("ar-{bill}")) });
