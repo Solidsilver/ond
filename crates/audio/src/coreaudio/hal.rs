@@ -122,6 +122,12 @@ pub fn default_output() -> Option<Id> {
     get::<Id>(SYSTEM, kAudioHardwarePropertyDefaultOutputDevice, GLOBAL).ok().filter(|d| *d != 0)
 }
 
+/// Makes `dev` the system's default output (hardware tests only).
+#[cfg(test)]
+pub fn set_default_output(dev: Id) -> Result<()> {
+    set(SYSTEM, kAudioHardwarePropertyDefaultOutputDevice, GLOBAL, &dev)
+}
+
 pub fn uid(dev: Id) -> Option<String> {
     get_string(dev, kAudioDevicePropertyDeviceUID)
 }

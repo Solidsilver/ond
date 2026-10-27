@@ -90,6 +90,11 @@ pub struct CoreAudioBackend {
     open: Option<Open>,
     /// Device we hold in hog mode.
     hogged: Option<hal::Id>,
+    /// Following the default, the device that was the default when we took it
+    /// exclusively. macOS moves the default off a device one app holds; that
+    /// move is ours, not the user's, so playback stays here until the user
+    /// picks another default.
+    pinned_default: Option<hal::Id>,
     /// Normal mode switches the device to the song's rate (true) or leaves it be.
     match_rate: bool,
     /// Devices we've changed, as they were before.
@@ -128,6 +133,7 @@ impl CoreAudioBackend {
             mode: PlaybackMode::Normal,
             open: None,
             hogged: None,
+            pinned_default: None,
             match_rate: false,
             originals: HashMap::new(),
             idle_since: None,
@@ -141,9 +147,11 @@ impl CoreAudioBackend {
     /// The device to play on: the selected one if it's present, else the default.
     fn resolve(&self) -> Option<hal::Id> {
         let devices = hal::output_devices();
+        let pinned = || self.pinned_default.filter(|d| self.selected.is_none() && devices.contains(d));
         self.selected
             .as_deref()
             .and_then(|uid| devices.iter().copied().find(|d| hal::uid(*d).as_deref() == Some(uid)))
+            .or_else(pinned)
             .or_else(hal::default_output)
             .or_else(|| devices.first().copied())
     }
@@ -211,6 +219,9 @@ impl CoreAudioBackend {
         match hal::set_hog(dev, true) {
             Ok(true) => {
                 self.hogged = Some(dev);
+                if self.selected.is_none() {
+                    self.pinned_default = Some(dev);
+                }
                 true
             }
             Ok(false) => false,
@@ -221,11 +232,16 @@ impl CoreAudioBackend {
         }
     }
 
-    /// Picks and sets the widest integer physical format at `rate` (mixable only,
-    /// unless we hold the device). Returns the integer bits in effect, or None
-    /// when the device stays on a float format.
+    /// Picks and sets the widest mixable integer physical format at `rate`.
+    /// Returns the integer bits in effect, or None when the device stays on a
+    /// float format.
+    ///
+    /// Never a non-mixable format, even holding the device: the AUHAL accepts
+    /// one and then never calls the render callback (a UMC22 sat silent at
+    /// "Verified"), and one left behind locks every other app out. A mixable
+    /// integer format is as exact: the samples arrive on its grid, so the HAL's
+    /// float → integer step changes nothing.
     fn set_integer_format(&self, dev: hal::Id, rate: u32, channels: u16) -> Option<u32> {
-        let exclusive = self.hogged == Some(dev);
         let stream = *hal::output_streams(dev).first()?;
         let best = hal::physical_formats(stream)
             .into_iter()
@@ -233,7 +249,7 @@ impl CoreAudioBackend {
                 let r = rate as f64;
                 hal::is_int(&f.mFormat)
                     && f.mFormat.mChannelsPerFrame >= channels as u32
-                    && (exclusive || hal::is_mixable(&f.mFormat))
+                    && hal::is_mixable(&f.mFormat)
                     && (f.mSampleRateRange.mMinimum <= r && r <= f.mSampleRateRange.mMaximum
                         || f.mFormat.mSampleRate as u32 == rate)
             })
@@ -435,6 +451,7 @@ impl OutputBackend for CoreAudioBackend {
     fn select_device(&mut self, uid: Option<&str>) -> Result<(), OutputError> {
         self.close();
         self.restore_all(None);
+        self.pinned_default = None;
         self.selected = uid.map(str::to_owned);
         Ok(())
     }
@@ -449,7 +466,14 @@ impl OutputBackend for CoreAudioBackend {
             events.push(DeviceEvent::ListChanged);
         }
         if self.default_changed.swap(false, Ordering::AcqRel) {
-            events.push(DeviceEvent::DefaultChanged);
+            // While we hold a device, a default change is macOS moving off it: ours.
+            // Otherwise it's the user's, unless it went back to where we are.
+            if self.hogged.is_none() && self.pinned_default.is_some_and(|d| hal::default_output() != Some(d)) {
+                self.pinned_default = None;
+            }
+            if self.pinned_default.is_none() {
+                events.push(DeviceEvent::DefaultChanged);
+            }
         }
         events
     }
@@ -652,6 +676,56 @@ mod tests {
                 d.caps.nominal_rate,
                 d.caps.active_bits
             );
+        }
+    }
+
+    /// Needs real hardware: the whole engine on the device named in
+    /// `OND_TEST_DEVICE` (by UID) in bit-perfect mode, as the app drives it,
+    /// playing near-silence. Prints every event and the position as it goes.
+    #[test]
+    #[ignore = "needs audio hardware"]
+    fn engine_plays_bit_perfect_on_a_real_device() {
+        let uid = std::env::var("OND_TEST_DEVICE").expect("OND_TEST_DEVICE");
+        let dir = tempfile::tempdir().unwrap();
+        let quiet = vec![1i16; 44_100 * 2 * 6];
+        let src = crate::decode::tests::file_source(&dir, "quiet", &quiet);
+        let engine = crate::spawn(crate::EngineConfig::default(), Box::new(CoreAudioBackend::new().unwrap()), None);
+        // OND_TEST_SWITCH: start in Normal and switch to bit-perfect mid-track, as the picker does.
+        let switch = std::env::var("OND_TEST_SWITCH").is_ok();
+        let first = if switch { PlaybackMode::Normal } else { PlaybackMode::BitPerfect };
+        // OND_TEST_FOLLOW: make the device the system default and follow the default.
+        let follow = std::env::var("OND_TEST_FOLLOW").is_ok();
+        let old_default = hal::default_output();
+        if follow {
+            let dev = hal::output_devices().into_iter().find(|d| hal::uid(*d).as_deref() == Some(&uid)).expect("device");
+            hal::set_default_output(dev).unwrap();
+        }
+        engine.send(crate::Command::DeviceModes([(uid.clone(), first)].into()));
+        engine.send(crate::Command::SelectDevice((!follow).then_some(uid)));
+        engine.send(crate::Command::Play(src));
+        let start = std::time::Instant::now();
+        let mut last = -1.0;
+        let mut switched = !switch;
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            if !switched && start.elapsed() > std::time::Duration::from_millis(1500) {
+                println!("{:>5} ms  -- SetMode(BitPerfect)", start.elapsed().as_millis());
+                engine.send(crate::Command::SetMode(PlaybackMode::BitPerfect));
+                switched = true;
+            }
+            while let Ok(ev) = engine.events.try_recv() {
+                println!("{:>5} ms  {ev:?}", start.elapsed().as_millis());
+            }
+            let pos = engine.status.position_secs();
+            if (pos - last).abs() > 0.4 {
+                println!("{:>5} ms  position {pos:.2} state {:?}", start.elapsed().as_millis(), engine.status.state());
+                last = pos;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        println!("final position {:.2}", engine.status.position_secs());
+        engine.shutdown(std::time::Duration::from_secs(2));
+        if follow && let Some(d) = old_default {
+            let _ = hal::set_default_output(d);
         }
     }
 
