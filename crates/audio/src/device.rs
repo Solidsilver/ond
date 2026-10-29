@@ -19,7 +19,8 @@ pub enum DeviceKind {
 
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
-    /// Stable across reboots and replugging (CoreAudio device UID).
+    /// Stable across reboots and replugging: the CoreAudio device UID on
+    /// macOS, `alsa:<card id>:<device>` on Linux.
     pub uid: String,
     pub name: String,
     pub kind: DeviceKind,

@@ -13,7 +13,7 @@ Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
 ## What it does
 
-- **Bit-perfect playback on macOS and Linux.** Ond takes exclusive access to the device and switches its sample rate to match each file. On Linux it asks PipeWire (or PulseAudio, or JACK) to let go of the sound card first, and gives it back a few seconds after playback stops. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither, and plays through PipeWire (or ALSA) on Linux. Windows plays through WASAPI.
+- **Bit-perfect playback on macOS and Linux.** Ond takes exclusive access to the device and switches its sample rate to match each file. On Linux it asks PipeWire (or PulseAudio) to let go of the sound card first, and gives it back a few seconds after playback stops; JACK outranks it and keeps the card when it has it. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither, and plays through PipeWire (or ALSA) on Linux. Windows plays through WASAPI.
 - **Gapless**, and seeking into parts of a track that haven't downloaded yet.
 - **A local copy of your library.** Browsing and search (⌘K) don't wait on the server, and offline downloads keep playing when it's unreachable.
 - **Library analysis.** Loudness, dynamic range, and a check for files that claim to be hi-res but were upsampled or made from lossy sources.

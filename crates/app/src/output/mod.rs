@@ -166,7 +166,7 @@ impl Outputs {
         engine.send(Command::MatchRate(on));
     }
 
-    /// The devices macOS reports, and which one is in use (`None`: following the default).
+    /// The devices the system reports, and which one is in use (`None`: following the default).
     pub fn devices(&self) -> (&[DeviceInfo], Option<&str>) {
         (&self.devices, self.current.as_deref())
     }
