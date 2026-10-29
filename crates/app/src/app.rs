@@ -106,7 +106,7 @@ pub use prefs_view::PrefsAction;
 pub use session::Session;
 pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, SongStats, UiState};
 pub use window_state::WindowAction;
-pub(crate) use widgets::{MODES, choice, elide as elide_text, link as link_text, mode_label};
+pub(crate) use widgets::{choice, elide as elide_text, link as link_text, switch_tinted, thin_slider, thin_slider_marked};
 
 use data::Pending;
 use pins::playable;
@@ -165,6 +165,9 @@ pub enum Action {
     Artist(String, QueueAction),
     Playlist(String, QueueAction),
     Tracks { tracks: Vec<Track>, source: Source, action: QueueAction },
+    /// The same, once the user said whether to keep the tracks they added
+    /// (Settings › Queue › Playing something new: Ask).
+    TracksAnswered { tracks: Vec<Track>, source: Source, action: QueueAction, keep: bool },
     /// A change to the queue itself: jump, replay, remove, move, clear, or
     /// what happens at its end.
     Queue(QueueEdit),
@@ -383,6 +386,8 @@ impl OndApp {
         };
 
         let shown = PrefsView::read(&prefs);
+        let mut player = Player::default();
+        player.queue.prefs = prefs.get(|s| s.queue);
         Ok(Self {
             _rt: AppRuntime(Some(rt)),
             ctx: ctx.clone(),
@@ -397,7 +402,7 @@ impl OndApp {
             pending: Vec::new(),
             art,
             cache: app_cache,
-            player: Player::default(),
+            player,
             output,
             ui: UiState::new(notices, shown),
             bit_perfect: false,
@@ -598,6 +603,7 @@ impl OndApp {
             Action::Artist(name, action) => self.play_artist(name, action),
             Action::Playlist(id, action) => self.play_playlist(id, action),
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
+            Action::TracksAnswered { tracks, source, action, keep } => self.queue_tracks_answered(tracks, source, action, keep),
             Action::Queue(edit) => self.queue_edit(edit),
             Action::PlayPause => self.play_pause(),
             Action::Next => self.next(),
@@ -859,6 +865,7 @@ impl eframe::App for OndApp {
         self.after_messages();
         self.poll_downloads();
         self.check_library_analysis();
+        self.output.tick(ctx, &self.engine);
         // The rest of this frame reads the preferences as they are now.
         self.read_prefs();
         let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
@@ -906,13 +913,18 @@ impl eframe::App for OndApp {
             self.edit_windows(|w| w.remember(g));
         }
         self.prefs.flush();
+        // Before the process exits: the output puts the device back the way it found it.
+        self.engine.shutdown(ENGINE_SHUTDOWN);
     }
 }
+
+/// How long quitting waits for the audio engine to let go of the device.
+const ENGINE_SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Drop for OndApp {
     fn drop(&mut self) {
         self.bridge.cancel_sync();
-        self.engine.send(Command::Shutdown);
+        self.engine.shutdown(ENGINE_SHUTDOWN);
     }
 }
 

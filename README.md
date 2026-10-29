@@ -13,7 +13,7 @@ Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
 ## What it does
 
-- **Bit-perfect playback on macOS.** Ond takes exclusive access to the device and switches its sample rate to match each file. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither. Linux plays through PipeWire (or ALSA), Windows through WASAPI.
+- **Bit-perfect playback on macOS and Linux.** Ond takes exclusive access to the device and switches its sample rate to match each file. On Linux it asks PipeWire (or PulseAudio) to let go of the sound card first, and gives it back a few seconds after playback stops; JACK outranks it and keeps the card when it has it. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither, and plays through PipeWire (or ALSA) on Linux. Windows plays through WASAPI.
 - **Gapless**, and seeking into parts of a track that haven't downloaded yet.
 - **A local copy of your library.** Browsing and search (⌘K) don't wait on the server, and offline downloads keep playing when it's unreachable.
 - **Library analysis.** Loudness, dynamic range, and a check for files that claim to be hi-res but were upsampled or made from lossy sources.
@@ -53,7 +53,7 @@ Ond needs PipeWire's library (`libpipewire-0.3`), which every current desktop di
 
 ### Nix and NixOS
 
-The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/v0.3.0`.
+The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/v0.4.0`.
 
 With Home Manager, the flake's module installs Ond and can set any of its settings. Settings set there are locked in the app, and the rest stay editable. It works on macOS too, for the app bundle. [docs/home-manager.md](docs/home-manager.md) has the setup and every setting.
 
@@ -115,7 +115,7 @@ The workspace has seven crates:
 | `library` | Local library mirror in redb, with hand-written indexes and migrations |
 | `streamcache` | Download cache that playback can read and seek while it fills |
 | `offline` | Pinned downloads |
-| `audio` | Decoding, the playback engine, resampling, dither, CoreAudio and cpal (PipeWire, ALSA, WASAPI) output |
+| `audio` | Decoding, the playback engine, resampling, dither, CoreAudio, ALSA and cpal (PipeWire, ALSA, WASAPI) output |
 | `analysis` | Loudness, dynamic range and fake hi-res detection |
 
 None of the crates are published to crates.io.

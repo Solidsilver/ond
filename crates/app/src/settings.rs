@@ -16,6 +16,30 @@ pub enum ViewMode {
     List,
 }
 
+/// When the volume slider shows the device's own level in dB (bit-perfect,
+/// on a device with a volume control).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DbReadout {
+    /// While the slider is hovered or dragged.
+    #[default]
+    Adjusting,
+    Always,
+    Never,
+}
+
+impl DbReadout {
+    pub const ALL: [DbReadout; 3] = [DbReadout::Adjusting, DbReadout::Always, DbReadout::Never];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DbReadout::Adjusting => "While adjusting",
+            DbReadout::Always => "Always",
+            DbReadout::Never => "Never",
+        }
+    }
+}
+
 /// How a device plays, as remembered per device. Saved as "normal" /
 /// "bit-perfect", as earlier builds wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,9 +77,33 @@ pub struct Settings {
     /// Output device UID; `None` follows the system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
+    /// The device last chosen, kept while following the system: "Choose a
+    /// device" goes back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_device: Option<String>,
     /// Playback mode the user picked per device UID.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub device_modes: std::collections::HashMap<String, DeviceMode>,
+    /// Normal mode switches the device to each song's sample rate. Off, the
+    /// device stays as the system has it and Ond converts the rate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_match_rate: bool,
+    /// Bit-perfect: the volume slider's knob has a green dot while it sets the device's own volume.
+    #[serde(default = "yes")]
+    pub device_volume_green: bool,
+    /// Bit-perfect: when the device's own level shows in dB beside the slider.
+    #[serde(default)]
+    pub device_volume_db: DbReadout,
+    /// Devices left out of the output menu, by UID (Settings › Output lists them all).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub device_hidden: std::collections::BTreeSet<String>,
+    /// Groups the user put devices in, by UID, for the output menu. Devices
+    /// not listed go in the default groups (hardware, then "Other").
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub device_groups: std::collections::HashMap<String, String>,
+    /// A toast names the output device whenever playback moves to another.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_change_toast: bool,
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
@@ -127,6 +175,10 @@ pub struct Settings {
     /// Software volume, 0..=1 (unused in bit-perfect mode).
     #[serde(default = "full")]
     pub volume: f32,
+    /// Where "play next" and "add to queue" put tracks, and what playing
+    /// something new does with them.
+    #[serde(default)]
+    pub queue: crate::queue::QueuePrefs,
     /// Experimental visuals (Settings › Experimental), all off by default.
     #[serde(default, skip_serializing_if = "crate::visuals::Experimental::all_off")]
     pub experimental: crate::visuals::Experimental,
@@ -148,6 +200,13 @@ impl Default for Settings {
             stream_cache_mb: None,
             output_device: None,
             device_modes: Default::default(),
+            output_match_rate: false,
+            last_device: None,
+            device_volume_green: true,
+            device_volume_db: DbReadout::default(),
+            device_change_toast: false,
+            device_hidden: Default::default(),
+            device_groups: Default::default(),
             theme: Default::default(),
             accent: Default::default(),
             adapt_colors: false,
@@ -172,6 +231,7 @@ impl Default for Settings {
             sidebar_width: None,
             queue_width: None,
             volume: 1.0,
+            queue: Default::default(),
             experimental: Default::default(),
         }
     }

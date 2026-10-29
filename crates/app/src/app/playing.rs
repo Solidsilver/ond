@@ -76,6 +76,17 @@ pub enum OutputAction {
     ToggleBitPerfect,
     /// Play through this device (by UID), e.g. one that came back.
     SelectDevice(String),
+    /// Normal mode switches the device to each song's sample rate.
+    MatchRate(bool),
+    /// The device's own volume, in dB (bit-perfect, on a device that has one).
+    DeviceVolume(f32),
+    /// How the output control shows things: the green slider, the dB readout,
+    /// and a notice when the device changes.
+    Show { green: bool, db: crate::settings::DbReadout, toast: bool },
+    /// Leave a device (by UID) out of the output menu, or put it back.
+    DeviceHidden(String, bool),
+    /// The group a device (by UID) goes in in the output menu; empty for the default.
+    DeviceGroup(String, String),
 }
 
 impl OndApp {
@@ -88,13 +99,19 @@ impl OndApp {
                 }
             }
             OutputAction::Volume(volume) => self.set_volume(volume),
-            OutputAction::ToggleBitPerfect if self.output.mode_locked(self.output.devices().1) => {}
             OutputAction::ToggleBitPerfect => {
-                self.bit_perfect = !self.bit_perfect;
-                let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                self.output.set_mode_in_use(mode, &self.engine);
+                let on = !self.bit_perfect;
+                let mode = if on { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                if self.output.set_mode_in_use(mode, &self.engine) {
+                    self.bit_perfect = on;
+                }
             }
             OutputAction::SelectDevice(uid) => self.output.choose(Some(uid), &self.engine),
+            OutputAction::MatchRate(on) => self.output.set_match_rate(on, &self.engine),
+            OutputAction::DeviceVolume(db) => self.output.set_device_volume(db, &self.engine),
+            OutputAction::Show { green, db, toast } => self.output.set_show(green, db, toast),
+            OutputAction::DeviceHidden(uid, hidden) => self.output.set_hidden(&uid, hidden),
+            OutputAction::DeviceGroup(uid, group) => self.output.set_group(&uid, &group),
         }
     }
 
@@ -108,7 +125,18 @@ impl OndApp {
         self.with_player(|p, cx| p.remote(r, cx));
     }
 
+    /// Acts on what the output control asked for this frame.
+    pub(super) fn output_control_out(&mut self, out: crate::output::ControlOut) {
+        if out.settings {
+            self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
+        }
+        if let Some(level) = out.volume {
+            self.actions.push(Action::Output(OutputAction::Volume(level)));
+        }
+    }
+
     pub(super) fn handle_engine(&mut self, ev: audio::Event) {
+        let before = self.output.devices().1.map(str::to_owned);
         if let Some(mode) = self.output.handle(&ev) {
             // The engine picked the mode for a new device (remembered, or its default).
             self.bit_perfect = mode == PlaybackMode::BitPerfect;
@@ -118,14 +146,24 @@ impl OndApp {
                 self.ui.toasts.remove(&back_text(name));
                 self.show_notice(format!("{name} disconnected. Playing through the system output."));
             }
-            // Offered, not switched to.
+            // The device chosen is back: play there again (the panel said it was waiting).
             audio::Event::DeviceReturned { uid, name } => {
-                self.ui.toasts.offer(back_text(name), "Switch back", Action::Output(OutputAction::SelectDevice(uid.clone())));
+                if self.prefs.get(|s| s.output_device.as_ref() == Some(uid)) {
+                    self.output.choose(Some(uid.clone()), &self.engine);
+                    self.show_notice(format!("{name} is back"));
+                } else {
+                    self.ui.toasts.offer(back_text(name), "Switch back", Action::Output(OutputAction::SelectDevice(uid.clone())));
+                }
             }
             // Playing through it again, however that came about: the offer's done.
             audio::Event::Devices { devices, current: Some(uid) } => {
                 if let Some(d) = devices.iter().find(|d| &d.uid == uid) {
                     self.ui.toasts.remove(&back_text(&d.name));
+                    // Only a move from one device to another, not the first report.
+                    let moved = before.as_ref().is_some_and(|b| b != uid);
+                    if moved && self.prefs.get(|s| s.device_change_toast) {
+                        self.show_notice(format!("Playing through {}", d.name));
+                    }
                 }
             }
             _ => {}

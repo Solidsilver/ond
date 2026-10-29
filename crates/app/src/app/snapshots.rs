@@ -269,14 +269,19 @@ fn devices() -> audio::Event {
         configs: vec![RateRange { channels: 2, min: 44_100, max }],
         max_bits: Some(bits),
         post_processed: post.map(Into::into),
+        integer: true,
         ..Default::default()
     };
     let dev = |uid: &str, name: &str, kind, caps, is_default| DeviceInfo { uid: uid.into(), name: name.into(), kind, caps, is_default };
     audio::Event::Devices {
         devices: vec![
             dev("spk", "MacBook Pro Speakers", DeviceKind::BuiltInSpeakers, caps("MacBook Pro Speakers", 24, 96_000, Some("macOS speaker processing")), true),
-            dev("hp", "External Headphones", DeviceKind::BuiltInHeadphones, caps("External Headphones", 24, 96_000, None), false),
+            // A Mac's headphone jack is float-only.
+            dev("hp", "External Headphones", DeviceKind::BuiltInHeadphones, DeviceCaps { integer: false, ..caps("External Headphones", 24, 96_000, None) }, false),
+            dev("tv", "LG TV", DeviceKind::Hdmi, caps("LG TV", 24, 192_000, None), false),
             dev("umc", "UMC22", DeviceKind::Usb, caps("UMC22", 16, 48_000, None), false),
+            dev("bh", "BlackHole 2ch", DeviceKind::Virtual, caps("BlackHole 2ch", 24, 768_000, None), false),
+            dev("zoom", "ZoomAudioDevice", DeviceKind::Virtual, caps("ZoomAudioDevice", 24, 192_000, None), false),
         ],
         current: Some("umc".into()),
     }
@@ -290,7 +295,7 @@ fn signal() -> audio::Event {
         device_bits: Some(16),
         resampled: true,
         dithered: true,
-        bit_perfect: audio::BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into() },
+        bit_perfect: audio::BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into(), device_limit: true },
         channels: Default::default(),
         gain: Default::default(),
         transcoded: None,
@@ -429,7 +434,7 @@ fn fill_queue(app: &mut OndApp) {
     q.play_next(vec![filler(23, 1).remove(0), kind_of_blue().remove(2)]);
     let playlist = Source::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() };
     for (k, t) in filler(20, 9).into_iter().enumerate() {
-        q.upcoming.push(Item { uid: 10_000 + k as u64, track: t, source: playlist.clone() });
+        q.upcoming.push(Item { uid: 10_000 + k as u64, track: t, source: playlist.clone(), next: false });
     }
     app.engine.status.preview(PlayState::Playing, 141.0, 383.0, 0.72);
 }
@@ -1033,10 +1038,33 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Recent);
     let toolbar = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1440.0, 52.0));
-    if !click_label(h, "UMC22", toolbar) {
-        eprintln!("  (output chip not found by label; picker scene shows the closed chip)");
-    }
+    let _ = toolbar;
+    h.run_steps(2);
+    h.get_by_label("Output: UMC22").click();
     s.shoot(h, "output-picker");
+
+    // Bit-perfect on a DAC with its own volume: the slider sets it, in green, with the level in dB.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        app.bit_perfect = true;
+        app.prefs.edit(|s| {
+            s.device_modes.insert("umc".into(), crate::settings::DeviceMode::BitPerfect);
+            s.output_device = Some("umc".into());
+        });
+        app.output.handle(&audio::Event::DeviceVolume(Some(audio::DeviceVolume { db: -21.5, min_db: -63.5, max_db: 0.0, muted: Some(false) })));
+        app.prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Always);
+    }
+    h.run_steps(2);
+    h.get_by_label("Output: UMC22").click();
+    s.shoot(h, "output-picker-device-volume");
+    app_mut(h).prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Adjusting);
+    app_mut(h).output.handle(&audio::Event::DeviceVolume(None));
+    app_mut(h).bit_perfect = false;
+    app_mut(h).prefs.edit(|s| {
+        s.device_modes.remove("umc");
+        s.output_device = None;
+    });
 
     reset(h, FULL, Route::Recent);
     app_mut(h).engine.status.preview(PlayState::Buffering, 141.0, 383.0, 0.38);
@@ -1112,6 +1140,11 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).ui.overlay = Some(Overlay::Delete { id: "pl-0".into(), name: "Late night, low volume".into() });
     s.shoot(h, "delete-playlist");
 
+    // Settings › Queue › Playing something new: Ask.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).ui.overlay = Some(Overlay::KeepAdded { tracks: vanguard(), source: crate::queue::Source::Added, action: QueueAction::Play { start: 0 }, added: 2 });
+    s.shoot(h, "keep-added");
+
     // The sidebar footer: server status (click for details), shortcuts, settings.
     reset(h, FULL, Route::Recent);
     let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 900.0));
@@ -1178,6 +1211,16 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         s.shoot(h, &format!("settings-{}", section.label().to_lowercase()));
     }
 
+    // A queue set up by hand: no preset matches, so Custom shows.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        let q = crate::queue::QueuePrefs { on_play: crate::queue::OnPlay::KeepBefore, ..Default::default() };
+        app.actions.push(Action::Prefs(PrefsAction::Queue(q)));
+        app.actions.push(Action::OpenSettings(settings_page::Section::Queue));
+    }
+    s.shoot(h, "settings-queue-custom");
+
     // Playback with ReplayGain and a transcode on, so every control shows.
     reset(h, FULL, Route::Recent);
     {
@@ -1203,6 +1246,21 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(900.0, 640.0), Route::Recent);
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
     s.shoot(h, "narrow-settings");
+
+    // A device open in Settings › Output: its mode, whether the menu shows it, its group.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).ui.output_open.insert("umc".into());
+    app_mut(h).prefs.edit(|s| {
+        s.device_hidden.insert("zoom".into());
+        s.device_groups.insert("tv".into(), "Living room".into());
+    });
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
+    s.shoot(h, "settings-output-device");
+    app_mut(h).ui.output_open.clear();
+    app_mut(h).prefs.edit(|s| {
+        s.device_hidden.clear();
+        s.device_groups.clear();
+    });
 
     // Places and their empty states.
     reset(h, FULL, Route::Songs);
@@ -2632,6 +2690,17 @@ fn readme_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.art.preload(&album_id(i), sleeve(i));
     }
     reset(h, FULL, Route::Recent);
+    // Playing bit-perfect on the DAC, verified, with its own volume: what Ond is for.
+    {
+        let app = app_mut(h);
+        app.bit_perfect = true;
+        app.prefs.edit(|s| {
+            s.device_modes.insert("umc".into(), crate::settings::DeviceMode::BitPerfect);
+            s.output_device = Some("umc".into());
+        });
+        app.output.handle(&signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Verified, None));
+        app.output.handle(&audio::Event::DeviceVolume(Some(audio::DeviceVolume { db: -18.0, min_db: -63.5, max_db: 0.0, muted: Some(false) })));
+    }
     s.shoot(h, "readme-library");
     reset(h, FULL, Route::Album(album_id(0)));
     s.shoot(h, "readme-album");

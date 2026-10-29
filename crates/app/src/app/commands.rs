@@ -35,6 +35,8 @@ pub fn move_item<T>(v: &mut Vec<T>, from: usize, to: usize) -> bool {
 
 /// How far ⌘↑ / ⌘↓ move the volume.
 const VOLUME_STEP: f32 = 0.1;
+/// The volume keys' step on a device's own volume (bit-perfect), in dB.
+const DEVICE_VOLUME_STEP_DB: f32 = 2.0;
 /// How far ⌥⌘→ / ⌥⌘← skip.
 const SKIP_SECS: f64 = 10.0;
 
@@ -48,11 +50,13 @@ impl Cmd {
             Cmd::Next => Action::Next,
             Cmd::Previous => Action::Previous,
             Cmd::VolumeUp | Cmd::VolumeDown => {
-                // Bit-perfect leaves volume to the DAC.
+                let up = self == Cmd::VolumeUp;
+                // Bit-perfect: the device's own volume, when it has one.
                 if app.bit_perfect {
-                    return None;
+                    let v = app.output.device_volume()?;
+                    return Some(Action::Output(OutputAction::DeviceVolume(v.db + if up { DEVICE_VOLUME_STEP_DB } else { -DEVICE_VOLUME_STEP_DB })));
                 }
-                let step = if self == Cmd::VolumeUp { VOLUME_STEP } else { -VOLUME_STEP };
+                let step = if up { VOLUME_STEP } else { -VOLUME_STEP };
                 Action::Output(OutputAction::Volume(app.prefs_now().volume + step))
             }
             Cmd::SeekForward | Cmd::SeekBack => {

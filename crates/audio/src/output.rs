@@ -16,6 +16,7 @@ use rtrb::Consumer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Software volume changes glide over this long instead of jumping (no zipper noise).
 const GAIN_RAMP_SECS: f32 = 0.015;
@@ -449,6 +450,29 @@ pub trait OutputBackend: Send {
     fn set_mode(&mut self, mode: PlaybackMode) {
         let _ = mode;
     }
+    /// Whether Normal mode switches the device to each song's rate (and an
+    /// integer format), as bit-perfect does, or leaves it as the system has it.
+    fn set_match_rate(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// The open stream no longer fits the mode and the backend can't switch it
+    /// in place (ALSA: exclusive hardware vs. the sound server): the engine
+    /// starts the track over where it is.
+    fn wants_reopen(&mut self) -> bool {
+        false
+    }
+    /// The device's own volume control, while we hold the device in
+    /// bit-perfect mode and it has one we may set.
+    fn device_volume(&mut self) -> Option<crate::DeviceVolume> {
+        None
+    }
+    /// Sets the device's own volume, in dB (clamped to its range, and to 0 dB).
+    fn set_device_volume(&mut self, db: f32) {
+        let _ = db;
+    }
+    fn set_device_mute(&mut self, muted: bool) {
+        let _ = muted;
+    }
     /// What the current output device can do, if the backend can tell. Used to
     /// judge whether bit-perfect playback is possible for a file.
     fn device_caps(&mut self) -> Option<DeviceCaps>;
@@ -472,14 +496,65 @@ pub trait OutputBackend: Send {
 /// verify bit-perfect output.
 pub struct CpalBackend {
     name: String,
-    ctl: Option<(Sender<()>, JoinHandle<()>)>,
+    /// Tells the stream's thread to close; the flag is set first, so the
+    /// stream ending under us isn't reported as an error.
+    ctl: Option<(Sender<()>, JoinHandle<()>, Arc<AtomicBool>)>,
     drained: Arc<AtomicBool>,
+    /// An ALSA card to play through instead of the default output: the
+    /// output the sound server (PipeWire) has for it, when there is one.
+    card: Option<u32>,
+    /// The sound server is bringing the card's output back (we just handed
+    /// it the card): wait for it until then rather than play elsewhere.
+    card_returning: Option<Instant>,
 }
 
 impl Default for CpalBackend {
     fn default() -> Self {
-        Self { name: "cpal".into(), ctl: None, drained: Arc::new(AtomicBool::new(false)) }
+        Self { name: "cpal".into(), ctl: None, drained: Arc::new(AtomicBool::new(false)), card: None, card_returning: None }
     }
+}
+
+impl CpalBackend {
+    /// Plays through ALSA card `card` (by index) from the next `open`, or the
+    /// default output with `None`. A card the sound server doesn't offer falls
+    /// back to the default.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn route_to_card(&mut self, card: Option<u32>) {
+        self.card = card;
+    }
+
+    /// The card was just given back to the sound server: the next stream
+    /// waits (up to `wait`) for its output to appear.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn card_returning(&mut self, wait: Duration) {
+        self.card_returning = Some(Instant::now() + wait);
+    }
+}
+
+/// The output device for `card` (see [`CpalBackend::route_to_card`]), else
+/// the default. Until `returning`, a card's missing output is waited for.
+fn output_device(card: Option<u32>, returning: Option<Instant>) -> Option<cpal::Device> {
+    // A new host each time: one lists the devices there were when it was made.
+    let find = |card: u32| {
+        cpal::default_host()
+            .output_devices()
+            .ok()?
+            .find(|d| d.description().ok().and_then(|desc| desc.address().and_then(alsa_card_of)) == Some(card))
+    };
+    let mut routed = card.and_then(find);
+    while let Some(card) = card.filter(|_| routed.is_none() && returning.is_some_and(|t| Instant::now() < t)) {
+        thread::sleep(Duration::from_millis(100));
+        routed = find(card);
+    }
+    routed.or_else(|| cpal::default_host().default_output_device())
+}
+
+/// The ALSA card index in a device path like PipeWire's `api.alsa.path`:
+/// `front:1`, `hw:1,0`, `hdmi:1,2`, `surround51:CARD=1`.
+pub(crate) fn alsa_card_of(path: &str) -> Option<u32> {
+    let args = path.split_once(':')?.1;
+    let first = args.split(',').next()?;
+    first.strip_prefix("CARD=").unwrap_or(first).parse().ok()
 }
 
 impl OutputBackend for CpalBackend {
@@ -488,7 +563,7 @@ impl OutputBackend for CpalBackend {
     }
 
     fn device_caps(&mut self) -> Option<DeviceCaps> {
-        let device = cpal::default_host().default_output_device()?;
+        let device = output_device(self.card, self.card_returning)?;
         let name = device.description().map(|d| d.name().to_owned()).unwrap_or_else(|_| "default".into());
         let mut configs = Vec::new();
         let mut any_float = false;
@@ -525,11 +600,14 @@ impl OutputBackend for CpalBackend {
         let drained = self.drained.clone();
         let (ctl_tx, ctl_rx) = bounded::<()>(1);
         let (ready_tx, ready_rx) = bounded(1);
+        let closing = Arc::new(AtomicBool::new(false));
+        let closing_in = closing.clone();
         // cpal streams are !Send on some platforms, so each lives on its own thread
         // until told to close.
+        let (card, returning) = (self.card, self.card_returning.take());
         let handle = thread::Builder::new()
             .name("audio-output".into())
-            .spawn(move || match start_stream(format, input, status, drained) {
+            .spawn(move || match start_stream(format, input, status, drained, card, returning, closing_in) {
                 Ok((stream, device)) => {
                     let _ = ready_tx.send(Ok(device));
                     let _ = ctl_rx.recv();
@@ -552,7 +630,7 @@ impl OutputBackend for CpalBackend {
             }
         };
         self.name = format!("cpal · {device}");
-        self.ctl = Some((ctl_tx, handle));
+        self.ctl = Some((ctl_tx, handle, closing));
         Ok(())
     }
 
@@ -561,7 +639,8 @@ impl OutputBackend for CpalBackend {
     }
 
     fn close(&mut self) {
-        if let Some((ctl, handle)) = self.ctl.take() {
+        if let Some((ctl, handle, closing)) = self.ctl.take() {
+            closing.store(true, Ordering::Release);
             let _ = ctl.send(());
             // Dropping the stream stops the device callback; joining makes that a
             // guarantee for the caller (no stale callback after close returns).
@@ -575,9 +654,12 @@ fn start_stream(
     input: RingInput,
     status: Arc<Status>,
     drained: Arc<AtomicBool>,
+    card: Option<u32>,
+    returning: Option<Instant>,
+    closing: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, String), OutputError> {
     let dev_err = |e: cpal::Error| OutputError::Device(e.to_string());
-    let device = cpal::default_host().default_output_device().ok_or(OutputError::NoDevice)?;
+    let device = output_device(card, returning).ok_or(OutputError::NoDevice)?;
     let device_name = device.description().map(|d| d.name().to_owned()).unwrap_or_else(|_| "default".into());
 
     let range = device
@@ -603,10 +685,10 @@ fn start_stream(
     // 16- and 24-bit integer formats get TPDF dither when samples are off their
     // grid; 32-bit integers are finer than the f32 samples themselves.
     let stream = match sample_format {
-        SampleFormat::F32 => build::<f32>(&device, config, input, status, drained, None),
-        SampleFormat::I32 => build::<i32>(&device, config, input, status, drained, None),
-        SampleFormat::I24 => build::<cpal::I24>(&device, config, input, status, drained, Some(24)),
-        SampleFormat::I16 => build::<i16>(&device, config, input, status, drained, Some(16)),
+        SampleFormat::F32 => build::<f32>(&device, config, input, status, drained, None, closing),
+        SampleFormat::I32 => build::<i32>(&device, config, input, status, drained, None, closing),
+        SampleFormat::I24 => build::<cpal::I24>(&device, config, input, status, drained, Some(24), closing),
+        SampleFormat::I16 => build::<i16>(&device, config, input, status, drained, Some(16), closing),
         other => return Err(OutputError::Device(format!("unsupported sample format {other}"))),
     }
     .map_err(dev_err)?;
@@ -621,6 +703,7 @@ fn build<T>(
     status: Arc<Status>,
     drained: Arc<AtomicBool>,
     device_bits: Option<u32>,
+    closing: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
@@ -635,7 +718,14 @@ where
             drained.store(true, Ordering::Release);
         }
     };
-    let on_error = |e: cpal::Error| tracing::warn!("output stream: {e}");
+    // PipeWire reports a stream we're tearing down as disconnected: not news.
+    let on_error = move |e: cpal::Error| {
+        if closing.load(Ordering::Acquire) {
+            tracing::debug!("output stream, closing: {e}");
+        } else {
+            tracing::warn!("output stream: {e}");
+        }
+    };
     device.build_output_stream(config, callback, on_error, None)
 }
 

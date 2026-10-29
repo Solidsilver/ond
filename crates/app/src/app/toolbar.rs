@@ -5,7 +5,7 @@ use super::WindowAction;
 use super::widgets::elide;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
-use super::{Action, OndApp, OutputAction};
+use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -31,6 +31,16 @@ const LCD_WAVE_H: f32 = 4.0;
 const LCD_KNOB_R: f32 = 3.5;
 /// Below this window width the toolbar tightens up.
 const NARROW_W: f32 = 900.0;
+
+/// The least room between the output control and its neighbours.
+const CONTROL_GAP: f32 = 12.0;
+
+/// Where the output control goes: centred between the now-playing display's
+/// right edge and the buttons, keeping clear of both.
+pub(super) fn control_x(lcd_right: f32, buttons_left: f32, width: f32) -> f32 {
+    let centred = (lcd_right + buttons_left) / 2.0 - width / 2.0;
+    centred.min(buttons_left - CONTROL_GAP - width).max(lcd_right + CONTROL_GAP)
+}
 
 /// Where prev/play/next go: centred in the free space between `free_left`
 /// (past the traffic lights) and the now-playing display, never left of
@@ -79,18 +89,30 @@ impl OndApp {
         } else {
             (whole.left() + reserved(ui.ctx(), Side::Left)).max(full.left() + TRANSPORT_INSET)
         };
-        // Narrow windows fold the volume slider behind its icon so the
+        // Narrow windows fold the volume slider into the output panel so the
         // now-playing display keeps room for the title.
         let narrow = full.width() < NARROW_W;
-        let right_w = if narrow { RIGHT_W - 90.0 } else { RIGHT_W };
-        let right = Rect::from_min_max(pos2(full.right() - right_w, full.top()), full.max);
-        let right_start = ui
+        let right = Rect::from_min_max(pos2(full.right() - RIGHT_W, full.top()), full.max);
+        let buttons_start = ui
             .scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
-                self.toolbar_right(ui, narrow);
+                self.toolbar_right(ui);
                 ui.min_rect().left()
             })
             .inner;
-        let lcd = lcd_rect(full, free_left + TRANSPORT_W, right_start);
+        // The output control, centred between the display and the buttons
+        // (as the transport is on the left), never past the buttons.
+        let slider = (!narrow).then_some(crate::output::SLIDER_W);
+        let control_w = self.output.control_width(slider);
+        // Centred on the whole window, not what's left of it: window buttons
+        // on the right (most Linux desktops) would pull it off centre. The
+        // two ends still keep it clear of them.
+        let lcd = lcd_rect(whole, free_left + TRANSPORT_W, buttons_start - CONTROL_GAP - control_w);
+        let x = control_x(lcd.right(), buttons_start, control_w);
+        let control = Rect::from_min_max(pos2(x, full.top()), pos2(x + control_w, full.bottom()));
+        ui.scope_builder(UiBuilder::new().max_rect(control).layout(Layout::left_to_right(Align::Center)), |ui| {
+            let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, slider);
+            self.output_control_out(out);
+        });
         let x = transport_x(free_left, lcd.left());
         let left = Rect::from_min_max(pos2(x, full.top()), pos2(x + TRANSPORT_W, full.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, None));
@@ -122,8 +144,8 @@ impl OndApp {
         }
     }
 
-    /// Queue toggle · volume · output chip (laid out right to left).
-    fn toolbar_right(&mut self, ui: &mut Ui, narrow: bool) {
+    /// Queue toggle · mini player (laid out right to left).
+    fn toolbar_right(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = 10.0;
         // In narrow windows the queue is a sheet: the button shows whether it's open.
@@ -137,30 +159,6 @@ impl OndApp {
         }
         if icons::sized_button(ui, Icon::MiniPlayer, "Mini player (⇧⌘M)", vec2(28.0, 28.0), 14.0, Some(t.muted)).clicked() {
             self.actions.push(Action::Window(WindowAction::ToggleMini));
-        }
-        let mut volume = |ui: &mut Ui, width: f32| {
-            let mut level = self.ui.prefs.volume;
-            let resp = ui
-                .add_enabled_ui(!self.bit_perfect, |ui| super::widgets::thin_slider(ui, &mut level, width, "Volume"))
-                .inner
-                .on_disabled_hover_text("In bit-perfect mode, use your DAC's or the system's volume");
-            if resp.changed() {
-                self.actions.push(Action::Output(OutputAction::Volume(level)));
-            }
-        };
-        if narrow {
-            let button = icons::sized_button(ui, Icon::Volume, "Volume", vec2(28.0, 28.0), 14.0, Some(t.muted));
-            egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| volume(ui, 140.0));
-        } else {
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                volume(ui, 80.0);
-                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                icons::paint(ui.painter(), r, Icon::Volume, t.muted);
-            });
-        }
-        if self.output.picker_ui(ui, &self.engine, &mut self.bit_perfect) {
-            self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
         }
     }
 }
@@ -352,6 +350,14 @@ mod tests {
     }
 
     #[test]
+    fn window_buttons_on_the_right_dont_pull_it_off_centre() {
+        // The bar as drawn: the window's width; the controls end before 90 px of window buttons.
+        let f = full(1440.0).expand2(vec2(12.0, 0.0));
+        let r = lcd_rect(f, 26.0 + 112.0, f.right() - 90.0 - 330.0);
+        assert!((r.center().x - 720.0).abs() < 0.5, "{r:?}");
+    }
+
+    #[test]
     fn a_tight_side_shrinks_it_but_keeps_it_centred() {
         let f = full(1000.0);
         let right_start = f.right() - 330.0;
@@ -367,6 +373,15 @@ mod tests {
         assert!(((x + TRANSPORT_W / 2.0) - 267.0).abs() < 0.5);
         // No room to centre: it stays clear of the lights.
         assert_eq!(transport_x(84.0, 150.0), 84.0);
+    }
+
+    #[test]
+    fn the_output_control_sits_midway_between_the_display_and_the_buttons() {
+        let x = control_x(700.0, 1000.0, 100.0);
+        assert!(((x + 50.0) - 850.0).abs() < 0.5);
+        // Too tight to centre: it stays clear of the display, whatever the buttons say.
+        assert_eq!(control_x(700.0, 790.0, 100.0), 700.0 + CONTROL_GAP);
+        assert_eq!(control_x(700.0, 820.0, 100.0), 700.0 + CONTROL_GAP);
     }
 
     #[test]

@@ -37,8 +37,18 @@ const ALLOWED: &[&str] = &[
     "playback.quality",
     "playback.format",
     "playback.kbps",
+    "queue.play_next",
+    "queue.add",
+    "queue.on_play",
+    "queue.clear",
     "output_device",
     "device_modes.*",
+    "output_match_rate",
+    "device_volume_green",
+    "device_volume_db",
+    "device_change_toast",
+    "device_hidden",
+    "device_groups.*",
     "stream_cache_mb",
     "offline_dir",
     "offline_limit_gb",
@@ -250,12 +260,14 @@ mod tests {
         let m = managed(json!({
             "theme": "dark",
             "playback": { "replay_gain": "album", "kbps": 192 },
+            "queue": { "on_play": "ask" },
             "device_modes": { "uid-umc22": "bit-perfect" },
             "window": { "system_title_bar": true, "mode": "mini" },
             "volume": 0.5,
             "sidebar_width": 300.0,
         }));
         assert!(m.has("theme") && m.has("playback.replay_gain") && m.has("playback.kbps") && m.has("device_modes.uid-umc22") && m.has("window.system_title_bar"));
+        assert!(m.has("queue.on_play") && !m.has("queue.add"), "queue settings are managed one by one");
         assert!(m.has("playback"), "part of it");
         assert!(!m.has("playback.quality") && !m.has("window.mode") && !m.has("volume") && !m.has("sidebar_width") && !m.has("device_modes.other"));
     }

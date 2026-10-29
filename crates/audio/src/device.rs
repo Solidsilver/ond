@@ -1,6 +1,5 @@
 //! Output devices as the UI sees them.
 
-use crate::PlaybackMode;
 use crate::signal::{DeviceCaps, describe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +19,8 @@ pub enum DeviceKind {
 
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
-    /// Stable across reboots and replugging (CoreAudio device UID).
+    /// Stable across reboots and replugging: the CoreAudio device UID on
+    /// macOS, `alsa:<card id>:<device>` on Linux.
     pub uid: String,
     pub name: String,
     pub kind: DeviceKind,
@@ -28,17 +28,27 @@ pub struct DeviceInfo {
     pub is_default: bool,
 }
 
+/// A device's own volume control, in the device: changing it doesn't touch
+/// the samples Ond sends. Reported while Ond holds the device in bit-perfect
+/// mode, when the device has one Ond may set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeviceVolume {
+    /// The level now (the loudest channel's, when they differ).
+    pub db: f32,
+    pub min_db: f32,
+    /// The top of the range, at most 0 dB: above it a device can clip.
+    pub max_db: f32,
+    /// Muted, when the device has a mute control.
+    pub muted: Option<bool>,
+}
+
 impl DeviceInfo {
-    /// The mode a device starts in until the user picks one: Normal where
-    /// bit-perfect can't mean anything (speaker DSP, lossy wireless links),
-    /// bit-perfect for DACs, headphone jacks and other wired outputs.
-    pub fn default_mode(&self) -> PlaybackMode {
-        match self.kind {
-            DeviceKind::BuiltInSpeakers | DeviceKind::Bluetooth | DeviceKind::AirPlay | DeviceKind::Virtual => {
-                PlaybackMode::Normal
-            }
-            _ => PlaybackMode::BitPerfect,
-        }
+    /// Whether bit-perfect can mean anything here: a device that takes integer
+    /// samples, not one macOS processes (speakers), compresses (Bluetooth,
+    /// AirPlay) or that's software (virtual devices, meeting apps' drivers).
+    pub fn can_bit_perfect(&self) -> bool {
+        self.caps.integer
+            && !matches!(self.kind, DeviceKind::BuiltInSpeakers | DeviceKind::Bluetooth | DeviceKind::AirPlay | DeviceKind::Virtual)
     }
 
     /// A terse capability line for the picker: "up to 24/96", "AirPlay".
@@ -78,19 +88,28 @@ mod tests {
             uid: "x".into(),
             name: "x".into(),
             kind,
-            caps: DeviceCaps { configs: vec![RateRange { channels: 2, min: 44_100, max }], max_bits: bits, ..Default::default() },
+            caps: DeviceCaps { configs: vec![RateRange { channels: 2, min: 44_100, max }], max_bits: bits, integer: true, ..Default::default() },
             is_default: false,
         }
     }
 
     #[test]
-    fn defaults_and_capability_lines() {
+    fn bit_perfect_is_offered_where_it_can_mean_something() {
+        assert!(info(DeviceKind::Usb, 192_000, Some(24)).can_bit_perfect());
+        assert!(info(DeviceKind::Hdmi, 96_000, Some(24)).can_bit_perfect());
+        for kind in [DeviceKind::BuiltInSpeakers, DeviceKind::Bluetooth, DeviceKind::AirPlay, DeviceKind::Virtual] {
+            assert!(!info(kind, 96_000, Some(24)).can_bit_perfect(), "{kind:?}");
+        }
+        let mut jack = info(DeviceKind::BuiltInHeadphones, 96_000, Some(24));
+        jack.caps.integer = false;
+        assert!(!jack.can_bit_perfect(), "a float-only headphone jack can't be verified");
+    }
+
+    #[test]
+    fn capability_lines() {
         let speakers = info(DeviceKind::BuiltInSpeakers, 96_000, Some(24));
-        assert_eq!(speakers.default_mode(), PlaybackMode::Normal);
         assert_eq!(speakers.capability_line(), "up to 24/96 · macOS processing");
         let umc = info(DeviceKind::Usb, 48_000, Some(16));
-        assert_eq!(umc.default_mode(), PlaybackMode::BitPerfect);
         assert_eq!(umc.capability_line(), "up to 16/48");
-        assert_eq!(info(DeviceKind::BuiltInHeadphones, 96_000, Some(24)).default_mode(), PlaybackMode::BitPerfect);
     }
 }

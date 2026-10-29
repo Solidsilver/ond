@@ -13,6 +13,9 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 - [ ] Stop playback in bit-perfect: other apps can use the DAC again (hog released). Same after quitting.
 - [ ] Unplug the UMC22 mid-track: continues on speakers; "Switch back" appears when it's plugged back in.
 - [ ] Per-device mode remembered across devices and restarts.
+- [ ] Output panel: System output follows the system default (no device list, every device plays Normal); Choose a device goes back to the device last chosen; picking one in the list leaves System output. Settings › Output shows the same choice.
+- [ ] UMC22 in bit-perfect: the toolbar slider sets the device's own level (a green dot in its knob; the dB beside it as Settings › Output has it), the panel's row has the exact dB (↑↓ 0.5 dB, ⇧ 0.1, scrolling) and mute. Dragging it doesn't jump back after letting go; a change made in Audio MIDI Setup (or `alsamixer`) shows in Ond within a second; turning it while muted unmutes.
+- [ ] Settings › Output: the eye on a device's row takes it out of the output menu and puts it back; a device put in a new group shows under that heading in the menu, between the hardware and Other.
 - [ ] Following the system default, plug in headphones mid-track (or pick another default in Control Center): playback moves there and carries on from where it was.
 - [ ] UMC22 in bit-perfect, a 44.1 kHz track followed by a 96 kHz one: other apps stay silent across the switch (hog kept through the reopen); no extra click beyond the rate change.
 - [ ] Toggle Normal → bit-perfect mid-track with a 24-bit file on a DAC that shares at 16 bits: the status shows the wider format, and a bit-exact check (loopback recording, or the DAC's own bit meter) shows the samples weren't dithered down to 16 bits.
@@ -26,6 +29,7 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 - [ ] Previous / ⌥⌘← in the last seconds of the queue: lands and plays (no stuck silence).
 - [ ] ReplayGain Track/Album/Auto: status shows `RG … track|album`; levels even out; bit-perfect shows "ReplayGain bypassed".
 - [ ] Streaming → Always AAC 256 (check Navidrome has the AAC transcoder): `AAC 256 · transcoded`.
+- [ ] Settings › Queue: the Apple Music and Spotify presets set the four rows at once and the queue follows them (Play next goes to the top with Apple Music, after the next track with Ond); changing a row turns the preset to Custom; the choice survives a restart.
 
 ## macOS integration
 - [ ] Control Center shows title/artwork/progress; scrubbing there seeks.
@@ -36,7 +40,7 @@ Run with `cargo run -p ond-player --release`. Visual review without a server:
 ## Linux
 Try at least one GNOME and one KDE Plasma session, Wayland and X11 if you can.
 - [ ] Installs with `./install.sh`; Ond appears in the app grid with its icon, and the running window gets the same icon in the dock/taskbar (app id `dev.solidsilver.ond`).
-- [ ] Playback goes through PipeWire: `pw-top` lists Ond while playing, and the output picker lists PipeWire devices. Unplugging the active device falls back cleanly.
+- [ ] Playback goes through PipeWire in Normal mode: `pw-top` lists Ond while playing. The output picker lists the ALSA sound cards; bit-perfect takes the card from PipeWire and gives it back a few seconds after playback stops (`pw-top` shows the sink go and come back). Unplugging the active device falls back cleanly.
 - [ ] Media controls: GNOME's top-bar player / KDE's media widget show title, artist, album and cover; play/pause, next, previous and the seek bar work. Clicking the player should bring Ond forward; on Wayland the compositor may only flag it as wanting attention (it won't hand over focus without an activation token), which is fine. Media keys work. `playerctl metadata` shows the track.
 - [ ] Ctrl+Alt+←/→ (skip 10 s): GNOME uses these to switch workspaces by default, so they may never reach Ond there. Note whether they do.
 - [ ] KDE Connect or GSConnect controls playback from a phone.

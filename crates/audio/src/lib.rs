@@ -24,6 +24,8 @@
 //! hands it the remembered per-device modes and is told what happened.
 
 mod channels;
+#[cfg(target_os = "linux")]
+pub mod alsa;
 #[cfg(target_os = "macos")]
 pub mod coreaudio;
 mod decode;
@@ -38,7 +40,7 @@ pub mod tap;
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
 pub use output::{CpalBackend, Marker, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
-pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
+pub use device::{DeviceEvent, DeviceInfo, DeviceKind, DeviceVolume};
 pub use dither::Tpdf;
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
 pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, adjust, assess, choose_rate, describe, khz};
@@ -152,9 +154,18 @@ pub enum Command {
     /// Play through this device (by UID), or `None` to follow the system default.
     /// The current track carries on from where it was.
     SelectDevice(Option<String>),
-    /// The modes the user picked per device UID. A device not listed gets
-    /// [`DeviceInfo::default_mode`] when playback moves to it.
+    /// The modes the user picked per device UID. A device not listed plays
+    /// Normal when playback moves to it: bit-perfect takes the device away
+    /// from every other app, so it's something to choose, never a surprise.
     DeviceModes(HashMap<String, PlaybackMode>),
+    /// Sets the device's own volume, in dB (see [`Event::DeviceVolume`]).
+    SetDeviceVolume(f32),
+    /// Mutes or unmutes the device itself.
+    SetDeviceMute(bool),
+    /// Normal mode switches the device to each song's rate (true), or leaves
+    /// the device at its own rate and resamples to it (false, the default).
+    /// The current track carries on from where it was.
+    MatchRate(bool),
     /// Ask for an [`Event::Devices`].
     RefreshDevices,
     Shutdown,
@@ -178,6 +189,10 @@ pub enum Event {
     DeviceLost { name: String },
     /// A device that went away is back; the UI may offer to switch to it.
     DeviceReturned { uid: String, name: String },
+    /// The device's own volume, when Ond holds a device that has one (in
+    /// bit-perfect mode); `None` when there's none to set. Sent when it
+    /// changes, whoever changed it.
+    DeviceVolume(Option<DeviceVolume>),
     /// Playback reached the end of the last queued track.
     Ended { track_id: String, token: u64 },
     /// A seek landed; playback continues from `position_secs` once buffered.
@@ -349,6 +364,8 @@ const REOPEN_DRAIN_WAIT: Duration = Duration::from_millis(250);
 /// The longest it sleeps while stopped or paused (it still notices devices
 /// coming and going). A command always wakes it at once.
 const IDLE_TICK: Duration = Duration::from_millis(250);
+/// How often the device's own volume is checked for changes made elsewhere.
+const DEVICE_VOLUME_EVERY: Duration = Duration::from_millis(500);
 
 /// The next wait after a quiet one: back to `TICK` while playing or loading,
 /// otherwise doubling up to `IDLE_TICK`, so a stopped engine barely wakes.
@@ -364,14 +381,20 @@ fn secs(frames: u64, rate: u32) -> f64 {
 }
 
 /// The best output for this platform: native CoreAudio on macOS (device choice,
-/// rate switching, exclusive mode), cpal elsewhere or if CoreAudio can't start.
+/// rate switching, exclusive mode), ALSA on Linux (device choice, exclusive
+/// hardware access in bit-perfect mode, the sound server otherwise), cpal
+/// elsewhere or if CoreAudio can't start.
 pub fn default_backend() -> Box<dyn OutputBackend> {
     #[cfg(target_os = "macos")]
     match coreaudio::CoreAudioBackend::new() {
         Ok(b) => return Box::new(b),
         Err(e) => tracing::warn!("CoreAudio output unavailable ({e}); using cpal"),
     }
-    Box::new(CpalBackend::default())
+    #[cfg(target_os = "linux")]
+    let backend: Box<dyn OutputBackend> = Box::new(self::alsa::AlsaBackend::new());
+    #[cfg(not(target_os = "linux"))]
+    let backend: Box<dyn OutputBackend> = Box::new(CpalBackend::default());
+    backend
 }
 
 /// Cloneable handle to a running engine.
@@ -380,12 +403,22 @@ pub struct EngineHandle {
     commands: Sender<Command>,
     pub events: Receiver<Event>,
     pub status: Arc<Status>,
+    /// Disconnects once the engine thread has finished, output closed.
+    finished: Receiver<()>,
 }
 
 impl EngineHandle {
     pub fn send(&self, cmd: Command) {
         // The engine only goes away on Shutdown; a send after that is a no-op.
         let _ = self.commands.send(cmd);
+    }
+
+    /// Stops the engine and waits (up to `wait`) for it to let go of the
+    /// output: the backend puts the device back the way it found it, which
+    /// can't happen once the process has exited. Calling it again returns at once.
+    pub fn shutdown(&self, wait: Duration) {
+        self.send(Command::Shutdown);
+        let _ = self.finished.recv_timeout(wait);
     }
 }
 
@@ -398,6 +431,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
     status.set_volume(1.0);
     status.bit_perfect.store(config.mode == PlaybackMode::BitPerfect, Ordering::Relaxed);
     let st = status.clone();
+    let (finished_tx, finished) = crossbeam_channel::bounded::<()>(0);
     thread::Builder::new()
         .name("audio-engine".into())
         .spawn(move || {
@@ -421,11 +455,14 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 known: Vec::new(),
                 lost: None,
                 restarting: false,
+                device_volume: (None, Instant::now()),
             }
-            .run(cmd_rx)
+            .run(cmd_rx);
+            // The engine (and its backend) is gone: the device is released.
+            drop(finished_tx);
         })
         .expect("spawn audio engine thread");
-    EngineHandle { commands: cmd_tx, events: ev_rx, status }
+    EngineHandle { commands: cmd_tx, events: ev_rx, status, finished }
 }
 
 /// A track the current session's decoder has started, by session sequence number.
@@ -486,6 +523,8 @@ struct Engine {
     /// The session being started picks up a track that was already playing, so
     /// its start is announced as a restart rather than a new play.
     restarting: bool,
+    /// The device volume last reported, and when it was last looked at.
+    device_volume: (Option<DeviceVolume>, Instant),
 }
 
 impl Engine {
@@ -503,6 +542,7 @@ impl Engine {
             self.poll_session();
             self.poll_fetch();
             self.poll_devices();
+            self.poll_device_volume(false);
         }
         self.stop();
         if let Some(cache) = &self.cache {
@@ -550,7 +590,12 @@ impl Engine {
                 }
                 self.report_signal_path();
             }
-            Command::SetMode(m) => self.apply_mode(m),
+            Command::SetMode(m) => {
+                // Bit-perfect only where it can mean something (see `DeviceInfo::can_bit_perfect`).
+                let in_use = self.current_device.as_ref().and_then(|uid| self.known.iter().find(|d| &d.uid == uid));
+                let m = if in_use.is_some_and(|d| !d.can_bit_perfect()) { PlaybackMode::Normal } else { m };
+                self.apply_mode(m);
+            }
             Command::Seek(to) => self.seek(to),
             Command::SetNext(next) => self.set_next(next),
             Command::SelectDevice(uid) => match self.backend.select_device(uid.as_deref()) {
@@ -567,6 +612,19 @@ impl Engine {
                 }
             },
             Command::DeviceModes(modes) => self.device_modes = modes,
+            Command::SetDeviceVolume(db) => {
+                self.backend.set_device_volume(db);
+                self.poll_device_volume(true);
+            }
+            Command::SetDeviceMute(muted) => {
+                self.backend.set_device_mute(muted);
+                self.poll_device_volume(true);
+            }
+            Command::MatchRate(on) => {
+                self.backend.set_match_rate(on);
+                self.follow_rate();
+                self.report_signal_path();
+            }
             Command::RefreshDevices => {
                 self.known = self.backend.devices();
                 self.current_device = self.backend.current_device().map(|d| d.uid);
@@ -580,7 +638,27 @@ impl Engine {
         self.config.mode = m;
         self.status.bit_perfect.store(m == PlaybackMode::BitPerfect, Ordering::Relaxed);
         self.backend.set_mode(m);
+        self.follow_rate();
         self.report_signal_path();
+    }
+
+    /// The rates the device offers can change with the mode (Normal can leave
+    /// the device at its own rate): when the current track would now run at a
+    /// different rate, start it over from where it is.
+    fn follow_rate(&mut self) {
+        let Some((file_rate, channels, rate)) =
+            self.ring.as_ref().zip(self.current()).map(|(r, t)| (t.format.sample_rate, r.format.channels, r.format.sample_rate))
+        else {
+            return;
+        };
+        let caps = self.backend.device_caps();
+        if choose_rate(file_rate, channels, caps.as_ref()) == rate && !self.backend.wants_reopen() {
+            return;
+        }
+        if let Some(at) = self.take_position() {
+            self.stop();
+            self.resume(at);
+        }
     }
 
     /// Starts a new session at `src`, optionally from `start_at`.
@@ -725,17 +803,17 @@ impl Engine {
     }
 
     /// Playback moved to another device: pick its mode and carry on where we were.
-    /// The mode is the one the user picked for that device; failing that, the
-    /// device's default, or Normal for a `fallback` (the device in use went away).
+    /// The mode is the one the user picked for that device, else Normal; with
+    /// no device at all, Normal for a `fallback` (the device in use went away).
     fn device_switched(&mut self, fallback: bool) {
         let resume = self.take_position();
         self.stop();
         self.known = self.backend.devices();
         let info = self.backend.current_device();
         self.current_device = info.as_ref().map(|d| d.uid.clone());
-        let unpicked = |d: &DeviceInfo| if fallback { PlaybackMode::Normal } else { d.default_mode() };
         let mode = match &info {
-            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or_else(|| unpicked(d)),
+            Some(d) if !d.can_bit_perfect() => PlaybackMode::Normal,
+            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or(PlaybackMode::Normal),
             None if fallback => PlaybackMode::Normal,
             None => self.config.mode,
         };
@@ -795,6 +873,21 @@ impl Engine {
     }
 
     /// Describes the path from the current track to the device.
+    /// Reports the device's own volume when it changed: at once with `now`
+    /// (after a stream or the mode changed, or we set it), else a few times a
+    /// second (the system or the device's buttons can change it too).
+    fn poll_device_volume(&mut self, now: bool) {
+        if !now && self.device_volume.1.elapsed() < DEVICE_VOLUME_EVERY {
+            return;
+        }
+        let volume = self.backend.device_volume();
+        self.device_volume.1 = Instant::now();
+        if volume != self.device_volume.0 {
+            self.device_volume.0 = volume;
+            let _ = self.events.send(Event::DeviceVolume(volume));
+        }
+    }
+
     fn report_signal_path(&mut self) {
         let (Some(ring), Some(track)) = (self.ring.as_ref(), self.current()) else { return };
         let (source, device_rate) = (track.format, ring.format.sample_rate);
@@ -839,6 +932,8 @@ impl Engine {
             transcoded,
         };
         let _ = self.events.send(Event::SignalPath(path));
+        // A new stream or mode can bring a device volume, or take it away.
+        self.poll_device_volume(true);
     }
 
     /// Publishes download progress and starts the next track's prefetch when it's time.

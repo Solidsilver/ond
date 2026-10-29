@@ -3,9 +3,10 @@
 //! tracks to load. Library messages from the bridge land here.
 
 use super::OndApp;
+use super::dialogs::Overlay;
 use crate::bridge::{ListKey, Msg};
 use crate::player::QueueAction;
-use crate::queue::Source;
+use crate::queue::{OnPlay, Source};
 use crate::search::SearchIndex;
 use crate::tracks::TrackSet;
 use library::{Album, Track};
@@ -283,9 +284,26 @@ impl OndApp {
         self.search.index = Some(index);
     }
 
-    /// Applies a queue action once the tracks are known.
+    /// Applies a queue action once the tracks are known. Playing something
+    /// new asks first when the queue is set to and there are tracks the user
+    /// added to keep or clear.
     pub(super) fn queue_tracks(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction) {
+        let q = &self.player.queue;
+        let added = q.added_count();
+        if matches!(action, QueueAction::Play { .. } | QueueAction::Shuffle) && q.prefs.on_play == OnPlay::Ask && added > 0 && !tracks.is_empty() {
+            self.ui.overlay = Some(Overlay::KeepAdded { tracks, source, action, added });
+            return;
+        }
         self.with_player(|p, cx| p.queue_tracks(tracks, source, action, cx));
+    }
+
+    /// Plays what was asked about: keeping the added tracks (after the new
+    /// music) or clearing them.
+    pub(super) fn queue_tracks_answered(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, keep: bool) {
+        let prefs = self.player.queue.prefs;
+        self.player.queue.prefs.on_play = if keep { OnPlay::KeepAfter } else { OnPlay::Clear };
+        self.with_player(|p, cx| p.queue_tracks(tracks, source, action, cx));
+        self.player.queue.prefs = prefs;
     }
 
     /// Holds `p` until its tracks load. A newer action for the same list

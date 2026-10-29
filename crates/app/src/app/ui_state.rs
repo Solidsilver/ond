@@ -188,12 +188,18 @@ pub struct UiState {
     pub memos: view_ctx::Memos,
     /// The preferences as of this frame (see [`PrefsView`]).
     pub prefs: PrefsView,
+    /// Devices open in Settings › Output, by UID.
+    pub output_open: std::collections::HashSet<String>,
+    /// Group names being typed in Settings › Output, by device UID.
+    pub group_drafts: HashMap<String, String>,
 }
 
 impl UiState {
     pub(super) fn new(notices: Vec<String>, prefs: PrefsView) -> Self {
         Self {
             prefs,
+            output_open: Default::default(),
+            group_drafts: Default::default(),
             nav: Nav::default(),
             sort: AlbumSort::default(),
             sort_desc: false,

@@ -11,9 +11,9 @@ name = "Ond"
 path = "src/main.rs"
 
 [dependencies]
-analysis = { version = "0.3.0", path = "../analysis" }
+analysis = { version = "0.4.0", path = "../analysis" }
 anyhow = "1.0.104"
-audio = { version = "0.3.0", path = "../audio" }
+audio = { version = "0.4.0", path = "../audio" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
 # `clipboard` gives text fields copy and paste; `links` opens URLs in the browser.
@@ -21,14 +21,14 @@ eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "de
 egui = "0.37.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 keyring = "4.2.0"
-library = { version = "0.3.0", path = "../library" }
+library = { version = "0.4.0", path = "../library" }
 nucleo-matcher = "0.3.1"
 realfft = "3.5.0"
-offline = { version = "0.3.0", path = "../offline" }
+offline = { version = "0.4.0", path = "../offline" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-streamcache = { version = "0.3.0", path = "../streamcache" }
-subsonic = { version = "0.3.0", path = "../subsonic" }
+streamcache = { version = "0.4.0", path = "../streamcache" }
+subsonic = { version = "0.4.0", path = "../subsonic" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -39,7 +39,7 @@ workspace = true
 
 [dev-dependencies]
 # Offscreen rendering for the review snapshots (`app/snapshots.rs`).
-audio = { version = "0.3.0", path = "../audio", features = ["preview"] }
+audio = { version = "0.4.0", path = "../audio", features = ["preview"] }
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
 tempfile = "3"
 

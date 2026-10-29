@@ -79,14 +79,31 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | `playback.format` | `"aac"`, `"mp3"` | `"aac"` |
 | `playback.kbps` | `128`, `192`, `256`, `320` | `256` |
 
+### Queue
+
+| Setting | Values | Default |
+|---|---|---|
+| `queue.play_next` | `"top"` (the top of the queue), `"after-next"` (after earlier play-nexts) | `"top"` |
+| `queue.add` | `"end"` (the end of the queue), `"before-source"` (after what you added, before the album or playlist) | `"end"` |
+| `queue.on_play` | What playing something new does with what you added: `"keep-after"`, `"keep-before"`, `"clear"`, `"ask"` | `"keep-after"` |
+| `queue.clear` | What Clear removes: `"everything"`, `"added"` (only what you added) | `"everything"` |
+
+The presets in Settings › Queue set all four: Apple Music is `top`, `end`, `ask`, `everything`; Spotify is `after-next`, `before-source`, `keep-before`, `added`.
+
 ### Output
 
 | Setting | Values | Default |
 |---|---|---|
 | `output_device` | A device ID to play through; leave it out to follow the system default | |
-| `device_modes.<device ID>` | `"normal"` or `"bit-perfect"` for that device | Bit-perfect for DACs and headphones, normal for the rest |
+| `device_modes.<device ID>` | `"normal"` or `"bit-perfect"` for that device | `"normal"` |
+| `device_volume_green` | In bit-perfect mode, a green dot in the volume slider's knob while it sets the device's own volume | `true` |
+| `device_volume_db` | When the device's own volume shows in dB beside the slider: `"adjusting"`, `"always"`, `"never"` | `"adjusting"` |
+| `device_hidden` | Device IDs left out of the output menu, e.g. `["BlackHole2ch_UID"]` | `[]` |
+| `device_groups.<device ID>` | A group name for that device in the output menu | Hardware first, then "Other" for software devices |
+| `device_change_toast` | Show a notice naming the output whenever playback moves to another device | `false` |
+| `output_match_rate` | `true` switches the device to each song's sample rate in normal mode; `false` leaves it as the system has it (macOS only) | `false` |
 
-Device IDs come from the system (CoreAudio's device UID on macOS) and aren't shown in the app. To find one, pick the device, or its mode in Settings › Output, in Ond once, then look in `settings.json` under `output_device` or `device_modes`.
+Device IDs come from the system (CoreAudio's device UID on macOS; on Linux `alsa:<card id>:<device>`, like `alsa:DX3:0`, where the card id is the one in `/proc/asound/cards`) and aren't shown in the app. To find one, pick the device, or its mode in Settings › Output, in Ond once, then look in `settings.json` under `output_device` or `device_modes`.
 
 ### Offline and library
 

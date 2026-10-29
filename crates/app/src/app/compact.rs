@@ -163,9 +163,8 @@ impl OndApp {
             .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    if self.output.picker_ui(ui, &self.engine, &mut self.bit_perfect) {
-                        self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
-                    }
+                    let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, Some(crate::output::SLIDER_W));
+                    self.output_control_out(out);
                     // The same few characters of signal path as the full window's display.
                     let readout = self.output.readout(&self.engine.status);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

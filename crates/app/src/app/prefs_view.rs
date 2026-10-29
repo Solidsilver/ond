@@ -106,6 +106,8 @@ pub enum PrefsAction {
     Diagnostics(bool),
     /// Turn experimental visuals on or off.
     Experimental(Experimental),
+    /// How the queue behaves.
+    Queue(crate::queue::QueuePrefs),
 }
 
 impl OndApp {
@@ -125,7 +127,7 @@ impl OndApp {
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
                 // Partly managed groups: the managed parts are put back.
-                PrefsAction::WaveformBars(_) | PrefsAction::Experimental(_) | PrefsAction::AlbumView(_) | PrefsAction::ArtistView(_) => return false,
+                PrefsAction::WaveformBars(_) | PrefsAction::Experimental(_) | PrefsAction::Queue(_) | PrefsAction::AlbumView(_) | PrefsAction::ArtistView(_) => return false,
             },
             Action::Window(WindowAction::SetSystemTitleBar(_)) => "window.system_title_bar",
             Action::Analysis(AnalysisAction::AnalyzePlaying(_)) => "analyze_playing",
@@ -157,6 +159,11 @@ impl OndApp {
             }
             PrefsAction::Diagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
             PrefsAction::Experimental(x) => self.prefs.edit(|s| s.experimental = x),
+            PrefsAction::Queue(q) => {
+                self.prefs.edit(|s| s.queue = q);
+                // As saved: managed parts may have been put back.
+                self.player.queue.prefs = self.prefs.get(|s| s.queue);
+            }
         }
     }
 

@@ -181,16 +181,6 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize
     segments(ui, options, &fit_segments(&natural, ui.available_width()), selected)
 }
 
-/// The two playback modes, in the order the switches show them.
-pub const MODES: [audio::PlaybackMode; 2] = [audio::PlaybackMode::Normal, audio::PlaybackMode::BitPerfect];
-
-pub fn mode_label(m: audio::PlaybackMode) -> String {
-    match m {
-        audio::PlaybackMode::Normal => "Normal".into(),
-        audio::PlaybackMode::BitPerfect => "Bit-perfect".into(),
-    }
-}
-
 /// One of `all` in a segmented control, each labelled by `label`. With a
 /// `width`, equal segments fill it; otherwise each fits its label. Writes the
 /// pick into `current` and says whether it changed.
@@ -424,7 +414,14 @@ pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
 /// filled part in the accent, a small round knob that grows on hover.
 /// Dragging, clicking, the scroll wheel and ←/→ (when focused) all adjust it.
 pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Response {
+    thin_slider_marked(ui, value, width, label, None)
+}
+
+/// [`thin_slider`] with a small dot of `mark` in its knob (it says what the
+/// slider sets, e.g. a device's own volume).
+pub fn thin_slider_marked(ui: &mut Ui, value: &mut f32, width: f32, label: &str, mark: Option<Color32>) -> Response {
     let t = Tokens::of(ui);
+    let fill = t.accent;
     let enabled = ui.is_enabled();
     let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
     let knob_r = 6.0;
@@ -461,7 +458,7 @@ pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Res
         resp.mark_changed();
     }
     if ui.is_rect_visible(rect) {
-        let fill = if enabled { t.accent } else { t.muted.gamma_multiply(0.5) };
+        let fill = if enabled { fill } else { t.muted.gamma_multiply(0.5) };
         ui.painter().rect_filled(track, 1.5, t.hairline);
         let x = track.left() + track.width() * value.clamp(0.0, 1.0);
         ui.painter().rect_filled(Rect::from_min_max(track.min, egui::pos2(x, track.bottom())), 1.5, fill);
@@ -472,6 +469,9 @@ pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Res
             let knob = if ui.visuals().dark_mode { t.text } else { Color32::WHITE };
             ui.painter().circle_filled(c + vec2(0.0, 0.5), r + 0.5, Color32::from_black_alpha(40));
             ui.painter().circle(c, r, knob, egui::Stroke::new(1.0, t.hairline));
+            if let Some(mark) = mark {
+                ui.painter().circle_filled(c, r * 0.45, mark);
+            }
         }
     }
     let v = f64::from(*value);
@@ -483,6 +483,12 @@ pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Res
 /// An on/off switch on its own; `label` names it for accessibility (the
 /// row it sits in shows the name).
 pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let accent = Tokens::of(ui).accent;
+    switch_tinted(ui, on, label, accent)
+}
+
+/// [`switch`] whose track is `on_color` when on (bit-perfect's green).
+pub fn switch_tinted(ui: &mut Ui, on: &mut bool, label: &str, on_color: Color32) -> Response {
     let t = Tokens::of(ui);
     let (rect, mut resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
     if resp.clicked() {
@@ -492,7 +498,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     if ui.is_rect_visible(rect) {
         let sw = Rect::from_center_size(rect.center(), vec2(30.0, 18.0));
         let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
-        let track = if *on { t.accent } else { t.selected };
+        let track = if *on { on_color } else { t.selected };
         ui.painter().rect_filled(sw, 9.0, track);
         let x = egui::lerp(sw.left() + 9.0..=sw.right() - 9.0, how_on);
         ui.painter().circle_filled(egui::pos2(x, sw.center().y), 7.0, Color32::WHITE);
