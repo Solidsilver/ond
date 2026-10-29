@@ -865,6 +865,7 @@ impl eframe::App for OndApp {
         self.after_messages();
         self.poll_downloads();
         self.check_library_analysis();
+        self.output.tick(ctx, &self.engine);
         // The rest of this frame reads the preferences as they are now.
         self.read_prefs();
         let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };

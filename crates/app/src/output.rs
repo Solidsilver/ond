@@ -326,6 +326,16 @@ impl Outputs {
         self.awaiting = Some((db, Instant::now()));
     }
 
+    /// Once a frame, whether or not the control is drawn (the visualizer or a
+    /// window mode may hide it): sends a level still waiting, and keeps the
+    /// frames coming until it's gone.
+    pub fn tick(&mut self, ctx: &egui::Context, engine: &EngineHandle) {
+        self.flush_device_volume(engine);
+        if self.unsent.is_some() {
+            ctx.request_repaint_after(SEND_EVERY);
+        }
+    }
+
     pub fn set_device_mute(&mut self, muted: bool, engine: &EngineHandle) {
         let Some(v) = self.device_volume.as_mut().filter(|v| v.muted.is_some()) else { return };
         v.muted = Some(muted);
@@ -442,10 +452,6 @@ impl Outputs {
     /// one (unusable when it doesn't).
     pub fn control_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, slider_w: Option<f32>) -> ControlOut {
         let mut out = ControlOut::default();
-        self.flush_device_volume(engine);
-        if self.unsent.is_some() {
-            ui.ctx().request_repaint_after(SEND_EVERY);
-        }
         let hw = self.device_volume.filter(|_| *bit_perfect);
         let readout = self.prefs.get(|s| s.device_volume_db);
         let width = self.control_width(slider_w);
