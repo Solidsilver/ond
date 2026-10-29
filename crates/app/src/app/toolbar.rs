@@ -103,7 +103,10 @@ impl OndApp {
         // (as the transport is on the left), never past the buttons.
         let slider = (!narrow).then_some(crate::output::SLIDER_W);
         let control_w = self.output.control_width(slider);
-        let lcd = lcd_rect(full, free_left + TRANSPORT_W, buttons_start - CONTROL_GAP - control_w);
+        // Centred on the whole window, not what's left of it: window buttons
+        // on the right (most Linux desktops) would pull it off centre. The
+        // two ends still keep it clear of them.
+        let lcd = lcd_rect(whole, free_left + TRANSPORT_W, buttons_start - CONTROL_GAP - control_w);
         let x = control_x(lcd.right(), buttons_start, control_w);
         let control = Rect::from_min_max(pos2(x, full.top()), pos2(x + control_w, full.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(control).layout(Layout::left_to_right(Align::Center)), |ui| {
@@ -344,6 +347,14 @@ mod tests {
         let r = lcd_rect(f, 26.0 + 112.0, f.right() - 330.0);
         assert!((r.center().x - 720.0).abs() < 0.5, "{r:?}");
         assert_eq!(r.width(), LCD_MAX_W);
+    }
+
+    #[test]
+    fn window_buttons_on_the_right_dont_pull_it_off_centre() {
+        // The bar as drawn: the window's width; the controls end before 90 px of window buttons.
+        let f = full(1440.0).expand2(vec2(12.0, 0.0));
+        let r = lcd_rect(f, 26.0 + 112.0, f.right() - 90.0 - 330.0);
+        assert!((r.center().x - 720.0).abs() < 0.5, "{r:?}");
     }
 
     #[test]
