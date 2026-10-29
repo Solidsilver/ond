@@ -304,6 +304,10 @@ impl Outputs {
     /// Sets the device's own volume (clamped to its range): at once, or
     /// within [`SEND_EVERY`] while it's being dragged.
     pub fn set_device_volume(&mut self, db: f32, engine: &EngineHandle) {
+        // Turning it up or down while muted means "let me hear it", as in macOS.
+        if self.device_volume.is_some_and(|v| v.muted == Some(true)) {
+            self.set_device_mute(false, engine);
+        }
         let Some(v) = self.device_volume.as_mut() else { return };
         v.db = db.clamp(v.min_db, v.max_db);
         self.unsent = Some(v.db);
@@ -452,8 +456,7 @@ impl Outputs {
                 let (resp, label) = match hw {
                     Some(v) => {
                         let mut pos = slider_pos(&v);
-                        let resp = crate::app::thin_slider_marked(ui, &mut pos, w, "Device volume", self.mark(ui))
-                            .on_hover_text(device_volume_hover(&name, &v));
+                        let resp = self.device_slider(ui, &mut pos, w, &name, &v);
                         if resp.changed() {
                             self.set_device_volume(slider_db(&v, pos), engine);
                         }
@@ -533,6 +536,19 @@ impl Outputs {
             None => name,
         };
         resp.on_hover_text(hover)
+    }
+
+    /// The device volume's slider: dimmed while the device is muted (moving it unmutes).
+    fn device_slider(&self, ui: &mut egui::Ui, pos: &mut f32, w: f32, name: &str, v: &DeviceVolume) -> egui::Response {
+        let mark = self.mark(ui);
+        ui.scope(|ui| {
+            if v.muted == Some(true) {
+                ui.multiply_opacity(0.4);
+            }
+            crate::app::thin_slider_marked(ui, pos, w, "Device volume", mark)
+        })
+        .inner
+        .on_hover_text(device_volume_hover(name, v))
     }
 
     /// The slider knob's mark in bit-perfect mode: a green dot, unless turned off.
@@ -773,8 +789,7 @@ impl Outputs {
                     let mut pos = (v.db - v.min_db) / (v.max_db - v.min_db).max(0.01);
                     // The row's width, less the dB field and the mute button.
                     let w = (ui.available_width() - 112.0).max(100.0);
-                    let resp = crate::app::thin_slider_marked(ui, &mut pos, w, "Device volume", self.mark(ui))
-                        .on_hover_text(device_volume_hover(&name, &v));
+                    let resp = self.device_slider(ui, &mut pos, w, &name, &v);
                     if resp.changed() {
                         self.set_device_volume(v.min_db + pos * (v.max_db - v.min_db), engine);
                     }
