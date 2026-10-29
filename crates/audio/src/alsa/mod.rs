@@ -69,6 +69,9 @@ pub struct AlsaBackend {
     /// What each device could do when we last had it open, by UID.
     caps: HashMap<String, DeviceCaps>,
     claim: Option<Claim>,
+    /// The held card's mixer (its own volume), opened when first asked for
+    /// and kept until the card goes back.
+    mixer: Option<mixer::CardMixer>,
     out: Option<Out>,
     /// Why bit-perfect mode is playing through the sound server.
     why_shared: Option<String>,
@@ -98,6 +101,7 @@ impl AlsaBackend {
             listed: Instant::now(),
             caps: HashMap::new(),
             claim: None,
+            mixer: None,
             out: None,
             why_shared: None,
             idle_since: None,
@@ -168,6 +172,7 @@ impl AlsaBackend {
 
     fn release_claim(&mut self) {
         self.idle_since = None;
+        self.mixer = None;
         // Dropping the reservation hands the card back to the sound server,
         // which takes a moment to bring the card's output back.
         if self.claim.take().is_some() {
@@ -232,6 +237,14 @@ impl AlsaBackend {
     fn exclusive_pcm(&self) -> Option<Pcm> {
         let Some(Out::Exclusive { uid, .. }) = &self.out else { return None };
         self.pcms.iter().find(|p| &p.uid == uid).cloned()
+    }
+
+    /// The mixer of card `card`, which we hold: the one open, or opened now.
+    fn card_mixer(&mut self, card: u32) -> Option<&mixer::CardMixer> {
+        if self.mixer.as_ref().is_none_or(|m| m.card != card) {
+            self.mixer = mixer::CardMixer::open(card);
+        }
+        self.mixer.as_ref()
     }
 
     /// Stops whatever is playing, keeping the card.
@@ -336,12 +349,13 @@ impl OutputBackend for AlsaBackend {
 
     /// The card's own volume, while we hold it in bit-perfect mode.
     fn device_volume(&mut self) -> Option<crate::DeviceVolume> {
-        mixer::volume(self.exclusive_pcm()?.card)
+        let card = self.exclusive_pcm()?.card;
+        self.card_mixer(card)?.volume()
     }
 
     fn set_device_volume(&mut self, db: f32) {
         let Some(pcm) = self.exclusive_pcm() else { return };
-        match mixer::set_volume(pcm.card, db) {
+        match self.card_mixer(pcm.card).ok_or_else(|| "no mixer".to_owned()).and_then(|m| m.set_volume(db)) {
             Ok(()) => drop(self.wanted_db.insert(pcm.uid, db)),
             Err(e) => tracing::warn!("device volume: {e}"),
         }
@@ -349,7 +363,7 @@ impl OutputBackend for AlsaBackend {
 
     fn set_device_mute(&mut self, muted: bool) {
         let Some(pcm) = self.exclusive_pcm() else { return };
-        if let Err(e) = mixer::set_mute(pcm.card, muted) {
+        if let Err(e) = self.card_mixer(pcm.card).ok_or_else(|| "no mixer".to_owned()).and_then(|m| m.set_mute(muted)) {
             tracing::warn!("device mute: {e}");
         }
     }
@@ -419,8 +433,8 @@ impl OutputBackend for AlsaBackend {
                         r.set_busy(true);
                     }
                     self.name = format!("ALSA · {} (exclusive)", pcm.name);
-                    if let Some(db) = self.wanted_db.get(&pcm.uid)
-                        && let Err(e) = mixer::set_volume(pcm.card, *db)
+                    if let Some(db) = self.wanted_db.get(&pcm.uid).copied()
+                        && let Some(Err(e)) = self.card_mixer(pcm.card).map(|m| m.set_volume(db))
                     {
                         tracing::warn!("device volume: {e}");
                     }
