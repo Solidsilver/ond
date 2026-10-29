@@ -2690,6 +2690,17 @@ fn readme_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.art.preload(&album_id(i), sleeve(i));
     }
     reset(h, FULL, Route::Recent);
+    // Playing bit-perfect on the DAC, verified, with its own volume: what Ond is for.
+    {
+        let app = app_mut(h);
+        app.bit_perfect = true;
+        app.prefs.edit(|s| {
+            s.device_modes.insert("umc".into(), crate::settings::DeviceMode::BitPerfect);
+            s.output_device = Some("umc".into());
+        });
+        app.output.handle(&signal_with((16, 44_100), (16, 44_100), audio::BitPerfectStatus::Verified, None));
+        app.output.handle(&audio::Event::DeviceVolume(Some(audio::DeviceVolume { db: -18.0, min_db: -63.5, max_db: 0.0, muted: Some(false) })));
+    }
     s.shoot(h, "readme-library");
     reset(h, FULL, Route::Album(album_id(0)));
     s.shoot(h, "readme-album");
