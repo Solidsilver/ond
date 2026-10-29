@@ -218,13 +218,13 @@ impl Outputs {
         (&self.devices, self.current.as_deref())
     }
 
-    /// The mode `d` plays in: remembered, else its kind's default. Always
-    /// Normal where bit-perfect can't mean anything.
+    /// The mode `d` plays in: the one remembered for it, else Normal (bit-perfect
+    /// is opt-in). Always Normal where bit-perfect can't mean anything.
     pub fn device_mode(&self, d: &DeviceInfo) -> PlaybackMode {
         if !d.can_bit_perfect() {
             return PlaybackMode::Normal;
         }
-        self.prefs.get(|s| s.device_modes.get(&d.uid).map(|&m| m.into())).unwrap_or_else(|| d.default_mode())
+        self.prefs.get(|s| s.device_modes.get(&d.uid).map(|&m| m.into())).unwrap_or(PlaybackMode::Normal)
     }
 
     /// Remembers `mode` for device `uid`; the engine switches now when that's
@@ -1049,10 +1049,10 @@ pub fn auto_group(d: &DeviceInfo) -> &'static str {
 fn warning(path: &SignalPath, t: &Tokens) -> Option<(String, egui::Color32)> {
     let warn = t.warn;
     match &path.bit_perfect {
-        BitPerfectStatus::Unavailable { .. } if path.summary().ends_with("device limit") => {
+        BitPerfectStatus::Unavailable { device_limit: true, .. } => {
             Some((format!("Device limit: plays at {}", audio::describe(path.device_bits, path.device_rate)), warn))
         }
-        BitPerfectStatus::Unavailable { reason } => Some((format!("Not bit-perfect: {reason}"), warn)),
+        BitPerfectStatus::Unavailable { reason, .. } => Some((format!("Not bit-perfect: {reason}"), warn)),
         BitPerfectStatus::Requested { reason } => Some((format!("Not verified: {reason}"), t.muted)),
         _ => None,
     }
@@ -1063,7 +1063,7 @@ fn hover_text(p: &SignalPath) -> String {
         BitPerfectStatus::Off => "Normal mode, with volume, ReplayGain and resampling".to_owned(),
         BitPerfectStatus::Verified => "Bit-perfect, with exclusive access, the file's sample rate and untouched samples".to_owned(),
         BitPerfectStatus::Requested { reason } => format!("Bit-perfect requested, not verified: {reason}"),
-        BitPerfectStatus::Unavailable { reason } => format!("Not bit-perfect: {reason}"),
+        BitPerfectStatus::Unavailable { reason, .. } => format!("Not bit-perfect: {reason}"),
     };
     format!("{}\n{verdict}", p.output)
 }

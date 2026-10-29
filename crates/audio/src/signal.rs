@@ -13,9 +13,11 @@ pub enum BitPerfectStatus {
     /// Bit-perfect was asked for and nothing in this app alters the samples,
     /// but something outside it may (e.g. the OS mixer in shared mode).
     Requested { reason: String },
-    /// This device can't play this file bit-perfectly (rate or bit depth out of
-    /// range). Playback continues through the resampler and dither.
-    Unavailable { reason: String },
+    /// Playback isn't bit-perfect and can't be made so here: the device can't
+    /// take the file (`device_limit`: its rate or bit depth is out of range, so
+    /// playback goes through the resampler and dither), or the samples were
+    /// changed before reaching it (a server transcode, a downmix).
+    Unavailable { reason: String, device_limit: bool },
     /// Every condition holds: exclusive access, the device runs at the file's
     /// rate with an integer format at least as wide as the file, no resampling
     /// and no gain or DSP.
@@ -118,15 +120,15 @@ pub fn assess(mode: PlaybackMode, source: &StreamFormat, device_rate: u32, caps:
         } else {
             format!("device can't run at {} kHz", khz(source.sample_rate))
         };
-        return BitPerfectStatus::Unavailable { reason };
+        return BitPerfectStatus::Unavailable { reason, device_limit: true };
     }
     if let (Some(max_bits), Some(bits)) = (caps.max_bits, source.bits_per_sample)
         && bits > max_bits
     {
-        return BitPerfectStatus::Unavailable { reason: format!("device max {}, file is {file}", describe(caps.max_bits, max)) };
+        return BitPerfectStatus::Unavailable { reason: format!("device max {}, file is {file}", describe(caps.max_bits, max)), device_limit: true };
     }
     if device_rate != source.sample_rate {
-        return BitPerfectStatus::Unavailable { reason: format!("resampled to {} kHz", khz(device_rate)) };
+        return BitPerfectStatus::Unavailable { reason: format!("resampled to {} kHz", khz(device_rate)), device_limit: false };
     }
     if let Some(reason) = &caps.post_processed {
         return BitPerfectStatus::Requested { reason: reason.clone() };
@@ -206,11 +208,12 @@ pub fn adjust(status: BitPerfectStatus, channels: ChannelChange, transcoded: Opt
         return status;
     }
     if let Some(t) = transcoded {
-        return BitPerfectStatus::Unavailable { reason: format!("transcoded by the server ({t})") };
+        return BitPerfectStatus::Unavailable { reason: format!("transcoded by the server ({t})"), device_limit: false };
     }
     match channels {
         ChannelChange::Downmix { from, to } => BitPerfectStatus::Unavailable {
             reason: format!("{} downmixed to {}", crate::channels::layout(from), crate::channels::layout(to)),
+            device_limit: false,
         },
         ChannelChange::Upmix { from, to } if !matches!(status, BitPerfectStatus::Unavailable { .. }) => {
             BitPerfectStatus::Requested {
@@ -251,8 +254,8 @@ impl SignalPath {
             BitPerfectStatus::Off => {}
             BitPerfectStatus::Verified => parts.push("bit-perfect".into()),
             BitPerfectStatus::Requested { reason } => parts.push(format!("not verified ({reason})")),
-            BitPerfectStatus::Unavailable { reason } if reason.starts_with("device") => parts.push("device limit".into()),
-            BitPerfectStatus::Unavailable { reason } => parts.push(reason.clone()),
+            BitPerfectStatus::Unavailable { device_limit: true, .. } => parts.push("device limit".into()),
+            BitPerfectStatus::Unavailable { reason, .. } => parts.push(reason.clone()),
         }
         parts.join(" · ")
     }
@@ -329,11 +332,11 @@ mod tests {
     #[test]
     fn hi_res_on_a_16_48_device_is_unavailable() {
         let s = assess(PlaybackMode::BitPerfect, &fmt(24, 96_000), 48_000, Some(&umc22()));
-        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into() });
+        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into(), device_limit: true });
         let s = assess(PlaybackMode::BitPerfect, &fmt(24, 48_000), 48_000, Some(&umc22()));
-        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/48".into() });
+        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/48".into(), device_limit: true });
         let s = assess(PlaybackMode::BitPerfect, &fmt(16, 88_200), 44_100, Some(&umc22()));
-        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 16/88.2".into() });
+        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 16/88.2".into(), device_limit: true });
     }
 
     #[test]
@@ -346,7 +349,7 @@ mod tests {
     fn unknown_device_depth_falls_back_to_rate_only() {
         let caps = DeviceCaps { max_bits: None, ..umc22() };
         let s = assess(PlaybackMode::BitPerfect, &fmt(24, 96_000), 48_000, Some(&caps));
-        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 48 kHz, file is 24/96".into() });
+        assert_eq!(s, BitPerfectStatus::Unavailable { reason: "device max 48 kHz, file is 24/96".into(), device_limit: true });
         // A 24-bit file at a supported rate can't be judged on depth: only "requested".
         let s = assess(PlaybackMode::BitPerfect, &fmt(24, 48_000), 48_000, Some(&caps));
         assert!(matches!(s, BitPerfectStatus::Requested { .. }));
@@ -386,7 +389,7 @@ mod tests {
             device_bits: Some(16),
             resampled: true,
             dithered: true,
-            bit_perfect: BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into() },
+            bit_perfect: BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into(), device_limit: true },
             channels: ChannelChange::None,
             gain: GainState::Off,
             transcoded: None,
@@ -428,14 +431,14 @@ mod tests {
         assert_eq!(adjust(BitPerfectStatus::Off, downmix, Some("AAC 256")), BitPerfectStatus::Off);
         assert_eq!(
             adjust(v.clone(), ChannelChange::None, Some("AAC 256")),
-            BitPerfectStatus::Unavailable { reason: "transcoded by the server (AAC 256)".into() }
+            BitPerfectStatus::Unavailable { reason: "transcoded by the server (AAC 256)".into(), device_limit: false }
         );
-        assert_eq!(adjust(v.clone(), downmix, None), BitPerfectStatus::Unavailable { reason: "5.1 downmixed to stereo".into() });
+        assert_eq!(adjust(v.clone(), downmix, None), BitPerfectStatus::Unavailable { reason: "5.1 downmixed to stereo".into(), device_limit: false });
         assert_eq!(
             adjust(v.clone(), ChannelChange::Upmix { from: 1, to: 2 }, None),
             BitPerfectStatus::Requested { reason: "mono upmixed to stereo".into() }
         );
-        let limit = BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into() };
+        let limit = BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into(), device_limit: true };
         assert_eq!(adjust(limit.clone(), ChannelChange::Upmix { from: 1, to: 2 }, None), limit);
         assert_eq!(adjust(v.clone(), ChannelChange::None, None), v);
     }

@@ -323,7 +323,7 @@ fn hi_res_on_a_16_48_device_is_resampled_and_reported_unavailable() {
             _ => None,
         })
         .expect("signal path");
-    assert_eq!(path.bit_perfect, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 16/96".into() });
+    assert_eq!(path.bit_perfect, BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 16/96".into(), device_limit: true });
     assert!(path.resampled && path.dithered);
     assert_eq!(path.device_rate, 48_000);
     assert_eq!(path.summary(), "16/96 → 16/48 · resampled, dithered · device limit");
@@ -1128,7 +1128,7 @@ fn on_a_16_bit_device_only_the_tracks_off_its_grid_are_dithered() {
     let dithered: Vec<_> = paths_by_track(&seen).into_iter().map(|(id, p)| (id, p.dithered)).collect();
     assert_eq!(dithered, [("t0".into(), true), ("t1".into(), false), ("t2".into(), true), ("t3".into(), false)]);
     let verdict = paths_by_track(&seen).into_iter().find(|(id, _)| id == "t2").unwrap().1.bit_perfect;
-    assert_eq!(verdict, BitPerfectStatus::Unavailable { reason: "device max 16/192, file is 24/44.1".into() });
+    assert_eq!(verdict, BitPerfectStatus::Unavailable { reason: "device max 16/192, file is 24/44.1".into(), device_limit: true });
 }
 
 /// Needs real hardware: the whole engine on this platform's own backend, on the
