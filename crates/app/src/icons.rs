@@ -64,6 +64,10 @@ pub enum Icon {
     Help,
     /// The speaker with a slash: muted.
     Muted,
+    /// An open eye: shown (a device in the output menu).
+    Eye,
+    /// A closed eye: hidden.
+    EyeClosed,
     /// Output devices, by kind: a headband with ear cups.
     Headphones,
     /// A small box with a knob and a jack: a DAC or audio interface.
@@ -219,6 +223,26 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 .collect();
             painter.add(Shape::line(hook, thin));
             painter.circle_filled(p(0.0, 0.45), r * 0.09, color);
+        }
+        Icon::Eye | Icon::EyeClosed => {
+            // The upper lid; open, the lower one and the iris too.
+            let lid = |sign: f32| (0..=12).map(move |k| {
+                let x = -0.9 + 1.8 * k as f32 / 12.0;
+                p(x, sign * 0.55 * (1.0 - (x / 0.9).powi(2)))
+            });
+            if matches!(icon, Icon::Eye) {
+                painter.add(Shape::line(lid(-1.0).collect(), line));
+                painter.add(Shape::line(lid(1.0).collect(), line));
+                painter.circle_filled(c, r * 0.28, color);
+            } else {
+                // Shut, with lashes: raised to sit where the open eye does.
+                let up = |q: Pos2| q - vec2(0.0, 0.3 * r);
+                painter.add(Shape::line(lid(1.0).map(up).collect(), line));
+                for x in [-0.55f32, 0.0, 0.55] {
+                    let y = 0.55 * (1.0 - (x / 0.9).powi(2));
+                    painter.line_segment([up(p(x, y)), up(p(x * 1.2, y + 0.3))], line);
+                }
+            }
         }
         Icon::Muted => {
             painter.add(tri(vec![p(-0.8, -0.3), p(-0.35, -0.3), p(0.15, -0.75), p(0.15, 0.75), p(-0.35, 0.3), p(-0.8, 0.3)]));

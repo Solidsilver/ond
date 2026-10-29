@@ -213,9 +213,15 @@ impl OndApp {
         // The groups as the output menu has them, then the hidden devices.
         let mut sections = crate::output::group_devices(devices.iter().filter(|d| !hidden.contains(&d.uid)), &named);
         let hidden_devices: Vec<audio::DeviceInfo> = devices.iter().filter(|d| hidden.contains(&d.uid)).cloned().collect();
-        let mut groups: Vec<String> = named.values().map(|g| g.trim().to_owned()).filter(|g| !g.is_empty()).collect();
+        // The two built in, then the user's.
+        let mut groups: Vec<String> = named
+            .values()
+            .map(|g| g.trim().to_owned())
+            .filter(|g| !g.is_empty() && g != crate::output::DEVICES && g != crate::output::OTHER)
+            .collect();
         groups.sort();
         groups.dedup();
+        groups.splice(0..0, [crate::output::DEVICES.to_owned(), crate::output::OTHER.to_owned()]);
         group(ui, "Devices", |ui| {
             if devices.is_empty() {
                 setting(ui, "No output devices found", "", |_| ());
@@ -297,6 +303,21 @@ impl OndApp {
             ui.painter().text(pos2(x + name_w + 8.0, rect.top() + 6.0), egui::Align2::LEFT_TOP, "in use", FontId::proportional(11.0), t.accent);
         }
         ui.painter().text(pos2(x, rect.top() + 23.0), egui::Align2::LEFT_TOP, d.capability_line(), FontId::proportional(11.0), dim(t.muted));
+        // Shown or hidden in the output menu: the eye at the right, without opening the device.
+        let eye_rect = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(28.0, 28.0));
+        let eye = ui.interact(eye_rect, egui::Id::unique(("device-eye", &d.uid)), Sense::click());
+        let eye_locked = self.prefs.managed("device_hidden");
+        if eye.hovered() && !eye_locked {
+            ui.painter().rect_filled(eye_rect, 6.0, t.hover);
+        }
+        let glyph = Rect::from_center_size(eye_rect.center(), vec2(14.0, 14.0));
+        icons::paint(ui.painter(), glyph, if hidden { Icon::EyeClosed } else { Icon::Eye }, if hidden { t.muted.gamma_multiply(0.7) } else { t.muted });
+        let eye_tip = if eye_locked { crate::managed::LOCKED.to_owned() } else if hidden { "Show in the output menu".into() } else { "Hide from the output menu".into() };
+        let eye_label = eye_tip.clone();
+        eye.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, !eye_locked, !hidden, &eye_label));
+        if eye.on_hover_text(eye_tip).clicked() && !eye_locked {
+            self.actions.push(Action::Output(OutputAction::DeviceHidden(d.uid.clone(), !hidden)));
+        }
         let label = d.name.clone();
         head.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, &label));
         if head.clicked() {
@@ -324,27 +345,22 @@ impl OndApp {
                         self.actions.push(Action::Output(OutputAction::DeviceMode(d.uid.clone(), m)));
                     }
                 }
-                let mut shown = !hidden;
-                if managed(ui, self.prefs.managed("device_hidden"), |ui| switch_row(ui, "Show in the output menu", "", &mut shown)) {
-                    self.actions.push(Action::Output(OutputAction::DeviceHidden(d.uid.clone(), !shown)));
-                }
-                let (_, place) = self.output.menu_place(&d.uid);
+                let named = self.prefs.get(|s| s.device_groups.clone());
+                let place = crate::output::group_of(d, &named);
+                let auto = crate::output::auto_group(d);
                 let locked = self.prefs.managed(&format!("device_groups.{}", d.uid));
                 managed(ui, locked, |ui| {
                     setting(ui, "Group", "", |ui| {
-                        let label = if place.is_empty() { "Default".to_owned() } else { place.clone() };
-                        let resp = menu_label(ui, &label, t.text);
+                        let resp = menu_label(ui, &place, t.text);
                         egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                             ui.set_min_width(180.0);
-                            let mut pick = |ui: &mut Ui, text: &str, group: &str| {
-                                if ui.selectable_label(place == group, text).clicked() {
-                                    self.actions.push(Action::Output(OutputAction::DeviceGroup(d.uid.clone(), group.to_owned())));
+                            for g in groups {
+                                if ui.selectable_label(&place == g, g).clicked() {
+                                    // Its own group is no choice to remember: a blank puts it back.
+                                    let keep = if g == auto { String::new() } else { g.clone() };
+                                    self.actions.push(Action::Output(OutputAction::DeviceGroup(d.uid.clone(), keep)));
                                     ui.close();
                                 }
-                            };
-                            pick(ui, "Default", "");
-                            for g in groups {
-                                pick(ui, g, g);
                             }
                             ui.separator();
                             let draft = self.ui.group_drafts.entry(d.uid.clone()).or_default();

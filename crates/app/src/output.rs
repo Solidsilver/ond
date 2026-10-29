@@ -23,7 +23,9 @@ const ROW_H: f32 = 32.0;
 /// The list shows about three and a half devices before it scrolls.
 const LIST_H: f32 = ROW_H * 3.5;
 /// The group software devices go in, after the rest.
-const OTHER: &str = "Other";
+pub const OTHER: &str = "Other";
+/// The group hardware goes in, first (it has no heading in the menu).
+pub const DEVICES: &str = "Devices";
 const BIT_PERFECT_HELP: &str = "Bit-perfect sends samples untouched and keeps other apps off the device while Ond plays. The volume then sets the device's own level, when it has one.";
 /// The toolbar slider covers the top this many dB of a device's volume (most
 /// of a 100 dB range is too quiet to use); the panel's covers all of it.
@@ -36,8 +38,11 @@ const FINE_STEP_DB: f32 = 0.1;
 const SCROLL_NOTCH: f32 = 24.0;
 /// Room beside the slider for "−24.0 dB".
 const DB_W: f32 = 52.0;
-/// After we set the device volume, reports older than this don't move the slider back.
-const SETTLE: Duration = Duration::from_millis(600);
+/// Dragging sends the device volume at most this often (the last value always goes).
+const SEND_EVERY: Duration = Duration::from_millis(40);
+/// After we set the device volume, reports of other levels are earlier ones
+/// still arriving, until the device reports ours or this long has passed.
+const SETTLE: Duration = Duration::from_millis(1500);
 
 pub struct Outputs {
     /// ReplayGain, streaming quality, the device and per-device modes live here.
@@ -53,8 +58,12 @@ pub struct Outputs {
     open_requested: bool,
     /// The device's own volume, while bit-perfect holds a device that has one.
     device_volume: Option<DeviceVolume>,
-    /// When we last set it ourselves (see [`SETTLE`]).
-    set_at: Option<Instant>,
+    /// The level we last asked for and when: until the device reports it
+    /// (see [`SETTLE`]), other reports don't move the slider.
+    awaiting: Option<(f32, Instant)>,
+    /// A level not yet sent (see [`SEND_EVERY`]), and when the last one was.
+    unsent: Option<f32>,
+    sent_at: Option<Instant>,
     /// The slider was hovered or dragged last frame (for the dB readout).
     adjusting: bool,
     /// Devices whose settings are open in the panel's list, by UID.
@@ -120,7 +129,9 @@ impl Outputs {
             wants_settings: false,
             open_requested: false,
             device_volume: None,
-            set_at: None,
+            awaiting: None,
+            unsent: None,
+            sent_at: None,
             adjusting: false,
             expanded: Default::default(),
             names: HashMap::new(),
@@ -263,10 +274,16 @@ impl Outputs {
             }
             audio::Event::ModeChanged { mode, .. } => return Some(*mode),
             audio::Event::DeviceVolume(v) => {
-                // Our own change may not have reached the device yet: keep showing it.
-                let settling = self.set_at.is_some_and(|t| t.elapsed() < SETTLE);
-                self.device_volume = match (v, self.device_volume) {
-                    (Some(v), Some(mine)) if settling => Some(DeviceVolume { db: mine.db, ..*v }),
+                // Reports from before our last change are still coming in: keep showing ours.
+                let ours = match (v, self.awaiting) {
+                    (Some(v), Some((db, at))) if at.elapsed() < SETTLE && (v.db - db).abs() > 0.3 => Some(db),
+                    _ => None,
+                };
+                if ours.is_none() && self.unsent.is_none() {
+                    self.awaiting = None;
+                }
+                self.device_volume = match (v, ours.or(self.unsent)) {
+                    (Some(v), Some(db)) => Some(DeviceVolume { db, ..*v }),
                     _ => *v,
                 };
             }
@@ -280,12 +297,25 @@ impl Outputs {
         self.device_volume
     }
 
-    /// Sets the device's own volume (clamped to its range).
+    /// Sets the device's own volume (clamped to its range): at once, or
+    /// within [`SEND_EVERY`] while it's being dragged.
     pub fn set_device_volume(&mut self, db: f32, engine: &EngineHandle) {
         let Some(v) = self.device_volume.as_mut() else { return };
         v.db = db.clamp(v.min_db, v.max_db);
-        engine.send(Command::SetDeviceVolume(v.db));
-        self.set_at = Some(Instant::now());
+        self.unsent = Some(v.db);
+        self.flush_device_volume(engine);
+    }
+
+    /// Sends the level waiting to go, when it's time.
+    fn flush_device_volume(&mut self, engine: &EngineHandle) {
+        let Some(db) = self.unsent else { return };
+        if self.sent_at.is_some_and(|t| t.elapsed() < SEND_EVERY) {
+            return;
+        }
+        engine.send(Command::SetDeviceVolume(db));
+        self.unsent = None;
+        self.sent_at = Some(Instant::now());
+        self.awaiting = Some((db, Instant::now()));
     }
 
     pub fn set_device_mute(&mut self, muted: bool, engine: &EngineHandle) {
@@ -346,11 +376,6 @@ impl Outputs {
         });
     }
 
-    /// Whether device `uid` is left out of the output menu, and its group (blank: default).
-    pub fn menu_place(&self, uid: &str) -> (bool, String) {
-        self.prefs.get(|s| (s.device_hidden.contains(uid), s.device_groups.get(uid).cloned().unwrap_or_default()))
-    }
-
     /// The name of the device in use, for messages.
     pub fn in_use_name(&self) -> Option<&str> {
         self.in_use().map(|d| d.name.as_str())
@@ -409,6 +434,10 @@ impl Outputs {
     /// one (unusable when it doesn't).
     pub fn control_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, slider_w: Option<f32>) -> ControlOut {
         let mut out = ControlOut::default();
+        self.flush_device_volume(engine);
+        if self.unsent.is_some() {
+            ui.ctx().request_repaint_after(SEND_EVERY);
+        }
         let hw = self.device_volume.filter(|_| *bit_perfect);
         let readout = self.prefs.get(|s| s.device_volume_db);
         let width = self.control_width(slider_w);
@@ -536,15 +565,30 @@ impl Outputs {
             });
         });
         ui.add_space(10.0);
+        if following {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Currently using").size(11.0).color(t.muted));
+            });
+            ui.add_space(4.0);
+        }
         self.in_use_card(ui, engine, bit_perfect, volume, volume_here, out);
         ui.add_space(8.0);
         ui.separator();
-        let groups = self.menu_groups();
-        // Following the system, the list is there to leave it: dimmed, still a click away.
+        if following {
+            // The system picks the device: the way out is a button, not the list.
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                let button = ui.add_enabled(!locked, egui::Button::new(egui::RichText::new("Choose a device  →").size(12.0)));
+                if button.on_hover_text("Pick the device Ond plays through, and its mode").clicked() {
+                    self.choose_a_device(engine);
+                }
+            });
+            ui.add_space(6.0);
+        }
+        let groups = if following { Vec::new() } else { self.menu_groups() };
         ui.scope(|ui| {
-            if following {
-                ui.multiply_opacity(0.55);
-            }
             egui::ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]).show(ui, |ui| {
                 for (name, devices) in groups {
                     if let Some(name) = name {
@@ -612,16 +656,6 @@ impl Outputs {
             ui.horizontal(|ui| {
                 ui.add_space(36.0);
                 glance_ui(ui, &path).on_hover_text(hover_text(&path));
-            });
-        }
-        if following && d.can_bit_perfect() {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(36.0);
-                let link = crate::app::link_text(ui, "Choose a device for bit-perfect", egui::FontId::proportional(11.0), t.muted);
-                if link.clicked() {
-                    self.choose(Some(d.uid.clone()), engine);
-                }
             });
         }
         if (*bit_perfect && !following) || volume_here {
@@ -739,7 +773,9 @@ impl Outputs {
             match self.device_volume.filter(|_| bit_perfect) {
                 Some(v) => {
                     let mut pos = (v.db - v.min_db) / (v.max_db - v.min_db).max(0.01);
-                    let resp = crate::app::thin_slider_marked(ui, &mut pos, 130.0, "Device volume", self.mark(ui))
+                    // The row's width, less the dB field and the mute button.
+                    let w = (ui.available_width() - 112.0).max(100.0);
+                    let resp = crate::app::thin_slider_marked(ui, &mut pos, w, "Device volume", self.mark(ui))
                         .on_hover_text(device_volume_hover(&name, &v));
                     if resp.changed() {
                         self.set_device_volume(v.min_db + pos * (v.max_db - v.min_db), engine);
@@ -791,7 +827,8 @@ impl Outputs {
                 }
                 None => {
                     let mut level = volume;
-                    if crate::app::thin_slider(ui, &mut level, 160.0, "Volume").changed() {
+                    let w = (ui.available_width() - 56.0).max(100.0);
+                    if crate::app::thin_slider(ui, &mut level, w, "Volume").changed() {
                         out.volume = Some(level);
                     }
                     ui.label(egui::RichText::new(format!("{:.0}%", level * 100.0)).size(11.0).color(t.muted));
@@ -951,7 +988,7 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
 pub fn group_devices<'a>(devices: impl Iterator<Item = &'a DeviceInfo>, named: &HashMap<String, String>) -> Vec<(Option<String>, Vec<DeviceInfo>)> {
     let mut groups: Vec<(Option<String>, Vec<DeviceInfo>)> = Vec::new();
     for d in devices {
-        let group = named.get(&d.uid).map(|g| g.trim()).filter(|g| !g.is_empty()).map(str::to_owned).or_else(|| (d.kind == DeviceKind::Virtual).then(|| OTHER.to_owned()));
+        let group = Some(group_of(d, named)).filter(|g| g != DEVICES);
         match groups.iter_mut().find(|(g, _)| *g == group) {
             Some((_, list)) => list.push(d.clone()),
             None => groups.push((group, vec![d.clone()])),
@@ -967,6 +1004,17 @@ pub fn group_devices<'a>(devices: impl Iterator<Item = &'a DeviceInfo>, named: &
         list.sort_by_key(|d| d.name.to_lowercase());
     }
     groups
+}
+
+/// The group device `d` is in: the one given it, else hardware in
+/// [`DEVICES`] and software in [`OTHER`].
+pub fn group_of(d: &DeviceInfo, named: &HashMap<String, String>) -> String {
+    named.get(&d.uid).map(|g| g.trim()).filter(|g| !g.is_empty()).map(str::to_owned).unwrap_or_else(|| auto_group(d).to_owned())
+}
+
+/// The group a device goes in unless it's given another.
+pub fn auto_group(d: &DeviceInfo) -> &'static str {
+    if d.kind == DeviceKind::Virtual { OTHER } else { DEVICES }
 }
 
 /// What's playing through the device, at a glance: the format pill (the
