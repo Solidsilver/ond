@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 cpal = "0.18.2"
 crossbeam-channel = "0.5.17"
-streamcache = { version = "0.3.0", path = "../streamcache" }
+streamcache = { version = "0.4.0", path = "../streamcache" }
 rtrb = "0.4.0"
 symphonia = { version = "0.6.1", features = ["all"] }
 thiserror = "2.0.21"
