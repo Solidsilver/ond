@@ -488,6 +488,7 @@ dependencies = [
  "coreaudio-rs",
  "cpal",
  "crossbeam-channel",
+ "enumflags2",
  "libc",
  "objc2-core-audio",
  "objc2-core-audio-types",

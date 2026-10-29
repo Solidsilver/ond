@@ -91,10 +91,9 @@ impl Reservation {
             .map_err(no_bus)?
             .build()
             .map_err(no_bus)?;
-        let other = |e: zbus::Error| ReserveError::Other(e.to_string());
         // Others may take it from us, once we agree (see `request_release`).
         let flags = RequestNameFlags::AllowReplacement | RequestNameFlags::DoNotQueue;
-        match conn.request_name_with_flags(name.as_str(), flags).map_err(other)? {
+        match request(&conn, &name, flags)? {
             RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {}
             RequestNameReply::Exists | RequestNameReply::InQueue => {
                 let owner = owner_name(&conn, &name, &path);
@@ -106,7 +105,7 @@ impl Reservation {
                 if !agreed {
                     return Err(ReserveError::Refused { owner });
                 }
-                match conn.request_name_with_flags(name.as_str(), flags | RequestNameFlags::ReplaceExisting).map_err(other)? {
+                match request(&conn, &name, flags | RequestNameFlags::ReplaceExisting)? {
                     RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {}
                     _ => return Err(ReserveError::Refused { owner }),
                 }
@@ -139,6 +138,16 @@ impl Drop for Reservation {
     }
 }
 
+/// Asks the bus for `name`. zbus reports a name someone else owns as an
+/// error (`NameTaken`), not as the bus's `Exists` reply: it's an answer here.
+fn request(conn: &Connection, name: &str, flags: enumflags2::BitFlags<RequestNameFlags>) -> Result<RequestNameReply, ReserveError> {
+    match conn.request_name_with_flags(name, flags) {
+        Ok(reply) => Ok(reply),
+        Err(zbus::Error::NameTaken) => Ok(RequestNameReply::Exists),
+        Err(e) => Err(ReserveError::Other(e.to_string())),
+    }
+}
+
 /// The current owner's `ApplicationName`, to say who won't let go.
 fn owner_name(conn: &Connection, name: &str, path: &str) -> Option<String> {
     let reply = conn
@@ -146,4 +155,30 @@ fn owner_name(conn: &Connection, name: &str, path: &str) -> Option<String> {
         .ok()?;
     let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
     String::try_from(value).ok().filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs a session bus (`dbus-run-session -- cargo test …`); passes
+    /// without one, saying so. Card 99 is one no sound server holds.
+    #[test]
+    fn a_reservation_asks_the_owner_and_takes_over() {
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            eprintln!("no session bus: skipped");
+            return;
+        }
+        let first = Reservation::acquire(99, "hw:99").expect("free name");
+        assert!(first.held());
+        // The owner is playing: it says no.
+        first.set_busy(true);
+        assert!(matches!(Reservation::acquire(99, "hw:99"), Err(ReserveError::Refused { owner: Some(o) }) if o == "Ond"));
+        assert!(first.held());
+        // Idle: it lets go, and the second takes the name over.
+        first.set_busy(false);
+        let second = Reservation::acquire(99, "hw:99").expect("released to us");
+        assert!(second.held());
+        assert!(!first.held(), "the first knows it gave the card up");
+    }
 }

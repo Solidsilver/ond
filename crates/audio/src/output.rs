@@ -483,7 +483,9 @@ pub trait OutputBackend: Send {
 /// verify bit-perfect output.
 pub struct CpalBackend {
     name: String,
-    ctl: Option<(Sender<()>, JoinHandle<()>)>,
+    /// Tells the stream's thread to close; the flag is set first, so the
+    /// stream ending under us isn't reported as an error.
+    ctl: Option<(Sender<()>, JoinHandle<()>, Arc<AtomicBool>)>,
     drained: Arc<AtomicBool>,
     /// An ALSA card to play through instead of the default output: the
     /// output the sound server (PipeWire) has for it, when there is one.
@@ -568,12 +570,14 @@ impl OutputBackend for CpalBackend {
         let drained = self.drained.clone();
         let (ctl_tx, ctl_rx) = bounded::<()>(1);
         let (ready_tx, ready_rx) = bounded(1);
+        let closing = Arc::new(AtomicBool::new(false));
+        let closing_in = closing.clone();
         // cpal streams are !Send on some platforms, so each lives on its own thread
         // until told to close.
         let card = self.card;
         let handle = thread::Builder::new()
             .name("audio-output".into())
-            .spawn(move || match start_stream(format, input, status, drained, card) {
+            .spawn(move || match start_stream(format, input, status, drained, card, closing_in) {
                 Ok((stream, device)) => {
                     let _ = ready_tx.send(Ok(device));
                     let _ = ctl_rx.recv();
@@ -596,7 +600,7 @@ impl OutputBackend for CpalBackend {
             }
         };
         self.name = format!("cpal · {device}");
-        self.ctl = Some((ctl_tx, handle));
+        self.ctl = Some((ctl_tx, handle, closing));
         Ok(())
     }
 
@@ -605,7 +609,8 @@ impl OutputBackend for CpalBackend {
     }
 
     fn close(&mut self) {
-        if let Some((ctl, handle)) = self.ctl.take() {
+        if let Some((ctl, handle, closing)) = self.ctl.take() {
+            closing.store(true, Ordering::Release);
             let _ = ctl.send(());
             // Dropping the stream stops the device callback; joining makes that a
             // guarantee for the caller (no stale callback after close returns).
@@ -620,6 +625,7 @@ fn start_stream(
     status: Arc<Status>,
     drained: Arc<AtomicBool>,
     card: Option<u32>,
+    closing: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, String), OutputError> {
     let dev_err = |e: cpal::Error| OutputError::Device(e.to_string());
     let device = output_device(card).ok_or(OutputError::NoDevice)?;
@@ -648,10 +654,10 @@ fn start_stream(
     // 16- and 24-bit integer formats get TPDF dither when samples are off their
     // grid; 32-bit integers are finer than the f32 samples themselves.
     let stream = match sample_format {
-        SampleFormat::F32 => build::<f32>(&device, config, input, status, drained, None),
-        SampleFormat::I32 => build::<i32>(&device, config, input, status, drained, None),
-        SampleFormat::I24 => build::<cpal::I24>(&device, config, input, status, drained, Some(24)),
-        SampleFormat::I16 => build::<i16>(&device, config, input, status, drained, Some(16)),
+        SampleFormat::F32 => build::<f32>(&device, config, input, status, drained, None, closing),
+        SampleFormat::I32 => build::<i32>(&device, config, input, status, drained, None, closing),
+        SampleFormat::I24 => build::<cpal::I24>(&device, config, input, status, drained, Some(24), closing),
+        SampleFormat::I16 => build::<i16>(&device, config, input, status, drained, Some(16), closing),
         other => return Err(OutputError::Device(format!("unsupported sample format {other}"))),
     }
     .map_err(dev_err)?;
@@ -666,6 +672,7 @@ fn build<T>(
     status: Arc<Status>,
     drained: Arc<AtomicBool>,
     device_bits: Option<u32>,
+    closing: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
@@ -680,7 +687,14 @@ where
             drained.store(true, Ordering::Release);
         }
     };
-    let on_error = |e: cpal::Error| tracing::warn!("output stream: {e}");
+    // PipeWire reports a stream we're tearing down as disconnected: not news.
+    let on_error = move |e: cpal::Error| {
+        if closing.load(Ordering::Acquire) {
+            tracing::debug!("output stream, closing: {e}");
+        } else {
+            tracing::warn!("output stream: {e}");
+        }
+    };
     device.build_output_stream(config, callback, on_error, None)
 }
 
