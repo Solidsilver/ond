@@ -2,11 +2,183 @@
 //! upcoming item came from. Pure data; the app feeds the engine from it.
 //!
 //! Layout: `history` (oldest first) · `current` · `upcoming` (next first).
-//! Items the user queued by hand carry [`Source::Added`] and sit in a block at
-//! the front of `upcoming`, so "play now" on an album keeps them.
+//! Items the user queued by hand carry [`Source::Added`]. Where "play next"
+//! and "add to queue" put them, and what "play now" does with them, follow
+//! [`QueuePrefs`].
 
 use chrono::NaiveTime;
 use library::Track;
+use serde::{Deserialize, Serialize};
+
+/// Where "play next" puts tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NextAt {
+    /// Right after the current track: the latest plays first.
+    #[default]
+    Top,
+    /// After what was played next before, in the order chosen.
+    AfterNext,
+}
+
+impl NextAt {
+    pub const ALL: [NextAt; 2] = [NextAt::Top, NextAt::AfterNext];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NextAt::Top => "Top",
+            NextAt::AfterNext => "In turn",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            NextAt::Top => "Right after the current track, ahead of anything played next before",
+            NextAt::AfterNext => "After anything played next before, in the order you chose them",
+        }
+    }
+}
+
+/// Where "add to queue" puts tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AddAt {
+    /// At the very end.
+    #[default]
+    End,
+    /// After the other tracks you added, ahead of the album or playlist.
+    BeforeSource,
+}
+
+impl AddAt {
+    pub const ALL: [AddAt; 2] = [AddAt::End, AddAt::BeforeSource];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AddAt::End => "End",
+            AddAt::BeforeSource => "Up front",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            AddAt::End => "At the end, after the rest of the album or playlist",
+            AddAt::BeforeSource => "After the other tracks you added, ahead of the rest of the album or playlist",
+        }
+    }
+}
+
+/// What playing an album, playlist or song does with the tracks you added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnPlay {
+    /// Kept, to play once the new music ends.
+    #[default]
+    KeepAfter,
+    /// Kept, and played before the rest of the new music.
+    KeepBefore,
+    /// Cleared along with everything else.
+    Clear,
+    /// Ask whether to keep them (the app asks; the queue keeps them after).
+    Ask,
+}
+
+impl OnPlay {
+    pub const ALL: [OnPlay; 4] = [OnPlay::KeepAfter, OnPlay::KeepBefore, OnPlay::Clear, OnPlay::Ask];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OnPlay::KeepAfter => "Play after",
+            OnPlay::KeepBefore => "Play first",
+            OnPlay::Clear => "Clear",
+            OnPlay::Ask => "Ask",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            OnPlay::KeepAfter => "Tracks you added wait until the new music ends",
+            OnPlay::KeepBefore => "Tracks you added play right after the first new track, then the rest of it",
+            OnPlay::Clear => "The whole queue is replaced, tracks you added too",
+            OnPlay::Ask => "When you've added tracks, Ond asks whether to keep them (for after the new music) or clear them",
+        }
+    }
+}
+
+/// What the queue's Clear removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClearWhat {
+    /// Everything up next.
+    #[default]
+    Everything,
+    /// Only the tracks added by hand; the album or playlist stays.
+    Added,
+}
+
+impl ClearWhat {
+    pub const ALL: [ClearWhat; 2] = [ClearWhat::Everything, ClearWhat::Added];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ClearWhat::Everything => "Everything",
+            ClearWhat::Added => "Yours",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            ClearWhat::Everything => "Everything up next, the rest of the album or playlist too",
+            ClearWhat::Added => "Only the tracks you added; the rest of the album or playlist stays",
+        }
+    }
+}
+
+/// How the queue behaves. Saved with the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueuePrefs {
+    pub play_next: NextAt,
+    pub add: AddAt,
+    pub on_play: OnPlay,
+    pub clear: ClearWhat,
+}
+
+/// Named sets of [`QueuePrefs`], for people used to another player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    Ond,
+    AppleMusic,
+    Spotify,
+    /// Anything else (only ever shown, never picked).
+    Custom,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 4] = [Preset::Ond, Preset::AppleMusic, Preset::Spotify, Preset::Custom];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::Ond => "Ond",
+            Preset::AppleMusic => "Apple Music",
+            Preset::Spotify => "Spotify",
+            Preset::Custom => "Custom",
+        }
+    }
+
+    pub fn prefs(self) -> Option<QueuePrefs> {
+        match self {
+            Preset::Ond => Some(QueuePrefs::default()),
+            Preset::AppleMusic => Some(QueuePrefs { play_next: NextAt::Top, add: AddAt::End, on_play: OnPlay::Ask, clear: ClearWhat::Everything }),
+            Preset::Spotify => Some(QueuePrefs { play_next: NextAt::AfterNext, add: AddAt::BeforeSource, on_play: OnPlay::KeepBefore, clear: ClearWhat::Added }),
+            Preset::Custom => None,
+        }
+    }
+
+    pub fn of(prefs: QueuePrefs) -> Preset {
+        Preset::ALL.into_iter().find(|p| p.prefs() == Some(prefs)).unwrap_or(Preset::Custom)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -42,6 +214,8 @@ pub struct Item {
     pub uid: u64,
     pub track: Track,
     pub source: Source,
+    /// Queued with "play next" (for [`NextAt::AfterNext`]).
+    pub next: bool,
 }
 
 /// What happens when the last upcoming item finishes.
@@ -68,6 +242,7 @@ pub struct Queue {
     pub current: Option<Item>,
     pub upcoming: Vec<Item>,
     pub end: EndAction,
+    pub prefs: QueuePrefs,
     /// Where in `history` the current pass started; what "repeat queue" replays.
     cycle_start: usize,
     next_uid: u64,
@@ -76,7 +251,7 @@ pub struct Queue {
 impl Queue {
     fn item(&mut self, track: Track, source: Source) -> Item {
         self.next_uid += 1;
-        Item { uid: self.next_uid, track, source }
+        Item { uid: self.next_uid, track, source, next: false }
     }
 
     fn items(&mut self, tracks: Vec<Track>, source: &Source) -> Vec<Item> {
@@ -89,9 +264,9 @@ impl Queue {
         }
     }
 
-    /// Plays `tracks[start]` now and queues the rest of `tracks` after it. Items
-    /// the user added by hand stay, ahead of the new tracks; everything else that
-    /// was upcoming is replaced.
+    /// Plays `tracks[start]` now and queues the rest of `tracks` after it. What
+    /// was upcoming is replaced, except items the user added by hand, which
+    /// stay before or after the new tracks or go too, as [`OnPlay`] says.
     pub fn play_now(&mut self, tracks: Vec<Track>, start: usize, source: Source) {
         if start >= tracks.len() {
             return;
@@ -102,25 +277,48 @@ impl Queue {
         let rest = items.split_off(start + 1);
         self.current = items.pop();
         self.upcoming.retain(|i| i.source == Source::Added);
-        self.upcoming.extend(rest);
+        match self.prefs.on_play {
+            OnPlay::KeepAfter | OnPlay::Ask => drop(self.upcoming.splice(0..0, rest)),
+            OnPlay::KeepBefore => self.upcoming.extend(rest),
+            OnPlay::Clear => self.upcoming = rest,
+        }
     }
 
-    /// Queues `tracks` right after the current track, after anything else the
-    /// user already chose to play next.
+    /// Queues `tracks` right after the current track, or after what was
+    /// played next before them ([`NextAt`]).
     pub fn play_next(&mut self, tracks: Vec<Track>) {
-        let at = self.added_block_len();
+        let at = match self.prefs.play_next {
+            NextAt::Top => 0,
+            NextAt::AfterNext => self.upcoming.iter().take_while(|i| i.next).count(),
+        };
+        let mut items = self.items(tracks, &Source::Added);
+        items.iter_mut().for_each(|i| i.next = true);
+        self.upcoming.splice(at..at, items);
+    }
+
+    /// Queues `tracks` at the end, or after the other tracks added by hand at
+    /// the front ([`AddAt`]).
+    pub fn add(&mut self, tracks: Vec<Track>) {
+        let at = match self.prefs.add {
+            AddAt::End => self.upcoming.len(),
+            AddAt::BeforeSource => self.upcoming.iter().take_while(|i| i.source == Source::Added).count(),
+        };
         let items = self.items(tracks, &Source::Added);
         self.upcoming.splice(at..at, items);
     }
 
-    /// Queues `tracks` at the very end.
-    pub fn add(&mut self, tracks: Vec<Track>) {
-        let items = self.items(tracks, &Source::Added);
-        self.upcoming.extend(items);
+    /// Whether what the user added is split into more than one group.
+    pub fn added_is_split(&self) -> bool {
+        self.groups().filter(|g| *g.source == Source::Added).count() > 1
     }
 
-    fn added_block_len(&self) -> usize {
-        self.upcoming.iter().take_while(|i| i.source == Source::Added).count()
+    /// Brings everything the user added together, in order, where the first
+    /// of it is.
+    pub fn gather_added(&mut self) {
+        let Some(at) = self.upcoming.iter().position(|i| i.source == Source::Added) else { return };
+        let (added, rest): (Vec<Item>, Vec<Item>) = std::mem::take(&mut self.upcoming).into_iter().partition(|i| i.source == Source::Added);
+        self.upcoming = rest;
+        self.upcoming.splice(at..at, added);
     }
 
     pub fn remove(&mut self, uid: u64) -> bool {
@@ -129,8 +327,25 @@ impl Queue {
         self.upcoming.len() != before
     }
 
+    /// Clears what's up next, or only what was added by hand ([`ClearWhat`]).
     pub fn clear(&mut self) {
-        self.upcoming.clear();
+        match self.prefs.clear {
+            ClearWhat::Everything => self.upcoming.clear(),
+            ClearWhat::Added => self.upcoming.retain(|i| i.source != Source::Added),
+        }
+    }
+
+    /// Whether Clear would remove anything.
+    pub fn can_clear(&self) -> bool {
+        match self.prefs.clear {
+            ClearWhat::Everything => !self.upcoming.is_empty(),
+            ClearWhat::Added => self.added_count() > 0,
+        }
+    }
+
+    /// How many upcoming items the user added by hand.
+    pub fn added_count(&self) -> usize {
+        self.upcoming.iter().filter(|i| i.source == Source::Added).count()
     }
 
     pub fn position(&self, uid: u64) -> Option<usize> {
@@ -201,7 +416,8 @@ impl Queue {
     /// Back to the previous item; the current one returns to the front of upcoming.
     pub fn back(&mut self) -> Option<&Item> {
         let prev = self.history.pop()?;
-        if let Some(c) = self.current.take() {
+        if let Some(mut c) = self.current.take() {
+            c.next = false;
             self.upcoming.insert(0, c);
         }
         self.cycle_start = self.cycle_start.min(self.history.len());
@@ -334,20 +550,85 @@ mod tests {
         q.play_next(album(&["n1"]));
         q.play_now(album(&["b1", "b2"]), 0, src("B"));
         assert_eq!(cur(&q), Some("b1"));
-        assert_eq!(ids(&q.upcoming), ["n1", "b2"]);
+        assert_eq!(ids(&q.upcoming), ["b2", "n1"]);
         assert_eq!(ids(&q.history), ["a1"]);
+        q.prefs.on_play = OnPlay::KeepBefore;
+        q.play_now(album(&["c1", "c2"]), 0, src("C"));
+        assert_eq!(ids(&q.upcoming), ["n1", "c2"]);
+        q.prefs.on_play = OnPlay::Clear;
+        q.play_now(album(&["d1", "d2"]), 0, src("D"));
+        assert_eq!(ids(&q.upcoming), ["d2"]);
     }
 
     #[test]
-    fn play_next_goes_after_earlier_play_next_but_before_album() {
+    fn clear_can_leave_the_album() {
+        let mut q = Queue::default();
+        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(album(&["n1"]));
+        q.add(album(&["z1"]));
+        q.prefs.clear = ClearWhat::Added;
+        assert!(q.can_clear());
+        q.clear();
+        assert_eq!(ids(&q.upcoming), ["a2", "a3"]);
+        assert!(!q.can_clear());
+        q.prefs.clear = ClearWhat::Everything;
+        assert!(q.can_clear());
+        q.clear();
+        assert!(q.upcoming.is_empty());
+    }
+
+    #[test]
+    fn spotify_style_queue() {
+        let mut q = Queue { prefs: Preset::Spotify.prefs().unwrap(), ..Default::default() };
+        q.play_now(album(&["a1", "a2"]), 0, src("A"));
+        q.add(album(&["z1"]));
+        q.play_next(album(&["n1"]));
+        q.play_next(album(&["n2"]));
+        q.add(album(&["z2"]));
+        assert_eq!(ids(&q.upcoming), ["n1", "n2", "z1", "z2", "a2"]);
+    }
+
+    #[test]
+    fn gathering_what_was_added() {
+        let mut q = Queue::default();
+        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(album(&["n1"]));
+        q.add(album(&["z1", "z2"]));
+        assert!(q.added_is_split());
+        q.gather_added();
+        assert_eq!(ids(&q.upcoming), ["n1", "z1", "z2", "a2", "a3"]);
+        assert!(!q.added_is_split());
+        // Nothing added at the front: they gather where the first one is.
+        let mut q = Queue::default();
+        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.add(album(&["z1"]));
+        q.upcoming.swap(1, 2);
+        q.add(album(&["z2"]));
+        q.gather_added();
+        assert_eq!(ids(&q.upcoming), ["a2", "z1", "z2", "a3"]);
+    }
+
+    #[test]
+    fn presets_round_trip() {
+        for p in [Preset::Ond, Preset::AppleMusic, Preset::Spotify] {
+            assert_eq!(Preset::of(p.prefs().unwrap()), p);
+        }
+        assert_eq!(Preset::of(QueuePrefs { on_play: OnPlay::KeepBefore, ..Default::default() }), Preset::Custom);
+    }
+
+    #[test]
+    fn play_next_goes_to_the_top() {
         let mut q = Queue::default();
         q.play_now(album(&["a1", "a2"]), 0, src("A"));
         q.play_next(album(&["n1"]));
         q.play_next(album(&["n2", "n3"]));
-        assert_eq!(ids(&q.upcoming), ["n1", "n2", "n3", "a2"]);
+        assert_eq!(ids(&q.upcoming), ["n2", "n3", "n1", "a2"]);
         q.add(album(&["z"]));
-        assert_eq!(ids(&q.upcoming), ["n1", "n2", "n3", "a2", "z"]);
+        assert_eq!(ids(&q.upcoming), ["n2", "n3", "n1", "a2", "z"]);
         assert_eq!(q.upcoming[4].source, Source::Added);
+        // Ahead of what was added to the queue, too.
+        q.play_next(album(&["n4"]));
+        assert_eq!(ids(&q.upcoming)[0], "n4");
     }
 
     #[test]

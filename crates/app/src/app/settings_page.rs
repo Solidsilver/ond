@@ -8,6 +8,7 @@ use super::widgets::{MODES, choice, menu_label, mode_label, secondary, secondary
 use super::seek::{WaveGrid, paint_wave};
 use super::{Action, OndApp};
 use crate::icons::{self, Icon};
+use crate::queue::{AddAt, ClearWhat, NextAt, OnPlay, Preset};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
 use crate::visuals::visualizer::Pick;
@@ -20,6 +21,7 @@ pub enum Section {
     General,
     Appearance,
     Playback,
+    Queue,
     Output,
     Offline,
     Library,
@@ -28,13 +30,14 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [Section::General, Section::Appearance, Section::Playback, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
+    pub const ALL: [Section; 9] = [Section::General, Section::Appearance, Section::Playback, Section::Queue, Section::Output, Section::Offline, Section::Library, Section::Account, Section::Experimental];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::General => "General",
             Section::Appearance => "Appearance",
             Section::Playback => "Playback",
+            Section::Queue => "Queue",
             Section::Output => "Output",
             Section::Offline => "Offline",
             Section::Library => "Library",
@@ -92,6 +95,7 @@ impl OndApp {
                             Section::General => self.general_settings(ui),
                             Section::Appearance => self.appearance_settings(ui),
                             Section::Playback => self.playback_settings(ui),
+                            Section::Queue => self.queue_settings(ui),
                             Section::Output => self.output_settings(ui),
                             Section::Offline => self.offline_settings(ui),
                             Section::Library => self.library_settings(ui),
@@ -203,6 +207,31 @@ impl OndApp {
         });
         if p != before {
             self.actions.push(Action::Output(OutputAction::Playback(p)));
+        }
+    }
+
+    fn queue_settings(&mut self, ui: &mut Ui) {
+        let mut q = self.prefs.get(|s| s.queue);
+        let before = q;
+        group(ui, "How the queue works", |ui| {
+            let mut preset = Preset::of(q);
+            let picks = [Preset::Ond, Preset::AppleMusic, Preset::Spotify];
+            let shown: &[Preset] = if preset == Preset::Custom { &Preset::ALL } else { &picks };
+            let hint = match preset {
+                Preset::Custom => "Your own mix of the settings below",
+                _ => "Works like the player you're used to; change anything below to make it your own",
+            };
+            if setting(ui, "Style", hint, |ui| choice(ui, shown, &mut preset, None, |p| p.label().into())) {
+                q = preset.prefs().unwrap_or(q);
+            }
+            managed(ui, self.prefs.managed("queue.play_next"), |ui| setting(ui, "Play next", q.play_next.hint(), |ui| choice(ui, &NextAt::ALL, &mut q.play_next, None, |n| n.label().into())));
+            managed(ui, self.prefs.managed("queue.add"), |ui| setting(ui, "Add to queue", q.add.hint(), |ui| choice(ui, &AddAt::ALL, &mut q.add, None, |a| a.label().into())));
+            managed(ui, self.prefs.managed("queue.on_play"), |ui| setting(ui, "Playing something new", q.on_play.hint(), |ui| choice(ui, &OnPlay::ALL, &mut q.on_play, None, |o| o.label().into())));
+            managed(ui, self.prefs.managed("queue.clear"), |ui| setting(ui, "Clear removes", q.clear.hint(), |ui| choice(ui, &ClearWhat::ALL, &mut q.clear, None, |c| c.label().into())));
+            note(ui, "Tracks you add show under “You added” in the queue. When they end up in more than one group, right-click one to bring them together.");
+        });
+        if q != before {
+            self.actions.push(Action::Prefs(PrefsAction::Queue(q)));
         }
     }
 
