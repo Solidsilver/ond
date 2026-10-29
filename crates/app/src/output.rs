@@ -575,20 +575,9 @@ impl Outputs {
         self.in_use_card(ui, engine, bit_perfect, volume, volume_here, out);
         ui.add_space(8.0);
         ui.separator();
-        if following {
-            // The system picks the device: the way out is a button, not the list.
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add_space(10.0);
-                let button = ui.add_enabled(!locked, egui::Button::new(egui::RichText::new("Choose a device  →").size(12.0)));
-                if button.on_hover_text("Pick the device Ond plays through, and its mode").clicked() {
-                    self.choose_a_device(engine);
-                }
-            });
-            ui.add_space(6.0);
-        }
-        let groups = if following { Vec::new() } else { self.menu_groups() };
-        ui.scope(|ui| {
+        // Following the system, the system picks: no list (the tab above leaves it).
+        if !following {
+            let groups = self.menu_groups();
             egui::ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]).show(ui, |ui| {
                 for (name, devices) in groups {
                     if let Some(name) = name {
@@ -604,9 +593,9 @@ impl Outputs {
                     }
                 }
             });
-        });
-        ui.add_space(4.0);
-        ui.separator();
+            ui.add_space(4.0);
+            ui.separator();
+        }
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(10.0);
@@ -618,7 +607,7 @@ impl Outputs {
         ui.add_space(4.0);
     }
 
-    /// The device in use, at a glance: its icon and name with its mode pill,
+    /// The device in use, at a glance: its icon and name with its mode switch,
     /// what's playing through it, and the volume when it's the device's own
     /// (or the toolbar has none). Details are in the hovers.
     fn in_use_card(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, volume_here: bool, out: &mut ControlOut) {
@@ -642,12 +631,12 @@ impl Outputs {
             });
             return;
         };
-        // Name, and the mode pill at the right.
+        // Name, and the mode switch at the right.
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
         let g = egui::Rect::from_center_size(egui::pos2(rect.left() + 20.0, rect.center().y), egui::vec2(16.0, 16.0));
         icons::paint(ui.painter(), g, kind_icon(Some(d.kind)), t.text);
-        let pill_w = self.mode_pill(ui, engine, &d, following, bit_perfect, rect);
-        let name_w = rect.width() - 36.0 - pill_w - 16.0;
+        let switch_w = self.mode_switch(ui, engine, &d, following, bit_perfect, rect);
+        let name_w = rect.width() - 36.0 - switch_w - 16.0;
         let name = crate::app::elide_text(ui, &d.name, egui::FontId::new(13.0, crate::theme::semibold()), t.text, name_w);
         ui.painter().galley(egui::pos2(rect.left() + 36.0, rect.center().y - name.size().y / 2.0), name, t.text);
         // What's playing through it.
@@ -664,36 +653,34 @@ impl Outputs {
         }
     }
 
-    /// The mode pill at the right of `row`, for device `d`: "Bit-perfect" in
-    /// green with a dot, or a quiet "Shared"; a click switches. None for a
-    /// device that can only play shared. Returns its width.
-    fn mode_pill(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, following: bool, bit_perfect: &mut bool, row: egui::Rect) -> f32 {
+    /// "Bit-perfect" and its switch at the right of `row`, for device `d`:
+    /// green when on. None for a device that can only play shared, or while
+    /// following the system. Returns their width.
+    fn mode_switch(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, following: bool, bit_perfect: &mut bool, row: egui::Rect) -> f32 {
         if !d.can_bit_perfect() || following {
             return 0.0;
         }
         let t = Tokens::of(ui);
-        let on = self.device_mode(d) == PlaybackMode::BitPerfect;
-        let text = if on { "Bit-perfect" } else { "Shared" };
-        let g = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(11.0), if on { t.ok } else { t.muted });
-        let w = g.size().x + if on { 26.0 } else { 18.0 };
-        let r = egui::Rect::from_min_size(egui::pos2(row.right() - 10.0 - w, row.center().y - 10.0), egui::vec2(w, 20.0));
+        let was = self.device_mode(d) == PlaybackMode::BitPerfect;
+        let mut on = was;
         let locked = self.mode_locked(Some(&d.uid));
-        let resp = ui.interact(r, egui::Id::unique(("mode-pill", &d.uid)), if locked { egui::Sense::hover() } else { egui::Sense::click() });
-        let fill = if on { t.ok.gamma_multiply(0.14) } else if resp.hovered() { t.hover } else { t.field };
-        ui.painter().rect(r, 10.0, fill, egui::Stroke::new(1.0, if on { t.ok.gamma_multiply(0.5) } else { t.hairline }), egui::StrokeKind::Inside);
-        let mut x = r.left() + 9.0;
-        if on {
-            ui.painter().circle_filled(egui::pos2(x + 2.5, r.center().y), 3.0, t.ok);
-            x += 9.0;
+        let g = ui.painter().layout_no_wrap("Bit-perfect".to_owned(), egui::FontId::proportional(12.0), if on { t.text } else { t.muted });
+        let w = g.size().x + 8.0 + 30.0;
+        let area = egui::Rect::from_min_size(egui::pos2(row.right() - 10.0 - w, row.center().y - 13.0), egui::vec2(w, 26.0));
+        // The label switches too.
+        let label = ui.interact(egui::Rect::from_min_max(area.min, egui::pos2(area.right() - 30.0, area.bottom())), egui::Id::unique(("mode-label", &d.uid)), if locked { egui::Sense::hover() } else { egui::Sense::click() });
+        ui.painter().galley(egui::pos2(area.left(), area.center().y - g.size().y / 2.0), g, if on { t.text } else { t.muted });
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        let help = if locked { crate::managed::LOCKED.to_owned() } else { BIT_PERFECT_HELP.to_owned() };
+        let sw = child.add_enabled_ui(!locked, |ui| crate::app::switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).inner;
+        if label.on_hover_text(&help).clicked() {
+            on = !on;
         }
-        ui.painter().galley(egui::pos2(x, r.center().y - g.size().y / 2.0), g, if on { t.ok } else { t.muted });
-        let help = if locked { crate::managed::LOCKED.to_owned() } else { format!("{BIT_PERFECT_HELP}\nClick to {}.", if on { "share the device" } else { "play bit-perfect" }) };
-        let label = format!("Bit-perfect on {}", d.name);
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, !locked, on, &label));
-        if resp.on_hover_text(help).clicked() {
-            let mode = if on { PlaybackMode::Normal } else { PlaybackMode::BitPerfect };
+        sw.on_hover_text(help);
+        if on != was {
+            let mode = if on { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
             if self.set_device_mode(&d.uid, mode, engine) {
-                *bit_perfect = !on;
+                *bit_perfect = on;
             }
         }
         w
@@ -744,9 +731,8 @@ impl Outputs {
         }
         if open {
             let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
-            ui.painter().text(egui::pos2(r.left() + 52.0, r.center().y), egui::Align2::LEFT_CENTER, "Plays", egui::FontId::proportional(11.0), t.muted);
-            // The pill reads the same here; picking it doesn't switch devices.
-            self.mode_pill(ui, engine, d, false, bit_perfect, r);
+            // The same switch as the device in use has; it doesn't switch devices.
+            self.mode_switch(ui, engine, d, false, bit_perfect, r);
             ui.add_space(4.0);
         }
     }
@@ -1025,11 +1011,12 @@ fn glance_ui(ui: &mut egui::Ui, path: &SignalPath) -> egui::Response {
     let size = paint_readout(ui, egui::Pos2::ZERO, &r, 11.0, false).size();
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
     paint_readout(ui, rect.right_center(), &r, 11.0, true);
+    // Verified needs no word (the switch says what was asked; the green dot, that it is).
     let word = match &path.bit_perfect {
-        BitPerfectStatus::Verified => Some(("bit-perfect".to_owned(), t.ok)),
+        BitPerfectStatus::Verified => None,
         BitPerfectStatus::Unavailable { .. } if path.summary().ends_with("device limit") => Some(("device limit".to_owned(), t.warn)),
         BitPerfectStatus::Unavailable { .. } => Some(("not bit-perfect".to_owned(), t.warn)),
-        BitPerfectStatus::Requested { .. } => Some(("not verified".to_owned(), t.muted)),
+        BitPerfectStatus::Requested { reason } => Some((format!("not verified: {reason}"), t.muted)),
         BitPerfectStatus::Off => None,
     };
     match word {

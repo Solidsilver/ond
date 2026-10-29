@@ -493,6 +493,12 @@ pub fn thin_slider_marked(ui: &mut Ui, value: &mut f32, width: f32, label: &str,
 /// An on/off switch on its own; `label` names it for accessibility (the
 /// row it sits in shows the name).
 pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let accent = Tokens::of(ui).accent;
+    switch_tinted(ui, on, label, accent)
+}
+
+/// [`switch`] whose track is `on_color` when on (bit-perfect's green).
+pub fn switch_tinted(ui: &mut Ui, on: &mut bool, label: &str, on_color: Color32) -> Response {
     let t = Tokens::of(ui);
     let (rect, mut resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
     if resp.clicked() {
@@ -502,7 +508,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     if ui.is_rect_visible(rect) {
         let sw = Rect::from_center_size(rect.center(), vec2(30.0, 18.0));
         let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
-        let track = if *on { t.accent } else { t.selected };
+        let track = if *on { on_color } else { t.selected };
         ui.painter().rect_filled(sw, 9.0, track);
         let x = egui::lerp(sw.left() + 9.0..=sw.right() - 9.0, how_on);
         ui.painter().circle_filled(egui::pos2(x, sw.center().y), 7.0, Color32::WHITE);
