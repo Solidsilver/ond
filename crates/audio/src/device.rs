@@ -28,6 +28,20 @@ pub struct DeviceInfo {
     pub is_default: bool,
 }
 
+/// A device's own volume control, in the device: changing it doesn't touch
+/// the samples Ond sends. Reported while Ond holds the device in bit-perfect
+/// mode, when the device has one Ond may set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeviceVolume {
+    /// The level now (the loudest channel's, when they differ).
+    pub db: f32,
+    pub min_db: f32,
+    /// The top of the range, at most 0 dB: above it a device can clip.
+    pub max_db: f32,
+    /// Muted, when the device has a mute control.
+    pub muted: Option<bool>,
+}
+
 impl DeviceInfo {
     /// The mode a device starts in until the user picks one: always Normal.
     /// Bit-perfect takes the device away from every other app (system sounds

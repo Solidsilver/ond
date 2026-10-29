@@ -62,6 +62,16 @@ pub enum Icon {
     Plus,
     /// A question mark in a circle: help, the keyboard shortcuts.
     Help,
+    /// Output devices, by kind: a headband with ear cups.
+    Headphones,
+    /// A small box with a knob and a jack: a DAC or audio interface.
+    Dac,
+    /// A screen on a stand: HDMI and DisplayPort.
+    Display,
+    /// The Bluetooth rune.
+    Bluetooth,
+    /// A triangle under rings: AirPlay.
+    AirPlay,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -207,6 +217,42 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 .collect();
             painter.add(Shape::line(hook, thin));
             painter.circle_filled(p(0.0, 0.45), r * 0.09, color);
+        }
+        Icon::Headphones => {
+            let band = (0..=12).map(|k| {
+                let a = std::f32::consts::PI * (1.0 + k as f32 / 12.0);
+                p(0.68 * a.cos(), 0.15 + 0.75 * a.sin())
+            });
+            painter.add(Shape::line(band.collect(), line));
+            for x in [-0.68, 0.68] {
+                let cup = Rect::from_center_size(p(x, 0.42), vec2(r * 0.42, r * 0.75));
+                painter.rect_filled(cup, r * 0.14, color);
+            }
+        }
+        Icon::Dac => {
+            let body = Rect::from_min_max(p(-0.85, -0.5), p(0.85, 0.5));
+            painter.rect_stroke(body, r * 0.15, line, egui::StrokeKind::Middle);
+            painter.circle_stroke(p(-0.3, 0.0), r * 0.24, line);
+            painter.circle_filled(p(0.42, 0.0), r * 0.12, color);
+        }
+        Icon::Display => {
+            let screen = Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.4));
+            painter.rect_stroke(screen, r * 0.1, line, egui::StrokeKind::Middle);
+            painter.line_segment([p(0.0, 0.4), p(0.0, 0.75)], line);
+            painter.line_segment([p(-0.4, 0.78), p(0.4, 0.78)], line);
+        }
+        Icon::Bluetooth => {
+            painter.add(Shape::line(vec![p(-0.45, -0.4), p(0.4, 0.4), p(0.0, 0.8), p(0.0, -0.8), p(0.4, -0.4), p(-0.45, 0.4)], line));
+        }
+        Icon::AirPlay => {
+            for rad in [0.85f32, 0.5] {
+                let arc = (0..=10).map(|i| {
+                    let a = std::f32::consts::PI * (1.15 + 0.7 * i as f32 / 10.0);
+                    p(rad * a.cos(), 0.2 + rad * a.sin())
+                });
+                painter.add(Shape::line(arc.collect(), line));
+            }
+            painter.add(tri(vec![p(0.0, 0.05), p(0.55, 0.85), p(-0.55, 0.85)]));
         }
         Icon::Gear => {
             for k in 0..8 {

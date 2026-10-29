@@ -16,6 +16,30 @@ pub enum ViewMode {
     List,
 }
 
+/// When the volume slider shows the device's own level in dB (bit-perfect,
+/// on a device with a volume control).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DbReadout {
+    /// While the slider is hovered or dragged.
+    #[default]
+    Adjusting,
+    Always,
+    Never,
+}
+
+impl DbReadout {
+    pub const ALL: [DbReadout; 3] = [DbReadout::Adjusting, DbReadout::Always, DbReadout::Never];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DbReadout::Adjusting => "While adjusting",
+            DbReadout::Always => "Always",
+            DbReadout::Never => "Never",
+        }
+    }
+}
+
 /// How a device plays, as remembered per device. Saved as "normal" /
 /// "bit-perfect", as earlier builds wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +84,15 @@ pub struct Settings {
     /// device stays as the system has it and Ond converts the rate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_match_rate: bool,
+    /// Bit-perfect: the volume slider, set to the device's own volume, is green.
+    #[serde(default = "yes")]
+    pub device_volume_green: bool,
+    /// Bit-perfect: when the device's own level shows in dB beside the slider.
+    #[serde(default)]
+    pub device_volume_db: DbReadout,
+    /// A toast names the output device whenever playback moves to another.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_change_toast: bool,
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
@@ -153,6 +186,9 @@ impl Default for Settings {
             output_device: None,
             device_modes: Default::default(),
             output_match_rate: false,
+            device_volume_green: true,
+            device_volume_db: DbReadout::default(),
+            device_change_toast: false,
             theme: Default::default(),
             accent: Default::default(),
             adapt_colors: false,

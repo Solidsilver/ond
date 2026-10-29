@@ -40,7 +40,7 @@ pub mod tap;
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
 pub use output::{CpalBackend, Marker, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
-pub use device::{DeviceEvent, DeviceInfo, DeviceKind};
+pub use device::{DeviceEvent, DeviceInfo, DeviceKind, DeviceVolume};
 pub use dither::Tpdf;
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
 pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, adjust, assess, choose_rate, describe, khz};
@@ -157,6 +157,10 @@ pub enum Command {
     /// The modes the user picked per device UID. A device not listed gets
     /// [`DeviceInfo::default_mode`] when playback moves to it.
     DeviceModes(HashMap<String, PlaybackMode>),
+    /// Sets the device's own volume, in dB (see [`Event::DeviceVolume`]).
+    SetDeviceVolume(f32),
+    /// Mutes or unmutes the device itself.
+    SetDeviceMute(bool),
     /// Normal mode switches the device to each song's rate (true), or leaves
     /// the device at its own rate and resamples to it (false, the default).
     /// The current track carries on from where it was.
@@ -184,6 +188,10 @@ pub enum Event {
     DeviceLost { name: String },
     /// A device that went away is back; the UI may offer to switch to it.
     DeviceReturned { uid: String, name: String },
+    /// The device's own volume, when Ond holds a device that has one (in
+    /// bit-perfect mode); `None` when there's none to set. Sent when it
+    /// changes, whoever changed it.
+    DeviceVolume(Option<DeviceVolume>),
     /// Playback reached the end of the last queued track.
     Ended { track_id: String, token: u64 },
     /// A seek landed; playback continues from `position_secs` once buffered.
@@ -355,6 +363,8 @@ const REOPEN_DRAIN_WAIT: Duration = Duration::from_millis(250);
 /// The longest it sleeps while stopped or paused (it still notices devices
 /// coming and going). A command always wakes it at once.
 const IDLE_TICK: Duration = Duration::from_millis(250);
+/// How often the device's own volume is checked for changes made elsewhere.
+const DEVICE_VOLUME_EVERY: Duration = Duration::from_millis(500);
 
 /// The next wait after a quiet one: back to `TICK` while playing or loading,
 /// otherwise doubling up to `IDLE_TICK`, so a stopped engine barely wakes.
@@ -444,6 +454,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 known: Vec::new(),
                 lost: None,
                 restarting: false,
+                device_volume: (None, Instant::now()),
             }
             .run(cmd_rx);
             // The engine (and its backend) is gone: the device is released.
@@ -511,6 +522,8 @@ struct Engine {
     /// The session being started picks up a track that was already playing, so
     /// its start is announced as a restart rather than a new play.
     restarting: bool,
+    /// The device volume last reported, and when it was last looked at.
+    device_volume: (Option<DeviceVolume>, Instant),
 }
 
 impl Engine {
@@ -528,6 +541,7 @@ impl Engine {
             self.poll_session();
             self.poll_fetch();
             self.poll_devices();
+            self.poll_device_volume(false);
         }
         self.stop();
         if let Some(cache) = &self.cache {
@@ -597,6 +611,14 @@ impl Engine {
                 }
             },
             Command::DeviceModes(modes) => self.device_modes = modes,
+            Command::SetDeviceVolume(db) => {
+                self.backend.set_device_volume(db);
+                self.poll_device_volume(true);
+            }
+            Command::SetDeviceMute(muted) => {
+                self.backend.set_device_mute(muted);
+                self.poll_device_volume(true);
+            }
             Command::MatchRate(on) => {
                 self.backend.set_match_rate(on);
                 self.follow_rate();
@@ -851,6 +873,21 @@ impl Engine {
     }
 
     /// Describes the path from the current track to the device.
+    /// Reports the device's own volume when it changed: at once with `now`
+    /// (after a stream or the mode changed, or we set it), else a few times a
+    /// second (the system or the device's buttons can change it too).
+    fn poll_device_volume(&mut self, now: bool) {
+        if !now && self.device_volume.1.elapsed() < DEVICE_VOLUME_EVERY {
+            return;
+        }
+        let volume = self.backend.device_volume();
+        self.device_volume.1 = Instant::now();
+        if volume != self.device_volume.0 {
+            self.device_volume.0 = volume;
+            let _ = self.events.send(Event::DeviceVolume(volume));
+        }
+    }
+
     fn report_signal_path(&mut self) {
         let (Some(ring), Some(track)) = (self.ring.as_ref(), self.current()) else { return };
         let (source, device_rate) = (track.format, ring.format.sample_rate);
@@ -895,6 +932,8 @@ impl Engine {
             transcoded,
         };
         let _ = self.events.send(Event::SignalPath(path));
+        // A new stream or mode can bring a device volume, or take it away.
+        self.poll_device_volume(true);
     }
 
     /// Publishes download progress and starts the next track's prefetch when it's time.

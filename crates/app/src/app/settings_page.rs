@@ -230,6 +230,24 @@ impl OndApp {
             }
             note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched, so use the device's own volume. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices always play Normal.");
         });
+        group(ui, "Volume and notices", |ui| {
+            let (mut green, mut db, mut toast) = self.prefs.get(|s| (s.device_volume_green, s.device_volume_db, s.device_change_toast));
+            let before = (green, db, toast);
+            managed(ui, self.prefs.managed("device_volume_green"), |ui| {
+                switch_row(ui, "Green slider in bit-perfect", "When the volume sets the device's own level, the slider says so in green.", &mut green)
+            });
+            managed(ui, self.prefs.managed("device_volume_db"), |ui| {
+                setting(ui, "Show the level in dB", "The device's own level beside the slider, in bit-perfect.", |ui| {
+                    choice(ui, &crate::settings::DbReadout::ALL, &mut db, None, |d| d.label().into())
+                })
+            });
+            managed(ui, self.prefs.managed("device_change_toast"), |ui| {
+                switch_row(ui, "Notify when the output changes", "A notice names the device whenever playback moves to another.", &mut toast)
+            });
+            if (green, db, toast) != before {
+                self.actions.push(Action::Output(OutputAction::Show { green, db, toast }));
+            }
+        });
         if cfg!(target_os = "macos") {
             group(ui, "Normal mode", |ui| {
                 let mut on = self.output.match_rate();

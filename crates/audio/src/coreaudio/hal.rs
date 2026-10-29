@@ -5,7 +5,9 @@
 use objc2_core_audio::{
     AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
     AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
-    AudioObjectSetPropertyData, AudioStreamRangedDescription, kAudioDevicePropertyAvailableNominalSampleRates,
+    AudioObjectHasProperty, AudioObjectIsPropertySettable, AudioObjectSetPropertyData, AudioStreamRangedDescription,
+    kAudioDevicePropertyAvailableNominalSampleRates, kAudioDevicePropertyMute, kAudioDevicePropertyVolumeDecibels,
+    kAudioDevicePropertyVolumeRangeDecibels,
     kAudioDevicePropertyDataSource, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyHogMode,
     kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreams, kAudioDevicePropertyTransportType,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
@@ -36,6 +38,10 @@ pub type Result<T> = std::result::Result<T, String>;
 
 fn addr(selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress { mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain }
+}
+
+fn addr_at(selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope, element: u32) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress { mSelector: selector, mScope: scope, mElement: element }
 }
 
 fn check(status: i32, what: &str) -> Result<()> {
@@ -284,6 +290,76 @@ pub fn make_mixable(dev: Id) -> Result<bool> {
     format.mSampleRate = rate;
     set_physical_format(stream, &format)?;
     Ok(true)
+}
+
+/// Output-scope elements carrying `selector` that we may set: the main one,
+/// else each channel's (devices put their volume and mute on either).
+fn settable_elements(dev: Id, selector: u32) -> Vec<u32> {
+    let settable = |element: u32| {
+        let a = addr_at(selector, OUTPUT, element);
+        let mut ok: u8 = 0;
+        // SAFETY: valid pointers to stack values.
+        unsafe {
+            AudioObjectHasProperty(dev, NonNull::from(&a))
+                && AudioObjectIsPropertySettable(dev, NonNull::from(&a), NonNull::from(&mut ok).cast()) == 0
+                && ok != 0
+        }
+    };
+    if settable(kAudioObjectPropertyElementMain) {
+        return vec![kAudioObjectPropertyElementMain];
+    }
+    (1..=2).filter(|e| settable(*e)).collect()
+}
+
+fn get_at<T: Copy>(obj: Id, selector: u32, element: u32) -> Option<T> {
+    let a = addr_at(selector, OUTPUT, element);
+    let mut value = MaybeUninit::<T>::zeroed();
+    let mut size = size_of::<T>() as u32;
+    // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
+    let status = unsafe {
+        AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast())
+    };
+    // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
+    (status == 0).then(|| unsafe { value.assume_init() })
+}
+
+fn set_at<T>(obj: Id, selector: u32, element: u32, value: &T) -> Result<()> {
+    let a = addr_at(selector, OUTPUT, element);
+    // SAFETY: `value` is a valid T of the size we pass.
+    let status = unsafe {
+        AudioObjectSetPropertyData(obj, NonNull::from(&a), 0, null(), size_of::<T>() as u32, NonNull::from(value).cast())
+    };
+    check(status, "set property")
+}
+
+/// The device's own output volume: (level, min, max) in dB, the loudest
+/// channel's level when they differ. None when it has none we may set.
+pub fn volume_db(dev: Id) -> Option<(f32, f32, f32)> {
+    let elements = settable_elements(dev, kAudioDevicePropertyVolumeDecibels);
+    let range: AudioValueRange = get_at(dev, kAudioDevicePropertyVolumeRangeDecibels, *elements.first()?)?;
+    let db = elements.iter().filter_map(|e| get_at::<f32>(dev, kAudioDevicePropertyVolumeDecibels, *e)).reduce(f32::max)?;
+    Some((db, range.mMinimum as f32, range.mMaximum as f32))
+}
+
+/// Sets every channel of the device's own volume to `db`.
+pub fn set_volume_db(dev: Id, db: f32) -> Result<()> {
+    for e in settable_elements(dev, kAudioDevicePropertyVolumeDecibels) {
+        set_at(dev, kAudioDevicePropertyVolumeDecibels, e, &db)?;
+    }
+    Ok(())
+}
+
+/// Whether the device is muted, when it has a mute we may set.
+pub fn muted(dev: Id) -> Option<bool> {
+    let e = *settable_elements(dev, kAudioDevicePropertyMute).first()?;
+    get_at::<u32>(dev, kAudioDevicePropertyMute, e).map(|m| m != 0)
+}
+
+pub fn set_muted(dev: Id, muted: bool) -> Result<()> {
+    for e in settable_elements(dev, kAudioDevicePropertyMute) {
+        set_at(dev, kAudioDevicePropertyMute, e, &u32::from(muted))?;
+    }
+    Ok(())
 }
 
 type Callback = Box<dyn FnMut() + Send>;

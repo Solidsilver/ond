@@ -19,6 +19,7 @@
 
 mod cards;
 mod hw;
+mod mixer;
 mod pwdefault;
 mod reserve;
 
@@ -72,6 +73,10 @@ pub struct AlsaBackend {
     drained: Arc<AtomicBool>,
     /// The card the sound server plays to by default, as last checked.
     default: Option<u32>,
+    /// The device volume set in Ond for each card this session, by UID: put
+    /// back when we take the card again (the sound server sets its own level
+    /// whenever it has the card).
+    wanted_db: HashMap<String, f32>,
 }
 
 impl AlsaBackend {
@@ -92,6 +97,7 @@ impl AlsaBackend {
             idle_since: None,
             drained: Arc::new(AtomicBool::new(false)),
             default,
+            wanted_db: HashMap::new(),
         }
     }
 
@@ -213,6 +219,12 @@ impl AlsaBackend {
         Some(caps)
     }
 
+    /// The device we're playing to exclusively.
+    fn exclusive_pcm(&self) -> Option<Pcm> {
+        let Some(Out::Exclusive { uid, .. }) = &self.out else { return None };
+        self.pcms.iter().find(|p| &p.uid == uid).cloned()
+    }
+
     /// Stops whatever is playing, keeping the card.
     fn stop_out(&mut self) {
         match self.out.take() {
@@ -311,6 +323,26 @@ impl OutputBackend for AlsaBackend {
         events
     }
 
+    /// The card's own volume, while we hold it in bit-perfect mode.
+    fn device_volume(&mut self) -> Option<crate::DeviceVolume> {
+        mixer::volume(self.exclusive_pcm()?.card)
+    }
+
+    fn set_device_volume(&mut self, db: f32) {
+        let Some(pcm) = self.exclusive_pcm() else { return };
+        match mixer::set_volume(pcm.card, db) {
+            Ok(()) => drop(self.wanted_db.insert(pcm.uid, db)),
+            Err(e) => tracing::warn!("device volume: {e}"),
+        }
+    }
+
+    fn set_device_mute(&mut self, muted: bool) {
+        let Some(pcm) = self.exclusive_pcm() else { return };
+        if let Err(e) = mixer::set_mute(pcm.card, muted) {
+            tracing::warn!("device mute: {e}");
+        }
+    }
+
     fn set_mode(&mut self, mode: PlaybackMode) {
         self.mode = mode;
         self.why_shared = None;
@@ -376,6 +408,11 @@ impl OutputBackend for AlsaBackend {
                         r.set_busy(true);
                     }
                     self.name = format!("ALSA · {} (exclusive)", pcm.name);
+                    if let Some(db) = self.wanted_db.get(&pcm.uid)
+                        && let Err(e) = mixer::set_volume(pcm.card, *db)
+                    {
+                        tracing::warn!("device volume: {e}");
+                    }
                     self.out = Some(Out::Exclusive { stream, uid: pcm.uid });
                     return Ok(());
                 }

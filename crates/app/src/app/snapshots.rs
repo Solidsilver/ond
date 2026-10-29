@@ -1036,10 +1036,31 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Recent);
     let toolbar = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1440.0, 52.0));
-    if !click_label(h, "UMC22", toolbar) {
-        eprintln!("  (output chip not found by label; picker scene shows the closed chip)");
-    }
+    let _ = toolbar;
+    h.run_steps(2);
+    h.get_by_label("Output: UMC22").click();
     s.shoot(h, "output-picker");
+
+    // Bit-perfect on a DAC with its own volume: the slider sets it, in green, with the level in dB.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        app.bit_perfect = true;
+        app.prefs.edit(|s| {
+            s.device_modes.insert("umc".into(), crate::settings::DeviceMode::BitPerfect);
+        });
+        app.output.handle(&audio::Event::DeviceVolume(Some(audio::DeviceVolume { db: -21.5, min_db: -63.5, max_db: 0.0, muted: Some(false) })));
+        app.prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Always);
+    }
+    h.run_steps(2);
+    h.get_by_label("Output: UMC22").click();
+    s.shoot(h, "output-picker-device-volume");
+    app_mut(h).prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Adjusting);
+    app_mut(h).output.handle(&audio::Event::DeviceVolume(None));
+    app_mut(h).bit_perfect = false;
+    app_mut(h).prefs.edit(|s| {
+        s.device_modes.remove("umc");
+    });
 
     reset(h, FULL, Route::Recent);
     app_mut(h).engine.status.preview(PlayState::Buffering, 141.0, 383.0, 0.38);

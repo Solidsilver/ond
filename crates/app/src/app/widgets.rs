@@ -424,6 +424,12 @@ pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
 /// filled part in the accent, a small round knob that grows on hover.
 /// Dragging, clicking, the scroll wheel and ←/→ (when focused) all adjust it.
 pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Response {
+    let fill = Tokens::of(ui).accent;
+    thin_slider_tinted(ui, value, width, label, fill)
+}
+
+/// [`thin_slider`] with its filled part in `fill`.
+pub fn thin_slider_tinted(ui: &mut Ui, value: &mut f32, width: f32, label: &str, fill: Color32) -> Response {
     let t = Tokens::of(ui);
     let enabled = ui.is_enabled();
     let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
@@ -461,7 +467,7 @@ pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Res
         resp.mark_changed();
     }
     if ui.is_rect_visible(rect) {
-        let fill = if enabled { t.accent } else { t.muted.gamma_multiply(0.5) };
+        let fill = if enabled { fill } else { t.muted.gamma_multiply(0.5) };
         ui.painter().rect_filled(track, 1.5, t.hairline);
         let x = track.left() + track.width() * value.clamp(0.0, 1.0);
         ui.painter().rect_filled(Rect::from_min_max(track.min, egui::pos2(x, track.bottom())), 1.5, fill);

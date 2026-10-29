@@ -180,7 +180,8 @@ impl Player {
             | audio::Event::Devices { .. }
             | audio::Event::ModeChanged { .. }
             | audio::Event::DeviceLost { .. }
-            | audio::Event::DeviceReturned { .. } => {}
+            | audio::Event::DeviceReturned { .. }
+            | audio::Event::DeviceVolume(_) => {}
         }
     }
 

@@ -5,7 +5,7 @@ use super::WindowAction;
 use super::widgets::elide;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
-use super::{Action, OndApp, OutputAction};
+use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -122,7 +122,7 @@ impl OndApp {
         }
     }
 
-    /// Queue toggle · volume · output chip (laid out right to left).
+    /// Queue toggle · mini player · output control (laid out right to left).
     fn toolbar_right(&mut self, ui: &mut Ui, narrow: bool) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = 10.0;
@@ -138,30 +138,10 @@ impl OndApp {
         if icons::sized_button(ui, Icon::MiniPlayer, "Mini player (⇧⌘M)", vec2(28.0, 28.0), 14.0, Some(t.muted)).clicked() {
             self.actions.push(Action::Window(WindowAction::ToggleMini));
         }
-        let mut volume = |ui: &mut Ui, width: f32| {
-            let mut level = self.ui.prefs.volume;
-            let resp = ui
-                .add_enabled_ui(!self.bit_perfect, |ui| super::widgets::thin_slider(ui, &mut level, width, "Volume"))
-                .inner
-                .on_disabled_hover_text("In bit-perfect mode, use your DAC's or the system's volume");
-            if resp.changed() {
-                self.actions.push(Action::Output(OutputAction::Volume(level)));
-            }
-        };
-        if narrow {
-            let button = icons::sized_button(ui, Icon::Volume, "Volume", vec2(28.0, 28.0), 14.0, Some(t.muted));
-            egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| volume(ui, 140.0));
-        } else {
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                volume(ui, 80.0);
-                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                icons::paint(ui.painter(), r, Icon::Volume, t.muted);
-            });
-        }
-        if self.output.picker_ui(ui, &self.engine, &mut self.bit_perfect) {
-            self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
-        }
+        // Narrow: the icon alone; its panel has the volume.
+        let slider = (!narrow).then_some(80.0);
+        let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, slider);
+        self.output_control_out(out);
     }
 }
 

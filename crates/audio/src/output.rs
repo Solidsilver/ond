@@ -461,6 +461,18 @@ pub trait OutputBackend: Send {
     fn wants_reopen(&mut self) -> bool {
         false
     }
+    /// The device's own volume control, while we hold the device in
+    /// bit-perfect mode and it has one we may set.
+    fn device_volume(&mut self) -> Option<crate::DeviceVolume> {
+        None
+    }
+    /// Sets the device's own volume, in dB (clamped to its range, and to 0 dB).
+    fn set_device_volume(&mut self, db: f32) {
+        let _ = db;
+    }
+    fn set_device_mute(&mut self, muted: bool) {
+        let _ = muted;
+    }
     /// What the current output device can do, if the backend can tell. Used to
     /// judge whether bit-perfect playback is possible for a file.
     fn device_caps(&mut self) -> Option<DeviceCaps>;

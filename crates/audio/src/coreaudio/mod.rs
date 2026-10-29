@@ -533,6 +533,31 @@ impl OutputBackend for CoreAudioBackend {
         Some(caps)
     }
 
+    /// The device's own volume, while we hold it in bit-perfect mode.
+    fn device_volume(&mut self) -> Option<crate::DeviceVolume> {
+        let dev = self.hogged.filter(|d| self.mode == PlaybackMode::BitPerfect && hal::hog_pid(*d) == hal::own_pid())?;
+        let (db, min_db, max_db) = hal::volume_db(dev)?;
+        Some(crate::DeviceVolume { db, min_db, max_db: max_db.min(0.0), muted: hal::muted(dev) })
+    }
+
+    fn set_device_volume(&mut self, db: f32) {
+        let Some(v) = self.device_volume() else { return };
+        let dev = self.hogged.expect("held: there's a device volume");
+        if let Err(e) = hal::set_volume_db(dev, db.clamp(v.min_db, v.max_db)) {
+            tracing::warn!("device volume: {e}");
+        }
+    }
+
+    fn set_device_mute(&mut self, muted: bool) {
+        if self.device_volume().is_none() {
+            return;
+        }
+        let dev = self.hogged.expect("held: there's a device volume");
+        if let Err(e) = hal::set_muted(dev, muted) {
+            tracing::warn!("device mute: {e}");
+        }
+    }
+
     fn set_match_rate(&mut self, on: bool) {
         self.match_rate = on;
         if self.leaves_device_alone() {
@@ -756,6 +781,14 @@ mod tests {
         b.open(format, input, status).unwrap();
         let caps = b.device_caps().unwrap();
         let during = hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel));
+        let volume = b.device_volume();
+        println!("device volume while held: {volume:?}");
+        if let Some(v) = volume {
+            // Nudge it and put it back: the device's own control answers.
+            b.set_device_volume(v.db - 1.0);
+            println!("after −1 dB: {:?}", b.device_volume());
+            b.set_device_volume(v.db);
+        }
         println!("{}: {:?}\nduring {during:?}", b.name(), crate::assess(PlaybackMode::BitPerfect, &format, rate, Some(&caps)));
         std::thread::sleep(std::time::Duration::from_secs(1));
         b.close();
