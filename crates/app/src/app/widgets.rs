@@ -181,16 +181,6 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize
     segments(ui, options, &fit_segments(&natural, ui.available_width()), selected)
 }
 
-/// The two playback modes, in the order the switches show them.
-pub const MODES: [audio::PlaybackMode; 2] = [audio::PlaybackMode::Normal, audio::PlaybackMode::BitPerfect];
-
-pub fn mode_label(m: audio::PlaybackMode) -> String {
-    match m {
-        audio::PlaybackMode::Normal => "Normal".into(),
-        audio::PlaybackMode::BitPerfect => "Bit-perfect".into(),
-    }
-}
-
 /// One of `all` in a segmented control, each labelled by `label`. With a
 /// `width`, equal segments fill it; otherwise each fits its label. Writes the
 /// pick into `current` and says whether it changed.

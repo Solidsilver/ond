@@ -4,7 +4,7 @@
 //! account) lives here; the popovers keep only what's needed in the moment.
 
 use super::{AnalysisAction, OfflineAction, OutputAction, PrefsAction, WindowAction};
-use super::widgets::{MODES, choice, menu_label, mode_label, secondary, secondary_danger, section, switch, thin_slider};
+use super::widgets::{choice, menu_label, secondary, secondary_danger, section, switch, switch_tinted, thin_slider};
 use super::seek::{WaveGrid, paint_wave};
 use super::{Action, OndApp};
 use crate::icons::{self, Icon};
@@ -275,7 +275,7 @@ impl OndApp {
                 }
             }
             ui.add_space(6.0);
-            note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices always play Normal.");
+            note(ui, "With bit-perfect off, Ond shares the device with other apps, like any music app. On, it takes the device for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices can't play bit-perfect.");
         });
         group(ui, "Volume and notices", |ui| {
             let (mut green, mut db, mut toast) = self.prefs.get(|s| (s.device_volume_green, s.device_volume_db, s.device_change_toast));
@@ -366,12 +366,14 @@ impl OndApp {
         let inner = ui
             .scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(rect.left() + 54.0, top), pos2(rect.right() - 12.0, top + 400.0))), |ui| {
                 if d.can_bit_perfect() {
-                    let mut m = self.output.device_mode(d);
+                    // The same switch as the output panel's, green when on.
+                    let mut on = self.output.device_mode(d) == audio::PlaybackMode::BitPerfect;
                     let changed = managed(ui, self.output.mode_locked(Some(&d.uid)), |ui| {
-                        setting(ui, "Mode", "", |ui| choice(ui, &MODES, &mut m, None, mode_label))
+                        setting(ui, "Bit-perfect", "", |ui| switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).changed()
                     });
                     if changed {
-                        self.actions.push(Action::Output(OutputAction::DeviceMode(d.uid.clone(), m)));
+                        let mode = if on { audio::PlaybackMode::BitPerfect } else { audio::PlaybackMode::Normal };
+                        self.actions.push(Action::Output(OutputAction::DeviceMode(d.uid.clone(), mode)));
                     }
                 }
                 let named = self.prefs.get(|s| s.device_groups.clone());
