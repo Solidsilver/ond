@@ -106,7 +106,7 @@ pub use prefs_view::PrefsAction;
 pub use session::Session;
 pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, SongStats, UiState};
 pub use window_state::WindowAction;
-pub(crate) use widgets::{elide as elide_text, link as link_text, switch, thin_slider, thin_slider_tinted};
+pub(crate) use widgets::{elide as elide_text, link as link_text, switch, thin_slider, thin_slider_marked};
 
 use data::Pending;
 use pins::playable;

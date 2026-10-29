@@ -32,6 +32,18 @@ const LCD_KNOB_R: f32 = 3.5;
 /// Below this window width the toolbar tightens up.
 const NARROW_W: f32 = 900.0;
 
+/// The toolbar's volume slider.
+const SLIDER_W: f32 = 90.0;
+/// The least room between the output control and its neighbours.
+const CONTROL_GAP: f32 = 12.0;
+
+/// Where the output control goes: centred between the now-playing display's
+/// right edge and the buttons, keeping clear of both.
+pub(super) fn control_x(lcd_right: f32, buttons_left: f32, width: f32) -> f32 {
+    let centred = (lcd_right + buttons_left) / 2.0 - width / 2.0;
+    centred.min(buttons_left - CONTROL_GAP - width).max(lcd_right + CONTROL_GAP)
+}
+
 /// Where prev/play/next go: centred in the free space between `free_left`
 /// (past the traffic lights) and the now-playing display, never left of
 /// `free_left`.
@@ -79,18 +91,27 @@ impl OndApp {
         } else {
             (whole.left() + reserved(ui.ctx(), Side::Left)).max(full.left() + TRANSPORT_INSET)
         };
-        // Narrow windows fold the volume slider behind its icon so the
+        // Narrow windows fold the volume slider into the output panel so the
         // now-playing display keeps room for the title.
         let narrow = full.width() < NARROW_W;
-        let right_w = if narrow { RIGHT_W - 90.0 } else { RIGHT_W };
-        let right = Rect::from_min_max(pos2(full.right() - right_w, full.top()), full.max);
-        let right_start = ui
+        let right = Rect::from_min_max(pos2(full.right() - RIGHT_W, full.top()), full.max);
+        let buttons_start = ui
             .scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
-                self.toolbar_right(ui, narrow);
+                self.toolbar_right(ui);
                 ui.min_rect().left()
             })
             .inner;
-        let lcd = lcd_rect(full, free_left + TRANSPORT_W, right_start);
+        // The output control, centred between the display and the buttons
+        // (as the transport is on the left), never past the buttons.
+        let slider = (!narrow).then_some(SLIDER_W);
+        let control_w = self.output.control_width(self.bit_perfect, slider);
+        let lcd = lcd_rect(full, free_left + TRANSPORT_W, buttons_start - CONTROL_GAP - control_w);
+        let x = control_x(lcd.right(), buttons_start, control_w);
+        let control = Rect::from_min_max(pos2(x, full.top()), pos2(x + control_w, full.bottom()));
+        ui.scope_builder(UiBuilder::new().max_rect(control).layout(Layout::left_to_right(Align::Center)), |ui| {
+            let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, slider);
+            self.output_control_out(out);
+        });
         let x = transport_x(free_left, lcd.left());
         let left = Rect::from_min_max(pos2(x, full.top()), pos2(x + TRANSPORT_W, full.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, None));
@@ -122,8 +143,8 @@ impl OndApp {
         }
     }
 
-    /// Queue toggle · mini player · output control (laid out right to left).
-    fn toolbar_right(&mut self, ui: &mut Ui, narrow: bool) {
+    /// Queue toggle · mini player (laid out right to left).
+    fn toolbar_right(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = 10.0;
         // In narrow windows the queue is a sheet: the button shows whether it's open.
@@ -138,10 +159,6 @@ impl OndApp {
         if icons::sized_button(ui, Icon::MiniPlayer, "Mini player (⇧⌘M)", vec2(28.0, 28.0), 14.0, Some(t.muted)).clicked() {
             self.actions.push(Action::Window(WindowAction::ToggleMini));
         }
-        // Narrow: the icon alone; its panel has the volume.
-        let slider = (!narrow).then_some(80.0);
-        let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, slider);
-        self.output_control_out(out);
     }
 }
 

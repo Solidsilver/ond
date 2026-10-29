@@ -85,8 +85,10 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 |---|---|---|
 | `output_device` | A device ID to play through; leave it out to follow the system default | |
 | `device_modes.<device ID>` | `"normal"` or `"bit-perfect"` for that device | `"normal"` |
-| `device_volume_green` | In bit-perfect mode, draw the volume slider in green while it sets the device's own volume | `true` |
+| `device_volume_green` | In bit-perfect mode, a green dot in the volume slider's knob while it sets the device's own volume | `true` |
 | `device_volume_db` | When the device's own volume shows in dB beside the slider: `"adjusting"`, `"always"`, `"never"` | `"adjusting"` |
+| `device_hidden` | Device IDs left out of the output menu, e.g. `["BlackHole2ch_UID"]` | `[]` |
+| `device_groups.<device ID>` | A group name for that device in the output menu | Hardware first, then "Other" for software devices |
 | `device_change_toast` | Show a notice naming the output whenever playback moves to another device | `false` |
 | `output_match_rate` | `true` switches the device to each song's sample rate in normal mode; `false` leaves it as the system has it (macOS only) | `false` |
 

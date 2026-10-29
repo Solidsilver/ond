@@ -43,6 +43,8 @@ const ALLOWED: &[&str] = &[
     "device_volume_green",
     "device_volume_db",
     "device_change_toast",
+    "device_hidden",
+    "device_groups.*",
     "stream_cache_mb",
     "offline_dir",
     "offline_limit_gb",

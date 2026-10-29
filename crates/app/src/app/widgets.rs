@@ -424,13 +424,14 @@ pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
 /// filled part in the accent, a small round knob that grows on hover.
 /// Dragging, clicking, the scroll wheel and ←/→ (when focused) all adjust it.
 pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Response {
-    let fill = Tokens::of(ui).accent;
-    thin_slider_tinted(ui, value, width, label, fill)
+    thin_slider_marked(ui, value, width, label, None)
 }
 
-/// [`thin_slider`] with its filled part in `fill`.
-pub fn thin_slider_tinted(ui: &mut Ui, value: &mut f32, width: f32, label: &str, fill: Color32) -> Response {
+/// [`thin_slider`] with a small dot of `mark` in its knob (it says what the
+/// slider sets, e.g. a device's own volume).
+pub fn thin_slider_marked(ui: &mut Ui, value: &mut f32, width: f32, label: &str, mark: Option<Color32>) -> Response {
     let t = Tokens::of(ui);
+    let fill = t.accent;
     let enabled = ui.is_enabled();
     let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
     let knob_r = 6.0;
@@ -478,6 +479,9 @@ pub fn thin_slider_tinted(ui: &mut Ui, value: &mut f32, width: f32, label: &str,
             let knob = if ui.visuals().dark_mode { t.text } else { Color32::WHITE };
             ui.painter().circle_filled(c + vec2(0.0, 0.5), r + 0.5, Color32::from_black_alpha(40));
             ui.painter().circle(c, r, knob, egui::Stroke::new(1.0, t.hairline));
+            if let Some(mark) = mark {
+                ui.painter().circle_filled(c, r * 0.45, mark);
+            }
         }
     }
     let v = f64::from(*value);

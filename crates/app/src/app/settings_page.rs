@@ -7,6 +7,7 @@ use super::{AnalysisAction, OfflineAction, OutputAction, PrefsAction, WindowActi
 use super::widgets::{MODES, choice, menu_label, mode_label, secondary, secondary_danger, section, switch, thin_slider};
 use super::seek::{WaveGrid, paint_wave};
 use super::{Action, OndApp};
+use crate::icons::{self, Icon};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
 use crate::visuals::visualizer::Pick;
@@ -212,21 +213,59 @@ impl OndApp {
             .iter()
             .map(|d| (d.uid.clone(), d.name.clone(), d.capability_line(), self.output.device_mode(d), current == Some(d.uid.as_str()), d.can_bit_perfect()))
             .collect();
+        let t = Tokens::of(ui);
         group(ui, "Devices", |ui| {
             if rows.is_empty() {
                 setting(ui, "No output devices found", "", |_| ());
             }
             for (uid, name, caps, mode, in_use, can) in &rows {
-                let mut m = *mode;
-                let head = Head { label: name, tag: in_use.then_some("in use"), hint: caps, path: false };
-                if !can {
-                    // Bit-perfect can't mean anything here: no choice to make.
-                    row_with(ui, head, |_| ());
+                // Each device opens to its settings, as in the output menu.
+                let open = self.ui.output_open.contains(uid);
+                let (hidden, place) = self.output.menu_place(uid);
+                let hint = if hidden { format!("{caps} · hidden from the output menu") } else { caps.clone() };
+                let head = Head { label: name, tag: in_use.then_some("in use"), hint: &hint, path: false };
+                let toggled = row_with(ui, head, |ui| {
+                    let icon = if open { Icon::ChevronDown } else { Icon::ChevronRight };
+                    icons::sized_button(ui, icon, if open { "Hide settings" } else { "Settings" }, egui::vec2(28.0, 28.0), 10.0, Some(t.muted)).clicked()
+                });
+                if toggled {
+                    if open {
+                        self.ui.output_open.remove(uid);
+                    } else {
+                        self.ui.output_open.insert(uid.clone());
+                    }
+                }
+                if !open {
                     continue;
                 }
-                if managed(ui, self.output.mode_locked(Some(uid)), |ui| row_with(ui, head, |ui| choice(ui, &MODES, &mut m, None, mode_label))) {
-                    self.actions.push(Action::Output(OutputAction::DeviceMode(uid.clone(), m)));
-                }
+                ui.indent(("device", uid), |ui| {
+                    if *can {
+                        let mut m = *mode;
+                        let changed = managed(ui, self.output.mode_locked(Some(uid)), |ui| {
+                            setting(ui, "Mode", "Bit-perfect takes the device for Ond alone and sends samples untouched.", |ui| {
+                                choice(ui, &MODES, &mut m, None, mode_label)
+                            })
+                        });
+                        if changed {
+                            self.actions.push(Action::Output(OutputAction::DeviceMode(uid.clone(), m)));
+                        }
+                    }
+                    let mut shown = !hidden;
+                    if managed(ui, self.prefs.managed("device_hidden"), |ui| switch_row(ui, "Show in the output menu", "", &mut shown)) {
+                        self.actions.push(Action::Output(OutputAction::DeviceHidden(uid.clone(), !shown)));
+                    }
+                    let draft = self.ui.group_drafts.entry(uid.clone()).or_insert_with(|| place.clone());
+                    let locked = self.prefs.managed(&format!("device_groups.{uid}"));
+                    let done = managed(ui, locked, |ui| {
+                        setting(ui, "Group", "A heading to list it under in the output menu. Blank: with the other devices (software ones under \"Other\").", |ui| {
+                            let edit = ui.add(egui::TextEdit::singleline(draft).hint_text("Default").desired_width(140.0));
+                            edit.lost_focus() || (edit.changed() && draft.is_empty())
+                        })
+                    });
+                    if done && draft.trim() != place.trim() {
+                        self.actions.push(Action::Output(OutputAction::DeviceGroup(uid.clone(), draft.clone())));
+                    }
+                });
             }
             note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched, so use the device's own volume. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices always play Normal.");
         });
@@ -234,7 +273,7 @@ impl OndApp {
             let (mut green, mut db, mut toast) = self.prefs.get(|s| (s.device_volume_green, s.device_volume_db, s.device_change_toast));
             let before = (green, db, toast);
             managed(ui, self.prefs.managed("device_volume_green"), |ui| {
-                switch_row(ui, "Green slider in bit-perfect", "When the volume sets the device's own level, the slider says so in green.", &mut green)
+                switch_row(ui, "Green dot on the slider in bit-perfect", "When the volume sets the device's own level, a green dot in the slider's knob says so.", &mut green)
             });
             managed(ui, self.prefs.managed("device_volume_db"), |ui| {
                 setting(ui, "Show the level in dB", "The device's own level beside the slider, in bit-perfect.", |ui| {

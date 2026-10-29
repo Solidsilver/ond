@@ -83,6 +83,10 @@ pub enum OutputAction {
     /// How the output control shows things: the green slider, the dB readout,
     /// and a notice when the device changes.
     Show { green: bool, db: crate::settings::DbReadout, toast: bool },
+    /// Leave a device (by UID) out of the output menu, or put it back.
+    DeviceHidden(String, bool),
+    /// The group a device (by UID) goes in in the output menu; empty for the default.
+    DeviceGroup(String, String),
 }
 
 impl OndApp {
@@ -105,6 +109,8 @@ impl OndApp {
             OutputAction::MatchRate(on) => self.output.set_match_rate(on, &self.engine),
             OutputAction::DeviceVolume(db) => self.output.set_device_volume(db, &self.engine),
             OutputAction::Show { green, db, toast } => self.output.set_show(green, db, toast),
+            OutputAction::DeviceHidden(uid, hidden) => self.output.set_hidden(&uid, hidden),
+            OutputAction::DeviceGroup(uid, group) => self.output.set_group(&uid, &group),
         }
     }
 

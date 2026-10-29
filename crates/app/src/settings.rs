@@ -84,12 +84,19 @@ pub struct Settings {
     /// device stays as the system has it and Ond converts the rate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_match_rate: bool,
-    /// Bit-perfect: the volume slider, set to the device's own volume, is green.
+    /// Bit-perfect: the volume slider's knob has a green dot while it sets the device's own volume.
     #[serde(default = "yes")]
     pub device_volume_green: bool,
     /// Bit-perfect: when the device's own level shows in dB beside the slider.
     #[serde(default)]
     pub device_volume_db: DbReadout,
+    /// Devices left out of the output menu, by UID (Settings › Output lists them all).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub device_hidden: std::collections::BTreeSet<String>,
+    /// Groups the user put devices in, by UID, for the output menu. Devices
+    /// not listed go in the default groups (hardware, then "Other").
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub device_groups: std::collections::HashMap<String, String>,
     /// A toast names the output device whenever playback moves to another.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_change_toast: bool,
@@ -189,6 +196,8 @@ impl Default for Settings {
             device_volume_green: true,
             device_volume_db: DbReadout::default(),
             device_change_toast: false,
+            device_hidden: Default::default(),
+            device_groups: Default::default(),
             theme: Default::default(),
             accent: Default::default(),
             adapt_colors: false,

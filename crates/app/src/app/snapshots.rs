@@ -280,6 +280,8 @@ fn devices() -> audio::Event {
             dev("hp", "External Headphones", DeviceKind::BuiltInHeadphones, DeviceCaps { integer: false, ..caps("External Headphones", 24, 96_000, None) }, false),
             dev("tv", "LG TV", DeviceKind::Hdmi, caps("LG TV", 24, 192_000, None), false),
             dev("umc", "UMC22", DeviceKind::Usb, caps("UMC22", 16, 48_000, None), false),
+            dev("bh", "BlackHole 2ch", DeviceKind::Virtual, caps("BlackHole 2ch", 24, 768_000, None), false),
+            dev("zoom", "ZoomAudioDevice", DeviceKind::Virtual, caps("ZoomAudioDevice", 24, 192_000, None), false),
         ],
         current: Some("umc".into()),
     }
@@ -1227,6 +1229,13 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(900.0, 640.0), Route::Recent);
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
     s.shoot(h, "narrow-settings");
+
+    // A device open in Settings › Output: its mode, whether the menu shows it, its group.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).ui.output_open.insert("umc".into());
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
+    s.shoot(h, "settings-output-device");
+    app_mut(h).ui.output_open.clear();
 
     // Places and their empty states.
     reset(h, FULL, Route::Songs);
