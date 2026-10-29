@@ -72,7 +72,8 @@ pub struct Outputs {
     adjusting: bool,
     /// Devices whose settings are open in the panel's list, by UID.
     expanded: std::collections::HashSet<String>,
-    /// Names of the devices seen, by UID (to name one that's unplugged).
+    /// Names of every device seen this session, by UID: kept after a device
+    /// is unplugged, to say which one we're waiting for.
     names: HashMap<String, String>,
     /// The dB field, while it has the keyboard (its arrows step 0.5 dB, not the drag speed).
     db_field: Option<egui::Id>,
@@ -241,16 +242,19 @@ impl Outputs {
         in_use
     }
 
-    /// Switches the device in use to `mode` now, remembering it for that device
-    /// (following the system default, there's no device to remember it for).
-    pub fn set_mode_in_use(&mut self, mode: PlaybackMode, engine: &EngineHandle) {
-        if self.mode_locked(self.current.as_deref()) || self.following_system() {
-            return;
+    /// Switches the device in use to `mode` now, remembering it for that
+    /// device. Returns whether it did: not when the mode is locked, when the
+    /// device can't play bit-perfect, or following the system default (there's
+    /// no device to remember it for).
+    pub fn set_mode_in_use(&mut self, mode: PlaybackMode, engine: &EngineHandle) -> bool {
+        if self.mode_locked(self.current.as_deref()) || !self.in_use_can_bit_perfect() || self.following_system() {
+            return false;
         }
         engine.send(Command::SetMode(mode));
         if let Some(uid) = self.current.clone() {
             self.remember(&uid, mode, engine);
         }
+        true
     }
 
     fn remember(&mut self, uid: &str, mode: PlaybackMode, engine: &EngineHandle) {
@@ -275,6 +279,8 @@ impl Outputs {
                 for d in devices {
                     self.names.insert(d.uid.clone(), d.name.clone());
                 }
+                // A device that's gone has no settings to show.
+                self.expanded.retain(|uid| devices.iter().any(|d| &d.uid == uid));
             }
             audio::Event::ModeChanged { mode, .. } => return Some(*mode),
             audio::Event::DeviceVolume(v) => {
@@ -615,7 +621,7 @@ impl Outputs {
                         ui.add_space(2.0);
                     }
                     for d in devices {
-                        self.device_entry(ui, engine, &d, locked, following, bit_perfect);
+                        self.device_entry(ui, engine, &d, locked, bit_perfect);
                     }
                 }
             });
@@ -722,7 +728,7 @@ impl Outputs {
     /// One device in the list: its icon and name (what it can do on hover);
     /// a green dot when it's set to bit-perfect; a click plays through it. One
     /// that can play bit-perfect has a ▸ that opens its mode here, without switching.
-    fn device_entry(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, locked: bool, following: bool, bit_perfect: &mut bool) {
+    fn device_entry(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, locked: bool, bit_perfect: &mut bool) {
         let t = Tokens::of(ui);
         let opens = d.can_bit_perfect();
         let open = opens && self.expanded.contains(&d.uid);
@@ -749,7 +755,7 @@ impl Outputs {
         }
         let caps = d.capability_line();
         let caps = if opens && self.device_mode(d) == PlaybackMode::BitPerfect { format!("{caps} · set to bit-perfect") } else { caps };
-        let hover = if following { format!("Play through {} (leaves System output)\n{caps}", d.name) } else { format!("Play through {}\n{caps}", d.name) };
+        let hover = format!("Play through {}\n{caps}", d.name);
         let label = d.name.clone();
         let row = row.on_hover_text(hover);
         row.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, !locked, &label));
@@ -812,19 +818,21 @@ impl Outputs {
                     } else {
                         0.0
                     };
-                    let mut db = self.device_volume.map_or(v.db, |v| v.db);
+                    // The level now: the slider above may just have moved it.
+                    let now = self.device_volume.map_or(v.db, |v| v.db);
+                    let mut db = now;
                     let field = ui.add(egui::DragValue::new(&mut db).range(v.min_db..=v.max_db).speed(0.1).fixed_decimals(1).suffix(" dB"));
                     self.db_field = Some(field.id);
                     let mut target = field.changed().then_some(db);
                     if step != 0.0 {
-                        target = Some(self.device_volume.map_or(v.db, |v| v.db) + step);
+                        target = Some(now + step);
                     }
                     if field.hovered() {
                         self.scroll += ui.input(|i| i.smooth_scroll_delta.y);
                         let notches = (self.scroll / SCROLL_NOTCH).trunc();
                         if notches != 0.0 {
                             self.scroll -= notches * SCROLL_NOTCH;
-                            target = Some(self.device_volume.map_or(v.db, |v| v.db) + notches * STEP_DB);
+                            target = Some(now + notches * STEP_DB);
                         }
                     }
                     if let Some(db) = target {

@@ -99,12 +99,12 @@ impl OndApp {
                 }
             }
             OutputAction::Volume(volume) => self.set_volume(volume),
-            OutputAction::ToggleBitPerfect
-                if self.output.mode_locked(self.output.devices().1) || !self.output.in_use_can_bit_perfect() || self.output.following_system() => {}
             OutputAction::ToggleBitPerfect => {
-                self.bit_perfect = !self.bit_perfect;
-                let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-                self.output.set_mode_in_use(mode, &self.engine);
+                let on = !self.bit_perfect;
+                let mode = if on { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+                if self.output.set_mode_in_use(mode, &self.engine) {
+                    self.bit_perfect = on;
+                }
             }
             OutputAction::SelectDevice(uid) => self.output.choose(Some(uid), &self.engine),
             OutputAction::MatchRate(on) => self.output.set_match_rate(on, &self.engine),
