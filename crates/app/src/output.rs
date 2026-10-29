@@ -28,8 +28,12 @@ const BIT_PERFECT_HELP: &str = "Bit-perfect sends samples untouched and keeps ot
 /// The toolbar slider covers the top this many dB of a device's volume (most
 /// of a 100 dB range is too quiet to use); the panel's covers all of it.
 const SLIDER_SPAN_DB: f32 = 60.0;
-/// The panel's step buttons, in dB.
+/// The dB field's step: ↑↓, and a scroll notch.
 const STEP_DB: f32 = 0.5;
+/// With ⇧.
+const FINE_STEP_DB: f32 = 0.1;
+/// Scrolling this far over the dB field is one step.
+const SCROLL_NOTCH: f32 = 24.0;
 /// Room beside the slider for "−24.0 dB".
 const DB_W: f32 = 52.0;
 /// After we set the device volume, reports older than this don't move the slider back.
@@ -55,6 +59,12 @@ pub struct Outputs {
     adjusting: bool,
     /// Devices whose settings are open in the panel's list, by UID.
     expanded: std::collections::HashSet<String>,
+    /// Names of the devices seen, by UID (to name one that's unplugged).
+    names: HashMap<String, String>,
+    /// The dB field, while it has the keyboard (its arrows step 0.5 dB, not the drag speed).
+    db_field: Option<egui::Id>,
+    /// Scrolling over the dB field, not yet a whole step.
+    scroll: f32,
 }
 
 /// What the output control asks of the app this frame.
@@ -95,7 +105,7 @@ impl Outputs {
     /// engine answers with the device's mode (`ModeChanged`) and the device list.
     pub fn restore(engine: &EngineHandle, prefs: Prefs) -> Self {
         let (modes, device, playback, match_rate) =
-            prefs.get(|s| (engine_modes(&s.device_modes), s.output_device.clone(), s.playback.clone(), s.output_match_rate));
+            prefs.get(|s| (engine_modes(s), s.output_device.clone(), s.playback.clone(), s.output_match_rate));
         engine.send(Command::DeviceModes(modes));
         engine.send(Command::MatchRate(match_rate));
         engine.send(Command::SelectDevice(device));
@@ -113,7 +123,25 @@ impl Outputs {
             set_at: None,
             adjusting: false,
             expanded: Default::default(),
+            names: HashMap::new(),
+            db_field: None,
+            scroll: 0.0,
         }
+    }
+
+    /// Ond plays wherever the system does (always shared), rather than on a chosen device.
+    pub fn following_system(&self) -> bool {
+        self.prefs.get(|s| s.output_device.is_none())
+    }
+
+    /// The device chosen, while it's unplugged: (its name, the one playing instead).
+    fn waiting_for(&self) -> Option<(String, Option<String>)> {
+        let uid = self.prefs.get(|s| s.output_device.clone())?;
+        if self.current.as_ref() == Some(&uid) {
+            return None;
+        }
+        let name = self.names.get(&uid).cloned().unwrap_or_else(|| "your device".into());
+        Some((name, self.in_use_name().map(str::to_owned)))
     }
 
     /// Checks (in the background) whether `server` is on this network.
@@ -189,7 +217,8 @@ impl Outputs {
         if self.mode_locked(Some(uid)) {
             return false;
         }
-        let in_use = self.current.as_deref() == Some(uid);
+        // Following the system, everything plays shared: it's kept for later.
+        let in_use = self.current.as_deref() == Some(uid) && !self.following_system();
         self.remember(uid, mode, engine);
         if in_use {
             engine.send(Command::SetMode(mode));
@@ -200,7 +229,7 @@ impl Outputs {
     /// Switches the device in use to `mode` now, remembering it for that device
     /// (following the system default, there's no device to remember it for).
     pub fn set_mode_in_use(&mut self, mode: PlaybackMode, engine: &EngineHandle) {
-        if self.mode_locked(self.current.as_deref()) {
+        if self.mode_locked(self.current.as_deref()) || self.following_system() {
             return;
         }
         engine.send(Command::SetMode(mode));
@@ -215,7 +244,7 @@ impl Outputs {
             self.prefs.edit(|s| {
                 s.device_modes.insert(key, DeviceMode::from(mode));
             });
-            self.prefs.get(|s| engine_modes(&s.device_modes))
+            self.prefs.get(engine_modes)
         };
         engine.send(Command::DeviceModes(modes));
     }
@@ -228,6 +257,9 @@ impl Outputs {
             audio::Event::Devices { devices, current } => {
                 self.devices = devices.clone();
                 self.current = current.clone();
+                for d in devices {
+                    self.names.insert(d.uid.clone(), d.name.clone());
+                }
             }
             audio::Event::ModeChanged { mode, .. } => return Some(*mode),
             audio::Event::DeviceVolume(v) => {
@@ -340,40 +372,51 @@ impl Outputs {
     }
 
     /// Plays through the device `uid` (the system default for `None`) and remembers it.
+    /// Choosing one leaves "System output" for "Choose a device"; `None` goes back.
     pub fn choose(&mut self, uid: Option<String>, engine: &EngineHandle) {
         if self.device_locked() {
             return;
         }
-        engine.send(Command::SelectDevice(uid.clone()));
-        self.prefs.edit(|s| s.output_device = uid);
+        self.prefs.edit(|s| {
+            if uid.is_some() {
+                s.last_device = uid.clone();
+            }
+            s.output_device = uid.clone();
+        });
+        // The modes first: the engine picks the new device's as it switches.
+        engine.send(Command::DeviceModes(self.prefs.get(engine_modes)));
+        engine.send(Command::SelectDevice(uid));
     }
 
-    /// The room the output control takes (to centre it in the toolbar).
-    pub fn control_width(&self, bit_perfect: bool, slider_w: Option<f32>) -> f32 {
-        ICON_W + slider_w.map_or(0.0, |w| w + GAP + self.db_width(bit_perfect))
+    /// "Choose a device": the last one chosen, else the one playing now.
+    pub fn choose_a_device(&mut self, engine: &EngineHandle) {
+        let uid = self.prefs.get(|s| s.last_device.clone()).or_else(|| self.current.clone());
+        if uid.is_some() {
+            self.choose(uid, engine);
+        }
     }
 
-    /// Room for the dB readout beside the slider, when it can show.
-    fn db_width(&self, bit_perfect: bool) -> f32 {
-        let hw = bit_perfect && self.device_volume.is_some();
-        if hw && self.prefs.get(|s| s.device_volume_db) != DbReadout::Never { DB_W } else { 0.0 }
+    /// The room the output control takes (to centre it in the toolbar). The
+    /// same in every mode, so nothing moves when the mode does.
+    pub fn control_width(&self, slider_w: Option<f32>) -> f32 {
+        let db = self.prefs.get(|s| s.device_volume_db) == DbReadout::Always;
+        ICON_W + slider_w.map_or(0.0, |w| w + GAP + if db { DB_W } else { 0.0 })
     }
 
     /// The output control: (given `slider_w`) the volume slider, then the
     /// device's icon with its status dot and a ▾, which opens the panel. The
-    /// slider is Ond's volume in Normal mode, and the device's own in
-    /// bit-perfect mode when it has one (unusable when it doesn't).
+    /// slider is Ond's volume, or in bit-perfect the device's own when it has
+    /// one (unusable when it doesn't).
     pub fn control_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, slider_w: Option<f32>) -> ControlOut {
         let mut out = ControlOut::default();
         let hw = self.device_volume.filter(|_| *bit_perfect);
         let readout = self.prefs.get(|s| s.device_volume_db);
-        let db_w = self.db_width(*bit_perfect);
-        let width = self.control_width(*bit_perfect, slider_w);
+        let width = self.control_width(slider_w);
         ui.allocate_ui_with_layout(egui::vec2(width, 28.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             if let Some(w) = slider_w {
                 let name = self.in_use_name().unwrap_or("the device").to_owned();
-                match hw {
+                let (resp, label) = match hw {
                     Some(v) => {
                         let mut pos = slider_pos(&v);
                         let resp = crate::app::thin_slider_marked(ui, &mut pos, w, "Device volume", self.mark(ui))
@@ -381,15 +424,7 @@ impl Outputs {
                         if resp.changed() {
                             self.set_device_volume(slider_db(&v, pos), engine);
                         }
-                        self.adjusting = resp.hovered() || resp.dragged();
-                        if db_w > 0.0 {
-                            let shown = readout == DbReadout::Always || self.adjusting;
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(db_w - GAP, 18.0), egui::Sense::hover());
-                            if shown && let Some(v) = self.device_volume {
-                                let t = Tokens::of(ui);
-                                ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, db_text(&v), egui::FontId::proportional(11.0), t.muted);
-                            }
-                        }
+                        (resp, self.device_volume.map(|v| db_text(&v)))
                     }
                     None => {
                         let mut level = volume;
@@ -400,8 +435,33 @@ impl Outputs {
                         if resp.changed() {
                             out.volume = Some(level);
                         }
+                        (resp, (!*bit_perfect).then(|| format!("{:.0}%", level * 100.0)))
                     }
+                };
+                let adjusting = resp.hovered() || resp.dragged();
+                let t = Tokens::of(ui);
+                match (readout, label) {
+                    // Its own room beside the slider, in every mode.
+                    (DbReadout::Always, label) => {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(DB_W - GAP, 18.0), egui::Sense::hover());
+                        if let Some(l) = label.filter(|_| hw.is_some()) {
+                            ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, l, egui::FontId::proportional(11.0), t.muted);
+                        }
+                    }
+                    // Floating under the knob while it's adjusted: takes no room.
+                    (DbReadout::Adjusting, Some(l)) if adjusting && hw.is_some() => {
+                        let layer = egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("db-label"));
+                        let painter = ui.ctx().layer_painter(layer);
+                        let knob = resp.rect.left() + 6.0 + (resp.rect.width() - 12.0) * slider_pos(&hw.expect("matched"));
+                        let at = egui::pos2(knob, resp.rect.bottom() + 3.0);
+                        let g = painter.layout_no_wrap(l, egui::FontId::proportional(10.5), t.text);
+                        let r = egui::Rect::from_center_size(at + egui::vec2(0.0, g.size().y / 2.0 + 2.0), g.size() + egui::vec2(10.0, 4.0));
+                        painter.rect(r, 4.0, t.panel, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+                        painter.galley(r.center() - g.size() / 2.0, g, t.text);
+                    }
+                    _ => {}
                 }
+                self.adjusting = adjusting;
             }
             let icon = self.icon_button(ui);
             if std::mem::take(&mut self.open_requested) {
@@ -416,11 +476,13 @@ impl Outputs {
         out
     }
 
-    /// The device's icon with the status dot at its corner, and a ▾.
+    /// The device's icon with the status dot at its corner, and a ▾. Its id
+    /// is fixed, so the panel stays open whatever moves beside it.
     fn icon_button(&self, ui: &mut egui::Ui) -> egui::Response {
         let t = Tokens::of(ui);
         let dot = self.dot_color(ui);
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ICON_W, 28.0), egui::Sense::click());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ICON_W, 28.0), egui::Sense::hover());
+        let resp = ui.interact(rect, egui::Id::unique("output-control-icon"), egui::Sense::click());
         if ui.is_rect_visible(rect) {
             if resp.hovered() {
                 ui.painter().rect_filled(rect, 6.0, t.hover);
@@ -431,7 +493,7 @@ impl Outputs {
             let chevron = egui::Rect::from_center_size(egui::pos2(rect.right() - 8.0, rect.center().y + 1.0), egui::vec2(7.0, 7.0));
             icons::paint(ui.painter(), chevron, Icon::ChevronDown, t.muted);
         }
-        let name = self.in_use_name().unwrap_or("System default").to_owned();
+        let name = self.in_use_name().unwrap_or("System output").to_owned();
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, format!("Output: {name}")));
         let hover = match &self.signal {
             Some(p) => format!("{name}\n{}", hover_text(p)),
@@ -445,8 +507,8 @@ impl Outputs {
         self.prefs.get(|s| s.device_volume_green).then(|| Tokens::of(ui).ok)
     }
 
-    /// The panel: the device in use (pinned, with its settings), following
-    /// the system default, the other devices (grouped, scrolling), and the
+    /// The panel: System output or a chosen device, the device in use (with
+    /// its mode and volume), the other devices (grouped, scrolling), and the
     /// way to Settings.
     /// `volume_here`: the toolbar has no slider (narrow), so Ond's volume is here.
     fn popup_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, volume_here: bool, out: &mut ControlOut) {
@@ -454,42 +516,56 @@ impl Outputs {
         ui.set_width(POPUP_W);
         ui.spacing_mut().item_spacing.y = 0.0;
         let locked = self.device_locked();
-        ui.add_space(6.0);
+        let following = self.following_system();
+        ui.add_space(8.0);
+        if locked {
+            locked_note(ui);
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.add_enabled_ui(!locked, |ui| {
+                let mut system = following;
+                let labels = |b: bool| if b { "System output".to_owned() } else { "Choose a device".to_owned() };
+                if crate::app::choice(ui, &[true, false], &mut system, Some(POPUP_W - 20.0), labels) {
+                    if system {
+                        self.choose(None, engine);
+                    } else {
+                        self.choose_a_device(engine);
+                    }
+                }
+            });
+        });
+        ui.add_space(10.0);
         self.in_use_card(ui, engine, bit_perfect, volume, volume_here, out);
         ui.add_space(8.0);
         ui.separator();
-        if locked {
-            ui.add_space(4.0);
-            locked_note(ui);
-        }
-        let following = self.prefs.get(|s| s.output_device.is_none());
-        let mut follow = following;
-        ui.add_enabled_ui(!locked, |ui| setting_line(ui, "Follow system default", None, &mut follow));
-        if follow != following {
-            let uid = if follow { None } else { self.current.clone() };
-            self.choose(uid, engine);
-        }
         let groups = self.menu_groups();
-        egui::ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]).show(ui, |ui| {
-            for (name, devices) in groups {
-                if let Some(name) = name {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        ui.label(egui::RichText::new(name).size(11.0).color(t.muted));
-                    });
-                    ui.add_space(2.0);
-                }
-                for d in devices {
-                    self.device_entry(ui, engine, &d, locked, bit_perfect);
-                }
+        // Following the system, the list is there to leave it: dimmed, still a click away.
+        ui.scope(|ui| {
+            if following {
+                ui.multiply_opacity(0.55);
             }
+            egui::ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]).show(ui, |ui| {
+                for (name, devices) in groups {
+                    if let Some(name) = name {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            ui.label(egui::RichText::new(name).size(11.0).color(t.muted));
+                        });
+                        ui.add_space(2.0);
+                    }
+                    for d in devices {
+                        self.device_entry(ui, engine, &d, locked, following, bit_perfect);
+                    }
+                }
+            });
         });
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             if crate::app::link_text(ui, "Playback settings…", egui::FontId::proportional(12.0), t.accent).clicked() {
                 self.wants_settings = true;
                 ui.close();
@@ -498,83 +574,110 @@ impl Outputs {
         ui.add_space(4.0);
     }
 
-    /// The device in use: its name and what it can do, what's playing
-    /// through it, its bit-perfect switch, and in bit-perfect its own volume.
+    /// The device in use, at a glance: its icon and name with its mode pill,
+    /// what's playing through it, and the volume when it's the device's own
+    /// (or the toolbar has none). Details are in the hovers.
     fn in_use_card(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, volume_here: bool, out: &mut ControlOut) {
         let t = Tokens::of(ui);
+        let following = self.following_system();
+        if let Some((name, instead)) = self.waiting_for() {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                let text = match instead {
+                    Some(i) => format!("Waiting for {name}: playing through {i}"),
+                    None => format!("Waiting for {name}"),
+                };
+                ui.add(egui::Label::new(egui::RichText::new(text).size(11.0).color(t.muted)).wrap());
+            });
+            ui.add_space(6.0);
+        }
         let Some(d) = self.in_use().cloned() else {
             ui.horizontal(|ui| {
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 ui.label(egui::RichText::new("No output device").size(13.0).color(t.muted));
             });
             return;
         };
-        // Following the default, and this is it.
-        let following = self.prefs.get(|s| s.output_device.is_none()) && d.is_default;
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            let (g, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-            icons::paint(ui.painter(), g, kind_icon(Some(d.kind)), t.text);
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(&d.name).size(13.0).font(egui::FontId::new(13.0, crate::theme::semibold())).color(t.text));
-        });
-        ui.add_space(2.0);
-        let caps = d.capability_line();
-        let sub = match (following, caps.is_empty()) {
-            (true, true) => "System default".to_owned(),
-            (true, false) => format!("System default · {caps}"),
-            (false, _) => caps,
-        };
-        if !sub.is_empty() {
-            ui.horizontal(|ui| {
-                ui.add_space(34.0);
-                ui.label(egui::RichText::new(sub).size(11.0).color(t.muted));
-            });
-        }
+        // Name, and the mode pill at the right.
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+        let g = egui::Rect::from_center_size(egui::pos2(rect.left() + 20.0, rect.center().y), egui::vec2(16.0, 16.0));
+        icons::paint(ui.painter(), g, kind_icon(Some(d.kind)), t.text);
+        let pill_w = self.mode_pill(ui, engine, &d, following, bit_perfect, rect);
+        let name_w = rect.width() - 36.0 - pill_w - 16.0;
+        let name = crate::app::elide_text(ui, &d.name, egui::FontId::new(13.0, crate::theme::semibold()), t.text, name_w);
+        ui.painter().galley(egui::pos2(rect.left() + 36.0, rect.center().y - name.size().y / 2.0), name, t.text);
+        // What's playing through it.
         if let Some(path) = self.signal.clone() {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add_space(34.0);
-                summary_ui(ui, &path, 12.0, true);
+                ui.add_space(36.0);
+                glance_ui(ui, &path).on_hover_text(hover_text(&path));
             });
         }
-        if d.can_bit_perfect() {
+        if following && d.can_bit_perfect() {
             ui.add_space(4.0);
-            self.bit_perfect_line(ui, engine, &d, bit_perfect);
+            ui.horizontal(|ui| {
+                ui.add_space(36.0);
+                let link = crate::app::link_text(ui, "Choose a device for bit-perfect", egui::FontId::proportional(11.0), t.muted);
+                if link.clicked() {
+                    self.choose(Some(d.uid.clone()), engine);
+                }
+            });
         }
-        if *bit_perfect || volume_here {
-            ui.add_space(2.0);
+        if (*bit_perfect && !following) || volume_here {
+            ui.add_space(6.0);
             self.volume_row(ui, engine, *bit_perfect, volume, out);
         }
     }
 
-    /// "Bit-perfect" and its switch, for device `d`: sets its mode (the one in
-    /// use switches at once).
-    fn bit_perfect_line(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, bit_perfect: &mut bool) {
-        let was = self.device_mode(d) == PlaybackMode::BitPerfect;
-        let mut on = was;
+    /// The mode pill at the right of `row`, for device `d`: "Bit-perfect" in
+    /// green with a dot, or a quiet "Shared"; a click switches. None for a
+    /// device that can only play shared. Returns its width.
+    fn mode_pill(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, following: bool, bit_perfect: &mut bool, row: egui::Rect) -> f32 {
+        if !d.can_bit_perfect() || following {
+            return 0.0;
+        }
+        let t = Tokens::of(ui);
+        let on = self.device_mode(d) == PlaybackMode::BitPerfect;
+        let text = if on { "Bit-perfect" } else { "Shared" };
+        let g = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(11.0), if on { t.ok } else { t.muted });
+        let w = g.size().x + if on { 26.0 } else { 18.0 };
+        let r = egui::Rect::from_min_size(egui::pos2(row.right() - 10.0 - w, row.center().y - 10.0), egui::vec2(w, 20.0));
         let locked = self.mode_locked(Some(&d.uid));
-        ui.add_enabled_ui(!locked, |ui| setting_line(ui, "Bit-perfect", Some(BIT_PERFECT_HELP), &mut on));
-        if on != was {
-            let mode = if on { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
+        let resp = ui.interact(r, egui::Id::unique(("mode-pill", &d.uid)), if locked { egui::Sense::hover() } else { egui::Sense::click() });
+        let fill = if on { t.ok.gamma_multiply(0.14) } else if resp.hovered() { t.hover } else { t.field };
+        ui.painter().rect(r, 10.0, fill, egui::Stroke::new(1.0, if on { t.ok.gamma_multiply(0.5) } else { t.hairline }), egui::StrokeKind::Inside);
+        let mut x = r.left() + 9.0;
+        if on {
+            ui.painter().circle_filled(egui::pos2(x + 2.5, r.center().y), 3.0, t.ok);
+            x += 9.0;
+        }
+        ui.painter().galley(egui::pos2(x, r.center().y - g.size().y / 2.0), g, if on { t.ok } else { t.muted });
+        let help = if locked { crate::managed::LOCKED.to_owned() } else { format!("{BIT_PERFECT_HELP}\nClick to {}.", if on { "share the device" } else { "play bit-perfect" }) };
+        let label = format!("Bit-perfect on {}", d.name);
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, !locked, on, &label));
+        if resp.on_hover_text(help).clicked() {
+            let mode = if on { PlaybackMode::Normal } else { PlaybackMode::BitPerfect };
             if self.set_device_mode(&d.uid, mode, engine) {
-                *bit_perfect = on;
+                *bit_perfect = !on;
             }
         }
+        w
     }
 
-    /// One device in the list: a click plays through it. One that has
-    /// settings has a ▸ that opens them here, without switching.
-    fn device_entry(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, locked: bool, bit_perfect: &mut bool) {
+    /// One device in the list: its icon and name (what it can do on hover);
+    /// a green dot when it's set to bit-perfect; a click plays through it. One
+    /// that can play bit-perfect has a ▸ that opens its mode here, without switching.
+    fn device_entry(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, locked: bool, following: bool, bit_perfect: &mut bool) {
         let t = Tokens::of(ui);
         let opens = d.can_bit_perfect();
         let open = opens && self.expanded.contains(&d.uid);
         let (rect, row) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), if locked { egui::Sense::hover() } else { egui::Sense::click() });
         let chevron = egui::Rect::from_min_size(rect.min, egui::vec2(26.0, ROW_H));
-        let toggle = opens.then(|| ui.interact(chevron, ui.scope_id().with(("open", &d.uid)), egui::Sense::click()));
+        let toggle = opens.then(|| ui.interact(chevron, egui::Id::unique(("device-open", &d.uid)), egui::Sense::click()));
         if ui.is_rect_visible(rect) {
             if row.hovered() || toggle.as_ref().is_some_and(egui::Response::hovered) {
-                ui.painter().rect_filled(rect, 6.0, t.hover);
+                ui.painter().rect_filled(rect.shrink2(egui::vec2(4.0, 0.0)), 6.0, t.hover);
             }
             if opens {
                 let c = egui::Rect::from_center_size(chevron.center(), egui::vec2(8.0, 8.0));
@@ -582,18 +685,20 @@ impl Outputs {
             }
             let g = egui::Rect::from_center_size(egui::pos2(rect.left() + 36.0, rect.center().y), egui::vec2(14.0, 14.0));
             icons::paint(ui.painter(), g, kind_icon(Some(d.kind)), t.muted);
-            let caps = d.capability_line();
-            let caps_g = ui.painter().layout_no_wrap(caps, egui::FontId::proportional(11.0), t.muted);
-            let x = rect.left() + 50.0;
-            let name_w = (rect.right() - 10.0 - caps_g.size().x - 8.0 - x).max(40.0);
-            let name = crate::app::elide_text(ui, &d.name, egui::FontId::proportional(13.0), t.text, name_w);
+            let x = rect.left() + 52.0;
+            let name = crate::app::elide_text(ui, &d.name, egui::FontId::proportional(13.0), t.text, rect.right() - 30.0 - x);
+            let name_end = x + name.size().x;
             ui.painter().galley(egui::pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
-            ui.painter().galley(egui::pos2(rect.right() - 10.0 - caps_g.size().x, rect.center().y - caps_g.size().y / 2.0), caps_g, t.muted);
+            if opens && self.device_mode(d) == PlaybackMode::BitPerfect {
+                ui.painter().circle_filled(egui::pos2(name_end + 8.0, rect.center().y), 3.0, t.ok);
+            }
         }
+        let caps = d.capability_line();
+        let hover = if following { format!("Play through {} (leaves System output)\n{caps}", d.name) } else { format!("Play through {}\n{caps}", d.name) };
         let label = d.name.clone();
-        let row = row.on_hover_text(format!("Play through {label}"));
+        let row = row.on_hover_text(hover);
         row.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, !locked, &label));
-        if toggle.is_some_and(|r| r.on_hover_text(if open { "Hide settings" } else { "Settings" }).clicked()) {
+        if toggle.is_some_and(|r| r.on_hover_text(if open { "Hide its mode" } else { "Its mode" }).clicked()) {
             if open {
                 self.expanded.remove(&d.uid);
             } else {
@@ -604,7 +709,10 @@ impl Outputs {
             self.choose(Some(d.uid.clone()), engine);
         }
         if open {
-            ui.indent(("settings", &d.uid), |ui| self.bit_perfect_line(ui, engine, d, bit_perfect));
+            let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+            ui.painter().text(egui::pos2(r.left() + 52.0, r.center().y), egui::Align2::LEFT_CENTER, "Plays", egui::FontId::proportional(11.0), t.muted);
+            // The pill reads the same here; picking it doesn't switch devices.
+            self.mode_pill(ui, engine, d, false, bit_perfect, r);
             ui.add_space(4.0);
         }
     }
@@ -614,58 +722,65 @@ impl Outputs {
     /// "Other" (software devices); each alphabetical.
     fn menu_groups(&self) -> Vec<(Option<String>, Vec<DeviceInfo>)> {
         let (hidden, named) = self.prefs.get(|s| (s.device_hidden.clone(), s.device_groups.clone()));
-        let mut groups: Vec<(Option<String>, Vec<DeviceInfo>)> = Vec::new();
-        for d in self.devices.iter().filter(|d| Some(&d.uid) != self.current.as_ref() && !hidden.contains(&d.uid)) {
-            let group = named.get(&d.uid).filter(|g| !g.trim().is_empty()).map(|g| g.trim().to_owned()).or_else(|| (d.kind == DeviceKind::Virtual).then(|| OTHER.to_owned()));
-            match groups.iter_mut().find(|(g, _)| *g == group) {
-                Some((_, list)) => list.push(d.clone()),
-                None => groups.push((group, vec![d.clone()])),
-            }
-        }
-        let rank = |g: &Option<String>| match g.as_deref() {
-            None => 0,
-            Some(OTHER) => 2,
-            Some(_) => 1,
-        };
-        groups.sort_by(|a, b| rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
-        for (_, list) in &mut groups {
-            list.sort_by_key(|d| d.name.to_lowercase());
-        }
-        groups
+        let current = self.current.clone();
+        group_devices(self.devices.iter().filter(|d| Some(&d.uid) != current.as_ref() && !hidden.contains(&d.uid)), &named)
     }
 
-    /// The volume line of the card: the device's own level over its whole
-    /// range, to the step, with mute (bit-perfect); or a word on using the
-    /// device's own control when it has none Ond can set.
+    /// The volume line of the card: in bit-perfect the device's own level over
+    /// its whole range, with its exact dB (↑↓ step 0.5 dB, ⇧ 0.1; scrolling
+    /// too) and mute; Ond's volume when the toolbar has no slider; or a word
+    /// on using the device's own control when it has none Ond can set.
     fn volume_row(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: bool, volume: f32, out: &mut ControlOut) {
         let t = Tokens::of(ui);
         let name = self.in_use_name().unwrap_or("the device").to_owned();
         ui.horizontal(|ui| {
-            ui.add_space(34.0);
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add_space(36.0);
+            ui.spacing_mut().item_spacing.x = 8.0;
             match self.device_volume.filter(|_| bit_perfect) {
                 Some(v) => {
                     let mut pos = (v.db - v.min_db) / (v.max_db - v.min_db).max(0.01);
-                    let resp = crate::app::thin_slider_marked(ui, &mut pos, 110.0, "Device volume", self.mark(ui))
+                    let resp = crate::app::thin_slider_marked(ui, &mut pos, 130.0, "Device volume", self.mark(ui))
                         .on_hover_text(device_volume_hover(&name, &v));
                     if resp.changed() {
                         self.set_device_volume(v.min_db + pos * (v.max_db - v.min_db), engine);
                     }
+                    // The field's own arrows step by its drag speed: ours step like the old buttons.
+                    let focused = self.db_field.is_some_and(|id| ui.memory(|m| m.has_focus(id)));
+                    let step = if focused {
+                        ui.input_mut(|i| {
+                            let fine = i.count_and_consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowUp) as f32
+                                - i.count_and_consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowDown) as f32;
+                            let coarse = i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as f32
+                                - i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as f32;
+                            fine * FINE_STEP_DB + coarse * STEP_DB
+                        })
+                    } else {
+                        0.0
+                    };
                     let mut db = self.device_volume.map_or(v.db, |v| v.db);
                     let field = ui.add(egui::DragValue::new(&mut db).range(v.min_db..=v.max_db).speed(0.1).fixed_decimals(1).suffix(" dB"));
-                    if field.changed() {
-                        self.set_device_volume(db, engine);
+                    self.db_field = Some(field.id);
+                    let mut target = field.changed().then_some(db);
+                    if step != 0.0 {
+                        target = Some(self.device_volume.map_or(v.db, |v| v.db) + step);
                     }
-                    for (text, step, label) in [("−", -STEP_DB, "Down 0.5 dB"), ("+", STEP_DB, "Up 0.5 dB")] {
-                        let b = ui.add(egui::Button::new(egui::RichText::new(text).size(13.0).color(t.muted)).frame(false).min_size(egui::vec2(14.0, 18.0)));
-                        if b.on_hover_text(label).clicked() {
-                            let now = self.device_volume.map_or(v.db, |v| v.db);
-                            self.set_device_volume(now + step, engine);
+                    if field.hovered() {
+                        self.scroll += ui.input(|i| i.smooth_scroll_delta.y);
+                        let notches = (self.scroll / SCROLL_NOTCH).trunc();
+                        if notches != 0.0 {
+                            self.scroll -= notches * SCROLL_NOTCH;
+                            target = Some(self.device_volume.map_or(v.db, |v| v.db) + notches * STEP_DB);
                         }
                     }
+                    if let Some(db) = target {
+                        self.set_device_volume(db, engine);
+                    }
+                    field.on_hover_text("↑↓ 0.5 dB · ⇧↑↓ 0.1 dB · or scroll");
                     if let Some(muted) = self.device_volume.and_then(|v| v.muted) {
-                        let text = egui::RichText::new(if muted { "Muted" } else { "Mute" }).size(11.0).color(if muted { t.accent } else { t.muted });
-                        if ui.add(egui::Button::new(text).frame(false)).on_hover_text(if muted { "Unmute" } else { "Mute" }).clicked() {
+                        let (r, b) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                        let g = egui::Rect::from_center_size(r.center(), egui::vec2(13.0, 13.0));
+                        icons::paint(ui.painter(), g, if muted { Icon::Muted } else { Icon::Volume }, if muted { t.accent } else { t.muted });
+                        if b.on_hover_text(if muted { "Unmute" } else { "Mute" }).clicked() {
                             self.set_device_mute(!muted, engine);
                         }
                     }
@@ -679,6 +794,7 @@ impl Outputs {
                     if crate::app::thin_slider(ui, &mut level, 160.0, "Volume").changed() {
                         out.volume = Some(level);
                     }
+                    ui.label(egui::RichText::new(format!("{:.0}%", level * 100.0)).size(11.0).color(t.muted));
                 }
             }
         });
@@ -715,7 +831,7 @@ impl Outputs {
 }
 
 /// The icon for a kind of device; the speaker when there's none to go by.
-fn kind_icon(kind: Option<DeviceKind>) -> Icon {
+pub fn kind_icon(kind: Option<DeviceKind>) -> Icon {
     match kind {
         Some(DeviceKind::BuiltInHeadphones) => Icon::Headphones,
         Some(DeviceKind::Usb | DeviceKind::Other) => Icon::Dac,
@@ -829,62 +945,48 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
     rect
 }
 
-/// The signal path summary: formats and processing in muted text, the verdict
-/// (the last part) coloured: green with a check when verified, the warning
-/// colour when bit-perfect isn't possible. `strong` uses the text colour for
-/// the formats (the picker's header).
-fn summary_ui(ui: &mut egui::Ui, path: &SignalPath, size: f32, strong: bool) -> egui::Response {
-    let t = Tokens::of(ui);
-    let base = if strong { t.text } else { t.muted };
-    let summary = path.summary();
-    let mut parts: Vec<&str> = summary.split(" · ").collect();
-    let verdict = match &path.bit_perfect {
-        BitPerfectStatus::Off => None,
-        _ if parts.len() > 1 => parts.pop(),
-        _ => None,
+
+/// Puts devices in their groups for the menu: the unnamed hardware group,
+/// the user's groups, then "Other" (software devices); each alphabetical.
+pub fn group_devices<'a>(devices: impl Iterator<Item = &'a DeviceInfo>, named: &HashMap<String, String>) -> Vec<(Option<String>, Vec<DeviceInfo>)> {
+    let mut groups: Vec<(Option<String>, Vec<DeviceInfo>)> = Vec::new();
+    for d in devices {
+        let group = named.get(&d.uid).map(|g| g.trim()).filter(|g| !g.is_empty()).map(str::to_owned).or_else(|| (d.kind == DeviceKind::Virtual).then(|| OTHER.to_owned()));
+        match groups.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, list)) => list.push(d.clone()),
+            None => groups.push((group, vec![d.clone()])),
+        }
+    }
+    let rank = |g: &Option<String>| match g.as_deref() {
+        None => 0,
+        Some(OTHER) => 2,
+        Some(_) => 1,
     };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (k, part) in parts.iter().enumerate() {
-            if k > 0 {
-                ui.label(egui::RichText::new("·").size(size).color(t.muted));
-            }
-            // The default font has no arrow glyph: draw it between the formats.
-            for (i, f) in part.split(" → ").enumerate() {
-                if i > 0 {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(size * 0.9, size), egui::Sense::hover());
-                    icons::paint(ui.painter(), r, Icon::ArrowRight, t.muted);
-                }
-                ui.label(egui::RichText::new(f).size(size).color(if k == 0 { base } else { t.muted }));
-            }
-        }
-        if let Some(v) = verdict {
-            ui.label(egui::RichText::new("·").size(size).color(t.muted));
-            let color = match &path.bit_perfect {
-                BitPerfectStatus::Verified => {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(size * 0.9, size), egui::Sense::hover());
-                    icons::paint(ui.painter(), r, Icon::Check, t.ok);
-                    t.ok
-                }
-                BitPerfectStatus::Unavailable { .. } => t.warn,
-                _ => t.muted,
-            };
-            ui.label(egui::RichText::new(v).size(size).color(color));
-        }
-    })
-    .response
+    groups.sort_by(|a, b| rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
+    for (_, list) in &mut groups {
+        list.sort_by_key(|d| d.name.to_lowercase());
+    }
+    groups
 }
 
-/// A label with a switch at the right of the panel, `help` on hover.
-fn setting_line(ui: &mut egui::Ui, label: &str, help: Option<&str>, on: &mut bool) {
+/// What's playing through the device, at a glance: the format pill (the
+/// display's), and a word only when something's wrong.
+fn glance_ui(ui: &mut egui::Ui, path: &SignalPath) -> egui::Response {
     let t = Tokens::of(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-    ui.painter().text(egui::pos2(rect.left() + 34.0, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), if ui.is_enabled() { t.text } else { t.muted });
-    let area = egui::Rect::from_min_max(egui::pos2(rect.right() - 50.0, rect.top()), egui::pos2(rect.right() - 8.0, rect.bottom()));
-    let mut sw = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
-    let s = crate::app::switch(&mut sw, on, label);
-    if let Some(help) = help {
-        resp.union(s).on_hover_text(help);
+    let r = readout_of(path, String::new());
+    let size = paint_readout(ui, egui::Pos2::ZERO, &r, 11.0, false).size();
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+    paint_readout(ui, rect.right_center(), &r, 11.0, true);
+    let word = match &path.bit_perfect {
+        BitPerfectStatus::Verified => Some(("bit-perfect".to_owned(), t.ok)),
+        BitPerfectStatus::Unavailable { .. } if path.summary().ends_with("device limit") => Some(("device limit".to_owned(), t.warn)),
+        BitPerfectStatus::Unavailable { .. } => Some(("not bit-perfect".to_owned(), t.warn)),
+        BitPerfectStatus::Requested { .. } => Some(("not verified".to_owned(), t.muted)),
+        BitPerfectStatus::Off => None,
+    };
+    match word {
+        Some((w, c)) => resp.union(ui.label(egui::RichText::new(w).size(11.0).color(c))),
+        None => resp,
     }
 }
 
@@ -898,8 +1000,14 @@ fn hover_text(p: &SignalPath) -> String {
     format!("{}\n{verdict}", p.output)
 }
 
-fn engine_modes(saved: &HashMap<String, DeviceMode>) -> HashMap<String, PlaybackMode> {
-    saved.iter().map(|(uid, &m)| (uid.clone(), m.into())).collect()
+/// The modes the engine plays devices in: the remembered ones on a chosen
+/// device; following the system, none (every device plays Normal: taking the
+/// system's device for Ond alone would only send the system elsewhere).
+fn engine_modes(s: &crate::settings::Settings) -> HashMap<String, PlaybackMode> {
+    if s.output_device.is_none() {
+        return HashMap::new();
+    }
+    s.device_modes.iter().map(|(uid, &m)| (uid.clone(), m.into())).collect()
 }
 
 /// Above a part of the popup set in managed.json, which can't be changed here.

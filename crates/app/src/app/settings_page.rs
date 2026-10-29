@@ -12,7 +12,6 @@ use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFor
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
 use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
-use audio::PlaybackMode;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -209,65 +208,39 @@ impl OndApp {
 
     fn output_settings(&mut self, ui: &mut Ui) {
         let (devices, current) = self.output.devices();
-        let rows: Vec<(String, String, String, PlaybackMode, bool, bool)> = devices
-            .iter()
-            .map(|d| (d.uid.clone(), d.name.clone(), d.capability_line(), self.output.device_mode(d), current == Some(d.uid.as_str()), d.can_bit_perfect()))
-            .collect();
-        let t = Tokens::of(ui);
+        let (devices, current) = (devices.to_vec(), current.map(str::to_owned));
+        let (hidden, named) = self.prefs.get(|s| (s.device_hidden.clone(), s.device_groups.clone()));
+        // The groups as the output menu has them, then the hidden devices.
+        let mut sections = crate::output::group_devices(devices.iter().filter(|d| !hidden.contains(&d.uid)), &named);
+        let hidden_devices: Vec<audio::DeviceInfo> = devices.iter().filter(|d| hidden.contains(&d.uid)).cloned().collect();
+        let mut groups: Vec<String> = named.values().map(|g| g.trim().to_owned()).filter(|g| !g.is_empty()).collect();
+        groups.sort();
+        groups.dedup();
         group(ui, "Devices", |ui| {
-            if rows.is_empty() {
+            if devices.is_empty() {
                 setting(ui, "No output devices found", "", |_| ());
             }
-            for (uid, name, caps, mode, in_use, can) in &rows {
-                // Each device opens to its settings, as in the output menu.
-                let open = self.ui.output_open.contains(uid);
-                let (hidden, place) = self.output.menu_place(uid);
-                let hint = if hidden { format!("{caps} · hidden from the output menu") } else { caps.clone() };
-                let head = Head { label: name, tag: in_use.then_some("in use"), hint: &hint, path: false };
-                let toggled = row_with(ui, head, |ui| {
-                    let icon = if open { Icon::ChevronDown } else { Icon::ChevronRight };
-                    icons::sized_button(ui, icon, if open { "Hide settings" } else { "Settings" }, egui::vec2(28.0, 28.0), 10.0, Some(t.muted)).clicked()
-                });
-                if toggled {
-                    if open {
-                        self.ui.output_open.remove(uid);
-                    } else {
-                        self.ui.output_open.insert(uid.clone());
-                    }
+            let t = Tokens::of(ui);
+            for (k, (name, list)) in sections.drain(..).enumerate() {
+                if let Some(name) = name {
+                    ui.add_space(if k == 0 { 2.0 } else { 12.0 });
+                    ui.label(egui::RichText::new(name).size(11.5).color(t.muted));
+                    ui.add_space(4.0);
                 }
-                if !open {
-                    continue;
+                for d in &list {
+                    self.device_card(ui, d, current.as_deref() == Some(d.uid.as_str()), false, &groups);
                 }
-                ui.indent(("device", uid), |ui| {
-                    if *can {
-                        let mut m = *mode;
-                        let changed = managed(ui, self.output.mode_locked(Some(uid)), |ui| {
-                            setting(ui, "Mode", "Bit-perfect takes the device for Ond alone and sends samples untouched.", |ui| {
-                                choice(ui, &MODES, &mut m, None, mode_label)
-                            })
-                        });
-                        if changed {
-                            self.actions.push(Action::Output(OutputAction::DeviceMode(uid.clone(), m)));
-                        }
-                    }
-                    let mut shown = !hidden;
-                    if managed(ui, self.prefs.managed("device_hidden"), |ui| switch_row(ui, "Show in the output menu", "", &mut shown)) {
-                        self.actions.push(Action::Output(OutputAction::DeviceHidden(uid.clone(), !shown)));
-                    }
-                    let draft = self.ui.group_drafts.entry(uid.clone()).or_insert_with(|| place.clone());
-                    let locked = self.prefs.managed(&format!("device_groups.{uid}"));
-                    let done = managed(ui, locked, |ui| {
-                        setting(ui, "Group", "A heading to list it under in the output menu. Blank: with the other devices (software ones under \"Other\").", |ui| {
-                            let edit = ui.add(egui::TextEdit::singleline(draft).hint_text("Default").desired_width(140.0));
-                            edit.lost_focus() || (edit.changed() && draft.is_empty())
-                        })
-                    });
-                    if done && draft.trim() != place.trim() {
-                        self.actions.push(Action::Output(OutputAction::DeviceGroup(uid.clone(), draft.clone())));
-                    }
-                });
             }
-            note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched, so use the device's own volume. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices always play Normal.");
+            if !hidden_devices.is_empty() {
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Hidden from the output menu").size(11.5).color(t.muted));
+                ui.add_space(4.0);
+                for d in &hidden_devices {
+                    self.device_card(ui, d, current.as_deref() == Some(d.uid.as_str()), true, &groups);
+                }
+            }
+            ui.add_space(6.0);
+            note(ui, "Normal shares the device with other apps, like any music app. Bit-perfect takes it for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices always play Normal.");
         });
         group(ui, "Volume and notices", |ui| {
             let (mut green, mut db, mut toast) = self.prefs.get(|s| (s.device_volume_green, s.device_volume_db, s.device_change_toast));
@@ -296,6 +269,102 @@ impl OndApp {
                 note(ui, "A few seconds after playback stops, Ond puts the device back the way it found it.");
             });
         }
+    }
+
+    /// A device in Settings › Output, as in the output menu: its header opens
+    /// it (the chevron on the left), and open it sits on a card with its mode
+    /// (when it can play bit-perfect), whether the menu shows it, and its group.
+    fn device_card(&mut self, ui: &mut Ui, d: &audio::DeviceInfo, in_use: bool, hidden: bool, groups: &[String]) {
+        let t = Tokens::of(ui);
+        let open = self.ui.output_open.contains(&d.uid);
+        let (rect, head) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+        let dim = |c: egui::Color32| if hidden { c.gamma_multiply(0.5) } else { c };
+        if open {
+            // The card's top, behind the header; its body follows the settings.
+            ui.painter().rect_filled(rect, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, t.field);
+        } else if head.hovered() {
+            ui.painter().rect_filled(rect, 8.0, t.hover);
+        }
+        let chevron = Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(9.0, 9.0));
+        icons::paint(ui.painter(), chevron, if open { Icon::ChevronDown } else { Icon::ChevronRight }, t.muted);
+        let glyph = Rect::from_center_size(pos2(rect.left() + 36.0, rect.center().y), vec2(15.0, 15.0));
+        icons::paint(ui.painter(), glyph, crate::output::kind_icon(Some(d.kind)), dim(t.text));
+        let x = rect.left() + 54.0;
+        let name = ui.painter().layout_no_wrap(d.name.clone(), FontId::proportional(13.0), dim(t.text));
+        let name_w = name.size().x;
+        ui.painter().galley(pos2(x, rect.top() + 6.0), name, dim(t.text));
+        if in_use {
+            ui.painter().text(pos2(x + name_w + 8.0, rect.top() + 6.0), egui::Align2::LEFT_TOP, "in use", FontId::proportional(11.0), t.accent);
+        }
+        ui.painter().text(pos2(x, rect.top() + 23.0), egui::Align2::LEFT_TOP, d.capability_line(), FontId::proportional(11.0), dim(t.muted));
+        let label = d.name.clone();
+        head.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, &label));
+        if head.clicked() {
+            if open {
+                self.ui.output_open.remove(&d.uid);
+            } else {
+                self.ui.output_open.insert(d.uid.clone());
+            }
+        }
+        if !open {
+            ui.add_space(2.0);
+            return;
+        }
+        let top = ui.cursor().top();
+        // The card behind the settings: its place in the paint order now, its size once they're laid out.
+        let bg = ui.painter().add(egui::Shape::Noop);
+        let inner = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(rect.left() + 54.0, top), pos2(rect.right() - 12.0, top + 400.0))), |ui| {
+                if d.can_bit_perfect() {
+                    let mut m = self.output.device_mode(d);
+                    let changed = managed(ui, self.output.mode_locked(Some(&d.uid)), |ui| {
+                        setting(ui, "Mode", "", |ui| choice(ui, &MODES, &mut m, None, mode_label))
+                    });
+                    if changed {
+                        self.actions.push(Action::Output(OutputAction::DeviceMode(d.uid.clone(), m)));
+                    }
+                }
+                let mut shown = !hidden;
+                if managed(ui, self.prefs.managed("device_hidden"), |ui| switch_row(ui, "Show in the output menu", "", &mut shown)) {
+                    self.actions.push(Action::Output(OutputAction::DeviceHidden(d.uid.clone(), !shown)));
+                }
+                let (_, place) = self.output.menu_place(&d.uid);
+                let locked = self.prefs.managed(&format!("device_groups.{}", d.uid));
+                managed(ui, locked, |ui| {
+                    setting(ui, "Group", "", |ui| {
+                        let label = if place.is_empty() { "Default".to_owned() } else { place.clone() };
+                        let resp = menu_label(ui, &label, t.text);
+                        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                            ui.set_min_width(180.0);
+                            let mut pick = |ui: &mut Ui, text: &str, group: &str| {
+                                if ui.selectable_label(place == group, text).clicked() {
+                                    self.actions.push(Action::Output(OutputAction::DeviceGroup(d.uid.clone(), group.to_owned())));
+                                    ui.close();
+                                }
+                            };
+                            pick(ui, "Default", "");
+                            for g in groups {
+                                pick(ui, g, g);
+                            }
+                            ui.separator();
+                            let draft = self.ui.group_drafts.entry(d.uid.clone()).or_default();
+                            let edit = ui.add(egui::TextEdit::singleline(draft).hint_text("New group…").desired_width(170.0));
+                            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !draft.trim().is_empty() {
+                                self.actions.push(Action::Output(OutputAction::DeviceGroup(d.uid.clone(), draft.trim().to_owned())));
+                                draft.clear();
+                                ui.close();
+                            }
+                        });
+                    })
+                });
+                ui.min_rect().bottom()
+            })
+            .inner;
+        // The card under the settings, joining the header's.
+        let body = Rect::from_min_max(pos2(rect.left(), top), pos2(rect.right(), inner + 8.0));
+        ui.painter().set(bg, egui::Shape::rect_filled(body, egui::CornerRadius { nw: 0, ne: 0, sw: 8, se: 8 }, t.field));
+        ui.advance_cursor_after_rect(body);
+        ui.add_space(6.0);
     }
 
     fn offline_settings(&mut self, ui: &mut Ui) {

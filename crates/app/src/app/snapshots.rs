@@ -1050,6 +1050,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.bit_perfect = true;
         app.prefs.edit(|s| {
             s.device_modes.insert("umc".into(), crate::settings::DeviceMode::BitPerfect);
+            s.output_device = Some("umc".into());
         });
         app.output.handle(&audio::Event::DeviceVolume(Some(audio::DeviceVolume { db: -21.5, min_db: -63.5, max_db: 0.0, muted: Some(false) })));
         app.prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Always);
@@ -1062,6 +1063,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).bit_perfect = false;
     app_mut(h).prefs.edit(|s| {
         s.device_modes.remove("umc");
+        s.output_device = None;
     });
 
     reset(h, FULL, Route::Recent);
@@ -1233,9 +1235,17 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // A device open in Settings › Output: its mode, whether the menu shows it, its group.
     reset(h, FULL, Route::Recent);
     app_mut(h).ui.output_open.insert("umc".into());
+    app_mut(h).prefs.edit(|s| {
+        s.device_hidden.insert("zoom".into());
+        s.device_groups.insert("tv".into(), "Living room".into());
+    });
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Output));
     s.shoot(h, "settings-output-device");
     app_mut(h).ui.output_open.clear();
+    app_mut(h).prefs.edit(|s| {
+        s.device_hidden.clear();
+        s.device_groups.clear();
+    });
 
     // Places and their empty states.
     reset(h, FULL, Route::Songs);

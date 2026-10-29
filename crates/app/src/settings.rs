@@ -77,6 +77,10 @@ pub struct Settings {
     /// Output device UID; `None` follows the system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
+    /// The device last chosen, kept while following the system: "Choose a
+    /// device" goes back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_device: Option<String>,
     /// Playback mode the user picked per device UID.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub device_modes: std::collections::HashMap<String, DeviceMode>,
@@ -193,6 +197,7 @@ impl Default for Settings {
             output_device: None,
             device_modes: Default::default(),
             output_match_rate: false,
+            last_device: None,
             device_volume_green: true,
             device_volume_db: DbReadout::default(),
             device_change_toast: false,

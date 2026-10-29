@@ -99,7 +99,8 @@ impl OndApp {
                 }
             }
             OutputAction::Volume(volume) => self.set_volume(volume),
-            OutputAction::ToggleBitPerfect if self.output.mode_locked(self.output.devices().1) || !self.output.in_use_can_bit_perfect() => {}
+            OutputAction::ToggleBitPerfect
+                if self.output.mode_locked(self.output.devices().1) || !self.output.in_use_can_bit_perfect() || self.output.following_system() => {}
             OutputAction::ToggleBitPerfect => {
                 self.bit_perfect = !self.bit_perfect;
                 let mode = if self.bit_perfect { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
@@ -145,9 +146,14 @@ impl OndApp {
                 self.ui.toasts.remove(&back_text(name));
                 self.show_notice(format!("{name} disconnected. Playing through the system output."));
             }
-            // Offered, not switched to.
+            // The device chosen is back: play there again (the panel said it was waiting).
             audio::Event::DeviceReturned { uid, name } => {
-                self.ui.toasts.offer(back_text(name), "Switch back", Action::Output(OutputAction::SelectDevice(uid.clone())));
+                if self.prefs.get(|s| s.output_device.as_ref() == Some(uid)) {
+                    self.output.choose(Some(uid.clone()), &self.engine);
+                    self.show_notice(format!("{name} is back"));
+                } else {
+                    self.ui.toasts.offer(back_text(name), "Switch back", Action::Output(OutputAction::SelectDevice(uid.clone())));
+                }
             }
             // Playing through it again, however that came about: the offer's done.
             audio::Event::Devices { devices, current: Some(uid) } => {

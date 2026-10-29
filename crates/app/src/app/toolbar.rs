@@ -104,7 +104,7 @@ impl OndApp {
         // The output control, centred between the display and the buttons
         // (as the transport is on the left), never past the buttons.
         let slider = (!narrow).then_some(SLIDER_W);
-        let control_w = self.output.control_width(self.bit_perfect, slider);
+        let control_w = self.output.control_width(slider);
         let lcd = lcd_rect(full, free_left + TRANSPORT_W, buttons_start - CONTROL_GAP - control_w);
         let x = control_x(lcd.right(), buttons_start, control_w);
         let control = Rect::from_min_max(pos2(x, full.top()), pos2(x + control_w, full.bottom()));

@@ -62,6 +62,8 @@ pub enum Icon {
     Plus,
     /// A question mark in a circle: help, the keyboard shortcuts.
     Help,
+    /// The speaker with a slash: muted.
+    Muted,
     /// Output devices, by kind: a headband with ear cups.
     Headphones,
     /// A small box with a knob and a jack: a DAC or audio interface.
@@ -217,6 +219,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 .collect();
             painter.add(Shape::line(hook, thin));
             painter.circle_filled(p(0.0, 0.45), r * 0.09, color);
+        }
+        Icon::Muted => {
+            painter.add(tri(vec![p(-0.8, -0.3), p(-0.35, -0.3), p(0.15, -0.75), p(0.15, 0.75), p(-0.35, 0.3), p(-0.8, 0.3)]));
+            painter.line_segment([p(0.4, -0.35), p(0.9, 0.35)], line);
+            painter.line_segment([p(0.4, 0.35), p(0.9, -0.35)], line);
         }
         Icon::Headphones => {
             let band = (0..=12).map(|k| {
