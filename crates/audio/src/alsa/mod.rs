@@ -35,6 +35,9 @@ use std::time::{Duration, Instant};
 
 /// How long a card stays reserved after playback stops.
 const IDLE_RELEASE: Duration = Duration::from_secs(5);
+/// How long the sound server gets to bring a card's output back after we
+/// hand it the card, before Normal mode plays elsewhere.
+const CARD_RETURN: Duration = Duration::from_secs(3);
 /// How often the card list is checked for devices coming and going.
 const LIST_EVERY: Duration = Duration::from_secs(1);
 
@@ -152,8 +155,11 @@ impl AlsaBackend {
 
     fn release_claim(&mut self) {
         self.idle_since = None;
-        // Dropping the reservation hands the card back to the sound server.
-        self.claim = None;
+        // Dropping the reservation hands the card back to the sound server,
+        // which takes a moment to bring the card's output back.
+        if self.claim.take().is_some() {
+            self.shared.card_returning(CARD_RETURN);
+        }
     }
 
     /// What `pcm` can do, read from the device itself (we hold its card).

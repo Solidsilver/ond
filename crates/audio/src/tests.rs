@@ -1135,17 +1135,22 @@ fn on_a_16_bit_device_only_the_tracks_off_its_grid_are_dithered() {
 /// device named in `OND_TEST_DEVICE` (by UID; the default without it), in
 /// bit-perfect mode as the app drives it, playing near-silence for
 /// `OND_TEST_SECS` (5). With `OND_TEST_SWITCH` set it starts in Normal and
-/// switches mid-track, as the picker does. Prints the events and position.
+/// switches to bit-perfect mid-track, as the picker does (`back`: the other
+/// way round). Prints the events and position.
 #[test]
 #[ignore = "needs audio hardware"]
 fn engine_on_a_real_device() {
     let uid = std::env::var("OND_TEST_DEVICE").ok();
     let secs: u64 = std::env::var("OND_TEST_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    // OND_TEST_SWITCH: start in Normal and switch to bit-perfect mid-track, as
+    // the picker does; `back` the other way round.
+    let back = std::env::var("OND_TEST_SWITCH").is_ok_and(|s| s == "back");
     let switch = std::env::var_os("OND_TEST_SWITCH").is_some();
+    let (first, then) = if back { (PlaybackMode::BitPerfect, PlaybackMode::Normal) } else { (PlaybackMode::Normal, PlaybackMode::BitPerfect) };
     let dir = tempfile::tempdir().unwrap();
     let quiet = vec![1i16; 44_100 * 2 * (secs as usize + 2)];
     let engine = spawn(EngineConfig::default(), default_backend(), None);
-    let first = if switch { PlaybackMode::Normal } else { PlaybackMode::BitPerfect };
+    let first = if switch { first } else { PlaybackMode::BitPerfect };
     if let Some(uid) = &uid {
         engine.send(Command::DeviceModes(HashMap::from([(uid.clone(), first)])));
     } else {
@@ -1157,8 +1162,11 @@ fn engine_on_a_real_device() {
     let (mut last, mut switched) = (-1.0, !switch);
     while start.elapsed() < Duration::from_secs(secs) {
         if !switched && start.elapsed() > Duration::from_millis(1500) {
-            println!("{:>5} ms  -- SetMode(BitPerfect)", start.elapsed().as_millis());
-            engine.send(Command::SetMode(PlaybackMode::BitPerfect));
+            println!("{:>5} ms  -- SetMode({then:?})", start.elapsed().as_millis());
+            if let Some(uid) = &uid {
+                engine.send(Command::DeviceModes(HashMap::from([(uid.clone(), then)])));
+            }
+            engine.send(Command::SetMode(then));
             switched = true;
         }
         while let Ok(ev) = engine.events.try_recv() {

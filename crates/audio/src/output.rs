@@ -16,6 +16,7 @@ use rtrb::Consumer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Software volume changes glide over this long instead of jumping (no zipper noise).
 const GAIN_RAMP_SECS: f32 = 0.015;
@@ -490,11 +491,14 @@ pub struct CpalBackend {
     /// An ALSA card to play through instead of the default output: the
     /// output the sound server (PipeWire) has for it, when there is one.
     card: Option<u32>,
+    /// The sound server is bringing the card's output back (we just handed
+    /// it the card): wait for it until then rather than play elsewhere.
+    card_returning: Option<Instant>,
 }
 
 impl Default for CpalBackend {
     fn default() -> Self {
-        Self { name: "cpal".into(), ctl: None, drained: Arc::new(AtomicBool::new(false)), card: None }
+        Self { name: "cpal".into(), ctl: None, drained: Arc::new(AtomicBool::new(false)), card: None, card_returning: None }
     }
 }
 
@@ -506,16 +510,29 @@ impl CpalBackend {
     pub(crate) fn route_to_card(&mut self, card: Option<u32>) {
         self.card = card;
     }
+
+    /// The card was just given back to the sound server: the next stream
+    /// waits (up to `wait`) for its output to appear.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn card_returning(&mut self, wait: Duration) {
+        self.card_returning = Some(Instant::now() + wait);
+    }
 }
 
-/// The output device for `card` (see [`CpalBackend::route_to_card`]), else the default.
-fn output_device(card: Option<u32>) -> Option<cpal::Device> {
+/// The output device for `card` (see [`CpalBackend::route_to_card`]), else
+/// the default. Until `returning`, a card's missing output is waited for.
+fn output_device(card: Option<u32>, returning: Option<Instant>) -> Option<cpal::Device> {
     let host = cpal::default_host();
-    let routed = card.and_then(|card| {
+    let find = |card: u32| {
         host.output_devices()
             .ok()?
             .find(|d| d.description().ok().and_then(|desc| desc.address().and_then(alsa_card_of)) == Some(card))
-    });
+    };
+    let mut routed = card.and_then(find);
+    while let Some(card) = card.filter(|_| routed.is_none() && returning.is_some_and(|t| Instant::now() < t)) {
+        thread::sleep(Duration::from_millis(100));
+        routed = find(card);
+    }
     routed.or_else(|| host.default_output_device())
 }
 
@@ -533,7 +550,7 @@ impl OutputBackend for CpalBackend {
     }
 
     fn device_caps(&mut self) -> Option<DeviceCaps> {
-        let device = output_device(self.card)?;
+        let device = output_device(self.card, self.card_returning)?;
         let name = device.description().map(|d| d.name().to_owned()).unwrap_or_else(|_| "default".into());
         let mut configs = Vec::new();
         let mut any_float = false;
@@ -574,10 +591,10 @@ impl OutputBackend for CpalBackend {
         let closing_in = closing.clone();
         // cpal streams are !Send on some platforms, so each lives on its own thread
         // until told to close.
-        let card = self.card;
+        let (card, returning) = (self.card, self.card_returning.take());
         let handle = thread::Builder::new()
             .name("audio-output".into())
-            .spawn(move || match start_stream(format, input, status, drained, card, closing_in) {
+            .spawn(move || match start_stream(format, input, status, drained, card, returning, closing_in) {
                 Ok((stream, device)) => {
                     let _ = ready_tx.send(Ok(device));
                     let _ = ctl_rx.recv();
@@ -625,10 +642,11 @@ fn start_stream(
     status: Arc<Status>,
     drained: Arc<AtomicBool>,
     card: Option<u32>,
+    returning: Option<Instant>,
     closing: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, String), OutputError> {
     let dev_err = |e: cpal::Error| OutputError::Device(e.to_string());
-    let device = output_device(card).ok_or(OutputError::NoDevice)?;
+    let device = output_device(card, returning).ok_or(OutputError::NoDevice)?;
     let device_name = device.description().map(|d| d.name().to_owned()).unwrap_or_else(|_| "default".into());
 
     let range = device
