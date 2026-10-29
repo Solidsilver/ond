@@ -115,3 +115,34 @@ pub(super) fn device_volume_hover(name: &str, v: &DeviceVolume) -> String {
         v.max_db
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(db: f32, min_db: f32, max_db: f32) -> DeviceVolume {
+        DeviceVolume { db, min_db, max_db, muted: None }
+    }
+
+    #[test]
+    fn the_toolbar_slider_covers_the_top_of_a_wide_range_and_all_of_a_narrow_one() {
+        let wide = v(-20.0, -96.0, 0.0);
+        assert_eq!(slider_floor(&wide), -60.0);
+        assert_eq!(slider_floor(&v(-5.0, -30.0, 0.0)), -30.0, "a 30 dB range fits whole");
+        // Round trips within the span; the very bottom is the device's minimum.
+        for db in [0.0, -12.5, -59.0] {
+            let pos = slider_pos(&v(db, -96.0, 0.0));
+            assert!((slider_db(&wide, pos) - db).abs() < 0.01, "{db} → {pos}");
+        }
+        assert_eq!(slider_pos(&v(-80.0, -96.0, 0.0)), 0.0, "below the span sits at the bottom");
+        assert_eq!(slider_db(&wide, 0.0), -96.0);
+        assert_eq!(slider_pos(&v(0.0, -96.0, 0.0)), 1.0);
+    }
+
+    #[test]
+    fn db_text_rounds_and_says_muted() {
+        assert_eq!(db_text(&v(-24.0, -96.0, 0.0)), "−24.0 dB");
+        assert_eq!(db_text(&v(-0.02, -96.0, 0.0)), "0.0 dB", "no −0.0");
+        assert_eq!(db_text(&DeviceVolume { muted: Some(true), ..v(-24.0, -96.0, 0.0) }), "Muted");
+    }
+}

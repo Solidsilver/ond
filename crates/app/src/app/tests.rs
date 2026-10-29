@@ -955,6 +955,46 @@ fn a_lost_device_is_a_notice_and_its_return_an_offer_until_playing_there() {
 }
 
 #[test]
+fn choose_a_device_goes_back_to_the_device_last_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert!(app.output.following_system());
+    app.output.choose(Some("dac".into()), &app.engine);
+    assert!(!app.output.following_system());
+    app.output.choose(None, &app.engine);
+    assert!(app.output.following_system());
+    assert_eq!(app.prefs.get(|s| s.last_device.clone()).as_deref(), Some("dac"), "System output keeps the choice for later");
+    app.output.choose_a_device(&app.engine);
+    assert_eq!(app.prefs.get(|s| s.output_device.clone()).as_deref(), Some("dac"));
+}
+
+#[test]
+fn device_volume_reports_from_before_our_change_do_not_move_the_slider() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let v = |db: f32| audio::DeviceVolume { db, min_db: -60.0, max_db: 0.0, muted: Some(false) };
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-30.0))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-30.0));
+    app.output.set_device_volume(-20.0, &app.engine);
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-20.0), "shown at once");
+    // An earlier level still arriving: ours stays.
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-30.0))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-20.0));
+    // The device reports ours (near enough): settled, and later reports count again.
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-20.1))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-20.1));
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-25.0))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-25.0), "the device's own knob moved it");
+    // Past the range: clamped before it's sent or shown.
+    app.output.set_device_volume(4.0, &app.engine);
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(0.0));
+    app.output.handle(&audio::Event::DeviceVolume(None));
+    assert_eq!(app.output.device_volume(), None, "the device was let go");
+}
+
+#[test]
 fn playing_something_new_can_ask_about_what_you_added() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();

@@ -400,3 +400,41 @@ fn engine_modes(s: &crate::settings::Settings) -> HashMap<String, PlaybackMode> 
     }
     s.device_modes.iter().map(|(uid, &m)| (uid.clone(), m.into())).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(uid: &str, name: &str, kind: DeviceKind) -> DeviceInfo {
+        DeviceInfo { uid: uid.into(), name: name.into(), kind, caps: Default::default(), is_default: false }
+    }
+
+    #[test]
+    fn the_menu_groups_hardware_first_then_the_users_groups_then_other() {
+        let devices = [dev("tv", "LG TV", DeviceKind::Hdmi), dev("loop", "BlackHole", DeviceKind::Virtual), dev("dac", "DAC", DeviceKind::Usb), dev("amp", "Amp", DeviceKind::Usb), dev("mic", "Zoom", DeviceKind::Virtual)];
+        let named = HashMap::from([("tv".to_owned(), "Living room".to_owned()), ("amp".to_owned(), "  Bedroom ".to_owned()), ("mic".to_owned(), "   ".to_owned())]);
+        let groups = group_devices(devices.iter(), &named);
+        let names: Vec<(Option<String>, Vec<String>)> = groups.into_iter().map(|(g, l)| (g, l.into_iter().map(|d| d.name).collect())).collect();
+        assert_eq!(
+            names,
+            [
+                (None, vec!["DAC".to_owned()]),
+                (Some("Bedroom".to_owned()), vec!["Amp".to_owned()]),
+                (Some("Living room".to_owned()), vec!["LG TV".to_owned()]),
+                (Some(OTHER.to_owned()), vec!["BlackHole".to_owned(), "Zoom".to_owned()]),
+            ]
+        );
+        assert_eq!(group_of(&devices[3], &named), "Bedroom", "trimmed");
+        assert_eq!(group_of(&devices[4], &named), OTHER, "a blank name is no group: back to its own");
+        assert_eq!(group_of(&devices[2], &named), DEVICES);
+    }
+
+    #[test]
+    fn the_engine_hears_no_modes_while_following_the_system() {
+        let mut s = crate::settings::Settings::default();
+        s.device_modes.insert("dac".into(), DeviceMode::BitPerfect);
+        assert!(engine_modes(&s).is_empty());
+        s.output_device = Some("dac".into());
+        assert_eq!(engine_modes(&s).get("dac"), Some(&PlaybackMode::BitPerfect));
+    }
+}

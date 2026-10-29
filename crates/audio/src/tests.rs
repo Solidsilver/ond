@@ -25,6 +25,8 @@ struct FakeBackend {
     own_rate: Option<u32>,
     /// Set when the backend is dropped (the engine let go of the device).
     dropped: Arc<AtomicBool>,
+    /// The device's own volume, reported while a stream is open (as a held device's is).
+    volume: Option<DeviceVolume>,
 }
 
 impl Drop for FakeBackend {
@@ -49,6 +51,7 @@ impl FakeBackend {
             period: (Duration::from_millis(1), 512),
             own_rate: None,
             dropped: Arc::default(),
+            volume: None,
         }
     }
 
@@ -97,6 +100,22 @@ impl OutputBackend for FakeBackend {
 
     fn poll_device_events(&mut self) -> Vec<DeviceEvent> {
         std::mem::take(&mut *self.device_events.lock().unwrap())
+    }
+
+    fn device_volume(&mut self) -> Option<DeviceVolume> {
+        self.volume.filter(|_| self.stop.is_some())
+    }
+
+    fn set_device_volume(&mut self, db: f32) {
+        if let Some(v) = self.volume.as_mut().filter(|_| self.stop.is_some()) {
+            v.db = db.clamp(v.min_db, v.max_db);
+        }
+    }
+
+    fn set_device_mute(&mut self, muted: bool) {
+        if let Some(v) = self.volume.as_mut().filter(|_| self.stop.is_some()) {
+            v.muted = Some(muted);
+        }
     }
 
     fn open(&mut self, format: StreamFormat, mut input: RingInput, status: Arc<Status>) -> Result<(), OutputError> {
@@ -455,6 +474,56 @@ fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
     let seen = events_until(&engine, |e| matches!(e, Event::DeviceReturned { .. }));
     assert!(matches!(seen.last(), Some(Event::DeviceReturned { uid, .. }) if uid == "dac"));
     assert_eq!(engine.status.mode(), PlaybackMode::Normal);
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn the_device_volume_is_reported_while_a_stream_is_open_and_follows_what_is_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 0);
+    let mut backend = FakeBackend::new(caps(Some(24), 96_000));
+    backend.volume = Some(DeviceVolume { db: -20.0, min_db: -60.0, max_db: 0.0, muted: Some(false) });
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    let seen = events_until(&engine, |e| matches!(e, Event::DeviceVolume(Some(_))));
+    assert!(matches!(seen.last(), Some(Event::DeviceVolume(Some(v))) if v.db == -20.0), "{seen:?}");
+
+    engine.send(Command::SetDeviceVolume(-12.5));
+    let seen = events_until(&engine, |e| matches!(e, Event::DeviceVolume(_)));
+    assert!(matches!(seen.last(), Some(Event::DeviceVolume(Some(v))) if v.db == -12.5 && v.muted == Some(false)), "{seen:?}");
+    engine.send(Command::SetDeviceMute(true));
+    let seen = events_until(&engine, |e| matches!(e, Event::DeviceVolume(_)));
+    assert!(matches!(seen.last(), Some(Event::DeviceVolume(Some(v))) if v.db == -12.5 && v.muted == Some(true)), "{seen:?}");
+    // Past the top: the device's range holds.
+    engine.send(Command::SetDeviceVolume(6.0));
+    let seen = events_until(&engine, |e| matches!(e, Event::DeviceVolume(_)));
+    assert!(matches!(seen.last(), Some(Event::DeviceVolume(Some(v))) if v.db == 0.0), "{seen:?}");
+
+    // Stopped, the device is let go: no volume to show.
+    engine.send(Command::Stop);
+    events_until(&engine, |e| matches!(e, Event::DeviceVolume(None)));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_chosen_device_that_is_not_plugged_in_is_offered_when_it_appears() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 20, 0);
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    let (devices, events) = (backend.devices.clone(), backend.device_events.clone());
+    *devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    // The saved DAC at startup, before it's plugged in: playback goes to the default meanwhile.
+    engine.send(Command::SelectDevice(Some("dac".into())));
+    let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert!(matches!(seen.last(), Some(Event::Devices { current: Some(d), .. }) if d == "spk"), "{seen:?}");
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+
+    devices.lock().unwrap().push(device("dac", "DAC", DeviceKind::Usb));
+    events.lock().unwrap().push(DeviceEvent::ListChanged);
+    let seen = events_until(&engine, |e| matches!(e, Event::DeviceReturned { .. }));
+    assert!(matches!(seen.last(), Some(Event::DeviceReturned { uid, name }) if uid == "dac" && name == "DAC"), "{seen:?}");
     engine.send(Command::Shutdown);
 }
 

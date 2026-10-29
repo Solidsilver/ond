@@ -365,6 +365,15 @@ mod tests {
     }
 
     #[test]
+    fn the_output_control_sits_midway_between_the_display_and_the_buttons() {
+        let x = control_x(700.0, 1000.0, 100.0);
+        assert!(((x + 50.0) - 850.0).abs() < 0.5);
+        // Too tight to centre: it stays clear of the display, whatever the buttons say.
+        assert_eq!(control_x(700.0, 790.0, 100.0), 700.0 + CONTROL_GAP);
+        assert_eq!(control_x(700.0, 820.0, 100.0), 700.0 + CONTROL_GAP);
+    }
+
+    #[test]
     fn with_no_room_at_the_centre_it_fits_between_the_sides() {
         let f = full(640.0);
         let (left_end, right_start) = (138.0, f.right() - 300.0);
