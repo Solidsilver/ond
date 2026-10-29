@@ -14,8 +14,23 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const POPUP_W: f32 = 320.0;
+/// The volume slider in the toolbar and the Player's status bar.
+pub const SLIDER_W: f32 = 90.0;
+/// The output control's height (the toolbar's rows are this tall).
+const CONTROL_H: f32 = 28.0;
 /// The device icon with its ▾.
 const ICON_W: f32 = 40.0;
+/// The card's text and controls, in from the panel's left: past the device's icon.
+const CARD_INDENT: f32 = 36.0;
+/// A listed device's icon, centred here, and its name, past the ▸ and the icon.
+const LIST_ICON_X: f32 = 36.0;
+const LIST_INDENT: f32 = 52.0;
+/// The room a mode switch takes at the right of its row.
+const SWITCH_W: f32 = 50.0;
+/// Beside the panel's device slider: the dB field and the mute button.
+const FIELD_MUTE_W: f32 = 112.0;
+/// Beside the panel's Ond slider: "100%".
+const PERCENT_W: f32 = 56.0;
 /// Between the slider, the dB readout and the icon.
 const GAP: f32 = 6.0;
 /// A device in the panel's list.
@@ -47,6 +62,8 @@ const SEND_EVERY: Duration = Duration::from_millis(40);
 /// After we set the device volume, reports of other levels are earlier ones
 /// still arriving, until the device reports ours or this long has passed.
 const SETTLE: Duration = Duration::from_millis(1500);
+/// A report this close to the level we set counts as ours (devices round).
+const SETTLE_DB: f32 = 0.3;
 
 pub struct Outputs {
     /// ReplayGain, streaming quality, the device and per-device modes live here.
@@ -286,7 +303,7 @@ impl Outputs {
             audio::Event::DeviceVolume(v) => {
                 // Reports from before our last change are still coming in: keep showing ours.
                 let ours = match (v, self.awaiting) {
-                    (Some(v), Some((db, at))) if at.elapsed() < SETTLE && (v.db - db).abs() > 0.3 => Some(db),
+                    (Some(v), Some((db, at))) if at.elapsed() < SETTLE && (v.db - db).abs() > SETTLE_DB => Some(db),
                     _ => None,
                 };
                 if ours.is_none() && self.unsent.is_none() {
@@ -461,7 +478,7 @@ impl Outputs {
         let hw = self.device_volume.filter(|_| *bit_perfect);
         let readout = self.prefs.get(|s| s.device_volume_db);
         let width = self.control_width(slider_w);
-        ui.allocate_ui_with_layout(egui::vec2(width, 28.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.allocate_ui_with_layout(egui::vec2(width, CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             if let Some(w) = slider_w {
                 let name = self.in_use_name().unwrap_or("the device").to_owned();
@@ -529,7 +546,7 @@ impl Outputs {
     fn icon_button(&self, ui: &mut egui::Ui) -> egui::Response {
         let t = Tokens::of(ui);
         let dot = self.dot_color(ui);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(ICON_W, 28.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ICON_W, CONTROL_H), egui::Sense::hover());
         let resp = ui.interact(rect, egui::Id::unique("output-control-icon"), egui::Sense::click());
         if ui.is_rect_visible(rect) {
             if resp.hovered() {
@@ -678,20 +695,20 @@ impl Outputs {
             }
             None => 0.0,
         };
-        let name_w = rect.width() - 36.0 - pill_w - PILL_INSET - 8.0;
+        let name_w = rect.width() - CARD_INDENT - pill_w - PILL_INSET - 8.0;
         let name = crate::app::elide_text(ui, &d.name, egui::FontId::new(13.0, crate::theme::semibold()), t.text, name_w);
-        ui.painter().galley(egui::pos2(rect.left() + 36.0, rect.center().y - name.size().y / 2.0), name, t.text);
+        ui.painter().galley(egui::pos2(rect.left() + CARD_INDENT, rect.center().y - name.size().y / 2.0), name, t.text);
         // Only when it isn't what was asked for.
         if let Some((text, color)) = path.as_ref().and_then(|p| warning(p, &t)) {
             ui.horizontal(|ui| {
-                ui.add_space(36.0);
+                ui.add_space(CARD_INDENT);
                 ui.add(egui::Label::new(egui::RichText::new(text).size(11.0).color(color)).wrap());
             });
         }
         if d.can_bit_perfect() && !following {
             ui.add_space(2.0);
             let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
-            self.mode_switch(ui, engine, &d, bit_perfect, row, 36.0);
+            self.mode_switch(ui, engine, &d, bit_perfect, row, CARD_INDENT);
         }
         if (*bit_perfect && !following) || volume_here {
             ui.add_space(6.0);
@@ -707,10 +724,10 @@ impl Outputs {
         let mut on = was;
         let locked = self.mode_locked(Some(&d.uid));
         let help = if locked { crate::managed::LOCKED.to_owned() } else { BIT_PERFECT_HELP.to_owned() };
-        let label_rect = egui::Rect::from_min_max(egui::pos2(row.left() + indent, row.top()), egui::pos2(row.right() - 50.0, row.bottom()));
+        let label_rect = egui::Rect::from_min_max(egui::pos2(row.left() + indent, row.top()), egui::pos2(row.right() - SWITCH_W, row.bottom()));
         let label = ui.interact(label_rect, egui::Id::unique(("mode-label", &d.uid)), if locked { egui::Sense::hover() } else { egui::Sense::click() });
         ui.painter().text(egui::pos2(label_rect.left(), row.center().y), egui::Align2::LEFT_CENTER, "Bit-perfect", egui::FontId::proportional(12.0), if on { t.text } else { t.muted });
-        let area = egui::Rect::from_min_max(egui::pos2(row.right() - 50.0, row.top()), egui::pos2(row.right() - PILL_INSET, row.bottom()));
+        let area = egui::Rect::from_min_max(egui::pos2(row.right() - SWITCH_W, row.top()), egui::pos2(row.right() - PILL_INSET, row.bottom()));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
         let sw = child.add_enabled_ui(!locked, |ui| crate::app::switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).inner;
         if label.on_hover_text(&help).clicked() {
@@ -743,10 +760,10 @@ impl Outputs {
                 let c = egui::Rect::from_center_size(chevron.center(), egui::vec2(8.0, 8.0));
                 icons::paint(ui.painter(), c, if open { Icon::ChevronDown } else { Icon::ChevronRight }, t.muted);
             }
-            let g = egui::Rect::from_center_size(egui::pos2(rect.left() + 36.0, rect.center().y), egui::vec2(14.0, 14.0));
+            let g = egui::Rect::from_center_size(egui::pos2(rect.left() + LIST_ICON_X, rect.center().y), egui::vec2(14.0, 14.0));
             icons::paint(ui.painter(), g, kind_icon(Some(d.kind)), t.muted);
-            let x = rect.left() + 52.0;
-            let name = crate::app::elide_text(ui, &d.name, egui::FontId::proportional(13.0), t.text, rect.right() - 36.0 - x);
+            let x = rect.left() + LIST_INDENT;
+            let name = crate::app::elide_text(ui, &d.name, egui::FontId::proportional(13.0), t.text, rect.right() - CARD_INDENT - x);
             ui.painter().galley(egui::pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
             // Set to bit-perfect: a green dot where the card's pill has its own.
             if opens && self.device_mode(d) == PlaybackMode::BitPerfect {
@@ -772,7 +789,7 @@ impl Outputs {
         if open {
             let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
             // The same switch as the device in use has; it doesn't switch devices.
-            self.mode_switch(ui, engine, d, bit_perfect, r, 52.0);
+            self.mode_switch(ui, engine, d, bit_perfect, r, LIST_INDENT);
             ui.add_space(4.0);
         }
     }
@@ -794,13 +811,12 @@ impl Outputs {
         let t = Tokens::of(ui);
         let name = self.in_use_name().unwrap_or("the device").to_owned();
         ui.horizontal(|ui| {
-            ui.add_space(36.0);
+            ui.add_space(CARD_INDENT);
             ui.spacing_mut().item_spacing.x = 8.0;
             match self.device_volume.filter(|_| bit_perfect) {
                 Some(v) => {
                     let mut pos = (v.db - v.min_db) / (v.max_db - v.min_db).max(0.01);
-                    // The row's width, less the dB field and the mute button.
-                    let w = (ui.available_width() - 112.0).max(100.0);
+                    let w = (ui.available_width() - FIELD_MUTE_W).max(100.0);
                     let resp = self.device_slider(ui, &mut pos, w, &name, &v);
                     if resp.changed() {
                         self.set_device_volume(v.min_db + pos * (v.max_db - v.min_db), engine);
@@ -854,7 +870,7 @@ impl Outputs {
                 }
                 None => {
                     let mut level = volume;
-                    let w = (ui.available_width() - 56.0).max(100.0);
+                    let w = (ui.available_width() - PERCENT_W).max(100.0);
                     if crate::app::thin_slider(ui, &mut level, w, "Volume").changed() {
                         out.volume = Some(level);
                     }

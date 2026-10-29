@@ -32,8 +32,6 @@ const LCD_KNOB_R: f32 = 3.5;
 /// Below this window width the toolbar tightens up.
 const NARROW_W: f32 = 900.0;
 
-/// The toolbar's volume slider.
-const SLIDER_W: f32 = 90.0;
 /// The least room between the output control and its neighbours.
 const CONTROL_GAP: f32 = 12.0;
 
@@ -103,7 +101,7 @@ impl OndApp {
             .inner;
         // The output control, centred between the display and the buttons
         // (as the transport is on the left), never past the buttons.
-        let slider = (!narrow).then_some(SLIDER_W);
+        let slider = (!narrow).then_some(crate::output::SLIDER_W);
         let control_w = self.output.control_width(slider);
         let lcd = lcd_rect(full, free_left + TRANSPORT_W, buttons_start - CONTROL_GAP - control_w);
         let x = control_x(lcd.right(), buttons_start, control_w);
