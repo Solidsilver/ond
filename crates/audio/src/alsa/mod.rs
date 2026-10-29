@@ -19,6 +19,7 @@
 
 mod cards;
 mod hw;
+mod pwdefault;
 mod reserve;
 
 use crate::device::{DeviceEvent, DeviceInfo};
@@ -66,16 +67,20 @@ pub struct AlsaBackend {
     /// Nothing has played since then: the card goes back once it's long enough ago.
     idle_since: Option<Instant>,
     drained: Arc<AtomicBool>,
+    /// The card the sound server plays to by default, as last checked.
+    default: Option<u32>,
 }
 
 impl AlsaBackend {
     pub fn new() -> Self {
+        let pcms = cards::list();
+        let default = Self::find_default(&pcms);
         Self {
             shared: CpalBackend::default(),
             name: "ALSA".into(),
             selected: None,
             mode: PlaybackMode::Normal,
-            pcms: cards::list(),
+            pcms,
             listed: Instant::now(),
             caps: HashMap::new(),
             claim: None,
@@ -83,14 +88,22 @@ impl AlsaBackend {
             why_shared: None,
             idle_since: None,
             drained: Arc::new(AtomicBool::new(false)),
+            default,
         }
     }
 
-    /// The card the sound server plays to by default, by index.
-    fn default_card() -> Option<u32> {
-        use cpal::traits::{DeviceTrait, HostTrait};
-        let device = cpal::default_host().default_output_device()?;
-        device.description().ok()?.address().and_then(alsa_card_of)
+    /// The card the sound server plays to by default, by index: PipeWire's
+    /// default sink, else what cpal's default device says (PulseAudio, ALSA).
+    fn find_default(pcms: &[Pcm]) -> Option<u32> {
+        match pwdefault::default_sink_card() {
+            Some(pwdefault::Card::Index(n)) => Some(n),
+            Some(pwdefault::Card::Id(id)) => pcms.iter().find(|p| p.uid.split(':').nth(1) == Some(id.as_str())).map(|p| p.card),
+            None => {
+                use cpal::traits::{DeviceTrait, HostTrait};
+                let device = cpal::default_host().default_output_device()?;
+                device.description().ok()?.address().and_then(alsa_card_of)
+            }
+        }
     }
 
     /// The device to play on: the selected one if it's present, else the
@@ -98,7 +111,7 @@ impl AlsaBackend {
     fn resolve(&self) -> Option<Pcm> {
         let selected = self.selected.as_deref().and_then(|uid| self.pcms.iter().find(|p| p.uid == uid));
         selected
-            .or_else(|| Self::default_card().and_then(|c| self.pcms.iter().find(|p| p.card == c)))
+            .or_else(|| self.default.and_then(|c| self.pcms.iter().find(|p| p.card == c)))
             .or_else(|| self.pcms.first())
             .cloned()
     }
@@ -237,7 +250,7 @@ impl OutputBackend for AlsaBackend {
     fn devices(&mut self) -> Vec<DeviceInfo> {
         self.pcms = cards::list();
         self.listed = Instant::now();
-        let default = Self::default_card();
+        let default = self.default;
         self.pcms.iter().map(|p| self.info(p, default)).collect()
     }
 
@@ -247,12 +260,12 @@ impl OutputBackend for AlsaBackend {
             _ => None,
         };
         let pcm = open.or_else(|| self.resolve())?;
-        Some(self.info(&pcm, Self::default_card()))
+        Some(self.info(&pcm, self.default))
     }
 
     fn target_device(&mut self) -> Option<DeviceInfo> {
         let pcm = self.resolve()?;
-        Some(self.info(&pcm, Self::default_card()))
+        Some(self.info(&pcm, self.default))
     }
 
     /// A UID that isn't plugged in is kept: playback uses the default until it appears.
@@ -276,7 +289,20 @@ impl OutputBackend for AlsaBackend {
         let uids = |l: &[Pcm]| l.iter().map(|p| p.uid.clone()).collect::<Vec<_>>();
         let changed = uids(&now) != uids(&self.pcms);
         self.pcms = now;
-        if changed { vec![DeviceEvent::ListChanged] } else { Vec::new() }
+        let mut events = Vec::new();
+        if changed {
+            events.push(DeviceEvent::ListChanged);
+        }
+        // While we hold a card the sound server has no sink for it, so its
+        // default moves elsewhere: that move is ours, not the user's.
+        if self.claim.is_none() {
+            let default = Self::find_default(&self.pcms);
+            if default != self.default {
+                self.default = default;
+                events.push(DeviceEvent::DefaultChanged);
+            }
+        }
+        events
     }
 
     fn set_mode(&mut self, mode: PlaybackMode) {
