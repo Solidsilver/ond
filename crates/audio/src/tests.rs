@@ -1130,3 +1130,52 @@ fn on_a_16_bit_device_only_the_tracks_off_its_grid_are_dithered() {
     let verdict = paths_by_track(&seen).into_iter().find(|(id, _)| id == "t2").unwrap().1.bit_perfect;
     assert_eq!(verdict, BitPerfectStatus::Unavailable { reason: "device max 16/192, file is 24/44.1".into() });
 }
+
+/// Needs real hardware: the whole engine on this platform's own backend, on the
+/// device named in `OND_TEST_DEVICE` (by UID; the default without it), in
+/// bit-perfect mode as the app drives it, playing near-silence for
+/// `OND_TEST_SECS` (5). With `OND_TEST_SWITCH` set it starts in Normal and
+/// switches mid-track, as the picker does. Prints the events and position.
+#[test]
+#[ignore = "needs audio hardware"]
+fn engine_on_a_real_device() {
+    let uid = std::env::var("OND_TEST_DEVICE").ok();
+    let secs: u64 = std::env::var("OND_TEST_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let switch = std::env::var_os("OND_TEST_SWITCH").is_some();
+    let dir = tempfile::tempdir().unwrap();
+    let quiet = vec![1i16; 44_100 * 2 * (secs as usize + 2)];
+    let engine = spawn(EngineConfig::default(), default_backend(), None);
+    let first = if switch { PlaybackMode::Normal } else { PlaybackMode::BitPerfect };
+    if let Some(uid) = &uid {
+        engine.send(Command::DeviceModes(HashMap::from([(uid.clone(), first)])));
+    } else {
+        engine.send(Command::SetMode(first));
+    }
+    engine.send(Command::SelectDevice(uid.clone()));
+    engine.send(Command::Play(file_source(&dir, "quiet", &quiet)));
+    let start = Instant::now();
+    let (mut last, mut switched) = (-1.0, !switch);
+    while start.elapsed() < Duration::from_secs(secs) {
+        if !switched && start.elapsed() > Duration::from_millis(1500) {
+            println!("{:>5} ms  -- SetMode(BitPerfect)", start.elapsed().as_millis());
+            engine.send(Command::SetMode(PlaybackMode::BitPerfect));
+            switched = true;
+        }
+        while let Ok(ev) = engine.events.try_recv() {
+            match ev {
+                Event::SignalPath(p) => println!("{:>5} ms  {} · {} · {:?}", start.elapsed().as_millis(), p.output, p.summary(), p.bit_perfect),
+                Event::Devices { .. } => {}
+                ev => println!("{:>5} ms  {ev:?}", start.elapsed().as_millis()),
+            }
+        }
+        let pos = engine.status.position_secs();
+        if (pos - last).abs() > 0.9 {
+            println!("{:>5} ms  position {pos:.2} {:?}", start.elapsed().as_millis(), engine.status.state());
+            last = pos;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    println!("final position {:.2}", engine.status.position_secs());
+    assert!(engine.status.position_secs() > secs as f64 - 2.5, "it played");
+    engine.shutdown(Duration::from_secs(3));
+}
