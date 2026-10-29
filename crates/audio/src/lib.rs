@@ -154,8 +154,9 @@ pub enum Command {
     /// Play through this device (by UID), or `None` to follow the system default.
     /// The current track carries on from where it was.
     SelectDevice(Option<String>),
-    /// The modes the user picked per device UID. A device not listed gets
-    /// [`DeviceInfo::default_mode`] when playback moves to it.
+    /// The modes the user picked per device UID. A device not listed plays
+    /// Normal when playback moves to it: bit-perfect takes the device away
+    /// from every other app, so it's something to choose, never a surprise.
     DeviceModes(HashMap<String, PlaybackMode>),
     /// Sets the device's own volume, in dB (see [`Event::DeviceVolume`]).
     SetDeviceVolume(f32),
@@ -802,18 +803,17 @@ impl Engine {
     }
 
     /// Playback moved to another device: pick its mode and carry on where we were.
-    /// The mode is the one the user picked for that device; failing that, the
-    /// device's default, or Normal for a `fallback` (the device in use went away).
+    /// The mode is the one the user picked for that device, else Normal; with
+    /// no device at all, Normal for a `fallback` (the device in use went away).
     fn device_switched(&mut self, fallback: bool) {
         let resume = self.take_position();
         self.stop();
         self.known = self.backend.devices();
         let info = self.backend.current_device();
         self.current_device = info.as_ref().map(|d| d.uid.clone());
-        let unpicked = |d: &DeviceInfo| if fallback { PlaybackMode::Normal } else { d.default_mode() };
         let mode = match &info {
             Some(d) if !d.can_bit_perfect() => PlaybackMode::Normal,
-            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or_else(|| unpicked(d)),
+            Some(d) => self.device_modes.get(&d.uid).copied().unwrap_or(PlaybackMode::Normal),
             None if fallback => PlaybackMode::Normal,
             None => self.config.mode,
         };

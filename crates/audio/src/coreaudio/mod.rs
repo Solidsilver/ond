@@ -692,12 +692,11 @@ mod tests {
         let mut b = CoreAudioBackend::new().unwrap();
         for d in b.devices() {
             println!(
-                "{} [{}] {:?} default={} mode={:?} · {} · rate {:?} active {:?} bits",
+                "{} [{}] {:?} default={} · {} · rate {:?} active {:?} bits",
                 d.name,
                 d.uid,
                 d.kind,
                 d.is_default,
-                d.default_mode(),
                 d.capability_line(),
                 d.caps.nominal_rate,
                 d.caps.active_bits
