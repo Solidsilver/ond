@@ -522,9 +522,10 @@ impl CpalBackend {
 /// The output device for `card` (see [`CpalBackend::route_to_card`]), else
 /// the default. Until `returning`, a card's missing output is waited for.
 fn output_device(card: Option<u32>, returning: Option<Instant>) -> Option<cpal::Device> {
-    let host = cpal::default_host();
+    // A new host each time: one lists the devices there were when it was made.
     let find = |card: u32| {
-        host.output_devices()
+        cpal::default_host()
+            .output_devices()
             .ok()?
             .find(|d| d.description().ok().and_then(|desc| desc.address().and_then(alsa_card_of)) == Some(card))
     };
@@ -533,7 +534,7 @@ fn output_device(card: Option<u32>, returning: Option<Instant>) -> Option<cpal::
         thread::sleep(Duration::from_millis(100));
         routed = find(card);
     }
-    routed.or_else(|| host.default_output_device())
+    routed.or_else(|| cpal::default_host().default_output_device())
 }
 
 /// The ALSA card index in a device path like PipeWire's `api.alsa.path`:
