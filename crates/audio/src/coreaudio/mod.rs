@@ -332,6 +332,12 @@ impl CoreAudioBackend {
         }
         Some(DeviceInfo { uid, name: caps.name.clone(), kind, caps, is_default: default == Some(dev) })
     }
+
+    /// The device we hold for ourselves: in bit-perfect mode, hogged by this
+    /// process (another may have taken it since). Its own volume is ours to set.
+    fn held_device(&self) -> Option<hal::Id> {
+        self.hogged.filter(|d| self.mode == PlaybackMode::BitPerfect && hal::hog_pid(*d) == hal::own_pid())
+    }
 }
 
 impl Drop for CoreAudioBackend {
@@ -535,24 +541,21 @@ impl OutputBackend for CoreAudioBackend {
 
     /// The device's own volume, while we hold it in bit-perfect mode.
     fn device_volume(&mut self) -> Option<crate::DeviceVolume> {
-        let dev = self.hogged.filter(|d| self.mode == PlaybackMode::BitPerfect && hal::hog_pid(*d) == hal::own_pid())?;
+        let dev = self.held_device()?;
         let (db, min_db, max_db) = hal::volume_db(dev)?;
         Some(crate::DeviceVolume { db, min_db, max_db: max_db.min(0.0), muted: hal::muted(dev) })
     }
 
     fn set_device_volume(&mut self, db: f32) {
-        let Some(v) = self.device_volume() else { return };
-        let dev = self.hogged.expect("held: there's a device volume");
-        if let Err(e) = hal::set_volume_db(dev, db.clamp(v.min_db, v.max_db)) {
+        let Some(dev) = self.held_device() else { return };
+        let Some((_, min_db, max_db)) = hal::volume_db(dev) else { return };
+        if let Err(e) = hal::set_volume_db(dev, db.clamp(min_db, max_db.min(0.0))) {
             tracing::warn!("device volume: {e}");
         }
     }
 
     fn set_device_mute(&mut self, muted: bool) {
-        if self.device_volume().is_none() {
-            return;
-        }
-        let dev = self.hogged.expect("held: there's a device volume");
+        let Some(dev) = self.held_device().filter(|d| hal::muted(*d).is_some()) else { return };
         if let Err(e) = hal::set_muted(dev, muted) {
             tracing::warn!("device mute: {e}");
         }
