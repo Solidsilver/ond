@@ -41,6 +41,10 @@ const IDLE_RELEASE: Duration = Duration::from_secs(5);
 const CARD_RETURN: Duration = Duration::from_secs(3);
 /// How often the card list is checked for devices coming and going.
 const LIST_EVERY: Duration = Duration::from_secs(1);
+/// How often the sound server is asked which card is its default when the
+/// card list hasn't changed: asking PipeWire means a main loop, a connection
+/// and a registry round trip (up to half a second), too much for every second.
+const DEFAULT_EVERY: Duration = Duration::from_secs(5);
 
 /// A card we've reserved (or, without a session bus, simply mean to open).
 struct Claim {
@@ -71,8 +75,10 @@ pub struct AlsaBackend {
     /// Nothing has played since then: the card goes back once it's long enough ago.
     idle_since: Option<Instant>,
     drained: Arc<AtomicBool>,
-    /// The card the sound server plays to by default, as last checked.
+    /// The card the sound server plays to by default, as last checked, and
+    /// when to ask again.
     default: Option<u32>,
+    default_due: Instant,
     /// The device volume set in Ond for each card this session, by UID: put
     /// back when we take the card again (the sound server sets its own level
     /// whenever it has the card).
@@ -97,6 +103,7 @@ impl AlsaBackend {
             idle_since: None,
             drained: Arc::new(AtomicBool::new(false)),
             default,
+            default_due: Instant::now() + DEFAULT_EVERY,
             wanted_db: HashMap::new(),
         }
     }
@@ -165,6 +172,8 @@ impl AlsaBackend {
         // which takes a moment to bring the card's output back.
         if self.claim.take().is_some() {
             self.shared.card_returning(CARD_RETURN);
+            // Its default comes back to the card once it has it.
+            self.default_due = Instant::now() + CARD_RETURN;
         }
     }
 
@@ -312,8 +321,10 @@ impl OutputBackend for AlsaBackend {
             events.push(DeviceEvent::ListChanged);
         }
         // While we hold a card the sound server has no sink for it, so its
-        // default moves elsewhere: that move is ours, not the user's.
-        if self.claim.is_none() {
+        // default moves elsewhere: that move is ours, not the user's. A card
+        // coming or going usually moves it; otherwise it's checked now and then.
+        if self.claim.is_none() && (changed || Instant::now() >= self.default_due) {
+            self.default_due = Instant::now() + DEFAULT_EVERY;
             let default = Self::find_default(&self.pcms);
             if default != self.default {
                 self.default = default;
