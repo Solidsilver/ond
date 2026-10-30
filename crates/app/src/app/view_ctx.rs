@@ -76,6 +76,11 @@ impl<'a> ViewCtx<'a> {
         self.player.duration_secs(self.engine)
     }
 
+    /// Where the playing song comes from, once it's been sent to play.
+    pub fn origin(&self) -> Option<super::playing::Origin> {
+        self.player.playing_from.as_ref().map(|s| super::playing::origin(s, self.cache))
+    }
+
     /// Whether `track` can play right now (see [`super::playable`]).
     pub fn playable(&self, track: &Track) -> bool {
         super::playable(self.session, self.downloads, self.cache, self.output, track)

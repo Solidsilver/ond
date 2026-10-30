@@ -192,7 +192,10 @@ impl ViewCtx<'_> {
         let readout = self.output.readout(&self.engine.status);
         let readout_anchor = pos2(heart.left() - 2.0, rect.center().y);
         let readout_rect = readout.as_ref().map(|r| crate::output::paint_readout(ui, readout_anchor, r, 10.0, false));
-        let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
+        // Where it plays from: a small glyph left of the pill.
+        let origin = self.origin();
+        let origin_rect = origin.as_ref().map(|_| Rect::from_center_size(pos2(readout_rect.map_or(heart.left(), |r| r.left()) - 10.0, rect.center().y), vec2(12.0, 12.0)));
+        let col_right = origin_rect.or(readout_rect).map_or(heart.left(), |r| r.left()) - 10.0;
         let col_left = art.right() + 10.0;
 
         // The titles keep clear of the seek line's knob, or the waveform's bars.
@@ -214,7 +217,14 @@ impl ViewCtx<'_> {
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
             resp
         });
-        let on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
+        let mut on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
+        if let (Some(o), Some(r)) = (&origin, origin_rect) {
+            crate::icons::paint(&painter, r, o.icon(), t.muted);
+            let resp = ui.interact(r.expand(3.0), ui.scope_id().with("lcd-origin"), Sense::hover());
+            on_readout |= resp.hovered();
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, o.hint()));
+            resp.on_hover_text(o.hint());
+        }
         let open_picker = readout_resp.as_ref().is_some_and(|r| r.clicked());
         // Always clickable: the heart sits over the display, so while the pointer
         // is on it the display itself doesn't count as hovered.

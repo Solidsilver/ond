@@ -339,7 +339,7 @@ impl OndApp {
     }
 
     pub(super) fn place(&self, ui: &mut Ui, label: &str, on: bool) -> egui::Response {
-        place(ui, label, on)
+        place(ui, label, on, None)
     }
 }
 
@@ -359,7 +359,9 @@ impl ViewCtx<'_> {
         };
         for (i, p) in data.playlists.iter().enumerate() {
             let mine = owns(self.session, p);
-            let resp = place(ui, &p.name, active == Some(i));
+            // Downloaded (or on its way): the same mark as on album cards.
+            let mark = super::widgets::Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())));
+            let resp = place(ui, &p.name, active == Some(i), mark);
             // A drop target for songs dragged from any list.
             if mine && dragging {
                 let over = resp.dnd_hover_payload::<DragTracks>().is_some_and(|d| d.from.as_ref().is_none_or(|(from, _)| *from != p.id));
@@ -410,8 +412,12 @@ pub(super) fn owns(session: &super::Session, p: &subsonic::Playlist) -> bool {
     }
 }
 
-/// A place in the sidebar: its name, highlighted when `on`.
-fn place(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
+/// Room a place's download mark takes at its right end.
+const MARK_ROOM: f32 = 16.0;
+
+/// A place in the sidebar: its name, highlighted when `on`, and a download
+/// mark at the right end when it has one.
+fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::widgets::Mark>) -> egui::Response {
     let t = Tokens::of(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -424,10 +430,18 @@ fn place(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
         };
         ui.painter().rect_filled(rect, 6.0, fill);
         let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-        let g = super::widgets::elide(ui, label, font, t.text, rect.width() - 16.0);
+        let room = if mark.is_some() { MARK_ROOM } else { 0.0 };
+        let g = super::widgets::elide(ui, label, font, t.text, rect.width() - 16.0 - room);
         ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, t.text);
+        if let Some(m) = mark {
+            super::widgets::mark(ui, pos2(rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, rect.center().y), 11.0, m);
+        }
     }
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, label));
+    let label = match mark {
+        Some(m) => format!("{label}, {}", m.hint().to_lowercase()),
+        None => label.to_owned(),
+    };
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, &label));
     resp
 }
 

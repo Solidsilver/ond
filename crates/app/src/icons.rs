@@ -50,6 +50,8 @@ pub enum Icon {
     Downloaded,
     /// A cloud with a slash: the server can't be reached.
     Offline,
+    /// The server: a song that streams.
+    Cloud,
     /// Love, not yet given.
     Heart,
     /// Loved.
@@ -331,14 +333,16 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.0, -0.45), p(0.0, 0.38)], thin);
             painter.add(Shape::line(vec![p(-0.32, 0.08), p(0.0, 0.4), p(0.32, 0.08)], thin));
         }
-        Icon::Offline => {
+        Icon::Offline | Icon::Cloud => {
             let arc = (0..=12).map(|k| {
                 let a = std::f32::consts::PI * (1.0 + k as f32 / 12.0);
                 p(0.1 + 0.45 * a.cos(), 0.1 + 0.45 * a.sin())
             });
             painter.add(Shape::line(arc.collect(), line));
             painter.add(Shape::line(vec![p(-0.35, 0.1), p(-0.75, 0.1), p(-0.85, 0.35), p(-0.6, 0.55), p(0.65, 0.55), p(0.85, 0.3), p(0.55, 0.1)], line));
-            painter.line_segment([p(-0.8, -0.8), p(0.8, 0.8)], line);
+            if matches!(icon, Icon::Offline) {
+                painter.line_segment([p(-0.8, -0.8), p(0.8, 0.8)], line);
+            }
         }
         Icon::Heart => {
             // Two open halves, notch to tip, so neither sharp point gets a

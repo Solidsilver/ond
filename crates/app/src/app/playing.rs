@@ -85,6 +85,52 @@ impl player::Sources for AppSources<'_> {
     }
 }
 
+/// Where the playing song comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Origin {
+    Downloaded,
+    /// The server's stream: the original file, or converted.
+    Streamed(Option<audio::Transcode>),
+    /// Streamed earlier and kept in the stream cache (played offline).
+    Cached,
+}
+
+impl Origin {
+    /// What it plays from, as the Player's details say it.
+    pub fn source_text(&self) -> String {
+        match self {
+            Origin::Downloaded => "Your downloads".into(),
+            Origin::Streamed(None) => "The server, original file".into(),
+            Origin::Streamed(Some(t)) => format!("The server, as {} {} kbps", t.format.to_uppercase(), t.kbps),
+            Origin::Cached => "The stream cache".into(),
+        }
+    }
+
+    /// The glyph's hover text in the now-playing display.
+    pub fn hint(&self) -> String {
+        match self {
+            Origin::Downloaded => "Downloaded".into(),
+            Origin::Streamed(None) => "Streaming the original file".into(),
+            Origin::Streamed(Some(t)) => format!("Streaming as {} {} kbps", t.format.to_uppercase(), t.kbps),
+            Origin::Cached => "Streamed earlier; playing the copy in the stream cache".into(),
+        }
+    }
+
+    pub fn icon(&self) -> crate::icons::Icon {
+        match self {
+            Origin::Downloaded => crate::icons::Icon::Downloaded,
+            Origin::Streamed(_) | Origin::Cached => crate::icons::Icon::Cloud,
+        }
+    }
+}
+
+/// Where `src` plays from: a file in the stream cache, another file (a
+/// download), or the server.
+pub(super) fn origin(src: &TrackSource, cache: &StreamCache) -> Origin {
+    let Some(path) = src.url.strip_prefix("file://") else { return Origin::Streamed(src.transcode.clone()) };
+    if std::path::Path::new(path).starts_with(cache.dir()) { Origin::Cached } else { Origin::Downloaded }
+}
+
 /// `track`'s file in the stream cache, as it plays now.
 pub(super) fn cached(cache: &StreamCache, output: &Outputs, track: &Track) -> Option<std::path::PathBuf> {
     crate::local::cached(cache, output.transcode().as_ref(), track)
