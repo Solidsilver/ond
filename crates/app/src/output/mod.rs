@@ -7,7 +7,7 @@ mod panel;
 mod readout;
 mod volume;
 
-pub use readout::{Readout, paint_readout, verdict_text};
+pub use readout::{Readout, paint_readout};
 
 use crate::icons::Icon;
 use crate::playback::{NetworkProbe, PlaybackPrefs};

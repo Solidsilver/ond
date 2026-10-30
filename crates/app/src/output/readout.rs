@@ -145,15 +145,11 @@ pub(super) fn warning(path: &SignalPath, t: &Tokens) -> Option<(String, egui::Co
 }
 
 pub(super) fn hover_text(p: &SignalPath) -> String {
-    format!("{}\n{}", p.output, verdict_text(p))
-}
-
-/// The output mode, and the bit-perfect verdict in words.
-pub fn verdict_text(p: &SignalPath) -> String {
-    match &p.bit_perfect {
+    let verdict = match &p.bit_perfect {
         BitPerfectStatus::Off => "Normal mode, with volume, ReplayGain and resampling".to_owned(),
         BitPerfectStatus::Verified => "Bit-perfect, with exclusive access, the file's sample rate and untouched samples".to_owned(),
         BitPerfectStatus::Requested { reason } => format!("Bit-perfect requested, not verified: {reason}"),
         BitPerfectStatus::Unavailable { reason, .. } => format!("Not bit-perfect: {reason}"),
-    }
+    };
+    format!("{}\n{verdict}", p.output)
 }

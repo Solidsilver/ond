@@ -34,13 +34,14 @@ pub(super) fn popover(resp: &egui::Response, origin: Option<&Origin>, track: &Tr
         }
         kv_text(ui, "Output", &p.output);
         let t = Tokens::of(ui);
-        let color = match p.bit_perfect {
-            BitPerfectStatus::Verified => t.ok,
-            BitPerfectStatus::Unavailable { .. } => t.warn,
-            _ => t.muted,
+        let (mode, color) = match &p.bit_perfect {
+            BitPerfectStatus::Off => ("Normal".to_owned(), t.text),
+            BitPerfectStatus::Verified => ("Bit-perfect".to_owned(), t.ok),
+            BitPerfectStatus::Requested { reason } => (format!("Bit-perfect, not verified ({reason})"), t.muted),
+            BitPerfectStatus::Unavailable { reason, .. } => (format!("Not bit-perfect ({reason})"), t.warn),
         };
-        super::widgets::kv_row(ui, "", |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(crate::output::verdict_text(p)).size(11.0).color(color)).wrap());
+        super::widgets::kv_row(ui, "Mode", |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(mode).size(super::widgets::KV_VALUE).color(color)).wrap());
         });
         if underruns > 0 {
             kv_text(ui, "Dropouts", &crate::fmt::thousands(underruns as usize));

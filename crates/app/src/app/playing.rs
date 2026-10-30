@@ -118,8 +118,8 @@ impl Origin {
         let with_kind = |from: &str| kind.as_ref().map_or_else(|| from.to_owned(), |k| format!("{from} · {k}"));
         match self {
             Origin::Downloaded => with_kind("Downloaded"),
-            Origin::Streamed(None) => with_kind("Server"),
-            Origin::Streamed(Some(t)) => format!("Server, converted to {} {} kbps", t.format.to_uppercase(), t.kbps),
+            Origin::Streamed(None) => with_kind("Streaming"),
+            Origin::Streamed(Some(t)) => format!("Streaming, converted to {} {} kbps", t.format.to_uppercase(), t.kbps),
             Origin::Cached => with_kind("Stream cache"),
         }
     }
