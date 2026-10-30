@@ -96,30 +96,31 @@ pub enum Origin {
 }
 
 impl Origin {
-    /// What it plays from, as the Player's details say it.
-    pub fn source_text(&self) -> String {
+    /// On this computer: a download, or the stream cache's copy.
+    pub fn is_local(&self) -> bool {
+        !matches!(self, Origin::Streamed(_))
+    }
+
+    /// A few words, for the format pill's hover.
+    pub fn short(&self) -> &'static str {
         match self {
-            Origin::Downloaded => "Your downloads".into(),
-            Origin::Streamed(None) => "The server, original file".into(),
-            Origin::Streamed(Some(t)) => format!("The server, as {} {} kbps", t.format.to_uppercase(), t.kbps),
-            Origin::Cached => "The stream cache".into(),
+            Origin::Downloaded => "Downloaded",
+            Origin::Streamed(None) => "Streaming",
+            Origin::Streamed(Some(_)) => "Streaming, converted",
+            Origin::Cached => "Stream cache",
         }
     }
 
-    /// The glyph's hover text in the now-playing display.
-    pub fn hint(&self) -> String {
+    /// The signal path's Source row: where from, and the file type (or
+    /// what the server converts to).
+    pub fn source_text(&self, track: &Track) -> String {
+        let kind = track.suffix.as_deref().map(str::to_uppercase);
+        let with_kind = |from: &str| kind.as_ref().map_or_else(|| from.to_owned(), |k| format!("{from} · {k}"));
         match self {
-            Origin::Downloaded => "Downloaded".into(),
-            Origin::Streamed(None) => "Streaming the original file".into(),
-            Origin::Streamed(Some(t)) => format!("Streaming as {} {} kbps", t.format.to_uppercase(), t.kbps),
-            Origin::Cached => "Streamed earlier; playing the copy in the stream cache".into(),
-        }
-    }
-
-    pub fn icon(&self) -> crate::icons::Icon {
-        match self {
-            Origin::Downloaded => crate::icons::Icon::Downloaded,
-            Origin::Streamed(_) | Origin::Cached => crate::icons::Icon::Cloud,
+            Origin::Downloaded => with_kind("Downloaded"),
+            Origin::Streamed(None) => with_kind("Server"),
+            Origin::Streamed(Some(t)) => format!("Server, converted to {} {} kbps", t.format.to_uppercase(), t.kbps),
+            Origin::Cached => with_kind("Stream cache"),
         }
     }
 }

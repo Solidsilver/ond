@@ -421,10 +421,10 @@ impl OndApp {
             super::offline_page::set_aside_notice(ui, &snap, &mut self.actions, "settings");
             ui.add_space(28.0);
         }
-        group(ui, "Working offline", |ui| {
+        group(ui, "Without the server", |ui| {
             let mut on = self.session.work_offline;
             if managed(ui, self.prefs.managed("work_offline"), |ui| {
-                switch_row(ui, "Work offline", "Ond doesn't connect to the server, and only music that plays offline shows: downloads, and songs streamed recently enough to still be cached.", &mut on)
+                switch_row(ui, "Offline mode", "Don't connect to the server. Show only music that plays without it: downloads, and songs streamed recently enough to still be cached.", &mut on)
             }) {
                 self.actions.push(Action::Offline(OfflineAction::WorkOffline(on)));
             }

@@ -230,10 +230,10 @@ impl OndApp {
                     Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
                     None => "Connected".to_owned(),
                 },
-                ServerState::Offline { .. } => "Offline · reconnecting".to_owned(),
+                ServerState::Offline { .. } => "Can't reach server · retrying".to_owned(),
                 ServerState::Connecting { .. } => "Connecting…".to_owned(),
                 ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
-                ServerState::WorkingOffline { .. } => "Working offline".to_owned(),
+                ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
             };
             let status_color = match state {
                 ServerState::Offline { .. } | ServerState::SignIn { .. } => t.warn,
@@ -289,7 +289,7 @@ impl OndApp {
             if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…", "") {
                 self.actions.push(Action::SignInAgain);
             }
-            let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Work offline", true) };
+            let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
             if !self.prefs.managed("work_offline") && menu_item(ui, label, "") {
                 self.actions.push(Action::Offline(super::OfflineAction::WorkOffline(on)));
             }
@@ -511,10 +511,10 @@ impl ServerState {
         match self {
             ServerState::Connected { host } => host,
             ServerState::Syncing { label, .. } => label,
-            ServerState::Offline { .. } => "Offline",
+            ServerState::Offline { .. } => "Can't reach server",
             ServerState::Connecting { .. } => "Connecting…",
             ServerState::SignIn { .. } => "Sign in again",
-            ServerState::WorkingOffline { .. } => "Working offline",
+            ServerState::WorkingOffline { .. } => "Offline mode",
         }
     }
 
@@ -525,7 +525,7 @@ impl ServerState {
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
             ServerState::SignIn { .. } => "The server didn't accept the saved login. Downloaded music still plays. Click to sign in.".into(),
-            ServerState::WorkingOffline { .. } => "Ond isn't connecting, and only music that plays offline shows. Click to go online.".into(),
+            ServerState::WorkingOffline { .. } => "Offline mode: Ond doesn't connect to the server, and shows only music that plays without it. Click to go online.".into(),
         }
     }
 

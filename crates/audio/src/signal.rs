@@ -182,7 +182,7 @@ pub enum GainState {
 }
 
 impl GainState {
-    fn label(&self) -> Option<String> {
+    pub fn label(&self) -> Option<String> {
         match self {
             GainState::Off => None,
             GainState::Bypassed => Some("ReplayGain bypassed".into()),

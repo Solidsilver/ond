@@ -15,6 +15,9 @@ pub struct Readout {
     /// What reaches the device, when that differs from the file.
     pub to: Option<String>,
     pub verdict: Verdict,
+    /// Playing from this computer (a download, or the stream cache): a
+    /// small down arrow leads.
+    pub local: bool,
     /// The full line and verdict, for the tooltip.
     pub detail: String,
 }
@@ -62,10 +65,11 @@ pub(super) fn readout_of(p: &SignalPath, detail: String) -> Readout {
         BitPerfectStatus::Requested { .. } => Verdict::Requested,
         BitPerfectStatus::Unavailable { .. } => Verdict::Unavailable,
     };
-    Readout { from, to, verdict, detail }
+    Readout { from, to, verdict, local: false, detail }
 }
 
-/// The readout in a small pill: the format(s) and, after them, the verdict dot.
+/// The readout in a small pill: a down arrow when playing from this
+/// computer, the format(s) and, after them, the verdict dot.
 /// Right-aligned at `right` (vertically centred on it). Returns the pill's
 /// rect; with `paint` false it only measures.
 pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, paint: bool) -> egui::Rect {
@@ -79,7 +83,8 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
     let arrow_w = size * 0.85;
     let gap = 3.0;
     let dot_w = if r.verdict == Verdict::None { 0.0 } else { 4.0 + 5.0 };
-    let text_w = from.size().x + to.as_ref().map_or(0.0, |g| gap + arrow_w + gap + g.size().x);
+    let local_w = if r.local { size * 0.6 + gap + 1.0 } else { 0.0 };
+    let text_w = local_w + from.size().x + to.as_ref().map_or(0.0, |g| gap + arrow_w + gap + g.size().x);
     let h = from.size().y;
     let rect = egui::Rect::from_min_max(
         egui::pos2(right.x - text_w - dot_w - 2.0 * PAD_X, right.y - h / 2.0 - PAD_Y),
@@ -91,6 +96,14 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
     painter.rect(rect, rect.height() / 2.0, t.field, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
     let mut x = rect.left() + PAD_X;
     let top = right.y - h / 2.0;
+    if r.local {
+        let (w, half) = (size * 0.6, size * 0.36);
+        let cx = x + w / 2.0;
+        let stroke = egui::Stroke::new((size * 0.11).max(1.0), t.muted);
+        painter.line_segment([egui::pos2(cx, right.y - half), egui::pos2(cx, right.y + half)], stroke);
+        painter.add(egui::Shape::line(vec![egui::pos2(cx - w * 0.42, right.y + half - w * 0.42), egui::pos2(cx, right.y + half), egui::pos2(cx + w * 0.42, right.y + half - w * 0.42)], stroke));
+        x += local_w;
+    }
     painter.galley(egui::pos2(x, top), from.clone(), t.muted);
     x += from.size().x;
     if let Some(to) = to {
@@ -132,11 +145,15 @@ pub(super) fn warning(path: &SignalPath, t: &Tokens) -> Option<(String, egui::Co
 }
 
 pub(super) fn hover_text(p: &SignalPath) -> String {
-    let verdict = match &p.bit_perfect {
+    format!("{}\n{}", p.output, verdict_text(p))
+}
+
+/// The output mode, and the bit-perfect verdict in words.
+pub fn verdict_text(p: &SignalPath) -> String {
+    match &p.bit_perfect {
         BitPerfectStatus::Off => "Normal mode, with volume, ReplayGain and resampling".to_owned(),
         BitPerfectStatus::Verified => "Bit-perfect, with exclusive access, the file's sample rate and untouched samples".to_owned(),
         BitPerfectStatus::Requested { reason } => format!("Bit-perfect requested, not verified: {reason}"),
         BitPerfectStatus::Unavailable { reason, .. } => format!("Not bit-perfect: {reason}"),
-    };
-    format!("{}\n{verdict}", p.output)
+    }
 }

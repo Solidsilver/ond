@@ -815,9 +815,14 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, player, Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     app_mut(h).ui.np_details = true;
-    app_mut(h).player.playing_from = Some(audio::TrackSource { url: "https://music.example.com/rest/stream".into(), ..Default::default() });
+    app_mut(h).player.playing_from = Some(audio::TrackSource { url: "file:///downloads/t.flac".into(), ..Default::default() });
     h.run_steps(4);
-    s.shoot(h, "player-details-from");
+    if !click_label(h, "Signal path", egui::Rect::from_min_size(pos2(0.0, player.y - 40.0), vec2(player.x, 40.0))) {
+        eprintln!("  (player's format pill not found)");
+    }
+    h.run_steps(4);
+    s.shoot(h, "player-signal-path");
+    egui::Popup::close_all(&h.ctx);
 
     // The full window's sidebar on its Lyrics tab.
     reset(h, FULL, Route::Recent);
@@ -1184,9 +1189,10 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     app_mut(h).session.online = false;
     app_mut(h).session.work_offline = true;
-    s.shoot(h, "footer-working-offline");
+    s.shoot(h, "footer-offline-mode");
 
-    // Where the song plays from (the glyph by the format pill), and the
+    // Where the song plays from (an arrow in the format pill, and its
+    // signal path), and the
     // download marks on playlists: one downloaded, one on its way.
     reset(h, FULL, Route::Recent);
     {
@@ -1198,6 +1204,12 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.downloads.snap = Arc::new(snap);
     }
     s.shoot(h, "origin-downloaded");
+    if !click_label(h, "Signal path", egui::Rect::from_min_size(Pos2::ZERO, vec2(FULL.x, 60.0))) {
+        eprintln!("  (format pill not found)");
+    }
+    h.run_steps(4);
+    s.shoot(h, "origin-downloaded-path");
+    egui::Popup::close_all(&h.ctx);
     app_mut(h).player.playing_from.as_mut().unwrap().url = "https://music.example.com/rest/stream".into();
     app_mut(h).player.playing_from.as_mut().unwrap().transcode = Some(audio::Transcode { format: "mp3".into(), kbps: 320 });
     s.shoot(h, "origin-streamed");

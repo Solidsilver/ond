@@ -50,8 +50,6 @@ pub enum Icon {
     Downloaded,
     /// A cloud with a slash: the server can't be reached.
     Offline,
-    /// The server: a song that streams.
-    Cloud,
     /// Love, not yet given.
     Heart,
     /// Loved.
@@ -342,16 +340,13 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.0, -0.45), p(0.0, 0.38)], thin);
             painter.add(Shape::line(vec![p(-0.32, 0.08), p(0.0, 0.4), p(0.32, 0.08)], thin));
         }
-        Icon::Offline | Icon::Cloud => {
-            let arc = (0..=12).map(|k| {
-                let a = std::f32::consts::PI * (1.0 + k as f32 / 12.0);
-                p(0.1 + 0.45 * a.cos(), 0.1 + 0.45 * a.sin())
-            });
-            painter.add(Shape::line(arc.collect(), line));
-            painter.add(Shape::line(vec![p(-0.35, 0.1), p(-0.75, 0.1), p(-0.85, 0.35), p(-0.6, 0.55), p(0.65, 0.55), p(0.85, 0.3), p(0.55, 0.1)], line));
-            if matches!(icon, Icon::Offline) {
-                painter.line_segment([p(-0.8, -0.8), p(0.8, 0.8)], line);
+        Icon::Offline => {
+            // The slash crosses the cloud with a gap either side of it.
+            let gap = (line.width * 1.1) / r;
+            for run in cloud_outline(|x, y| (x - y).abs() / std::f32::consts::SQRT_2 > gap) {
+                painter.add(Shape::line(run.into_iter().map(|(x, y)| p(x, y)).collect(), line));
             }
+            painter.line_segment([p(-0.78, -0.78), p(0.78, 0.78)], line);
         }
         Icon::Heart => {
             // Two open halves, notch to tip, so neither sharp point gets a
@@ -446,20 +441,55 @@ pub fn inline(ui: &mut Ui, icon: Icon, color: Color32) {
     paint(ui.painter(), rect, icon, color);
 }
 
+/// A cloud's outline, flat along the bottom, as runs of points (−1..=1
+/// across) that `keep` accepts: three overlapping circles over a base.
+fn cloud_outline(keep: impl Fn(f32, f32) -> bool) -> Vec<Vec<(f32, f32)>> {
+    const BASE: f32 = 0.48;
+    let circles: [(f32, f32, f32); 3] = [(-0.5, 0.16, 0.32), (-0.02, -0.1, 0.46), (0.48, 0.13, 0.35)];
+    let (left, right) = (circles[0].0, circles[2].0);
+    // Inside another circle, or the box under the circles.
+    let covered = |x: f32, y: f32, skip: usize| {
+        circles.iter().enumerate().any(|(k, &(cx, cy, cr))| k != skip && (x - cx).powi(2) + (y - cy).powi(2) < (cr - 0.005).powi(2))
+            || (x > left + 0.005 && x < right - 0.005 && y > 0.1 && y < BASE - 0.005)
+    };
+    let mut runs = Vec::new();
+    let mut run: Vec<(f32, f32)> = Vec::new();
+    let mut take = |pt: Option<(f32, f32)>, runs: &mut Vec<Vec<(f32, f32)>>| match pt {
+        Some(pt) => run.push(pt),
+        None if run.len() > 1 => runs.push(std::mem::take(&mut run)),
+        None => run.clear(),
+    };
+    const N: usize = 96;
+    for (k, &(cx, cy, cr)) in circles.iter().enumerate() {
+        for i in 0..=N {
+            let a = std::f32::consts::TAU * i as f32 / N as f32;
+            let (x, y) = (cx + cr * a.cos(), cy + cr * a.sin());
+            take((!covered(x, y, k) && keep(x, y)).then_some((x, y)), &mut runs);
+        }
+        take(None, &mut runs);
+    }
+    for i in 0..=N {
+        let x = left + (right - left) * i as f32 / N as f32;
+        take(keep(x, BASE).then_some((x, BASE)), &mut runs);
+    }
+    take(None, &mut runs);
+    runs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Renders the volume icons at toolbar size and large, to look at:
-    /// `cargo test -p ond-player --release icons::tests::volume_icons -- --ignored`
+    /// Renders the volume and offline icons at toolbar size and large, to
+    /// look at: `cargo test -p ond-player --release icons::tests::volume_icons -- --ignored`
     /// writes target/snapshots/icons-volume.png.
     #[test]
     #[ignore = "writes a picture to look at"]
     fn volume_icons() {
-        let mut h = egui_kittest::Harness::builder().with_size(vec2(260.0, 80.0)).with_pixels_per_point(2.0).with_theme(egui::Theme::Dark).build_ui(|ui| {
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(380.0, 80.0)).with_pixels_per_point(2.0).with_theme(egui::Theme::Dark).build_ui(|ui| {
             let painter = ui.painter();
             painter.rect_filled(ui.max_rect(), 0.0, Color32::from_gray(30));
-            for (k, icon) in [Icon::Volume, Icon::Muted].into_iter().enumerate() {
+            for (k, icon) in [Icon::Volume, Icon::Muted, Icon::Offline].into_iter().enumerate() {
                 let x = 20.0 + k as f32 * 120.0;
                 paint(painter, Rect::from_center_size(egui::pos2(x, 40.0), vec2(15.0, 15.0)), icon, Color32::WHITE);
                 paint(painter, Rect::from_center_size(egui::pos2(x + 60.0, 40.0), vec2(60.0, 60.0)), icon, Color32::WHITE);

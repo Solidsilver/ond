@@ -30,6 +30,7 @@ mod pins;
 mod playing;
 mod prefs_view;
 mod session;
+mod signal_card;
 mod ui_state;
 mod view_ctx;
 mod window_state;

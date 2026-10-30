@@ -115,9 +115,6 @@ impl Outputs {
                 self.adjusting = adjusting;
             }
             let icon = self.icon_button(ui);
-            if std::mem::take(&mut self.open_requested) {
-                egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&icon));
-            }
             egui::Popup::menu(&icon)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .width(POPUP_W)

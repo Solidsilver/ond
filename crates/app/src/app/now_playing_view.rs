@@ -313,10 +313,7 @@ impl ViewCtx<'_> {
             return;
         }
         ui.add_space(8.0);
-        let mut rows = details_rows(track, self.output.signal().map(|s| s.summary()), self.analysis_of(track));
-        if let Some(o) = self.origin() {
-            rows.insert(0, ("From", o.source_text()));
-        }
+        let rows = details_rows(track, self.output.signal().map(|s| s.summary()), self.analysis_of(track));
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for (k, v) in rows {

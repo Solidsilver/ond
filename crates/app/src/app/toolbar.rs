@@ -2,6 +2,7 @@
 //! window, output / volume / queue on the right.
 
 use super::WindowAction;
+use super::playing::Origin;
 use super::widgets::elide;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
@@ -9,6 +10,7 @@ use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
+use crate::output::Readout;
 use crate::theme::{Tokens, semibold};
 use audio::PlayState;
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -116,9 +118,7 @@ impl OndApp {
         let x = transport_x(free_left, lcd.left());
         let left = Rect::from_min_max(pos2(x, full.top()), pos2(x + TRANSPORT_W, full.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| self.transport(ui, None));
-        if self.view().lcd_display(ui, lcd) {
-            self.output.request_open();
-        }
+        self.view().lcd_display(ui, lcd);
     }
 
     /// Previous · play/pause (a spinner while buffering) · next. `color`
@@ -167,8 +167,8 @@ impl ViewCtx<'_> {
     /// The now-playing display. Art on the left; title and "artist — album"
     /// centred; along the bottom a thin seek line with the elapsed and
     /// remaining times at its ends; the format pill and the heart on the right.
-    /// Returns whether the format pill was clicked (to open the output picker).
-    fn lcd_display(&mut self, ui: &mut Ui, rect: Rect) -> bool {
+    /// The format pill opens the signal path.
+    fn lcd_display(&mut self, ui: &mut Ui, rect: Rect) {
         let t = Tokens::of(ui);
         let painter = ui.painter().clone();
         let fill = crate::theme::tint_of(ui).map_or(t.sidebar, |x| x.display);
@@ -180,7 +180,7 @@ impl ViewCtx<'_> {
         let (player, data) = (self.player, self.data);
         let Some(item) = player.queue.current.as_ref() else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Not playing", FontId::proportional(12.0), t.muted);
-            return false;
+            return;
         };
         let art = Rect::from_min_size(rect.min, vec2(rect.height(), rect.height()));
         let album = data.album(&item.track.album_id);
@@ -189,20 +189,22 @@ impl ViewCtx<'_> {
         // The right column: the heart at the end, the format pill just left of
         // it, both centred vertically.
         let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(22.0, 22.0));
-        let readout = self.output.readout(&self.engine.status);
+        let origin = self.origin();
+        let readout = self.output.readout(&self.engine.status).map(|r| Readout { local: origin.as_ref().is_some_and(Origin::is_local), ..r });
         let readout_anchor = pos2(heart.left() - 2.0, rect.center().y);
         let readout_rect = readout.as_ref().map(|r| crate::output::paint_readout(ui, readout_anchor, r, 10.0, false));
-        // Where it plays from: a small glyph left of the pill.
-        let origin = self.origin();
-        let origin_rect = origin.as_ref().map(|_| Rect::from_center_size(pos2(readout_rect.map_or(heart.left(), |r| r.left()) - 10.0, rect.center().y), vec2(12.0, 12.0)));
-        let col_right = origin_rect.or(readout_rect).map_or(heart.left(), |r| r.left()) - 10.0;
+        let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
+        // The seek line sits on the display's centre, like the titles, when
+        // the same margin fits on both sides.
         let col_left = art.right() + 10.0;
+        let reserve = (col_left - rect.left()).max(rect.right() - col_right);
+        let (seek_left, seek_right) = if rect.width() - 2.0 * reserve >= 200.0 { (rect.left() + reserve, rect.right() - reserve) } else { (col_left, col_right) };
 
         // The titles keep clear of the seek line's knob, or the waveform's bars.
         let reach = if self.ui.prefs.waveform { LCD_WAVE_H } else { LCD_KNOB_R };
         let floor = rect.bottom() - LCD_SEEK_INSET - reach - 1.0;
         let sub_text = lcd_titles(ui, &painter, &t, rect.with_max_y(floor), col_left..=col_right, &item.track, album);
-        let strip_resp = self.lcd_seek(ui, &painter, &t, rect, col_left..=col_right);
+        let strip_resp = self.lcd_seek(ui, &painter, &t, rect, seek_left..=seek_right);
 
         let hovering = body.hovered() || strip_resp.hovered() || self.ui.seek_preview.is_some();
         // Love: the heart at the right end, shown when loved or on hover.
@@ -217,15 +219,7 @@ impl ViewCtx<'_> {
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
             resp
         });
-        let mut on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
-        if let (Some(o), Some(r)) = (&origin, origin_rect) {
-            crate::icons::paint(&painter, r, o.icon(), t.muted);
-            let resp = ui.interact(r.expand(3.0), ui.scope_id().with("lcd-origin"), Sense::hover());
-            on_readout |= resp.hovered();
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, o.hint()));
-            resp.on_hover_text(o.hint());
-        }
-        let open_picker = readout_resp.as_ref().is_some_and(|r| r.clicked());
+        let on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
         // Always clickable: the heart sits over the display, so while the pointer
         // is on it the display itself doesn't count as hovered.
         let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
@@ -248,9 +242,10 @@ impl ViewCtx<'_> {
         }
         heart_resp.on_hover_text(crate::keys::shown(love_label));
         if let (Some(resp), Some(r)) = (readout_resp, readout) {
-            resp.on_hover_text(r.detail).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let path = self.output.signal();
+            super::signal_card::popover(&resp, origin.as_ref(), &item.track, path, self.engine.status.underruns());
+            resp.on_hover_text(super::signal_card::hover(origin.as_ref(), path, &r.detail)).on_hover_cursor(egui::CursorIcon::PointingHand);
         }
-        open_picker
     }
 
     /// The live spectrum, faint behind the display's text (experimental).
