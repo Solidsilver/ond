@@ -104,6 +104,12 @@ fn heart_points(n: usize) -> Vec<(f32, f32)> {
 }
 
 /// Paints `icon` centred in `rect`.
+/// A speaker's body and cone, for the volume icons. Filled in two convex
+/// parts: as one shape it isn't convex, and a convex fill draws it wrong.
+fn speaker(tri: &impl Fn(Vec<Pos2>) -> Shape, p: &impl Fn(f32, f32) -> Pos2) -> [Shape; 2] {
+    [tri(vec![p(-0.95, -0.28), p(-0.5, -0.28), p(-0.5, 0.28), p(-0.95, 0.28)]), tri(vec![p(-0.55, -0.28), p(-0.1, -0.72), p(-0.1, 0.72), p(-0.55, 0.28)])]
+}
+
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let r = rect.width().min(rect.height()) / 2.0;
@@ -161,7 +167,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(tri(vec![p(0.3, 0.3), p(0.85, 0.62), p(0.3, 0.95)]));
         }
         Icon::Volume => {
-            painter.add(tri(vec![p(-0.95, -0.28), p(-0.55, -0.28), p(-0.1, -0.72), p(-0.1, 0.72), p(-0.55, 0.28), p(-0.95, 0.28)]));
+            painter.extend(speaker(&tri, &p));
             // Two waves from the cone's mouth.
             for radius in [0.42, 0.8] {
                 let arc = (0..=10).map(|k| {
@@ -250,7 +256,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Muted => {
-            painter.add(tri(vec![p(-0.95, -0.28), p(-0.55, -0.28), p(-0.1, -0.72), p(-0.1, 0.72), p(-0.55, 0.28), p(-0.95, 0.28)]));
+            painter.extend(speaker(&tri, &p));
             painter.line_segment([p(0.3, -0.32), p(0.9, 0.32)], line);
             painter.line_segment([p(0.3, 0.32), p(0.9, -0.32)], line);
         }
@@ -438,4 +444,29 @@ pub fn inline(ui: &mut Ui, icon: Icon, color: Color32) {
     let h = ui.text_style_height(&egui::TextStyle::Body) * 0.7;
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(h), Sense::hover());
     paint(ui.painter(), rect, icon, color);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Renders the volume icons at toolbar size and large, to look at:
+    /// `cargo test -p ond-player --release icons::tests::volume_icons -- --ignored`
+    /// writes target/snapshots/icons-volume.png.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    fn volume_icons() {
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(260.0, 80.0)).with_pixels_per_point(2.0).with_theme(egui::Theme::Dark).build_ui(|ui| {
+            let painter = ui.painter();
+            painter.rect_filled(ui.max_rect(), 0.0, Color32::from_gray(30));
+            for (k, icon) in [Icon::Volume, Icon::Muted].into_iter().enumerate() {
+                let x = 20.0 + k as f32 * 120.0;
+                paint(painter, Rect::from_center_size(egui::pos2(x, 40.0), vec2(15.0, 15.0)), icon, Color32::WHITE);
+                paint(painter, Rect::from_center_size(egui::pos2(x + 60.0, 40.0), vec2(60.0, 60.0)), icon, Color32::WHITE);
+            }
+        });
+        let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
+        std::fs::create_dir_all(&out).unwrap();
+        h.render().unwrap().save(out.join("icons-volume.png")).unwrap();
+    }
 }
