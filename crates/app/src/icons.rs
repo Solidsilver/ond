@@ -161,12 +161,15 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(tri(vec![p(0.3, 0.3), p(0.85, 0.62), p(0.3, 0.95)]));
         }
         Icon::Volume => {
-            painter.add(tri(vec![p(-0.8, -0.3), p(-0.35, -0.3), p(0.15, -0.75), p(0.15, 0.75), p(-0.35, 0.3), p(-0.8, 0.3)]));
-            let arc = (0..=8).map(|k| {
-                let a = -0.9 + 1.8 * k as f32 / 8.0;
-                p(0.2 + 0.55 * a.cos(), 0.55 * a.sin())
-            });
-            painter.add(Shape::line(arc.collect(), line));
+            painter.add(tri(vec![p(-0.95, -0.28), p(-0.55, -0.28), p(-0.1, -0.72), p(-0.1, 0.72), p(-0.55, 0.28), p(-0.95, 0.28)]));
+            // Two waves from the cone's mouth.
+            for radius in [0.42, 0.8] {
+                let arc = (0..=10).map(|k| {
+                    let a = -0.85 + 1.7 * k as f32 / 10.0;
+                    p(-0.1 + radius * a.cos(), radius * a.sin())
+                });
+                painter.add(Shape::line(arc.collect(), line));
+            }
         }
         Icon::Shuffle => {
             painter.add(Shape::line(vec![p(-0.85, -0.55), p(-0.35, -0.55), p(0.35, 0.55), p(0.85, 0.55)], line));
@@ -247,9 +250,9 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Muted => {
-            painter.add(tri(vec![p(-0.8, -0.3), p(-0.35, -0.3), p(0.15, -0.75), p(0.15, 0.75), p(-0.35, 0.3), p(-0.8, 0.3)]));
-            painter.line_segment([p(0.4, -0.35), p(0.9, 0.35)], line);
-            painter.line_segment([p(0.4, 0.35), p(0.9, -0.35)], line);
+            painter.add(tri(vec![p(-0.95, -0.28), p(-0.55, -0.28), p(-0.1, -0.72), p(-0.1, 0.72), p(-0.55, 0.28), p(-0.95, 0.28)]));
+            painter.line_segment([p(0.3, -0.32), p(0.9, 0.32)], line);
+            painter.line_segment([p(0.3, 0.32), p(0.9, -0.32)], line);
         }
         Icon::Headphones => {
             let band = (0..=12).map(|k| {

@@ -127,8 +127,9 @@ impl Outputs {
         out
     }
 
-    /// The device's icon with the status dot at its corner, and a ▾. Its id
-    /// is fixed, so the panel stays open whatever moves beside it.
+    /// The device's icon with the status dot at its corner (bit-perfect's
+    /// verdict; none in Normal mode), and a ▾. Its id is fixed, so the panel
+    /// stays open whatever moves beside it.
     fn icon_button(&self, ui: &mut egui::Ui) -> egui::Response {
         let t = Tokens::of(ui);
         let dot = self.dot_color(ui);
@@ -140,7 +141,9 @@ impl Outputs {
             }
             let glyph = egui::Rect::from_center_size(egui::pos2(rect.left() + 14.0, rect.center().y), egui::vec2(15.0, 15.0));
             icons::paint(ui.painter(), glyph, kind_icon(self.in_use().map(|d| d.kind)), t.text);
-            ui.painter().circle(egui::pos2(glyph.right() + 1.0, glyph.top() + 1.0), 3.5, dot, egui::Stroke::new(1.5, t.bg));
+            if let Some(dot) = dot {
+                ui.painter().circle(egui::pos2(glyph.right() + 1.0, glyph.top() + 1.0), 3.5, dot, egui::Stroke::new(1.5, t.bg));
+            }
             let chevron = egui::Rect::from_center_size(egui::pos2(rect.right() - 8.0, rect.center().y + 1.0), egui::vec2(7.0, 7.0));
             icons::paint(ui.painter(), chevron, Icon::ChevronDown, t.muted);
         }
@@ -466,13 +469,15 @@ impl Outputs {
         });
     }
 
-    fn dot_color(&self, ui: &egui::Ui) -> egui::Color32 {
+    /// The status dot's color: bit-perfect verified, unavailable or not yet
+    /// verified. `None` in Normal mode, which has nothing to report.
+    fn dot_color(&self, ui: &egui::Ui) -> Option<egui::Color32> {
         let v = ui.visuals();
-        match self.signal.as_ref().map(|p| &p.bit_perfect) {
-            Some(BitPerfectStatus::Verified) => crate::theme::Tokens::of(ui).ok,
-            Some(BitPerfectStatus::Unavailable { .. }) => v.warn_fg_color,
-            Some(BitPerfectStatus::Requested { .. }) => v.text_color(),
-            _ => v.weak_text_color(),
+        match self.signal.as_ref().map(|p| &p.bit_perfect)? {
+            BitPerfectStatus::Verified => Some(crate::theme::Tokens::of(ui).ok),
+            BitPerfectStatus::Unavailable { .. } => Some(v.warn_fg_color),
+            BitPerfectStatus::Requested { .. } => Some(v.text_color()),
+            BitPerfectStatus::Off => None,
         }
     }
 }
