@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "analysis"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ebur128",
  "postcard",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "audio"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "alsa",
  "coreaudio-rs",
@@ -2461,7 +2461,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "library"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "postcard",
  "redb",
@@ -3297,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "offline"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "reqwest",
@@ -3318,7 +3318,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "ond-player"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "analysis",
  "anyhow",
@@ -4583,7 +4583,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "streamcache"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "reqwest",
@@ -4601,7 +4601,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "subsonic"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "hex",
  "md-5",

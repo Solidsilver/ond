@@ -133,6 +133,8 @@ impl OndApp {
             Action::Analysis(AnalysisAction::AnalyzePlaying(_)) => "analyze_playing",
             Action::Offline(OfflineAction::SetLimit(_)) => "offline_limit_gb",
             Action::Offline(OfflineAction::Move) => "offline_dir",
+            Action::Offline(OfflineAction::WorkOffline(_)) => "work_offline",
+            Action::Offline(OfflineAction::Unplayable(_)) => "offline_unplayable",
             _ => return false,
         };
         self.prefs.managed(path)

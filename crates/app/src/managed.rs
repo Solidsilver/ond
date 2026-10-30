@@ -52,6 +52,8 @@ const ALLOWED: &[&str] = &[
     "stream_cache_mb",
     "offline_dir",
     "offline_limit_gb",
+    "offline_unplayable",
+    "work_offline",
     "analyze_playing",
     "experimental.spectrum",
     "experimental.spectrogram",

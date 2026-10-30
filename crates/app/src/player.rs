@@ -50,6 +50,11 @@ pub trait Sources {
     fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource>;
     /// `track` is about to play (Now Playing learns its details early).
     fn announce(&self, track: &Track);
+    /// The server isn't answering yet but should be soon (it's connecting):
+    /// a track that needs it waits instead of being skipped.
+    fn waiting(&self) -> bool {
+        false
+    }
 }
 
 /// Something for the app to act on.
@@ -84,6 +89,16 @@ pub struct Player {
     /// open. If it fails too, playback stops instead of skipping again (the
     /// server may be gone, and every track would fail).
     skipped_failure: bool,
+    /// The current item needs the server, which is still connecting: it
+    /// starts once the server answers (see [`resume_held`](Self::resume_held)).
+    pub held: bool,
+    /// Offline, a track that can't play stops playback (with a notice)
+    /// instead of being skipped.
+    pub stop_on_unplayable: bool,
+    /// What the engine was told to play for the current item, and for the
+    /// one named next: where it plays from (a file, or the server's stream).
+    pub playing_from: Option<TrackSource>,
+    next_from: Option<TrackSource>,
 }
 
 impl Player {
@@ -117,6 +132,17 @@ impl Player {
         self.pending_seek = None;
         self.started = None;
         self.skipped_failure = false;
+        self.held = false;
+        self.playing_from = None;
+        self.next_from = None;
+    }
+
+    /// The server answered, or is known to be away: a held item starts now
+    /// (or, with the server away, is skipped or stops as when offline).
+    pub fn resume_held(&mut self, cx: &mut Ctx<'_>) {
+        if self.held {
+            self.start_current(cx);
+        }
     }
 
     /// The queue entry the engine just started: the current one, or the next (gapless).
@@ -131,6 +157,9 @@ impl Player {
                 self.pending_seek = None;
                 self.started = Some(*token);
                 self.skipped_failure = false;
+                if self.next_from.as_ref().is_some_and(|s| s.token == *token) {
+                    self.playing_from = self.next_from.take();
+                }
                 if let Some(t) = self.playing_track(*token) {
                     cx.notes.push(Note::Started { track: Box::new(t.clone()), restart: *restart });
                 }
@@ -192,6 +221,8 @@ impl Player {
         self.sent_next = None;
         self.started = None;
         self.skipped_failure = false;
+        self.held = false;
+        self.playing_from = None;
         let mut skipped = 0;
         // With "repeat queue" the queue never runs out, so give up after one
         // full pass in which nothing could play.
@@ -210,8 +241,19 @@ impl Player {
             let next = self.queue.peek_next().map(|i| &i.track);
             if let Some(src) = cx.sources.source(item.uid, prev, &item.track, next) {
                 cx.sources.announce(&item.track);
+                self.playing_from = Some(src.clone());
                 cx.engine.send(Command::Play(src));
                 self.sync_next(cx);
+                break;
+            }
+            if cx.sources.waiting() {
+                cx.engine.send(Command::Stop);
+                self.held = true;
+                break;
+            }
+            if self.stop_on_unplayable {
+                cx.engine.send(Command::Stop);
+                cx.notes.push(Note::Notice(format!("Paused: “{}” isn't downloaded", item.track.title)));
                 break;
             }
             skipped += 1;
@@ -243,6 +285,7 @@ impl Player {
             if let Some((_, t)) = next.filter(|_| source.is_some()) {
                 cx.sources.announce(t);
             }
+            self.next_from = source.clone();
             cx.engine.send(Command::SetNext(source));
             self.sent_next = sent;
         }
@@ -454,6 +497,8 @@ mod tests {
     #[derive(Default)]
     struct FakeSources {
         unplayable: HashSet<String>,
+        /// As if connecting: the server should answer soon.
+        waiting: bool,
     }
 
     impl Sources for FakeSources {
@@ -469,6 +514,9 @@ mod tests {
             })
         }
         fn announce(&self, _: &Track) {}
+        fn waiting(&self) -> bool {
+            self.waiting
+        }
     }
 
     fn track(id: &str) -> Track {
@@ -589,6 +637,60 @@ mod tests {
         assert!(r.engine.played().is_empty());
         assert!(r.engine.stopped());
         assert!(r.notes.contains(&Note::Notice("Nothing in the queue is downloaded".into())));
+    }
+
+    #[test]
+    fn a_track_needing_the_server_waits_while_it_connects() {
+        let mut r = Rig::new();
+        r.sources.unplayable = ["a".to_owned()].into();
+        r.sources.waiting = true;
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        assert!(r.engine.played().is_empty() && r.player.held);
+        assert!(r.notes.is_empty(), "nothing said yet");
+        // The server answered: it plays.
+        r.sources = FakeSources::default();
+        r.run(|p, cx| p.resume_held(cx));
+        assert_eq!(r.engine.played(), ["a"]);
+        assert!(!r.player.held);
+        // Nothing held: nothing starts again.
+        r.run(|p, cx| p.resume_held(cx));
+        assert_eq!(r.engine.played(), ["a"]);
+    }
+
+    #[test]
+    fn a_held_track_is_skipped_when_the_server_is_away() {
+        let mut r = Rig::new();
+        r.sources.unplayable = ["a".to_owned()].into();
+        r.sources.waiting = true;
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.sources.waiting = false;
+        r.run(|p, cx| p.resume_held(cx));
+        assert_eq!(r.engine.played(), ["b"]);
+        assert!(r.notes.contains(&Note::Notice("Skipped 1 song that isn't downloaded".into())));
+    }
+
+    #[test]
+    fn offline_it_can_stop_on_a_track_instead_of_skipping() {
+        let mut r = Rig::new();
+        r.player.stop_on_unplayable = true;
+        r.sources.unplayable = ["b".to_owned()].into();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        let ended = audio::Event::Ended { track_id: "a".into(), token: 0 };
+        r.run(|p, cx| p.handle_engine(&ended, cx));
+        assert_eq!(r.engine.played(), ["a"]);
+        assert!(r.engine.stopped());
+        assert_eq!(r.player.queue.current.as_ref().map(|c| c.track.id.as_str()), Some("b"), "stays on it");
+        assert!(r.notes.contains(&Note::Notice("Paused: “b” isn't downloaded".into())));
+    }
+
+    #[test]
+    fn it_knows_where_the_playing_track_comes_from_also_after_a_gapless_move() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        assert_eq!(r.player.playing_from.as_ref().map(|s| s.url.as_str()), Some("test://a"));
+        let b = r.uid_of("b");
+        r.started(b, true);
+        assert_eq!(r.player.playing_from.as_ref().map(|s| s.url.as_str()), Some("test://b"));
     }
 
     #[test]

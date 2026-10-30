@@ -41,6 +41,10 @@ pub enum OfflineAction {
     RemoveSetAside,
     /// Pick a new folder for downloads (they move at the next launch).
     Move,
+    /// Work offline (true) or go back online.
+    WorkOffline(bool),
+    /// What playback does offline with a song that isn't downloaded.
+    Unplayable(crate::settings::Unplayable),
 }
 
 impl OfflineAction {
@@ -51,9 +55,10 @@ impl OfflineAction {
     }
 }
 
-/// Whether `track` can play right now: downloaded, or the server is there.
-pub(super) fn playable(session: &Session, downloads: &Downloads, track: &Track) -> bool {
-    session.online || downloads.snap.is_done(&track.id)
+/// Whether `track` can play right now: the server is there (or connecting),
+/// or it's downloaded, or it was streamed whole and is still cached.
+pub(super) fn playable(session: &Session, downloads: &Downloads, cache: &streamcache::StreamCache, output: &crate::output::Outputs, track: &Track) -> bool {
+    session.expected() || downloads.snap.is_done(&track.id) || super::playing::cached(cache, output, track).is_some()
 }
 
 /// Offline downloads, and their state as of this frame.
@@ -290,6 +295,11 @@ impl OndApp {
         match action {
             OfflineAction::Keep(what, on) => self.keep_offline(what, on),
             OfflineAction::Move => self.choose_offline_folder(),
+            OfflineAction::WorkOffline(on) => self.set_work_offline(on),
+            OfflineAction::Unplayable(u) => {
+                self.prefs.edit(|s| s.offline_unplayable = u);
+                self.player.stop_on_unplayable = u == crate::settings::Unplayable::Pause;
+            }
             other => {
                 if let Err(e) = self.downloads.apply(other, &self.prefs) {
                     self.show_error(e);
@@ -317,11 +327,17 @@ impl OndApp {
                         // What's downloaded can play again.
                         self.sync_next();
                     }
+                    if self.session.work_offline {
+                        self.load_local();
+                    }
                 }
                 Ok(false) => {}
                 Err(e) => {
                     self.downloads.deferred.clear();
                     self.show_error(format!("Downloads couldn't be opened: {e}"));
+                    if self.session.work_offline {
+                        self.load_local();
+                    }
                 }
             },
             Msg::OfflineMoving(p) => {
