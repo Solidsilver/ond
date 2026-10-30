@@ -10,6 +10,7 @@ use crate::player::{self, Note, Player, QueueEdit};
 use audio::{Command, PlaybackMode, TrackSource};
 use library::Track;
 use offline::OfflineStore;
+use streamcache::StreamCache;
 use subsonic::Client;
 
 /// Where queue items play from: a downloaded file first (instant, no
@@ -17,8 +18,13 @@ use subsonic::Client;
 struct AppSources<'a> {
     /// `None` while the store opens.
     offline: Option<&'a OfflineStore>,
+    /// Songs streamed before and still whole in the cache play without the
+    /// server too.
+    cache: &'a StreamCache,
     /// Only while the server answers.
     client: Option<&'a Client>,
+    /// The server is connecting: what needs it waits.
+    connecting: bool,
     output: &'a Outputs,
     data: &'a Data,
     now_playing: &'a now_playing::Session,
@@ -41,7 +47,18 @@ impl player::Sources for AppSources<'_> {
                 token,
             });
         }
-        let client = self.client?;
+        let Some(client) = self.client else {
+            let path = cached(self.cache, self.output, track)?;
+            return Some(TrackSource {
+                id: track.id.clone(),
+                url: format!("file://{}", path.display()),
+                suffix: path.extension().map(|e| e.to_string_lossy().into_owned()),
+                replay_gain,
+                album_context,
+                transcode: None,
+                token,
+            });
+        };
         let transcode = self.output.transcode();
         let (url, suffix) = match &transcode {
             None => (client.stream_url(&track.id), track.suffix.clone()),
@@ -62,6 +79,15 @@ impl player::Sources for AppSources<'_> {
             cover: self.data.cover_for(track).map(str::to_owned),
         });
     }
+
+    fn waiting(&self) -> bool {
+        self.connecting
+    }
+}
+
+/// `track`'s file in the stream cache, as it plays now.
+pub(super) fn cached(cache: &StreamCache, output: &Outputs, track: &Track) -> Option<std::path::PathBuf> {
+    crate::local::cached(cache, output.transcode().as_ref(), track)
 }
 
 /// A change to how audio is output.
@@ -177,7 +203,9 @@ impl OndApp {
         let mut notes = Vec::new();
         let sources = AppSources {
             offline: self.downloads.store.as_ref(),
+            cache: &self.cache,
             client: self.session.live(),
+            connecting: self.session.connecting,
             output: &self.output,
             data: &self.data,
             now_playing: &self.now_playing,
@@ -213,6 +241,12 @@ impl OndApp {
     #[cfg(test)]
     pub(super) fn source(&mut self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
         self.with_player(|_, cx| cx.sources.source(token, prev, track, next))
+    }
+
+    /// The server is known to be away (or turned the login down): a track
+    /// held for it is skipped, or stops, as offline.
+    pub(super) fn server_gone(&mut self) {
+        self.with_player(|p, cx| p.resume_held(cx));
     }
 
     pub(super) fn sync_next(&mut self) {

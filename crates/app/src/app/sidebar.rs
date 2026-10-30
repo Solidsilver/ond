@@ -191,6 +191,12 @@ impl OndApp {
         if self.session.online {
             return ServerState::Connected { host };
         }
+        if self.session.work_offline {
+            return ServerState::WorkingOffline { host };
+        }
+        if self.session.sign_in.is_some() {
+            return ServerState::SignIn { host };
+        }
         if self.session.unreachable {
             return ServerState::Offline { host };
         }
@@ -226,12 +232,21 @@ impl OndApp {
                 },
                 ServerState::Offline { .. } => "Offline · reconnecting".to_owned(),
                 ServerState::Connecting { .. } => "Connecting…".to_owned(),
+                ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
+                ServerState::WorkingOffline { .. } => "Working offline".to_owned(),
             };
             let status_color = match state {
-                ServerState::Offline { .. } => t.warn,
+                ServerState::Offline { .. } | ServerState::SignIn { .. } => t.warn,
                 _ => t.text,
             };
             info_row(ui, "Status", &status, status_color);
+            if let (ServerState::SignIn { .. }, Some(why)) = (state, &self.session.sign_in) {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
+                });
+            }
             if !user.is_empty() {
                 info_row(ui, "User", &user, t.text);
             }
@@ -271,6 +286,13 @@ impl OndApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
+            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…", "") {
+                self.actions.push(Action::SignInAgain);
+            }
+            let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Work offline", true) };
+            if !self.prefs.managed("work_offline") && menu_item(ui, label, "") {
+                self.actions.push(Action::Offline(super::OfflineAction::WorkOffline(on)));
+            }
             if menu_item(ui, "Sign out", "") {
                 self.actions.push(Action::SignOut);
             }
@@ -452,12 +474,21 @@ enum ServerState {
     Offline { host: String },
     /// The first connect is still under way.
     Connecting { host: String },
+    /// The server turned the saved login down.
+    SignIn { host: String },
+    /// Offline by choice: not connecting.
+    WorkingOffline { host: String },
 }
 
 impl ServerState {
     fn host(&self) -> &str {
         match self {
-            ServerState::Connected { host } | ServerState::Syncing { host, .. } | ServerState::Offline { host } | ServerState::Connecting { host } => host,
+            ServerState::Connected { host }
+            | ServerState::Syncing { host, .. }
+            | ServerState::Offline { host }
+            | ServerState::Connecting { host }
+            | ServerState::SignIn { host }
+            | ServerState::WorkingOffline { host } => host,
         }
     }
 
@@ -468,6 +499,8 @@ impl ServerState {
             ServerState::Syncing { label, .. } => label,
             ServerState::Offline { .. } => "Offline",
             ServerState::Connecting { .. } => "Connecting…",
+            ServerState::SignIn { .. } => "Sign in again",
+            ServerState::WorkingOffline { .. } => "Working offline",
         }
     }
 
@@ -477,6 +510,8 @@ impl ServerState {
             ServerState::Syncing { detail, .. } => format!("{detail}\nYou can browse while it runs. New albums and tracks appear as they arrive."),
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
+            ServerState::SignIn { .. } => "The server didn't accept the saved login. Downloaded music still plays. Click to sign in.".into(),
+            ServerState::WorkingOffline { .. } => "Ond isn't connecting, and only music that plays offline shows. Click to go online.".into(),
         }
     }
 
@@ -503,7 +538,8 @@ impl ServerState {
                     ui.ctx().request_repaint_after(SPIN);
                 }
             }
-            ServerState::Offline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
+            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
+            ServerState::SignIn { .. } => super::widgets::mark(ui, c, 12.0, super::widgets::Mark::Failed),
         }
         if !matches!(self, ServerState::Connecting { .. }) {
             ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));

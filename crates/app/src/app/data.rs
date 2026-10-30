@@ -37,6 +37,17 @@ pub struct Data {
     pub artists: Arc<Vec<library::Artist>>,
     /// Bumped whenever the stored tracks (`tracks.all`) change.
     pub tracks_version: u64,
+    /// What the server has sent this session, so the saved copies read at
+    /// startup don't replace it when they arrive late.
+    pub served: Served,
+}
+
+/// Lists the server has sent since startup.
+#[derive(Default)]
+pub struct Served {
+    pub newest: bool,
+    pub playlists: bool,
+    pub starred: bool,
 }
 
 impl Data {
@@ -232,21 +243,43 @@ impl OndApp {
                     }
                 }
             }
-            Msg::Tracks { album_id, tracks, fresh } => {
+            Msg::Tracks { album_id, mut tracks, fresh } => {
+                if self.session.work_offline {
+                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
+                }
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.set_album(&album_id, tracks);
                 self.run_pending(&ListKey::Album(album_id), fresh);
             }
             Msg::Newest(ids) => {
+                self.data.served.newest = true;
                 self.data.newest = ids;
                 self.data.version += 1;
             }
-            Msg::Playlists(p) => self.data.playlists = p,
-            Msg::PlaylistTracks { id, tracks } => {
-                // Always the server's complete listing.
-                self.refresh_pin(Pin::Playlist(id.clone()), &tracks, true);
+            Msg::Playlists(p) => {
+                self.data.served.playlists = true;
+                self.data.playlists = p;
+            }
+            Msg::Saved(saved) => {
+                if let Some(ids) = saved.newest.filter(|_| !self.data.served.newest) {
+                    self.data.newest = ids;
+                    self.data.version += 1;
+                }
+                if let Some(p) = saved.playlists.filter(|_| !self.data.served.playlists) {
+                    self.data.playlists = p;
+                }
+                if let Some(s) = saved.starred.filter(|_| !self.data.served.starred) {
+                    self.favorites.load(s.starred, s.ratings);
+                }
+            }
+            Msg::PlaylistTracks { id, mut tracks, fresh } => {
+                if self.session.work_offline {
+                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
+                }
+                // Only the server's own listing may drop songs from a download.
+                self.refresh_pin(Pin::Playlist(id.clone()), &tracks, fresh);
                 self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
-                self.run_pending(&ListKey::Playlist(id), true);
+                self.run_pending(&ListKey::Playlist(id), fresh);
             }
             Msg::Credited { name, album_ids } => {
                 self.data.credited.insert(name, album_ids);

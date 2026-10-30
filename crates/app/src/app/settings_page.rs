@@ -421,6 +421,24 @@ impl OndApp {
             super::offline_page::set_aside_notice(ui, &snap, &mut self.actions, "settings");
             ui.add_space(28.0);
         }
+        group(ui, "Working offline", |ui| {
+            let mut on = self.session.work_offline;
+            if managed(ui, self.prefs.managed("work_offline"), |ui| {
+                switch_row(ui, "Work offline", "Ond doesn't connect to the server, and only music that plays offline shows: downloads, and songs streamed recently enough to still be cached.", &mut on)
+            }) {
+                self.actions.push(Action::Offline(OfflineAction::WorkOffline(on)));
+            }
+            let mut unplayable = self.prefs.get(|s| s.offline_unplayable);
+            let before = unplayable;
+            managed(ui, self.prefs.managed("offline_unplayable"), |ui| {
+                setting(ui, "Songs that aren't downloaded", "What playback does with them while the server can't be reached.", |ui| {
+                    choice(ui, &crate::settings::Unplayable::ALL, &mut unplayable, None, |u| u.label().into())
+                })
+            });
+            if unplayable != before {
+                self.actions.push(Action::Offline(OfflineAction::Unplayable(unplayable)));
+            }
+        });
         group(ui, "Storage", |ui| {
             managed(ui, self.prefs.managed("offline_limit_gb"), |ui| setting(ui, "Storage limit", &super::offline_page::storage_used(&snap), |ui| {
                 let label = match snap.limit {

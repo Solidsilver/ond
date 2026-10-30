@@ -130,7 +130,7 @@ impl OndApp {
         if icons::sized_button(ui, Icon::Previous, "Previous", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Previous);
         }
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some();
+        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some() || self.player.held;
         let (icon, label) = match state {
             _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
             PlayState::Playing => (Icon::Pause, "Pause"),

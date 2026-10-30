@@ -44,6 +44,10 @@ const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_sta
 /// Track id → an analysis record, opaque here (the `analysis` crate owns the format).
 /// A new table rather than a schema bump: older builds simply ignore it.
 const ANALYSIS: TableDefinition<&str, &[u8]> = TableDefinition::new("analysis");
+/// Name → a copy of something the server lists outside the library (the
+/// playlists, favorites, Recently added), kept for starting offline. Opaque
+/// here; a new table rather than a schema bump, like `ANALYSIS`.
+const SAVED: TableDefinition<&str, &[u8]> = TableDefinition::new("saved");
 
 const SCHEMA_KEY: &str = "schema_version";
 /// Which server account the mirror belongs to (a hash of server and user).
@@ -225,6 +229,7 @@ impl Library {
             wt.open_table(CREDITS)?;
             wt.open_table(ALBUM_STAMPS)?;
             wt.open_table(ANALYSIS)?;
+            wt.open_table(SAVED)?;
         }
         wt.commit()?;
         Ok(Self { db })
@@ -275,6 +280,7 @@ impl Library {
                 wt.open_table(CREDITS)?.retain(|_, _| false)?;
                 wt.open_table(ALBUM_STAMPS)?.retain(|_, _| false)?;
                 wt.open_table(ANALYSIS)?.retain(|_, _| false)?;
+                wt.open_table(SAVED)?.retain(|_, _| false)?;
                 // Sync progress and similar flags were about the old library.
                 meta.retain(|k, _| k == SCHEMA_KEY)?;
             }
@@ -388,6 +394,28 @@ impl Library {
         let wt = self.db.begin_write()?;
         wt.open_table(ANALYSIS)?.retain(|_, _| false)?;
         Ok(wt.commit()?)
+    }
+
+    /// Keeps a copy of `value` under `name` (see [`saved`](Self::saved)).
+    pub fn save<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
+        let bytes = encode(value)?;
+        let wt = self.db.begin_write()?;
+        wt.open_table(SAVED)?.insert(name, bytes.as_slice())?;
+        Ok(wt.commit()?)
+    }
+
+    /// The copy saved under `name`. One written by a build whose types
+    /// differed reads as missing: it's a copy, and the server has the original.
+    pub fn saved<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
+        let rt = self.db.begin_read()?;
+        let Some(row) = rt.open_table(SAVED)?.get(name)? else { return Ok(None) };
+        match decode(row.value()) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => {
+                tracing::debug!("saved {name}: {e}");
+                Ok(None)
+            }
+        }
     }
 
     /// Stamps of albums whose tracks are stored and current as of that stamp.

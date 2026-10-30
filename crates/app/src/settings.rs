@@ -40,6 +40,28 @@ impl DbReadout {
     }
 }
 
+/// What playback does offline with a song that isn't downloaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Unplayable {
+    /// Skips to the next song that's downloaded.
+    #[default]
+    Skip,
+    /// Stops on it, with a notice.
+    Pause,
+}
+
+impl Unplayable {
+    pub const ALL: [Unplayable; 2] = [Unplayable::Skip, Unplayable::Pause];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Unplayable::Skip => "Skip to a downloaded song",
+            Unplayable::Pause => "Pause",
+        }
+    }
+}
+
 /// How a device plays, as remembered per device. Saved as "normal" /
 /// "bit-perfect", as earlier builds wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +126,12 @@ pub struct Settings {
     /// A toast names the output device whenever playback moves to another.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub device_change_toast: bool,
+    /// Offline, what playback does with a song that isn't downloaded.
+    #[serde(default)]
+    pub offline_unplayable: Unplayable,
+    /// Offline by choice: Ond doesn't connect, and only what can play shows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub work_offline: bool,
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
@@ -205,6 +233,8 @@ impl Default for Settings {
             device_volume_green: true,
             device_volume_db: DbReadout::default(),
             device_change_toast: false,
+            offline_unplayable: Unplayable::default(),
+            work_offline: false,
             device_hidden: Default::default(),
             device_groups: Default::default(),
             theme: Default::default(),

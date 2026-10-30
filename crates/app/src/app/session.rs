@@ -17,6 +17,9 @@ pub(super) struct LoginForm {
     pub(super) password: String,
     pub(super) busy: bool,
     pub(super) error: Option<String>,
+    /// Opened over the library (signing in again): it can be closed to keep
+    /// browsing what's stored.
+    pub(super) closable: bool,
 }
 
 /// The server connection and who's signed in.
@@ -29,6 +32,14 @@ pub struct Session {
     /// The server stopped answering and reconnecting runs in the background
     /// (as opposed to the first connect still under way).
     pub unreachable: bool,
+    /// The saved login is being tried: the server should answer soon, so
+    /// nothing is treated as offline yet.
+    pub connecting: bool,
+    /// The server turned the saved login away (password changed, nothing in
+    /// the keychain): why. The library stays up; the footer asks to sign in.
+    pub sign_in: Option<String>,
+    /// Offline by choice: no connecting, and only what can play shows.
+    pub work_offline: bool,
     /// The login in use, for reconnecting.
     pub settings: Option<Settings>,
     /// "user · navidrome 0.64.2", or "user · offline".
@@ -41,6 +52,11 @@ impl Session {
     /// The client, while the server answers.
     pub fn live(&self) -> Option<&Client> {
         self.client.as_ref().filter(|_| self.online)
+    }
+
+    /// Online, or about to be as far as anyone knows.
+    pub fn expected(&self) -> bool {
+        self.online || self.connecting
     }
 }
 
@@ -73,6 +89,8 @@ impl OndApp {
         self.diagnostics.latency_asked();
         self.bridge.measure_latency(client.clone());
         self.session.unreachable = false;
+        self.session.connecting = false;
+        self.session.sign_in = None;
         self.session.client = Some(client);
         self.prefs.set_login(&settings.server, &settings.username);
         self.session.settings = Some(*settings);
@@ -82,18 +100,74 @@ impl OndApp {
             self.player.forget_next();
             self.sync_next();
         }
+        // Asked for while connecting.
+        self.with_player(|p, cx| p.resume_held(cx));
         self.resume_library_analysis();
     }
 
-    /// The sign-in failed: back to the form, with the error.
+    /// The sign-in failed. From the form: back to it, with the error. The
+    /// saved login (at startup or reconnecting) leaves the library up, and
+    /// the footer asks to sign in again.
     pub(super) fn connect_failed(&mut self, e: String) {
         self.set_offline();
-        let form = self.login.get_or_insert_with(|| {
-            let s = self.session.settings.clone().unwrap_or_default();
-            LoginForm { server: s.server, username: s.username, ..Default::default() }
-        });
-        form.busy = false;
-        form.error = Some(e);
+        self.session.connecting = false;
+        match self.login.as_mut() {
+            Some(form) => {
+                form.busy = false;
+                form.error = Some(e);
+            }
+            None => {
+                tracing::info!("saved login refused: {e}");
+                self.session.unreachable = false;
+                self.session.sign_in = Some(e);
+            }
+        }
+        self.server_gone();
+    }
+
+    /// Works offline (stops connecting, shows only what can play) or goes
+    /// back online.
+    pub(super) fn set_work_offline(&mut self, on: bool) {
+        if self.session.work_offline == on {
+            return;
+        }
+        self.session.work_offline = on;
+        self.prefs.edit(|s| s.work_offline = on);
+        if on {
+            // Connects and reconnects in flight stop; what they'd deliver is dropped.
+            self.bridge.end_session();
+            self.set_offline();
+            self.session.connecting = false;
+            self.session.unreachable = false;
+            self.diagnostics.set_latency(None);
+            self.server_gone();
+        } else if let Some(settings) = self.session.settings.clone() {
+            self.session.connecting = true;
+            self.bridge.connect(settings, None);
+        }
+        self.load_local();
+    }
+
+    /// Reads the library from disk again: all of it, or working offline only
+    /// what can play (once downloads are open: until then nothing is known
+    /// to be downloaded, and their opening calls this again).
+    pub(super) fn load_local(&mut self) {
+        self.data.served = Default::default();
+        if !self.session.work_offline {
+            return self.bridge.load_local(None);
+        }
+        if self.downloads.opening {
+            return;
+        }
+        let keep = crate::local::Playable { downloads: self.downloads.snap.clone(), cache: self.cache.clone(), transcode: self.output.transcode() };
+        self.bridge.load_local(Some(keep));
+    }
+
+    /// Opens the sign-in form over the library, filled in, with why it's
+    /// needed.
+    pub(super) fn sign_in_again(&mut self) {
+        let s = self.session.settings.clone().unwrap_or_default();
+        self.login = Some(LoginForm { server: s.server, username: s.username, error: self.session.sign_in.clone(), closable: true, ..Default::default() });
     }
 
     /// The server stopped answering: carry on offline while reconnecting.
@@ -102,9 +176,11 @@ impl OndApp {
         self.login = None;
         self.set_offline();
         self.session.unreachable = true;
+        self.session.connecting = false;
         self.diagnostics.set_latency(None);
         self.session.server_label = format!("{username} · offline");
         self.sync.label = "reconnecting…".into();
+        self.server_gone();
     }
 
     /// Measures the server's round trip again if the last reading is old
@@ -179,6 +255,14 @@ impl OndApp {
         // Not in `set_offline`: going unreachable sets these for the outage,
         // and a failed sign-in leaves them be.
         self.session.unreachable = false;
+        self.session.connecting = false;
+        self.session.sign_in = None;
+        // Whoever signs in next is online.
+        if self.session.work_offline {
+            self.session.work_offline = false;
+            self.prefs.edit(|s| s.work_offline = false);
+            self.load_local();
+        }
         self.session.server_label.clear();
         let saved = self.prefs.snapshot();
         if self.prefs.has_login() {
@@ -192,7 +276,7 @@ impl OndApp {
     pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
         let Some(form) = self.login.as_mut() else { return };
         let locked = (self.prefs.managed("server"), self.prefs.managed("username"));
-        let mut submit = false;
+        let (mut submit, mut close) = (false, false);
         let t = Tokens::of(ui);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
             // The top strip is the title bar here too.
@@ -262,9 +346,21 @@ impl OndApp {
                         ui.add_space(12.0);
                         ui.add(egui::Label::new(egui::RichText::new(e).size(12.0).color(ui.visuals().error_fg_color)).wrap());
                     }
+                    if form.closable && !form.busy {
+                        ui.add_space(16.0);
+                        ui.vertical_centered(|ui| {
+                            if super::widgets::link(ui, "Keep browsing offline", egui::FontId::proportional(12.0), t.accent).clicked() {
+                                close = true;
+                            }
+                        });
+                    }
                 });
             });
         });
+        if close {
+            self.login = None;
+            return;
+        }
         if submit && !form.busy {
             form.busy = true;
             form.error = None;

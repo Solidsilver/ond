@@ -111,6 +111,8 @@ Device IDs come from the system (CoreAudio's device UID on macOS; on Linux `alsa
 |---|---|---|
 | `offline_dir` | The folder for downloads | Next to the library |
 | `offline_limit_gb` | Cap on downloads in GB; leave it out for no limit | |
+| `work_offline` | Don't connect; show only music that plays offline | `false` |
+| `offline_unplayable` | Offline, a song that isn't downloaded: `"skip"` to the next one that is, or `"pause"` | `"skip"` |
 | `stream_cache_mb` | Cap on the streaming cache in MB | `2048` |
 | `analyze_playing` | Analyze each track as it plays | `false` |
 

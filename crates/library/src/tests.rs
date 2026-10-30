@@ -600,6 +600,7 @@ fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
         .unwrap();
     lib.set_meta("bulk_done", Some(1)).unwrap();
     assert!(!lib.claim_account(7).unwrap());
+    lib.save("newest", &vec!["al".to_owned()]).unwrap();
     assert_eq!(lib.album_count().unwrap(), 1);
     // Reconnecting as the same account changes nothing.
     assert!(!lib.claim_account(7).unwrap());
@@ -610,6 +611,7 @@ fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
     assert_eq!(lib.track_count().unwrap(), 0);
     assert!(lib.album_stamps().unwrap().is_empty());
     assert_eq!(lib.meta("bulk_done").unwrap(), None);
+    assert_eq!(lib.saved::<Vec<String>>("newest").unwrap(), None);
     assert!(lib.check_indexes().unwrap().is_empty());
     assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
     assert!(!lib.claim_account(8).unwrap());
@@ -728,4 +730,15 @@ fn a_row_that_cannot_be_read_is_left_out_of_lists() {
     assert_eq!(lib.album_tracks("al-1").unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(), ["s-1"]);
     assert_eq!(lib.all_tracks().unwrap().len(), 1);
     assert!(lib.artists().unwrap().is_empty());
+}
+
+#[test]
+fn saved_copies_read_back_and_unreadable_ones_read_as_missing() {
+    let lib = Library::in_memory().unwrap();
+    assert_eq!(lib.saved::<Vec<String>>("newest").unwrap(), None);
+    lib.save("newest", &vec!["b".to_owned(), "a".to_owned()]).unwrap();
+    assert_eq!(lib.saved::<Vec<String>>("newest").unwrap(), Some(vec!["b".to_owned(), "a".to_owned()]));
+    // Saved by a build with another type: missing, not an error.
+    lib.save("odd", &7u8).unwrap();
+    assert_eq!(lib.saved::<Vec<(String, String)>>("odd").unwrap(), None);
 }

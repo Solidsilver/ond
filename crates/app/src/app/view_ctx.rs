@@ -27,6 +27,7 @@ pub struct ViewCtx<'a> {
     pub engine: &'a EngineHandle,
     pub favorites: &'a Favorites,
     pub downloads: &'a Downloads,
+    pub cache: &'a streamcache::StreamCache,
     pub analysis: &'a Analysis,
     pub output: &'a Outputs,
     pub session: &'a Session,
@@ -75,9 +76,9 @@ impl<'a> ViewCtx<'a> {
         self.player.duration_secs(self.engine)
     }
 
-    /// Whether `track` can play right now: downloaded, or the server is there.
+    /// Whether `track` can play right now (see [`super::playable`]).
     pub fn playable(&self, track: &Track) -> bool {
-        super::playable(self.session, self.downloads, track)
+        super::playable(self.session, self.downloads, self.cache, self.output, track)
     }
 
     /// This frame's spectrum of what's playing, for a visual on screen;
@@ -116,6 +117,7 @@ impl OndApp {
             engine: &self.engine,
             favorites: &self.favorites,
             downloads: &self.downloads,
+            cache: &self.cache,
             analysis: &self.analysis,
             output: &self.output,
             session: &self.session,

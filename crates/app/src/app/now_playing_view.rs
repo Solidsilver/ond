@@ -254,7 +254,7 @@ impl ViewCtx<'_> {
     pub(super) fn big_transport(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let state = self.engine.status.state();
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some();
+        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some() || self.player.held;
         let (icon, label) = match state {
             _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
             PlayState::Playing => (Icon::Pause, "Pause"),
