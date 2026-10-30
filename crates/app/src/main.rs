@@ -17,6 +17,7 @@ mod favorites;
 mod fmt;
 mod icons;
 mod keys;
+mod local;
 mod lyrics;
 mod managed;
 mod memo;

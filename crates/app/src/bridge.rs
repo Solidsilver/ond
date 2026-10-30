@@ -38,7 +38,11 @@ pub enum Msg {
     /// Ids of the most recently added albums, newest first.
     Newest(Vec<String>),
     Playlists(Vec<subsonic::Playlist>),
-    PlaylistTracks { id: String, tracks: Vec<Track> },
+    /// A playlist's songs. `fresh`: the server's listing, not the saved copy.
+    PlaylistTracks { id: String, tracks: Vec<Track>, fresh: bool },
+    /// The copies saved last time of what the server lists outside the
+    /// library, read at startup so they show before it answers (or offline).
+    Saved(Box<Saved>),
     /// Albums whose stored tracks credit `name`.
     Credited { name: String, album_ids: Vec<String> },
     /// Tracks of several albums, gathered for one queue action (`key` says which).
@@ -89,6 +93,55 @@ pub enum Msg {
     Error(String),
 }
 
+/// What the server lists outside the library, as saved last time; `None`
+/// where nothing was.
+#[derive(Default)]
+pub struct Saved {
+    pub newest: Option<Vec<String>>,
+    pub playlists: Option<Vec<subsonic::Playlist>>,
+    pub starred: Option<SavedStarred>,
+}
+
+/// The favorites and the ratings seen with them, as saved.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SavedStarred {
+    pub starred: Starred,
+    pub ratings: Vec<(String, u8)>,
+}
+
+/// Names of the saved copies (see [`library::Library::save`]).
+const SAVED_NEWEST: &str = "newest";
+const SAVED_PLAYLISTS: &str = "playlists";
+const SAVED_STARRED: &str = "starred";
+
+fn saved_playlist_name(id: &str) -> String {
+    format!("playlist/{id}")
+}
+
+/// A playlist as saved: [`subsonic::Playlist`] reads numbers leniently,
+/// which needs a self-describing format; the saved copies aren't one.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedPlaylist {
+    id: String,
+    name: String,
+    song_count: u32,
+    duration: u32,
+    cover_art: Option<String>,
+    owner: Option<String>,
+}
+
+impl From<&subsonic::Playlist> for SavedPlaylist {
+    fn from(p: &subsonic::Playlist) -> Self {
+        Self { id: p.id.clone(), name: p.name.clone(), song_count: p.song_count, duration: p.duration, cover_art: p.cover_art.clone(), owner: p.owner.clone() }
+    }
+}
+
+impl From<SavedPlaylist> for subsonic::Playlist {
+    fn from(p: SavedPlaylist) -> Self {
+        Self { id: p.id, name: p.name, song_count: p.song_count, duration: p.duration, cover_art: p.cover_art, owner: p.owner }
+    }
+}
+
 /// A track list something can wait for: an album's, a playlist's, or all of
 /// an artist's albums together.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -109,6 +162,10 @@ pub enum PlaylistEdit {
     Replace(Vec<String>),
     Delete,
 }
+
+/// More time passed on the wall clock than on the monotonic one: the
+/// computer slept.
+const SLEPT: Duration = Duration::from_secs(5);
 
 /// What the user sees when connecting fails: the gist, without the plumbing.
 pub fn connect_error(e: &subsonic::Error) -> String {
@@ -165,6 +222,8 @@ pub struct Bridge {
     reload_owed: Arc<AtomicBool>,
     /// A reconnect loop is running (one is enough).
     reconnecting: Arc<AtomicBool>,
+    /// Wakes the reconnect loop to try now (the window came to the front).
+    retry_now: Arc<tokio::sync::Notify>,
     /// Bumped on sign-out: connects and reconnect loops started before it stop
     /// and their results are ignored.
     session: Arc<AtomicU64>,
@@ -188,6 +247,7 @@ impl Bridge {
             album_pass: Arc::default(),
             reload_owed: Arc::default(),
             reconnecting: Arc::default(),
+            retry_now: Arc::default(),
             session: Arc::default(),
             in_order: Arc::default(),
             scope: None,
@@ -297,18 +357,59 @@ impl Bridge {
     }
 
     /// Loads the cached library from disk without touching the network.
-    pub fn load_cached_albums(&self) {
+    /// Reads the stored library and the saved copies of the playlists,
+    /// favorites and Recently added. With `keep` (working offline), only
+    /// what can play: the rest isn't sent.
+    pub fn load_local(&self, keep: Option<crate::local::Playable>) {
         let this = self.clone();
         self.rt.spawn_blocking(move || {
-            match this.library.albums() {
-                Ok(a) => this.send(Msg::Albums(a)),
+            let l = &this.library;
+            let mut saved = Saved {
+                newest: l.saved(SAVED_NEWEST).ok().flatten(),
+                playlists: l.saved::<Vec<SavedPlaylist>>(SAVED_PLAYLISTS).ok().flatten().map(|p| p.into_iter().map(Into::into).collect()),
+                starred: l.saved(SAVED_STARRED).ok().flatten(),
+            };
+            let Some(keep) = keep else {
+                match l.albums() {
+                    Ok(a) => this.send(Msg::Albums(a)),
+                    Err(e) => return this.send(Msg::Error(format!("Couldn't read the library: {e}"))),
+                }
+                if let Ok(a) = l.artists() {
+                    this.send(Msg::Artists(a));
+                }
+                this.send(Msg::Saved(Box::new(saved)));
+                return this.load_all_tracks();
+            };
+            let read = || -> library::Result<_> { Ok((l.albums()?, l.artists()?, l.all_tracks()?)) };
+            let (albums, artists, tracks) = match read() {
+                Ok(r) => r,
                 Err(e) => return this.send(Msg::Error(format!("Couldn't read the library: {e}"))),
+            };
+            let kept = crate::local::Kept::new(&keep, albums, artists, tracks);
+            if let Some(ids) = &mut saved.newest {
+                kept.newest(ids);
             }
-            if let Ok(a) = this.library.artists() {
-                this.send(Msg::Artists(a));
+            if let Some(s) = &mut saved.starred {
+                kept.starred(&keep, s);
             }
-            this.load_all_tracks();
+            // A playlist shows if any of its songs (as saved) can play.
+            if let Some(p) = &mut saved.playlists {
+                p.retain(|p| l.saved::<Vec<Track>>(&saved_playlist_name(&p.id)).ok().flatten().is_some_and(|t| t.iter().any(|t| keep.track(t))));
+            }
+            this.send(Msg::Albums(kept.albums));
+            this.send(Msg::Artists(kept.artists));
+            this.send(Msg::Saved(Box::new(saved)));
+            this.send(Msg::AllTracks(Box::new(crate::tracks::TrackSet::new(kept.tracks))));
         });
+    }
+
+    /// Saves a copy of `value` for starting offline. A failure costs only
+    /// the copy, so it's logged, not shown.
+    async fn keep<T: serde::Serialize + Send + 'static>(&self, name: String, value: T) {
+        let what = name.clone();
+        if let Err(e) = self.db(move |l| l.save(&name, &value)).await {
+            tracing::warn!("saving {what}: {e}");
+        }
     }
 
     /// Runs `job` on the blocking pool after every job queued here before it
@@ -442,8 +543,36 @@ impl Bridge {
         });
     }
 
-    /// Pings with backoff (5 s, doubling to a minute) until the server answers,
-    /// or until the user signs out (`session` ends).
+    /// Has the reconnect loop, if one runs, try right away.
+    pub fn retry_now(&self) {
+        if self.reconnecting.load(Ordering::Relaxed) {
+            self.retry_now.notify_one();
+        }
+    }
+
+    /// Waits `delay` before the next ping, or less: when asked to retry now,
+    /// or when the clock jumped (the computer slept, and the network may be
+    /// back since). The monotonic clock stops during sleep, so a wait begun
+    /// before it would otherwise run on for its full length after waking.
+    async fn backoff(&self, delay: Duration) {
+        let (start, wall) = (Instant::now(), std::time::SystemTime::now());
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until((start + delay).into()) => return,
+                () = self.retry_now.notified() => return,
+                _ = tick.tick() => {
+                    let slept = wall.elapsed().unwrap_or_default().saturating_sub(start.elapsed());
+                    if slept > SLEPT {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pings with backoff (5 s, doubling to half a minute) until the server
+    /// answers, or until the user signs out (`session` ends).
     fn reconnect(&self, client: Client, settings: Settings, session: u64) {
         if !self.live(session) || self.reconnecting.swap(true, Ordering::Relaxed) {
             return;
@@ -452,7 +581,7 @@ impl Bridge {
         self.rt.spawn(async move {
             let mut delay = Duration::from_secs(5);
             loop {
-                tokio::time::sleep(delay).await;
+                this.backoff(delay).await;
                 if !this.live(session) {
                     // Signed out: `end_session` already cleared `reconnecting`
                     // (and a new loop may own it now).
@@ -467,7 +596,7 @@ impl Bridge {
                         this.reconnecting.store(false, Ordering::Relaxed);
                         return this.connected(session, client, settings, server).await;
                     }
-                    Err(PingError::Unreachable(_)) => delay = (delay * 2).min(Duration::from_secs(60)),
+                    Err(PingError::Unreachable(_)) => delay = (delay * 2).min(Duration::from_secs(30)),
                     Err(PingError::Refused(e)) => {
                         // Reachable but turning us away (password changed): back to the login form.
                         this.reconnecting.store(false, Ordering::Relaxed);
@@ -630,32 +759,39 @@ impl Bridge {
                     let ids = albums.iter().map(|a| a.id.clone()).collect();
                     // Newest albums may predate the last full sync; announced
                     // only once they're stored, or they'd show as missing.
-                    match this.db(move |l| l.upsert_albums(albums)).await {
+                    let saved = Vec::clone(&ids);
+                    match this.db(move |l| l.upsert_albums(albums).and_then(|()| l.save(SAVED_NEWEST, &saved))).await {
                         Ok(()) => this.send(Msg::Newest(ids)),
                         Err(e) => this.send(Msg::Error(format!("Couldn't save Recently added: {e}"))),
                     }
                 }
                 Err(e) => this.send(Msg::Error(format!("Couldn't load Recently added: {e}"))),
             }
-            match client.playlists().await {
-                Ok(p) => this.send(Msg::Playlists(p)),
-                Err(e) => this.send(Msg::Error(format!("Couldn't load playlists: {e}"))),
-            }
+            this.refresh_playlists(&client).await;
         });
     }
 
     pub fn open_playlist(&self, client: Option<Client>, id: String) {
-        let Some(client) = client else {
-            return self.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: None });
-        };
         let this = self.scoped();
+        let Some(client) = client else {
+            // Offline: the copy saved when it last loaded, if there is one.
+            self.rt.spawn(async move {
+                let name = saved_playlist_name(&id);
+                match this.db(move |l| l.saved::<Vec<Track>>(&name)).await {
+                    Ok(Some(tracks)) => this.send(Msg::PlaylistTracks { id, tracks, fresh: false }),
+                    _ => this.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: None }),
+                }
+            });
+            return;
+        };
         self.rt.spawn(async move {
             match client.playlist(&id).await {
                 Ok(p) => {
                     let meta = song_meta(&p.entry);
                     let tracks: Vec<Track> = p.entry.into_iter().map(song_track).collect();
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
-                    this.send(Msg::PlaylistTracks { id, tracks });
+                    this.send(Msg::PlaylistTracks { id: id.clone(), tracks: tracks.clone(), fresh: true });
+                    this.keep(saved_playlist_name(&id), tracks).await;
                 }
                 Err(e) => this.send(Msg::LoadFailed { key: ListKey::Playlist(id), error: Some(format!("Couldn't load the playlist: {e}")) }),
             }
@@ -676,7 +812,9 @@ impl Bridge {
                         albums: s.album.into_iter().map(|a| a.id).collect(),
                         artists: s.artist.into_iter().map(|a| (a.id, a.name)).collect(),
                     };
+                    let saved = SavedStarred { starred: starred.clone(), ratings: ratings.clone() };
                     this.send(Msg::Starred { starred, ratings });
+                    this.keep(SAVED_STARRED.to_owned(), saved).await;
                 }
                 Err(e) => this.send(Msg::Error(format!("Couldn't load favorites: {e}"))),
             }
@@ -789,7 +927,11 @@ impl Bridge {
 
     async fn refresh_playlists(&self, client: &Client) {
         match client.playlists().await {
-            Ok(p) => self.send(Msg::Playlists(p)),
+            Ok(p) => {
+                let saved: Vec<SavedPlaylist> = p.iter().map(SavedPlaylist::from).collect();
+                self.send(Msg::Playlists(p));
+                self.keep(SAVED_PLAYLISTS.to_owned(), saved).await;
+            }
             Err(e) => self.send(Msg::Error(format!("Couldn't load playlists: {e}"))),
         }
     }

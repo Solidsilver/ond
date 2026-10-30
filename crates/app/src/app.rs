@@ -30,6 +30,7 @@ mod pins;
 mod playing;
 mod prefs_view;
 mod session;
+mod signal_card;
 mod ui_state;
 mod view_ctx;
 mod window_state;
@@ -161,6 +162,8 @@ pub enum Action {
     MeasureLatency,
     /// Back to the login screen; the saved password is forgotten.
     SignOut,
+    /// The server turned the saved login down: the sign-in form, over the library.
+    SignInAgain,
     Album(String, QueueAction),
     Artist(String, QueueAction),
     Playlist(String, QueueAction),
@@ -361,7 +364,12 @@ impl OndApp {
         });
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
-        bridge.load_cached_albums();
+        // Working offline, the library loads once downloads are open (only
+        // what can play shows).
+        let work_offline = saved.work_offline && prefs.has_login() && !saved.signed_out;
+        if !work_offline {
+            bridge.load_local(None);
+        }
         bridge.load_analyses(analyses.clone());
         let analyzer = {
             let (results, ticks) = (bridge.clone(), bridge.notifier());
@@ -376,26 +384,32 @@ impl OndApp {
         };
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
 
+        // With a saved login the library opens at once (what's stored),
+        // while the server is tried in the background.
         let login = if !prefs.has_login() {
-            LoginForm { server: "http://localhost:4533".into(), ..Default::default() }
+            Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() })
         } else if saved.signed_out {
-            LoginForm { server: saved.server.clone(), username: saved.username.clone(), ..Default::default() }
+            Some(LoginForm { server: saved.server.clone(), username: saved.username.clone(), ..Default::default() })
         } else {
-            bridge.connect(saved.clone(), None);
-            LoginForm { server: saved.server.clone(), username: saved.username.clone(), busy: true, ..Default::default() }
+            if !work_offline {
+                bridge.connect(saved.clone(), None);
+            }
+            None
         };
+        let connecting = login.is_none() && !work_offline;
 
         let shown = PrefsView::read(&prefs);
         let mut player = Player::default();
         player.queue.prefs = prefs.get(|s| s.queue);
+        player.stop_on_unplayable = saved.offline_unplayable == crate::settings::Unplayable::Pause;
         Ok(Self {
             _rt: AppRuntime(Some(rt)),
             ctx: ctx.clone(),
             bridge,
             inbox,
             engine,
-            login: Some(login),
-            session: Session { settings: prefs.has_login().then(|| saved.clone()), ..Default::default() },
+            login,
+            session: Session { settings: prefs.has_login().then(|| saved.clone()), connecting, work_offline, ..Default::default() },
             sync: SyncState::default(),
             data: Data::default(),
             actions: Vec::new(),
@@ -443,13 +457,17 @@ impl OndApp {
             | Msg::Newest(_)
             | Msg::Playlists(_)
             | Msg::PlaylistTracks { .. }
+            | Msg::Saved(_)
             | Msg::Credited { .. }
             | Msg::TrackBatch { .. }) => self.library_msg(m),
             m @ (Msg::Analyzed { .. } | Msg::AnalysesLoaded(_)) => self.analysis_msg(m),
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
             m @ (Msg::OfflineFolder(_) | Msg::OfflineStore { .. } | Msg::OfflineMoving(_) | Msg::OfflineMoved(_)) => self.offline_msg(m),
-            Msg::Starred { starred, ratings } => self.favorites.load(starred, ratings),
+            Msg::Starred { starred, ratings } => {
+                self.data.served.starred = true;
+                self.favorites.load(starred, ratings);
+            }
             Msg::Lyrics { track_id, lyrics } => {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
             }
@@ -599,6 +617,7 @@ impl OndApp {
             Action::ClearStreamCache => self.cache.clear(),
             Action::MeasureLatency => self.refresh_latency(),
             Action::SignOut => self.sign_out(),
+            Action::SignInAgain => self.sign_in_again(),
             Action::Album(id, action) => self.play_album(id, action),
             Action::Artist(name, action) => self.play_artist(name, action),
             Action::Playlist(id, action) => self.play_playlist(id, action),
@@ -874,6 +893,11 @@ impl eframe::App for OndApp {
             menu.sync(queue, self.bit_perfect, theme);
             menu.set_diagnostics(diagnostics);
         }
+        // Back at the window: if the server's away, try it now rather than
+        // at the end of the wait.
+        if self.session.unreachable && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            self.bridge.retry_now();
+        }
         // The diagnostics bar keeps the server round trip fresh, but only while
         // something plays (idle stays idle).
         if self.ui.prefs.diagnostics_bar && self.engine.status.state() == PlayState::Playing {
@@ -884,7 +908,7 @@ impl eframe::App for OndApp {
         match self.engine.status.state() {
             PlayState::Playing => ctx.request_repaint_after(Duration::from_millis(250)),
             PlayState::Buffering | PlayState::Loading => ctx.request_repaint_after(Duration::from_millis(33)),
-            _ if self.player.pending_seek.is_some() => ctx.request_repaint_after(Duration::from_millis(33)),
+            _ if self.player.pending_seek.is_some() || self.player.held => ctx.request_repaint_after(Duration::from_millis(33)),
             _ => {}
         }
         crate::chrome::sync(ctx, crate::chrome::Bar { height: title_bar_h(self.ui.prefs.mode) });

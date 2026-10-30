@@ -497,6 +497,10 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     app.sync.progress = None;
     app.ui.toasts = super::toasts::Toasts::default();
     app.session.unreachable = false;
+    app.session.connecting = false;
+    app.session.sign_in = None;
+    app.session.work_offline = false;
+    app.player.playing_from = None;
     app.diagnostics = super::diagnostics::Diagnostics::default();
     app.prefs.edit(|s| s.diagnostics_bar = false);
     app.diagnostics.set_latency(Some(Duration::from_millis(14)));
@@ -807,6 +811,18 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.hover_at(pos2(190.0, 150.0));
     h.run_steps(4);
     s.shoot(h, "player-details-art-hover");
+
+    reset(h, player, Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    app_mut(h).ui.np_details = true;
+    app_mut(h).player.playing_from = Some(audio::TrackSource { url: "file:///downloads/t.flac".into(), ..Default::default() });
+    h.run_steps(4);
+    if !click_label(h, "Signal path", egui::Rect::from_min_size(pos2(0.0, player.y - 40.0), vec2(player.x, 40.0))) {
+        eprintln!("  (player's format pill not found)");
+    }
+    h.run_steps(4);
+    s.shoot(h, "player-signal-path");
+    egui::Popup::close_all(&h.ctx);
 
     // The full window's sidebar on its Lyrics tab.
     reset(h, FULL, Route::Recent);
@@ -1164,6 +1180,39 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     app_mut(h).session.online = false;
     s.shoot(h, "footer-connecting");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).session.online = false;
+    app_mut(h).session.sign_in = Some("Wrong username or password.".into());
+    s.shoot(h, "footer-sign-in");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).session.online = false;
+    app_mut(h).session.work_offline = true;
+    s.shoot(h, "footer-offline-mode");
+
+    // Where the song plays from (an arrow in the format pill, and its
+    // signal path), and the
+    // download marks on playlists: one downloaded, one on its way.
+    reset(h, FULL, Route::Recent);
+    {
+        let app = app_mut(h);
+        let id = app.player.queue.current.as_ref().map(|c| c.track.id.clone()).unwrap_or_default();
+        app.player.playing_from = Some(audio::TrackSource { id, url: "file:///downloads/t.flac".into(), ..Default::default() });
+        let pin = |id: &str, done: usize| offline::PinSummary { pin: offline::Pin::Playlist(id.into()), label: id.into(), total: 12, done, failed: 0, bytes_done: 0, bytes_total: 0, downloading: done < 12 };
+        let snap = offline::Snapshot { pins: vec![pin("pl-1", 12), pin("pl-2", 5)], ..(*app.downloads.snap).clone() };
+        app.downloads.snap = Arc::new(snap);
+    }
+    s.shoot(h, "origin-downloaded");
+    if !click_label(h, "Signal path", egui::Rect::from_min_size(Pos2::ZERO, vec2(FULL.x, 60.0))) {
+        eprintln!("  (format pill not found)");
+    }
+    h.run_steps(4);
+    s.shoot(h, "origin-downloaded-path");
+    egui::Popup::close_all(&h.ctx);
+    app_mut(h).player.playing_from.as_mut().unwrap().url = "https://music.example.com/rest/stream".into();
+    app_mut(h).player.playing_from.as_mut().unwrap().transcode = Some(audio::Transcode { format: "mp3".into(), kbps: 320 });
+    s.shoot(h, "origin-streamed");
 
     // The diagnostics bar, on, while playing and syncing; and at a narrow width.
     reset(h, FULL, Route::Recent);

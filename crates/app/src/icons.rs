@@ -102,6 +102,12 @@ fn heart_points(n: usize) -> Vec<(f32, f32)> {
 }
 
 /// Paints `icon` centred in `rect`.
+/// A speaker's body and cone, for the volume icons. Filled in two convex
+/// parts: as one shape it isn't convex, and a convex fill draws it wrong.
+fn speaker(tri: &impl Fn(Vec<Pos2>) -> Shape, p: &impl Fn(f32, f32) -> Pos2) -> [Shape; 2] {
+    [tri(vec![p(-0.95, -0.28), p(-0.5, -0.28), p(-0.5, 0.28), p(-0.95, 0.28)]), tri(vec![p(-0.55, -0.28), p(-0.1, -0.72), p(-0.1, 0.72), p(-0.55, 0.28)])]
+}
+
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let r = rect.width().min(rect.height()) / 2.0;
@@ -159,12 +165,15 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(tri(vec![p(0.3, 0.3), p(0.85, 0.62), p(0.3, 0.95)]));
         }
         Icon::Volume => {
-            painter.add(tri(vec![p(-0.8, -0.3), p(-0.35, -0.3), p(0.15, -0.75), p(0.15, 0.75), p(-0.35, 0.3), p(-0.8, 0.3)]));
-            let arc = (0..=8).map(|k| {
-                let a = -0.9 + 1.8 * k as f32 / 8.0;
-                p(0.2 + 0.55 * a.cos(), 0.55 * a.sin())
-            });
-            painter.add(Shape::line(arc.collect(), line));
+            painter.extend(speaker(&tri, &p));
+            // Two waves from the cone's mouth.
+            for radius in [0.42, 0.8] {
+                let arc = (0..=10).map(|k| {
+                    let a = -0.85 + 1.7 * k as f32 / 10.0;
+                    p(-0.1 + radius * a.cos(), radius * a.sin())
+                });
+                painter.add(Shape::line(arc.collect(), line));
+            }
         }
         Icon::Shuffle => {
             painter.add(Shape::line(vec![p(-0.85, -0.55), p(-0.35, -0.55), p(0.35, 0.55), p(0.85, 0.55)], line));
@@ -245,9 +254,9 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Muted => {
-            painter.add(tri(vec![p(-0.8, -0.3), p(-0.35, -0.3), p(0.15, -0.75), p(0.15, 0.75), p(-0.35, 0.3), p(-0.8, 0.3)]));
-            painter.line_segment([p(0.4, -0.35), p(0.9, 0.35)], line);
-            painter.line_segment([p(0.4, 0.35), p(0.9, -0.35)], line);
+            painter.extend(speaker(&tri, &p));
+            painter.line_segment([p(0.3, -0.32), p(0.9, 0.32)], line);
+            painter.line_segment([p(0.3, 0.32), p(0.9, -0.32)], line);
         }
         Icon::Headphones => {
             let band = (0..=12).map(|k| {
@@ -332,13 +341,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(Shape::line(vec![p(-0.32, 0.08), p(0.0, 0.4), p(0.32, 0.08)], thin));
         }
         Icon::Offline => {
-            let arc = (0..=12).map(|k| {
-                let a = std::f32::consts::PI * (1.0 + k as f32 / 12.0);
-                p(0.1 + 0.45 * a.cos(), 0.1 + 0.45 * a.sin())
-            });
-            painter.add(Shape::line(arc.collect(), line));
-            painter.add(Shape::line(vec![p(-0.35, 0.1), p(-0.75, 0.1), p(-0.85, 0.35), p(-0.6, 0.55), p(0.65, 0.55), p(0.85, 0.3), p(0.55, 0.1)], line));
-            painter.line_segment([p(-0.8, -0.8), p(0.8, 0.8)], line);
+            // The slash crosses the cloud with a gap either side of it.
+            let gap = (line.width * 1.1) / r;
+            for run in cloud_outline(|x, y| (x - y).abs() / std::f32::consts::SQRT_2 > gap) {
+                painter.add(Shape::line(run.into_iter().map(|(x, y)| p(x, y)).collect(), line));
+            }
+            painter.line_segment([p(-0.78, -0.78), p(0.78, 0.78)], line);
         }
         Icon::Heart => {
             // Two open halves, notch to tip, so neither sharp point gets a
@@ -431,4 +439,64 @@ pub fn inline(ui: &mut Ui, icon: Icon, color: Color32) {
     let h = ui.text_style_height(&egui::TextStyle::Body) * 0.7;
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(h), Sense::hover());
     paint(ui.painter(), rect, icon, color);
+}
+
+/// A cloud's outline, flat along the bottom, as runs of points (−1..=1
+/// across) that `keep` accepts: three overlapping circles over a base.
+fn cloud_outline(keep: impl Fn(f32, f32) -> bool) -> Vec<Vec<(f32, f32)>> {
+    const BASE: f32 = 0.48;
+    let circles: [(f32, f32, f32); 3] = [(-0.5, 0.16, 0.32), (-0.02, -0.1, 0.46), (0.48, 0.13, 0.35)];
+    let (left, right) = (circles[0].0, circles[2].0);
+    // Inside another circle, or the box under the circles.
+    let covered = |x: f32, y: f32, skip: usize| {
+        circles.iter().enumerate().any(|(k, &(cx, cy, cr))| k != skip && (x - cx).powi(2) + (y - cy).powi(2) < (cr - 0.005).powi(2))
+            || (x > left + 0.005 && x < right - 0.005 && y > 0.1 && y < BASE - 0.005)
+    };
+    let mut runs = Vec::new();
+    let mut run: Vec<(f32, f32)> = Vec::new();
+    let mut take = |pt: Option<(f32, f32)>, runs: &mut Vec<Vec<(f32, f32)>>| match pt {
+        Some(pt) => run.push(pt),
+        None if run.len() > 1 => runs.push(std::mem::take(&mut run)),
+        None => run.clear(),
+    };
+    const N: usize = 96;
+    for (k, &(cx, cy, cr)) in circles.iter().enumerate() {
+        for i in 0..=N {
+            let a = std::f32::consts::TAU * i as f32 / N as f32;
+            let (x, y) = (cx + cr * a.cos(), cy + cr * a.sin());
+            take((!covered(x, y, k) && keep(x, y)).then_some((x, y)), &mut runs);
+        }
+        take(None, &mut runs);
+    }
+    for i in 0..=N {
+        let x = left + (right - left) * i as f32 / N as f32;
+        take(keep(x, BASE).then_some((x, BASE)), &mut runs);
+    }
+    take(None, &mut runs);
+    runs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Renders the volume and offline icons at toolbar size and large, to
+    /// look at: `cargo test -p ond-player --release icons::tests::volume_icons -- --ignored`
+    /// writes target/snapshots/icons-volume.png.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    fn volume_icons() {
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(380.0, 80.0)).with_pixels_per_point(2.0).with_theme(egui::Theme::Dark).build_ui(|ui| {
+            let painter = ui.painter();
+            painter.rect_filled(ui.max_rect(), 0.0, Color32::from_gray(30));
+            for (k, icon) in [Icon::Volume, Icon::Muted, Icon::Offline].into_iter().enumerate() {
+                let x = 20.0 + k as f32 * 120.0;
+                paint(painter, Rect::from_center_size(egui::pos2(x, 40.0), vec2(15.0, 15.0)), icon, Color32::WHITE);
+                paint(painter, Rect::from_center_size(egui::pos2(x + 60.0, 40.0), vec2(60.0, 60.0)), icon, Color32::WHITE);
+            }
+        });
+        let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
+        std::fs::create_dir_all(&out).unwrap();
+        h.render().unwrap().save(out.join("icons-volume.png")).unwrap();
+    }
 }

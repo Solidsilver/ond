@@ -191,6 +191,12 @@ impl OndApp {
         if self.session.online {
             return ServerState::Connected { host };
         }
+        if self.session.work_offline {
+            return ServerState::WorkingOffline { host };
+        }
+        if self.session.sign_in.is_some() {
+            return ServerState::SignIn { host };
+        }
         if self.session.unreachable {
             return ServerState::Offline { host };
         }
@@ -224,14 +230,23 @@ impl OndApp {
                     Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
                     None => "Connected".to_owned(),
                 },
-                ServerState::Offline { .. } => "Offline · reconnecting".to_owned(),
+                ServerState::Offline { .. } => "Can't reach server · retrying".to_owned(),
                 ServerState::Connecting { .. } => "Connecting…".to_owned(),
+                ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
+                ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
             };
             let status_color = match state {
-                ServerState::Offline { .. } => t.warn,
+                ServerState::Offline { .. } | ServerState::SignIn { .. } => t.warn,
                 _ => t.text,
             };
             info_row(ui, "Status", &status, status_color);
+            if let (ServerState::SignIn { .. }, Some(why)) = (state, &self.session.sign_in) {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
+                });
+            }
             if !user.is_empty() {
                 info_row(ui, "User", &user, t.text);
             }
@@ -271,6 +286,13 @@ impl OndApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
+            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…", "") {
+                self.actions.push(Action::SignInAgain);
+            }
+            let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
+            if !self.prefs.managed("work_offline") && menu_item(ui, label, "") {
+                self.actions.push(Action::Offline(super::OfflineAction::WorkOffline(on)));
+            }
             if menu_item(ui, "Sign out", "") {
                 self.actions.push(Action::SignOut);
             }
@@ -317,7 +339,7 @@ impl OndApp {
     }
 
     pub(super) fn place(&self, ui: &mut Ui, label: &str, on: bool) -> egui::Response {
-        place(ui, label, on)
+        place(ui, label, on, None)
     }
 }
 
@@ -337,7 +359,9 @@ impl ViewCtx<'_> {
         };
         for (i, p) in data.playlists.iter().enumerate() {
             let mine = owns(self.session, p);
-            let resp = place(ui, &p.name, active == Some(i));
+            // Downloaded (or on its way): the same mark as on album cards.
+            let mark = super::widgets::Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())));
+            let resp = place(ui, &p.name, active == Some(i), mark);
             // A drop target for songs dragged from any list.
             if mine && dragging {
                 let over = resp.dnd_hover_payload::<DragTracks>().is_some_and(|d| d.from.as_ref().is_none_or(|(from, _)| *from != p.id));
@@ -388,8 +412,12 @@ pub(super) fn owns(session: &super::Session, p: &subsonic::Playlist) -> bool {
     }
 }
 
-/// A place in the sidebar: its name, highlighted when `on`.
-fn place(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
+/// Room a place's download mark takes at its right end.
+const MARK_ROOM: f32 = 16.0;
+
+/// A place in the sidebar: its name, highlighted when `on`, and a download
+/// mark at the right end when it has one.
+fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::widgets::Mark>) -> egui::Response {
     let t = Tokens::of(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -402,10 +430,18 @@ fn place(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
         };
         ui.painter().rect_filled(rect, 6.0, fill);
         let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-        let g = super::widgets::elide(ui, label, font, t.text, rect.width() - 16.0);
+        let room = if mark.is_some() { MARK_ROOM } else { 0.0 };
+        let g = super::widgets::elide(ui, label, font, t.text, rect.width() - 16.0 - room);
         ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, t.text);
+        if let Some(m) = mark {
+            super::widgets::mark(ui, pos2(rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, rect.center().y), 11.0, m);
+        }
     }
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, label));
+    let label = match mark {
+        Some(m) => format!("{label}, {}", m.hint().to_lowercase()),
+        None => label.to_owned(),
+    };
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, &label));
     resp
 }
 
@@ -452,12 +488,21 @@ enum ServerState {
     Offline { host: String },
     /// The first connect is still under way.
     Connecting { host: String },
+    /// The server turned the saved login down.
+    SignIn { host: String },
+    /// Offline by choice: not connecting.
+    WorkingOffline { host: String },
 }
 
 impl ServerState {
     fn host(&self) -> &str {
         match self {
-            ServerState::Connected { host } | ServerState::Syncing { host, .. } | ServerState::Offline { host } | ServerState::Connecting { host } => host,
+            ServerState::Connected { host }
+            | ServerState::Syncing { host, .. }
+            | ServerState::Offline { host }
+            | ServerState::Connecting { host }
+            | ServerState::SignIn { host }
+            | ServerState::WorkingOffline { host } => host,
         }
     }
 
@@ -466,8 +511,10 @@ impl ServerState {
         match self {
             ServerState::Connected { host } => host,
             ServerState::Syncing { label, .. } => label,
-            ServerState::Offline { .. } => "Offline",
+            ServerState::Offline { .. } => "Can't reach server",
             ServerState::Connecting { .. } => "Connecting…",
+            ServerState::SignIn { .. } => "Sign in again",
+            ServerState::WorkingOffline { .. } => "Offline mode",
         }
     }
 
@@ -477,6 +524,8 @@ impl ServerState {
             ServerState::Syncing { detail, .. } => format!("{detail}\nYou can browse while it runs. New albums and tracks appear as they arrive."),
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
+            ServerState::SignIn { .. } => "The server didn't accept the saved login. Downloaded music still plays. Click to sign in.".into(),
+            ServerState::WorkingOffline { .. } => "Offline mode: Ond doesn't connect to the server, and shows only music that plays without it. Click to go online.".into(),
         }
     }
 
@@ -503,7 +552,8 @@ impl ServerState {
                     ui.ctx().request_repaint_after(SPIN);
                 }
             }
-            ServerState::Offline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
+            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
+            ServerState::SignIn { .. } => super::widgets::mark(ui, c, 12.0, super::widgets::Mark::Failed),
         }
         if !matches!(self, ServerState::Connecting { .. }) {
             ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));

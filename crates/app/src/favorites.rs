@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub use subsonic::StarKind;
 
 /// Loved things for the Favorites view, newest first.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Starred {
     pub songs: Vec<Track>,
     pub albums: Vec<String>,

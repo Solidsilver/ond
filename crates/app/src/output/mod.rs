@@ -7,7 +7,7 @@ mod panel;
 mod readout;
 mod volume;
 
-pub use readout::paint_readout;
+pub use readout::{Readout, paint_readout};
 
 use crate::icons::Icon;
 use crate::playback::{NetworkProbe, PlaybackPrefs};
@@ -35,8 +35,6 @@ pub struct Outputs {
     signal: Option<SignalPath>,
     /// "Playback settings…" was clicked in the popup this frame.
     wants_settings: bool,
-    /// Something else (the readout) asked for the picker to open.
-    open_requested: bool,
     /// The device's own volume, while bit-perfect holds a device that has one.
     device_volume: Option<DeviceVolume>,
     /// The level we last asked for and when: until the device reports it
@@ -85,7 +83,6 @@ impl Outputs {
             current: None,
             signal: None,
             wants_settings: false,
-            open_requested: false,
             device_volume: None,
             awaiting: None,
             unsent: None,
@@ -337,11 +334,6 @@ impl Outputs {
         if uid.is_some() {
             self.choose(uid, engine);
         }
-    }
-
-    /// Opens the output popup (from the readout) on the next pass of the picker.
-    pub fn request_open(&mut self) {
-        self.open_requested = true;
     }
 }
 
