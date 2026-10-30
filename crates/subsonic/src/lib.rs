@@ -165,10 +165,7 @@ impl Client {
 
     /// Builds a signed endpoint URL; `params` are appended after the auth params.
     pub fn endpoint(&self, method: &str, params: &[(&str, &str)]) -> Url {
-        let mut url = self
-            .base
-            .join(&format!("rest/{method}"))
-            .expect("method names are valid path segments");
+        let mut url = self.base.join(&format!("rest/{method}")).expect("method names are valid path segments");
         let token = self.creds.token();
         url.query_pairs_mut()
             .append_pair("u", &self.creds.username)
@@ -212,12 +209,8 @@ impl Client {
 
     /// One page of `getAlbumList2`. Navidrome caps `size` at 500.
     pub async fn album_list(&self, kind: AlbumListType, size: u32, offset: u32) -> Result<Vec<Album>> {
-        let (_, p): (_, AlbumList2Payload) = self
-            .call(
-                "getAlbumList2",
-                &[("type", kind.as_str()), ("size", &size.to_string()), ("offset", &offset.to_string())],
-            )
-            .await?;
+        let (_, p): (_, AlbumList2Payload) =
+            self.call("getAlbumList2", &[("type", kind.as_str()), ("size", &size.to_string()), ("offset", &offset.to_string())]).await?;
         Ok(p.album_list2.album)
     }
 
@@ -276,12 +269,8 @@ impl Client {
     /// `true` records the play (Navidrome forwards both to Last.fm / ListenBrainz).
     /// `time_ms` is when playback started, in milliseconds since the Unix epoch.
     pub async fn scrobble(&self, id: &str, time_ms: u64, submission: bool) -> Result<()> {
-        let (_, _): (_, serde_json::Value) = self
-            .call(
-                "scrobble",
-                &[("id", id), ("time", &time_ms.to_string()), ("submission", if submission { "true" } else { "false" })],
-            )
-            .await?;
+        let (_, _): (_, serde_json::Value) =
+            self.call("scrobble", &[("id", id), ("time", &time_ms.to_string()), ("submission", if submission { "true" } else { "false" })]).await?;
         Ok(())
     }
 
@@ -291,13 +280,7 @@ impl Client {
         let (_, p): (_, SearchResult3Payload) = self
             .call(
                 "search3",
-                &[
-                    ("query", query),
-                    ("artistCount", "0"),
-                    ("albumCount", "0"),
-                    ("songCount", &count.to_string()),
-                    ("songOffset", &offset.to_string()),
-                ],
+                &[("query", query), ("artistCount", "0"), ("albumCount", "0"), ("songCount", &count.to_string()), ("songOffset", &offset.to_string())],
             )
             .await?;
         Ok(p.search_result3.song)

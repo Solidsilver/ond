@@ -22,7 +22,6 @@ mod tests;
 pub use decode::{AnalyzeError, analyze, analyze_reader, peaks, peaks_reader};
 pub use peaks::{PeakMeter, Peaks};
 
-
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};
 
@@ -85,10 +84,9 @@ impl Verdict {
                 "Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy, though some early digital recordings stop there too.",
                 khz(*cutoff_hz)
             ),
-            VerdictKind::LossySource { cutoff_hz } => format!(
-                "Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy.",
-                khz(*cutoff_hz)
-            ),
+            VerdictKind::LossySource { cutoff_hz } => {
+                format!("Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy.", khz(*cutoff_hz))
+            }
         }
     }
 
@@ -152,14 +150,7 @@ impl Record {
 /// stamp. The server gives no modification time, so a file replaced by one of
 /// the same size, format and length (to the second) keeps its stamp.
 pub fn stamp(size: Option<u64>, suffix: Option<&str>, bits: Option<u32>, rate: Option<u32>, duration_secs: Option<u32>) -> String {
-    format!(
-        "v{ANALYSIS_VERSION}:{}:{}:{}:{}:{}",
-        size.unwrap_or(0),
-        suffix.unwrap_or(""),
-        bits.unwrap_or(0),
-        rate.unwrap_or(0),
-        duration_secs.unwrap_or(0)
-    )
+    format!("v{ANALYSIS_VERSION}:{}:{}:{}:{}:{}", size.unwrap_or(0), suffix.unwrap_or(""), bits.unwrap_or(0), rate.unwrap_or(0), duration_secs.unwrap_or(0))
 }
 
 /// An album at a glance, from whichever of its tracks are analysed.
@@ -277,11 +268,7 @@ impl Analyzer {
             Some(e) => (
                 e.loudness_global().ok().and_then(finite),
                 e.loudness_range().ok().and_then(finite),
-                (0..self.channels as u32)
-                    .filter_map(|c| e.true_peak(c).ok())
-                    .reduce(f64::max)
-                    .filter(|p| *p > 0.0)
-                    .map(|p| 20.0 * p.log10()),
+                (0..self.channels as u32).filter_map(|c| e.true_peak(c).ok()).reduce(f64::max).filter(|p| *p > 0.0).map(|p| 20.0 * p.log10()),
             ),
             None => (None, None, None),
         };
@@ -313,11 +300,7 @@ impl Analyzer {
                 verdicts.push(Verdict { kind: VerdictKind::Upsampled { from_hz, cutoff_hz: edge.cutoff_hz }, confidence });
                 cutoff_hz = Some(edge.cutoff_hz);
             }
-            if lossless
-                && (10_000..=20_300).contains(&edge.cutoff_hz)
-                && nyquist.saturating_sub(edge.cutoff_hz) >= 1_500
-                && edge.drop_db >= 30.0
-            {
+            if lossless && (10_000..=20_300).contains(&edge.cutoff_hz) && nyquist.saturating_sub(edge.cutoff_hz) >= 1_500 && edge.drop_db >= 30.0 {
                 let confidence = if edge.cutoff_hz <= 19_200 && edge.drop_db >= 40.0 { Confidence::High } else { Confidence::Medium };
                 verdicts.push(Verdict { kind: VerdictKind::LossySource { cutoff_hz: edge.cutoff_hz }, confidence });
                 cutoff_hz = Some(edge.cutoff_hz);

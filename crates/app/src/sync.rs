@@ -15,10 +15,10 @@
 
 use library::{Album, Library};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashSet;
 use subsonic::{AlbumListType, AlbumWithSongs, Client, Song};
 use tokio::task::JoinSet;
 
@@ -99,7 +99,10 @@ impl Progress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// `fetched` albums were (re)loaded; `bulk` when the search3 pass ran.
-    Done { fetched: usize, bulk: bool },
+    Done {
+        fetched: usize,
+        bulk: bool,
+    },
     Cancelled,
     Failed(String),
 }
@@ -107,7 +110,9 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     /// Page through every song from this offset, then fix up per album.
-    Bulk { from: u32 },
+    Bulk {
+        from: u32,
+    },
     PerAlbum(Vec<String>),
 }
 
@@ -133,11 +138,7 @@ pub fn plan(albums: &[Album], stamps: &HashMap<String, u64>, bulk_done: bool, bu
 /// album list. The rest (changed mid-pass, or songs the pass missed) stay stale
 /// and get fetched one by one.
 pub fn bulk_stamps(albums: &[Album], counts: &HashMap<String, u32>) -> Vec<(String, u64)> {
-    albums
-        .iter()
-        .filter(|a| counts.get(&a.id).copied().unwrap_or(0) == a.song_count)
-        .map(|a| (a.id.clone(), a.sync_stamp()))
-        .collect()
+    albums.iter().filter(|a| counts.get(&a.id).copied().unwrap_or(0) == a.song_count).map(|a| (a.id.clone(), a.sync_stamp())).collect()
 }
 
 /// Runs `f` on the library off the async workers (redb blocks).
@@ -219,8 +220,7 @@ async fn run_inner<F: Fetch>(
     live: &impl Fn() -> bool,
     progress: &impl Fn(Progress),
 ) -> Result<Outcome, String> {
-    let (albums, stamps, done, offset) =
-        blocking(lib, |l| Ok((l.albums()?, l.album_stamps()?, l.meta(BULK_DONE)?.is_some(), l.meta(BULK_OFFSET)?))).await?;
+    let (albums, stamps, done, offset) = blocking(lib, |l| Ok((l.albums()?, l.album_stamps()?, l.meta(BULK_DONE)?.is_some(), l.meta(BULK_OFFSET)?))).await?;
     let mut bulk = false;
     if let Plan::Bulk { from } = plan(&albums, &stamps, done, offset) {
         let total = albums.iter().map(|a| a.song_count as usize).sum();
@@ -253,7 +253,9 @@ async fn run_inner<F: Fetch>(
 
 enum BulkEnd {
     /// `songs`: where the pass ended (0: the server listed none).
-    Done { songs: u32 },
+    Done {
+        songs: u32,
+    },
     Cancelled,
     /// The server returned nothing for an empty query; use per-album sync.
     Unsupported,
@@ -500,14 +502,7 @@ pub(crate) mod tests {
             if !self.bulk {
                 return Ok(Vec::new());
             }
-            let all: Vec<Song> = self
-                .albums
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|a| Some(&a.id) != self.bulk_skips.as_ref())
-                .flat_map(Fake::songs_of)
-                .collect();
+            let all: Vec<Song> = self.albums.lock().unwrap().iter().filter(|a| Some(&a.id) != self.bulk_skips.as_ref()).flat_map(Fake::songs_of).collect();
             Ok(all.into_iter().skip(offset as usize).take(count as usize).collect())
         }
     }
@@ -646,11 +641,17 @@ pub(crate) mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let c = cancel.clone();
         let fake = Fake::new(albums, false);
-        let out = rt().block_on(run(lib.clone(), fake, cancel, || true, move |p| {
-            if p.done == 20 {
-                c.store(true, Ordering::SeqCst);
-            }
-        }));
+        let out = rt().block_on(run(
+            lib.clone(),
+            fake,
+            cancel,
+            || true,
+            move |p| {
+                if p.done == 20 {
+                    c.store(true, Ordering::SeqCst);
+                }
+            },
+        ));
         assert_eq!(out, Outcome::Cancelled);
         let stamped = lib.album_stamps().unwrap().len();
         assert!((20..40).contains(&stamped), "kept {stamped}");

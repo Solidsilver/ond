@@ -219,8 +219,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                     st.cursor = pos;
                     failures = 0;
                     let relocate = relocation(&mut st, pos, ranged == Some(true));
-                    let ran_into_data =
-                        ranged == Some(true) && st.ranges.available_from(pos) > 0 && st.len.is_none_or(|l| pos < l);
+                    let ran_into_data = ranged == Some(true) && st.ranges.available_from(pos) > 0 && st.len.is_none_or(|l| pos < l);
                     drop(st);
                     dl.cond.notify_all();
                     if let Some(w) = relocate {

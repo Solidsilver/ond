@@ -6,9 +6,9 @@
 //! details strip folds out under the transport.
 
 use super::WindowAction;
+use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
 use super::widgets::{elide, heart_button, link, link_line};
-use super::seek::SeekStyle;
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -65,7 +65,8 @@ impl ViewCtx<'_> {
             if let Some(o) = on_art {
                 o.apply(ui);
             }
-            for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⇧⌘M)", WindowMode::Mini)] {
+            for (icon, label, mode) in [(Icon::Expand, "Full window (⇧⌘N)", WindowMode::Full), (Icon::MiniPlayer, "Mini player (⇧⌘M)", WindowMode::Mini)]
+            {
                 let r = ui.available_rect_before_wrap();
                 let slot = Rect::from_min_max(pos2(r.right() - 28.0, r.center().y - 14.0), pos2(r.right(), r.center().y + 14.0));
                 if let Some(scrim) = on_art.and_then(|o| o.scrim) {
@@ -127,7 +128,12 @@ impl ViewCtx<'_> {
         let art = |this: &mut Self, ui: &mut Ui, side: f32| {
             let (art, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
             let dark = ui.visuals().dark_mode;
-            let shadow = egui::Shadow { offset: [0, (side / 40.0) as i8], blur: (side / 14.0).min(28.0) as u8, spread: 0, color: Color32::from_black_alpha(if dark { 110 } else { 46 }) };
+            let shadow = egui::Shadow {
+                offset: [0, (side / 40.0) as i8],
+                blur: (side / 14.0).min(28.0) as u8,
+                spread: 0,
+                color: Color32::from_black_alpha(if dark { 110 } else { 46 }),
+            };
             ui.painter().add(shadow.as_shape(art, 8));
             this.art.paint(ui, art, cover, if side < 120.0 { 6.0 } else { 8.0 });
             // The live spectrum along the foot of the artwork (experimental).
@@ -141,7 +147,9 @@ impl ViewCtx<'_> {
                 // Light bars over a dark foot of the cover, dark over a light one;
                 // see-through either way (a meter, not a control).
                 let under = cover.and_then(|c| this.art.look(c)).and_then(|l| l.backdrop.clone());
-                let uv = |b: &crate::visuals::backdrop::Blurred| crate::visuals::over_art::region(&b.image, crate::visuals::over_art::uv_of(area, art, crate::art::crop_uv(1.0)));
+                let uv = |b: &crate::visuals::backdrop::Blurred| {
+                    crate::visuals::over_art::region(&b.image, crate::visuals::over_art::uv_of(area, art, crate::art::crop_uv(1.0)))
+                };
                 let on = under.map_or(OnArt::plain(Color32::WHITE), |b| OnArt::pick(uv(&b), Color32::WHITE, crate::visuals::over_art::GRAPHIC));
                 crate::visuals::paint_bars(ui.painter(), area, &crate::visuals::spectrum::grouped(&f.bands, n), on.fg.gamma_multiply(0.47));
             }
@@ -270,7 +278,11 @@ impl ViewCtx<'_> {
             let (r, resp) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::click());
             let fill = if resp.hovered() { t.text.gamma_multiply(0.85) } else { t.text };
             ui.painter().circle_filled(r.center(), 26.0, fill);
-            let glyph = if matches!(icon, Icon::Play) { Rect::from_center_size(r.center() + vec2(1.5, 0.0), vec2(20.0, 20.0)) } else { Rect::from_center_size(r.center(), vec2(20.0, 20.0)) };
+            let glyph = if matches!(icon, Icon::Play) {
+                Rect::from_center_size(r.center() + vec2(1.5, 0.0), vec2(20.0, 20.0))
+            } else {
+                Rect::from_center_size(r.center(), vec2(20.0, 20.0))
+            };
             icons::paint(ui.painter(), glyph, icon, t.bg);
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -382,7 +394,13 @@ impl ViewCtx<'_> {
                                     ui.painter().rect_filled(r.expand2(vec2(6.0, 0.0)), 6.0, t.hover);
                                 }
                                 ui.painter().galley(r.min + vec2(0.0, 3.0), galley, color);
-                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0))));
+                                resp.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::Button,
+                                        true,
+                                        format!("{text}, at {}", crate::fmt::clock(lines[i].start_ms as f64 / 1000.0)),
+                                    )
+                                });
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     seek_to = Some(lines[i].start_ms as f64 / 1000.0);
                                 }
@@ -551,12 +569,8 @@ fn section_label(ui: &mut Ui, label: &str, size: f32, space_above: bool) {
     if space_above {
         ui.add_space((size * 1.1).round());
     }
-    let format = egui::TextFormat {
-        font_id: FontId::new((size * 0.66).round().max(10.0), semibold()),
-        color: t.muted,
-        extra_letter_spacing: 0.9,
-        ..Default::default()
-    };
+    let format =
+        egui::TextFormat { font_id: FontId::new((size * 0.66).round().max(10.0), semibold()), color: t.muted, extra_letter_spacing: 0.9, ..Default::default() };
     let galley = ui.painter().layout_job(egui::text::LayoutJob::single_section(label.to_uppercase(), format));
     let (r, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
     ui.painter().galley(r.min, galley, t.muted);
@@ -643,9 +657,9 @@ impl OndApp {
                     self.view().lyrics_pane(ui, DRAWER_LYRIC);
                 });
         }
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(stage).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 }))
-            .show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(stage).inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 4 })).show(
+            ui,
+            |ui| {
                 let full = ui.available_rect_before_wrap();
                 let wave = if self.ui.prefs.waveform { WAVE_EXTRA } else { 0.0 };
                 let below = BELOW_ART_H + wave + if self.ui.np_details { DETAILS_H } else { 0.0 } + QUEUE_MIN_H;
@@ -662,7 +676,8 @@ impl OndApp {
                 ui.painter().hline(full.x_range(), top, egui::Stroke::new(1.0, t.hairline));
                 let rest = Rect::from_min_max(pos2(full.left() - 8.0, top + 10.0), pos2(full.right() + 8.0, full.bottom()));
                 ui.scope_builder(UiBuilder::new().max_rect(rest).layout(Layout::top_down(Align::Min)), |ui| self.view().queue_panel(ui, false));
-            });
+            },
+        );
     }
 }
 

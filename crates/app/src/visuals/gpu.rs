@@ -348,10 +348,19 @@ impl Gpu {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { multisampled: false, sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2 },
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -360,7 +369,11 @@ impl Gpu {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("visualizer"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("visualizer"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
         let full = |entry: &str, format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
@@ -419,7 +432,12 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor { label: Some("visualizer"), size: (UNIFORM_FLOATS * 4) as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("visualizer"),
+            size: (UNIFORM_FLOATS * 4) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let capacity = 4096;
         Self {
             target,
@@ -485,7 +503,14 @@ impl Gpu {
 }
 
 impl CallbackTrait for VisualizerCallback {
-    fn prepare(&self, device: &wgpu::Device, queue: &wgpu::Queue, _screen: &ScreenDescriptor, encoder: &mut wgpu::CommandEncoder, resources: &mut CallbackResources) -> Vec<wgpu::CommandBuffer> {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen: &ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
         if self.size_px[0] == 0 || self.size_px[1] == 0 {
             return Vec::new();
         }
@@ -580,7 +605,8 @@ mod tests {
     #[test]
     fn the_uniforms_fill_their_buffer() {
         let pic = Picture::new(Default::default(), Look::Lit { centre: [0.1; 3], edge: [0.0; 3] }, 1.0);
-        let cb = VisualizerCallback { target: Target::plain(wgpu::TextureFormat::Bgra8UnormSrgb), size_px: [10, 10], half: [1.6, 1.0], picture: pic, clear: true };
+        let cb =
+            VisualizerCallback { target: Target::plain(wgpu::TextureFormat::Bgra8UnormSrgb), size_px: [10, 10], half: [1.6, 1.0], picture: pic, clear: true };
         let u = uniforms(&cb, [0.1, 0.1]);
         assert_eq!(u[0], 0.0, "cleared: nothing carries over");
         assert_eq!(u[6], 1.0, "an sRGB target gets linear color");

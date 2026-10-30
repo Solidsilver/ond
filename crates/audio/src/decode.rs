@@ -15,8 +15,6 @@ use crate::replaygain::{GainConfig, ReplayGain, applied_gain, parse_tag_value};
 use crate::resample::StreamResampler;
 use crate::signal::{DeviceCaps, choose_rate};
 use crate::{EngineConfig, Status, TrackSource};
-use symphonia::core::audio::Channels;
-use symphonia::core::meta::{StandardTag, Tag};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rtrb::{Producer, RingBuffer};
 use std::io::{Read, Seek, SeekFrom};
@@ -25,12 +23,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use streamcache::{Abort, CachedSource, StreamCache};
+use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::{Error as SymError, SeekErrorKind};
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{StandardTag, Tag};
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 /// Messages from the decode thread to the engine, in the order things happened.
@@ -247,9 +247,7 @@ impl Clock {
             return 0;
         }
         match self.time_base {
-            Some(tb) => {
-                (ts as i128 * tb.numer.get() as i128 * self.rate as i128 / tb.denom.get() as i128) as u64
-            }
+            Some(tb) => (ts as i128 * tb.numer.get() as i128 * self.rate as i128 / tb.denom.get() as i128) as u64,
             None => ts as u64,
         }
     }
@@ -458,9 +456,7 @@ impl Ctx {
         let probed = Arc::new(AtomicBool::new(false));
         let abort: Abort = {
             let (cancel, seek, probed) = (self.cancel.clone(), self.seek_pending.clone(), probed.clone());
-            Arc::new(move || {
-                cancel.load(Ordering::Relaxed) || (probed.load(Ordering::Relaxed) && seek.load(Ordering::Relaxed))
-            })
+            Arc::new(move || cancel.load(Ordering::Relaxed) || (probed.load(Ordering::Relaxed) && seek.load(Ordering::Relaxed)))
         };
         let mss = MediaSourceStream::new(open_source(src, self.cache.as_ref(), abort)?, Default::default());
 
@@ -468,26 +464,19 @@ impl Ctx {
         if let Some(ext) = &src.suffix {
             hint.with_extension(ext);
         }
-        let mut reader = symphonia::default::get_probe()
-            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
-            .map_err(|e| format!("probe: {e}"))?;
+        let mut reader =
+            symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()).map_err(|e| format!("probe: {e}"))?;
         probed.store(true, Ordering::Relaxed);
         let tag_gain = tag_replay_gain(reader.as_mut());
         let track = reader.default_track(TrackType::Audio).ok_or("no audio track")?;
         let track_id = track.id;
         let total_frames = track.num_frames;
         let time_base = track.time_base;
-        let params = track
-            .codec_params
-            .as_ref()
-            .and_then(|p| p.audio())
-            .ok_or("track has no audio codec parameters")?
-            .clone();
+        let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or("track has no audio codec parameters")?.clone();
         // `gapless` makes decoders that support it (MP3, Vorbis) drop encoder delay and padding.
         let mut opts = AudioDecoderOptions::default();
         opts.gapless = true;
-        let decoder =
-            symphonia::default::get_codecs().make_audio_decoder(&params, &opts).map_err(|e| format!("decoder: {e}"))?;
+        let decoder = symphonia::default::get_codecs().make_audio_decoder(&params, &opts).map_err(|e| format!("decoder: {e}"))?;
         Ok(Track {
             reader,
             decoder,
@@ -498,10 +487,7 @@ impl Ctx {
             // From the codec parameters, so that a seek before the first packet
             // (a restart at a position) lands at the right output frame; the
             // first packet's own format confirms or corrects it.
-            out_rate: self.device_rate(
-                params.sample_rate.unwrap_or(0),
-                params.channels.as_ref().map_or(2, |c| c.count() as u16),
-            ),
+            out_rate: self.device_rate(params.sample_rate.unwrap_or(0), params.channels.as_ref().map_or(2, |c| c.count() as u16)),
             tag_gain,
         })
     }
@@ -636,14 +622,7 @@ impl Ctx {
     /// Sets track `seq` up from its first audio: the channel mapping, the
     /// output format, its ReplayGain, its place in a ring, and the report to
     /// the engine.
-    fn start_track(
-        &mut self,
-        seq: u64,
-        src: &TrackSource,
-        t: &mut Track,
-        spec: Spec,
-        out: &mut Option<Out>,
-    ) -> Result<(ChannelMap, Attached), String> {
+    fn start_track(&mut self, seq: u64, src: &TrackSource, t: &mut Track, spec: Spec, out: &mut Option<Out>) -> Result<(ChannelMap, Attached), String> {
         let format = StreamFormat { sample_rate: spec.rate, channels: spec.channels, bits_per_sample: t.bits };
         let out_channels = output_channels(format.channels, self.caps.as_ref());
         let (map, change) = ChannelMap::new(format.channels, spec.positions, out_channels);
@@ -659,15 +638,7 @@ impl Ctx {
         let attached = self.attach(output, feed, out)?;
         if !matches!(attached, Attached::Cancelled) {
             let total_frames = t.total_frames.map(|f| t.to_output(f));
-            let _ = self.msgs.send(DecoderMsg::Track {
-                seq,
-                src: src.clone(),
-                format,
-                output,
-                total_frames,
-                replay_gain,
-                channels: change,
-            });
+            let _ = self.msgs.send(DecoderMsg::Track { seq, src: src.clone(), format, output, total_frames, replay_gain, channels: change });
         }
         Ok((map, attached))
     }
@@ -780,18 +751,15 @@ impl Ctx {
             }
             // The engine zeroes the position when it reopens the device.
         }
-        let resampler = if feed.rate == format.sample_rate {
-            None
-        } else {
-            Some(StreamResampler::new(feed.rate, format.sample_rate, format.channels as usize)?)
-        };
+        let resampler =
+            if feed.rate == format.sample_rate { None } else { Some(StreamResampler::new(feed.rate, format.sample_rate, format.channels as usize)?) };
         let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
         let (samples, consumer) = RingBuffer::new(cap.max(8192));
         let (markers, marker_consumer) = RingBuffer::new(MARKER_CAP);
         let done = Arc::new(AtomicBool::new(false));
         let ctl = Arc::new(RingCtl::default());
-        let input = RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone())
-            .with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
+        let input =
+            RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone()).with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
         let (src_rate, src_channels) = (feed.rate, feed.channels);
         *out = Some(Out { format, src_rate, samples, markers, done, ctl, pushed: 0, src_channels, resampler, rs_base: 0 });
         Ok(Attached::NewRing(input))
@@ -878,11 +846,7 @@ impl Ctx {
 
 /// The message a panic carried, for error reports.
 pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
-    payload
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown panic".to_owned())
+    payload.downcast_ref::<&str>().map(|s| (*s).to_owned()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".to_owned())
 }
 
 /// Drops encoder delay/padding the decoder left in. Decoders that honour
@@ -1015,14 +979,7 @@ impl MediaSource for Cached {
 /// interrupts. Counts what went in. A seek interrupts on a `frame` boundary
 /// (samples per frame), so the ring never ends mid-frame: the channels would
 /// swap for everything after it if no flush followed.
-fn push_all(
-    p: &mut Producer<f32>,
-    mut data: &[f32],
-    frame: usize,
-    pushed: &mut u64,
-    cancel: &AtomicBool,
-    seek: &AtomicBool,
-) -> Push {
+fn push_all(p: &mut Producer<f32>, mut data: &[f32], frame: usize, pushed: &mut u64, cancel: &AtomicBool, seek: &AtomicBool) -> Push {
     let frame = frame.max(1);
     while !data.is_empty() {
         if cancel.load(Ordering::Relaxed) || p.is_abandoned() {

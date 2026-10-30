@@ -112,14 +112,7 @@ fn read_at(src: &mut CachedSource, pos: u64, n: usize) -> Vec<u8> {
     buf
 }
 
-const FAST: Opts = Opts {
-    ranges: true,
-    chunk: 16 * 1024,
-    delay: Duration::ZERO,
-    declared_extra: 0,
-    star_total: false,
-    no_length: false,
-};
+const FAST: Opts = Opts { ranges: true, chunk: 16 * 1024, delay: Duration::ZERO, declared_extra: 0, star_total: false, no_length: false };
 
 /// Reads `src` from `from` to the end on another thread, failing the test
 /// instead of hanging if that takes longer than `timeout`. Hands the source back.
@@ -254,9 +247,7 @@ fn blocked_read_aborts_and_dropping_cancels() {
     // The only holder goes away: the download stops and its partial file is removed.
     drop(src);
     wait_until("cancel", Duration::from_secs(2), || cache.progress(&key).is_none());
-    wait_until("part cleanup", Duration::from_secs(2), || {
-        std::fs::read_dir(dir.path()).unwrap().next().is_none()
-    });
+    wait_until("part cleanup", Duration::from_secs(2), || std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
 #[test]
@@ -351,10 +342,7 @@ fn a_subsonic_error_reply_is_not_cached_as_audio() {
                 line.clear();
             }
             let body: &[u8] = br#"{"subsonic-response":{"status":"failed","error":{"code":40}}}"#;
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
             let _ = conn.write_all(head.as_bytes());
             let _ = conn.write_all(body);
         }
@@ -483,8 +471,7 @@ fn a_200_without_content_length_is_read_to_its_end() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(300_000);
-    let server =
-        Server::start(body.clone(), Opts { ranges: false, no_length: true, delay: Duration::from_millis(1), ..FAST });
+    let server = Server::start(body.clone(), Opts { ranges: false, no_length: true, delay: Duration::from_millis(1), ..FAST });
     let key = CacheKey::new("chunked", None);
 
     let src = cache.open(&key, &server.url, never()).unwrap();
@@ -735,9 +722,7 @@ fn a_late_eviction_spares_a_file_downloaded_again() {
     cache.clear();
     cache.inner.remove(vec![key.file_name()]);
     assert!(!dir.path().join("again").exists());
-    wait_until("background deletion", slack(Duration::from_secs(5)), || {
-        std::fs::read_dir(dir.path()).unwrap().next().is_none()
-    });
+    wait_until("background deletion", slack(Duration::from_secs(5)), || std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
 /// Time budgets in these tests are tight on purpose (they guard real

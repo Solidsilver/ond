@@ -12,8 +12,8 @@ pub use readout::{Readout, paint_readout};
 use crate::icons::Icon;
 use crate::playback::{NetworkProbe, PlaybackPrefs};
 use crate::prefs::Prefs;
-use crate::settings::DeviceMode;
 use crate::settings::DbReadout;
+use crate::settings::DeviceMode;
 use audio::{Command, DeviceInfo, DeviceKind, DeviceVolume, EngineHandle, PlaybackMode, SignalPath, Transcode};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -69,8 +69,7 @@ impl Outputs {
     /// Restores the saved device and per-device modes into a fresh engine. The
     /// engine answers with the device's mode (`ModeChanged`) and the device list.
     pub fn restore(engine: &EngineHandle, prefs: Prefs) -> Self {
-        let (modes, device, playback, match_rate) =
-            prefs.get(|s| (engine_modes(s), s.output_device.clone(), s.playback.clone(), s.output_match_rate));
+        let (modes, device, playback, match_rate) = prefs.get(|s| (engine_modes(s), s.output_device.clone(), s.playback.clone(), s.output_match_rate));
         engine.send(Command::DeviceModes(modes));
         engine.send(Command::MatchRate(match_rate));
         engine.send(Command::SelectDevice(device));
@@ -403,8 +402,15 @@ mod tests {
 
     #[test]
     fn the_menu_groups_hardware_first_then_the_users_groups_then_other() {
-        let devices = [dev("tv", "LG TV", DeviceKind::Hdmi), dev("loop", "BlackHole", DeviceKind::Virtual), dev("dac", "DAC", DeviceKind::Usb), dev("amp", "Amp", DeviceKind::Usb), dev("mic", "Zoom", DeviceKind::Virtual)];
-        let named = HashMap::from([("tv".to_owned(), "Living room".to_owned()), ("amp".to_owned(), "  Bedroom ".to_owned()), ("mic".to_owned(), "   ".to_owned())]);
+        let devices = [
+            dev("tv", "LG TV", DeviceKind::Hdmi),
+            dev("loop", "BlackHole", DeviceKind::Virtual),
+            dev("dac", "DAC", DeviceKind::Usb),
+            dev("amp", "Amp", DeviceKind::Usb),
+            dev("mic", "Zoom", DeviceKind::Virtual),
+        ];
+        let named =
+            HashMap::from([("tv".to_owned(), "Living room".to_owned()), ("amp".to_owned(), "  Bedroom ".to_owned()), ("mic".to_owned(), "   ".to_owned())]);
         let groups = group_devices(devices.iter(), &named);
         let names: Vec<(Option<String>, Vec<String>)> = groups.into_iter().map(|(g, l)| (g, l.into_iter().map(|d| d.name).collect())).collect();
         assert_eq!(

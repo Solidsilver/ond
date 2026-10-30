@@ -170,7 +170,9 @@ impl Preset {
         match self {
             Preset::Ond => Some(QueuePrefs::default()),
             Preset::AppleMusic => Some(QueuePrefs { play_next: NextAt::Top, add: AddAt::End, on_play: OnPlay::Ask, clear: ClearWhat::Everything }),
-            Preset::Spotify => Some(QueuePrefs { play_next: NextAt::AfterNext, add: AddAt::BeforeSource, on_play: OnPlay::KeepBefore, clear: ClearWhat::Added }),
+            Preset::Spotify => {
+                Some(QueuePrefs { play_next: NextAt::AfterNext, add: AddAt::BeforeSource, on_play: OnPlay::KeepBefore, clear: ClearWhat::Added })
+            }
             Preset::Custom => None,
         }
     }
@@ -184,9 +186,17 @@ impl Preset {
 pub enum Source {
     /// Queued by hand: "play next" or "add to queue".
     Added,
-    Album { id: String, name: String },
-    Playlist { id: String, name: String },
-    ArtistShuffle { name: String },
+    Album {
+        id: String,
+        name: String,
+    },
+    Playlist {
+        id: String,
+        name: String,
+    },
+    ArtistShuffle {
+        name: String,
+    },
 }
 
 impl Source {
@@ -394,11 +404,8 @@ impl Queue {
             if let Some(c) = &self.current {
                 pass.push(c.track.clone());
             }
-            let sources: Vec<Source> = self.history[self.cycle_start.min(self.history.len())..]
-                .iter()
-                .chain(self.current.as_ref())
-                .map(|i| i.source.clone())
-                .collect();
+            let sources: Vec<Source> =
+                self.history[self.cycle_start.min(self.history.len())..].iter().chain(self.current.as_ref()).map(|i| i.source.clone()).collect();
             self.retire_current();
             self.cycle_start = self.history.len();
             let items: Vec<Item> = pass.into_iter().zip(sources).map(|(t, s)| self.item(t, s)).collect();
@@ -695,7 +702,6 @@ mod tests {
         assert_eq!(q.advance().map(|i| i.track.id.clone()), Some("a1".into()));
         assert!(!ids(&q.upcoming).contains(&"old"));
     }
-
 
     #[test]
     fn back_jump_and_replay() {

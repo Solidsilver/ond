@@ -28,7 +28,7 @@ use crate::output::{CpalBackend, OutputBackend, OutputError, RingInput, StreamFo
 use crate::signal::DeviceCaps;
 use crate::{PlaybackMode, Status};
 use cards::Pcm;
-use reserve::{ReserveError, Reservation};
+use reserve::{Reservation, ReserveError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -130,10 +130,7 @@ impl AlsaBackend {
     /// default card's first, else the first there is.
     fn resolve(&self) -> Option<Pcm> {
         let selected = self.selected.as_deref().and_then(|uid| self.pcms.iter().find(|p| p.uid == uid));
-        selected
-            .or_else(|| self.default.and_then(|c| self.pcms.iter().find(|p| p.card == c)))
-            .or_else(|| self.pcms.first())
-            .cloned()
+        selected.or_else(|| self.default.and_then(|c| self.pcms.iter().find(|p| p.card == c))).or_else(|| self.pcms.first()).cloned()
     }
 
     /// The card the sound server should play to in Normal mode: the chosen
@@ -163,9 +160,7 @@ impl AlsaBackend {
                 self.claim = Some(Claim { card: pcm.card, reservation: None });
                 Ok(())
             }
-            Err(ReserveError::Refused { owner }) => {
-                Err(format!("{} won't release {}", owner.unwrap_or_else(|| "the sound server".into()), pcm.card_name))
-            }
+            Err(ReserveError::Refused { owner }) => Err(format!("{} won't release {}", owner.unwrap_or_else(|| "the sound server".into()), pcm.card_name)),
             Err(ReserveError::Other(e)) => Err(format!("reserving {}: {e}", pcm.card_name)),
         }
     }
@@ -193,11 +188,7 @@ impl AlsaBackend {
     /// What `pcm` can do, without opening it: from the last time we did, or
     /// from the kernel for USB devices.
     fn known_caps(&self, pcm: &Pcm) -> DeviceCaps {
-        self.caps
-            .get(&pcm.uid)
-            .cloned()
-            .or_else(|| cards::usb_caps(pcm))
-            .unwrap_or_else(|| DeviceCaps { name: pcm.name.clone(), ..Default::default() })
+        self.caps.get(&pcm.uid).cloned().or_else(|| cards::usb_caps(pcm)).unwrap_or_else(|| DeviceCaps { name: pcm.name.clone(), ..Default::default() })
     }
 
     fn info(&self, pcm: &Pcm, default_card: Option<u32>) -> DeviceInfo {
@@ -214,13 +205,7 @@ impl AlsaBackend {
         }
         // A card's first device stands for it as the default.
         let first_of_card = self.pcms.iter().find(|p| p.card == pcm.card).is_some_and(|p| p.uid == pcm.uid);
-        DeviceInfo {
-            uid: pcm.uid.clone(),
-            name: pcm.name.clone(),
-            kind: pcm.kind,
-            caps,
-            is_default: first_of_card && default_card == Some(pcm.card),
-        }
+        DeviceInfo { uid: pcm.uid.clone(), name: pcm.name.clone(), kind: pcm.kind, caps, is_default: first_of_card && default_card == Some(pcm.card) }
     }
 
     /// The sound server's view, for Normal mode and bit-perfect's fallback.

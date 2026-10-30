@@ -75,8 +75,7 @@ impl DeviceCaps {
     }
 }
 
-const COMMON_RATES: [u32; 15] =
-    [8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000];
+const COMMON_RATES: [u32; 15] = [8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000];
 
 /// The rate to run the device at for a file at `src`:
 /// 1. the file's own rate, if the device supports it;
@@ -216,9 +215,7 @@ pub fn adjust(status: BitPerfectStatus, channels: ChannelChange, transcoded: Opt
             device_limit: false,
         },
         ChannelChange::Upmix { from, to } if !matches!(status, BitPerfectStatus::Unavailable { .. }) => {
-            BitPerfectStatus::Requested {
-                reason: format!("{} upmixed to {}", crate::channels::layout(from), crate::channels::layout(to)),
-            }
+            BitPerfectStatus::Requested { reason: format!("{} upmixed to {}", crate::channels::layout(from), crate::channels::layout(to)) }
         }
         _ => status,
     }
@@ -407,20 +404,13 @@ mod tests {
         let normal = SignalPath { bit_perfect: BitPerfectStatus::Off, ..verified.clone() };
         assert_eq!(normal.summary(), "16/44.1");
 
-        let gained = SignalPath {
-            gain: GainState::Applied(AppliedGain { linear: 0.398_107_2, source: GainSource::Album, limited: false }),
-            ..normal.clone()
-        };
+        let gained = SignalPath { gain: GainState::Applied(AppliedGain { linear: 0.398_107_2, source: GainSource::Album, limited: false }), ..normal.clone() };
         assert_eq!(gained.summary(), "16/44.1 · RG −8.0 dB album");
         let bypassed = SignalPath { gain: GainState::Bypassed, ..verified.clone() };
         assert_eq!(bypassed.summary(), "16/44.1 · ReplayGain bypassed · bit-perfect");
         let mono = SignalPath { channels: ChannelChange::Upmix { from: 1, to: 2 }, ..normal.clone() };
         assert_eq!(mono.summary(), "16/44.1 · mono → stereo");
-        let aac = SignalPath {
-            source: StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: None },
-            transcoded: Some("AAC 256".into()),
-            ..normal
-        };
+        let aac = SignalPath { source: StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: None }, transcoded: Some("AAC 256".into()), ..normal };
         assert_eq!(aac.summary(), "AAC 256 · transcoded · 44.1 kHz");
     }
 
@@ -434,10 +424,7 @@ mod tests {
             BitPerfectStatus::Unavailable { reason: "transcoded by the server (AAC 256)".into(), device_limit: false }
         );
         assert_eq!(adjust(v.clone(), downmix, None), BitPerfectStatus::Unavailable { reason: "5.1 downmixed to stereo".into(), device_limit: false });
-        assert_eq!(
-            adjust(v.clone(), ChannelChange::Upmix { from: 1, to: 2 }, None),
-            BitPerfectStatus::Requested { reason: "mono upmixed to stereo".into() }
-        );
+        assert_eq!(adjust(v.clone(), ChannelChange::Upmix { from: 1, to: 2 }, None), BitPerfectStatus::Requested { reason: "mono upmixed to stereo".into() });
         let limit = BitPerfectStatus::Unavailable { reason: "device max 16/48, file is 24/96".into(), device_limit: true };
         assert_eq!(adjust(limit.clone(), ChannelChange::Upmix { from: 1, to: 2 }, None), limit);
         assert_eq!(adjust(v.clone(), ChannelChange::None, None), v);

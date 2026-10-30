@@ -4,8 +4,8 @@
 
 use super::Action;
 use super::view_ctx::ViewCtx;
-use audio::PlayState;
 use crate::visuals::waveform::Bars;
+use audio::PlayState;
 use egui::{Color32, Rect, Response, Sense, Ui, pos2, vec2};
 
 /// How one seek line looks.
@@ -82,7 +82,11 @@ impl ViewCtx<'_> {
         if state == PlayState::Buffering || self.player.pending_seek.is_some() {
             let tm = ui.input(|i| i.time) as f32;
             let alpha = 0.35 + 0.35 * (tm * std::f32::consts::TAU / 1.2).sin();
-            painter.rect_filled(Rect::from_min_max(pos2(x, line.top()), pos2((x + s.pulse_len).min(line.right()), line.bottom())), s.radius, s.pulse.gamma_multiply(alpha));
+            painter.rect_filled(
+                Rect::from_min_max(pos2(x, line.top()), pos2((x + s.pulse_len).min(line.right()), line.bottom())),
+                s.radius,
+                s.pulse.gamma_multiply(alpha),
+            );
         }
         if grabbed && seekable {
             painter.circle_filled(pos2(x, line.center().y), s.knob_r, s.knob);

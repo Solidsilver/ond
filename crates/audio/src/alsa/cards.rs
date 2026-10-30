@@ -39,13 +39,7 @@ pub fn list() -> Vec<Pcm> {
         let Ok(ctl) = Ctl::from_card(&card, false) else { continue };
         let Ok(info) = ctl.card_info() else { continue };
         let id = info.get_id().unwrap_or_default().to_owned();
-        let card_name = info
-            .get_name()
-            .ok()
-            .filter(|n| !n.is_empty())
-            .or_else(|| info.get_longname().ok())
-            .unwrap_or(id.as_str())
-            .to_owned();
+        let card_name = info.get_name().ok().filter(|n| !n.is_empty()).or_else(|| info.get_longname().ok()).unwrap_or(id.as_str()).to_owned();
         let driver = info.get_driver().unwrap_or_default().to_owned();
         let index = card.get_index() as u32;
         let devices: Vec<(u32, String)> = DeviceIter::new(&ctl)
@@ -58,14 +52,7 @@ pub fn list() -> Vec<Pcm> {
         let several = devices.len() > 1;
         for (device, pcm_name) in devices {
             let name = if several && !pcm_name.is_empty() { format!("{card_name} · {pcm_name}") } else { card_name.clone() };
-            out.push(Pcm {
-                card: index,
-                device,
-                uid: format!("alsa:{id}:{device}"),
-                name,
-                card_name: card_name.clone(),
-                kind: kind_of(&driver, &pcm_name),
-            });
+            out.push(Pcm { card: index, device, uid: format!("alsa:{id}:{device}"), name, card_name: card_name.clone(), kind: kind_of(&driver, &pcm_name) });
         }
     }
     out
@@ -101,12 +88,7 @@ pub fn probe(pcm: &PCM, name: &str) -> Option<DeviceCaps> {
     if cmin > 2 {
         channels.push(2);
     }
-    Some(DeviceCaps {
-        name: name.to_owned(),
-        configs: configs(&channels, &rates),
-        max_bits,
-        ..Default::default()
-    })
+    Some(DeviceCaps { name: name.to_owned(), configs: configs(&channels, &rates), max_bits, ..Default::default() })
 }
 
 fn configs(channels: &[u16], rates: &[u32]) -> Vec<RateRange> {

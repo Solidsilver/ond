@@ -5,9 +5,9 @@ use super::OfflineAction;
 use super::view_ctx::ViewCtx;
 use super::widgets::{Mark, choice, elide, view_picker};
 use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
-use crate::settings::ViewMode;
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
+use crate::settings::ViewMode;
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
@@ -145,11 +145,17 @@ impl OndApp {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let back = ui.add_enabled_ui(self.ui.nav.can_back(), |ui| icons::sized_button(ui, Icon::ChevronLeft, "Back (⌘[)", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
+            let back = ui
+                .add_enabled_ui(self.ui.nav.can_back(), |ui| icons::sized_button(ui, Icon::ChevronLeft, "Back (⌘[)", vec2(26.0, 26.0), 10.0, Some(t.text)))
+                .inner;
             if back.clicked() {
                 self.actions.push(Action::Back);
             }
-            let fwd = ui.add_enabled_ui(self.ui.nav.can_forward(), |ui| icons::sized_button(ui, Icon::ChevronRight, "Forward (⌘])", vec2(26.0, 26.0), 10.0, Some(t.text))).inner;
+            let fwd = ui
+                .add_enabled_ui(self.ui.nav.can_forward(), |ui| {
+                    icons::sized_button(ui, Icon::ChevronRight, "Forward (⌘])", vec2(26.0, 26.0), 10.0, Some(t.text))
+                })
+                .inner;
             if fwd.clicked() {
                 self.actions.push(Action::Forward);
             }
@@ -206,23 +212,25 @@ impl OndApp {
         });
         ui.add_space(14.0);
         let (cols, tile) = grid_metrics(ui.available_width());
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-            for chunk in own.chunks(cols) {
-                self.view().grid_row(ui, chunk, tile);
-            }
-            if !credited.is_empty() {
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("Also credited on").font(FontId::new(15.0, semibold())).color(t.text));
-                ui.add_space(8.0);
-                for chunk in credited.chunks(cols) {
+        super::layout::into_gutter(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
+                for chunk in own.chunks(cols) {
                     self.view().grid_row(ui, chunk, tile);
                 }
-            }
-            if own.is_empty() && credited.is_empty() {
-                let text = if self.sync.tracks { "Nothing yet. Credits fill in while tracks sync." } else { "No albums credit this name." };
-                ui.label(egui::RichText::new(text).color(t.muted));
-            }
-        }));
+                if !credited.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Also credited on").font(FontId::new(15.0, semibold())).color(t.text));
+                    ui.add_space(8.0);
+                    for chunk in credited.chunks(cols) {
+                        self.view().grid_row(ui, chunk, tile);
+                    }
+                }
+                if own.is_empty() && credited.is_empty() {
+                    let text = if self.sync.tracks { "Nothing yet. Credits fill in while tracks sync." } else { "No albums credit this name." };
+                    ui.label(egui::RichText::new(text).color(t.muted));
+                }
+            })
+        });
     }
 
     /// The artist's name and album count, and (when they have albums) the
@@ -242,7 +250,12 @@ impl OndApp {
                 if let Route::Artist { id: Some(id), .. } = route {
                     let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
                     if super::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
-                        self.actions.push(Action::ToggleStar { kind: crate::favorites::StarKind::Artist, id: id.clone(), track: None, name: Some(name.to_owned()) });
+                        self.actions.push(Action::ToggleStar {
+                            kind: crate::favorites::StarKind::Artist,
+                            id: id.clone(),
+                            track: None,
+                            name: Some(name.to_owned()),
+                        });
                     }
                 }
             });
@@ -334,7 +347,6 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
         actions.push(Action::Offline(OfflineAction::Keep(what(), !kept)));
     }
 }
-
 
 impl ViewCtx<'_> {
     pub(super) fn heading(&self, ui: &mut Ui, title: &str, sub: Option<String>) {
@@ -470,7 +482,9 @@ impl ViewCtx<'_> {
                 }
             }
         }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist"))));
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist")))
+        });
         if resp.double_clicked() {
             self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
         } else if resp.clicked() {
@@ -490,7 +504,6 @@ impl ViewCtx<'_> {
             }
         }
     }
-
 }
 
 #[cfg(test)]

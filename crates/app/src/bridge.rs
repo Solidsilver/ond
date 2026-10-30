@@ -17,40 +17,70 @@ pub enum Msg {
     /// it if the user signed out since.
     /// Signed in. `new_account` means the local library belonged to another
     /// server or user and was cleared for this one.
-    Connected { session: u64, client: Client, settings: Box<Settings>, server: String, new_account: bool },
+    Connected {
+        session: u64,
+        client: Client,
+        settings: Box<Settings>,
+        server: String,
+        new_account: bool,
+    },
     ConnectFailed(String),
     /// The server can't be reached (saved login, so the app opens offline);
     /// reconnecting continues in the background and ends with `Connected`.
-    Unreachable { session: u64, username: String, error: String },
+    Unreachable {
+        session: u64,
+        username: String,
+        error: String,
+    },
     /// A ping's round trip, or `None` when it got no answer.
     Latency(Option<Duration>),
     /// A search index built off the UI thread, for the request numbered `generation`.
-    SearchIndex { generation: u64, index: Box<crate::search::SearchIndex> },
+    SearchIndex {
+        generation: u64,
+        index: Box<crate::search::SearchIndex>,
+    },
     Albums(Vec<Album>),
     SyncProgress(usize),
     /// The album list sync finished (`Ok`: how many albums) or failed.
     AlbumSyncDone(Result<usize, String>),
     /// An album's tracks. `fresh`: straight from the server's `getAlbum` (the
     /// complete list), not the local library (which may be partial).
-    Tracks { album_id: String, tracks: Vec<Track>, fresh: bool },
+    Tracks {
+        album_id: String,
+        tracks: Vec<Track>,
+        fresh: bool,
+    },
     /// An album row refreshed from `getAlbum` (labels, genres).
     AlbumUpdated(Album),
     /// Ids of the most recently added albums, newest first.
     Newest(Vec<String>),
     Playlists(Vec<subsonic::Playlist>),
     /// A playlist's songs. `fresh`: the server's listing, not the saved copy.
-    PlaylistTracks { id: String, tracks: Vec<Track>, fresh: bool },
+    PlaylistTracks {
+        id: String,
+        tracks: Vec<Track>,
+        fresh: bool,
+    },
     /// The copies saved last time of what the server lists outside the
     /// library, read at startup so they show before it answers (or offline).
     Saved(Box<Saved>),
     /// Albums whose stored tracks credit `name`.
-    Credited { name: String, album_ids: Vec<String> },
+    Credited {
+        name: String,
+        album_ids: Vec<String>,
+    },
     /// Tracks of several albums, gathered for one queue action (`key` says which).
-    TrackBatch { key: ListKey, tracks: Vec<Track> },
+    TrackBatch {
+        key: ListKey,
+        tracks: Vec<Track>,
+    },
     /// An album's or playlist's tracks couldn't be loaded (offline with
     /// nothing stored, or the server failed). Whatever waited for them gives
     /// up. `error` is worth showing; `None` when offline explains it already.
-    LoadFailed { key: ListKey, error: Option<String> },
+    LoadFailed {
+        key: ListKey,
+        error: Option<String>,
+    },
     /// The server's artists (split from joined credits), sorted.
     Artists(Vec<library::Artist>),
     /// Every stored track, grouped by album and indexed (built here, off the
@@ -59,7 +89,10 @@ pub enum Msg {
     TrackSync(sync::Progress),
     TrackSyncDone(sync::Outcome),
     /// A track's analysis just finished.
-    Analyzed { track_id: String, record: analysis::Record },
+    Analyzed {
+        track_id: String,
+        record: analysis::Record,
+    },
     /// Every stored analysis, read at startup.
     AnalysesLoaded(Vec<(String, analysis::Record)>),
     Engine(audio::Event),
@@ -69,25 +102,54 @@ pub enum Msg {
     OfflineFolder(std::path::PathBuf),
     /// An offline store opened off the UI thread, for the open numbered
     /// `generation` (a newer one may have replaced it since).
-    OfflineStore { generation: u64, store: Result<offline::OfflineStore, String> },
+    OfflineStore {
+        generation: u64,
+        store: Result<offline::OfflineStore, String>,
+    },
     /// The downloads folder is moving: how far it got.
     OfflineMoving(offline::MoveProgress),
     /// The move finished, or stopped (it's tried again at the next start).
     OfflineMoved(Result<(), String>),
     /// `getStarred2`: everything loved, and the ratings seen with it.
-    Starred { starred: Starred, ratings: Vec<(String, u8)> },
+    Starred {
+        starred: Starred,
+        ratings: Vec<(String, u8)>,
+    },
     /// A track's lyrics arrived (`None`: the server has none).
-    Lyrics { track_id: String, lyrics: Option<crate::lyrics::Lyrics> },
+    Lyrics {
+        track_id: String,
+        lyrics: Option<crate::lyrics::Lyrics>,
+    },
     /// A song's play count and last-played time (`None` when the server
     /// couldn't say).
-    SongStats { track_id: String, stats: Option<crate::app::SongStats> },
+    SongStats {
+        track_id: String,
+        stats: Option<crate::app::SongStats>,
+    },
     /// Hearts and ratings seen while loading an album or playlist.
-    UserMeta { meta: UserMeta, tracks: Vec<Track> },
+    UserMeta {
+        meta: UserMeta,
+        tracks: Vec<Track>,
+    },
     /// A heart change reached the server (`error` is `None`) or didn't.
-    StarDone { kind: StarKind, id: String, on: bool, seq: u64, error: Option<String> },
-    RatingDone { id: String, previous: u8, seq: u64, error: Option<String> },
+    StarDone {
+        kind: StarKind,
+        id: String,
+        on: bool,
+        seq: u64,
+        error: Option<String>,
+    },
+    RatingDone {
+        id: String,
+        previous: u8,
+        seq: u64,
+        error: Option<String>,
+    },
     /// A playlist was made; the app opens it.
-    PlaylistCreated { id: String, name: String },
+    PlaylistCreated {
+        id: String,
+        name: String,
+    },
     /// Selected from the native menu bar.
     Menu(crate::keys::Cmd),
     Error(String),
@@ -180,7 +242,10 @@ pub fn connect_error(e: &subsonic::Error) -> String {
             // repeats the status, as "502 Bad Gateway" pages do.
             let said = h.message().map(str::trim).filter(|m| {
                 let m = m.trim_end_matches('.');
-                !m.is_empty() && !m.eq_ignore_ascii_case(&status.to_string()) && !status.canonical_reason().is_some_and(|r| m.eq_ignore_ascii_case(r)) && m != status.as_str()
+                !m.is_empty()
+                    && !m.eq_ignore_ascii_case(&status.to_string())
+                    && !status.canonical_reason().is_some_and(|r| m.eq_ignore_ascii_case(r))
+                    && m != status.as_str()
             });
             match said {
                 Some(said) => format!("The server answered with an error ({status}): {said}"),
@@ -661,13 +726,19 @@ impl Bridge {
         self.rt.spawn(async move {
             // At most ~10 progress repaints a second, however fast albums arrive.
             let last = Mutex::new(Instant::now() - Duration::from_secs(1));
-            let outcome = sync::run(this.library.clone(), client, cancel.clone(), || this.current(), |p| {
-                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
-                if (p.done == p.total || last.elapsed() >= Duration::from_millis(100)) && this.is_current(&cancel) {
-                    *last = Instant::now();
-                    this.send(Msg::TrackSync(p));
-                }
-            })
+            let outcome = sync::run(
+                this.library.clone(),
+                client,
+                cancel.clone(),
+                || this.current(),
+                |p| {
+                    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                    if (p.done == p.total || last.elapsed() >= Duration::from_millis(100)) && this.is_current(&cancel) {
+                        *last = Instant::now();
+                        this.send(Msg::TrackSync(p));
+                    }
+                },
+            )
             .await;
             let stored = outcome != (sync::Outcome::Done { fetched: 0, bulk: false });
             // A newer sync took over: it reports, and shows what this one

@@ -59,9 +59,7 @@ fn run(rate: u32, bits: Option<u32>, mono: &[f32]) -> TrackAnalysis {
 }
 
 fn sine(rate: u32, secs: f64, hz: f64, amp: f64) -> Vec<f32> {
-    (0..(f64::from(rate) * secs) as usize)
-        .map(|i| (amp * (std::f64::consts::TAU * hz * i as f64 / f64::from(rate)).sin()) as f32)
-        .collect()
+    (0..(f64::from(rate) * secs) as usize).map(|i| (amp * (std::f64::consts::TAU * hz * i as f64 / f64::from(rate)).sin()) as f32).collect()
 }
 
 #[test]
@@ -201,7 +199,15 @@ fn hi_res_with_nothing_above_23k_is_upsampled_from_48k() {
 #[test]
 fn genuine_hi_res_is_left_alone() {
     // Ultrasonic content 30 dB down, all the way to the converter's filter.
-    let n = shaped_noise(96_000, 15.0, -20.0, |hz| if hz < 20_000.0 { 1.0 } else if hz < 46_000.0 { 0.03 } else { 0.0 });
+    let n = shaped_noise(96_000, 15.0, -20.0, |hz| {
+        if hz < 20_000.0 {
+            1.0
+        } else if hz < 46_000.0 {
+            0.03
+        } else {
+            0.0
+        }
+    });
     let a = run(96_000, Some(24), &n);
     assert!(a.verdicts.is_empty(), "{:?}", a.verdicts);
 }

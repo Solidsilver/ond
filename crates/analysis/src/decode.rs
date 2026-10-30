@@ -1,14 +1,14 @@
 //! Decodes a whole file with symphonia and runs it through an [`Analyzer`].
 
-use crate::{Analyzer, TrackAnalysis};
 use crate::peaks::{PeakMeter, Peaks};
+use crate::{Analyzer, TrackAnalysis};
+use std::io::{Read, Seek, SeekFrom};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
-use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnalyzeError {
@@ -54,7 +54,12 @@ pub fn peaks(source: Box<dyn MediaSource>, suffix: Option<&str>, cancel: &dyn Fn
 }
 
 /// [`peaks`] for any seekable reader.
-pub fn peaks_reader<R: Read + Seek + Send + Sync + 'static>(reader: R, len: Option<u64>, suffix: Option<&str>, cancel: &dyn Fn() -> bool) -> Result<Peaks, AnalyzeError> {
+pub fn peaks_reader<R: Read + Seek + Send + Sync + 'static>(
+    reader: R,
+    len: Option<u64>,
+    suffix: Option<&str>,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Peaks, AnalyzeError> {
     peaks(Box::new(Source { reader, len }), suffix, cancel)
 }
 
@@ -132,16 +137,10 @@ type Opened = (u32, Option<u32>, Box<dyn AudioDecoder>);
 /// The default audio track, opened.
 fn open_track(reader: &dyn FormatReader) -> Result<Opened, AnalyzeError> {
     let track = reader.default_track(TrackType::Audio).ok_or_else(|| AnalyzeError::Failed("no audio track".into()))?;
-    let params = track
-        .codec_params
-        .as_ref()
-        .and_then(|p| p.audio())
-        .ok_or_else(|| AnalyzeError::Failed("no audio codec parameters".into()))?;
+    let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or_else(|| AnalyzeError::Failed("no audio codec parameters".into()))?;
     let mut opts = AudioDecoderOptions::default();
     opts.gapless = true;
-    let decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(params, &opts)
-        .map_err(|e| AnalyzeError::Failed(format!("decoder: {e}")))?;
+    let decoder = symphonia::default::get_codecs().make_audio_decoder(params, &opts).map_err(|e| AnalyzeError::Failed(format!("decoder: {e}")))?;
     // Lossy decoders don't report a bit depth; lossless ones do.
     Ok((track.id, params.bits_per_sample, decoder))
 }

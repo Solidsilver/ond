@@ -127,7 +127,11 @@ impl OndApp {
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
                 // Partly managed groups: the managed parts are put back.
-                PrefsAction::WaveformBars(_) | PrefsAction::Experimental(_) | PrefsAction::Queue(_) | PrefsAction::AlbumView(_) | PrefsAction::ArtistView(_) => return false,
+                PrefsAction::WaveformBars(_)
+                | PrefsAction::Experimental(_)
+                | PrefsAction::Queue(_)
+                | PrefsAction::AlbumView(_)
+                | PrefsAction::ArtistView(_) => return false,
             },
             Action::Window(WindowAction::SetSystemTitleBar(_)) => "window.system_title_bar",
             Action::Analysis(AnalysisAction::AnalyzePlaying(_)) => "analyze_playing",

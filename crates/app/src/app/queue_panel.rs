@@ -112,8 +112,7 @@ impl ViewCtx<'_> {
                     EndAction::RepeatQueue => "Repeat queue",
                 };
                 let mut end = self.player.queue.end;
-                let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text)
-                    .on_hover_text("What happens when the queue runs out");
+                let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text).on_hover_text("What happens when the queue runs out");
                 egui::Popup::menu(&button).show(|ui| {
                     ui.selectable_value(&mut end, EndAction::Stop, label(EndAction::Stop));
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
@@ -166,14 +165,36 @@ impl ViewCtx<'_> {
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, 5.0, t.hover);
                 }
-                icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + GROUP_ICON_X, rect.center().y), vec2(10.0, 10.0)), group_icon(source), t.muted);
+                icons::paint(
+                    ui.painter(),
+                    Rect::from_center_size(pos2(rect.left() + GROUP_ICON_X, rect.center().y), vec2(10.0, 10.0)),
+                    group_icon(source),
+                    t.muted,
+                );
                 let name = elide(ui, source.label(), FontId::new(11.5, semibold()), t.muted, rect.width() - GROUP_NAME_CLEAR);
                 ui.painter().galley(pos2(rect.left() + GROUP_NAME_X, rect.center().y - name.size().y / 2.0), name, t.muted);
                 let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
-                icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - GROUP_CHEVRON_FROM_RIGHT, rect.center().y), vec2(8.0, 8.0)), chevron, t.muted);
-                ui.painter().text(pos2(rect.right() - GROUP_COUNT_FROM_RIGHT, rect.center().y), egui::Align2::RIGHT_CENTER, len.to_string(), FontId::proportional(11.0), t.muted);
+                icons::paint(
+                    ui.painter(),
+                    Rect::from_center_size(pos2(rect.right() - GROUP_CHEVRON_FROM_RIGHT, rect.center().y), vec2(8.0, 8.0)),
+                    chevron,
+                    t.muted,
+                );
+                ui.painter().text(
+                    pos2(rect.right() - GROUP_COUNT_FROM_RIGHT, rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    len.to_string(),
+                    FontId::proportional(11.0),
+                    t.muted,
+                );
             }
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, format!("{}, {len} tracks, {}", source.label(), if open { "expanded" } else { "collapsed" })));
+            resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::Role::DisclosureTriangle,
+                    true,
+                    format!("{}, {len} tracks, {}", source.label(), if open { "expanded" } else { "collapsed" }),
+                )
+            });
             if resp.clicked() {
                 self.ui.queue_ui.open.insert(key, !open);
             }
@@ -242,7 +263,13 @@ impl ViewCtx<'_> {
             let text_w = rect.right() - col::INSET - right_g.size().x - col::RIGHT_GAP - x;
             ui.painter().galley(pos2(rect.right() - col::INSET - right_g.size().x, row.cy() - right_g.size().y / 2.0), right_g, t.muted);
             let color = super::widgets::track_color(t, false, available);
-            row.two_lines(ui, x, text_w, (&item.track.title, FontId::proportional(12.5), color), (item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted));
+            row.two_lines(
+                ui,
+                x,
+                text_w,
+                (&item.track.title, FontId::proportional(12.5), color),
+                (item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted),
+            );
         }
         row.describe(selected, || format!("{} by {}", item.track.title, item.track.artist.as_deref().unwrap_or("unknown artist")));
 

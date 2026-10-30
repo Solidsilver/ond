@@ -126,7 +126,13 @@ impl Palette {
     /// The color for brightness `i`.
     pub fn at(&self, i: f32) -> [f32; 3] {
         let s = &self.0;
-        let k = if i <= s[1][3] { 0 } else if i <= s[2][3] { 1 } else { 2 };
+        let k = if i <= s[1][3] {
+            0
+        } else if i <= s[2][3] {
+            1
+        } else {
+            2
+        };
         let (a, b) = (s[k], s[k + 1]);
         let f = ((i - a[3]) / (b[3] - a[3]).max(1e-4)).clamp(0.0, 1.0);
         std::array::from_fn(|c| a[c] + (b[c] - a[c]) * f)
@@ -345,9 +351,15 @@ pub const DEFAULT_COLORS: [Color32; 3] = [Color32::from_rgb(0x6F, 0xA8, 0xDC), C
 /// with no colors gives the defaults, and one with a single hue gets two
 /// neighbours of it, so there's always some variety.
 pub fn vivid_colors(colors: &[Color32]) -> Vec<[f32; 3]> {
-    let mut hues: Vec<(f32, f32)> = colors.iter().map(|c| rgb_to_hsv([c.r(), c.g(), c.b()].map(|v| f32::from(v) / 255.0))).filter(|&[_, s, v]| s > 0.12 && v > 0.08).map(|[h, s, _]| (h, s.clamp(0.55, 0.85))).collect();
+    let mut hues: Vec<(f32, f32)> = colors
+        .iter()
+        .map(|c| rgb_to_hsv([c.r(), c.g(), c.b()].map(|v| f32::from(v) / 255.0)))
+        .filter(|&[_, s, v]| s > 0.12 && v > 0.08)
+        .map(|[h, s, _]| (h, s.clamp(0.55, 0.85)))
+        .collect();
     if hues.is_empty() {
-        hues = DEFAULT_COLORS.iter().map(|c| rgb_to_hsv([c.r(), c.g(), c.b()].map(|v| f32::from(v) / 255.0))).map(|[h, s, _]| (h, s.clamp(0.55, 0.85))).collect();
+        hues =
+            DEFAULT_COLORS.iter().map(|c| rgb_to_hsv([c.r(), c.g(), c.b()].map(|v| f32::from(v) / 255.0))).map(|[h, s, _]| (h, s.clamp(0.55, 0.85))).collect();
     }
     let (h0, s0) = hues[0];
     if hues.iter().all(|(h, _)| hue_gap(*h, h0) < 0.08) {

@@ -57,12 +57,8 @@ fn song(id: &str, album_id: &str, disc: u32, track: u32) -> subsonic::Song {
 #[test]
 fn albums_sorted_by_artist_then_year() {
     let lib = Library::in_memory().unwrap();
-    lib.upsert_albums([
-        album("3", "Discovery", "Daft Punk", 2001),
-        album("1", "Kind of Blue", "Miles Davis", 1959),
-        album("2", "Homework", "Daft Punk", 1997),
-    ])
-    .unwrap();
+    lib.upsert_albums([album("3", "Discovery", "Daft Punk", 2001), album("1", "Kind of Blue", "Miles Davis", 1959), album("2", "Homework", "Daft Punk", 1997)])
+        .unwrap();
     let names: Vec<_> = lib.albums().unwrap().into_iter().map(|a| a.name).collect();
     assert_eq!(names, ["Homework", "Discovery", "Kind of Blue"]);
     assert_eq!(lib.album_count().unwrap(), 3);
@@ -82,16 +78,9 @@ fn upsert_is_idempotent() {
 fn album_tracks_in_disc_track_order_and_replaced_on_resync() {
     let lib = Library::in_memory().unwrap();
     let with_songs = |songs| subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: songs };
-    lib.upsert_album_tracks(with_songs(vec![
-        song("c", "al", 2, 1),
-        song("b", "al", 1, 10),
-        song("a", "al", 1, 2),
-        song("gone", "al", 1, 3),
-    ]))
-    .unwrap();
+    lib.upsert_album_tracks(with_songs(vec![song("c", "al", 2, 1), song("b", "al", 1, 10), song("a", "al", 1, 2), song("gone", "al", 1, 3)])).unwrap();
     // An album id that is a prefix of another must not leak tracks across.
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al2", "B", "X", 2001), song: vec![song("z", "al2", 1, 1)] })
-        .unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al2", "B", "X", 2001), song: vec![song("z", "al2", 1, 1)] }).unwrap();
 
     let ids: Vec<_> = lib.album_tracks("al").unwrap().into_iter().map(|t| t.id).collect();
     assert_eq!(ids, ["a", "gone", "b", "c"]);
@@ -142,13 +131,8 @@ fn album_update_moves_index_entry() {
 #[test]
 fn remove_album_drops_tracks_and_index_entries() {
     let lib = Library::in_memory().unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs {
-        album: album("al", "A", "X", 2000),
-        song: vec![song("a", "al", 1, 1), song("b", "al", 1, 2)],
-    })
-    .unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al2", "B", "X", 2001), song: vec![song("c", "al2", 1, 1)] })
-        .unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: vec![song("a", "al", 1, 1), song("b", "al", 1, 2)] }).unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al2", "B", "X", 2001), song: vec![song("c", "al2", 1, 1)] }).unwrap();
 
     assert!(lib.remove_album("al").unwrap());
     assert!(!lib.remove_album("al").unwrap());
@@ -185,13 +169,7 @@ fn resync_keeps_indexes_consistent() {
 #[test]
 fn artists_sorted_by_folded_name() {
     let lib = Library::in_memory().unwrap();
-    let artist = |id: &str, name: &str| subsonic::Artist {
-        id: id.into(),
-        name: name.into(),
-        sort_name: None,
-        album_count: 1,
-        cover_art: None,
-    };
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
     lib.upsert_artists([artist("1", "Émile"), artist("2", "eagles"), artist("3", "Zappa")]).unwrap();
     lib.upsert_artists([artist("2", "Eagles")]).unwrap();
     let names: Vec<_> = lib.artists().unwrap().into_iter().map(|a| a.name).collect();
@@ -214,8 +192,7 @@ fn schema_version_recorded_and_newer_rejected() {
 }
 
 fn files_in(dir: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> =
-        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort();
     names
 }
@@ -436,7 +413,12 @@ fn bulk_songs_store_without_stamping_and_counts_add_up() {
     lib.upsert_albums([album("one", "One", "X", 2000), album("two", "Two", "X", 2001)]).unwrap();
     // A page boundary splits album "two" across two pages.
     lib.store_songs(vec![song("a", "one", 1, 1), song("b", "one", 1, 2), song("c", "two", 1, 1)]).unwrap();
-    lib.store_songs(vec![song("d", "two", 1, 2), { let mut s = song("x", "", 1, 1); s.album_id = None; s }]).unwrap();
+    lib.store_songs(vec![song("d", "two", 1, 2), {
+        let mut s = song("x", "", 1, 1);
+        s.album_id = None;
+        s
+    }])
+    .unwrap();
     assert!(lib.album_stamps().unwrap().is_empty());
     let counts = lib.track_counts().unwrap();
     assert_eq!(counts.get("one"), Some(&2));
@@ -454,8 +436,7 @@ fn bulk_songs_store_without_stamping_and_counts_add_up() {
 fn retain_albums_drops_what_the_server_no_longer_has() {
     let lib = Library::in_memory().unwrap();
     for id in ["a", "b", "c"] {
-        lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album(id, id, "X", 2000), song: vec![song(&format!("{id}-1"), id, 1, 1)] })
-            .unwrap();
+        lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album(id, id, "X", 2000), song: vec![song(&format!("{id}-1"), id, 1, 1)] }).unwrap();
     }
     let keep = ["a".to_owned(), "c".to_owned()].into_iter().collect();
     assert_eq!(lib.retain_albums(&keep).unwrap(), 1);
@@ -596,8 +577,7 @@ fn analysis_survives_a_library_rebuild_and_old_records_move_over() {
 fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
     let lib = Library::in_memory().unwrap();
     // A database from before accounts were recorded belongs to whoever claims it first.
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: vec![song("a", "al", 1, 1)] })
-        .unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: vec![song("a", "al", 1, 1)] }).unwrap();
     lib.set_meta("bulk_done", Some(1)).unwrap();
     assert!(!lib.claim_account(7).unwrap());
     lib.save("newest", &vec!["al".to_owned()]).unwrap();
@@ -620,10 +600,8 @@ fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
 #[test]
 fn retaining_albums_also_drops_tracks_whose_album_is_not_stored() {
     let lib = Library::in_memory().unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("keep", "K", "X", 2000), song: vec![song("k1", "keep", 1, 1)] })
-        .unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("gone", "G", "X", 2001), song: vec![song("g1", "gone", 1, 1)] })
-        .unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("keep", "K", "X", 2000), song: vec![song("k1", "keep", 1, 1)] }).unwrap();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("gone", "G", "X", 2001), song: vec![song("g1", "gone", 1, 1)] }).unwrap();
     // A bulk sync stored songs of an album the album list never had.
     lib.store_songs(vec![song("o1", "orphan", 1, 1), song("o2", "orphan", 1, 2)]).unwrap();
     assert_eq!(lib.track_count().unwrap(), 4);
@@ -660,8 +638,7 @@ fn fold_spells_out_letters_unicode_does_not_decompose() {
 #[test]
 fn letters_without_a_decomposition_sort_with_their_base_letter() {
     let lib = Library::in_memory().unwrap();
-    lib.upsert_albums([album("1", "Z", "Zappa", 1970), album("2", "O", "Øystein Sevåg", 1989), album("3", "N", "Nina Simone", 1965)])
-        .unwrap();
+    lib.upsert_albums([album("1", "Z", "Zappa", 1970), album("2", "O", "Øystein Sevåg", 1989), album("3", "N", "Nina Simone", 1965)]).unwrap();
     let names: Vec<_> = lib.albums().unwrap().into_iter().map(|a| a.name).collect();
     assert_eq!(names, ["N", "O", "Z"]);
 }
@@ -678,8 +655,7 @@ fn v3_indexes_are_rebuilt_with_the_new_folding() {
         let mut s = song("s-1", "al-1", 1, 1);
         s.display_composer = Some("Øystein Sevåg".into());
         lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a.clone(), song: vec![s] }).unwrap();
-        lib.upsert_artists([subsonic::Artist { id: "ar-1".into(), name: "Øystein Sevåg".into(), album_count: 1, cover_art: None, sort_name: None }])
-            .unwrap();
+        lib.upsert_artists([subsonic::Artist { id: "ar-1".into(), name: "Øystein Sevåg".into(), album_count: 1, cover_art: None, sort_name: None }]).unwrap();
         let wt = lib.db.begin_write().unwrap();
         {
             wt.open_table(META).unwrap().insert(SCHEMA_KEY, 3).unwrap();

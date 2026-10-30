@@ -135,7 +135,11 @@ impl ViewCtx<'_> {
             });
             let underruns = status.underruns();
             if underruns > 0 {
-                out.push(Segment { text: crate::fmt::plural(underruns as usize, "underrun"), detail: "Times the output ran out of audio this session".into(), tone: Tone::Warn });
+                out.push(Segment {
+                    text: crate::fmt::plural(underruns as usize, "underrun"),
+                    detail: "Times the output ran out of audio this session".into(),
+                    tone: Tone::Warn,
+                });
             }
         }
 
@@ -176,7 +180,11 @@ impl ViewCtx<'_> {
             } else {
                 ""
             };
-            out.push(Segment { text: format!("analysis {}/{}{state}", a.done.min(a.total), a.total), detail: "Library analysis (loudness, dynamic range, hi-res checks)".into(), tone: Tone::Normal });
+            out.push(Segment {
+                text: format!("analysis {}/{}{state}", a.done.min(a.total), a.total),
+                detail: "Library analysis (loudness, dynamic range, hi-res checks)".into(),
+                tone: Tone::Normal,
+            });
         }
 
         // Server.

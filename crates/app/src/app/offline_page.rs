@@ -4,8 +4,8 @@
 
 use super::OfflineAction;
 use super::browse::grid_metrics;
-use super::widgets::{Mark, danger, elide, link, secondary};
 use super::view_ctx::ViewCtx;
+use super::widgets::{Mark, danger, elide, link, secondary};
 use super::{Action, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
@@ -182,39 +182,41 @@ impl ViewCtx<'_> {
             return;
         }
 
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("offline").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-            let in_progress: Vec<&PinSummary> = snap.pins.iter().filter(|p| !p.complete()).collect();
-            if !in_progress.is_empty() {
-                self.in_progress(ui, &snap, &in_progress);
-                ui.add_space(22.0);
-            }
-            if !albums.is_empty() {
-                super::widgets::section(ui, "Albums");
-                ui.add_space(8.0);
-                let (cols, tile) = grid_metrics(ui.available_width());
-                let ids: Vec<usize> = albums.iter().map(|(i, _)| *i).collect();
-                for chunk in ids.chunks(cols) {
-                    self.grid_row(ui, chunk, tile);
+        super::layout::into_gutter(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("offline").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
+                let in_progress: Vec<&PinSummary> = snap.pins.iter().filter(|p| !p.complete()).collect();
+                if !in_progress.is_empty() {
+                    self.in_progress(ui, &snap, &in_progress);
+                    ui.add_space(22.0);
                 }
-            }
-            if !playlists.is_empty() {
-                ui.add_space(6.0);
-                super::widgets::section(ui, "Playlists");
-                ui.add_space(6.0);
-                for p in &playlists {
-                    self.pin_row(ui, &snap, p);
+                if !albums.is_empty() {
+                    super::widgets::section(ui, "Albums");
+                    ui.add_space(8.0);
+                    let (cols, tile) = grid_metrics(ui.available_width());
+                    let ids: Vec<usize> = albums.iter().map(|(i, _)| *i).collect();
+                    for chunk in ids.chunks(cols) {
+                        self.grid_row(ui, chunk, tile);
+                    }
                 }
-                ui.add_space(16.0);
-            }
-            if !songs.is_empty() {
-                super::widgets::section(ui, "Songs");
-                ui.add_space(6.0);
-                for p in &songs {
-                    self.pin_row(ui, &snap, p);
+                if !playlists.is_empty() {
+                    ui.add_space(6.0);
+                    super::widgets::section(ui, "Playlists");
+                    ui.add_space(6.0);
+                    for p in &playlists {
+                        self.pin_row(ui, &snap, p);
+                    }
+                    ui.add_space(16.0);
                 }
-            }
-            ui.add_space(24.0);
-        }));
+                if !songs.is_empty() {
+                    super::widgets::section(ui, "Songs");
+                    ui.add_space(6.0);
+                    for p in &songs {
+                        self.pin_row(ui, &snap, p);
+                    }
+                }
+                ui.add_space(24.0);
+            })
+        });
     }
 
     /// The storage summary, then the limit and Finder.

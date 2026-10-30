@@ -47,8 +47,7 @@ impl DeviceInfo {
     /// samples, not one macOS processes (speakers), compresses (Bluetooth,
     /// AirPlay) or that's software (virtual devices, meeting apps' drivers).
     pub fn can_bit_perfect(&self) -> bool {
-        self.caps.integer
-            && !matches!(self.kind, DeviceKind::BuiltInSpeakers | DeviceKind::Bluetooth | DeviceKind::AirPlay | DeviceKind::Virtual)
+        self.caps.integer && !matches!(self.kind, DeviceKind::BuiltInSpeakers | DeviceKind::Bluetooth | DeviceKind::AirPlay | DeviceKind::Virtual)
     }
 
     /// A terse capability line for the picker: "up to 24/96", "AirPlay".
