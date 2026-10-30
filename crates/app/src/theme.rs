@@ -80,12 +80,10 @@ impl Accent {
             Accent::Rose => pair(0x9C3A62, 0xE79AB9),
             Accent::Violet => pair(0x5E4A9E, 0xB3A2EC),
             Accent::Graphite => pair(0x4E4F55, 0xB9BAC2),
-            Accent::Custom([r, g, b]) => {
-                match crate::visuals::colors::held_accent(Color32::from_rgb(r, g, b), &[t.bg, t.sidebar, t.panel, t.field], dark) {
-                    Some(c) => c,
-                    None => return (t.accent, t.on_accent),
-                }
-            }
+            Accent::Custom([r, g, b]) => match crate::visuals::colors::held_accent(Color32::from_rgb(r, g, b), &[t.bg, t.sidebar, t.panel, t.field], dark) {
+                Some(c) => c,
+                None => return (t.accent, t.on_accent),
+            },
         };
         (accent, crate::visuals::colors::on_accent(accent, &t).unwrap_or(t.on_accent))
     }
@@ -412,7 +410,9 @@ fn system_fonts() -> SystemFonts {
     // GNOME's UI fonts (Adwaita Sans, Cantarell) are variable: one file for
     // every weight, set through the weight axis.
     let ui_paths = weights("sans-serif");
-    let ui = ui_paths.as_ref().and_then(|(regular, semi)| if regular == semi { std::fs::read(regular).ok().map(|b| variable(b, 600.0)) } else { pair(regular, semi) });
+    let ui = ui_paths
+        .as_ref()
+        .and_then(|(regular, semi)| if regular == semi { std::fs::read(regular).ok().map(|b| variable(b, 600.0)) } else { pair(regular, semi) });
     // A CJK font is big (Noto Sans CJK is ~20 MB): one face, used for both
     // weights, and none at all when fontconfig only has the UI font to offer.
     let cjk = weights("sans-serif:lang=ja")

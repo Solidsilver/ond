@@ -56,9 +56,14 @@ pub fn output_channels(src: u16, caps: Option<&DeviceCaps>) -> u16 {
 pub enum ChannelMap {
     Identity,
     /// One channel to `to`, copied.
-    Duplicate { to: usize },
+    Duplicate {
+        to: usize,
+    },
     /// `rows[out][in]` weights, `inputs` channels in.
-    Matrix { inputs: usize, rows: Vec<Vec<f32>> },
+    Matrix {
+        inputs: usize,
+        rows: Vec<Vec<f32>>,
+    },
 }
 
 impl ChannelMap {
@@ -128,11 +133,11 @@ impl ChannelMap {
 /// front left/right at full level, centre and surrounds at −3 dB, LFE dropped.
 fn weights(bit: u32) -> (f32, f32) {
     match bit {
-        0 => (1.0, 0.0),                                // front left
-        1 => (0.0, 1.0),                                // front right
-        3 | 18 => (0.0, 0.0),                           // LFE
-        2 | 8 | 11 | 13 | 16 | 21 => (SIDE, SIDE),      // centres
-        4 | 6 | 9 | 12 | 15 | 19 | 22 | 24 | 26 => (SIDE, 0.0), // left surrounds, heights, wides
+        0 => (1.0, 0.0),                                         // front left
+        1 => (0.0, 1.0),                                         // front right
+        3 | 18 => (0.0, 0.0),                                    // LFE
+        2 | 8 | 11 | 13 | 16 | 21 => (SIDE, SIDE),               // centres
+        4 | 6 | 9 | 12 | 15 | 19 | 22 | 24 | 26 => (SIDE, 0.0),  // left surrounds, heights, wides
         5 | 7 | 10 | 14 | 17 | 20 | 23 | 25 | 27 => (0.0, SIDE), // right side
         _ => (SIDE / 2.0, SIDE / 2.0),
     }

@@ -35,11 +35,8 @@ pub fn pick(versions: Vec<subsonic::StructuredLyrics>) -> Option<Lyrics> {
         let lyrics = if synced {
             // A positive offset shows the lines sooner (OpenSubsonic, as in LRC).
             let offset = v.offset.unwrap_or(0);
-            let mut lines: Vec<Line> = v
-                .line
-                .into_iter()
-                .filter_map(|l| Some(Line { start_ms: l.start?.saturating_sub(offset).max(0), text: squash(&l.value) }))
-                .collect();
+            let mut lines: Vec<Line> =
+                v.line.into_iter().filter_map(|l| Some(Line { start_ms: l.start?.saturating_sub(offset).max(0), text: squash(&l.value) })).collect();
             lines.sort_by_key(|l| l.start_ms);
             Lyrics::Synced(lines)
         } else {
@@ -191,8 +188,28 @@ fn split_markers(line: &str) -> Vec<String> {
 /// Words that name a part of a song, for markers written without brackets
 /// ("Chorus:", "(Instrumental)") or inside them ("[Verse 1]").
 const SECTION_WORDS: &[&str] = &[
-    "verse", "chorus", "pre-chorus", "prechorus", "post-chorus", "bridge", "intro", "outro", "hook", "refrain", "interlude",
-    "instrumental", "solo", "break", "breakdown", "coda", "tag", "repeat", "spoken", "drop", "part", "skit",
+    "verse",
+    "chorus",
+    "pre-chorus",
+    "prechorus",
+    "post-chorus",
+    "bridge",
+    "intro",
+    "outro",
+    "hook",
+    "refrain",
+    "interlude",
+    "instrumental",
+    "solo",
+    "break",
+    "breakdown",
+    "coda",
+    "tag",
+    "repeat",
+    "spoken",
+    "drop",
+    "part",
+    "skit",
 ];
 
 /// Whether `inner` starts with a section's name ("Verse 2", "Chorus: X").

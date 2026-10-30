@@ -1,10 +1,10 @@
 //! Favorites: loved songs, albums and artists, one kind at a time.
 
-use super::view_ctx::ViewCtx;
+use super::Action;
 use super::album_page::ListOpts;
 use super::browse::grid_metrics;
+use super::view_ctx::ViewCtx;
 use super::widgets::{choice, elide};
-use super::{Action};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::queue::Source;
@@ -59,7 +59,9 @@ impl ViewCtx<'_> {
                 });
                 ui.add_space(14.0);
                 let scroll = egui::ScrollArea::vertical().id_salt("favorite-songs").auto_shrink(false).content_margin(super::layout::gutter());
-                super::layout::into_gutter(ui, |ui| self.track_list_rows(ui, scroll, &v.songs, &favorites_source(), ListOpts { numbers: false, artist: true, playlist: None }));
+                super::layout::into_gutter(ui, |ui| {
+                    self.track_list_rows(ui, scroll, &v.songs, &favorites_source(), ListOpts { numbers: false, artist: true, playlist: None })
+                });
             }
             FavTab::Albums => {
                 let ids: Vec<usize> = v.albums.iter().filter_map(|id| self.data.by_id.get(id).copied()).collect();
@@ -67,32 +69,41 @@ impl ViewCtx<'_> {
                     return empty(ui, "Albums you love show up here. Use the heart next to Play on an album.");
                 }
                 let (cols, tile) = grid_metrics(ui.available_width());
-                super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("favorite-albums").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-                    for chunk in ids.chunks(cols) {
-                        self.grid_row(ui, chunk, tile);
-                    }
-                }));
+                super::layout::into_gutter(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("favorite-albums").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
+                        for chunk in ids.chunks(cols) {
+                            self.grid_row(ui, chunk, tile);
+                        }
+                    })
+                });
             }
             FavTab::Artists => {
                 if v.artists.is_empty() {
                     return empty(ui, "Artists you love show up here. Use the heart on an artist's page.");
                 }
-                super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt("favorite-artists").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for (id, name) in &v.artists {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
-                        if resp.hovered() {
-                            ui.painter().rect_filled(rect, 6.0, t.hover);
+                super::layout::into_gutter(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("favorite-artists").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for (id, name) in &v.artists {
+                            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
+                            if resp.hovered() {
+                                ui.painter().rect_filled(rect, 6.0, t.hover);
+                            }
+                            let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 50.0);
+                            ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
+                            icons::paint(
+                                ui.painter(),
+                                Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(11.0, 11.0)),
+                                Icon::HeartFilled,
+                                t.accent,
+                            );
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+                            if resp.clicked() {
+                                self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: Some(id.clone()) }));
+                            }
                         }
-                        let g = elide(ui, name, FontId::proportional(13.0), t.text, rect.width() - 50.0);
-                        ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, t.text);
-                        icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(11.0, 11.0)), Icon::HeartFilled, t.accent);
-                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-                        if resp.clicked() {
-                            self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: Some(id.clone()) }));
-                        }
-                    }
-                }));
+                    })
+                });
             }
         }
     }

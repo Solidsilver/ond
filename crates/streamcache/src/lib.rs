@@ -186,10 +186,7 @@ impl StreamCache {
                 continue;
             }
             index.total += meta.len();
-            index.complete.insert(
-                name.to_owned(),
-                Entry { size: meta.len(), last_used: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH) },
-            );
+            index.complete.insert(name.to_owned(), Entry { size: meta.len(), last_used: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH) });
         }
         let inner = Inner {
             client: fetch::client(cfg.read_timeout).map_err(io::Error::other)?,
@@ -414,13 +411,7 @@ impl Inner {
     fn evict(&self, idx: &mut Index, keep: Option<&str>) -> Vec<String> {
         let mut victims = Vec::new();
         while idx.total > self.cfg.max_bytes {
-            let Some(victim) = idx
-                .complete
-                .iter()
-                .filter(|(n, _)| Some(n.as_str()) != keep)
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(n, _)| n.clone())
-            else {
+            let Some(victim) = idx.complete.iter().filter(|(n, _)| Some(n.as_str()) != keep).min_by_key(|(_, e)| e.last_used).map(|(n, _)| n.clone()) else {
                 break;
             };
             let size = idx.complete.remove(&victim).map_or(0, |e| e.size);
@@ -446,8 +437,7 @@ impl Inner {
                 if idx.complete.contains_key(&victim) {
                     continue;
                 }
-                let doomed =
-                    self.cfg.dir.join(format!("{victim}.{}.part", self.seq.fetch_add(1, Ordering::Relaxed)));
+                let doomed = self.cfg.dir.join(format!("{victim}.{}.part", self.seq.fetch_add(1, Ordering::Relaxed)));
                 match std::fs::rename(self.cfg.dir.join(&victim), &doomed) {
                     Ok(()) => doomed,
                     Err(e) => {

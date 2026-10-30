@@ -408,7 +408,8 @@ mod tests {
         assert!(!fresh.backdrop && !fresh.waveform && !fresh.adapt_colors && !fresh.alpha_rail && fresh.experimental.all_off());
         // An experiment's switch isn't carried over when the feature moves
         // out of Experimental: the old key is dropped, the rest still reads.
-        let mut s: Settings = serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"backdrop": true, "waveform": true, "spectrum": true}}"#).unwrap();
+        let mut s: Settings =
+            serde_json::from_str(r#"{"server": "", "username": "", "experimental": {"backdrop": true, "waveform": true, "spectrum": true}}"#).unwrap();
         s.migrate();
         assert!(!s.backdrop && !s.waveform && s.experimental.spectrum);
     }

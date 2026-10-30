@@ -110,7 +110,8 @@ impl OndApp {
 
     /// Scroll bars show while scrolling and fade a second after.
     pub(super) fn scroll_bars(&mut self, ctx: &egui::Context) {
-        let (now, scrolling) = ctx.input(|i| (i.time, i.smooth_scroll_delta != egui::Vec2::ZERO || i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. }))));
+        let (now, scrolling) =
+            ctx.input(|i| (i.time, i.smooth_scroll_delta != egui::Vec2::ZERO || i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. }))));
         if scrolling {
             self.ui.last_scroll = now;
         }

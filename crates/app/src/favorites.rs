@@ -249,7 +249,10 @@ mod tests {
         f.load(Starred { songs: vec![track("a")], albums: vec!["al".into()], artists: vec![("ar".into(), "Bill".into())] }, vec![("a".into(), 4)]);
         assert!(f.is_on(StarKind::Song, "a") && f.is_on(StarKind::Album, "al") && f.is_on(StarKind::Artist, "ar"));
         assert_eq!(f.rating("a"), 4);
-        f.note(UserMeta { starred: vec![(StarKind::Song, "b".into(), true), (StarKind::Song, "a".into(), false)], ratings: vec![("b".into(), 2)] }, &[track("b")]);
+        f.note(
+            UserMeta { starred: vec![(StarKind::Song, "b".into(), true), (StarKind::Song, "a".into(), false)], ratings: vec![("b".into(), 2)] },
+            &[track("b")],
+        );
         assert!(f.is_on(StarKind::Song, "b"));
         assert!(!f.is_on(StarKind::Song, "a"));
         assert_eq!(f.view.songs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["b"]);

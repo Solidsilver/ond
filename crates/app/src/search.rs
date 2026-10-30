@@ -186,7 +186,8 @@ impl SearchIndex {
             }
         }
         // The most common, the first met among equals.
-        let genre = |key: &str| genres.get(key).and_then(|counts| counts.iter().max_by_key(|&(g, n)| (*n, std::cmp::Reverse(*g))).map(|(g, _)| (*g).to_owned()));
+        let genre =
+            |key: &str| genres.get(key).and_then(|counts| counts.iter().max_by_key(|&(g, n)| (*n, std::cmp::Reverse(*g))).map(|(g, _)| (*g).to_owned()));
         let artists: Vec<ArtistEntry> = if artists.is_empty() {
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
             for a in albums {
@@ -194,7 +195,18 @@ impl SearchIndex {
                     *counts.entry(artist).or_default() += 1;
                 }
             }
-            counts.into_iter().map(|(name, albums)| ArtistEntry { id: None, name: name.to_owned(), sort: name.to_owned(), albums, cover: None, years: years.get(name).copied(), genre: genre(name) }).collect()
+            counts
+                .into_iter()
+                .map(|(name, albums)| ArtistEntry {
+                    id: None,
+                    name: name.to_owned(),
+                    sort: name.to_owned(),
+                    albums,
+                    cover: None,
+                    years: years.get(name).copied(),
+                    genre: genre(name),
+                })
+                .collect()
         } else {
             artists
                 .iter()
@@ -210,10 +222,8 @@ impl SearchIndex {
                 .collect()
         };
         let album_names: HashMap<&str, &str> = albums.iter().map(|a| (a.id.as_str(), a.name.as_str())).collect();
-        let albums: Vec<AlbumEntry> = albums
-            .iter()
-            .map(|a| AlbumEntry { id: a.id.clone(), title: a.name.clone(), artist: a.artist.clone().unwrap_or_default(), year: a.year })
-            .collect();
+        let albums: Vec<AlbumEntry> =
+            albums.iter().map(|a| AlbumEntry { id: a.id.clone(), title: a.name.clone(), artist: a.artist.clone().unwrap_or_default(), year: a.year }).collect();
         let tracks: Vec<TrackEntry> = tracks
             .iter()
             .map(|t| TrackEntry {
@@ -276,11 +286,8 @@ impl SearchIndex {
 fn scored(query: &str, words: &[&str], pattern: &Pattern, hay: &[Hay], matcher: &mut Matcher, tiebreak: impl Fn(usize) -> i64) -> Vec<Scored> {
     // Cheap literal pass first; the fuzzy matcher only sees what survives.
     let literal: Vec<(Rank, usize)> = hay.iter().enumerate().map(|(i, h)| (rank(query, words, &h.plain), i)).filter(|(r, _)| r.tier > 0).collect();
-    let pool: Vec<(Rank, usize)> = if literal.is_empty() {
-        (0..hay.len()).map(|i| (Rank { tier: 0, exact: false, leading: false }, i)).collect()
-    } else {
-        literal
-    };
+    let pool: Vec<(Rank, usize)> =
+        if literal.is_empty() { (0..hay.len()).map(|i| (Rank { tier: 0, exact: false, leading: false }, i)).collect() } else { literal };
     let mut out: Vec<Scored> = pool
         .into_iter()
         .filter_map(|(r, i)| {
@@ -493,8 +500,11 @@ mod tests {
     #[test]
     fn keystrokes_stay_fast_on_a_full_library() {
         let words = ["blue", "night", "river", "song", "love", "light", "dance", "home", "road", "summer", "rain", "fire"];
-        let albums: Vec<Album> =
-            (0..1866).map(|i| album(&format!("al{i}"), &format!("Artist {} {}", words[i % 12], i % 700), &format!("{} {} {i}", words[(i * 7) % 12], words[(i * 5) % 12]))).collect();
+        let albums: Vec<Album> = (0..1866)
+            .map(|i| {
+                album(&format!("al{i}"), &format!("Artist {} {}", words[i % 12], i % 700), &format!("{} {} {i}", words[(i * 7) % 12], words[(i * 5) % 12]))
+            })
+            .collect();
         let artists: Vec<Artist> = (0..700).map(|i| artist(&format!("ar{i}"), &format!("Artist {} {i}", words[i % 12]), 3)).collect();
         let tracks: Vec<Track> = (0..20_000)
             .map(|i| track(&format!("t{i}"), &format!("al{}", i % 1866), &format!("{} of the {} {i}", words[(i * 3) % 12], words[(i * 11) % 12]), "Someone"))

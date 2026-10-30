@@ -14,12 +14,26 @@ pub enum Overlay {
     Shortcuts,
     Settings,
     /// Name a new playlist holding `tracks` (empty for File › New Playlist).
-    NewPlaylist { name: String, tracks: Vec<Track> },
-    Rename { id: String, name: String },
-    Delete { id: String, name: String },
+    NewPlaylist {
+        name: String,
+        tracks: Vec<Track>,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    Delete {
+        id: String,
+        name: String,
+    },
     /// Playing something new while the user has added tracks: keep them or
     /// clear them? (Settings › Queue › Playing something new: Ask.)
-    KeepAdded { tracks: Vec<Track>, source: crate::queue::Source, action: super::QueueAction, added: usize },
+    KeepAdded {
+        tracks: Vec<Track>,
+        source: crate::queue::Source,
+        action: super::QueueAction,
+        added: usize,
+    },
 }
 
 impl Overlay {
@@ -77,8 +91,12 @@ impl OndApp {
                     let what = if *added == 1 { "the track you added".to_owned() } else { format!("the {added} tracks you added") };
                     ui.label(egui::RichText::new("Keep what you added?").font(FontId::new(15.0, semibold())).color(t.text));
                     ui.add_space(6.0);
-                    ui.add(egui::Label::new(egui::RichText::new(format!("Keep {what} to play after this, or clear them from the queue."))
-                        .size(12.0).color(t.muted)).wrap());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("Keep {what} to play after this, or clear them from the queue.")).size(12.0).color(t.muted),
+                        )
+                        .wrap(),
+                    );
                     ui.add_space(18.0);
                     let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
                     let mut answer = None;
@@ -101,7 +119,12 @@ impl OndApp {
                     ui.set_width(DIALOG_W);
                     ui.label(egui::RichText::new(format!("Delete “{name}”?")).font(FontId::new(15.0, semibold())).color(t.text));
                     ui.add_space(6.0);
-                    ui.add(egui::Label::new(egui::RichText::new("This deletes the playlist on the server. The songs stay in your library.").size(12.0).color(t.muted)).wrap());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("This deletes the playlist on the server. The songs stay in your library.").size(12.0).color(t.muted),
+                        )
+                        .wrap(),
+                    );
                     ui.add_space(18.0);
                     let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
                     ui.horizontal(|ui| {
@@ -142,13 +165,7 @@ fn name_dialog(ui: &mut egui::Ui, title: &str, sub: &str, name: &mut String, ver
         ui.label(egui::RichText::new(sub).size(12.0).color(t.muted));
     }
     ui.add_space(14.0);
-    let field = ui.add(
-        egui::TextEdit::singleline(name)
-            .hint_text("Playlist name")
-            .desired_width(DIALOG_W)
-            .margin(vec2(10.0, 7.0))
-            .background_color(t.field),
-    );
+    let field = ui.add(egui::TextEdit::singleline(name).hint_text("Playlist name").desired_width(DIALOG_W).margin(vec2(10.0, 7.0)).background_color(t.field));
     // Focus once; after that the user may tab away.
     if !ui.data(|d| d.get_temp::<bool>(name_focused_id()).unwrap_or(false)) {
         field.request_focus();

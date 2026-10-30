@@ -97,7 +97,8 @@ impl Flow {
         self.palette.step(dt, false, &mut self.rng);
 
         let kick = feel.beat;
-        let fields = [(self.field.from, self.field_var[0]), (self.field.to, self.field_var[1])].map(|(k, v)| kicked(field(k, self.t, v), kick, v).over(input.n()));
+        let fields =
+            [(self.field.from, self.field_var[0]), (self.field.to, self.field_var[1])].map(|(k, v)| kicked(field(k, self.t, v), kick, v).over(input.n()));
         let warp = Warp { from: fields[0], to: fields[1], mix: self.field.mix(), fade: FADE.powf(input.n()), blur: 0.55 };
         let look = Look::Mapped { from: self.colors(self.palette.from), to: self.colors(self.palette.to), mix: self.palette.mix() };
         let mut picture = Picture::new(warp, look, self.t);

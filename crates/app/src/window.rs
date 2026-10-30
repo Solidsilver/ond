@@ -297,7 +297,8 @@ impl Windows {
         self.mode = to;
         let mut plan = self.plan();
         let small = |m| matches!(m, WindowMode::Mini | WindowMode::Player);
-        if small(from) && small(to)
+        if small(from)
+            && small(to)
             && let Some(p) = now.and_then(|g| g.pos)
         {
             plan.pos = Some(p);

@@ -70,7 +70,10 @@ impl OndApp {
         ui.add_space(4.0);
         let bottom_h = 34.0;
         let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
-        egui::ScrollArea::vertical().id_salt("playlists").max_height((ui.available_height() - bottom_h).max(40.0)).show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
+        egui::ScrollArea::vertical()
+            .id_salt("playlists")
+            .max_height((ui.available_height() - bottom_h).max(40.0))
+            .show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
 
         // The footer: the server's state on the left (click for details and
         // Sign out), keyboard shortcuts and Settings on the right.
@@ -445,7 +448,6 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::widgets::Mark>)
     resp
 }
 
-
 /// A menu row with a right-aligned shortcut hint. True when chosen.
 fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
     let t = Tokens::of(ui);
@@ -482,16 +484,31 @@ fn info_row(ui: &mut Ui, label: &str, value: &str, color: egui::Color32) {
 /// The server's state as the footer shows it.
 #[derive(Debug, Clone, PartialEq)]
 enum ServerState {
-    Connected { host: String },
-    Syncing { host: String, label: String, detail: String, fraction: Option<f32> },
+    Connected {
+        host: String,
+    },
+    Syncing {
+        host: String,
+        label: String,
+        detail: String,
+        fraction: Option<f32>,
+    },
     /// Not answering; reconnecting in the background.
-    Offline { host: String },
+    Offline {
+        host: String,
+    },
     /// The first connect is still under way.
-    Connecting { host: String },
+    Connecting {
+        host: String,
+    },
     /// The server turned the saved login down.
-    SignIn { host: String },
+    SignIn {
+        host: String,
+    },
     /// Offline by choice: not connecting.
-    WorkingOffline { host: String },
+    WorkingOffline {
+        host: String,
+    },
 }
 
 impl ServerState {
@@ -525,7 +542,9 @@ impl ServerState {
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
             ServerState::SignIn { .. } => "The server didn't accept the saved login. Downloaded music still plays. Click to sign in.".into(),
-            ServerState::WorkingOffline { .. } => "Offline mode: Ond doesn't connect to the server, and shows only music that plays without it. Click to go online.".into(),
+            ServerState::WorkingOffline { .. } => {
+                "Offline mode: Ond doesn't connect to the server, and shows only music that plays without it. Click to go online.".into()
+            }
         }
     }
 
@@ -552,7 +571,9 @@ impl ServerState {
                     ui.ctx().request_repaint_after(SPIN);
                 }
             }
-            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
+            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => {
+                icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted)
+            }
             ServerState::SignIn { .. } => super::widgets::mark(ui, c, 12.0, super::widgets::Mark::Failed),
         }
         if !matches!(self, ServerState::Connecting { .. }) {

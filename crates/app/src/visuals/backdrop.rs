@@ -146,10 +146,7 @@ impl Crossfade {
 /// The darkest and brightest colors seen in `uv` of the backdrop `layers`
 /// under `wash` at `alpha` (either layer's, mid-fade). `None` without layers.
 pub fn seen(layers: &[Layer], uv: egui::Rect, wash: Color32, alpha: f32) -> Option<[Color32; 2]> {
-    layers
-        .iter()
-        .map(|l| super::over_art::region(&l.blurred.image, uv).map(|c| c.lerp_to_gamma(wash, alpha)))
-        .reduce(super::over_art::union)
+    layers.iter().map(|l| super::over_art::region(&l.blurred.image, uv).map(|c| c.lerp_to_gamma(wash, alpha))).reduce(super::over_art::union)
 }
 
 #[cfg(test)]
@@ -161,7 +158,8 @@ mod tests {
     fn the_blur_is_small_smooth_and_keeps_the_colors() {
         // Left half red, right half blue: a hard edge.
         let n = 128;
-        let img = ColorImage::new([n, n], (0..n * n).map(|i| if i % n < n / 2 { Color32::from_rgb(200, 20, 20) } else { Color32::from_rgb(20, 20, 200) }).collect());
+        let img =
+            ColorImage::new([n, n], (0..n * n).map(|i| if i % n < n / 2 { Color32::from_rgb(200, 20, 20) } else { Color32::from_rgb(20, 20, 200) }).collect());
         let (b, [dark, bright]) = blurred(&img).unwrap();
         assert_eq!(b.size, [SIDE, SIDE]);
         let row = &b.pixels[SIDE * (SIDE / 2)..SIDE * (SIDE / 2 + 1)];

@@ -107,7 +107,11 @@ enum In {
     Engine(audio::Event),
     Scrobbling(bool),
     /// A submitted play came back.
-    Submitted { play: PendingPlay, outcome: Outcome, from_retry: bool },
+    Submitted {
+        play: PendingPlay,
+        outcome: Outcome,
+        from_retry: bool,
+    },
 }
 
 /// Handle to the worker; cheap to clone. The worker stops when every handle is gone.

@@ -13,7 +13,9 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QueueAction {
     /// Play now, starting at this track.
-    Play { start: usize },
+    Play {
+        start: usize,
+    },
     Shuffle,
     PlayNext,
     Add,
@@ -66,7 +68,10 @@ pub enum Note {
     Probe,
     /// A queue item started playing (`restart`: the engine restarted it, e.g.
     /// after a device change; it isn't a new play).
-    Started { track: Box<Track>, restart: bool },
+    Started {
+        track: Box<Track>,
+        restart: bool,
+    },
 }
 
 /// The engine, the sources and where notes go, for one call.
@@ -193,9 +198,8 @@ impl Player {
                 // parked on it. A track that failed partway, an error not about
                 // a track (the device) or a second failure in a row stops as before.
                 let current = self.queue.current.as_ref().filter(|c| track_id.as_ref() == Some(&c.track.id));
-                let skip = current
-                    .filter(|c| self.started != Some(c.uid) && !self.skipped_failure && self.queue.peek_next().is_some())
-                    .map(|c| c.track.title.clone());
+                let skip =
+                    current.filter(|c| self.started != Some(c.uid) && !self.skipped_failure && self.queue.peek_next().is_some()).map(|c| c.track.title.clone());
                 let text = skip.as_ref().map_or_else(|| message.clone(), |title| format!("Skipped “{title}”: {message}"));
                 cx.notes.push(Note::Error(text));
                 cx.notes.push(Note::Probe);

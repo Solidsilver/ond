@@ -33,7 +33,8 @@ const GAP: f32 = 6.0;
 const ROW_H: f32 = 32.0;
 /// The list shows about three and a half devices before it scrolls.
 const LIST_H: f32 = ROW_H * 3.5;
-const BIT_PERFECT_HELP: &str = "Bit-perfect sends samples untouched and keeps other apps off the device while Ond plays. The volume then sets the device's own level, when it has one.";
+const BIT_PERFECT_HELP: &str =
+    "Bit-perfect sends samples untouched and keeps other apps off the device while Ond plays. The volume then sets the device's own level, when it has one.";
 /// The format pill's (and the list's bit-perfect dots') inset from the panel's right.
 const PILL_INSET: f32 = 10.0;
 /// Where the pill's dot sits, in from its right edge.
@@ -312,7 +313,13 @@ impl Outputs {
         let help = if locked { crate::managed::LOCKED.to_owned() } else { BIT_PERFECT_HELP.to_owned() };
         let label_rect = egui::Rect::from_min_max(egui::pos2(row.left() + indent, row.top()), egui::pos2(row.right() - SWITCH_W, row.bottom()));
         let label = ui.interact(label_rect, egui::Id::unique(("mode-label", &d.uid)), if locked { egui::Sense::hover() } else { egui::Sense::click() });
-        ui.painter().text(egui::pos2(label_rect.left(), row.center().y), egui::Align2::LEFT_CENTER, "Bit-perfect", egui::FontId::proportional(12.0), if on { t.text } else { t.muted });
+        ui.painter().text(
+            egui::pos2(label_rect.left(), row.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Bit-perfect",
+            egui::FontId::proportional(12.0),
+            if on { t.text } else { t.muted },
+        );
         let area = egui::Rect::from_min_max(egui::pos2(row.right() - SWITCH_W, row.top()), egui::pos2(row.right() - PILL_INSET, row.bottom()));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
         let sw = child.add_enabled_ui(!locked, |ui| crate::app::switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).inner;

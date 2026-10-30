@@ -128,7 +128,8 @@ impl ViewCtx<'_> {
                 let known = index.artists[i].id.clone();
                 let action = match verb {
                     Verb::Open => {
-                        let id = known.or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name.as_str())).and_then(|a| a.artist_ref.clone()));
+                        let id =
+                            known.or_else(|| self.data.albums.iter().find(|a| a.artist.as_deref() == Some(name.as_str())).and_then(|a| a.artist_ref.clone()));
                         self.actions.push(Action::Go(Route::Artist { name, id }));
                         return;
                     }

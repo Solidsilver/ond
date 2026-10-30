@@ -206,7 +206,9 @@ fn collect(obj: &Map<String, Value>, at: &mut Vec<String>, out: &mut Vec<(Vec<St
         let any_key = ALLOWED.contains(&format!("{dotted}.*").as_str());
         match value {
             // Like a folder picked in Settings, one of Ond's own inside it.
-            Value::String(dir) if dotted == "offline_dir" => out.push((at.clone(), Value::String(crate::settings::offline_folder(dir.into()).to_string_lossy().into_owned()))),
+            Value::String(dir) if dotted == "offline_dir" => {
+                out.push((at.clone(), Value::String(crate::settings::offline_folder(dir.into()).to_string_lossy().into_owned())))
+            }
             _ if exact => out.push((at.clone(), value.clone())),
             Value::Object(inner) if under || any_key => collect(inner, at, out),
             _ if under && at.len() > 1 => out.push((at.clone(), value.clone())),
@@ -268,7 +270,9 @@ mod tests {
             "volume": 0.5,
             "sidebar_width": 300.0,
         }));
-        assert!(m.has("theme") && m.has("playback.replay_gain") && m.has("playback.kbps") && m.has("device_modes.uid-umc22") && m.has("window.system_title_bar"));
+        assert!(
+            m.has("theme") && m.has("playback.replay_gain") && m.has("playback.kbps") && m.has("device_modes.uid-umc22") && m.has("window.system_title_bar")
+        );
         assert!(m.has("queue.on_play") && !m.has("queue.add"), "queue settings are managed one by one");
         assert!(m.has("playback"), "part of it");
         assert!(!m.has("playback.quality") && !m.has("window.mode") && !m.has("volume") && !m.has("sidebar_width") && !m.has("device_modes.other"));

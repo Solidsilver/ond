@@ -3,9 +3,9 @@
 //! a thread writes the ring's samples to it as exact integers.
 
 use super::cards::{self, FORMATS, Pcm};
+use crate::Status;
 use crate::dither::Tpdf;
 use crate::output::{RingInput, StreamFormat};
-use crate::Status;
 use ::alsa::pcm::{Access, Format, HwParams, PCM};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -109,10 +109,7 @@ pub fn prepare(pcm: &Pcm, format: StreamFormat) -> Result<Prepared, String> {
         if !cards::set_rate_exactly(&hwp, format.sample_rate) {
             return Err(format!("{} can't run at {} Hz", pcm.name, format.sample_rate));
         }
-        let (alsa_format, _) = FORMATS
-            .iter()
-            .find(|(f, _)| hwp.test_format(*f).is_ok())
-            .ok_or_else(|| format!("{} takes no integer format", pcm.name))?;
+        let (alsa_format, _) = FORMATS.iter().find(|(f, _)| hwp.test_format(*f).is_ok()).ok_or_else(|| format!("{} takes no integer format", pcm.name))?;
         hwp.set_format(*alsa_format).map_err(|e| e.to_string())?;
         hwp.set_period_time_near(PERIOD_US, ::alsa::ValueOr::Nearest).ok();
         hwp.set_buffer_time_near(BUFFER_US, ::alsa::ValueOr::Nearest).ok();
@@ -139,13 +136,7 @@ pub struct Stream {
 impl Stream {
     /// Plays `input` (at `format`) on the prepared device until stopped.
     /// `drained` is set once the input is done and the device has played it.
-    pub fn start(
-        prepared: Prepared,
-        format: StreamFormat,
-        mut input: RingInput,
-        status: Arc<Status>,
-        drained: Arc<AtomicBool>,
-    ) -> Self {
+    pub fn start(prepared: Prepared, format: StreamFormat, mut input: RingInput, status: Arc<Status>, drained: Arc<AtomicBool>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let bits = prepared.bits();
@@ -281,8 +272,7 @@ mod tests {
         let (mut p, c) = rtrb::RingBuffer::new(samples.len());
         p.push_entire_slice(&samples).unwrap();
         let (_m, mc) = rtrb::RingBuffer::new(4);
-        let mut input =
-            RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), false);
+        let mut input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         let mut out = vec![0.0f32; samples.len()];

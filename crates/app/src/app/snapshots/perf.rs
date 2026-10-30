@@ -109,7 +109,13 @@ fn perf() {
     scene(&mut h, Route::Songs);
     h.hover_at(pos2(700.0, 500.0));
     for _ in 0..40 {
-        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -20_000.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -20_000.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
         h.step();
     }
     results.push(("songs, mid-scroll".into(), time_frames(&mut h, 60)));
@@ -185,20 +191,39 @@ fn perf() {
     {
         let app = app_mut(&mut h);
         let songs: Vec<Track> = app.data.tracks.all.iter().take(PLAYLIST_N).cloned().collect();
-        app.data.playlists.push(subsonic::Playlist { id: "big-pl".into(), name: "Everything".into(), song_count: PLAYLIST_N as u32, duration: 0, cover_art: None, owner: None });
+        app.data.playlists.push(subsonic::Playlist {
+            id: "big-pl".into(),
+            name: "Everything".into(),
+            song_count: PLAYLIST_N as u32,
+            duration: 0,
+            cover_art: None,
+            owner: None,
+        });
         app.data.playlist_tracks.insert("big-pl".into(), Arc::new(songs));
     }
     scene(&mut h, Route::Playlist { id: "big-pl".into(), name: "Everything".into() });
     h.hover_at(pos2(700.0, 500.0));
     for _ in 0..20 {
-        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -20_000.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -20_000.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
         h.step();
     }
     results.push((format!("playlist, {PLAYLIST_N} songs"), time_frames(&mut h, 60)));
     // Sanity: the frames drew the list's rows (the queue's are "… by …"),
     // scrolled away from the top.
     let first = app_mut(&mut h).data.tracks.all[0].title.clone();
-    let rows: Vec<String> = h.query_all_by_label_contains(" part ").map(|n| format!("{n:?}")).filter(|l| l.contains("ListBoxOption") && !l.contains(" by ")).map(|l| l.chars().take(80).collect()).take(2).collect();
+    let rows: Vec<String> = h
+        .query_all_by_label_contains(" part ")
+        .map(|n| format!("{n:?}"))
+        .filter(|l| l.contains("ListBoxOption") && !l.contains(" by "))
+        .map(|l| l.chars().take(80).collect())
+        .take(2)
+        .collect();
     println!("  playlist rows on screen, e.g. {rows:?}");
     assert!(!rows.is_empty(), "playlist view drew no rows");
     assert!(h.query_by_label(&first).is_none(), "the playlist scrolled");
@@ -316,7 +341,11 @@ fn experimental_costs(h: &mut Harness<'_, Option<OndApp>>) {
     // paint callback; the GPU work isn't timed here) and the painter version.
     use crate::visuals::visualizer::{Kind, Pick};
     let target = Some(crate::visuals::gpu::Target::plain(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8Unorm));
-    for (scene, kind, gpu) in Kind::ALL.map(|k| (format!("{}, GPU (CPU side)", k.label()), k, target)).into_iter().chain(Kind::ALL.map(|k| (format!("{}, painter", k.label()), k, None))) {
+    for (scene, kind, gpu) in Kind::ALL
+        .map(|k| (format!("{}, GPU (CPU side)", k.label()), k, target))
+        .into_iter()
+        .chain(Kind::ALL.map(|k| (format!("{}, painter", k.label()), k, None)))
+    {
         reset(h, FULL, Route::Recent);
         let off = time_with_audio(h, 60);
         reset(h, FULL, Route::Recent);
@@ -350,6 +379,5 @@ fn time_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) -> Duration {
 }
 
 fn ms(d: Duration) -> f64 {
-
     d.as_secs_f64() * 1000.0
 }

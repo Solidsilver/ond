@@ -8,10 +8,10 @@ use super::table::Head;
 use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
 use super::{Action, Focus, QueueAction};
+use crate::memo::Memo;
 use crate::queue::Source;
 use crate::theme::Tokens;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use crate::memo::Memo;
 use library::{Track, fold};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -63,11 +63,7 @@ impl SortKeys {
     pub fn new(tracks: &[Track], album_names: &dyn Fn(&str) -> String) -> Self {
         let mut names: HashMap<&str, String> = HashMap::new();
         let album = tracks.iter().map(|t| names.entry(t.album_id.as_str()).or_insert_with(|| fold(&album_names(&t.album_id))).clone()).collect();
-        Self {
-            title: tracks.iter().map(|t| fold(&t.title)).collect(),
-            artist: tracks.iter().map(|t| fold(t.artist.as_deref().unwrap_or(""))).collect(),
-            album,
-        }
+        Self { title: tracks.iter().map(|t| fold(&t.title)).collect(), artist: tracks.iter().map(|t| fold(t.artist.as_deref().unwrap_or(""))).collect(), album }
     }
 }
 

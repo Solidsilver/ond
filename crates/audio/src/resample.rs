@@ -44,21 +44,10 @@ pub(crate) struct StreamResampler {
 impl StreamResampler {
     pub fn new(from: u32, to: u32, channels: usize) -> Result<Self, String> {
         let ratio = to as f64 / from as f64;
-        let inner = Async::<f32>::new_sinc(ratio, 1.0, &params(), CHUNK, channels, FixedAsync::Input)
-            .map_err(|e| format!("resampler {from} → {to}: {e}"))?;
+        let inner = Async::<f32>::new_sinc(ratio, 1.0, &params(), CHUNK, channels, FixedAsync::Input).map_err(|e| format!("resampler {from} → {to}: {e}"))?;
         let scratch = vec![0.0; inner.output_frames_max() * channels];
         let delay_left = inner.output_delay();
-        Ok(Self {
-            inner,
-            channels,
-            from,
-            to,
-            pending: Vec::with_capacity(CHUNK * 2 * channels),
-            scratch,
-            delay_left,
-            in_frames: 0,
-            out_frames: 0,
-        })
+        Ok(Self { inner, channels, from, to, pending: Vec::with_capacity(CHUNK * 2 * channels), scratch, delay_left, in_frames: 0, out_frames: 0 })
     }
 
     /// Input frames fed since the last reset.

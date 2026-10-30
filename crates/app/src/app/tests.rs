@@ -94,11 +94,7 @@ fn app(ctx: &egui::Context, dir: &std::path::Path) -> OndApp {
 }
 
 fn frame(ctx: &egui::Context, app: &mut OndApp, events: Vec<egui::Event>) {
-    let input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))),
-        events,
-        ..Default::default()
-    };
+    let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), events, ..Default::default() };
     let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
     // No renderer here to upload textures to.
     out.textures_delta.clear();
@@ -106,7 +102,8 @@ fn frame(ctx: &egui::Context, app: &mut OndApp, events: Vec<egui::Event>) {
 
 /// A frame at `time` seconds, so colors can be seen easing.
 fn frame_at(ctx: &egui::Context, app: &mut OndApp, time: f64) {
-    let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), time: Some(time), ..Default::default() };
+    let input =
+        egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), time: Some(time), ..Default::default() };
     let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
     out.textures_delta.clear();
 }
@@ -874,7 +871,8 @@ fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
     }
     // ⇧⌘D on the album page toggles it.
     app.ui.nav.go(Route::Album("al-5".into()));
-    let key = egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT };
+    let key =
+        egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT };
     frame(&ctx, &mut app, vec![key]);
     assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
     assert!(app.downloads.store().is_pinned(&Pin::Track("t-3".into())));
@@ -887,13 +885,7 @@ fn gapless_start_advances_the_queue() {
     let mut app = app(&ctx, dir.path());
     let next = app.player.queue.peek_next().unwrap().clone();
     let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
-    let started = |i: &crate::queue::Item| audio::Event::TrackStarted {
-        track_id: i.track.id.clone(),
-        token: i.uid,
-        format,
-        gapless: true,
-        restart: false,
-    };
+    let started = |i: &crate::queue::Item| audio::Event::TrackStarted { track_id: i.track.id.clone(), token: i.uid, format, gapless: true, restart: false };
     app.handle_engine(started(&next));
     assert_eq!(app.player.queue.current.as_ref().unwrap().uid, next.uid);
     // A repeat of the same event (or the current track) changes nothing.
@@ -908,13 +900,7 @@ fn the_playing_song_queued_next_still_advances_gaplessly() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
-    let started = |i: &crate::queue::Item| audio::Event::TrackStarted {
-        track_id: i.track.id.clone(),
-        token: i.uid,
-        format,
-        gapless: true,
-        restart: false,
-    };
+    let started = |i: &crate::queue::Item| audio::Event::TrackStarted { track_id: i.track.id.clone(), token: i.uid, format, gapless: true, restart: false };
     // "Play next" on the song that's playing: the same track, a new queue item.
     let playing = app.player.queue.current.clone().unwrap();
     app.player.queue.clear();
@@ -941,7 +927,13 @@ fn a_lost_device_is_a_notice_and_its_return_an_offer_until_playing_there() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
-    let dev = |uid: &str, name: &str| audio::DeviceInfo { uid: uid.into(), name: name.into(), kind: audio::DeviceKind::Usb, caps: Default::default(), is_default: false };
+    let dev = |uid: &str, name: &str| audio::DeviceInfo {
+        uid: uid.into(),
+        name: name.into(),
+        kind: audio::DeviceKind::Usb,
+        caps: Default::default(),
+        is_default: false,
+    };
     let list = || vec![dev("spk", "Speakers"), dev("dac", "DAC")];
     app.handle_engine(audio::Event::DeviceLost { name: "DAC".into() });
     assert!(app.ui.toasts.texts().iter().any(|t| t.starts_with("DAC disconnected")), "{:?}", app.ui.toasts.texts());

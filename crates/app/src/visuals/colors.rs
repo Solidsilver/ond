@@ -238,10 +238,7 @@ pub struct Tints {
 impl Tints {
     /// `palette`'s tints, falling back to `base`'s colors where the art's can't be read.
     pub fn new(palette: &ArtPalette, base: &Tints) -> Self {
-        Self {
-            light: Tint::from_palette(palette, &Tokens::LIGHT, false, base.light),
-            dark: Tint::from_palette(palette, &Tokens::DARK, true, base.dark),
-        }
+        Self { light: Tint::from_palette(palette, &Tokens::LIGHT, false, base.light), dark: Tint::from_palette(palette, &Tokens::DARK, true, base.dark) }
     }
 
     /// The themes' own colors with `accent`: what shows without art.

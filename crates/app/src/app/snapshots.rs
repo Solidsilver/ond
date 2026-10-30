@@ -176,11 +176,7 @@ fn track(id: String, album: usize, title: &str, artist: &str, n: u32, disc: u32,
 }
 
 fn vanguard() -> Vec<Track> {
-    VANGUARD
-        .iter()
-        .enumerate()
-        .map(|(n, (t, c, s))| track(format!("vg-{n}"), 0, t, "Bill Evans Trio", n as u32 + 1, 1, *s, Some(c), 24, 96_000))
-        .collect()
+    VANGUARD.iter().enumerate().map(|(n, (t, c, s))| track(format!("vg-{n}"), 0, t, "Bill Evans Trio", n as u32 + 1, 1, *s, Some(c), 24, 96_000)).collect()
 }
 
 /// Two discs: the album, then the bonus disc.
@@ -197,7 +193,20 @@ fn kind_of_blue() -> Vec<Track> {
 fn filler(album: usize, count: usize) -> Vec<Track> {
     let (_, artist, ..) = ALBUMS[album];
     (0..count)
-        .map(|n| track(format!("f{album}-{n}"), album, &format!("{} Part {}", ALBUMS[album].0.split(' ').next().unwrap_or("Song"), n + 1), artist, n as u32 + 1, 1, 200 + 17 * n as u32, None, 16, 44_100))
+        .map(|n| {
+            track(
+                format!("f{album}-{n}"),
+                album,
+                &format!("{} Part {}", ALBUMS[album].0.split(' ').next().unwrap_or("Song"), n + 1),
+                artist,
+                n as u32 + 1,
+                1,
+                200 + 17 * n as u32,
+                None,
+                16,
+                44_100,
+            )
+        })
         .collect()
 }
 
@@ -277,7 +286,13 @@ fn devices() -> audio::Event {
         devices: vec![
             dev("spk", "MacBook Pro Speakers", DeviceKind::BuiltInSpeakers, caps("MacBook Pro Speakers", 24, 96_000, Some("macOS speaker processing")), true),
             // A Mac's headphone jack is float-only.
-            dev("hp", "External Headphones", DeviceKind::BuiltInHeadphones, DeviceCaps { integer: false, ..caps("External Headphones", 24, 96_000, None) }, false),
+            dev(
+                "hp",
+                "External Headphones",
+                DeviceKind::BuiltInHeadphones,
+                DeviceCaps { integer: false, ..caps("External Headphones", 24, 96_000, None) },
+                false,
+            ),
             dev("tv", "LG TV", DeviceKind::Hdmi, caps("LG TV", 24, 192_000, None), false),
             dev("umc", "UMC22", DeviceKind::Usb, caps("UMC22", 16, 48_000, None), false),
             dev("bh", "BlackHole 2ch", DeviceKind::Virtual, caps("BlackHole 2ch", 24, 768_000, None), false),
@@ -376,7 +391,11 @@ fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     let mut loved_songs = vec![vg[1].clone(), vg[4].clone()];
     loved_songs.extend(kind_of_blue().into_iter().take(3));
     app.favorites.load(
-        crate::favorites::Starred { songs: loved_songs, albums: vec![album_id(0), album_id(1), album_id(5)], artists: vec![("ar-be".into(), "Bill Evans".into()), ("ar-md".into(), "Miles Davis".into())] },
+        crate::favorites::Starred {
+            songs: loved_songs,
+            albums: vec![album_id(0), album_id(1), album_id(5)],
+            artists: vec![("ar-be".into(), "Bill Evans".into()), ("ar-md".into(), "Miles Davis".into())],
+        },
         vec![(vg[1].id.clone(), 5), (vg[4].id.clone(), 4)],
     );
     app.data.credited.insert("Scott LaFaro".into(), vec![album_id(0), album_id(21), album_id(22)]);
@@ -385,10 +404,7 @@ fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     // Kind of Blue measured and clean; the Vanguard (a 24/96 release of a
     // 1961 tape) flagged as upsampled, so both album-page variants show.
     analysed(&mut app, 1, None);
-    let up = analysis::Verdict {
-        kind: analysis::VerdictKind::Upsampled { from_hz: 44_100, cutoff_hz: 21_400 },
-        confidence: analysis::Confidence::High,
-    };
+    let up = analysis::Verdict { kind: analysis::VerdictKind::Upsampled { from_hz: 44_100, cutoff_hz: 21_400 }, confidence: analysis::Confidence::High };
     analysed(&mut app, 0, Some(up));
     app.analysis.loaded = true;
 
@@ -584,9 +600,21 @@ fn fixture_waveform(app: &mut OndApp) {
             let t = i as f32 / n as f32;
             let section = match t {
                 t if t < 0.08 => 0.25 + 2.0 * t,
-                t if t < 0.55 => if ((t * 9.0) as u32).is_multiple_of(2) { 0.55 } else { 0.85 },
+                t if t < 0.55 => {
+                    if ((t * 9.0) as u32).is_multiple_of(2) {
+                        0.55
+                    } else {
+                        0.85
+                    }
+                }
                 t if t < 0.62 => 0.3,
-                t if t < 0.9 => if ((t * 11.0) as u32).is_multiple_of(2) { 0.65 } else { 0.95 },
+                t if t < 0.9 => {
+                    if ((t * 11.0) as u32).is_multiple_of(2) {
+                        0.65
+                    } else {
+                        0.95
+                    }
+                }
                 t => 0.95 * (1.0 - t) * 10.0,
             };
             let grain = 0.7 + 0.3 * (seed % 1000) as f32 / 1000.0;
@@ -701,7 +729,10 @@ const VERSES: [&str; 26] = [
 fn traffic_lights(ctx: &egui::Context, bar_h: Option<f32>) {
     let Some(h) = bar_h else { return };
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("snapshot-traffic-lights")));
-    for (i, c) in [egui::Color32::from_rgb(0xFF, 0x5F, 0x57), egui::Color32::from_rgb(0xFE, 0xBC, 0x2E), egui::Color32::from_rgb(0x28, 0xC8, 0x40)].into_iter().enumerate() {
+    for (i, c) in [egui::Color32::from_rgb(0xFF, 0x5F, 0x57), egui::Color32::from_rgb(0xFE, 0xBC, 0x2E), egui::Color32::from_rgb(0x28, 0xC8, 0x40)]
+        .into_iter()
+        .enumerate()
+    {
         painter.circle_filled(pos2(18.0 + 7.0 + 20.0 * i as f32, h / 2.0), 6.0, c);
     }
 }
@@ -979,10 +1010,18 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).ui.queue_ui.tab = QueueTab::Info;
     h.run_steps(3);
     s.shoot(h, "info-long");
-    { let mut c = app_mut(h).prefs_now().columns; c.right = super::layout::RIGHT_MIN; app_mut(h).set_columns(c); }
+    {
+        let mut c = app_mut(h).prefs_now().columns;
+        c.right = super::layout::RIGHT_MIN;
+        app_mut(h).set_columns(c);
+    }
     h.run_steps(3);
     s.shoot(h, "info-long-min");
-    { let mut c = app_mut(h).prefs_now().columns; c.right = super::layout::RIGHT_DEFAULT; app_mut(h).set_columns(c); }
+    {
+        let mut c = app_mut(h).prefs_now().columns;
+        c.right = super::layout::RIGHT_DEFAULT;
+        app_mut(h).set_columns(c);
+    }
     app_mut(h).player.queue.current = saved;
     info_fixture(app_mut(h));
     h.run_steps(3);
@@ -1031,7 +1070,6 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     h.run_steps(30);
     s.shoot(h, "album-verdict-hover");
-
 
     reset(h, FULL, Route::Recent);
     let queue = egui::Rect::from_min_max(pos2(1120.0, 52.0), pos2(1440.0, 876.0));
@@ -1158,7 +1196,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     // Settings › Queue › Playing something new: Ask.
     reset(h, FULL, Route::Recent);
-    app_mut(h).ui.overlay = Some(Overlay::KeepAdded { tracks: vanguard(), source: crate::queue::Source::Added, action: QueueAction::Play { start: 0 }, added: 2 });
+    app_mut(h).ui.overlay =
+        Some(Overlay::KeepAdded { tracks: vanguard(), source: crate::queue::Source::Added, action: QueueAction::Play { start: 0 }, added: 2 });
     s.shoot(h, "keep-added");
 
     // The sidebar footer: server status (click for details), shortcuts, settings.
@@ -1199,7 +1238,16 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         let app = app_mut(h);
         let id = app.player.queue.current.as_ref().map(|c| c.track.id.clone()).unwrap_or_default();
         app.player.playing_from = Some(audio::TrackSource { id, url: "file:///downloads/t.flac".into(), ..Default::default() });
-        let pin = |id: &str, done: usize| offline::PinSummary { pin: offline::Pin::Playlist(id.into()), label: id.into(), total: 12, done, failed: 0, bytes_done: 0, bytes_total: 0, downloading: done < 12 };
+        let pin = |id: &str, done: usize| offline::PinSummary {
+            pin: offline::Pin::Playlist(id.into()),
+            label: id.into(),
+            total: 12,
+            done,
+            failed: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            downloading: done < 12,
+        };
         let snap = offline::Snapshot { pins: vec![pin("pl-1", 12), pin("pl-2", 5)], ..(*app.downloads.snap).clone() };
         app.downloads.snap = Arc::new(snap);
     }
@@ -1286,7 +1334,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        let jobs: Vec<_> = (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
+        let jobs: Vec<_> =
+            (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
         app.analysis.runner.enqueue(jobs);
         app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
@@ -1400,7 +1449,6 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(900.0, 700.0), Route::Album(album_id(7)));
     s.shoot(h, "narrow-long-album");
 
-
     reset(h, vec2(280.0, 280.0), Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
     s.shoot(h, "mini");
@@ -1428,7 +1476,6 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "empty-queue");
 
     experimental_scenes(h, s);
-
 
     // No status bar: the signal path lives in the now-playing display.
     let lcd = egui::Rect::from_min_max(pos2(400.0, 0.0), pos2(1000.0, 52.0));
@@ -1766,7 +1813,14 @@ const MANAGED: &str = r#"{
 }"#;
 
 fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
-    for section in [settings_page::Section::General, settings_page::Section::Appearance, settings_page::Section::Playback, settings_page::Section::Output, settings_page::Section::Offline, settings_page::Section::Experimental] {
+    for section in [
+        settings_page::Section::General,
+        settings_page::Section::Appearance,
+        settings_page::Section::Playback,
+        settings_page::Section::Output,
+        settings_page::Section::Offline,
+        settings_page::Section::Experimental,
+    ] {
         reset(h, FULL, Route::Recent);
         app_mut(h).actions.push(Action::OpenSettings(section));
         s.shoot(h, &format!("managed-settings-{}", section.label().to_lowercase()));
@@ -1870,7 +1924,13 @@ fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Experimental));
     h.run_steps(2);
     h.hover_at(pos2(FULL.x / 2.0, FULL.y / 2.0));
-    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -600.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, -600.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    });
     h.run_steps(30);
     s.shoot(h, "x-settings-visualizer");
     open(h, Kind::Flow, 1, false);
@@ -1945,18 +2005,14 @@ fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 #[test]
 fn info_stays_inside_its_column_after_a_long_song() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     let check = |h: &mut Harness<'_, Option<OndApp>>, what: &str| {
@@ -1974,7 +2030,11 @@ fn info_stays_inside_its_column_after_a_long_song() {
     };
     for right in [super::layout::RIGHT_DEFAULT, super::layout::RIGHT_MIN] {
         reset(&mut h, FULL, Route::Album(album_id(0)));
-        { let mut c = app_mut(&mut h).prefs_now().columns; c.right = right; app_mut(&mut h).set_columns(c); }
+        {
+            let mut c = app_mut(&mut h).prefs_now().columns;
+            c.right = right;
+            app_mut(&mut h).set_columns(c);
+        }
         let saved = long_info(app_mut(&mut h));
         app_mut(&mut h).ui.queue_ui.tab = QueueTab::Info;
         h.run_steps(4);
@@ -1991,18 +2051,14 @@ fn info_stays_inside_its_column_after_a_long_song() {
 #[test]
 fn column_edges_drag_and_persist() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
@@ -2045,18 +2101,14 @@ mod perf;
 #[test]
 fn live_visuals_ask_for_frames_only_while_playing() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     let soon = |h: &mut Harness<'_, Option<OndApp>>| h.output().viewport_output.values().any(|v| v.repaint_delay <= Duration::from_millis(50));
@@ -2085,18 +2137,14 @@ fn live_visuals_ask_for_frames_only_while_playing() {
 #[test]
 fn the_now_playing_heart_toggles_both_ways() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
@@ -2121,19 +2169,15 @@ fn the_now_playing_heart_toggles_both_ways() {
 #[test]
 fn leaving_a_maximized_window_resizes_after_it_lets_go() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                    app.track_window(ui.ctx());
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+                app.track_window(ui.ctx());
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
@@ -2173,18 +2217,14 @@ fn leaving_a_maximized_window_resizes_after_it_lets_go() {
 #[test]
 fn a_long_album_name_doesnt_push_the_player_down() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(vec2(380.0, 880.0))
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(vec2(380.0, 880.0)).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, vec2(380.0, 880.0), Route::Recent);
@@ -2207,18 +2247,14 @@ fn a_long_album_name_doesnt_push_the_player_down() {
 #[test]
 fn the_play_button_on_an_album_cover_plays_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
@@ -2249,18 +2285,14 @@ fn the_play_button_on_an_album_cover_plays_it() {
 #[test]
 fn our_window_frame_leaves_the_content_working() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     crate::csd::preview(&ctx, true);
@@ -2309,18 +2341,14 @@ fn our_window_frame_leaves_the_content_working() {
 #[test]
 fn list_keys_stay_with_an_open_sheet() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
 
@@ -2405,18 +2433,14 @@ fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
 
 /// The full window with the fixture library, for the behaviour tests below.
 fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir));
     h
@@ -2427,7 +2451,13 @@ fn wheel(h: &mut Harness<'_, Option<OndApp>>, at: Pos2, dy: f32, steps: usize) {
     h.hover_at(at);
     h.step();
     for _ in 0..steps {
-        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, dy / steps as f32), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, dy / steps as f32),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+            source: egui::MouseWheelSource::Wheel,
+        });
         h.run_steps(3);
     }
     h.run_steps(10);
@@ -2642,18 +2672,14 @@ fn a_long_playlist_reorders_reveals_and_follows_the_keys() {
 #[test]
 fn dragging_the_volume_slider_doesnt_move_the_window() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder()
-        .with_size(FULL)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_ui_state(
-            |ui, app: &mut Option<OndApp>| {
-                if let Some(app) = app {
-                    app.main_ui(ui);
-                }
-            },
-            None,
-        );
+    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(populated(&ctx, dir.path()));
     reset(&mut h, FULL, Route::Recent);
@@ -2684,7 +2710,11 @@ fn dragging_the_volume_slider_doesnt_move_the_window() {
 #[test]
 fn managed_settings_cant_be_changed_in_the_app() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("settings.json"), r#"{ "server": "https://music.example.com", "username": "demo", "scrobble": true, "accent": "rose", "alpha_rail": false }"#).unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{ "server": "https://music.example.com", "username": "demo", "scrobble": true, "accent": "rose", "alpha_rail": false }"#,
+    )
+    .unwrap();
     std::fs::write(dir.path().join("managed.json"), MANAGED).unwrap();
     let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
         |ui, app: &mut Option<OndApp>| {
@@ -2774,7 +2804,8 @@ fn sleeve(i: usize) -> ColorImage {
     // An edge `w` pixels soft: 1 inside (`d` < 0), 0 outside.
     let inside = |d: f32, w: f32| (0.5 - d / w).clamp(0.0, 1.0);
     let hash = |x: usize, y: usize, k: usize| -> f32 {
-        let mut n = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ (k as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+        let mut n =
+            (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ (k as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
         n ^= n >> 29;
         n = n.wrapping_mul(0xBF58_476D_1CE4_E5B9);
         n ^= n >> 32;
@@ -2814,7 +2845,15 @@ fn sleeve(i: usize) -> ColorImage {
                 let (cx, cy) = ((u * cells).floor() as usize, (v * cells).floor() as usize);
                 let (lx, ly) = ((u * cells).fract(), (v * cells).fract());
                 let pick = hash(cx, cy, i);
-                let c = if pick < 0.3 { ink } else if pick < 0.55 { hsv(0.5, 0.35, 0.55) } else if pick < 0.8 { hsv(0.12, 0.45, 0.88) } else { dark };
+                let c = if pick < 0.3 {
+                    ink
+                } else if pick < 0.55 {
+                    hsv(0.5, 0.35, 0.55)
+                } else if pick < 0.8 {
+                    hsv(0.12, 0.45, 0.88)
+                } else {
+                    dark
+                };
                 let gap = 0.025;
                 if lx < gap || ly < gap || lx > 1.0 - gap || ly > 1.0 - gap { paper } else { c }
             }

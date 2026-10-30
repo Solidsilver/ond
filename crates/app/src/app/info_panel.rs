@@ -5,15 +5,14 @@
 
 use super::AnalysisAction;
 use super::album_page::{Credit, credits};
-use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use super::view_ctx::ViewCtx;
+use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use super::{Action, SongStats};
 use crate::icons::Icon;
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Sense, Ui, vec2};
 use library::Track;
-
 
 /// The Info tab's text worked out from the song, its album and its analysis,
 /// kept between frames (see [`InfoKey`]).
@@ -96,7 +95,12 @@ impl ViewCtx<'_> {
             if !facts.credits.is_empty() {
                 kv_section(ui, "Credits");
                 for c in &facts.credits {
-                    links_row(self.actions, ui, &c.role, c.people.iter().map(|(name, id)| (name.as_str(), || Route::Artist { name: name.clone(), id: id.clone() })));
+                    links_row(
+                        self.actions,
+                        ui,
+                        &c.role,
+                        c.people.iter().map(|(name, id)| (name.as_str(), || Route::Artist { name: name.clone(), id: id.clone() })),
+                    );
                 }
             }
 
@@ -118,7 +122,12 @@ impl ViewCtx<'_> {
                     links_row(self.actions, ui, label, genres.into_iter().map(|g| (g, move || Route::Filter { kind: FilterKind::Genre, value: g.to_owned() })));
                 }
                 if !al.labels.is_empty() {
-                    links_row(self.actions, ui, "Label", al.labels.iter().map(|l| (l.as_str(), || Route::Filter { kind: FilterKind::Label, value: l.clone() })));
+                    links_row(
+                        self.actions,
+                        ui,
+                        "Label",
+                        al.labels.iter().map(|l| (l.as_str(), || Route::Filter { kind: FilterKind::Label, value: l.clone() })),
+                    );
                 }
             }
 
@@ -170,7 +179,8 @@ impl ViewCtx<'_> {
             painter.hline(plot.x_range(), y, egui::Stroke::new(1.0, t.hairline.gamma_multiply(0.6)));
             painter.text(egui::pos2(plot.left() - 6.0, y), egui::Align2::RIGHT_CENTER, label, FontId::proportional(9.5), t.muted);
         }
-        ui.allocate_response(vec2(0.0, 0.0), Sense::hover()).widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Spectrogram of the last few seconds"));
+        ui.allocate_response(vec2(0.0, 0.0), Sense::hover())
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Spectrogram of the last few seconds"));
     }
 
     /// Small artwork, the title, and artist / album as links.
@@ -302,7 +312,6 @@ fn play_rows(stats: Option<&SongStats>, rating: u8) -> Vec<(&'static str, String
     }
     rows
 }
-
 
 #[cfg(test)]
 mod tests {

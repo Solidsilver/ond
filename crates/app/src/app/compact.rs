@@ -4,8 +4,8 @@
 //! bottom status line lives here too.
 
 use super::WindowAction;
-use super::widgets::elide;
 use super::seek::SeekStyle;
+use super::widgets::elide;
 use super::{Action, OndApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
@@ -69,7 +69,11 @@ impl OndApp {
                     ui.painter().rect_filled(line.expand2(vec2(5.0, 3.0)), 4.0, scrim.gamma_multiply(fade));
                 }
                 ui.painter().rect_filled(line, 1.0, on.fg.gamma_multiply(0.22 * fade));
-                ui.painter().rect_filled(Rect::from_min_max(line.min, pos2(line.left() + line.width() * frac, line.bottom())), 1.0, on.fg.gamma_multiply(0.9 * fade));
+                ui.painter().rect_filled(
+                    Rect::from_min_max(line.min, pos2(line.left() + line.width() * frac, line.bottom())),
+                    1.0,
+                    on.fg.gamma_multiply(0.9 * fade),
+                );
             }
             if shown > 0.0 {
                 self.mini_overlay(ui, rect, shown, blurred.as_ref());
@@ -96,7 +100,8 @@ impl OndApp {
             let wash = scrim().to_opaque();
             let mut alpha: f32 = 0.0;
             for l in &layers {
-                ui.painter().add(egui::epaint::RectShape::filled(panel, 0.0, Color32::WHITE.gamma_multiply(l.opacity)).with_texture(l.blurred.texture.id(), uv));
+                ui.painter()
+                    .add(egui::epaint::RectShape::filled(panel, 0.0, Color32::WHITE.gamma_multiply(l.opacity)).with_texture(l.blurred.texture.id(), uv));
                 alpha = alpha.max(crate::visuals::backdrop::wash_alpha(l.blurred.extremes, wash, ON_ART, ON_ART_MUTED));
             }
             ui.painter().rect_filled(panel, 0.0, wash.gamma_multiply(alpha));
@@ -167,13 +172,18 @@ impl OndApp {
                     self.output_control_out(out);
                     // The same few characters of signal path as the full window's display.
                     let origin = self.player.playing_from.as_ref().map(|s| super::playing::origin(s, &self.cache));
-                    let readout = self.output.readout(&self.engine.status).map(|r| crate::output::Readout { local: origin.as_ref().is_some_and(super::playing::Origin::is_local), ..r });
+                    let readout = self
+                        .output
+                        .readout(&self.engine.status)
+                        .map(|r| crate::output::Readout { local: origin.as_ref().is_some_and(super::playing::Origin::is_local), ..r });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let (Some(r), Some(item)) = (readout, self.player.queue.current.as_ref()) {
                             let size = crate::output::paint_readout(ui, egui::Pos2::ZERO, &r, 10.5, false).size();
                             let (rect, resp) = ui.allocate_exact_size(size + vec2(4.0, 6.0), Sense::click());
                             crate::output::paint_readout(ui, rect.right_center() - vec2(2.0, 0.0), &r, 10.5, true);
-                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default()))
+                            });
                             let path = self.output.signal();
                             super::signal_card::popover(&resp, origin.as_ref(), &item.track, path, self.engine.status.underruns());
                             resp.on_hover_text(super::signal_card::hover(origin.as_ref(), path, &r.detail)).on_hover_cursor(egui::CursorIcon::PointingHand);
