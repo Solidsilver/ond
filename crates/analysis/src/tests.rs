@@ -453,3 +453,12 @@ fn album_summary_with_mixed_verdicts() {
     let s = summarize(&[&b, &c, &e, &e, &e], 5);
     assert_eq!(s.verdict, None);
 }
+
+#[test]
+fn opus_files_analyze() {
+    let bytes = include_bytes!("../../audio/testdata/sine-1s.opus");
+    let a = analyze_reader(std::io::Cursor::new(bytes.to_vec()), Some(bytes.len() as u64), Some("opus"), &|| false).unwrap();
+    assert_eq!((a.sample_rate, a.channels, a.bits), (48_000, 2, None));
+    assert!((a.duration_secs - 1.0).abs() < 0.05, "{a:?}");
+    assert!(a.integrated_lufs.is_some(), "{a:?}");
+}

@@ -15,6 +15,7 @@ symphonia = { version = "0.6.1", features = ["all"] }
 thiserror = "2.0.21"
 tracing = "0.1.44"
 rubato = "5.0.1"
+symphonia-adapter-libopus = "0.3.0"
 
 [lints]
 workspace = true

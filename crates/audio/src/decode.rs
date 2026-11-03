@@ -476,7 +476,7 @@ impl Ctx {
         // `gapless` makes decoders that support it (MP3, Vorbis) drop encoder delay and padding.
         let mut opts = AudioDecoderOptions::default();
         opts.gapless = true;
-        let decoder = symphonia::default::get_codecs().make_audio_decoder(&params, &opts).map_err(|e| format!("decoder: {e}"))?;
+        let decoder = codecs().make_audio_decoder(&params, &opts).map_err(|e| format!("decoder: {e}"))?;
         Ok(Track {
             reader,
             decoder,
@@ -1003,6 +1003,17 @@ fn push_all(p: &mut Producer<f32>, mut data: &[f32], frame: usize, pushed: &mut 
         data = &data[n..];
     }
     Push::Done
+}
+
+/// Symphonia's decoders, and Opus (libopus): Symphonia has none of its own.
+fn codecs() -> &'static symphonia::core::codecs::registry::CodecRegistry {
+    static CODECS: std::sync::LazyLock<symphonia::core::codecs::registry::CodecRegistry> = std::sync::LazyLock::new(|| {
+        let mut registry = symphonia::core::codecs::registry::CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut registry);
+        registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+        registry
+    });
+    &CODECS
 }
 
 #[cfg(test)]
