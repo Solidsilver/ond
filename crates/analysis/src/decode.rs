@@ -140,7 +140,7 @@ fn open_track(reader: &dyn FormatReader) -> Result<Opened, AnalyzeError> {
     let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or_else(|| AnalyzeError::Failed("no audio codec parameters".into()))?;
     let mut opts = AudioDecoderOptions::default();
     opts.gapless = true;
-    let decoder = symphonia::default::get_codecs().make_audio_decoder(params, &opts).map_err(|e| AnalyzeError::Failed(format!("decoder: {e}")))?;
+    let decoder = codecs().make_audio_decoder(params, &opts).map_err(|e| AnalyzeError::Failed(format!("decoder: {e}")))?;
     // Lossy decoders don't report a bit depth; lossless ones do.
     Ok((track.id, params.bits_per_sample, decoder))
 }
@@ -181,4 +181,15 @@ impl<R: Read + Seek + Send + Sync> MediaSource for Source<R> {
     fn byte_len(&self) -> Option<u64> {
         self.len
     }
+}
+
+/// Symphonia's decoders, and Opus (libopus): Symphonia has none of its own.
+fn codecs() -> &'static symphonia::core::codecs::registry::CodecRegistry {
+    static CODECS: std::sync::LazyLock<symphonia::core::codecs::registry::CodecRegistry> = std::sync::LazyLock::new(|| {
+        let mut registry = symphonia::core::codecs::registry::CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut registry);
+        registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+        registry
+    });
+    &CODECS
 }

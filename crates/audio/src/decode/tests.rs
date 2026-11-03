@@ -681,3 +681,18 @@ fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
     assert_eq!(status.track_seq.load(Ordering::Relaxed), N as u64 - 1, "every boundary crossed");
     assert!(dev.played == tracks.concat(), "every track, in order, gaplessly");
 }
+
+#[test]
+fn opus_files_decode() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/sine-1s.opus");
+    let src = TrackSource { id: "opus".into(), url: format!("file://{}", path.display()), suffix: Some("opus".into()), ..Default::default() };
+    let status = bit_perfect_status();
+    let s = Session::start(src, None, config(0.05), status.clone(), None, None, Arc::default());
+    let (input, seen) = wait_ring(&s);
+    let Some(DecoderMsg::Track { format, .. }) = seen.first() else { panic!("no Track message: {seen:?}") };
+    assert_eq!(*format, StreamFormat { sample_rate: 48_000, channels: 2, bits_per_sample: None });
+    let mut dev = Device { input, status, played: Vec::new() };
+    play_to_end(&s, &mut dev);
+    // A second of 440 Hz: most of its 96,000 samples aren't silent.
+    assert!(dev.played.len() > 80_000, "{} samples played", dev.played.len());
+}
