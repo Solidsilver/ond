@@ -131,6 +131,7 @@ impl OndApp {
                 self.actions.push(Action::Prefs(PrefsAction::Scrobble(scrobble)));
             }
         });
+        self.update_settings(ui);
         group(ui, "Advanced", |ui| {
             let mut shown = self.ui.prefs.diagnostics_bar;
             if managed(ui, self.prefs.managed("diagnostics_bar"), |ui| {
@@ -156,6 +157,34 @@ impl OndApp {
                     self.actions.push(Action::Window(WindowAction::SetSystemTitleBar(system)));
                 }
             }
+        });
+    }
+
+    /// This version, and whether Ond looks for newer ones (copies from the
+    /// GitHub releases; a package manager updates its own).
+    fn update_settings(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let current = crate::updates::Version::current();
+        group(ui, "Updates", |ui| match crate::updates::channel() {
+            crate::updates::Channel::GitHub => {
+                let mut on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
+                if managed(ui, self.prefs.managed("updates"), |ui| {
+                    switch_row(ui, "Check for updates", "Once a day, Ond looks on GitHub for a newer version and tells you when there is one.", &mut on)
+                }) {
+                    let check = if on { crate::settings::UpdateCheck::Notify } else { crate::settings::UpdateCheck::Off };
+                    self.actions.push(Action::Update(super::UpdateAction::Check(check)));
+                }
+                match self.update {
+                    Some(v) => setting(ui, &format!("Ond {v} is available"), &format!("You have {current}."), |ui| {
+                        if super::widgets::link(ui, "Release notes and download", FontId::proportional(13.0), t.accent).clicked() {
+                            self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+                        }
+                    }),
+                    None => setting(ui, "Version", "", |ui| value(ui, &current.to_string(), t.muted)),
+                }
+            }
+            crate::updates::Channel::Packaged(by) => setting(ui, "Version", &format!("Updates come from {by}."), |ui| value(ui, &current.to_string(), t.muted)),
+            crate::updates::Channel::Source => setting(ui, "Version", "Built from source.", |ui| value(ui, &current.to_string(), t.muted)),
         });
     }
 

@@ -52,6 +52,7 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | `scrobble` | Report plays to the server | `true` |
 | `diagnostics_bar` | The diagnostics bar along the bottom | `false` |
 | `window.system_title_bar` | Linux: the desktop's title bar instead of Ond's own buttons | `false` |
+| `updates` | `"notify"`: look once a day for a newer release and say when there is one; `"off"`. Only copies from the GitHub releases look: one Nix installed never does | `"notify"` |
 
 ### Appearance
 

@@ -152,6 +152,8 @@ pub enum Msg {
     },
     /// Selected from the native menu bar.
     Menu(crate::keys::Cmd),
+    /// A newer Ond is out.
+    UpdateAvailable(crate::updates::Version),
     Error(String),
 }
 
@@ -368,6 +370,11 @@ impl Bridge {
     /// False once the session this copy works for has ended.
     fn current(&self) -> bool {
         self.scope.is_none_or(|s| self.live(s))
+    }
+
+    /// The runtime its work runs on, for other background work to share.
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.rt
     }
 
     /// The UI's wake-up, for other background work to share.

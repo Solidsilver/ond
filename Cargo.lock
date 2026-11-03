@@ -3348,6 +3348,7 @@ dependencies = [
  "offline",
  "raw-window-handle",
  "realfft",
+ "reqwest",
  "rfd",
  "serde",
  "serde_json",

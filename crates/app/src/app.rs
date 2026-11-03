@@ -167,6 +167,7 @@ pub enum Action {
     SignOut,
     /// The server turned the saved login down: the sign-in form, over the library.
     SignInAgain,
+    Update(UpdateAction),
     Album(String, QueueAction),
     Artist(String, QueueAction),
     Playlist(String, QueueAction),
@@ -213,6 +214,36 @@ pub enum Action {
     /// A key or menu-bar command; applying it applies what it stands for.
     Command(Cmd),
     PlaylistEdit(PlaylistAction),
+}
+
+/// About a newer Ond.
+pub enum UpdateAction {
+    /// Its release page, in the browser.
+    Open(crate::updates::Version),
+    /// Don't mention it again.
+    Skip(crate::updates::Version),
+    /// Look for new versions, or don't.
+    Check(crate::settings::UpdateCheck),
+}
+
+impl OndApp {
+    fn update_action(&mut self, action: UpdateAction) {
+        match action {
+            UpdateAction::Open(v) => self.ctx.open_url(egui::OpenUrl::new_tab(v.page())),
+            UpdateAction::Skip(v) => {
+                self.prefs.edit(|s| s.skipped_update = Some(v.to_string()));
+                self.update = None;
+            }
+            UpdateAction::Check(check) => {
+                self.prefs.edit(|s| s.updates = check);
+                let on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
+                self.update_check.store(on, std::sync::atomic::Ordering::Relaxed);
+                if !on {
+                    self.update = None;
+                }
+            }
+        }
+    }
 }
 
 /// The app's tokio runtime, kept for the app's lifetime (the bridge and the
@@ -290,6 +321,10 @@ pub struct OndApp {
     /// What the window renders to, for the visualizer's own GPU drawing;
     /// `None` without a wgpu renderer (it then uses the painter).
     gpu: Option<crate::visuals::gpu::Target>,
+    /// A newer Ond that's out and not skipped.
+    update: Option<crate::updates::Version>,
+    /// The update checker looks while this is set (the setting).
+    update_check: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl OndApp {
@@ -301,6 +336,9 @@ impl OndApp {
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
+        app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
+        let bridge = app.bridge.clone();
+        crate::updates::start(app.bridge.runtime(), app.update_check.clone(), move |v| bridge.post(Msg::UpdateAvailable(v)));
         // The window opened from this plan (see `main`); our title bar follows it.
         app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
         Ok(app)
@@ -443,6 +481,8 @@ impl OndApp {
             diagnostics: diagnostics::Diagnostics::default(),
             waveforms: crate::visuals::waveform::Waveforms::new(ctx.clone()),
             gpu: None,
+            update: None,
+            update_check: Arc::default(),
             prefs,
             analysis: Analysis::new(analyzer),
             favorites: Favorites::default(),
@@ -500,6 +540,11 @@ impl OndApp {
                 self.go(Route::Playlist { id, name });
             }
             Msg::Menu(cmd) => self.command(cmd),
+            Msg::UpdateAvailable(v) => {
+                if self.prefs.get(|s| s.skipped_update.as_deref() != Some(&v.to_string())) {
+                    self.update = Some(v);
+                }
+            }
             Msg::Error(e) => {
                 self.probe();
                 // Offline, network errors are expected and the offline pill already says so.
@@ -635,6 +680,7 @@ impl OndApp {
             Action::MeasureLatency => self.refresh_latency(),
             Action::SignOut => self.sign_out(),
             Action::SignInAgain => self.sign_in_again(),
+            Action::Update(a) => self.update_action(a),
             Action::Album(id, action) => self.play_album(id, action),
             Action::Artist(name, action) => self.play_artist(name, action),
             Action::Playlist(id, action) => self.play_playlist(id, action),

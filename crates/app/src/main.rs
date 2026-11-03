@@ -37,6 +37,7 @@ mod settings;
 mod sync;
 mod theme;
 mod tracks;
+mod updates;
 mod visuals;
 mod window;
 

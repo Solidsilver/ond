@@ -516,6 +516,7 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     app.session.connecting = false;
     app.session.sign_in = None;
     app.session.work_offline = false;
+    app.update = None;
     app.player.playing_from = None;
     app.diagnostics = super::diagnostics::Diagnostics::default();
     app.prefs.edit(|s| s.diagnostics_bar = false);
@@ -1288,6 +1289,20 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
     s.shoot(h, "settings-general-diagnostics");
+
+    // A newer Ond is out: the notice above the footer, its menu, and
+    // Settings › General (the GitHub copy's rows with OND_DISTRIBUTION=github).
+    reset(h, FULL, Route::Recent);
+    app_mut(h).update = crate::updates::Version::parse("0.5.0");
+    s.shoot(h, "update-available");
+    if !click_label(h, "Ond 0.5.0 is available", egui::Rect::from_min_size(Pos2::ZERO, vec2(320.0, FULL.y))) {
+        eprintln!("  (update notice not found)");
+    }
+    h.run_steps(4);
+    s.shoot(h, "update-available-menu");
+    egui::Popup::close_all(&h.ctx);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
+    s.shoot(h, "update-available-settings");
 
     // Another accent color: everything accented takes it, in either theme.
     reset(h, FULL, Route::Album(album_id(0)));

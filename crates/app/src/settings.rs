@@ -40,6 +40,17 @@ impl DbReadout {
     }
 }
 
+/// Whether Ond looks for a newer version of itself (copies from the GitHub
+/// releases only). Room for installing them itself later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateCheck {
+    Off,
+    /// Says when one is out, with a link to it.
+    #[default]
+    Notify,
+}
+
 /// What playback does offline with a song that isn't downloaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -132,6 +143,12 @@ pub struct Settings {
     /// Offline by choice: Ond doesn't connect, and only what can play shows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub work_offline: bool,
+    /// Look for a newer Ond.
+    #[serde(default)]
+    pub updates: UpdateCheck,
+    /// A newer version the user chose to skip: it isn't mentioned again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_update: Option<String>,
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
@@ -235,6 +252,8 @@ impl Default for Settings {
             device_change_toast: false,
             offline_unplayable: Unplayable::default(),
             work_offline: false,
+            updates: UpdateCheck::default(),
+            skipped_update: None,
             device_hidden: Default::default(),
             device_groups: Default::default(),
             theme: Default::default(),
