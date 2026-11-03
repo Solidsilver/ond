@@ -30,11 +30,7 @@ Downloads are on the [Releases](../../releases) page.
 
 Open the `.dmg` and drag Ond to Applications.
 
-The app isn't signed with an Apple Developer ID yet, so macOS blocks the first launch. Open Ond once, then go to System Settings › Privacy & Security and click Open Anyway. On macOS 14 and earlier you can right-click Ond in Applications and choose Open instead. Or run:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/Ond.app
-```
+The app is signed and notarized by Apple, so it opens like any other. Releases before 0.4.3 weren't signed; to open one of those, see the [0.4.2 README](https://github.com/Solidsilver/ond/tree/v0.4.2#macos).
 
 Ond needs macOS 11 (Big Sur) or later.
 
