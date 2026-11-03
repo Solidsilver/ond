@@ -74,23 +74,24 @@ impl QualityMode {
     }
 }
 
-/// Formats the decoder can play from a transcode. (Opus would need a decoder
-/// the app doesn't ship yet.)
+/// Formats to ask the server to transcode to (all ones the decoder plays).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TranscodeFormat {
     #[default]
     Aac,
     Mp3,
+    Opus,
 }
 
 impl TranscodeFormat {
-    pub const ALL: [TranscodeFormat; 2] = [TranscodeFormat::Aac, TranscodeFormat::Mp3];
+    pub const ALL: [TranscodeFormat; 3] = [TranscodeFormat::Aac, TranscodeFormat::Mp3, TranscodeFormat::Opus];
 
     pub fn id(self) -> &'static str {
         match self {
             TranscodeFormat::Aac => "aac",
             TranscodeFormat::Mp3 => "mp3",
+            TranscodeFormat::Opus => "opus",
         }
     }
 
@@ -98,6 +99,7 @@ impl TranscodeFormat {
         match self {
             TranscodeFormat::Aac => "AAC",
             TranscodeFormat::Mp3 => "MP3",
+            TranscodeFormat::Opus => "Opus",
         }
     }
 }
@@ -312,6 +314,8 @@ mod tests {
         p.format = TranscodeFormat::Mp3;
         p.kbps = 192;
         assert_eq!(p.transcode(Network::Home), Some(Transcode { format: "mp3".into(), kbps: 192 }));
+        p.format = TranscodeFormat::Opus;
+        assert_eq!(p.transcode(Network::Home), Some(Transcode { format: "opus".into(), kbps: 192 }));
     }
 
     #[test]

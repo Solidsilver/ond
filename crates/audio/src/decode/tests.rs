@@ -696,3 +696,16 @@ fn opus_files_decode() {
     // A second of 440 Hz: most of its 96,000 samples aren't silent.
     assert!(dev.played.len() > 80_000, "{} samples played", dev.played.len());
 }
+
+/// A transcode to Opus arrives as Ogg read front to back: it plays the same.
+#[test]
+fn opus_streams_decode() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/sine-1s.opus");
+    let src = TrackSource { id: "opus".into(), url: format!("test-unseekable://{}", path.display()), suffix: Some("opus".into()), ..Default::default() };
+    let status = bit_perfect_status();
+    let s = Session::start(src, None, config(0.05), status.clone(), None, None, Arc::default());
+    let (input, _) = wait_ring(&s);
+    let mut dev = Device { input, status, played: Vec::new() };
+    play_to_end(&s, &mut dev);
+    assert!(dev.played.len() > 80_000, "{} samples played", dev.played.len());
+}

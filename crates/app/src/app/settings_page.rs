@@ -383,7 +383,12 @@ impl OndApp {
             });
             if p.quality != QualityMode::Original {
                 managed(ui, self.prefs.managed("playback.format"), |ui| {
-                    setting(ui, "Format", "", |ui| choice(ui, &TranscodeFormat::ALL, &mut p.format, None, |f| f.label().into()))
+                    let hint = if p.format == TranscodeFormat::Opus {
+                        "Opus sounds best for its size. Your server needs an Opus transcoding; Navidrome has one unless it was removed."
+                    } else {
+                        ""
+                    };
+                    setting(ui, "Format", hint, |ui| choice(ui, &TranscodeFormat::ALL, &mut p.format, None, |f| f.label().into()))
                 });
                 let network = crate::fmt::capitalize(self.output.network().label());
                 let now = match p.transcode(self.output.network()) {
