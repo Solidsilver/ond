@@ -77,7 +77,7 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | `playback.preamp_db` | Pre-amp in dB, −12 to 12 | `0.0` |
 | `playback.untagged_db` | Gain for tracks without ReplayGain tags, in dB, −12 to 0 | `-6.0` |
 | `playback.quality` | `"original"`, `"auto"` (original at home, transcoded elsewhere), `"transcode"` | `"original"` |
-| `playback.format` | `"aac"`, `"mp3"` | `"aac"` |
+| `playback.format` | `"aac"`, `"mp3"`, `"opus"` | `"aac"` |
 | `playback.kbps` | `128`, `192`, `256`, `320` | `256` |
 
 ### Queue

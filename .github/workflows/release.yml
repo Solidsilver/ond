@@ -34,8 +34,53 @@ jobs:
       - name: Test
         run: cargo test --workspace --no-fail-fast
 
+      # Developer ID signing and notarization, when the secrets are set (see
+      # docs/macos-signing.md). Without them the app is signed ad hoc.
+      - name: Signing keychain
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: |
+          if [ -z "$CERTIFICATE" ]; then
+            echo "No MACOS_CERTIFICATE secret: the app will be signed ad hoc."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -base64 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')"
+          if [ -z "$identity" ]; then
+            echo "The certificate has no Developer ID Application identity" >&2
+            exit 1
+          fi
+          echo "OND_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_KEY" ]; then
+            echo "$NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+            {
+              echo "OND_NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+              echo "OND_NOTARY_KEY_ID=$NOTARY_KEY_ID"
+              echo "OND_NOTARY_ISSUER=$NOTARY_ISSUER"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: Bundle
         run: scripts/bundle-macos.sh --universal
+
+      - name: Remove signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8"
 
       - uses: actions/upload-artifact@v7
         with:

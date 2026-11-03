@@ -96,8 +96,8 @@ impl OndApp {
         });
     }
 
-    /// A newer Ond is out, above the footer: click for its release page, or
-    /// to skip it.
+    /// A newer Ond is out, above the footer: click for Settings › About,
+    /// with its release notes, Download and Skip.
     fn update_notice(&mut self, ui: &mut Ui, v: crate::updates::Version) {
         let t = Tokens::of(ui);
         let label = format!("Ond {v} is available");
@@ -109,16 +109,9 @@ impl OndApp {
             p.text(pos2(rect.left() + 30.0, rect.center().y), egui::Align2::LEFT_CENTER, &label, FontId::proportional(12.5), t.accent);
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width()).show(|ui| {
-            ui.set_width(rect.width());
-            if menu_item(ui, "Release notes and download", "") {
-                self.actions.push(Action::Update(super::UpdateAction::Open(v)));
-            }
-            if menu_item(ui, "Skip this version", "") {
-                self.actions.push(Action::Update(super::UpdateAction::Skip(v)));
-            }
-        });
-        resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            self.actions.push(Action::OpenSettings(super::settings_page::Section::About));
+        }
     }
 
     /// The narrow-window sidebar: one icon per place, playlists behind a
@@ -159,7 +152,7 @@ impl OndApp {
             });
         });
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            self.settings_button(ui);
+            self.rail_settings_button(ui);
             self.help_button(ui);
             self.rail_server_status(ui);
         });
@@ -340,6 +333,21 @@ impl OndApp {
         let button = icons::sized_button(ui, Icon::Gear, "Settings (⌘,)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
         if button.clicked() {
             self.actions.push(Action::OpenSettings(self.ui.settings_section));
+        }
+    }
+
+    /// The rail's gear: with a dot while a newer Ond is out, and then it opens
+    /// Settings › About.
+    fn rail_settings_button(&mut self, ui: &mut Ui) {
+        let Some(v) = self.update else { return self.settings_button(ui) };
+        let t = Tokens::of(ui);
+        let tip = format!("Settings (⌘,)\nOnd {v} is available");
+        let button = icons::sized_button(ui, Icon::Gear, &tip, vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
+        let dot = pos2(button.rect.center().x + 6.0, button.rect.center().y - 6.0);
+        ui.painter().circle_filled(dot, 4.0, t.sidebar);
+        ui.painter().circle_filled(dot, 3.0, t.accent);
+        if button.clicked() {
+            self.actions.push(Action::OpenSettings(super::settings_page::Section::About));
         }
     }
 

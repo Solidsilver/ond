@@ -5,7 +5,15 @@
 #   scripts/bundle-macos.sh --universal  # arm64 + x86_64 in one binary
 #
 # Needs cargo and the Xcode command line tools (lipo, ditto, hdiutil).
-# The app is not signed: on first launch, right-click it and choose Open.
+#
+# Signing: with OND_SIGN_IDENTITY set (a Developer ID Application identity in
+# the keychain, e.g. "Developer ID Application: Name (TEAMID)"), the app and
+# the .dmg get a Developer ID signature with the hardened runtime. With
+# OND_NOTARY_KEY (path to an App Store Connect API key, .p8),
+# OND_NOTARY_KEY_ID and OND_NOTARY_ISSUER also set, the .dmg goes to Apple's
+# notary service and both it and the app get the ticket stapled. Without
+# OND_SIGN_IDENTITY the app gets an ad-hoc signature and macOS blocks its
+# first launch.
 set -euo pipefail
 
 MIN_MACOS="11.0"
@@ -16,7 +24,7 @@ universal=false
 for arg in "$@"; do
   case "$arg" in
     --universal) universal=true ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -69,13 +77,27 @@ sed -e "s/@VERSION@/$version/" \
     -e "s/@COPYRIGHT@/© $year Ond contributors/" \
     packaging/macos/Info.plist.in > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist" >/dev/null
-# An ad-hoc signature keeps Apple Silicon happy and lets macOS track the app
-# consistently; it is not a Developer ID signature.
-codesign --force --deep --sign - "$app" >/dev/null 2>&1 || echo "note: ad-hoc codesign failed; continuing unsigned" >&2
+identity="${OND_SIGN_IDENTITY:-}"
+notarize=false
+if [[ -n "$identity" && -n "${OND_NOTARY_KEY:-}" ]]; then
+  if [[ -z "${OND_NOTARY_KEY_ID:-}" || -z "${OND_NOTARY_ISSUER:-}" ]]; then
+    echo "OND_NOTARY_KEY needs OND_NOTARY_KEY_ID and OND_NOTARY_ISSUER" >&2
+    exit 1
+  fi
+  notarize=true
+fi
+if [[ -n "$identity" ]]; then
+  # The hardened runtime and a secure timestamp are what notarization asks for.
+  codesign --force --options runtime --timestamp --sign "$identity" "$app"
+  codesign --verify --strict --verbose=2 "$app"
+else
+  # An ad-hoc signature keeps Apple Silicon happy and lets macOS track the app
+  # consistently; it is not a Developer ID signature.
+  codesign --force --sign - "$app" >/dev/null 2>&1 || echo "note: ad-hoc codesign failed; continuing unsigned" >&2
+fi
 
 name="Ond-$version-macos-$arch"
 rm -f "$out/$name.zip" "$out/$name.dmg"
-ditto -c -k --keepParent "$app" "$out/$name.zip"
 
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
@@ -92,6 +114,22 @@ for attempt in 1 2 3; do
   fi
   sleep 5
 done
+
+if [[ -n "$identity" ]]; then
+  codesign --force --timestamp --sign "$identity" "$out/$name.dmg"
+fi
+if $notarize; then
+  # Notarizing the .dmg covers the app inside it, so one submission gives
+  # tickets for both.
+  xcrun notarytool submit "$out/$name.dmg" \
+    --key "$OND_NOTARY_KEY" --key-id "$OND_NOTARY_KEY_ID" --issuer "$OND_NOTARY_ISSUER" \
+    --wait --timeout 30m
+  xcrun stapler staple "$out/$name.dmg"
+  xcrun stapler staple "$app"
+  spctl --assess --type execute --verbose=2 "$app"
+fi
+# Zipped last, so the zip's app carries the stapled ticket.
+ditto -c -k --keepParent "$app" "$out/$name.zip"
 
 echo "built:"
 du -sh "$app" "$out/$name.zip" "$out/$name.dmg"
