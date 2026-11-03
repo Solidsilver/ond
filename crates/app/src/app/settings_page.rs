@@ -27,10 +27,11 @@ pub enum Section {
     Library,
     Account,
     Experimental,
+    About,
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::General,
         Section::Appearance,
         Section::Playback,
@@ -40,6 +41,7 @@ impl Section {
         Section::Library,
         Section::Account,
         Section::Experimental,
+        Section::About,
     ];
 
     pub fn label(self) -> &'static str {
@@ -53,6 +55,7 @@ impl Section {
             Section::Library => "Library",
             Section::Account => "Account",
             Section::Experimental => "Experimental",
+            Section::About => "About",
         }
     }
 }
@@ -111,6 +114,7 @@ impl OndApp {
                             Section::Library => self.library_settings(ui),
                             Section::Account => self.account_settings(ui),
                             Section::Experimental => self.experimental_settings(ui),
+                            Section::About => self.about(ui),
                         }
                         ui.add_space(24.0);
                     });
@@ -131,7 +135,6 @@ impl OndApp {
                 self.actions.push(Action::Prefs(PrefsAction::Scrobble(scrobble)));
             }
         });
-        self.update_settings(ui);
         group(ui, "Advanced", |ui| {
             let mut shown = self.ui.prefs.diagnostics_bar;
             if managed(ui, self.prefs.managed("diagnostics_bar"), |ui| {
@@ -160,11 +163,24 @@ impl OndApp {
         });
     }
 
-    /// This version, and whether Ond looks for newer ones (copies from the
-    /// GitHub releases; a package manager updates its own).
-    fn update_settings(&mut self, ui: &mut Ui) {
+    /// The app and its version, whether Ond looks for newer ones (copies
+    /// from the GitHub releases; a package manager updates its own), and a
+    /// newer release's notes.
+    fn about(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let current = crate::updates::Version::current();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.add(egui::Image::new((app_icon(ui.ctx()).id(), vec2(56.0, 56.0))));
+            ui.vertical(|ui| {
+                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(egui::RichText::new("Ond").font(FontId::new(17.0, semibold())).color(t.text));
+                ui.label(egui::RichText::new(format!("Version {current}")).size(12.5).color(t.muted));
+            });
+        });
+        ui.add_space(20.0);
+        let newer = self.updates.latest.filter(|v| *v > current);
         group(ui, "Updates", |ui| match crate::updates::channel() {
             crate::updates::Channel::GitHub => {
                 let mut on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
@@ -174,17 +190,100 @@ impl OndApp {
                     let check = if on { crate::settings::UpdateCheck::Notify } else { crate::settings::UpdateCheck::Off };
                     self.actions.push(Action::Update(super::UpdateAction::Check(check)));
                 }
-                match self.update {
-                    Some(v) => setting(ui, &format!("Ond {v} is available"), &format!("You have {current}."), |ui| {
-                        if super::widgets::link(ui, "Release notes and download", FontId::proportional(13.0), t.accent).clicked() {
-                            self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+                self.update_status(ui, current, newer);
+            }
+            crate::updates::Channel::Packaged(by) => setting(ui, &format!("Updates come from {by}"), "", |_| ()),
+            crate::updates::Channel::Source => setting(ui, "Built from source", "This copy doesn't look for updates.", |_| ()),
+        });
+        if let Some(v) = newer {
+            self.release_notes(ui, v);
+        }
+        group(ui, "Links", |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 18.0;
+                for (text, url) in [("Source code", crate::updates::REPO.to_owned()), ("Report a problem", format!("{}/issues", crate::updates::REPO))] {
+                    if super::widgets::link(ui, text, FontId::proportional(13.0), t.accent).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
+                }
+            });
+        });
+    }
+
+    /// The row under Check for updates: a newer version with Download, or
+    /// how the last look went, with Check Now.
+    fn update_status(&mut self, ui: &mut Ui, current: crate::updates::Version, newer: Option<crate::updates::Version>) {
+        let u = &self.updates;
+        if let Some(v) = newer {
+            let skipped = self.prefs.get(|s| s.skipped_update.as_deref() == Some(&v.to_string()));
+            let hint = if skipped { format!("You have {current}. You skipped this version.") } else { format!("You have {current}.") };
+            setting(ui, &format!("Ond {v} is available"), &hint, |ui| {
+                if super::widgets::primary(ui, Some(Icon::Download), "Download").clicked() {
+                    self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+                }
+                if !skipped && secondary(ui, "Skip").clicked() {
+                    self.actions.push(Action::Update(super::UpdateAction::Skip(v)));
+                }
+            });
+            return;
+        }
+        let (label, hint) = if u.checking {
+            ("Checking…".to_owned(), String::new())
+        } else if let Some(e) = &u.error {
+            ("Couldn't check for updates".to_owned(), e.clone())
+        } else if let Some(at) = u.checked {
+            ("Ond is up to date".to_owned(), format!("Checked {}.", ago(at)))
+        } else {
+            ("Not checked yet".to_owned(), String::new())
+        };
+        let checking = u.checking;
+        setting(ui, &label, &hint, |ui| {
+            if ui.add_enabled_ui(!checking, |ui| secondary(ui, "Check now")).inner.clicked() {
+                self.actions.push(Action::Update(super::UpdateAction::CheckNow));
+            }
+        });
+    }
+
+    /// What's new in `v`, from its release notes (fetched the first time
+    /// they're shown).
+    fn release_notes(&mut self, ui: &mut Ui, v: crate::updates::Version) {
+        let t = Tokens::of(ui);
+        if self.updates.notes.as_ref().is_none_or(|(n, _)| *n != v) {
+            self.actions.push(Action::Update(super::UpdateAction::Notes(v)));
+        }
+        group(ui, &format!("What's new in {v}"), |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            match self.updates.notes.as_ref().and_then(|(_, n)| n.as_ref()) {
+                None => paragraph(ui, "Loading the release notes…"),
+                Some(Err(_)) => paragraph(ui, "Ond couldn't load the release notes. They're on the release page."),
+                Some(Ok(blocks)) => {
+                    for (i, b) in blocks.iter().enumerate() {
+                        match b {
+                            crate::updates::Block::Heading(h) => {
+                                if i > 0 {
+                                    ui.add_space(8.0);
+                                }
+                                ui.label(egui::RichText::new(h).font(FontId::new(13.0, semibold())).color(t.text));
+                            }
+                            crate::updates::Block::Paragraph(p) => {
+                                ui.add(egui::Label::new(egui::RichText::new(p).size(13.0).color(t.text)).wrap());
+                            }
+                            crate::updates::Block::Bullet(b) => {
+                                ui.horizontal_top(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    let (dot, _) = ui.allocate_exact_size(vec2(6.0, 18.0), Sense::hover());
+                                    ui.painter().circle_filled(pos2(dot.center().x, dot.top() + 9.0), 2.0, t.muted);
+                                    ui.add(egui::Label::new(egui::RichText::new(b).size(13.0).color(t.text)).wrap());
+                                });
+                            }
                         }
-                    }),
-                    None => setting(ui, "Version", "", |ui| value(ui, &current.to_string(), t.muted)),
+                    }
                 }
             }
-            crate::updates::Channel::Packaged(by) => setting(ui, "Version", &format!("Updates come from {by}."), |ui| value(ui, &current.to_string(), t.muted)),
-            crate::updates::Channel::Source => setting(ui, "Version", "Built from source.", |ui| value(ui, &current.to_string(), t.muted)),
+            ui.add_space(4.0);
+            if super::widgets::link(ui, "Release page", FontId::proportional(13.0), t.accent).clicked() {
+                self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+            }
         });
     }
 
@@ -919,6 +1018,32 @@ fn switch_row(ui: &mut Ui, label: &str, hint: &str, on: &mut bool) -> bool {
 /// A value read out on the right of a row.
 fn value(ui: &mut Ui, text: &str, color: egui::Color32) {
     ui.label(egui::RichText::new(text).size(13.0).color(color));
+}
+
+/// "just now", "5 minutes ago", "3 hours ago", "2 days ago".
+fn ago(at: std::time::SystemTime) -> String {
+    let s = at.elapsed().map_or(0, |d| d.as_secs());
+    let (n, unit) = match s {
+        0..60 => return "just now".into(),
+        60..3600 => (s / 60, "minute"),
+        3600..86400 => (s / 3600, "hour"),
+        _ => (s / 86400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+/// Ond's icon, for the About page.
+fn app_icon(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::unique("about-app-icon");
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return tex;
+    }
+    let icon =
+        eframe::icon_data::from_png_bytes(include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png")).unwrap_or_default();
+    let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    let tex = ctx.load_texture("about-app-icon", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    tex
 }
 
 /// Muted text under a group's rows, about all of them.

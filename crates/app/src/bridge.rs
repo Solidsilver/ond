@@ -152,8 +152,10 @@ pub enum Msg {
     },
     /// Selected from the native menu bar.
     Menu(crate::keys::Cmd),
-    /// A newer Ond is out.
-    UpdateAvailable(crate::updates::Version),
+    /// The update checker's latest release, or why it couldn't tell.
+    UpdateChecked(Result<crate::updates::Version, String>),
+    /// A release's notes, for Settings › About.
+    ReleaseNotes(crate::updates::Version, crate::updates::Notes),
     Error(String),
 }
 

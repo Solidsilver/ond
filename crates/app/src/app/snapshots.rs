@@ -517,6 +517,7 @@ fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Route) {
     app.session.sign_in = None;
     app.session.work_offline = false;
     app.update = None;
+    app.updates = Default::default();
     app.player.playing_from = None;
     app.diagnostics = super::diagnostics::Diagnostics::default();
     app.prefs.edit(|s| s.diagnostics_bar = false);
@@ -1290,19 +1291,39 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
     s.shoot(h, "settings-general-diagnostics");
 
-    // A newer Ond is out: the notice above the footer, its menu, and
-    // Settings › General (the GitHub copy's rows with OND_DISTRIBUTION=github).
+    // A newer Ond is out: the notice above the footer, the rail's dot, and
+    // Settings › About with the release notes (the GitHub copy's rows with
+    // OND_DISTRIBUTION=github).
     reset(h, FULL, Route::Recent);
-    app_mut(h).update = crate::updates::Version::parse("0.5.0");
+    let v = crate::updates::Version::parse("0.5.0").unwrap();
+    app_mut(h).update = Some(v);
+    app_mut(h).updates.latest = Some(v);
     s.shoot(h, "update-available");
+    reset(h, vec2(720.0, 600.0), Route::Recent);
+    app_mut(h).update = Some(v);
+    s.shoot(h, "update-available-rail");
+    reset(h, FULL, Route::Recent);
+    app_mut(h).update = Some(v);
+    app_mut(h).updates.latest = Some(v);
+    app_mut(h).updates.notes = Some((
+        v,
+        Some(Ok(vec![
+            crate::updates::Block::Paragraph("Ond is signed, and Settings has an About page.".into()),
+            crate::updates::Block::Heading("Updates".into()),
+            crate::updates::Block::Bullet("Settings › About shows the version, checks for updates on request, and shows a new version's release notes.".into()),
+            crate::updates::Block::Bullet("The icon rail's gear has a dot when a new version is out.".into()),
+        ])),
+    ));
+    h.run_steps(2);
     if !click_label(h, "Ond 0.5.0 is available", egui::Rect::from_min_size(Pos2::ZERO, vec2(320.0, FULL.y))) {
         eprintln!("  (update notice not found)");
     }
     h.run_steps(4);
-    s.shoot(h, "update-available-menu");
-    egui::Popup::close_all(&h.ctx);
-    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
-    s.shoot(h, "update-available-settings");
+    s.shoot(h, "update-available-about");
+    reset(h, FULL, Route::Recent);
+    app_mut(h).updates.checked = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600));
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::About));
+    s.shoot(h, "about-up-to-date");
 
     // Another accent color: everything accented takes it, in either theme.
     reset(h, FULL, Route::Album(album_id(0)));
