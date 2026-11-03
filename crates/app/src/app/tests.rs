@@ -1106,3 +1106,31 @@ fn working_offline_stops_connecting_and_hides_what_cant_play() {
     app.apply(Action::Offline(OfflineAction::WorkOffline(false)));
     assert!(!app.session.work_offline && app.session.connecting);
 }
+
+#[test]
+fn a_newer_release_shows_until_skipped_or_checking_is_off() {
+    use crate::settings::UpdateCheck;
+    use crate::updates::Version;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let v = Version::parse("99.0.0").unwrap();
+    app.handle(Msg::UpdateAvailable(v));
+    assert_eq!(app.update, Some(v));
+    frame(&ctx, &mut app, Vec::new());
+
+    app.apply(Action::Update(super::UpdateAction::Skip(v)));
+    assert_eq!(app.update, None);
+    assert_eq!(app.prefs.get(|s| s.skipped_update.clone()).as_deref(), Some("99.0.0"));
+    app.handle(Msg::UpdateAvailable(v));
+    assert_eq!(app.update, None, "a skipped version stays quiet");
+    let next = Version::parse("99.0.1").unwrap();
+    app.handle(Msg::UpdateAvailable(next));
+    assert_eq!(app.update, Some(next), "the next one shows");
+
+    app.update_check.store(true, std::sync::atomic::Ordering::Relaxed);
+    app.apply(Action::Update(super::UpdateAction::Check(UpdateCheck::Off)));
+    assert!(app.update.is_none() && !app.update_check.load(std::sync::atomic::Ordering::Relaxed));
+    app.apply(Action::Update(super::UpdateAction::Check(UpdateCheck::Notify)));
+    assert!(app.update_check.load(std::sync::atomic::Ordering::Relaxed));
+}

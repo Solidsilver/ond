@@ -54,6 +54,9 @@ rustPlatform.buildRustPackage {
   };
 
   cargoLock.lockFile = ../Cargo.lock;
+  # Nix updates Ond, so Ond doesn't look for new releases itself.
+  env.OND_DISTRIBUTION = "nix";
+
   cargoBuildFlags = [
     "-p"
     "ond-player"

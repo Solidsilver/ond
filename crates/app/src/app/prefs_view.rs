@@ -139,6 +139,7 @@ impl OndApp {
             Action::Offline(OfflineAction::Move) => "offline_dir",
             Action::Offline(OfflineAction::WorkOffline(_)) => "work_offline",
             Action::Offline(OfflineAction::Unplayable(_)) => "offline_unplayable",
+            Action::Update(super::UpdateAction::Check(_)) => "updates",
             _ => return false,
         };
         self.prefs.managed(path)

@@ -12,6 +12,8 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 pub const RAIL_W: f32 = 52.0;
 /// The footer's buttons (and the server status row's height).
 const FOOTER_BUTTON: f32 = 28.0;
+/// The notice that a newer Ond is out.
+const UPDATE_H: f32 = 28.0;
 
 /// In ⌘1…⌘6 order.
 pub(super) const PLACES: [(&str, Route, Icon); 6] = [
@@ -68,7 +70,7 @@ impl OndApp {
             });
         });
         ui.add_space(4.0);
-        let bottom_h = 34.0;
+        let bottom_h = if self.update.is_some() { 34.0 + UPDATE_H + 6.0 } else { 34.0 };
         let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
         egui::ScrollArea::vertical()
             .id_salt("playlists")
@@ -87,7 +89,36 @@ impl OndApp {
                     self.help_button(ui);
                 });
             });
+            if let Some(v) = self.update {
+                ui.add_space(6.0);
+                self.update_notice(ui, v);
+            }
         });
+    }
+
+    /// A newer Ond is out, above the footer: click for its release page, or
+    /// to skip it.
+    fn update_notice(&mut self, ui: &mut Ui, v: crate::updates::Version) {
+        let t = Tokens::of(ui);
+        let label = format!("Ond {v} is available");
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), UPDATE_H), Sense::click());
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            p.rect_filled(rect, 6.0, t.accent.gamma_multiply(if resp.hovered() { 0.2 } else { 0.12 }));
+            icons::paint(p, Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(12.0, 12.0)), Icon::Download, t.accent);
+            p.text(pos2(rect.left() + 30.0, rect.center().y), egui::Align2::LEFT_CENTER, &label, FontId::proportional(12.5), t.accent);
+        }
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width()).show(|ui| {
+            ui.set_width(rect.width());
+            if menu_item(ui, "Release notes and download", "") {
+                self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+            }
+            if menu_item(ui, "Skip this version", "") {
+                self.actions.push(Action::Update(super::UpdateAction::Skip(v)));
+            }
+        });
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
 
     /// The narrow-window sidebar: one icon per place, playlists behind a
