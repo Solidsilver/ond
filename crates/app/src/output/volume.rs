@@ -109,11 +109,7 @@ pub(super) fn db_text(v: &DeviceVolume) -> String {
 }
 
 pub(super) fn device_volume_hover(name: &str, v: &DeviceVolume) -> String {
-    format!(
-        "{name}'s own volume · {}\nOnd's samples reach it untouched; the device sets the level. The top is {:.0} dB, full level.",
-        db_text(v),
-        v.max_db
-    )
+    format!("{name}'s own volume · {}\nOnd's samples reach it untouched; the device sets the level. The top is {:.0} dB, full level.", db_text(v), v.max_db)
 }
 
 #[cfg(test)]

@@ -10,8 +10,8 @@
 //! These go through [`serde_json::Value`], so they only work with
 //! self-describing formats. The wire types are only ever read from JSON.
 
-use serde::de::{DeserializeOwned, Deserializer};
 use serde::Deserialize;
+use serde::de::{DeserializeOwned, Deserializer};
 use serde_json::Value;
 
 /// A list where an item that doesn't decode is skipped with a warning instead

@@ -90,8 +90,7 @@ impl<K: Clone + Eq + Hash> Lru<K> {
         self.total += weight;
         let mut evicted = Vec::new();
         while self.total > self.budget && self.entries.len() > 1 {
-            let Some(oldest) = self.entries.iter().filter(|(key, _)| **key != k).min_by_key(|(_, (t, _))| *t).map(|(key, _)| key.clone())
-            else {
+            let Some(oldest) = self.entries.iter().filter(|(key, _)| **key != k).min_by_key(|(_, (t, _))| *t).map(|(key, _)| key.clone()) else {
                 break;
             };
             if let Some((_, w)) = self.entries.remove(&oldest) {
@@ -699,12 +698,7 @@ async fn read_cached(dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
 }
 
 async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<(ColorImage, Print)> {
-    tokio::task::spawn_blocking(move || {
-        decode(&bytes, size).map(|image| (image, print(&bytes)))
-    })
-    .await
-    .ok()
-    .flatten()
+    tokio::task::spawn_blocking(move || decode(&bytes, size).map(|image| (image, print(&bytes)))).await.ok().flatten()
 }
 
 /// Downloads `cover` at `size` px into the cache (written whole, then renamed
@@ -995,9 +989,7 @@ mod tests {
     #[test]
     fn decodes_and_downscales_oversized_art() {
         let mut png = Vec::new();
-        image::RgbaImage::from_pixel(600, 600, image::Rgba([10, 20, 30, 255]))
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap();
+        image::RgbaImage::from_pixel(600, 600, image::Rgba([10, 20, 30, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let img = decode(&png, 128).unwrap();
         assert_eq!(img.size, [128, 128]);
         assert!(decode(b"not an image", 64).is_none());

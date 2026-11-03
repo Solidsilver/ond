@@ -4,6 +4,7 @@
   lib,
   rustPlatform,
   pkg-config,
+  cmake,
   alsa-lib,
   pipewire,
   libxkbcommon,
@@ -53,6 +54,9 @@ rustPlatform.buildRustPackage {
   };
 
   cargoLock.lockFile = ../Cargo.lock;
+  # Nix updates Ond, so Ond doesn't look for new releases itself.
+  env.OND_DISTRIBUTION = "nix";
+
   cargoBuildFlags = [
     "-p"
     "ond-player"
@@ -62,7 +66,11 @@ rustPlatform.buildRustPackage {
     pkg-config
     # PipeWire's bindings are generated with bindgen, which needs libclang.
     rustPlatform.bindgenHook
+    # libopus (for Opus files) is built from source by its crate.
+    cmake
   ];
+  # cmake is only for that crate's build script, not to configure Ond.
+  dontUseCmakeConfigure = true;
   buildInputs = [
     alsa-lib
     pipewire

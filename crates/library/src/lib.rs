@@ -12,10 +12,7 @@ mod model;
 
 pub use model::*;
 
-use redb::{
-    Database, ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata, Table, TableDefinition,
-    WriteTransaction,
-};
+use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata, Table, TableDefinition, WriteTransaction};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -60,7 +57,9 @@ pub enum Error {
     Db(Box<redb::Error>),
     #[error("corrupt row: {0}")]
     Codec(#[from] postcard::Error),
-    #[error("The library database comes from a newer version of Ond (schema v{found}; this build reads v{SCHEMA_VERSION}). Update Ond, or delete the file to sync again")]
+    #[error(
+        "The library database comes from a newer version of Ond (schema v{found}; this build reads v{SCHEMA_VERSION}). Update Ond, or delete the file to sync again"
+    )]
     NewerSchema { found: u32 },
 }
 
@@ -73,14 +72,7 @@ macro_rules! from_redb {
         }
     )*};
 }
-from_redb!(
-    redb::Error,
-    redb::DatabaseError,
-    redb::TransactionError,
-    redb::TableError,
-    redb::StorageError,
-    redb::CommitError
-);
+from_redb!(redb::Error, redb::DatabaseError, redb::TransactionError, redb::TableError, redb::StorageError, redb::CommitError);
 
 impl Error {
     /// The file is unreadable as a database of ours (old redb format, corrupt
@@ -745,10 +737,7 @@ fn track_ids(rt: &ReadTransaction, album_id: &str) -> Result<Vec<String>> {
 
 type TrackIndex<'t> = Table<'t, (&'static str, u32, u32, &'static str), ()>;
 
-fn collect_track_ids(
-    idx: &impl ReadableTable<(&'static str, u32, u32, &'static str), ()>,
-    album_id: &str,
-) -> Result<Vec<String>> {
+fn collect_track_ids(idx: &impl ReadableTable<(&'static str, u32, u32, &'static str), ()>, album_id: &str) -> Result<Vec<String>> {
     let mut ids = Vec::new();
     for entry in idx.range((album_id, 0, 0, "")..)? {
         let (key, _) = entry?;
@@ -761,11 +750,7 @@ fn collect_track_ids(
     Ok(ids)
 }
 
-fn put_album(
-    rows: &mut Table<&'static str, &'static [u8]>,
-    idx: &mut Table<(&'static str, i32, &'static str, &'static str), ()>,
-    a: &Album,
-) -> Result<()> {
+fn put_album(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut Table<(&'static str, i32, &'static str, &'static str), ()>, a: &Album) -> Result<()> {
     if let Some(old) = rows.insert(a.id.as_str(), encode(a)?.as_slice())? {
         let old: Album = decode(old.value())?;
         let (artist, year, title) = old.sort_parts();
@@ -786,12 +771,7 @@ struct AlbumTables<'t> {
 
 impl<'t> AlbumTables<'t> {
     fn open(wt: &'t WriteTransaction) -> Result<Self> {
-        Ok(Self {
-            rows: wt.open_table(ALBUMS)?,
-            idx: wt.open_table(ALBUMS_BY_SORT)?,
-            stamps: wt.open_table(ALBUM_STAMPS)?,
-            tracks: TrackTables::open(wt)?,
-        })
+        Ok(Self { rows: wt.open_table(ALBUMS)?, idx: wt.open_table(ALBUMS_BY_SORT)?, stamps: wt.open_table(ALBUM_STAMPS)?, tracks: TrackTables::open(wt)? })
     }
 
     /// Removes an album, its tracks, its stamp and their index entries.

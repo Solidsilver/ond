@@ -19,7 +19,9 @@ pub enum Loaded {
     Missing,
     Read,
     /// The file couldn't be parsed; it was moved to `aside` and defaults used.
-    Unreadable { aside: PathBuf },
+    Unreadable {
+        aside: PathBuf,
+    },
 }
 
 /// A cheap handle; clones share the same preferences.

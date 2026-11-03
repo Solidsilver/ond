@@ -85,7 +85,16 @@ pub fn take_jump(ui: &Ui, list: impl Hash + std::fmt::Debug) -> Option<f32> {
 /// [`take_jump`]). `row_of` turns an entry into the row it's in, rows `row_h`
 /// apart (with spacing).
 #[expect(clippy::too_many_arguments)]
-pub fn rail<R>(ui: &mut Ui, list: impl Hash + std::fmt::Debug, area: Rect, out: &ScrollAreaOutput<R>, marks: &Marks, top: usize, row_of: impl Fn(usize) -> usize, row_h: f32) {
+pub fn rail<R>(
+    ui: &mut Ui,
+    list: impl Hash + std::fmt::Debug,
+    area: Rect,
+    out: &ScrollAreaOutput<R>,
+    marks: &Marks,
+    top: usize,
+    row_of: impl Fn(usize) -> usize,
+    row_h: f32,
+) {
     let n = marks.0.len();
     // Nothing to jump between, or nowhere to scroll.
     if n < MIN_MARKS || out.content_size.y <= out.inner_rect.height() {

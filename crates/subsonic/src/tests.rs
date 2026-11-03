@@ -386,8 +386,18 @@ fn reply(status: &str, content_type: &str, body: &str) -> impl FnOnce(std::net::
 #[tokio::test]
 async fn http_errors_keep_the_servers_message() {
     let cases = [
-        ("503 Service Unavailable", "text/html", "<html><head><title>503 Service\n Unavailable</title></head><body>nginx</body></html>", "503 Service Unavailable"),
-        ("401 Unauthorized", "application/json", r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}"#, "Wrong username or password"),
+        (
+            "503 Service Unavailable",
+            "text/html",
+            "<html><head><title>503 Service\n Unavailable</title></head><body>nginx</body></html>",
+            "503 Service Unavailable",
+        ),
+        (
+            "401 Unauthorized",
+            "application/json",
+            r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}"#,
+            "Wrong username or password",
+        ),
         ("500 Internal Server Error", "text/plain", "database is locked\nstack trace...", "database is locked"),
     ];
     for (status, ct, body, said) in cases {

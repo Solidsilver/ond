@@ -9,11 +9,20 @@ pub enum Route {
     /// Every track, as a sortable table.
     Songs,
     /// An album artist's page; `id` when the server gave one.
-    Artist { name: String, id: Option<String> },
+    Artist {
+        name: String,
+        id: Option<String>,
+    },
     Album(String),
-    Playlist { id: String, name: String },
+    Playlist {
+        id: String,
+        name: String,
+    },
     /// Albums sharing a genre, year or label.
-    Filter { kind: FilterKind, value: String },
+    Filter {
+        kind: FilterKind,
+        value: String,
+    },
     /// Loved songs, albums and artists.
     Favorites,
     Offline,

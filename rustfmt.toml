@@ -1,0 +1,4 @@
+# Wide lines: the code keeps short calls and literals on one line.
+max_width = 160
+use_small_heuristics = "Max"
+style_edition = "2024"

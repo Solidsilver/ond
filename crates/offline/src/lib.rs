@@ -61,10 +61,17 @@ pub struct OfflineConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackState {
     Queued,
-    Downloading { done: u64, total: Option<u64> },
-    Done { size: u64 },
+    Downloading {
+        done: u64,
+        total: Option<u64>,
+    },
+    Done {
+        size: u64,
+    },
     /// Gave up after several attempts; retried on reconnect or by hand.
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 /// Progress of one pin.
@@ -92,11 +99,7 @@ impl PinSummary {
         if self.total == 0 {
             return 1.0;
         }
-        if self.bytes_total > 0 {
-            (self.bytes_done as f64 / self.bytes_total as f64).clamp(0.0, 1.0) as f32
-        } else {
-            self.done as f32 / self.total as f32
-        }
+        if self.bytes_total > 0 { (self.bytes_done as f64 / self.bytes_total as f64).clamp(0.0, 1.0) as f32 } else { self.done as f32 / self.total as f32 }
     }
 }
 
@@ -380,15 +383,9 @@ impl OfflineStore {
         // From here on, an early return drops this and stops the workers.
         let owner = Arc::new(Owner { inner: inner.clone(), workers });
         let (weak, dir) = (Arc::downgrade(&inner), inner.dir.clone());
-        std::thread::Builder::new()
-            .name("offline-delete".into())
-            .spawn(move || deleter(weak, dir, doomed_rx))
-            .map_err(io::Error::other)?;
+        std::thread::Builder::new().name("offline-delete".into()).spawn(move || deleter(weak, dir, doomed_rx)).map_err(io::Error::other)?;
         let dir = inner.dir.clone();
-        std::thread::Builder::new()
-            .name("offline-save".into())
-            .spawn(move || saver(dir, saves_rx, flush))
-            .map_err(io::Error::other)?;
+        std::thread::Builder::new().name("offline-save".into()).spawn(move || saver(dir, saves_rx, flush)).map_err(io::Error::other)?;
         Ok(Self { inner, _owner: owner })
     }
 
@@ -443,11 +440,8 @@ impl OfflineStore {
         let Some(rec) = st.pins.record(pin) else { return };
         let same = rec.tracks.len() == tracks.len() && rec.tracks.iter().zip(&tracks).all(|(a, b)| a == &b.id);
         let label = label.into();
-        let refreshed: Vec<String> = tracks
-            .iter()
-            .filter(|t| st.pins.tracks.get(&t.id).is_some_and(|s| s.done.is_none() && s.r != **t))
-            .map(|t| t.id.clone())
-            .collect();
+        let refreshed: Vec<String> =
+            tracks.iter().filter(|t| st.pins.tracks.get(&t.id).is_some_and(|s| s.done.is_none() && s.r != **t)).map(|t| t.id.clone()).collect();
         if same && rec.label == label && refreshed.is_empty() {
             return;
         }

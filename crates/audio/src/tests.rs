@@ -702,7 +702,6 @@ fn the_same_track_twice_is_told_apart_and_restarts_are_flagged() {
     engine.send(Command::Shutdown);
 }
 
-
 #[test]
 fn an_idle_engine_backs_off_and_a_busy_one_does_not() {
     use crate::{IDLE_TICK, TICK, next_wait};
@@ -716,7 +715,6 @@ fn an_idle_engine_backs_off_and_a_busy_one_does_not() {
         assert_eq!(next_wait(IDLE_TICK, state), TICK, "{state:?}: back to the fast tick");
     }
 }
-
 
 #[test]
 fn turning_the_volume_down_is_reported_as_dithered() {
@@ -942,7 +940,6 @@ fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
     engine.send(Command::Shutdown);
 }
 
-
 /// Plays `src` paused (so its position stays at 0) and waits for it to open.
 fn play_paused(engine: &EngineHandle, src: TrackSource) {
     let id = src.id.clone();
@@ -1147,8 +1144,7 @@ fn paths_by_track(seen: &[Event]) -> Vec<(String, SignalPath)> {
 fn tracks_of_different_depths_play_gaplessly_on_one_stream() {
     let dir = tempfile::tempdir().unwrap();
     let depths = [Some(16), Some(24), None, Some(16)];
-    let (tracks, expected): (Vec<_>, Vec<_>) =
-        depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 60 + i as i64)).unzip();
+    let (tracks, expected): (Vec<_>, Vec<_>) = depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 60 + i as i64)).unzip();
     let backend = FakeBackend::new(caps(None, 192_000));
     let (played, opens) = (backend.played.clone(), backend.opens.clone());
     let seen = play_queue(backend, &tracks);
@@ -1170,8 +1166,7 @@ fn tracks_of_different_depths_play_gaplessly_on_one_stream() {
 fn on_a_16_bit_device_only_the_tracks_off_its_grid_are_dithered() {
     let dir = tempfile::tempdir().unwrap();
     let depths = [None, Some(16), Some(24), Some(16)];
-    let (tracks, sources): (Vec<_>, Vec<_>) =
-        depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 70 + i as i64)).unzip();
+    let (tracks, sources): (Vec<_>, Vec<_>) = depths.iter().enumerate().map(|(i, bits)| track_of_depth(&dir, &format!("t{i}"), *bits, 70 + i as i64)).unzip();
     let device = DeviceCaps { active_bits: Some(16), ..caps(Some(16), 192_000) };
     let backend = FakeBackend::new(device);
     let (played, opens) = (backend.played.clone(), backend.opens.clone());

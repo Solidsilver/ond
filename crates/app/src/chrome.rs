@@ -98,9 +98,9 @@ fn settle_resize(ctx: &egui::Context) {
 mod mac {
     use super::{Bar, LIGHTS_STEP, LIGHTS_X};
     use objc2::MainThreadMarker;
+    use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject};
-    use objc2::msg_send;
     use objc2_app_kit::{NSApplication, NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility};
     use objc2_core_foundation::{CGPoint, CGRect};
 
@@ -125,8 +125,10 @@ mod mac {
             window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         }
         keep_drags_in_content(&window);
-        let buttons: Vec<Retained<objc2_app_kit::NSButton>> =
-            [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton].into_iter().filter_map(|k| window.standardWindowButton(k)).collect();
+        let buttons: Vec<Retained<objc2_app_kit::NSButton>> = [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton]
+            .into_iter()
+            .filter_map(|k| window.standardWindowButton(k))
+            .collect();
         let hide = bar.height.is_none();
         for b in &buttons {
             if b.isHidden() != hide {

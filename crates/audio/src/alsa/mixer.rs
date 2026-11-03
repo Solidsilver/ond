@@ -3,7 +3,7 @@
 //! the same control for the system volume, which is why it carried over.
 
 use crate::DeviceVolume;
-use alsa::mixer::{Mixer, MilliBel, Selem, SelemChannelId};
+use alsa::mixer::{MilliBel, Mixer, Selem, SelemChannelId};
 
 /// Playback controls that usually are the card's main volume, best first.
 const NAMES: [&str; 6] = ["PCM", "Master", "Speaker", "Headphone", "Digital", "Playback"];
@@ -33,10 +33,7 @@ impl CardMixer {
         };
         let selems: Vec<Selem<'_>> = self.mixer.iter().filter_map(Selem::new).filter(usable).collect();
         let name = |s: &Selem<'_>| s.get_id().get_name().map(str::to_owned).unwrap_or_default();
-        let best = NAMES
-            .iter()
-            .find_map(|n| selems.iter().position(|s| name(s) == *n))
-            .or_else(|| (!selems.is_empty()).then_some(0))?;
+        let best = NAMES.iter().find_map(|n| selems.iter().position(|s| name(s) == *n)).or_else(|| (!selems.is_empty()).then_some(0))?;
         Some(f(&selems[best]))
     }
 

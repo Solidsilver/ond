@@ -195,7 +195,9 @@ impl OndApp {
 
     pub(super) fn visualizer_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        let (f, left, right) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::F), i.consume_key(Modifiers::NONE, Key::ArrowLeft), i.consume_key(Modifiers::NONE, Key::ArrowRight)));
+        let (f, left, right) = ctx.input_mut(|i| {
+            (i.consume_key(Modifiers::NONE, Key::F), i.consume_key(Modifiers::NONE, Key::ArrowLeft), i.consume_key(Modifiers::NONE, Key::ArrowRight))
+        });
         if left != right {
             self.switch_visualizer(if right { 1 } else { -1 });
         }
@@ -306,7 +308,11 @@ fn paint_caption(painter: &egui::Painter, rect: Rect, art: Option<egui::TextureH
         }
     }
     let x = tile.right() + 14.0;
-    let lines = [(Some(title), FontId::new(16.0, crate::theme::semibold()), 240.0), (artist, FontId::proportional(14.0), 200.0), (album, FontId::proportional(14.0), 170.0)];
+    let lines = [
+        (Some(title), FontId::new(16.0, crate::theme::semibold()), 240.0),
+        (artist, FontId::proportional(14.0), 200.0),
+        (album, FontId::proportional(14.0), 170.0),
+    ];
     let shown: Vec<_> = lines.into_iter().filter_map(|(t, f, a)| t.map(|t| (t, f, a))).collect();
     let line_h = 20.0;
     let mut y = tile.center().y - line_h * shown.len() as f32 / 2.0 + line_h / 2.0;

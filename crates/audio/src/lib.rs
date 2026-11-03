@@ -23,9 +23,9 @@
 //! device, and which mode each device gets, is the engine's call too: the UI
 //! hands it the remembered per-device modes and is told what happened.
 
-mod channels;
 #[cfg(target_os = "linux")]
 pub mod alsa;
+mod channels;
 #[cfg(target_os = "macos")]
 pub mod coreaudio;
 mod decode;
@@ -39,9 +39,9 @@ pub mod tap;
 
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
-pub use output::{CpalBackend, Marker, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind, DeviceVolume};
 pub use dither::Tpdf;
+pub use output::{CpalBackend, Marker, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
 pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, adjust, assess, choose_rate, describe, khz};
 use streamcache::{CacheKey, StreamCache};
@@ -50,8 +50,8 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use decode::{DecoderMsg, Session};
 use replaygain::{TrackGains, applied_gain};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -177,27 +177,53 @@ pub enum Event {
     /// track on the next sample without reopening the device. `restart` is true
     /// when the engine started the same track over by itself (device switch, a
     /// seek it couldn't serve in place, the queue changing under it): not a new play.
-    TrackStarted { track_id: String, token: u64, format: StreamFormat, gapless: bool, restart: bool },
+    TrackStarted {
+        track_id: String,
+        token: u64,
+        format: StreamFormat,
+        gapless: bool,
+        restart: bool,
+    },
     /// The device stream changed, or the mode did; describes what reaches the device.
     SignalPath(SignalPath),
     /// The output devices, and which one playback uses.
-    Devices { devices: Vec<DeviceInfo>, current: Option<String> },
+    Devices {
+        devices: Vec<DeviceInfo>,
+        current: Option<String>,
+    },
     /// The engine changed mode by itself (device switch or fallback). Not sent for `SetMode`.
-    ModeChanged { mode: PlaybackMode, device: Option<String> },
+    ModeChanged {
+        mode: PlaybackMode,
+        device: Option<String>,
+    },
     /// The device in use went away; playback moved to the system default, in
     /// the mode picked for it if there is one, else in Normal mode.
-    DeviceLost { name: String },
+    DeviceLost {
+        name: String,
+    },
     /// A device that went away is back; the UI may offer to switch to it.
-    DeviceReturned { uid: String, name: String },
+    DeviceReturned {
+        uid: String,
+        name: String,
+    },
     /// The device's own volume, when Ond holds a device that has one (in
     /// bit-perfect mode); `None` when there's none to set. Sent when it
     /// changes, whoever changed it.
     DeviceVolume(Option<DeviceVolume>),
     /// Playback reached the end of the last queued track.
-    Ended { track_id: String, token: u64 },
+    Ended {
+        track_id: String,
+        token: u64,
+    },
     /// A seek landed; playback continues from `position_secs` once buffered.
-    Seeked { track_id: String, position_secs: f64 },
-    Error { track_id: Option<String>, message: String },
+    Seeked {
+        track_id: String,
+        position_secs: f64,
+    },
+    Error {
+        track_id: Option<String>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -669,15 +695,7 @@ impl Engine {
         self.status.paused.store(false, Ordering::Relaxed);
         let caps = self.backend.device_caps();
         self.opening = Some(src.clone());
-        let session = Session::start(
-            src,
-            start_at,
-            self.config.clone(),
-            self.status.clone(),
-            self.cache.clone(),
-            caps,
-            self.gain.clone(),
-        );
+        let session = Session::start(src, start_at, self.config.clone(), self.status.clone(), self.cache.clone(), caps, self.gain.clone());
         session.set_next(0, self.next.clone());
         self.session = Some(session);
     }
@@ -902,11 +920,7 @@ impl Engine {
         let caps = self.backend.device_caps();
         // Judged on what reaches the device channel-wise; the mapping itself is folded in below.
         let sent = StreamFormat { channels: ring.format.channels, ..source };
-        let bit_perfect = adjust(
-            assess(self.config.mode, &sent, device_rate, caps.as_ref()),
-            channels,
-            transcoded.as_deref(),
-        );
+        let bit_perfect = adjust(assess(self.config.mode, &sent, device_rate, caps.as_ref()), channels, transcoded.as_deref());
         // The integer format actually in use: what the callback dithers to.
         let device_bits = caps.as_ref().and_then(|c| c.active_bits);
         let resampled = device_rate != source.sample_rate;
@@ -958,8 +972,7 @@ impl Engine {
         if next.is_local() || self.prefetched.as_ref() == Some(&next.id) {
             return;
         }
-        let near_end =
-            self.status.duration_secs().is_some_and(|d| d - self.status.position_secs() <= PREFETCH_LEAD_SECS);
+        let near_end = self.status.duration_secs().is_some_and(|d| d - self.status.position_secs() <= PREFETCH_LEAD_SECS);
         if progress.is_some_and(|p| p.complete) || near_end {
             cache.prefetch(&next.cache_key(), &next.url);
             self.prefetched = Some(next.id.clone());
@@ -971,8 +984,7 @@ impl Engine {
     fn network_in_use(&self, progress: Option<&streamcache::Progress>) -> bool {
         let Some(cache) = &self.cache else { return false };
         let incomplete = |src: &TrackSource| !src.is_local() && cache.progress(&src.cache_key()).is_none_or(|p| !p.complete);
-        let current = self.session.is_some()
-            && self.current().is_some_and(|t| !t.src.is_local() && progress.is_none_or(|p| !p.complete));
+        let current = self.session.is_some() && self.current().is_some_and(|t| !t.src.is_local() && progress.is_none_or(|p| !p.complete));
         let prefetch = self.prefetched.is_some() && self.next.as_ref().is_some_and(incomplete);
         current || prefetch
     }
@@ -1019,9 +1031,7 @@ impl Engine {
 
         // The decoder exited just as a seek went in (it had finished the last
         // track), so nothing will release the output: start over at the target.
-        if finished
-            && let Some(to) = self.held_seek.take()
-        {
+        if finished && let Some(to) = self.held_seek.take() {
             if let Some(src) = self.current().map(|t| t.src.clone()) {
                 self.restart_at(src, to);
             }
@@ -1112,8 +1122,7 @@ impl Engine {
     /// Publishes the output's current track.
     fn announce(&mut self, gapless: bool) {
         let Some(t) = self.current() else { return };
-        let (track_id, token, format, total, rate) =
-            (t.src.id.clone(), t.src.token, t.format, t.total_frames, t.output.sample_rate);
+        let (track_id, token, format, total, rate) = (t.src.id.clone(), t.src.token, t.format, t.total_frames, t.output.sample_rate);
         self.status.total_frames.store(total.unwrap_or(0), Ordering::Relaxed);
         self.status.sample_rate.store(rate, Ordering::Relaxed);
         // Only the first announcement of a restarted session is a restart, and only

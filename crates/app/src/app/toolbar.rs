@@ -3,9 +3,9 @@
 
 use super::WindowAction;
 use super::playing::Origin;
-use super::widgets::elide;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
+use super::widgets::elide;
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -150,7 +150,14 @@ impl OndApp {
         ui.spacing_mut().item_spacing.x = 10.0;
         // In narrow windows the queue is a sheet: the button shows whether it's open.
         let shown = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
-        let queue_icon = icons::sized_button(ui, Icon::Queue, if shown { "Hide queue (⌥⌘U)" } else { "Show queue (⌥⌘U)" }, vec2(28.0, 28.0), 14.0, Some(if shown { t.accent } else { t.muted }));
+        let queue_icon = icons::sized_button(
+            ui,
+            Icon::Queue,
+            if shown { "Hide queue (⌥⌘U)" } else { "Show queue (⌥⌘U)" },
+            vec2(28.0, 28.0),
+            14.0,
+            Some(if shown { t.accent } else { t.muted }),
+        );
         if shown {
             ui.painter().rect_filled(queue_icon.rect, 6.0, t.accent.gamma_multiply(0.12));
         }
@@ -198,7 +205,8 @@ impl ViewCtx<'_> {
         // the same margin fits on both sides.
         let col_left = art.right() + 10.0;
         let reserve = (col_left - rect.left()).max(rect.right() - col_right);
-        let (seek_left, seek_right) = if rect.width() - 2.0 * reserve >= 200.0 { (rect.left() + reserve, rect.right() - reserve) } else { (col_left, col_right) };
+        let (seek_left, seek_right) =
+            if rect.width() - 2.0 * reserve >= 200.0 { (rect.left() + reserve, rect.right() - reserve) } else { (col_left, col_right) };
 
         // The titles keep clear of the seek line's knob, or the waveform's bars.
         let reach = if self.ui.prefs.waveform { LCD_WAVE_H } else { LCD_KNOB_R };
@@ -256,7 +264,12 @@ impl ViewCtx<'_> {
         {
             let area = Rect::from_min_max(pos2(rect.left() + rect.height() + 8.0, rect.top() + 5.0), pos2(rect.right() - 8.0, rect.bottom() - 13.0));
             let n = ((area.width() / 6.0) as usize).clamp(8, crate::visuals::spectrum::BANDS);
-            crate::visuals::paint_bars(painter, area, &crate::visuals::spectrum::grouped(&f.bands, n), t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }));
+            crate::visuals::paint_bars(
+                painter,
+                area,
+                &crate::visuals::spectrum::grouped(&f.bands, n),
+                t.accent.gamma_multiply(if ui.visuals().dark_mode { 0.16 } else { 0.12 }),
+            );
         }
     }
 
@@ -295,7 +308,15 @@ impl ViewCtx<'_> {
 /// the same margin fits on both sides, else centred in the middle column
 /// (`cols`, left to right), within `rect` (the display down to the seek
 /// line). Returns the second line's text.
-fn lcd_titles(ui: &Ui, painter: &egui::Painter, t: &Tokens, rect: Rect, cols: std::ops::RangeInclusive<f32>, track: &library::Track, album: Option<&library::Album>) -> String {
+fn lcd_titles(
+    ui: &Ui,
+    painter: &egui::Painter,
+    t: &Tokens,
+    rect: Rect,
+    cols: std::ops::RangeInclusive<f32>,
+    track: &library::Track,
+    album: Option<&library::Album>,
+) -> String {
     let (col_left, col_right) = (*cols.start(), *cols.end());
     let reserve = (col_left - rect.left()).max(rect.right() - col_right);
     let symmetric = rect.width() - 2.0 * reserve;

@@ -109,7 +109,15 @@ impl Downloads {
 
     /// The downloads at start-up: `account`'s store under `base`, opened now,
     /// or after moving the downloads from `move_from` in the background.
-    pub(super) fn start(base: PathBuf, account: Option<u32>, limit: Option<u64>, move_from: Option<PathBuf>, open: OpenStore, bridge: &Bridge, notices: &mut Vec<String>) -> anyhow::Result<Self> {
+    pub(super) fn start(
+        base: PathBuf,
+        account: Option<u32>,
+        limit: Option<u64>,
+        move_from: Option<PathBuf>,
+        open: OpenStore,
+        bridge: &Bridge,
+        notices: &mut Vec<String>,
+    ) -> anyhow::Result<Self> {
         let mut downloads = Downloads {
             store: None,
             snap: Arc::default(),

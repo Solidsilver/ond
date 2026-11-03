@@ -123,11 +123,8 @@ pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: b
     let t = Tokens::of(ui);
     let resp = ui.interact(rect, id, Sense::click());
     if loved || reveal || resp.hovered() {
-        let (icon, color) = if loved {
-            (crate::icons::Icon::HeartFilled, t.accent)
-        } else {
-            (crate::icons::Icon::Heart, if resp.hovered() { t.text } else { t.muted })
-        };
+        let (icon, color) =
+            if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if resp.hovered() { t.text } else { t.muted }) };
         crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
     }
     let label = crate::keys::shown(label).into_owned();
@@ -148,7 +145,12 @@ pub fn rating_choice(ui: &mut Ui, rating: u8, current: bool) -> Response {
         ui.painter().rect_filled(rect, 4.0, t.selected);
     }
     if current {
-        crate::icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(rect.left() + 10.0, rect.center().y), vec2(10.0, 10.0)), crate::icons::Icon::Check, t.text);
+        crate::icons::paint(
+            ui.painter(),
+            Rect::from_center_size(egui::pos2(rect.left() + 10.0, rect.center().y), vec2(10.0, 10.0)),
+            crate::icons::Icon::Check,
+            t.text,
+        );
     }
     for k in 0..5u8 {
         let c = egui::pos2(rect.left() + 26.0 + f32::from(k) * (star + 3.0), rect.center().y);

@@ -274,11 +274,7 @@ fn seek_cuts_stale_audio_and_resumes_at_the_exact_frame() {
 
 /// A device that only runs at 48 kHz (stereo, 16-bit), like a UMC22 asked for 96 kHz.
 fn caps_48k() -> Option<DeviceCaps> {
-    Some(DeviceCaps {
-        configs: vec![crate::signal::RateRange { channels: 2, min: 48_000, max: 48_000 }],
-        max_bits: Some(16),
-        ..Default::default()
-    })
+    Some(DeviceCaps { configs: vec![crate::signal::RateRange { channels: 2, min: 48_000, max: 48_000 }], max_bits: Some(16), ..Default::default() })
 }
 
 fn source_at(dir: &tempfile::TempDir, name: &str, rate: u32, samples: &[i16]) -> TrackSource {
@@ -547,10 +543,7 @@ fn each_track_gets_its_gain_before_its_first_sample() {
     // Auto: a plays alone (track gain), b as part of its album (album gain).
     assert!((status.gains.get(0) - db_to_linear(-6.0)).abs() < 1e-6);
     assert!((status.gains.get(1) - db_to_linear(-9.0)).abs() < 1e-6);
-    let gains: Vec<ReplayGain> = seen
-        .iter()
-        .filter_map(|m| if let DecoderMsg::Track { replay_gain, .. } = m { Some(*replay_gain) } else { None })
-        .collect();
+    let gains: Vec<ReplayGain> = seen.iter().filter_map(|m| if let DecoderMsg::Track { replay_gain, .. } = m { Some(*replay_gain) } else { None }).collect();
     assert_eq!(gains.len(), 2);
     assert_eq!(gains[1].track_gain, Some(-12.0));
 }
@@ -559,10 +552,7 @@ fn each_track_gets_its_gain_before_its_first_sample() {
 fn replay_gain_tags_are_read_by_standard_or_raw_key() {
     use symphonia::core::meta::RawTag;
     let tags = [
-        Tag {
-            raw: RawTag::new("REPLAYGAIN_TRACK_GAIN", "-7.50 dB"),
-            std: Some(StandardTag::ReplayGainTrackGain(Arc::new("-7.50 dB".into()))),
-        },
+        Tag { raw: RawTag::new("REPLAYGAIN_TRACK_GAIN", "-7.50 dB"), std: Some(StandardTag::ReplayGainTrackGain(Arc::new("-7.50 dB".into()))) },
         Tag { raw: RawTag::new("TXXX:replaygain_album_gain", "-8.25 dB"), std: None },
         Tag { raw: RawTag::new("----:com.apple.iTunes:replaygain_track_peak", "0.988"), std: None },
         Tag { raw: RawTag::new("ARTIST", "x"), std: None },
@@ -690,4 +680,19 @@ fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
     }
     assert_eq!(status.track_seq.load(Ordering::Relaxed), N as u64 - 1, "every boundary crossed");
     assert!(dev.played == tracks.concat(), "every track, in order, gaplessly");
+}
+
+#[test]
+fn opus_files_decode() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/sine-1s.opus");
+    let src = TrackSource { id: "opus".into(), url: format!("file://{}", path.display()), suffix: Some("opus".into()), ..Default::default() };
+    let status = bit_perfect_status();
+    let s = Session::start(src, None, config(0.05), status.clone(), None, None, Arc::default());
+    let (input, seen) = wait_ring(&s);
+    let Some(DecoderMsg::Track { format, .. }) = seen.first() else { panic!("no Track message: {seen:?}") };
+    assert_eq!(*format, StreamFormat { sample_rate: 48_000, channels: 2, bits_per_sample: None });
+    let mut dev = Device { input, status, played: Vec::new() };
+    play_to_end(&s, &mut dev);
+    // A second of 440 Hz: most of its 96,000 samples aren't silent.
+    assert!(dev.played.len() > 80_000, "{} samples played", dev.played.len());
 }

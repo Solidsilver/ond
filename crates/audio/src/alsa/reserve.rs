@@ -24,7 +24,9 @@ pub enum ReserveError {
     /// No session bus to ask on (headless, or a sandbox without access).
     NoBus(String),
     /// The current owner said no.
-    Refused { owner: Option<String> },
+    Refused {
+        owner: Option<String>,
+    },
     Other(String),
 }
 
@@ -150,9 +152,7 @@ fn request(conn: &Connection, name: &str, flags: enumflags2::BitFlags<RequestNam
 
 /// The current owner's `ApplicationName`, to say who won't let go.
 fn owner_name(conn: &Connection, name: &str, path: &str) -> Option<String> {
-    let reply = conn
-        .call_method(Some(name), path, Some("org.freedesktop.DBus.Properties"), "Get", &(INTERFACE, "ApplicationName"))
-        .ok()?;
+    let reply = conn.call_method(Some(name), path, Some("org.freedesktop.DBus.Properties"), "Get", &(INTERFACE, "ApplicationName")).ok()?;
     let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
     String::try_from(value).ok().filter(|s| !s.is_empty())
 }

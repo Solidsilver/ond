@@ -86,10 +86,8 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
     let local_w = if r.local { size * 0.6 + gap + 1.0 } else { 0.0 };
     let text_w = local_w + from.size().x + to.as_ref().map_or(0.0, |g| gap + arrow_w + gap + g.size().x);
     let h = from.size().y;
-    let rect = egui::Rect::from_min_max(
-        egui::pos2(right.x - text_w - dot_w - 2.0 * PAD_X, right.y - h / 2.0 - PAD_Y),
-        egui::pos2(right.x, right.y + h / 2.0 + PAD_Y),
-    );
+    let rect =
+        egui::Rect::from_min_max(egui::pos2(right.x - text_w - dot_w - 2.0 * PAD_X, right.y - h / 2.0 - PAD_Y), egui::pos2(right.x, right.y + h / 2.0 + PAD_Y));
     if !paint {
         return rect;
     }
@@ -101,7 +99,10 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
         let cx = x + w / 2.0;
         let stroke = egui::Stroke::new((size * 0.11).max(1.0), t.muted);
         painter.line_segment([egui::pos2(cx, right.y - half), egui::pos2(cx, right.y + half)], stroke);
-        painter.add(egui::Shape::line(vec![egui::pos2(cx - w * 0.42, right.y + half - w * 0.42), egui::pos2(cx, right.y + half), egui::pos2(cx + w * 0.42, right.y + half - w * 0.42)], stroke));
+        painter.add(egui::Shape::line(
+            vec![egui::pos2(cx - w * 0.42, right.y + half - w * 0.42), egui::pos2(cx, right.y + half), egui::pos2(cx + w * 0.42, right.y + half - w * 0.42)],
+            stroke,
+        ));
         x += local_w;
     }
     painter.galley(egui::pos2(x, top), from.clone(), t.muted);

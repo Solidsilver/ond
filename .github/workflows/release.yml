@@ -11,6 +11,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # These builds look for newer releases (crates/app/src/updates.rs).
+  OND_DISTRIBUTION: github
 
 jobs:
   macos:

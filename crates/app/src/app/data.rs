@@ -177,7 +177,8 @@ impl OndApp {
                 // A sync may have added tracks to pinned albums. The library can be
                 // partial (a sync stopped or failed, a rebuilt database), so this may
                 // only add: removals wait for the server's own listing of the album.
-                let albums: Vec<String> = self.downloads.snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
+                let albums: Vec<String> =
+                    self.downloads.snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { Some(id.clone()) } else { None }).collect();
                 for id in albums {
                     if let Some(tracks) = self.data.tracks.album(&id).cloned() {
                         self.refresh_pin(Pin::Album(id), &tracks, false);

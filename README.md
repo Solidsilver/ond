@@ -30,7 +30,7 @@ Downloads are on the [Releases](../../releases) page.
 
 Open the `.dmg` and drag Ond to Applications.
 
-The app isn't signed with an Apple Developer ID yet, so macOS blocks the first launch. Right-click Ond in Applications and choose Open, or run:
+The app isn't signed with an Apple Developer ID yet, so macOS blocks the first launch. Open Ond once, then go to System Settings › Privacy & Security and click Open Anyway. On macOS 14 and earlier you can right-click Ond in Applications and choose Open instead. Or run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Ond.app
@@ -53,7 +53,7 @@ Ond needs PipeWire's library (`libpipewire-0.3`), which every current desktop di
 
 ### Nix and NixOS
 
-The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/v0.4.1`.
+The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/v0.4.2`.
 
 With Home Manager, the flake's module installs Ond and can set any of its settings. Settings set there are locked in the app, and the rest stay editable. It works on macOS too, for the app bundle. [docs/home-manager.md](docs/home-manager.md) has the setup and every setting.
 

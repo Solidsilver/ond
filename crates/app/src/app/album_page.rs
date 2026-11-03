@@ -4,18 +4,18 @@
 //! per-track measurements, folded away until asked for. Playlists reuse the
 //! track list.
 
-use super::{AnalysisAction, OfflineAction};
 use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
 use super::widgets::{chip, elide, heart_button, link};
 use super::{Action, DragTracks, Focus, Keep, Overlay, PlaylistAction, QueueAction};
+use super::{AnalysisAction, OfflineAction};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
-use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use analysis::TrackAnalysis;
+use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use library::Track;
 
 /// One line of credits: a role and the people in it, in first-seen order.
@@ -64,7 +64,6 @@ pub fn credits(tracks: &[Track]) -> Vec<Credit> {
     out.sort_by_key(|c| rank(&c.role));
     out
 }
-
 
 /// `FLAC 16/44.1` when every track shares it.
 fn shared_format(tracks: &[Track]) -> Option<String> {
@@ -239,21 +238,23 @@ impl ViewCtx<'_> {
         let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis));
         let analysing = analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
         let page = AlbumHeader { album, tracks, facts: &facts, analysing };
-        super::layout::into_gutter(ui, |ui| egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-            self.album_header(ui, &t, &page);
-            ui.add_space(24.0);
-            if tracks.is_empty() {
-                ui.label(egui::RichText::new("Loading tracks…").color(t.muted));
-                return;
-            }
+        super::layout::into_gutter(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
+                self.album_header(ui, &t, &page);
+                ui.add_space(24.0);
+                if tracks.is_empty() {
+                    ui.label(egui::RichText::new("Loading tracks…").color(t.muted));
+                    return;
+                }
 
-            self.track_list(ui, tracks, &facts.source, ListOpts { numbers: true, artist: false, playlist: None });
-            ui.add_space(14.0);
-            ui.label(egui::RichText::new(&facts.footer).size(12.0).color(t.muted));
-            ui.add_space(10.0);
-            self.album_details(ui, tracks, &facts, analysing > 0);
-            ui.add_space(24.0);
-        }));
+                self.track_list(ui, tracks, &facts.source, ListOpts { numbers: true, artist: false, playlist: None });
+                ui.add_space(14.0);
+                ui.label(egui::RichText::new(&facts.footer).size(12.0).color(t.muted));
+                ui.add_space(10.0);
+                self.album_details(ui, tracks, &facts, analysing > 0);
+                ui.add_space(24.0);
+            })
+        });
     }
 
     /// The artwork beside the album's name, artist, facts and buttons, or
@@ -342,8 +343,7 @@ impl ViewCtx<'_> {
         // count while it's being worked on.
         if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
             sep(ui);
-            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted))
-                .on_hover_text("Dynamic range (DR meter), averaged across the album");
+            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted)).on_hover_text("Dynamic range (DR meter), averaged across the album");
             sep(ui);
             ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
                 .on_hover_text("Integrated loudness (EBU R128), across the album");
@@ -415,7 +415,12 @@ impl ViewCtx<'_> {
             if !facts.credits.is_empty() {
                 super::widgets::kv_section(ui, "Credits");
                 for c in &facts.credits {
-                    super::info_panel::links_row(self.actions, ui, &c.role, c.people.iter().map(|(name, id)| (name.as_str(), || Route::Artist { name: name.clone(), id: id.clone() })));
+                    super::info_panel::links_row(
+                        self.actions,
+                        ui,
+                        &c.role,
+                        c.people.iter().map(|(name, id)| (name.as_str(), || Route::Artist { name: name.clone(), id: id.clone() })),
+                    );
                 }
             }
             super::widgets::kv_section(ui, "Analysis");
@@ -506,12 +511,18 @@ impl ViewCtx<'_> {
             return;
         };
         if tracks.is_empty() {
-            let hint = if mine { "Drag songs onto this playlist in the sidebar, or use “Add to playlist” on any song." } else { "Its owner hasn’t added any songs." };
+            let hint = if mine {
+                "Drag songs onto this playlist in the sidebar, or use “Add to playlist” on any song."
+            } else {
+                "Its owner hasn’t added any songs."
+            };
             super::widgets::empty_state(ui, Icon::Note, "This playlist is empty", hint);
             return;
         }
         let scroll = egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).content_margin(super::layout::gutter());
-        super::layout::into_gutter(ui, |ui| self.track_list_rows(ui, scroll, tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) }));
+        super::layout::into_gutter(ui, |ui| {
+            self.track_list_rows(ui, scroll, tracks, &source, ListOpts { numbers: false, artist: true, playlist: mine.then(|| id.to_owned()) })
+        });
     }
 
     /// Rename… and Delete… for one of the user's playlists.
@@ -985,7 +996,6 @@ impl ListKeys {
         sel
     }
 }
-
 
 fn composer_of(t: &Track) -> Option<String> {
     t.composer.clone().or_else(|| t.contributors.iter().find(|c| c.role.eq_ignore_ascii_case("composer")).map(|c| c.name.clone()))

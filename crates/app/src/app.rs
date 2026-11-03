@@ -91,8 +91,8 @@ use std::time::Duration;
 // What the tests (here and in `snapshots`) build their fixtures from.
 #[cfg(test)]
 use {
-    crate::bridge::ListKey, crate::nav::Nav, crate::search::SearchIndex, crate::settings::Settings, crate::theme::ThemePref, crate::tracks::TrackSet, library::Album,
-    offline::TrackRef, pins::track_ref, ui_state::QueueUi,
+    crate::bridge::ListKey, crate::nav::Nav, crate::search::SearchIndex, crate::settings::Settings, crate::theme::ThemePref, crate::tracks::TrackSet,
+    library::Album, offline::TrackRef, pins::track_ref, ui_state::QueueUi,
 };
 
 pub use crate::player::QueueAction;
@@ -106,8 +106,8 @@ pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
 pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, SongStats, UiState};
-pub use window_state::WindowAction;
 pub(crate) use widgets::{choice, elide as elide_text, link as link_text, switch_tinted, thin_slider, thin_slider_marked};
+pub use window_state::WindowAction;
 
 use data::Pending;
 use pins::playable;
@@ -126,7 +126,10 @@ pub enum Action {
     Forward,
     BackBy(usize),
     /// An album's page with one of its tracks selected (⌘L: the playing one).
-    Reveal { track: String, album: String },
+    Reveal {
+        track: String,
+        album: String,
+    },
     OpenPalette,
     /// Open the Settings window at a section.
     OpenSettings(settings_page::Section),
@@ -164,13 +167,23 @@ pub enum Action {
     SignOut,
     /// The server turned the saved login down: the sign-in form, over the library.
     SignInAgain,
+    Update(UpdateAction),
     Album(String, QueueAction),
     Artist(String, QueueAction),
     Playlist(String, QueueAction),
-    Tracks { tracks: Vec<Track>, source: Source, action: QueueAction },
+    Tracks {
+        tracks: Vec<Track>,
+        source: Source,
+        action: QueueAction,
+    },
     /// The same, once the user said whether to keep the tracks they added
     /// (Settings › Queue › Playing something new: Ask).
-    TracksAnswered { tracks: Vec<Track>, source: Source, action: QueueAction, keep: bool },
+    TracksAnswered {
+        tracks: Vec<Track>,
+        source: Source,
+        action: QueueAction,
+        keep: bool,
+    },
     /// A change to the queue itself: jump, replay, remove, move, clear, or
     /// what happens at its end.
     Queue(QueueEdit),
@@ -190,12 +203,47 @@ pub enum Action {
     Analysis(AnalysisAction),
     /// Love or unlove a song, album or artist. `track` / `name` keep the
     /// Favorites view current.
-    ToggleStar { kind: StarKind, id: String, track: Option<Box<Track>>, name: Option<String> },
+    ToggleStar {
+        kind: StarKind,
+        id: String,
+        track: Option<Box<Track>>,
+        name: Option<String>,
+    },
     /// Rate a song 1–5; 0 clears it.
     Rate(String, u8),
     /// A key or menu-bar command; applying it applies what it stands for.
     Command(Cmd),
     PlaylistEdit(PlaylistAction),
+}
+
+/// About a newer Ond.
+pub enum UpdateAction {
+    /// Its release page, in the browser.
+    Open(crate::updates::Version),
+    /// Don't mention it again.
+    Skip(crate::updates::Version),
+    /// Look for new versions, or don't.
+    Check(crate::settings::UpdateCheck),
+}
+
+impl OndApp {
+    fn update_action(&mut self, action: UpdateAction) {
+        match action {
+            UpdateAction::Open(v) => self.ctx.open_url(egui::OpenUrl::new_tab(v.page())),
+            UpdateAction::Skip(v) => {
+                self.prefs.edit(|s| s.skipped_update = Some(v.to_string()));
+                self.update = None;
+            }
+            UpdateAction::Check(check) => {
+                self.prefs.edit(|s| s.updates = check);
+                let on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
+                self.update_check.store(on, std::sync::atomic::Ordering::Relaxed);
+                if !on {
+                    self.update = None;
+                }
+            }
+        }
+    }
 }
 
 /// The app's tokio runtime, kept for the app's lifetime (the bridge and the
@@ -273,6 +321,10 @@ pub struct OndApp {
     /// What the window renders to, for the visualizer's own GPU drawing;
     /// `None` without a wgpu renderer (it then uses the painter).
     gpu: Option<crate::visuals::gpu::Target>,
+    /// A newer Ond that's out and not skipped.
+    update: Option<crate::updates::Version>,
+    /// The update checker looks while this is set (the setting).
+    update_check: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl OndApp {
@@ -284,6 +336,9 @@ impl OndApp {
         // The app is running by now, so NSApp takes the menu bar.
         let bridge = app.bridge.clone();
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
+        app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
+        let bridge = app.bridge.clone();
+        crate::updates::start(app.bridge.runtime(), app.update_check.clone(), move |v| bridge.post(Msg::UpdateAvailable(v)));
         // The window opened from this plan (see `main`); our title bar follows it.
         app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
         Ok(app)
@@ -426,6 +481,8 @@ impl OndApp {
             diagnostics: diagnostics::Diagnostics::default(),
             waveforms: crate::visuals::waveform::Waveforms::new(ctx.clone()),
             gpu: None,
+            update: None,
+            update_check: Arc::default(),
             prefs,
             analysis: Analysis::new(analyzer),
             favorites: Favorites::default(),
@@ -483,6 +540,11 @@ impl OndApp {
                 self.go(Route::Playlist { id, name });
             }
             Msg::Menu(cmd) => self.command(cmd),
+            Msg::UpdateAvailable(v) => {
+                if self.prefs.get(|s| s.skipped_update.as_deref() != Some(&v.to_string())) {
+                    self.update = Some(v);
+                }
+            }
             Msg::Error(e) => {
                 self.probe();
                 // Offline, network errors are expected and the offline pill already says so.
@@ -618,6 +680,7 @@ impl OndApp {
             Action::MeasureLatency => self.refresh_latency(),
             Action::SignOut => self.sign_out(),
             Action::SignInAgain => self.sign_in_again(),
+            Action::Update(a) => self.update_action(a),
             Action::Album(id, action) => self.play_album(id, action),
             Action::Artist(name, action) => self.play_artist(name, action),
             Action::Playlist(id, action) => self.play_playlist(id, action),
@@ -851,11 +914,21 @@ impl OndApp {
         let w = width.min(content.width() - 24.0);
         let id = egui::Id::unique("queue-sheet");
         let area = egui::Modal::default_area(id).anchor(egui::Align2::RIGHT_TOP, egui::vec2(0.0, content.top()));
-        let shadow = egui::Shadow { offset: [-6, 0], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 120 } else { 40 }) };
+        let shadow = egui::Shadow {
+            offset: [-6, 0],
+            blur: 24,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 120 } else { 40 }),
+        };
         let modal = egui::Modal::new(id)
             .area(area)
             .backdrop_color(egui::Color32::from_black_alpha(18))
-            .frame(egui::Frame::new().fill(t.panel).shadow(shadow).stroke(egui::Stroke::new(1.0, t.hairline)).inner_margin(egui::Margin { left: 8, right: 8, top: 12, bottom: 8 }))
+            .frame(egui::Frame::new().fill(t.panel).shadow(shadow).stroke(egui::Stroke::new(1.0, t.hairline)).inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 12,
+                bottom: 8,
+            }))
             .show(ctx, |ui| {
                 ui.set_width(w - 16.0);
                 ui.set_height(content.height() - 20.0);

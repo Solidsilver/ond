@@ -11,8 +11,8 @@
 //! system title bar for now. "Use the system title bar" in Settings turns all
 //! of this off.
 
-use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
 use crate::visuals::over_art::OnArt;
+use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
 use std::sync::OnceLock;
 
 /// Whether this platform draws its own window controls.
@@ -359,10 +359,7 @@ mod tests {
     #[test]
     fn reads_gnome_button_layouts() {
         assert_eq!(Layout::parse("appmenu:close"), Layout { left: vec![], right: vec![Button::Close] });
-        assert_eq!(
-            Layout::parse("appmenu:minimize,maximize,close"),
-            Layout { left: vec![], right: vec![Button::Minimize, Button::Maximize, Button::Close] }
-        );
+        assert_eq!(Layout::parse("appmenu:minimize,maximize,close"), Layout { left: vec![], right: vec![Button::Minimize, Button::Maximize, Button::Close] });
         // macOS-style, on the left.
         assert_eq!(Layout::parse("close,minimize,maximize:"), Layout { left: vec![Button::Close, Button::Minimize, Button::Maximize], right: vec![] });
         assert_eq!(Layout::parse("icon:spacer,close"), Layout { left: vec![], right: vec![Button::Close] });

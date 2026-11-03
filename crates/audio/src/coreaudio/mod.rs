@@ -36,12 +36,12 @@ use crate::{PlaybackMode, Status};
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
 use coreaudio::audio_unit::render_callback::{self, data};
 use coreaudio::audio_unit::{AudioUnit, Element, IOType, SampleFormat, Scope};
-use objc2_core_audio_types::AudioStreamBasicDescription;
 use objc2_core_audio::{
-    kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeAirPlay, kAudioDeviceTransportTypeBluetooth,
-    kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeBuiltIn, kAudioDeviceTransportTypeDisplayPort,
-    kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeUSB, kAudioDeviceTransportTypeVirtual,
+    kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeAirPlay, kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
+    kAudioDeviceTransportTypeBuiltIn, kAudioDeviceTransportTypeDisplayPort, kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeUSB,
+    kAudioDeviceTransportTypeVirtual,
 };
+use objc2_core_audio_types::AudioStreamBasicDescription;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -116,8 +116,7 @@ impl CoreAudioBackend {
         let devices_changed = Arc::new(AtomicBool::new(false));
         let default_changed = Arc::new(AtomicBool::new(false));
         let (d, f) = (devices_changed.clone(), default_changed.clone());
-        let listeners =
-            hal::watch_system(move || d.store(true, Ordering::Release), move || f.store(true, Ordering::Release));
+        let listeners = hal::watch_system(move || d.store(true, Ordering::Release), move || f.store(true, Ordering::Release));
         // An earlier run that crashed (or anything else) may have left a device
         // in a format no one can share: nobody holds it now, so fix it.
         for dev in hal::output_devices().into_iter().filter(|d| hal::hog_pid(*d) == -1) {
@@ -250,8 +249,7 @@ impl CoreAudioBackend {
                 hal::is_int(&f.mFormat)
                     && f.mFormat.mChannelsPerFrame >= channels as u32
                     && hal::is_mixable(&f.mFormat)
-                    && (f.mSampleRateRange.mMinimum <= r && r <= f.mSampleRateRange.mMaximum
-                        || f.mFormat.mSampleRate as u32 == rate)
+                    && (f.mSampleRateRange.mMinimum <= r && r <= f.mSampleRateRange.mMaximum || f.mFormat.mSampleRate as u32 == rate)
             })
             .max_by_key(|f| f.mFormat.mBitsPerChannel);
         if let Some(f) = best {
@@ -325,8 +323,8 @@ impl CoreAudioBackend {
         let kind = kind_of(dev);
         let mut caps = caps_of(dev, kind);
         caps.exclusive = self.hogged == Some(dev) && hal::hog_pid(dev) == hal::own_pid();
-        caps.shared_reason = (!caps.exclusive)
-            .then(|| Self::held_by_other(dev).map_or_else(|| "shared mode".into(), |holder| format!("{holder} has the device")));
+        caps.shared_reason =
+            (!caps.exclusive).then(|| Self::held_by_other(dev).map_or_else(|| "shared mode".into(), |holder| format!("{holder} has the device")));
         if let Some(open) = self.open.as_ref().filter(|o| o.dev == dev) {
             caps.active_bits = open.active_bits;
         }
@@ -394,11 +392,8 @@ fn caps_of(dev: hal::Id, kind: DeviceKind) -> DeviceCaps {
     let mut configs: Vec<RateRange> = Vec::new();
     let (mut int_bits, mut float) = (None::<u32>, false);
     for f in formats.iter().filter(|f| hal::is_lpcm(&f.mFormat)) {
-        let range = RateRange {
-            channels: f.mFormat.mChannelsPerFrame as u16,
-            min: f.mSampleRateRange.mMinimum as u32,
-            max: f.mSampleRateRange.mMaximum as u32,
-        };
+        let range =
+            RateRange { channels: f.mFormat.mChannelsPerFrame as u16, min: f.mSampleRateRange.mMinimum as u32, max: f.mSampleRateRange.mMaximum as u32 };
         // A stream with more channels plays stereo on its first two.
         for channels in [range.channels, 2, 1].into_iter().filter(|c| *c <= range.channels) {
             let r = RateRange { channels, ..range };
@@ -414,10 +409,7 @@ fn caps_of(dev: hal::Id, kind: DeviceKind) -> DeviceCaps {
     }
     if configs.is_empty() {
         // No physical formats reported: fall back to the device's nominal rates.
-        configs = hal::available_rates(dev)
-            .iter()
-            .map(|r| RateRange { channels: 2, min: r.mMinimum as u32, max: r.mMaximum as u32 })
-            .collect();
+        configs = hal::available_rates(dev).iter().map(|r| RateRange { channels: 2, min: r.mMinimum as u32, max: r.mMaximum as u32 }).collect();
     }
     let active = stream.and_then(hal::physical_format);
     DeviceCaps {
@@ -530,8 +522,7 @@ impl OutputBackend for CoreAudioBackend {
         if self.leaves_device_alone()
             && let Some(rate) = caps.nominal_rate
         {
-            let at: Vec<RateRange> =
-                caps.configs.iter().filter(|c| c.min <= rate && rate <= c.max).map(|c| RateRange { min: rate, max: rate, ..*c }).collect();
+            let at: Vec<RateRange> = caps.configs.iter().filter(|c| c.min <= rate && rate <= c.max).map(|c| RateRange { min: rate, max: rate, ..*c }).collect();
             if !at.is_empty() {
                 caps.configs = at;
             }
@@ -667,8 +658,7 @@ mod tests {
     #[test]
     fn the_callback_dithers_to_the_format_in_effect_now() {
         // 24-bit audio, bit-perfect: a 16-bit device needs it requantized, a 24-bit one doesn't.
-        let samples: Vec<f32> =
-            (0..1_024i64).map(|i| ((i * 2_654_435) % (1 << 24) - (1 << 23)) as f32 / (1 << 23) as f32).collect();
+        let samples: Vec<f32> = (0..1_024i64).map(|i| ((i * 2_654_435) % (1 << 24) - (1 << 23)) as f32 / (1 << 23) as f32).collect();
         let (mut p, c) = rtrb::RingBuffer::new(samples.len());
         p.push_entire_slice(&samples).unwrap();
         let (_m, mc) = rtrb::RingBuffer::new(4);

@@ -3,20 +3,16 @@
 //! Everything here runs on the engine thread (never in the render callback).
 
 use objc2_core_audio::{
-    AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
-    AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
-    AudioObjectHasProperty, AudioObjectIsPropertySettable, AudioObjectSetPropertyData, AudioStreamRangedDescription,
-    kAudioDevicePropertyAvailableNominalSampleRates, kAudioDevicePropertyMute, kAudioDevicePropertyVolumeDecibels,
-    kAudioDevicePropertyVolumeRangeDecibels,
-    kAudioDevicePropertyDataSource, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyHogMode,
-    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreams, kAudioDevicePropertyTransportType,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
-    kAudioStreamPropertyAvailablePhysicalFormats, kAudioStreamPropertyPhysicalFormat,
+    AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectHasProperty, AudioObjectID,
+    AudioObjectIsPropertySettable, AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
+    AudioObjectSetPropertyData, AudioStreamRangedDescription, kAudioDevicePropertyAvailableNominalSampleRates, kAudioDevicePropertyDataSource,
+    kAudioDevicePropertyDeviceUID, kAudioDevicePropertyHogMode, kAudioDevicePropertyMute, kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreams,
+    kAudioDevicePropertyTransportType, kAudioDevicePropertyVolumeDecibels, kAudioDevicePropertyVolumeRangeDecibels, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput,
+    kAudioObjectSystemObject, kAudioStreamPropertyAvailablePhysicalFormats, kAudioStreamPropertyPhysicalFormat,
 };
 use objc2_core_audio_types::{
-    AudioStreamBasicDescription, AudioValueRange, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonMixable,
-    kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM,
+    AudioStreamBasicDescription, AudioValueRange, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonMixable, kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 use std::ffi::c_void;
@@ -54,9 +50,7 @@ fn get<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<T> {
     let mut value = MaybeUninit::<T>::zeroed();
     let mut size = size_of::<T>() as u32;
     // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
-    let status = unsafe {
-        AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast())
-    };
+    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
     check(status, "get property")?;
     // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
     Ok(unsafe { value.assume_init() })
@@ -77,14 +71,8 @@ fn get_vec<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<Vec<T>> {
     // SAFETY: `v` has room for `n` T's (`size` bytes); the HAL writes at most that and
     // reports what it wrote in `size`.
     unsafe {
-        let status = AudioObjectGetPropertyData(
-            obj,
-            NonNull::from(&a),
-            0,
-            null(),
-            NonNull::from(&mut size),
-            NonNull::new(v.as_mut_ptr()).expect("non-null").cast(),
-        );
+        let status =
+            AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::new(v.as_mut_ptr()).expect("non-null").cast());
         check(status, "get property")?;
         v.set_len((size as usize / size_of::<T>()).min(n));
     }
@@ -94,9 +82,7 @@ fn get_vec<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<Vec<T>> {
 fn set<T>(obj: Id, selector: u32, scope: u32, value: &T) -> Result<()> {
     let a = addr(selector, scope);
     // SAFETY: `value` is a valid T of the size we pass.
-    let status = unsafe {
-        AudioObjectSetPropertyData(obj, NonNull::from(&a), 0, null(), size_of::<T>() as u32, NonNull::from(value).cast())
-    };
+    let status = unsafe { AudioObjectSetPropertyData(obj, NonNull::from(&a), 0, null(), size_of::<T>() as u32, NonNull::from(value).cast()) };
     check(status, "set property")
 }
 
@@ -105,9 +91,7 @@ fn get_string(obj: Id, selector: u32) -> Option<String> {
     let mut s: *mut CFString = std::ptr::null_mut();
     let mut size = size_of::<*mut CFString>() as u32;
     // SAFETY: the HAL writes a CFStringRef we own (+1) into `s`.
-    let status = unsafe {
-        AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut s).cast())
-    };
+    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut s).cast()) };
     if status != 0 {
         return None;
     }
@@ -117,11 +101,7 @@ fn get_string(obj: Id, selector: u32) -> Option<String> {
 
 /// All devices with at least one output stream.
 pub fn output_devices() -> Vec<Id> {
-    get_vec::<Id>(SYSTEM, kAudioHardwarePropertyDevices, GLOBAL)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|d| !output_streams(*d).is_empty())
-        .collect()
+    get_vec::<Id>(SYSTEM, kAudioHardwarePropertyDevices, GLOBAL).unwrap_or_default().into_iter().filter(|d| !output_streams(*d).is_empty()).collect()
 }
 
 pub fn default_output() -> Option<Id> {
@@ -316,9 +296,7 @@ fn get_at<T: Copy>(obj: Id, selector: u32, element: u32) -> Option<T> {
     let mut value = MaybeUninit::<T>::zeroed();
     let mut size = size_of::<T>() as u32;
     // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
-    let status = unsafe {
-        AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast())
-    };
+    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
     // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
     (status == 0).then(|| unsafe { value.assume_init() })
 }
@@ -326,9 +304,7 @@ fn get_at<T: Copy>(obj: Id, selector: u32, element: u32) -> Option<T> {
 fn set_at<T>(obj: Id, selector: u32, element: u32, value: &T) -> Result<()> {
     let a = addr_at(selector, OUTPUT, element);
     // SAFETY: `value` is a valid T of the size we pass.
-    let status = unsafe {
-        AudioObjectSetPropertyData(obj, NonNull::from(&a), 0, null(), size_of::<T>() as u32, NonNull::from(value).cast())
-    };
+    let status = unsafe { AudioObjectSetPropertyData(obj, NonNull::from(&a), 0, null(), size_of::<T>() as u32, NonNull::from(value).cast()) };
     check(status, "set property")
 }
 

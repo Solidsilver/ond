@@ -118,7 +118,9 @@ impl Toasts {
             let rect = Rect::from_min_size(pos2(within.center().x - w / 2.0, bottom - h), vec2(w, h));
             bottom = rect.top() - 8.0;
             let close = Rect::from_center_size(pos2(rect.right() - 12.0, if button.is_some() { rect.center().y } else { rect.top() + 12.0 }), vec2(8.0, 8.0));
-            let button_rect = button.as_ref().map(|b| Rect::from_min_size(pos2(close.left() - 10.0 - b.size().x - 12.0, rect.center().y - 11.0), vec2(b.size().x + 12.0, 22.0)));
+            let button_rect = button
+                .as_ref()
+                .map(|b| Rect::from_min_size(pos2(close.left() - 10.0 - b.size().x - 12.0, rect.center().y - 11.0), vec2(b.size().x + 12.0, 22.0)));
             let id = egui::Id::unique(("toast", toast.id));
             let (resp, pressed) = egui::Area::new(id)
                 .order(egui::Order::Foreground)
@@ -154,12 +156,27 @@ impl Toasts {
             }
             // Fade the last second of a notice.
             let alpha = toast.until.map_or(1.0, |at| ((at - now) as f32).clamp(0.0, 1.0));
-            let shadow = egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 110 } else { 34 }) };
+            let shadow = egui::Shadow {
+                offset: [0, 6],
+                blur: 20,
+                spread: 0,
+                color: Color32::from_black_alpha(if ctx.global_style().visuals.dark_mode { 110 } else { 34 }),
+            };
             painter.add(shadow.as_shape(rect, 10.0));
-            painter.rect(rect, 10.0, t.panel.gamma_multiply(alpha.max(0.0)), egui::Stroke::new(1.0, t.hairline.gamma_multiply(alpha)), egui::StrokeKind::Inside);
+            painter.rect(
+                rect,
+                10.0,
+                t.panel.gamma_multiply(alpha.max(0.0)),
+                egui::Stroke::new(1.0, t.hairline.gamma_multiply(alpha)),
+                egui::StrokeKind::Inside,
+            );
             let mut x = rect.left() + 14.0;
             if toast.error {
-                painter.circle_filled(pos2(x + 3.0, rect.top() + 9.0 + galley.rows.first().map_or(8.0, |r| r.height() / 2.0)), 3.0, t.warn.gamma_multiply(alpha));
+                painter.circle_filled(
+                    pos2(x + 3.0, rect.top() + 9.0 + galley.rows.first().map_or(8.0, |r| r.height() / 2.0)),
+                    3.0,
+                    t.warn.gamma_multiply(alpha),
+                );
                 x += 14.0;
             }
             painter.galley(pos2(x, rect.top() + 9.0), galley, t.text.gamma_multiply(alpha));

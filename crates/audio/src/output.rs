@@ -139,19 +139,7 @@ impl std::fmt::Debug for RingInput {
 
 impl RingInput {
     pub fn new(samples: Consumer<f32>, markers: Consumer<Marker>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
-        Self {
-            samples,
-            markers,
-            input_done,
-            ctl,
-            pos: 0,
-            gain: 1.0,
-            rg: 1.0,
-            buffering: true,
-            faded: 0,
-            source_bits: None,
-            processed: false,
-        }
+        Self { samples, markers, input_done, ctl, pos: 0, gain: 1.0, rg: 1.0, buffering: true, faded: 0, source_bits: None, processed: false }
     }
 
     /// Describes what's in the ring, for the dither decision: the first
@@ -178,15 +166,7 @@ impl RingInput {
     /// each stretch that needs it (a gain ramp, a track of another depth:
     /// one buffer can hold both kinds). With `device_bits` `None` (float
     /// device) samples pass through untouched.
-    pub fn fill_for_device(
-        &mut self,
-        out: &mut [f32],
-        channels: usize,
-        rate: u32,
-        status: &Status,
-        device_bits: Option<u32>,
-        dither: &mut Tpdf,
-    ) -> bool {
+    pub fn fill_for_device(&mut self, out: &mut [f32], channels: usize, rate: u32, status: &Status, device_bits: Option<u32>, dither: &mut Tpdf) -> bool {
         self.fill_with(out, channels, rate, status, |stretch, treatment| {
             if let Some(bits) = device_bits
                 && needs_dither(device_bits, treatment)
@@ -233,14 +213,7 @@ impl RingInput {
 
     /// [`fill`](Self::fill), handing each stretch of audio it writes to
     /// `written_to` with what was done to it (silence is left out).
-    fn fill_with<T>(
-        &mut self,
-        out: &mut [T],
-        channels: usize,
-        rate: u32,
-        status: &Status,
-        mut written_to: impl FnMut(&mut [T], Treatment),
-    ) -> bool
+    fn fill_with<T>(&mut self, out: &mut [T], channels: usize, rate: u32, status: &Status, mut written_to: impl FnMut(&mut [T], Treatment)) -> bool
     where
         T: SizedSample + FromSample<f32>,
     {
@@ -316,8 +289,7 @@ impl RingInput {
                 Ok(m) => (m.at - self.pos) as usize,
                 Err(_) => usize::MAX,
             };
-            let rg_target =
-                if bit_perfect { 1.0 } else { status.gains.get(status.track_seq.load(Ordering::Acquire)) };
+            let rg_target = if bit_perfect { 1.0 } else { status.gains.get(status.track_seq.load(Ordering::Acquire)) };
             let n = (avail - written).min(until);
             let Ok(chunk) = self.samples.read_chunk(n) else { break };
             let (a, b) = chunk.as_slices();
@@ -536,10 +508,7 @@ impl CpalBackend {
 fn output_device(card: Option<u32>, returning: Option<Instant>) -> Option<cpal::Device> {
     // A new host each time: one lists the devices there were when it was made.
     let find = |card: u32| {
-        cpal::default_host()
-            .output_devices()
-            .ok()?
-            .find(|d| d.description().ok().and_then(|desc| desc.address().and_then(alsa_card_of)) == Some(card))
+        cpal::default_host().output_devices().ok()?.find(|d| d.description().ok().and_then(|desc| desc.address().and_then(alsa_card_of)) == Some(card))
     };
     let mut routed = card.and_then(find);
     while let Some(card) = card.filter(|_| routed.is_none() && returning.is_some_and(|t| Instant::now() < t)) {
@@ -665,11 +634,7 @@ fn start_stream(
     let range = device
         .supported_output_configs()
         .map_err(dev_err)?
-        .filter(|c| {
-            c.channels() == format.channels
-                && c.min_sample_rate() <= format.sample_rate
-                && c.max_sample_rate() >= format.sample_rate
-        })
+        .filter(|c| c.channels() == format.channels && c.min_sample_rate() <= format.sample_rate && c.max_sample_rate() >= format.sample_rate)
         // Prefer float, then the widest integer format.
         .max_by_key(|c| match c.sample_format() {
             SampleFormat::F32 => 4,

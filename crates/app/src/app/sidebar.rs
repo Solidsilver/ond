@@ -12,6 +12,8 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 pub const RAIL_W: f32 = 52.0;
 /// The footer's buttons (and the server status row's height).
 const FOOTER_BUTTON: f32 = 28.0;
+/// The notice that a newer Ond is out.
+const UPDATE_H: f32 = 28.0;
 
 /// In ⌘1…⌘6 order.
 pub(super) const PLACES: [(&str, Route, Icon); 6] = [
@@ -68,9 +70,12 @@ impl OndApp {
             });
         });
         ui.add_space(4.0);
-        let bottom_h = 34.0;
+        let bottom_h = if self.update.is_some() { 34.0 + UPDATE_H + 6.0 } else { 34.0 };
         let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
-        egui::ScrollArea::vertical().id_salt("playlists").max_height((ui.available_height() - bottom_h).max(40.0)).show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
+        egui::ScrollArea::vertical()
+            .id_salt("playlists")
+            .max_height((ui.available_height() - bottom_h).max(40.0))
+            .show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
 
         // The footer: the server's state on the left (click for details and
         // Sign out), keyboard shortcuts and Settings on the right.
@@ -84,7 +89,36 @@ impl OndApp {
                     self.help_button(ui);
                 });
             });
+            if let Some(v) = self.update {
+                ui.add_space(6.0);
+                self.update_notice(ui, v);
+            }
         });
+    }
+
+    /// A newer Ond is out, above the footer: click for its release page, or
+    /// to skip it.
+    fn update_notice(&mut self, ui: &mut Ui, v: crate::updates::Version) {
+        let t = Tokens::of(ui);
+        let label = format!("Ond {v} is available");
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), UPDATE_H), Sense::click());
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            p.rect_filled(rect, 6.0, t.accent.gamma_multiply(if resp.hovered() { 0.2 } else { 0.12 }));
+            icons::paint(p, Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(12.0, 12.0)), Icon::Download, t.accent);
+            p.text(pos2(rect.left() + 30.0, rect.center().y), egui::Align2::LEFT_CENTER, &label, FontId::proportional(12.5), t.accent);
+        }
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width()).show(|ui| {
+            ui.set_width(rect.width());
+            if menu_item(ui, "Release notes and download", "") {
+                self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+            }
+            if menu_item(ui, "Skip this version", "") {
+                self.actions.push(Action::Update(super::UpdateAction::Skip(v)));
+            }
+        });
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
 
     /// The narrow-window sidebar: one icon per place, playlists behind a
@@ -445,7 +479,6 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::widgets::Mark>)
     resp
 }
 
-
 /// A menu row with a right-aligned shortcut hint. True when chosen.
 fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
     let t = Tokens::of(ui);
@@ -482,16 +515,31 @@ fn info_row(ui: &mut Ui, label: &str, value: &str, color: egui::Color32) {
 /// The server's state as the footer shows it.
 #[derive(Debug, Clone, PartialEq)]
 enum ServerState {
-    Connected { host: String },
-    Syncing { host: String, label: String, detail: String, fraction: Option<f32> },
+    Connected {
+        host: String,
+    },
+    Syncing {
+        host: String,
+        label: String,
+        detail: String,
+        fraction: Option<f32>,
+    },
     /// Not answering; reconnecting in the background.
-    Offline { host: String },
+    Offline {
+        host: String,
+    },
     /// The first connect is still under way.
-    Connecting { host: String },
+    Connecting {
+        host: String,
+    },
     /// The server turned the saved login down.
-    SignIn { host: String },
+    SignIn {
+        host: String,
+    },
     /// Offline by choice: not connecting.
-    WorkingOffline { host: String },
+    WorkingOffline {
+        host: String,
+    },
 }
 
 impl ServerState {
@@ -525,7 +573,9 @@ impl ServerState {
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
             ServerState::SignIn { .. } => "The server didn't accept the saved login. Downloaded music still plays. Click to sign in.".into(),
-            ServerState::WorkingOffline { .. } => "Offline mode: Ond doesn't connect to the server, and shows only music that plays without it. Click to go online.".into(),
+            ServerState::WorkingOffline { .. } => {
+                "Offline mode: Ond doesn't connect to the server, and shows only music that plays without it. Click to go online.".into()
+            }
         }
     }
 
@@ -552,7 +602,9 @@ impl ServerState {
                     ui.ctx().request_repaint_after(SPIN);
                 }
             }
-            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted),
+            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => {
+                icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted)
+            }
             ServerState::SignIn { .. } => super::widgets::mark(ui, c, 12.0, super::widgets::Mark::Failed),
         }
         if !matches!(self, ServerState::Connecting { .. }) {

@@ -64,7 +64,14 @@ impl Ribbons {
         let energy = [feel.bass, feel.mid, feel.treble];
         let beat = feel.beat;
         let n = input.n();
-        let field = Field { zoom: 1.004 + 0.012 * beat, turn: 0.0015 + 0.004 * feel.mid, twist: 0.004, waves: 1.5, wave: 0.0007 * (self.t * 0.13).sin(), ..Field::default() };
+        let field = Field {
+            zoom: 1.004 + 0.012 * beat,
+            turn: 0.0015 + 0.004 * feel.mid,
+            twist: 0.004,
+            waves: 1.5,
+            wave: 0.0007 * (self.t * 0.13).sin(),
+            ..Field::default()
+        };
         let warp = Warp { from: field.over(n), to: field.over(n), mix: 0.0, fade: (0.93 + 0.03 * (1.0 - feel.level)).powf(n), blur: 0.3 };
         let base = self.color(0);
         let look = Look::Lit { centre: base.map(|c| c * 0.035), edge: [0.0; 3] };
@@ -90,7 +97,12 @@ impl Ribbons {
                     for _ in 0..SPARKS / 6 {
                         let a = self.rng.range(0.0, std::f32::consts::TAU);
                         let v = self.rng.range(0.3, 1.2) * (0.6 + 0.4 * beat);
-                        self.sparks.push(Spark { at: head, vel: [a.cos() * v, a.sin() * v], life: self.rng.range(0.4, 0.9), color: color.map(|c| c + (1.0 - c) * 0.5) });
+                        self.sparks.push(Spark {
+                            at: head,
+                            vel: [a.cos() * v, a.sin() * v],
+                            life: self.rng.range(0.4, 0.9),
+                            color: color.map(|c| c + (1.0 - c) * 0.5),
+                        });
                     }
                 }
             }

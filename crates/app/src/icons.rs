@@ -235,10 +235,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Eye | Icon::EyeClosed => {
             // The upper lid; open, the lower one and the iris too.
-            let lid = |sign: f32| (0..=12).map(move |k| {
-                let x = -0.9 + 1.8 * k as f32 / 12.0;
-                p(x, sign * 0.55 * (1.0 - (x / 0.9).powi(2)))
-            });
+            let lid = |sign: f32| {
+                (0..=12).map(move |k| {
+                    let x = -0.9 + 1.8 * k as f32 / 12.0;
+                    p(x, sign * 0.55 * (1.0 - (x / 0.9).powi(2)))
+                })
+            };
             if matches!(icon, Icon::Eye) {
                 painter.add(Shape::line(lid(-1.0).collect(), line));
                 painter.add(Shape::line(lid(1.0).collect(), line));

@@ -164,7 +164,15 @@ mod tests {
         w.extend_from_slice(b"RIFF");
         w.extend_from_slice(&(36 + data).to_le_bytes());
         w.extend_from_slice(b"WAVEfmt ");
-        for v in [16u32.to_le_bytes().as_slice(), &1u16.to_le_bytes(), &1u16.to_le_bytes(), &rate.to_le_bytes(), &(rate * 2).to_le_bytes(), &2u16.to_le_bytes(), &16u16.to_le_bytes()] {
+        for v in [
+            16u32.to_le_bytes().as_slice(),
+            &1u16.to_le_bytes(),
+            &1u16.to_le_bytes(),
+            &rate.to_le_bytes(),
+            &(rate * 2).to_le_bytes(),
+            &2u16.to_le_bytes(),
+            &16u16.to_le_bytes(),
+        ] {
             w.extend_from_slice(v);
         }
         w.extend_from_slice(b"data");

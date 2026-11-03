@@ -9,8 +9,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, OnceLock};
 use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Media::{
-    MediaPlaybackStatus, MediaPlaybackType, PlaybackPositionChangeRequestedEventArgs, SystemMediaTransportControls,
-    SystemMediaTransportControlsButton, SystemMediaTransportControlsButtonPressedEventArgs, SystemMediaTransportControlsTimelineProperties,
+    MediaPlaybackStatus, MediaPlaybackType, PlaybackPositionChangeRequestedEventArgs, SystemMediaTransportControls, SystemMediaTransportControlsButton,
+    SystemMediaTransportControlsButtonPressedEventArgs, SystemMediaTransportControlsTimelineProperties,
 };
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference};
 use windows::Win32::Foundation::HWND;
@@ -77,32 +77,28 @@ fn run(handler: Arc<dyn Fn(Remote) + Send + Sync>, hwnd: isize, rx: Receiver<Msg
     smtc.SetIsPreviousEnabled(true)?;
 
     let h = handler.clone();
-    smtc.ButtonPressed(&TypedEventHandler::<SystemMediaTransportControls, SystemMediaTransportControlsButtonPressedEventArgs>::new(
-        move |_, args| {
-            if let Some(args) = args.as_ref() {
-                let remote = match args.Button()? {
-                    SystemMediaTransportControlsButton::Play => Some(Remote::Play),
-                    SystemMediaTransportControlsButton::Pause | SystemMediaTransportControlsButton::Stop => Some(Remote::Pause),
-                    SystemMediaTransportControlsButton::Next => Some(Remote::Next),
-                    SystemMediaTransportControlsButton::Previous => Some(Remote::Previous),
-                    _ => None,
-                };
-                if let Some(r) = remote {
-                    h(r);
-                }
+    smtc.ButtonPressed(&TypedEventHandler::<SystemMediaTransportControls, SystemMediaTransportControlsButtonPressedEventArgs>::new(move |_, args| {
+        if let Some(args) = args.as_ref() {
+            let remote = match args.Button()? {
+                SystemMediaTransportControlsButton::Play => Some(Remote::Play),
+                SystemMediaTransportControlsButton::Pause | SystemMediaTransportControlsButton::Stop => Some(Remote::Pause),
+                SystemMediaTransportControlsButton::Next => Some(Remote::Next),
+                SystemMediaTransportControlsButton::Previous => Some(Remote::Previous),
+                _ => None,
+            };
+            if let Some(r) = remote {
+                h(r);
             }
-            Ok(())
-        },
-    ))?;
+        }
+        Ok(())
+    }))?;
     let h = handler;
-    smtc.PlaybackPositionChangeRequested(&TypedEventHandler::<SystemMediaTransportControls, PlaybackPositionChangeRequestedEventArgs>::new(
-        move |_, args| {
-            if let Some(args) = args.as_ref() {
-                h(Remote::Seek(secs(args.RequestedPlaybackPosition()?)));
-            }
-            Ok(())
-        },
-    ))?;
+    smtc.PlaybackPositionChangeRequested(&TypedEventHandler::<SystemMediaTransportControls, PlaybackPositionChangeRequestedEventArgs>::new(move |_, args| {
+        if let Some(args) = args.as_ref() {
+            h(Remote::Seek(secs(args.RequestedPlaybackPosition()?)));
+        }
+        Ok(())
+    }))?;
 
     let mut art: Option<(String, Vec<u8>)> = None;
     let mut current: Option<Info> = None;

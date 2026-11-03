@@ -332,7 +332,13 @@ impl OndApp {
                     ui.add_space(18.0);
                     let label = if form.busy { "Connecting…" } else { "Connect" };
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, 34.0), if form.busy { egui::Sense::hover() } else { egui::Sense::click() });
-                    let fill = if form.busy { t.accent.gamma_multiply(0.6) } else if resp.hovered() { t.accent.gamma_multiply(0.88) } else { t.accent };
+                    let fill = if form.busy {
+                        t.accent.gamma_multiply(0.6)
+                    } else if resp.hovered() {
+                        t.accent.gamma_multiply(0.88)
+                    } else {
+                        t.accent
+                    };
                     ui.painter().rect_filled(rect, 7.0, fill);
                     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::new(13.0, theme::semibold()), t.on_accent);
                     if form.busy {
@@ -364,12 +370,8 @@ impl OndApp {
         if submit && !form.busy {
             form.busy = true;
             form.error = None;
-            let settings = Settings {
-                server: form.server.trim().to_owned(),
-                username: form.username.trim().to_owned(),
-                signed_out: false,
-                ..self.prefs.snapshot()
-            };
+            let settings =
+                Settings { server: form.server.trim().to_owned(), username: form.username.trim().to_owned(), signed_out: false, ..self.prefs.snapshot() };
             self.bridge.connect(settings, Some(std::mem::take(&mut form.password)));
         }
     }

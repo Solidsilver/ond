@@ -31,7 +31,12 @@ pub struct Tap {
 
 impl Default for Tap {
     fn default() -> Self {
-        Self { samples: (0..TAP_FRAMES).map(|_| AtomicU32::new(0)).collect(), written: AtomicU64::new(0), rate: AtomicU32::new(0), active: AtomicBool::new(false) }
+        Self {
+            samples: (0..TAP_FRAMES).map(|_| AtomicU32::new(0)).collect(),
+            written: AtomicU64::new(0),
+            rate: AtomicU32::new(0),
+            active: AtomicBool::new(false),
+        }
     }
 }
 

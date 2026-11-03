@@ -38,13 +38,7 @@ pub fn stamp_of(t: &Track) -> String {
 }
 
 pub fn job_for(t: &Track, local: Option<std::path::PathBuf>) -> Job {
-    Job {
-        track_id: t.id.clone(),
-        suffix: t.suffix.clone(),
-        stamp: stamp_of(t),
-        secs: f64::from(t.duration_secs.unwrap_or(0)),
-        local,
-    }
+    Job { track_id: t.id.clone(), suffix: t.suffix.clone(), stamp: stamp_of(t), secs: f64::from(t.duration_secs.unwrap_or(0)), local }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -344,11 +338,7 @@ fn run(shared: &Shared, cfg: &Config) {
 
 /// The message a panic carried.
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
-    payload
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown panic".to_owned())
+    payload.downcast_ref::<&str>().map(|s| (*s).to_owned()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".to_owned())
 }
 
 /// Reads the job's downloaded copy, if it has one that opens.
@@ -360,7 +350,12 @@ fn analyze_local(job: &Job, stop: &(dyn Fn() -> bool + Sync)) -> Option<Result<T
 
 /// Analyses `job`: its downloaded copy if it has one, else fetched from
 /// `url()` (`None`: signed out).
-fn analyze_job(job: &Job, url: impl FnOnce() -> Option<String>, cfg: &Config, stop: &(dyn Fn() -> bool + Sync)) -> Result<TrackAnalysis, analysis::AnalyzeError> {
+fn analyze_job(
+    job: &Job,
+    url: impl FnOnce() -> Option<String>,
+    cfg: &Config,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<TrackAnalysis, analysis::AnalyzeError> {
     #[cfg(test)]
     if job.track_id == "test-panic" {
         panic!("odd file");
@@ -404,11 +399,7 @@ fn analyze_job(job: &Job, url: impl FnOnce() -> Option<String>, cfg: &Config, st
         });
         let out = (|| {
             let source = cache.open(&key, &url, abort.clone()).map_err(|e| {
-                if halt.load(Ordering::Relaxed) {
-                    analysis::AnalyzeError::Cancelled
-                } else {
-                    analysis::AnalyzeError::Failed(format!("fetch: {e}"))
-                }
+                if halt.load(Ordering::Relaxed) { analysis::AnalyzeError::Cancelled } else { analysis::AnalyzeError::Failed(format!("fetch: {e}")) }
             })?;
             let len = source.byte_len();
             analysis::analyze_reader(source, len, job.suffix.as_deref(), &|| halt.load(Ordering::Relaxed))

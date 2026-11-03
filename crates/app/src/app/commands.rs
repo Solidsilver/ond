@@ -2,25 +2,43 @@
 //! hearts, ratings and playlist edits.
 
 use super::{Action, OndApp, OutputAction, PrefsAction, WindowAction, sidebar};
-use std::sync::Arc;
 use crate::bridge::PlaylistEdit;
 use crate::favorites::StarKind;
 use crate::keys::{Cmd, EditCmd};
 use crate::nav::Route;
 use crate::window::WindowMode;
 use library::Track;
+use std::sync::Arc;
 
 /// A change to a playlist, from a view.
 #[derive(Debug, Clone)]
 pub enum PlaylistAction {
-    Create { name: String, tracks: Vec<Track> },
-    Add { id: String, tracks: Vec<Track> },
-    Rename { id: String, name: String },
-    Delete { id: String },
+    Create {
+        name: String,
+        tracks: Vec<Track>,
+    },
+    Add {
+        id: String,
+        tracks: Vec<Track>,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    Delete {
+        id: String,
+    },
     /// Remove the track at `index`.
-    Remove { id: String, index: usize },
+    Remove {
+        id: String,
+        index: usize,
+    },
     /// Move the track at `from` to `to` (both indices into the list as it is).
-    Move { id: String, from: usize, to: usize },
+    Move {
+        id: String,
+        from: usize,
+        to: usize,
+    },
 }
 
 /// Moves `v[from]` to `to`, shifting the others; out-of-range is a no-op.

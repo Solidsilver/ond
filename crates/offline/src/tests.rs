@@ -74,7 +74,11 @@ fn serve(conn: TcpStream, data: &[u8], opts: Opts, first: bool, log: &Mutex<Vec<
         return;
     }
     if opts.wrong_start && range.is_some() {
-        let _ = write!(out, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{len}\r\nContent-Type: audio/flac\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n", len - 1);
+        let _ = write!(
+            out,
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{len}\r\nContent-Type: audio/flac\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+            len - 1
+        );
         let _ = out.write_all(data);
         return;
     }

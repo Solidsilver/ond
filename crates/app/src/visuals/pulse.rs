@@ -230,7 +230,10 @@ pub(crate) mod tests {
                 let since = (t * 2.0).fract() / 2.0;
                 // The pitch drops from about 130 Hz to 50 as it sounds.
                 let thump = kick * (-since * 15.0).exp() * (TAU * (50.0 * since + 3.2 * (1.0 - (-since * 25.0).exp()))).sin();
-                let chord: f32 = [(55.0, 0.15), (110.0, 0.12), (220.0, 0.15), (330.0, 0.1), (440.0, 0.08), (1320.0, 0.03)].iter().map(|(hz, a)| a * (TAU * hz * t).sin()).sum();
+                let chord: f32 = [(55.0, 0.15), (110.0, 0.12), (220.0, 0.15), (330.0, 0.1), (440.0, 0.08), (1320.0, 0.03)]
+                    .iter()
+                    .map(|(hz, a)| a * (TAU * hz * t).sin())
+                    .sum();
                 gain * (chord + thump + 0.02 * noise(&mut seed))
             })
             .collect()

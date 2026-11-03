@@ -24,7 +24,6 @@ pub mod spectrum;
 pub mod visualizer;
 pub mod waveform;
 
-
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
