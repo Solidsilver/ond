@@ -211,7 +211,7 @@ impl Session {
     }
 }
 
-struct Ctx {
+pub(crate) struct Ctx {
     config: EngineConfig,
     status: Arc<Status>,
     cache: Option<StreamCache>,
