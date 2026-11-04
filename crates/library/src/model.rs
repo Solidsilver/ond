@@ -1,11 +1,37 @@
+//! The stored rows, one struct per shape a build has written.
+//!
+//! Rows are postcard, which writes fields in order with no names or tags. The
+//! bytes only mean something to the exact struct that wrote them, so these
+//! rules hold for every struct stored in the library database:
+//!
+//! - Once a build has shipped a struct, it is frozen. No field is added,
+//!   removed, reordered or retyped. postcard reads none of those as a
+//!   compatible change: an added field fails to decode old rows, and a removed
+//!   trailing one decodes them into the wrong fields.
+//! - Freezing a struct freezes every type inside it. Nested types are
+//!   versioned the same way (`ContributorV1`, `ArtistLinkV1`), and a stored
+//!   struct names the exact version it holds, never an alias. Repointing
+//!   [`Contributor`] at a `ContributorV2` then can't change `TrackV2`.
+//! - postcard writes an enum variant as its index. While an enum is current a
+//!   variant may be added at the end, since old rows never hold its index.
+//!   Once frozen, not even that. (No stored type has an enum yet.)
+//!
+//! To change a stored type, copy it to the next version, point its alias at
+//! the copy, give each struct that holds it a new version too, bump
+//! `SCHEMA_VERSION` and add a step to `migrate` that rewrites the rows
+//! (`rewrite_rows::<TrackV3, TrackV4>`). `ArtistV1` has never changed, and
+//! takes the same steps when it does. The golden-bytes tests fail when the
+//! current types' shape changes without that.
+
 use serde::{Deserialize, Serialize};
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
-/// Current schema versions. When a model changes, add a `V2` struct, point the
-/// alias at it and rewrite rows in `Library::migrate`.
+/// The current version of each stored type.
 pub type Artist = ArtistV1;
 pub type Album = AlbumV3;
 pub type Track = TrackV3;
+pub type ArtistLink = ArtistLinkV1;
+pub type Contributor = ContributorV1;
 
 /// Sort-key normalization: case- and accent-insensitive, so "Björk" sorts with
 /// "Bjork" and "bill evans" with "Bill Evans". Letters that Unicode doesn't
@@ -91,12 +117,12 @@ pub struct AlbumV2 {
 /// An artist as a linkable entity: Navidrome splits "A, B & C" credits into
 /// separate artists with ids.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ArtistLink {
+pub struct ArtistLinkV1 {
     pub id: Option<String>,
     pub name: String,
 }
 
-impl From<subsonic::ArtistRef> for ArtistLink {
+impl From<subsonic::ArtistRef> for ArtistLinkV1 {
     fn from(a: subsonic::ArtistRef) -> Self {
         Self { id: a.id, name: a.name }
     }
@@ -119,7 +145,7 @@ pub struct AlbumV3 {
     pub created: Option<String>,
     pub labels: Vec<String>,
     pub genres: Vec<String>,
-    pub artists: Vec<ArtistLink>,
+    pub artists: Vec<ArtistLinkV1>,
 }
 
 impl AlbumV3 {
@@ -246,7 +272,7 @@ impl From<subsonic::Album> for AlbumV3 {
             created: a.created,
             labels: a.record_labels.into_iter().map(|l| l.name).collect(),
             genres: a.genres.into_iter().map(|g| g.name).collect(),
-            artists: a.artists.into_iter().map(ArtistLink::from).collect(),
+            artists: a.artists.into_iter().map(ArtistLinkV1::from).collect(),
         }
     }
 }
@@ -275,7 +301,7 @@ pub struct TrackV1 {
 
 /// A credit on a track: who, in what role ("composer", "performer" + "piano").
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct Contributor {
+pub struct ContributorV1 {
     pub role: String,
     pub sub_role: Option<String>,
     pub name: String,
@@ -305,7 +331,7 @@ pub struct TrackV2 {
     pub track_peak: Option<f32>,
     pub album_peak: Option<f32>,
     pub composer: Option<String>,
-    pub contributors: Vec<Contributor>,
+    pub contributors: Vec<ContributorV1>,
     pub cover_art: Option<String>,
 }
 
@@ -362,9 +388,9 @@ pub struct TrackV3 {
     pub track_peak: Option<f32>,
     pub album_peak: Option<f32>,
     pub composer: Option<String>,
-    pub contributors: Vec<Contributor>,
+    pub contributors: Vec<ContributorV1>,
     pub cover_art: Option<String>,
-    pub artists: Vec<ArtistLink>,
+    pub artists: Vec<ArtistLinkV1>,
 }
 
 impl From<TrackV2> for TrackV3 {
@@ -447,10 +473,10 @@ impl TrackV3 {
             contributors: s
                 .contributors
                 .into_iter()
-                .map(|c| Contributor { role: c.role, sub_role: c.sub_role, name: c.artist.name, artist_id: c.artist.id })
+                .map(|c| ContributorV1 { role: c.role, sub_role: c.sub_role, name: c.artist.name, artist_id: c.artist.id })
                 .collect(),
             cover_art: s.cover_art,
-            artists: s.artists.into_iter().map(ArtistLink::from).collect(),
+            artists: s.artists.into_iter().map(ArtistLinkV1::from).collect(),
         }
     }
 }

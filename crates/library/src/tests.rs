@@ -802,6 +802,103 @@ fn a_schema_step_without_a_migration_is_an_error() {
     assert!(matches!(migrate(&wt, 0, 1), Err(Error::NoMigration { from: 0 })));
 }
 
+fn full_artist() -> Artist {
+    Artist { id: "ar-1".into(), name: "Bill Evans".into(), sort: Some("Evans, Bill".into()), album_count: 3, cover_art: Some("ar-1_0".into()) }
+}
+
+fn full_album() -> Album {
+    Album {
+        id: "al-1".into(),
+        name: "Sunday".into(),
+        sort: Some("Sunday at".into()),
+        artist: Some("Bill Evans Trio".into()),
+        artist_ref: Some("ar-2".into()),
+        year: Some(1961),
+        genre: Some("Jazz".into()),
+        song_count: 5,
+        duration_secs: 2400,
+        cover_art: Some("al-1_0".into()),
+        created: Some("2024-01-02".into()),
+        labels: vec!["Riverside".into()],
+        genres: vec!["Jazz".into()],
+        artists: vec![ArtistLink { id: Some("ar-2".into()), name: "Bill Evans Trio".into() }],
+    }
+}
+
+fn full_track() -> Track {
+    Track {
+        id: "s-1".into(),
+        album_id: "al-1".into(),
+        title: "Gloria's Step".into(),
+        artist: Some("Bill Evans Trio".into()),
+        artist_ref: Some("ar-2".into()),
+        track: Some(1),
+        disc: Some(2),
+        duration_secs: Some(370),
+        suffix: Some("flac".into()),
+        content_type: Some("audio/flac".into()),
+        size: Some(300_000),
+        bit_rate_kbps: Some(900),
+        bit_depth: Some(24),
+        sample_rate: Some(96_000),
+        channels: Some(2),
+        track_gain: Some(-1.5),
+        album_gain: Some(-2.0),
+        track_peak: Some(0.5),
+        album_peak: Some(1.0),
+        composer: Some("Scott LaFaro".into()),
+        contributors: vec![Contributor {
+            role: "performer".into(),
+            sub_role: Some("bass".into()),
+            name: "Scott LaFaro".into(),
+            artist_id: Some("ar-3".into()),
+        }],
+        cover_art: Some("s-1_0".into()),
+        artists: vec![ArtistLink { id: None, name: "Bill Evans".into() }],
+    }
+}
+
+/// What to do when a golden-bytes test fails.
+const SHAPE_CHANGED: &str = "the stored shape of a library row changed, so rows already on disk no longer decode as this type. \
+    Don't edit the bytes to match: freeze the old struct (and every type inside it) as the previous version, \
+    add the next version, bump SCHEMA_VERSION and add a step to `migrate` (see the rules in model.rs). \
+    Then add the new bytes as the new version's test";
+
+#[test]
+fn artist_v1_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 114, 45, 49, 10, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115, 1, 11, 69, 118, 97, 110, 115, 44, 32, 66, 105, 108, 108, 3, 1, 6, 97, 114, 45,
+        49, 95, 48,
+    ];
+    assert_eq!(encode(&full_artist()).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<Artist>(BYTES).unwrap(), full_artist());
+}
+
+#[test]
+fn album_v3_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+        32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
+        48, 49, 45, 48, 50, 1, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 1, 4, 74, 97, 122, 122, 1, 1, 4, 97, 114, 45, 50, 15, 66, 105, 108, 108, 32, 69,
+        118, 97, 110, 115, 32, 84, 114, 105, 111,
+    ];
+    assert_eq!(encode(&full_album()).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<Album>(BYTES).unwrap(), full_album());
+}
+
+#[test]
+fn track_v3_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        3, 115, 45, 49, 4, 97, 108, 45, 49, 13, 71, 108, 111, 114, 105, 97, 39, 115, 32, 83, 116, 101, 112, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110,
+        115, 32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 1, 1, 2, 1, 242, 2, 1, 4, 102, 108, 97, 99, 1, 10, 97, 117, 100, 105, 111, 47, 102, 108, 97, 99,
+        1, 224, 167, 18, 1, 132, 7, 1, 24, 1, 128, 238, 5, 1, 2, 1, 0, 0, 192, 191, 1, 0, 0, 0, 192, 1, 0, 0, 0, 63, 1, 0, 0, 128, 63, 1, 12, 83, 99, 111, 116,
+        116, 32, 76, 97, 70, 97, 114, 111, 1, 9, 112, 101, 114, 102, 111, 114, 109, 101, 114, 1, 4, 98, 97, 115, 115, 12, 83, 99, 111, 116, 116, 32, 76, 97,
+        70, 97, 114, 111, 1, 4, 97, 114, 45, 51, 1, 5, 115, 45, 49, 95, 48, 1, 0, 10, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+    ];
+    assert_eq!(encode(&full_track()).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<Track>(BYTES).unwrap(), full_track());
+}
+
 /// An album with two credited tracks, then its album row and its first
 /// track's row overwritten with bytes that don't decode.
 fn library_with_unreadable_rows() -> Library {
