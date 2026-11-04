@@ -596,6 +596,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_shader_compiles() {
+        let module = naga::front::wgsl::parse_str(SHADER).unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
+    }
+
+    #[test]
     fn big_views_are_drawn_smaller_and_scaled_up() {
         assert_eq!(picture_size([1280, 800]), [1280, 800]);
         assert_eq!(picture_size([2880, 1800]), [1440, 900]);
