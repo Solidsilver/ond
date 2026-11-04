@@ -682,7 +682,6 @@ impl Engine {
             return;
         }
         if let Some(at) = self.take_position() {
-            self.stop();
             self.resume(at);
         }
     }
@@ -690,6 +689,11 @@ impl Engine {
     /// Starts a new session at `src`, optionally from `start_at`.
     fn start(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.stop();
+        self.begin(src, start_at);
+    }
+
+    /// Starts a new session once the old one is stopped.
+    fn begin(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.restarting = false;
         self.status.set_state(PlayState::Loading);
         self.status.paused.store(false, Ordering::Relaxed);
@@ -701,6 +705,14 @@ impl Engine {
     }
 
     fn stop(&mut self) {
+        self.halt(false);
+    }
+
+    /// Stops the session and the stream. With `reopen`, a new session for the
+    /// same device follows at once, so the backend may keep exclusive access
+    /// (see [`OutputBackend::close_for_reopen`]). If that session never opens a
+    /// stream, it ends in a plain [`stop`](Self::stop), which lets go.
+    fn halt(&mut self, reopen: bool) {
         self.held_seek = None;
         self.opening = None;
         // From here on the old decode thread leaves `Status` alone (it may
@@ -710,7 +722,11 @@ impl Engine {
         }
         // Synchronous: no callback runs after this. With the decoder silenced
         // too, the counters below stay reset.
-        self.backend.close();
+        if reopen {
+            self.backend.close_for_reopen();
+        } else {
+            self.backend.close();
+        }
         self.ring = None;
         self.tracks.clear();
         self.out_seq = 0;
@@ -811,8 +827,10 @@ impl Engine {
     }
 
     /// Restarts at a position from [`take_position`](Self::take_position), keeping pause.
+    /// The device stays claimed for the reopen.
     fn resume(&mut self, (src, at, paused): (TrackSource, Duration, bool)) {
-        self.start(src, Some(at));
+        self.halt(true);
+        self.begin(src, Some(at));
         self.restarting = true;
         if paused {
             self.status.paused.store(true, Ordering::Relaxed);

@@ -12,6 +12,11 @@ struct FakeBackend {
     stop: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
     drained: Arc<AtomicBool>,
     opens: Arc<AtomicU64>,
+    /// Calls to `close`, and to `close_for_reopen`.
+    closes: Arc<AtomicU64>,
+    reopen_closes: Arc<AtomicU64>,
+    /// Like CoreAudio, bit-perfect mode follows the song's rate whatever `own_rate` says.
+    bit_perfect: bool,
     /// Devices "plugged in"; the first is the system default.
     devices: Arc<Mutex<Vec<DeviceInfo>>>,
     device_events: Arc<Mutex<Vec<DeviceEvent>>>,
@@ -44,6 +49,9 @@ impl FakeBackend {
             stop: None,
             drained: Arc::default(),
             opens: Arc::default(),
+            closes: Arc::default(),
+            reopen_closes: Arc::default(),
+            bit_perfect: false,
             devices: Arc::default(),
             device_events: Arc::default(),
             selected: None,
@@ -52,6 +60,14 @@ impl FakeBackend {
             own_rate: None,
             dropped: Arc::default(),
             volume: None,
+        }
+    }
+
+    fn stop_stream(&mut self) {
+        self.open_dev = None;
+        if let Some((stop, handle)) = self.stop.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
         }
     }
 
@@ -70,10 +86,14 @@ impl OutputBackend for FakeBackend {
 
     fn device_caps(&mut self) -> Option<DeviceCaps> {
         let mut caps = self.caps.clone();
-        if let Some(rate) = self.own_rate {
+        if let Some(rate) = self.own_rate.filter(|_| !self.bit_perfect) {
             caps.configs = caps.configs.iter().map(|c| RateRange { min: rate, max: rate, ..*c }).collect();
         }
         Some(caps)
+    }
+
+    fn set_mode(&mut self, mode: PlaybackMode) {
+        self.bit_perfect = mode == PlaybackMode::BitPerfect;
     }
 
     fn set_match_rate(&mut self, on: bool) {
@@ -119,7 +139,7 @@ impl OutputBackend for FakeBackend {
     }
 
     fn open(&mut self, format: StreamFormat, mut input: RingInput, status: Arc<Status>) -> Result<(), OutputError> {
-        self.close();
+        self.stop_stream();
         if !self.caps.supports(format.sample_rate, format.channels) {
             return Err(OutputError::Unsupported { rate: format.sample_rate, channels: format.channels });
         }
@@ -162,11 +182,13 @@ impl OutputBackend for FakeBackend {
     }
 
     fn close(&mut self) {
-        self.open_dev = None;
-        if let Some((stop, handle)) = self.stop.take() {
-            stop.store(true, Ordering::Relaxed);
-            let _ = handle.join();
-        }
+        self.closes.fetch_add(1, Ordering::Relaxed);
+        self.stop_stream();
+    }
+
+    fn close_for_reopen(&mut self) {
+        self.reopen_closes.fetch_add(1, Ordering::Relaxed);
+        self.stop_stream();
     }
 }
 
@@ -307,6 +329,37 @@ fn leaving_the_device_at_its_rate_restarts_the_track_resampled_and_back() {
     engine.send(Command::MatchRate(true));
     let seen = events_until(&engine, |e| matches!(e, Event::SignalPath(p) if p.device_rate == 44_100));
     assert_eq!(rate(&seen), Some((44_100, false)));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_bit_perfect_toggle_restarts_the_track_without_letting_go_of_the_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(4 * 44_100 * 2, 0);
+    let backend = FakeBackend::new(caps(Some(24), 96_000));
+    let (closes, reopen_closes) = (backend.closes.clone(), backend.reopen_closes.clone());
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(backend), None);
+    // Normal mode leaves the device at 48 kHz; this file is 44.1.
+    engine.send(Command::MatchRate(false));
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::SignalPath(p) if p.device_rate == 48_000));
+    let before = (closes.load(Ordering::Relaxed), reopen_closes.load(Ordering::Relaxed));
+
+    engine.send(Command::SetMode(PlaybackMode::BitPerfect));
+    let seen = events_until(&engine, |e| matches!(e, Event::SignalPath(p) if p.device_rate == 44_100));
+    assert!(seen.iter().any(|e| matches!(e, Event::TrackStarted { restart: true, .. })), "the track starts over at its own rate");
+    // A full close lets go of an exclusive device (CoreAudio's hog, ALSA's
+    // claim) only for the reopen to take it straight back.
+    assert_eq!(closes.load(Ordering::Relaxed), before.0, "the restart never lets go of the device");
+    assert!(reopen_closes.load(Ordering::Relaxed) > before.1, "it closes for the reopen instead");
+
+    engine.send(Command::Stop);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while closes.load(Ordering::Relaxed) == before.0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(closes.load(Ordering::Relaxed) > before.0, "stopping does let go");
     engine.send(Command::Shutdown);
 }
 
