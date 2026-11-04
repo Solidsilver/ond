@@ -4,10 +4,10 @@
 //! [`OfflineStore`] keeps the pins (see [`pins`]) in `offline.json` next to the
 //! files and runs a small download queue on the tokio runtime: two at a time,
 //! resumed with `Range` after an interruption or a restart (when the server's
-//! file is provably still the same, see [`RESUME_OVERLAP`]), retried with
-//! backoff, and checked against the size the server reported. A track that's
-//! already complete in the stream cache is hard-linked (or copied) instead of
-//! downloaded again.
+//! file is provably still the same, because the last 64 KB on disk match what
+//! it sends again), retried with backoff, and checked against the size the
+//! server reported. A track that's already complete in the stream cache is
+//! hard-linked (or copied) instead of downloaded again.
 //!
 //! Files are named by [`streamcache::file_name`], exactly as in the stream
 //! cache, with `.part` appended while downloading. The engine plays a finished one as a
@@ -123,7 +123,7 @@ pub struct Snapshot {
     pub active: usize,
     pub failed: usize,
     /// A state file that couldn't be read was set aside, so files the pins
-    /// don't name are kept (see [`load_pins`]); `None` normally.
+    /// don't name are kept (see [`SetAside`]); `None` normally.
     pub set_aside: Option<SetAside>,
 }
 
@@ -163,7 +163,7 @@ impl Snapshot {
 }
 
 /// A handle to the store; copies share it. The store shuts down when the last
-/// copy is dropped (see [`Owner`]).
+/// copy is dropped.
 #[derive(Clone)]
 pub struct OfflineStore {
     inner: Arc<Inner>,
@@ -628,7 +628,7 @@ impl Inner {
         }
     }
 
-    /// The pins as they are now, to [`write`](Self::write) once the lock is released.
+    /// The pins as they are now, for the [`saver`] thread to write once the lock is released.
     fn save(&self, st: &mut State) -> Option<Save> {
         st.pins_revision += 1;
         match serde_json::to_vec(&st.pins) {
@@ -1368,30 +1368,49 @@ pub struct MoveProgress {
     pub total: u64,
 }
 
+/// What a move left behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MoveOutcome {
+    /// Files still where they came from, because a file of another size had
+    /// the same name at the destination. The destination's file wins, and the
+    /// original stays, since nothing proves it's a stray. Their folder stays
+    /// too. Empty when everything moved.
+    pub kept: Vec<PathBuf>,
+}
+
 /// Moves a store's files from `from` to `to` (run before opening it at `to`),
 /// including the per-account stores in folders under it. Renames where it can,
-/// copies across volumes. Files already at `to` win.
+/// copies across volumes. Files already at `to` win, and the originals that
+/// lost are listed in the outcome.
 ///
 /// Stopping it anywhere (quitting, a crash) loses nothing, and running it again
-/// finishes the job: a copy is made under a temporary name (see
-/// [`moving_name`]) and renamed into place before the original goes, and a file
-/// found at both ends with the same size is one whose copy was done.
-pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
+/// finishes the job. A copy is made under a temporary name and renamed into
+/// place before the original goes, and a file found at both ends with the same
+/// size is one whose copy was done.
+pub fn move_store(from: &Path, to: &Path) -> io::Result<MoveOutcome> {
     move_store_with(from, to, &mut |_| {})
 }
 
 /// [`move_store`], telling `progress` after each file. It can take a while
-/// across volumes: run it off the UI thread.
-pub fn move_store_with(from: &Path, to: &Path, progress: &mut dyn FnMut(MoveProgress)) -> io::Result<()> {
+/// across volumes, so run it off the UI thread.
+pub fn move_store_with(from: &Path, to: &Path, progress: &mut dyn FnMut(MoveProgress)) -> io::Result<MoveOutcome> {
+    let mut outcome = MoveOutcome::default();
     if from == to || !from.is_dir() {
-        return Ok(());
+        return Ok(outcome);
     }
     let mut at = MoveProgress { done: 0, total: tree_size(from) };
     progress(at);
-    move_files(from, to, true, &mut |bytes| {
-        at.done += bytes;
-        progress(at);
-    })
+    move_files(
+        from,
+        to,
+        true,
+        &mut |bytes| {
+            at.done += bytes;
+            progress(at);
+        },
+        &mut outcome,
+    )?;
+    Ok(outcome)
 }
 
 /// Bytes in the files under `dir`.
@@ -1412,24 +1431,52 @@ fn tree_size(dir: &Path) -> u64 {
 /// else never fetches the old pins with the new server's URLs, and switching
 /// back finds them again. A store kept directly in `base` by an older version
 /// becomes this account's the first time.
+///
+/// That adoption moves files one by one, in no set order, so a crash can stop
+/// it after `offline.json` moved and before the downloads did. So an account
+/// that has its own `offline.json` also takes any file still in `base`, and
+/// the move carries on where it stopped. An account without one leaves them,
+/// so a new account never picks up another's half-moved downloads. A second
+/// `offline.json` in `base` while this account has its own is another store,
+/// and it stays put rather than mixing two sets of pins.
 pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
     let dir = base.join(format!("{account:08x}"));
-    if base.join(STATE_FILE).is_file() && !dir.join(STATE_FILE).exists() {
-        move_files(base, &dir, false, &mut |_| {})?;
+    let (theirs, mine) = (base.join(STATE_FILE).is_file(), dir.join(STATE_FILE).exists());
+    let start = theirs && !mine;
+    let resume = !theirs && mine && has_leftovers(base);
+    if start || resume {
+        let mut outcome = MoveOutcome::default();
+        move_files(base, &dir, false, &mut |_| {}, &mut outcome)?;
+        for kept in &outcome.kept {
+            tracing::warn!("offline: kept {}, as {} already has a different file by that name", kept.display(), dir.display());
+        }
     }
     Ok(dir)
 }
 
+/// `dir` holds files an adoption into an account folder still has to move: any
+/// but hidden ones (a `.DS_Store`), apart from copies a move left unfinished.
+fn has_leftovers(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            e.file_type().is_ok_and(|t| t.is_file()) && (!name.starts_with('.') || is_moving(&name))
+        })
+    })
+}
+
 /// Moves the files in `from` (with `folders`, the folders in it too) to `to`,
-/// calling `moved` with each file's size once it's dealt with.
-fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64)) -> io::Result<()> {
+/// calling `moved` with each file's size once it's dealt with. Originals kept
+/// because `to` has a different file by the same name go in `outcome`.
+fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64), outcome: &mut MoveOutcome) -> io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let kind = e.file_type()?;
         if kind.is_dir() {
             if folders {
-                move_files(&e.path(), &to.join(e.file_name()), true, moved)?;
+                move_files(&e.path(), &to.join(e.file_name()), true, moved, outcome)?;
             }
             continue;
         }
@@ -1448,6 +1495,8 @@ fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64))
             if there.is_file() && there.len() == len {
                 // Copied, but the move stopped before the original went.
                 std::fs::remove_file(e.path())?;
+            } else {
+                outcome.kept.push(e.path());
             }
             moved(len);
             continue;

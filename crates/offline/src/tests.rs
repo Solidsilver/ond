@@ -553,6 +553,59 @@ fn each_account_keeps_its_own_downloads_and_old_stores_are_adopted() {
     assert_eq!(server.requests().len(), 1);
 }
 
+#[test]
+fn an_adoption_cut_short_after_the_state_file_moved_finishes_on_the_next_open() {
+    let base = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(20_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(base.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("the download", || s.snapshot().is_done("t"));
+    s.set_source(None);
+    drop(s);
+
+    // The first adoption moved offline.json and then stopped, before the
+    // download it names.
+    let mine = base.path().join(format!("{:08x}", 1));
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::rename(base.path().join(STATE_FILE), mine.join(STATE_FILE)).unwrap();
+    // Hidden files alone don't count as a store left behind.
+    std::fs::write(base.path().join(".DS_Store"), b"finder").unwrap();
+    assert!(base.path().join("t.flac").exists());
+
+    assert_eq!(account_store(base.path(), 1).unwrap(), mine);
+    assert!(!base.path().join("t.flac").exists(), "the rest of the move happened");
+    let s = store(&mine, &rt);
+    assert!(s.snapshot().is_done("t"));
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+    assert_eq!(server.requests().len(), 1, "nothing downloaded again");
+    drop(s);
+
+    // Nothing is left to adopt, so another account starts empty.
+    std::fs::write(base.path().join(".DS_Store"), b"finder").unwrap();
+    let theirs = account_store(base.path(), 2).unwrap();
+    assert!(!theirs.exists() || std::fs::read_dir(&theirs).unwrap().next().is_none());
+}
+
+#[test]
+fn a_move_reports_the_originals_it_kept() {
+    let base = tempfile::tempdir().unwrap();
+    let (from, to) = (base.path().join("old"), base.path().join("new"));
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::create_dir_all(&to).unwrap();
+    std::fs::write(from.join("t.flac"), b"the old file").unwrap();
+    std::fs::write(to.join("t.flac"), b"another").unwrap();
+    std::fs::write(from.join("u.flac"), b"moves").unwrap();
+    let outcome = move_store(&from, &to).unwrap();
+    assert_eq!(outcome.kept, [from.join("t.flac")]);
+    assert_eq!(std::fs::read(from.join("t.flac")).unwrap(), b"the old file", "never deleted");
+    assert_eq!(std::fs::read(to.join("t.flac")).unwrap(), b"another", "the destination wins");
+    assert_eq!(std::fs::read(to.join("u.flac")).unwrap(), b"moves");
+    assert!(move_store(&to, &base.path().join("newer")).unwrap().kept.is_empty());
+}
+
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
 fn slack(d: std::time::Duration) -> std::time::Duration {

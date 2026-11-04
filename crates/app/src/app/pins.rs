@@ -194,7 +194,7 @@ impl Downloads {
                 if let Err(e) = &moved {
                     tracing::warn!("moving downloads from {}: {e}", from.display());
                 }
-                b.post(Msg::OfflineMoved(moved.map_err(|e| e.to_string())));
+                b.post(Msg::OfflineMoved(moved.map(drop).map_err(|e| e.to_string())));
             }
             let store = Self::dir_for(&base, account).map_err(anyhow::Error::from).and_then(|dir| open(dir, limit));
             b.post(Msg::OfflineStore { generation, store: store.map_err(|e| format!("{e:#}")) });
