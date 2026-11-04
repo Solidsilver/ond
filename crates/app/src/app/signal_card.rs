@@ -2,12 +2,29 @@
 //! format, what changes on the way, and the output.
 
 use super::playing::Origin;
+use crate::output::{Outputs, Readout};
 use crate::theme::Tokens;
 use crate::widgets::kv_text;
 use audio::{BitPerfectStatus, SignalPath};
 use library::Track;
 
 const WIDTH: f32 = 300.0;
+
+/// The readout for the pill, marked local when the track plays from this
+/// computer.
+pub(super) fn readout(output: &Outputs, status: &audio::Status, origin: Option<&Origin>) -> Option<Readout> {
+    output.readout(status).map(|r| Readout { local: origin.is_some_and(Origin::is_local), ..r })
+}
+
+/// What the pill does wherever it's shown (the now-playing display, the
+/// Player's bottom line): it names the path for screen readers, opens the
+/// signal card when clicked, and spells the path out on hover.
+pub(super) fn pill(resp: egui::Response, r: &Readout, origin: Option<&Origin>, track: &Track, output: &Outputs, underruns: u64) {
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
+    let path = output.signal();
+    popover(&resp, origin, track, path, underruns);
+    resp.on_hover_text(hover(origin, path, &r.detail)).on_hover_cursor(egui::CursorIcon::PointingHand);
+}
 
 /// The pill's hover: where from, then the terse signal line.
 pub(super) fn hover(origin: Option<&Origin>, path: Option<&SignalPath>, detail: &str) -> String {

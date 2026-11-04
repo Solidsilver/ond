@@ -172,21 +172,13 @@ impl OndApp {
                     self.output_control_out(out);
                     // The same few characters of signal path as the full window's display.
                     let origin = self.player.playing_from.as_ref().map(|s| super::playing::origin(s, &self.cache));
-                    let readout = self
-                        .output
-                        .readout(&self.engine.status)
-                        .map(|r| crate::output::Readout { local: origin.as_ref().is_some_and(super::playing::Origin::is_local), ..r });
+                    let readout = super::signal_card::readout(&self.output, &self.engine.status, origin.as_ref());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let (Some(r), Some(item)) = (readout, self.player.queue.current.as_ref()) {
                             let size = crate::output::paint_readout(ui, egui::Pos2::ZERO, &r, 10.5, false).size();
                             let (rect, resp) = ui.allocate_exact_size(size + vec2(4.0, 6.0), Sense::click());
                             crate::output::paint_readout(ui, rect.right_center() - vec2(2.0, 0.0), &r, 10.5, true);
-                            resp.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default()))
-                            });
-                            let path = self.output.signal();
-                            super::signal_card::popover(&resp, origin.as_ref(), &item.track, path, self.engine.status.underruns());
-                            resp.on_hover_text(super::signal_card::hover(origin.as_ref(), path, &r.detail)).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            super::signal_card::pill(resp, &r, origin.as_ref(), &item.track, &self.output, self.engine.status.underruns());
                         }
                         if !self.session.online && self.session.settings.is_some() {
                             let (g, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
