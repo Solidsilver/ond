@@ -4,7 +4,7 @@
 //! name. Each page draws its own rows; this is the frame around them.
 
 use super::alpha::{self, Marks};
-use egui::{Margin, Ui};
+use egui::{Margin, Rect, Ui, UiBuilder};
 use std::hash::Hash;
 use std::ops::Range;
 
@@ -58,6 +58,38 @@ impl<'a, L: Hash + std::fmt::Debug + Copy> VirtualList<'a, L> {
     }
 }
 
+/// For a list whose lines differ in height (the queue: group headings,
+/// tracks, gaps), inside a scroll area's `show_viewport`: sizes the content
+/// for every line, then lays out only those in `viewport`, calling `draw`
+/// with each one's index. Lines are laid out from the first one shown, so
+/// their auto ids shift as the list scrolls: give each one its own
+/// (`push_id`).
+pub fn visible_lines(ui: &mut Ui, viewport: Rect, heights: &[f32], mut draw: impl FnMut(&mut Ui, usize)) {
+    let top = ui.max_rect().top();
+    let total: f32 = heights.iter().sum();
+    ui.set_height(total);
+    // Where the first line on screen starts.
+    let mut y = 0.0;
+    let mut first = heights.len();
+    for (k, &h) in heights.iter().enumerate() {
+        if y + h > viewport.min.y {
+            first = k;
+            break;
+        }
+        y += h;
+    }
+    let shown = Rect::from_x_y_ranges(ui.max_rect().x_range(), top + y..=top + total);
+    ui.scope_builder(UiBuilder::new().max_rect(shown), |ui| {
+        for (k, &h) in heights.iter().enumerate().skip(first) {
+            if y >= viewport.max.y {
+                break;
+            }
+            draw(ui, k);
+            y += h;
+        }
+    });
+}
+
 /// The scroll area's content margin: the gutter, and room for the rail when
 /// there is one.
 pub fn margin(rail: bool) -> Margin {
@@ -79,5 +111,39 @@ mod tests {
         assert_eq!(near(&(0..5), 2, 10).collect::<Vec<_>>(), [5, 6]);
         assert_eq!(near(&(4..8), 2, 10).collect::<Vec<_>>(), [2, 3, 8, 9]);
         assert_eq!(near(&(8..10), 2, 10).collect::<Vec<_>>(), [6, 7]);
+    }
+
+    #[test]
+    fn only_the_lines_on_screen_are_laid_out_each_in_its_place() {
+        // Headings among tracks, as in the queue.
+        let heights: Vec<f32> = (0..1000).map(|k| if k % 10 == 0 { 26.0 } else { 44.0 }).collect();
+        let starts: Vec<f32> = heights.iter().scan(0.0, |y, h| Some(std::mem::replace(y, *y + h))).collect();
+        let ctx = egui::Context::default();
+        let mut drawn = Vec::new();
+        for _ in 0..2 {
+            drawn.clear();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 800.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let scroll = egui::ScrollArea::vertical().max_height(300.0).vertical_scroll_offset(1000.0);
+                scroll.show_viewport(ui, |ui, viewport| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let top = ui.max_rect().top();
+                    visible_lines(ui, viewport, &heights, |ui, k| {
+                        drawn.push((k, ui.cursor().top() - top));
+                        ui.allocate_exact_size(egui::vec2(10.0, heights[k]), egui::Sense::hover());
+                    });
+                });
+            });
+            // No renderer here to upload textures to.
+            out.textures_delta.clear();
+        }
+        let (first, at) = drawn[0];
+        assert!(starts[first] <= 1000.0 && 1000.0 < starts[first] + heights[first], "first line {first} starts at {}", starts[first]);
+        assert!(drawn.len() < 12, "{} lines laid out", drawn.len());
+        for &(k, y) in &drawn {
+            assert_eq!(y, starts[k], "line {k}");
+        }
+        assert_eq!(at, starts[first]);
+        assert!(starts[drawn.last().unwrap().0] < 1300.0);
     }
 }
