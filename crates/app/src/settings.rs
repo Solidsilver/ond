@@ -102,7 +102,9 @@ impl From<DeviceMode> for audio::PlaybackMode {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
     pub server: String,
+    #[serde(default)]
     pub username: String,
     /// Size cap for the streaming cache; `None` uses the default (2 GB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,6 +231,18 @@ pub struct Settings {
     pub experimental: crate::visuals::Experimental,
 }
 
+/// Each value in `obj` that isn't itself an object, with its path.
+fn leaves_of(obj: &serde_json::Map<String, serde_json::Value>, at: &mut Vec<String>, out: &mut Vec<(Vec<String>, serde_json::Value)>) {
+    for (key, value) in obj {
+        at.push(key.clone());
+        match value {
+            serde_json::Value::Object(inner) if !inner.is_empty() => leaves_of(inner, at, out),
+            _ => out.push((at.clone(), value.clone())),
+        }
+        at.pop();
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -334,7 +348,36 @@ impl Settings {
     /// Reads the settings file without changing anything (the window's first
     /// size, before the app starts). `None` when missing or unreadable.
     pub fn read(path: &Path) -> Option<Self> {
-        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+        Self::from_json(&std::fs::read(path).ok()?).ok()
+    }
+
+    /// Reads a settings file's contents. A value this build doesn't know (a
+    /// format a newer Ond added, a typo) costs only that setting. It's logged
+    /// and left at its default, and the rest of the file still counts, so
+    /// going back a version doesn't reset everything or sign the user out.
+    /// `Err` only when the bytes aren't JSON.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        if let Ok(s) = serde_json::from_value(value.clone()) {
+            return Ok(s);
+        }
+        let serde_json::Value::Object(top) = value else {
+            return serde_json::from_value(value);
+        };
+        // Each leaf goes over the defaults in turn and stays only if the
+        // whole still reads.
+        let mut leaves = Vec::new();
+        leaves_of(&top, &mut Vec::new(), &mut leaves);
+        let mut kept = serde_json::to_value(Settings::default())?;
+        for (path, leaf) in leaves {
+            let mut tried = kept.clone();
+            crate::managed::set(&mut tried, &path, leaf);
+            match serde_json::from_value::<Settings>(tried.clone()) {
+                Ok(_) => kept = tried,
+                Err(e) => tracing::warn!("setting {}: {e}; using the default", path.join(".")),
+            }
+        }
+        serde_json::from_value(kept)
     }
 
     /// A stable id for the server account (server address and user), used to

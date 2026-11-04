@@ -65,13 +65,15 @@ struct Handle {
 
 impl Prefs {
     /// Reads the settings file at `path`, with the managed settings beside it
-    /// (see [`crate::managed`]) over it. An unreadable file is moved aside
-    /// (never silently overwritten) and the defaults used instead.
+    /// (see [`crate::managed`]) over it. A value this build doesn't know costs
+    /// only that setting (see [`Settings::from_json`]). A file that isn't JSON
+    /// at all is moved aside, never silently overwritten, and the defaults
+    /// used instead.
     pub fn open(path: impl Into<PathBuf>) -> (Self, Loaded) {
         let path = path.into();
         let (settings, loaded) = match std::fs::read(&path) {
             Err(_) => (Settings::default(), Loaded::Missing),
-            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+            Ok(bytes) => match Settings::from_json(&bytes) {
                 Ok(mut s) => {
                     s.migrate();
                     (s, Loaded::Read)
@@ -338,6 +340,44 @@ mod tests {
         prefs.flush();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#""uid-umc22": "bit-perfect""#), "{text}");
+    }
+
+    #[test]
+    fn a_value_this_build_does_not_know_costs_only_that_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A format and a theme from a newer build (as Opus was to 0.4.2).
+        std::fs::write(
+            &path,
+            r#"{
+  "server": "https://music.example.com",
+  "username": "me",
+  "theme": "sepia",
+  "show_queue": false,
+  "volume": 0.3,
+  "device_modes": { "uid-umc22": "bit-perfect" },
+  "playback": { "replay_gain": "album", "format": "flac-hd", "kbps": 192 }
+}"#,
+        )
+        .unwrap();
+        let (prefs, loaded) = Prefs::open(&path);
+        assert_eq!(loaded, Loaded::Read, "read, not set aside");
+        let s = prefs.snapshot();
+        assert_eq!((s.server.as_str(), s.username.as_str()), ("https://music.example.com", "me"), "still signed in");
+        assert_eq!(s.theme, ThemePref::default());
+        assert_eq!(s.playback.format, crate::playback::TranscodeFormat::default());
+        assert_eq!(s.playback.replay_gain, crate::playback::RgMode::Album);
+        assert_eq!(s.playback.kbps, 192);
+        assert!(!s.show_queue);
+        assert_eq!(s.volume, 0.3);
+        assert_eq!(s.device_modes.get("uid-umc22"), Some(&DeviceMode::BitPerfect));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing set aside");
+    }
+
+    #[test]
+    fn a_file_without_a_login_reads_as_signed_out() {
+        let s = Settings::from_json(br#"{ "theme": "dark" }"#).unwrap();
+        assert_eq!((s.server.as_str(), s.theme), ("", ThemePref::Dark));
     }
 
     #[test]
