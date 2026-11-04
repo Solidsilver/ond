@@ -8,7 +8,7 @@ use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::queue::Source;
 use crate::theme::Tokens;
-use crate::widgets::{choice, elide};
+use crate::widgets::elide;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,18 +33,11 @@ impl ViewCtx<'_> {
             FavTab::Albums => format!("Albums {}", v.albums.len()),
             FavTab::Artists => format!("Artists {}", v.artists.len()),
         };
-        ui.horizontal(|ui| {
-            self.heading(ui, "Favorites", None);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Right-to-left layout: the pill itself still reads left to right.
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    choice(ui, &[FavTab::Songs, FavTab::Albums, FavTab::Artists], &mut self.ui.fav_tab, None, label);
-                });
-            });
-        });
+        let tabs = [FavTab::Songs, FavTab::Albums, FavTab::Artists];
+        super::browse::heading_bar(ui, "Favorites", None, None, Some((&tabs[..], &mut self.ui.fav_tab)), label);
         let empty = |ui: &mut Ui, text: &str| crate::widgets::empty_state(ui, Icon::Heart, "Nothing loved yet", text);
         if !self.favorites.loaded && self.session.client.is_some() {
-            ui.label(egui::RichText::new("Loading…").color(t.muted));
+            crate::widgets::empty_state(ui, Icon::Heart, "Loading…", "");
             return;
         }
         match self.ui.fav_tab {

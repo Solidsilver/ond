@@ -92,6 +92,7 @@ mod toasts;
 mod toolbar;
 mod track_list;
 mod track_row;
+mod virtual_list;
 mod visualizer_view;
 
 #[cfg(test)]
@@ -260,6 +261,19 @@ pub enum Action {
     Command(Cmd),
     PlaylistEdit(PlaylistAction),
 }
+
+// A part's own action stands for the whole one, so a settings row can take
+// `PrefsAction::Scrobble` where it needs something that makes an `Action`.
+macro_rules! action_from {
+    ($($part:ident => $variant:ident),* $(,)?) => {
+        $(impl From<$part> for Action {
+            fn from(a: $part) -> Self {
+                Action::$variant(a)
+            }
+        })*
+    };
+}
+action_from!(WindowAction => Window, PrefsAction => Prefs, OutputAction => Output, OfflineAction => Offline, AnalysisAction => Analysis);
 
 /// About a newer Ond.
 pub enum UpdateAction {

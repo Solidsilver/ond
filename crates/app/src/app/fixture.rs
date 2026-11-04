@@ -143,29 +143,19 @@ pub(super) fn track(id: String, album: usize, title: &str, artist: &str, n: u32,
         contributors.push(person("composer", None, c));
     }
     Track {
-        id,
-        album_id: album_id(album),
-        title: title.into(),
         artist: Some(artist.into()),
-        artist_ref: None,
         track: Some(n),
         disc: Some(disc),
         duration_secs: Some(secs),
         suffix: Some("flac".into()),
-        content_type: None,
-        size: None,
-        bit_rate_kbps: None,
         bit_depth: Some(bits),
         sample_rate: Some(rate),
         channels: Some(2),
-        track_gain: None,
-        album_gain: None,
-        track_peak: None,
-        album_peak: None,
         composer: composer.map(Into::into),
         contributors,
         cover_art: Some(album_id(album)),
         artists: vec![library::ArtistLink { id: None, name: artist.into() }],
+        ..crate::test_tracks::track(&id, &album_id(album), title)
     }
 }
 

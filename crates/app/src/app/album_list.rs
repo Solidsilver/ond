@@ -5,9 +5,10 @@
 //! own order.
 
 use super::offline_page::Mark;
-use super::table::{HEAD_H, Head};
+use super::table::{Head, Width};
 use super::track_row::{TrackRow, col};
 use super::view_ctx::ViewCtx;
+use super::virtual_list::{VirtualList, near};
 use super::{Action, AlbumSort, QueueAction};
 use crate::nav::Route;
 use crate::theme::Tokens;
@@ -28,12 +29,12 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         let ids = self.cached_grid(route);
         if ids.is_empty() {
-            ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
+            let title = if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." };
+            crate::widgets::empty_state(ui, crate::icons::Icon::Disc, title, "");
             return;
         }
         let marks = self.grid_marks(route);
-        let rail_w = if marks.is_some() { super::alpha::RAIL_W } else { 0.0 };
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width() - rail_w, HEAD_H), Sense::hover());
+        let head = super::table::head_rect(ui, marks.is_some());
         let c = columns(head);
         // Only Albums sorts; the other pages keep their order.
         let sorts = |by: AlbumSort| (*route == Route::Albums).then_some(by);
@@ -48,31 +49,15 @@ impl ViewCtx<'_> {
         ];
         super::table::header(ui, head, "albums-col", &heads, &mut self.ui.sort, &mut self.ui.sort_desc);
 
-        let list = ("albums-list", route);
-        super::layout::into_gutter(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let area = ui.available_rect_before_wrap();
-            let mut scroll = egui::ScrollArea::vertical().id_salt(list).auto_shrink(false);
-            scroll = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() });
-            if let Some(y) = super::alpha::take_jump(ui, list) {
-                scroll = scroll.vertical_scroll_offset(y);
+        VirtualList::table(("albums-list", route), marks.as_deref(), ROW_H, ids.len()).show(ui, |ui, range| {
+            // The covers just past either end, so scrolling finds them loaded.
+            for row in near(&range, PREFETCH_ROWS, ids.len()) {
+                if let Some(cover) = self.data.albums[ids[row]].cover_art.as_deref() {
+                    self.art.prefetch(cover, ART);
+                }
             }
-            let mut top = 0;
-            let out = scroll.show_rows(ui, ROW_H, ids.len(), |ui, range| {
-                top = range.start;
-                // The covers just past either end, so scrolling finds them loaded.
-                let near = range.start.saturating_sub(PREFETCH_ROWS)..range.start;
-                for &i in ids[near].iter().chain(ids.iter().skip(range.end).take(PREFETCH_ROWS)) {
-                    if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
-                        self.art.prefetch(cover, ART);
-                    }
-                }
-                for &i in &ids[range] {
-                    self.album_row(ui, &t, i);
-                }
-            });
-            if let Some(marks) = marks {
-                super::alpha::rail(ui, list, area, &out, &marks, top, |i| i, ROW_H);
+            for &i in &ids[range] {
+                self.album_row(ui, &t, i);
             }
         });
     }
@@ -133,14 +118,9 @@ struct Columns {
 
 /// Title, artist and genre share what's left after the fixed columns.
 fn columns(row: Rect) -> Columns {
-    let flex = (row.width() - YEAR_W - SONGS_W - LENGTH_W - ADDED_W).max(0.0);
-    let col = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
-    let title = col(row.left(), flex * 0.4);
-    let artist = col(title.right(), flex * 0.32);
-    let year = col(artist.right(), YEAR_W);
-    let genre = col(year.right(), flex * 0.28);
-    let songs = col(genre.right(), SONGS_W);
-    let length = col(songs.right(), LENGTH_W);
-    let added = col(length.right(), ADDED_W);
+    let [title, artist, year, genre, songs, length, added] = super::table::columns(
+        row,
+        [Width::Share(0.4), Width::Share(0.32), Width::Fixed(YEAR_W), Width::Share(0.28), Width::Fixed(SONGS_W), Width::Fixed(LENGTH_W), Width::Fixed(ADDED_W)],
+    );
     Columns { title, artist, year, genre, songs, length, added }
 }

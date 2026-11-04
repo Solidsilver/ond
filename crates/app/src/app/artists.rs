@@ -3,19 +3,20 @@
 //! how many albums, or by when they started. The photos are the server's
 //! (Settings › Appearance › Lists can turn them off).
 
-use super::browse::{Collection, GAP_X, GAP_Y, LABEL_H, collection_menu, grid_metrics};
-use super::table::{HEAD_H, Head};
+use super::browse::{Collection, GAP_X, GAP_Y, LABEL_H, collection_menu, grid_metrics, heading_bar};
+use super::table::{Head, Width};
 use super::track_row::{TrackRow, col};
 use super::view_ctx::ViewCtx;
+use super::virtual_list::{VirtualList, near};
 use super::{Action, ArtistSort, PrefsAction, QueueAction};
 use crate::art::Art;
-use crate::icons::{self, Icon};
+use crate::icons::Icon;
 use crate::memo::Memo;
 use crate::nav::Route;
 use crate::search::ArtistEntry;
 use crate::settings::ViewMode;
 use crate::theme::{Tokens, semibold};
-use crate::widgets::{choice, elide, view_picker};
+use crate::widgets::elide;
 use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
 
@@ -29,30 +30,21 @@ const PREFETCH_ROWS: usize = 8;
 
 impl ViewCtx<'_> {
     pub(super) fn artists_page(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
         let Some(index) = &self.search.index else {
             self.heading(ui, "Artists", None);
-            ui.label(egui::RichText::new("Loading your library…").color(t.muted));
+            crate::widgets::empty_state(ui, Icon::Person, "Loading your library…", "");
             return;
         };
         // The server's artists (with ids) once synced, else album-artist names.
         let artists = Arc::clone(&index.artists);
         let mut view = self.ui.prefs.artist_view;
-        ui.horizontal(|ui| {
-            self.heading(ui, "Artists", Some(artists.len().to_string()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if view_picker(ui, &mut view) {
-                    self.actions.push(Action::Prefs(PrefsAction::ArtistView(view)));
-                }
-                ui.add_space(8.0);
-                // Right-to-left layout: the pill itself still reads left to right.
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    if choice(ui, &ArtistSort::ALL, &mut self.ui.artist_sort, None, |s| s.label().into()) {
-                        self.ui.artist_desc = false;
-                    }
-                });
-            });
-        });
+        let sort = Some((&ArtistSort::ALL[..], &mut self.ui.artist_sort));
+        if heading_bar(ui, "Artists", Some(artists.len().to_string()), Some(&mut view), sort, |s| s.label().into()) {
+            self.ui.artist_desc = false;
+        }
+        if view != self.ui.prefs.artist_view {
+            self.actions.push(Action::Prefs(PrefsAction::ArtistView(view)));
+        }
         let order = self.artist_order(&artists);
         let marks = self.artist_marks(&artists, &order);
         match view {
@@ -80,41 +72,28 @@ impl ViewCtx<'_> {
     fn artist_grid(&mut self, ui: &mut Ui, artists: &[ArtistEntry], order: &[usize], marks: Option<Arc<super::alpha::Marks>>) {
         let t = Tokens::of(ui);
         let photos = self.ui.prefs.artist_photos;
-        let margin = if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() };
+        let margin = super::virtual_list::margin(marks.is_some());
         let (cols, tile) = grid_metrics(ui.available_width() - f32::from(margin.right) + super::layout::GUTTER);
         let rows = order.len().div_ceil(cols);
         let row_h = tile + LABEL_H + GAP_Y;
-        super::layout::into_gutter(ui, |ui| {
-            let area = ui.available_rect_before_wrap();
-            let row_spacing = ui.spacing().item_spacing.y;
-            let mut top = 0;
-            let mut scroll = egui::ScrollArea::vertical().id_salt("artists-grid").auto_shrink(false).content_margin(margin);
-            if let Some(y) = super::alpha::take_jump(ui, "artists-grid") {
-                scroll = scroll.vertical_scroll_offset(y);
+        VirtualList::grid("artists-grid", marks.as_deref(), row_h, rows, cols).show(ui, |ui, range| {
+            let row_ids = |row: usize| &order[row * cols..((row + 1) * cols).min(order.len())];
+            for row in range.clone() {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = GAP_X;
+                    for &i in row_ids(row) {
+                        self.artist_tile(ui, &t, &artists[i], tile);
+                    }
+                });
+                ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
             }
-            let out = scroll.show_rows(ui, row_h, rows, |ui, range| {
-                top = range.start * cols;
-                let row_ids = |row: usize| &order[row * cols..((row + 1) * cols).min(order.len())];
-                for row in range.clone() {
-                    ui.horizontal_top(|ui| {
-                        ui.spacing_mut().item_spacing.x = GAP_X;
-                        for &i in row_ids(row) {
-                            self.artist_tile(ui, &t, &artists[i], tile);
-                        }
-                    });
-                    ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
-                }
-                // The rows just above and below load next, after what's on screen.
-                if photos {
-                    for row in [range.start.checked_sub(1), Some(range.end).filter(|&r| r < rows)].into_iter().flatten() {
-                        for cover in row_ids(row).iter().filter_map(|&i| artists[i].cover.as_deref()) {
-                            self.art.prefetch(cover, tile);
-                        }
+            // The rows just above and below load next, after what's on screen.
+            if photos {
+                for row in near(&range, 1, rows) {
+                    for cover in row_ids(row).iter().filter_map(|&i| artists[i].cover.as_deref()) {
+                        self.art.prefetch(cover, tile);
                     }
                 }
-            });
-            if let Some(marks) = marks {
-                super::alpha::rail(ui, "artists-grid", area, &out, &marks, top, |i| i / cols, row_h + row_spacing);
             }
         });
     }
@@ -134,17 +113,10 @@ impl ViewCtx<'_> {
             // On the circle's edge, low on the left, where the album tiles have theirs.
             let at = photo.center() + vec2(-1.0, 1.0) * (tile / 2.0 * std::f32::consts::FRAC_1_SQRT_2);
             let shuffle = Rect::from_center_size(at, vec2(32.0, 32.0));
-            let shuffle_resp = ui.interact(shuffle, ui.scope_id().with(("artist-shuffle", &a.name)), Sense::click());
-            if resp.hovered() || shuffle_resp.hovered() {
-                let fill = if shuffle_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
-                let fg = if shuffle_resp.hovered() { t.on_accent } else { t.text };
-                ui.painter().circle_filled(shuffle.center(), 16.0, fill);
-                icons::paint(ui.painter(), Rect::from_center_size(shuffle.center(), vec2(13.0, 13.0)), Icon::Shuffle, fg);
-                shuffle_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Shuffle artist"));
-                if shuffle_resp.clicked() {
-                    self.actions.push(Action::Artist(a.name.clone(), QueueAction::Play { start: 0 }));
-                    return;
-                }
+            let id = ui.scope_id().with(("artist-shuffle", &a.name));
+            if crate::widgets::tile_button(ui, t, shuffle, id, resp.hovered(), Icon::Shuffle, "Shuffle artist") {
+                self.actions.push(Action::Artist(a.name.clone(), QueueAction::Play { start: 0 }));
+                return;
             }
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a.name));
@@ -160,8 +132,7 @@ impl ViewCtx<'_> {
     fn artist_table(&mut self, ui: &mut Ui, artists: &[ArtistEntry], order: &[usize], marks: Option<Arc<super::alpha::Marks>>) {
         let t = Tokens::of(ui);
         let photos = self.ui.prefs.artist_photos;
-        let rail_w = if marks.is_some() { super::alpha::RAIL_W } else { 0.0 };
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width() - rail_w, HEAD_H), Sense::hover());
+        let head = super::table::head_rect(ui, marks.is_some());
         let c = columns(head);
         let heads = [
             Head { label: "Name", rect: c.name, right: false, sorts: Some(ArtistSort::Name) },
@@ -170,30 +141,15 @@ impl ViewCtx<'_> {
             Head { label: "Years", rect: c.years, right: false, sorts: Some(ArtistSort::Year) },
         ];
         super::table::header(ui, head, "artists-col", &heads, &mut self.ui.artist_sort, &mut self.ui.artist_desc);
-        super::layout::into_gutter(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let area = ui.available_rect_before_wrap();
-            let mut scroll = egui::ScrollArea::vertical().id_salt("artists").auto_shrink(false);
-            scroll = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() });
-            if let Some(y) = super::alpha::take_jump(ui, "artists") {
-                scroll = scroll.vertical_scroll_offset(y);
+        VirtualList::table("artists", marks.as_deref(), ROW_H, order.len()).show(ui, |ui, range| {
+            if photos {
+                // The photos just past either end, so scrolling finds them loaded.
+                for cover in near(&range, PREFETCH_ROWS, order.len()).filter_map(|row| artists[order[row]].cover.as_deref()) {
+                    self.art.prefetch(cover, AVATAR);
+                }
             }
-            let mut top = 0;
-            let out = scroll.show_rows(ui, ROW_H, order.len(), |ui, range| {
-                top = range.start;
-                if photos {
-                    // The photos just past either end, so scrolling finds them loaded.
-                    let near = range.start.saturating_sub(PREFETCH_ROWS)..range.start;
-                    for cover in order[near].iter().chain(order.iter().skip(range.end).take(PREFETCH_ROWS)).filter_map(|&i| artists[i].cover.as_deref()) {
-                        self.art.prefetch(cover, AVATAR);
-                    }
-                }
-                for &i in &order[range] {
-                    self.artist_row(ui, &t, &artists[i], photos);
-                }
-            });
-            if let Some(marks) = marks {
-                super::alpha::rail(ui, "artists", area, &out, &marks, top, |i| i, ROW_H);
+            for &i in &order[range] {
+                self.artist_row(ui, &t, &artists[i], photos);
             }
         });
     }
@@ -304,12 +260,7 @@ struct Columns {
 
 /// Name and genre share what's left after the albums and years.
 fn columns(row: Rect) -> Columns {
-    let flex = (row.width() - ALBUMS_W - YEARS_W).max(0.0);
-    let col = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
-    let name = col(row.left(), flex * 0.55);
-    let genre = col(name.right(), flex * 0.45);
-    let albums = col(genre.right(), ALBUMS_W);
-    let years = col(albums.right(), YEARS_W);
+    let [name, genre, albums, years] = super::table::columns(row, [Width::Share(0.55), Width::Share(0.45), Width::Fixed(ALBUMS_W), Width::Fixed(YEARS_W)]);
     Columns { name, genre, albums, years }
 }
 

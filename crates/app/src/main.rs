@@ -36,6 +36,8 @@ mod queue;
 mod search;
 mod settings;
 mod sync;
+#[cfg(test)]
+mod test_tracks;
 mod theme;
 mod tracks;
 mod updates;

@@ -262,12 +262,7 @@ impl ViewCtx<'_> {
     pub(super) fn big_transport(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let state = self.engine.status.state();
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some() || self.player.held;
-        let (icon, label) = match state {
-            _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
-            PlayState::Playing => (Icon::Pause, "Pause"),
-            _ => (Icon::Play, "Play"),
-        };
+        let (icon, label) = super::playing::play_pause(state, self.player);
         let row_w = 44.0 + 24.0 + 52.0 + 24.0 + 44.0;
         ui.horizontal(|ui| {
             ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));
@@ -687,31 +682,7 @@ mod tests {
 
     #[test]
     fn details_only_say_what_is_known() {
-        let mut t = Track {
-            id: "t".into(),
-            album_id: "a".into(),
-            title: "x".into(),
-            artist: None,
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: None,
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        };
+        let mut t = crate::test_tracks::track("t", "a", "x");
         assert!(details_rows(&t, None, None).is_empty());
         t.suffix = Some("flac".into());
         t.bit_depth = Some(24);

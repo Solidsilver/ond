@@ -4,6 +4,7 @@
 use super::OfflineAction;
 use super::offline_page::Mark;
 use super::view_ctx::ViewCtx;
+use super::virtual_list::VirtualList;
 use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
@@ -118,23 +119,14 @@ impl OndApp {
             _ => ("Recently added".to_owned(), None),
         };
         let mut view = self.ui.prefs.album_view;
-        ui.horizontal(|ui| {
-            self.view().heading(ui, &title, sub);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if view_picker(ui, &mut view) {
-                    self.actions.push(Action::Prefs(PrefsAction::AlbumView(view)));
-                }
-                if *route == Route::Albums {
-                    ui.add_space(8.0);
-                    // Right-to-left layout: the pill itself still reads left to right.
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        if choice(ui, &AlbumSort::ALL, &mut self.ui.sort, None, |s| s.label().into()) {
-                            self.ui.sort_desc = false;
-                        }
-                    });
-                }
-            });
-        });
+        // Only Albums sorts; the other pages keep their order.
+        let sort = (*route == Route::Albums).then_some((&AlbumSort::ALL[..], &mut self.ui.sort));
+        if heading_bar(ui, &title, sub, Some(&mut view), sort, |s| s.label().into()) {
+            self.ui.sort_desc = false;
+        }
+        if view != self.ui.prefs.album_view {
+            self.actions.push(Action::Prefs(PrefsAction::AlbumView(view)));
+        }
         match view {
             ViewMode::Grid => self.view().grid_place(ui, route),
             ViewMode::List => self.view().album_list(ui, route),
@@ -227,8 +219,9 @@ impl OndApp {
                     }
                 }
                 if own.is_empty() && credited.is_empty() {
-                    let text = if self.sync.tracks { "Nothing yet. Credits fill in while tracks sync." } else { "No albums credit this name." };
-                    ui.label(egui::RichText::new(text).color(t.muted));
+                    let (title, body) =
+                        if self.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
+                    crate::widgets::empty_state(ui, Icon::Disc, title, body);
                 }
             })
         });
@@ -262,6 +255,49 @@ impl OndApp {
             });
         }
     }
+}
+
+/// A page's title, large, with a muted note beside it (a count, a kind).
+pub(super) fn page_heading(ui: &mut Ui, title: &str, sub: Option<String>) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
+        if let Some(sub) = sub {
+            ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
+        }
+    });
+    ui.add_space(10.0);
+}
+
+/// A page's heading with its controls at the right: the grid/list picker
+/// when the page has one (`view`), and just left of it a pill of `tabs` (a
+/// sort, or which list to show). True when the pill changed.
+pub(super) fn heading_bar<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    title: &str,
+    sub: Option<String>,
+    view: Option<&mut ViewMode>,
+    tabs: Option<(&[T], &mut T)>,
+    label: impl Fn(T) -> String,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        page_heading(ui, title, sub);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let picker = view.is_some();
+            if let Some(view) = view {
+                view_picker(ui, view);
+            }
+            if let Some((all, current)) = tabs {
+                if picker {
+                    ui.add_space(8.0);
+                }
+                // Right-to-left layout: the pill itself still reads left to right.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| changed = choice(ui, all, current, None, label));
+            }
+        });
+    });
+    changed
 }
 
 /// Columns and tile width that fill `width`.
@@ -351,14 +387,7 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
 
 impl ViewCtx<'_> {
     pub(super) fn heading(&self, ui: &mut Ui, title: &str, sub: Option<String>) {
-        let t = Tokens::of(ui);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
-            if let Some(sub) = sub {
-                ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
-            }
-        });
-        ui.add_space(10.0);
+        page_heading(ui, title, sub);
     }
 
     pub(super) fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
@@ -371,40 +400,27 @@ impl ViewCtx<'_> {
     pub(super) fn grid_place(&mut self, ui: &mut Ui, route: &Route) {
         let ids = self.cached_grid(route);
         if ids.is_empty() {
-            let t = Tokens::of(ui);
-            ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
+            let title = if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." };
+            crate::widgets::empty_state(ui, Icon::Disc, title, "");
             return;
         }
         let marks = self.grid_marks(route);
-        let margin = if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() };
+        let margin = super::virtual_list::margin(marks.is_some());
         let (cols, tile) = grid_metrics(ui.available_width() - f32::from(margin.right) + super::layout::GUTTER);
         let rows = ids.len().div_ceil(cols);
         let row_h = tile + LABEL_H + GAP_Y;
-        super::layout::into_gutter(ui, |ui| {
-            let area = ui.available_rect_before_wrap();
-            let row_spacing = ui.spacing().item_spacing.y;
-            let mut top = 0;
-            let mut scroll = egui::ScrollArea::vertical().id_salt(("grid", route)).auto_shrink(false).content_margin(margin);
-            if let Some(y) = super::alpha::take_jump(ui, ("grid", route)) {
-                scroll = scroll.vertical_scroll_offset(y);
+        VirtualList::grid(("grid", route), marks.as_deref(), row_h, rows, cols).show(ui, |ui, range| {
+            let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
+            for row in range.clone() {
+                self.grid_row(ui, row_ids(row), tile);
             }
-            let out = scroll.show_rows(ui, row_h, rows, |ui, range| {
-                top = range.start * cols;
-                let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
-                for row in range.clone() {
-                    self.grid_row(ui, row_ids(row), tile);
-                }
-                // The rows just above and below load next, after what's on screen.
-                for row in [range.start.checked_sub(1), Some(range.end).filter(|&r| r < rows)].into_iter().flatten() {
-                    for &i in row_ids(row) {
-                        if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
-                            self.art.prefetch(cover, tile);
-                        }
+            // The rows just above and below load next, after what's on screen.
+            for row in super::virtual_list::near(&range, 1, rows) {
+                for &i in row_ids(row) {
+                    if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
+                        self.art.prefetch(cover, tile);
                     }
                 }
-            });
-            if let Some(marks) = marks {
-                super::alpha::rail(ui, ("grid", route), area, &out, &marks, top, |i| i / cols, row_h + row_spacing);
             }
         });
     }
@@ -467,20 +483,10 @@ impl ViewCtx<'_> {
             if let Some(m) = mark {
                 super::offline_page::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
             }
-            // The button sits on the tile, so with the pointer on it the tile
-            // itself doesn't read as hovered: it's there whenever either is.
             let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
-            let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", id)), Sense::click());
-            if resp.hovered() || play_resp.hovered() {
-                let fill = if play_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
-                let fg = if play_resp.hovered() { t.on_accent } else { t.text };
-                ui.painter().circle_filled(play.center(), 16.0, fill);
-                icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(1.0, 0.0), vec2(12.0, 12.0)), Icon::Play, fg);
-                play_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Play album"));
-                if play_resp.clicked() {
-                    self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
-                    return;
-                }
+            if crate::widgets::tile_button(ui, t, play, ui.scope_id().with(("tile-play", id)), resp.hovered(), Icon::Play, "Play album") {
+                self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
+                return;
             }
         }
         resp.widget_info(|| {
