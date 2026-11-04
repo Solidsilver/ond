@@ -243,7 +243,8 @@ impl OndApp {
             }
             LibraryMsg::Tracks { album_id, mut tracks, fresh } => {
                 if self.session.work_offline {
-                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
+                    let transcode = self.output.transcode();
+                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, transcode.as_ref(), t));
                 }
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.set_album(&album_id, tracks);
@@ -277,7 +278,8 @@ impl OndApp {
             }
             LibraryMsg::PlaylistTracks { id, mut tracks, fresh } => {
                 if self.session.work_offline {
-                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
+                    let transcode = self.output.transcode();
+                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, transcode.as_ref(), t));
                 }
                 // Only the server's own listing may drop songs from a download.
                 self.refresh_pin(Pin::Playlist(id.clone()), &tracks, fresh);

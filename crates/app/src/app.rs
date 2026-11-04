@@ -821,6 +821,10 @@ impl OndApp {
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui) {
+        // `logic` took this frame's copy just before; nothing between there
+        // and here changes the preferences. Tests draw frames without
+        // `logic`, so they take it here.
+        #[cfg(test)]
         self.read_prefs();
         let ctx = ui.ctx().clone();
         self.art.poll();

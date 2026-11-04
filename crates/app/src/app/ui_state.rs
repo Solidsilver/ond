@@ -180,6 +180,10 @@ pub struct UiState {
     pub memos: view_ctx::Memos,
     /// The preferences as of this frame (see [`PrefsView`]).
     pub prefs: PrefsView,
+    /// What streams are converted to as of this frame (see
+    /// `Outputs::transcode`), taken with `prefs`: rows ask whether their
+    /// track can play, and working it out locks the preferences.
+    pub transcode: Option<audio::Transcode>,
     /// Devices open in Settings › Output, by UID.
     pub output_open: std::collections::HashSet<String>,
     /// Group names being typed in Settings › Output, by device UID.
@@ -190,6 +194,7 @@ impl UiState {
     pub(super) fn new(notices: Vec<String>, prefs: PrefsView) -> Self {
         Self {
             prefs,
+            transcode: None,
             output_open: Default::default(),
             group_drafts: Default::default(),
             nav: Nav::default(),

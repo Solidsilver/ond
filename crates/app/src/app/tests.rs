@@ -1010,6 +1010,10 @@ fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
     assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
     // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
     app.downloads.snap = app.downloads.store().snapshot();
+    // Tiles find it by id, before and after the index catches up.
+    assert!(app.downloads.album_pin("al-5").is_some());
+    app.downloads.index_album_pins();
+    assert!(app.downloads.album_pin("al-5").is_some() && app.downloads.album_pin("al-0").is_none());
     app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
     // (The stored album now lists only y-1; a library-wide refresh sees that.)
     let all = app.data.tracks.all.to_vec();
@@ -1187,7 +1191,7 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
     app.session.settings = Some(Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
     app.session.connecting = true;
     let t = app.data.tracks.all[0].clone();
-    let playable = |app: &OndApp| super::playable(&app.session, &app.downloads, &app.cache, &app.output, &t);
+    let playable = |app: &OndApp| super::playable(&app.session, &app.downloads, &app.cache, app.output.transcode().as_ref(), &t);
     assert!(playable(&app), "connecting counts as online");
 
     app.handle(Msg::ConnectFailed("Wrong username or password.".into()));

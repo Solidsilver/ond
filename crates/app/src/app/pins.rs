@@ -7,6 +7,7 @@ use crate::bridge::{Bridge, ListKey, OfflineMsg};
 use crate::prefs::Prefs;
 use library::Track;
 use offline::{OfflineStore, Pin, TrackRef};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,8 +58,16 @@ impl OfflineAction {
 
 /// Whether `track` can play right now: the server is there (or connecting),
 /// or it's downloaded, or it was streamed whole and is still cached.
-pub(super) fn playable(session: &Session, downloads: &Downloads, cache: &streamcache::StreamCache, output: &crate::output::Outputs, track: &Track) -> bool {
-    session.expected() || downloads.snap.is_done(&track.id) || super::playing::cached(cache, output, track).is_some()
+/// `transcode` is what streams are converted to (see `Outputs::transcode`),
+/// worked out once by the caller rather than for each track.
+pub(super) fn playable(
+    session: &Session,
+    downloads: &Downloads,
+    cache: &streamcache::StreamCache,
+    transcode: Option<&audio::Transcode>,
+    track: &Track,
+) -> bool {
+    session.expected() || downloads.snap.is_done(&track.id) || crate::local::cached(cache, transcode, track).is_some()
 }
 
 /// Offline downloads, and their state as of this frame.
@@ -85,6 +94,9 @@ pub struct Downloads {
     /// The notice showing the downloads folder's move, while it moves.
     moving: Option<String>,
     pub(super) open: OpenStore,
+    /// Where each kept album is in `snap.pins`, for the snapshot it was
+    /// made from (see [`album_pin`](Self::album_pin)).
+    album_pins: (Arc<offline::Snapshot>, HashMap<String, usize>),
 }
 
 /// Opens the offline store kept in a folder, with an optional size limit.
@@ -94,6 +106,27 @@ type OpenStore = Arc<dyn Fn(PathBuf, Option<u64>) -> anyhow::Result<OfflineStore
 const MOVE_PROGRESS_EVERY: Duration = Duration::from_millis(500);
 
 impl Downloads {
+    /// Indexes the kept albums of the snapshot in use, if it changed since
+    /// (the app calls this before lending the downloads to a view).
+    pub(super) fn index_album_pins(&mut self) {
+        if Arc::ptr_eq(&self.album_pins.0, &self.snap) {
+            return;
+        }
+        let at = self.snap.pins.iter().enumerate().filter_map(|(i, p)| if let Pin::Album(id) = &p.pin { Some((id.clone(), i)) } else { None }).collect();
+        self.album_pins = (Arc::clone(&self.snap), at);
+    }
+
+    /// The album's download, when it's kept offline. A lookup, not a walk
+    /// through the pins: the grid asks for every tile, every frame. Before
+    /// [`index_album_pins`](Self::index_album_pins) catches up with a new
+    /// snapshot, it walks them.
+    pub fn album_pin(&self, id: &str) -> Option<&offline::PinSummary> {
+        if Arc::ptr_eq(&self.album_pins.0, &self.snap) {
+            return self.album_pins.1.get(id).and_then(|&i| self.snap.pins.get(i));
+        }
+        self.snap.pins.iter().find(|p| matches!(&p.pin, Pin::Album(a) if a == id))
+    }
+
     /// How a store is opened: in a folder, with a size limit, the stream
     /// cache to link finished streams from, and the window to wake.
     pub(super) fn opener(rt: tokio::runtime::Handle, ctx: egui::Context, cache: streamcache::StreamCache) -> OpenStore {
@@ -129,6 +162,7 @@ impl Downloads {
             deferred: Vec::new(),
             moving: None,
             open,
+            album_pins: Default::default(),
         };
         match move_from {
             // A new location chosen last time: the downloads move there
