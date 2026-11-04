@@ -170,6 +170,14 @@ impl OndApp {
         if v.fullscreen {
             self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
+        // Its pipelines and pictures stay in egui-wgpu's resources until
+        // something takes them out; this frame's callback does. When it was
+        // closed after drawing this frame, that last picture goes blank, but
+        // the repaint below replaces it straight away.
+        if self.gpu.is_some() {
+            let corner = Rect::from_min_size(self.ctx.content_rect().min, vec2(1.0, 1.0));
+            self.ctx.layer_painter(egui::LayerId::background()).add(gpu::release(corner));
+        }
         // Closed after this frame was drawn (a menu, a command): draw the
         // window again now, not at the next input.
         self.ctx.request_repaint();

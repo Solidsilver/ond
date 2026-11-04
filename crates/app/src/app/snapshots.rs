@@ -1884,6 +1884,7 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, s
         // app knows what it renders to, for the visualizer's pipelines.
         let rs = egui_kittest::wgpu::create_render_state(egui_kittest::wgpu::default_wgpu_setup(), eframe::egui_wgpu::RendererOptions::PREDICTABLE);
         let target = crate::visuals::gpu::Target::new(rs.target_format, &rs.adapter);
+        RENDERER.set(Some(std::sync::Arc::clone(&rs.renderer)));
         let mut h = Harness::builder()
             .with_size(FULL)
             .with_pixels_per_point(2.0)
@@ -1919,6 +1920,12 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, s
         // Drop the app (and its engine/runtime) before the next theme.
         *h.state_mut() = None;
     }
+}
+
+thread_local! {
+    /// The renderer [`shoot_scenes`] made, so a scene can look at what's
+    /// held in its callback resources.
+    static RENDERER: std::cell::RefCell<Option<std::sync::Arc<egui::mutex::RwLock<eframe::egui_wgpu::Renderer>>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The visualizers, each fed the fixture's music in real time at 60 frames a
@@ -2009,7 +2016,14 @@ fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     frames(h, 40);
     s.shoot_now(h, "x-visualizer-switched");
     assert_eq!(app_mut(h).prefs_now().experimental.visualizer_pick, Pick::Particles);
+    let held = |h: &mut Harness<'_, Option<OndApp>>| {
+        h.step();
+        let _ = h.render();
+        RENDERER.with_borrow(|r| crate::visuals::gpu::held(&r.as_ref().expect("a wgpu renderer").read().callback_resources))
+    };
+    assert!(held(h), "the open visualizer has its pictures on the GPU");
     app_mut(h).close_visualizer();
+    assert!(!held(h), "closing it gives them back");
     // What a GPU frame costs with each, rendered offscreen and read back (the
     // read-back is in all of them), against the ordinary window.
     let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {
