@@ -34,6 +34,15 @@ pub enum Error {
     Decode(#[from] serde_json::Error),
     #[error("server error {code}: {message}")]
     Api { code: i32, message: String },
+    /// A success status with a body that isn't JSON at all. That's usually a
+    /// web page, like the login page of a reverse proxy or a single sign-on
+    /// gate in front of the server. Holds what the page says (its `<title>`,
+    /// or its first line) when it says anything.
+    #[error("{}", match .0 {
+        Some(said) => format!("the server answered with a page instead of the API: {said}"),
+        None => "the server answered with something other than the API".to_owned(),
+    })]
+    NotApi(Option<String>),
 }
 
 impl From<reqwest::Error> for Error {
@@ -97,21 +106,31 @@ async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response> {
 /// HTML page's `<title>`, or the first line of anything else, at most 200
 /// characters. `None` when the body says nothing.
 fn status_text(body: &[u8]) -> Option<String> {
-    let found = if let Err(Error::Api { message, .. }) = parse_response::<serde_json::Value>(body) {
-        message
+    match parse_response::<serde_json::Value>(body) {
+        Err(Error::Api { message, .. }) => tidy(&message),
+        _ => page_text(body),
+    }
+}
+
+/// What a body that isn't a Subsonic reply says: an HTML page's `<title>`, or
+/// the first line of anything else, at most 200 characters. `None` when it
+/// says nothing.
+fn page_text(body: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(&body[..body.len().min(4096)]);
+    let text = text.trim();
+    if text.starts_with('<') {
+        let lower = text.to_ascii_lowercase();
+        let start = lower.find("<title>")? + "<title>".len();
+        let end = lower[start..].find("</title>").map_or(text.len(), |i| start + i);
+        tidy(&text[start..end])
     } else {
-        let text = String::from_utf8_lossy(&body[..body.len().min(4096)]);
-        let text = text.trim();
-        if text.starts_with('<') {
-            let lower = text.to_ascii_lowercase();
-            let start = lower.find("<title>")? + "<title>".len();
-            let end = lower[start..].find("</title>").map_or(text.len(), |i| start + i);
-            text[start..end].to_owned()
-        } else {
-            text.lines().next().unwrap_or_default().to_owned()
-        }
-    };
-    let found: String = found.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
+        tidy(text.lines().next().unwrap_or_default())
+    }
+}
+
+/// `text` on one line, its whitespace collapsed, at most 200 characters.
+fn tidy(text: &str) -> Option<String> {
+    let found: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
     (!found.is_empty()).then_some(found)
 }
 
@@ -381,16 +400,36 @@ pub fn error_text(body: &[u8]) -> String {
     }
 }
 
-/// Unwraps the `subsonic-response` envelope, surfacing API-level failures as [`Error::Api`].
+/// Unwraps the `subsonic-response` envelope, surfacing API-level failures as
+/// [`Error::Api`]. A body that isn't JSON at all is [`Error::NotApi`].
+///
+/// A reply fails when its `status` isn't `ok`, or when it has no `status` but
+/// carries an `error`. A failure without an `error`, or one without a `code`,
+/// still counts, with code -1.
 pub fn parse_response<T: DeserializeOwned>(bytes: &[u8]) -> Result<(ServerInfo, T)> {
-    let env: Envelope = serde_json::from_slice(bytes)?;
+    let env: Envelope = match serde_json::from_slice(bytes) {
+        Ok(env) => env,
+        Err(e) if (e.is_syntax() || e.is_eof()) && !looks_like_json(bytes) => return Err(Error::NotApi(page_text(bytes))),
+        Err(e) => return Err(e.into()),
+    };
     let body = env.response;
-    if body.status != "ok" {
-        let err = body.error.unwrap_or(ApiError { code: -1, message: "unknown error".into() });
-        return Err(Error::Api { code: err.code, message: err.message });
+    let failed = match &body.status {
+        Some(status) => !status.trim().eq_ignore_ascii_case("ok"),
+        None => body.error.is_some(),
+    };
+    if failed {
+        let err = body.error.unwrap_or_default();
+        return Err(Error::Api { code: err.code.unwrap_or(-1), message: err.message.unwrap_or_else(|| "unknown error".into()) });
     }
     let payload = serde_json::from_value(serde_json::Value::Object(body.rest))?;
     Ok((body.info, payload))
+}
+
+/// The body starts like a JSON object or array, so a parse error is a broken
+/// reply rather than something else answering.
+fn looks_like_json(bytes: &[u8]) -> bool {
+    let start = bytes.strip_prefix(b"\xEF\xBB\xBF".as_slice()).unwrap_or(bytes);
+    matches!(start.iter().find(|b| !b.is_ascii_whitespace()), Some(b'{' | b'['))
 }
 
 #[cfg(test)]

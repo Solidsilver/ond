@@ -340,6 +340,24 @@ fn failed_status_without_an_error_object() {
 }
 
 #[test]
+fn a_failed_envelope_without_a_code_is_still_an_api_error() {
+    let json = br#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"message":"Not allowed"}}}"#;
+    match parse_response::<serde_json::Value>(json) {
+        Err(Error::Api { code, message }) => assert_eq!((code, message.as_str()), (-1, "Not allowed")),
+        other => panic!("expected api error, got {other:?}"),
+    }
+    // A code sent as a string, and an error with no status beside it.
+    let json = br#"{"subsonic-response":{"version":"1.16.1","error":{"code":"40","message":"Wrong username or password"}}}"#;
+    assert!(matches!(parse_response::<serde_json::Value>(json), Err(Error::Api { code: 40, .. })));
+    // An error object that isn't one still fails the reply.
+    let json = br#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":"nope"}}"#;
+    assert!(matches!(parse_response::<serde_json::Value>(json), Err(Error::Api { code: -1, .. })));
+    // No status and no error: the payload is what counts.
+    let json = br#"{"subsonic-response":{"version":"1.16.1","song":{"id":"s1","title":"T"}}}"#;
+    assert_eq!(parse_response::<SongPayload>(json).unwrap().1.song.id, "s1");
+}
+
+#[test]
 fn server_addresses() {
     let creds = || Credentials::new("joe", "pw");
     // A query string or fragment on the address is dropped, not sent along.
@@ -417,6 +435,35 @@ async fn http_errors_keep_the_servers_message() {
     let base = serve_once(reply("502 Bad Gateway", "text/html", ""));
     let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
     assert!(matches!(c.ping().await, Err(Error::Http(h)) if h.message().is_none()));
+}
+
+#[tokio::test]
+async fn a_login_page_answering_200_says_what_it_is() {
+    let cases = [
+        (
+            "text/html; charset=utf-8",
+            "<!DOCTYPE html>\n<html><head><title>Sign in to\n  Authelia</title></head><body><form></form></body></html>",
+            Some("Sign in to Authelia"),
+        ),
+        ("text/plain", "Access denied by policy\nrequest id 42", Some("Access denied by policy")),
+        ("text/html", "", None),
+    ];
+    for (ct, body, said) in cases {
+        let base = serve_once(reply("200 OK", ct, body));
+        let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+        match c.ping().await {
+            Err(e @ Error::NotApi(_)) => {
+                assert!(matches!(&e, Error::NotApi(s) if s.as_deref() == said), "{e:?}");
+                let shown = e.to_string();
+                assert!(said.is_none_or(|said| shown.contains(said)) && !shown.contains("t="), "{shown}");
+            }
+            other => panic!("expected a page that isn't the API, got {other:?}"),
+        }
+    }
+    // Broken JSON is still a malformed reply, not a page.
+    let base = serve_once(reply("200 OK", "application/json", r#"{"subsonic-response":{"status":"#));
+    let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+    assert!(matches!(c.ping().await, Err(Error::Decode(_))));
 }
 
 #[tokio::test]
