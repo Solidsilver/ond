@@ -515,7 +515,8 @@ pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bo
 }
 
 /// The one empty-state layout: a muted glyph, a short title, a line or two
-/// of how to fill it. Centred, with the same spacing everywhere.
+/// of how to fill it (none when `body` is empty, as while loading).
+/// Centred, with the same spacing everywhere.
 pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &str) {
     let t = Tokens::of(ui);
     ui.add_space(48.0);
@@ -524,6 +525,9 @@ pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &st
         crate::icons::paint(ui.painter(), r, icon, t.muted);
         ui.add_space(12.0);
         ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
+        if body.is_empty() {
+            return;
+        }
         ui.add_space(6.0);
         ui.scope(|ui| {
             ui.set_max_width(440.0);

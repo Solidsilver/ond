@@ -30,10 +30,9 @@ const PREFETCH_ROWS: usize = 8;
 
 impl ViewCtx<'_> {
     pub(super) fn artists_page(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
         let Some(index) = &self.search.index else {
             self.heading(ui, "Artists", None);
-            ui.label(egui::RichText::new("Loading your library…").color(t.muted));
+            crate::widgets::empty_state(ui, Icon::Person, "Loading your library…", "");
             return;
         };
         // The server's artists (with ids) once synced, else album-artist names.

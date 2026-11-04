@@ -75,7 +75,7 @@ impl ViewCtx<'_> {
         });
         ui.add_space(20.0);
         let Some(tracks) = tracks else {
-            ui.label(egui::RichText::new("Loading…").color(t.muted));
+            crate::widgets::empty_state(ui, Icon::List, "Loading…", "");
             return;
         };
         if tracks.is_empty() {

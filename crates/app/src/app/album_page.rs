@@ -180,7 +180,7 @@ impl ViewCtx<'_> {
         // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
         let (data, analysis) = (self.data, self.analysis);
         let Some(album) = data.album(id) else {
-            ui.label(egui::RichText::new("Loading…").color(t.muted));
+            crate::widgets::empty_state(ui, Icon::Disc, "Loading…", "");
             return;
         };
         let slice = data.tracks.album(id);
@@ -198,7 +198,7 @@ impl ViewCtx<'_> {
                 self.album_header(ui, &t, &page);
                 ui.add_space(24.0);
                 if tracks.is_empty() {
-                    ui.label(egui::RichText::new("Loading tracks…").color(t.muted));
+                    crate::widgets::empty_state(ui, Icon::Note, "Loading tracks…", "");
                     return;
                 }
 

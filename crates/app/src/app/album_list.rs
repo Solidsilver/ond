@@ -29,7 +29,8 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         let ids = self.cached_grid(route);
         if ids.is_empty() {
-            ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
+            let title = if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." };
+            crate::widgets::empty_state(ui, crate::icons::Icon::Disc, title, "");
             return;
         }
         let marks = self.grid_marks(route);

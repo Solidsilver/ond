@@ -37,7 +37,7 @@ impl ViewCtx<'_> {
         super::browse::heading_bar(ui, "Favorites", None, None, Some((&tabs[..], &mut self.ui.fav_tab)), label);
         let empty = |ui: &mut Ui, text: &str| crate::widgets::empty_state(ui, Icon::Heart, "Nothing loved yet", text);
         if !self.favorites.loaded && self.session.client.is_some() {
-            ui.label(egui::RichText::new("Loading…").color(t.muted));
+            crate::widgets::empty_state(ui, Icon::Heart, "Loading…", "");
             return;
         }
         match self.ui.fav_tab {

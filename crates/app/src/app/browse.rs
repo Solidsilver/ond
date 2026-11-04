@@ -219,8 +219,9 @@ impl OndApp {
                     }
                 }
                 if own.is_empty() && credited.is_empty() {
-                    let text = if self.sync.tracks { "Nothing yet. Credits fill in while tracks sync." } else { "No albums credit this name." };
-                    ui.label(egui::RichText::new(text).color(t.muted));
+                    let (title, body) =
+                        if self.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
+                    crate::widgets::empty_state(ui, Icon::Disc, title, body);
                 }
             })
         });
@@ -399,8 +400,8 @@ impl ViewCtx<'_> {
     pub(super) fn grid_place(&mut self, ui: &mut Ui, route: &Route) {
         let ids = self.cached_grid(route);
         if ids.is_empty() {
-            let t = Tokens::of(ui);
-            ui.label(egui::RichText::new(if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." }).color(t.muted));
+            let title = if self.data.albums.is_empty() { "Loading your library…" } else { "No albums here." };
+            crate::widgets::empty_state(ui, Icon::Disc, title, "");
             return;
         }
         let marks = self.grid_marks(route);
