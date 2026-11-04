@@ -10,6 +10,30 @@
 //! Verdicts are deliberately cautious: each carries a confidence and the
 //! evidence it rests on ("no content above 21.4 kHz"), and nothing is claimed
 //! when there isn't enough signal to judge.
+//!
+//! # Stored records
+//!
+//! The app stores each result as [`Record::encode`] bytes, and they take hours
+//! of decoding to replace. The bytes are a mark, [`RECORD_LAYOUT`], then the
+//! [`Record`] in postcard. Two numbers version them, for different reasons:
+//!
+//! - [`ANALYSIS_VERSION`] says the numbers changed: an algorithm now measures
+//!   differently. It's part of each record's stamp, so the app analyses the
+//!   track again.
+//! - [`RECORD_LAYOUT`] says the bytes changed. postcard writes fields in order
+//!   with no names, and enum variants as their index, so any change to
+//!   `Record`, `TrackAnalysis`, `Verdict`, `VerdictKind` or `Confidence`
+//!   changes what old bytes mean. Some changes fail to decode. Others decode
+//!   into the wrong value: `PaddedBits` and `Upsampled` are both two `u32`s,
+//!   so swapping them turns one verdict into the other.
+//!
+//! The rule for these types: a variant may be added after the last one of an
+//! enum. Old records never hold its index, so they still read the same.
+//! Anything else (a field added, removed, reordered or retyped, or a variant
+//! inserted, removed or reordered) needs `RECORD_LAYOUT` bumped and a frozen
+//! copy of the old types that [`Record::decode`] reads the old layout with and
+//! converts. Dropping old records instead throws away every result. The
+//! golden-bytes test in `tests.rs` fails when the shape changes.
 
 mod decode;
 mod dr;
@@ -136,13 +160,42 @@ pub struct Record {
     pub analysis: TrackAnalysis,
 }
 
+/// The shape of an encoded [`Record`] (see "Stored records" in the crate
+/// docs). Bump it when `Record` or any type inside it changes shape, and keep
+/// reading the old layout in [`Record::decode`].
+pub const RECORD_LAYOUT: u8 = 1;
+
+/// First byte of an encoded record, then [`RECORD_LAYOUT`]. Records from
+/// before the layout byte start with their stamp's length instead, which is
+/// never 0 because every [`stamp`] starts with "v". So the two can't be
+/// confused, and those older records read as layout 1, the only shape there
+/// was before it.
+const RECORD_MARK: u8 = 0;
+
 impl Record {
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).unwrap_or_default()
+        postcard::to_extend(self, vec![RECORD_MARK, RECORD_LAYOUT])
+            .expect("postcard writes a Record to a Vec without fail: no maps, no sequences of unknown length, no custom Serialize")
     }
 
+    /// The record in `bytes`, or `None` for a layout this build doesn't know
+    /// (a newer build wrote it) or bytes that don't decode.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        postcard::from_bytes(bytes).ok()
+        match bytes {
+            [RECORD_MARK, layout, body @ ..] => Self::decode_layout(*layout, body),
+            unmarked => Self::decode_layout(1, unmarked),
+        }
+    }
+
+    fn decode_layout(layout: u8, body: &[u8]) -> Option<Self> {
+        match layout {
+            // Every byte must be used: bytes left over mean another shape.
+            1 => match postcard::take_from_bytes(body) {
+                Ok((record, [])) => Some(record),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 }
 
