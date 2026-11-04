@@ -1507,26 +1507,36 @@ fn tree_size(dir: &Path) -> u64 {
 /// becomes this account's the first time.
 ///
 /// That adoption moves files one by one, in no set order, so a crash can stop
-/// it after `offline.json` moved and before the downloads did. So an account
-/// that has its own `offline.json` also takes any file still in `base`, and
-/// the move carries on where it stopped. An account without one leaves them,
-/// so a new account never picks up another's half-moved downloads. A second
-/// `offline.json` in `base` while this account has its own is another store,
-/// and it stays put rather than mixing two sets of pins.
+/// it after `offline.json` moved and before the downloads did. A marker
+/// written in the account's folder before the first file moves says its
+/// adoption is unfinished, and comes off once every file is there; that
+/// account carries the move on at its next open, and no other account
+/// touches what's left in `base` (a second account signing in between would
+/// otherwise take them). A second `offline.json` in `base` while this account
+/// has its own is another store, and it stays put rather than mixing two sets
+/// of pins.
 pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
     let dir = base.join(format!("{account:08x}"));
+    let marker = dir.join(ADOPTING_FILE);
     let (theirs, mine) = (base.join(STATE_FILE).is_file(), dir.join(STATE_FILE).exists());
     let start = theirs && !mine;
-    let resume = !theirs && mine && has_leftovers(base);
+    let resume = !theirs && marker.is_file() && has_leftovers(base);
     if start || resume {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&marker, b"")?;
         let mut outcome = MoveOutcome::default();
         move_files(base, &dir, false, &mut |_| {}, &mut outcome)?;
         for kept in &outcome.kept {
             tracing::warn!("offline: kept {}, as {} already has a different file by that name", kept.display(), dir.display());
         }
+        std::fs::remove_file(&marker)?;
     }
     Ok(dir)
 }
+
+/// In an account's folder while an older store is being adopted into it.
+/// Hidden, so the store's sweep leaves it alone.
+const ADOPTING_FILE: &str = ".adopting";
 
 /// `dir` holds files an adoption into an account folder still has to move: any
 /// but hidden ones (a `.DS_Store`), apart from copies a move left unfinished.

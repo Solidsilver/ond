@@ -571,11 +571,18 @@ fn an_adoption_cut_short_after_the_state_file_moved_finishes_on_the_next_open() 
     let mine = base.path().join(format!("{:08x}", 1));
     std::fs::create_dir_all(&mine).unwrap();
     std::fs::rename(base.path().join(STATE_FILE), mine.join(STATE_FILE)).unwrap();
+    std::fs::write(mine.join(ADOPTING_FILE), b"").unwrap();
     // Hidden files alone don't count as a store left behind.
     std::fs::write(base.path().join(".DS_Store"), b"finder").unwrap();
     assert!(base.path().join("t.flac").exists());
 
+    // Another account signing in meanwhile leaves the files to the one they're going to.
+    assert_eq!(account_store(base.path(), 2).unwrap(), base.path().join(format!("{:08x}", 2)));
+    assert!(base.path().join("t.flac").exists(), "not taken by another account");
+    assert!(mine.join(ADOPTING_FILE).exists());
+
     assert_eq!(account_store(base.path(), 1).unwrap(), mine);
+    assert!(!mine.join(ADOPTING_FILE).exists(), "the marker comes off once the move is done");
     assert!(!base.path().join("t.flac").exists(), "the rest of the move happened");
     let s = store(&mine, &rt);
     assert!(s.snapshot().is_done("t"));
@@ -676,7 +683,7 @@ fn the_snapshot_never_measures_free_space_itself() {
     let s = store(dir.path(), &rt);
     assert!(s.snapshot().free_bytes.is_some(), "measured at open");
     // A reading gone stale is shown while the deleter thread measures again.
-    s.inner.lock().free = Some((Instant::now() - FREE_SPACE_EVERY, Some(1)));
+    s.inner.lock().free = Some((Instant::now().checked_sub(FREE_SPACE_EVERY).unwrap_or_else(Instant::now), Some(1)));
     s.retry_failed();
     assert_eq!(s.snapshot().free_bytes, Some(1));
     wait_for("a new reading", || s.snapshot().free_bytes != Some(1));
