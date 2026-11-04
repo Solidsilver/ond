@@ -82,7 +82,7 @@ impl From<subsonic::Artist> for ArtistV1 {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct AlbumV1 {
+pub(crate) struct AlbumV1 {
     pub id: String,
     pub name: String,
     pub sort: Option<String>,
@@ -98,7 +98,7 @@ pub struct AlbumV1 {
 
 /// Schema v2: adds record labels and all genres.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct AlbumV2 {
+pub(crate) struct AlbumV2 {
     pub id: String,
     pub name: String,
     pub sort: Option<String>,
@@ -278,7 +278,7 @@ impl From<subsonic::Album> for AlbumV3 {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct TrackV1 {
+pub(crate) struct TrackV1 {
     pub id: String,
     pub album_id: String,
     pub title: String,
@@ -310,7 +310,7 @@ pub struct ContributorV1 {
 
 /// Schema v2: adds the artist id, composer, credits and per-track cover art.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct TrackV2 {
+pub(crate) struct TrackV2 {
     pub id: String,
     pub album_id: String,
     pub title: String,

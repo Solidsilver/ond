@@ -10,7 +10,10 @@
 
 mod model;
 
-pub use model::*;
+/// Only the current versions are public. The frozen ones exist to read old
+/// rows and stay inside the crate.
+pub use model::{Album, Artist, ArtistLink, Contributor, Track, fold};
+use model::{AlbumV1, AlbumV2, AlbumV3, TrackV1, TrackV2, TrackV3};
 
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata, Table, TableDefinition, WriteTransaction};
 use serde::{Serialize, de::DeserializeOwned};
@@ -19,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bump when a model or index layout changes, and handle the step in `migrate`.
-pub const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
 const ARTISTS: TableDefinition<&str, &[u8]> = TableDefinition::new("artists");
@@ -398,7 +401,7 @@ impl Library {
 
     /// Keeps a copy of `value` under `name` (see [`saved`](Self::saved)).
     ///
-    /// The copy is tagged with [`SCHEMA_VERSION`], which covers the library's
+    /// The copy is tagged with the schema version, which covers the library's
     /// own types ([`Track`] and the rest). A type defined elsewhere that
     /// changes shape needs a new `name`: the tag can't see that change.
     pub fn save<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
