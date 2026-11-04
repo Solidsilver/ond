@@ -6,6 +6,7 @@
 use crate::managed::Managed;
 use crate::settings::Settings;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -35,6 +36,10 @@ struct Shared {
     wake: Condvar,
     path: PathBuf,
     overlay: Overlay,
+    /// Why the last write failed, until the app has said so (once a run).
+    write_error: Mutex<Option<String>>,
+    /// A failure has been handed to the app; later ones are only logged.
+    write_error_told: AtomicBool,
 }
 
 /// The managed settings (see [`crate::managed`]) and what they lie over.
@@ -106,7 +111,14 @@ impl Prefs {
     }
 
     fn with(settings: Settings, path: PathBuf, overlay: Overlay) -> Self {
-        let shared = Arc::new(Shared { state: Mutex::new(State { settings, revision: 0, written: 0, closing: false }), wake: Condvar::new(), path, overlay });
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State { settings, revision: 0, written: 0, closing: false }),
+            wake: Condvar::new(),
+            path,
+            overlay,
+            write_error: Mutex::new(None),
+            write_error_told: AtomicBool::new(false),
+        });
         let writer_shared = shared.clone();
         let writer = std::thread::Builder::new().name("settings-writer".into()).spawn(move || writer_loop(&writer_shared)).ok();
         Self { handle: Arc::new(Handle { shared, writer: Mutex::new(writer) }) }
@@ -169,6 +181,19 @@ impl Prefs {
         self.handle.shared.overlay.offline_was.clone()
     }
 
+    /// Why saving the settings failed, the first time it does in a run (the
+    /// app polls this each frame and says so once; later failures are only
+    /// logged). Cheap when nothing failed.
+    pub fn take_write_error(&self) -> Option<String> {
+        let shared = &self.handle.shared;
+        if shared.write_error_told.load(Ordering::Acquire) {
+            return None;
+        }
+        let e = shared.write_error.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        shared.write_error_told.store(true, Ordering::Release);
+        Some(e)
+    }
+
     /// Writes now if anything changed (quitting, tests).
     pub fn flush(&self) {
         flush(&self.handle.shared);
@@ -225,23 +250,23 @@ fn flush(shared: &Shared) {
         state.written = state.revision;
         state.settings.clone()
     };
-    write(&shared.path, &snapshot, &shared.overlay);
+    if let Err(e) = write(&shared.path, &snapshot, &shared.overlay) {
+        tracing::warn!("saving settings: {e}");
+        if !shared.write_error_told.load(Ordering::Acquire) {
+            *shared.write_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+        }
+    }
 }
 
 /// Writes `settings`, with the user's own values where managed ones lie over them.
-fn write(path: &Path, settings: &Settings, overlay: &Overlay) {
-    let result = (|| -> anyhow::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let mut v = serde_json::to_value(settings)?;
-        overlay.managed.restore(&mut v, &overlay.users);
-        replace_file(path, &path.with_extension("json.tmp"), &serde_json::to_vec_pretty(&v)?)?;
-        Ok(())
-    })();
-    if let Err(e) = result {
-        tracing::warn!("saving settings: {e}");
+fn write(path: &Path, settings: &Settings, overlay: &Overlay) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
     }
+    let mut v = serde_json::to_value(settings)?;
+    overlay.managed.restore(&mut v, &overlay.users);
+    replace_file(path, &path.with_extension("json.tmp"), &serde_json::to_vec_pretty(&v)?)?;
+    Ok(())
 }
 
 /// Replaces `path` with `bytes` through `tmp`, renamed over it, so a reader
@@ -372,6 +397,22 @@ mod tests {
         assert_eq!(s.volume, 0.3);
         assert_eq!(s.device_modes.get("uid-umc22"), Some(&DeviceMode::BitPerfect));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing set aside");
+    }
+
+    #[test]
+    fn a_failed_save_is_told_once() {
+        let dir = tempfile::tempdir().unwrap();
+        // The settings folder can't be made: a file is in the way.
+        std::fs::write(dir.path().join("Ond"), b"").unwrap();
+        let (prefs, _) = Prefs::open(dir.path().join("Ond").join("settings.json"));
+        assert_eq!(prefs.take_write_error(), None);
+        prefs.edit(|s| s.volume = 0.5);
+        prefs.flush();
+        assert!(prefs.take_write_error().is_some());
+        assert_eq!(prefs.take_write_error(), None, "told already");
+        prefs.edit(|s| s.volume = 0.6);
+        prefs.flush();
+        assert_eq!(prefs.take_write_error(), None, "later failures are only logged");
     }
 
     #[test]

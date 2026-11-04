@@ -1022,6 +1022,10 @@ impl eframe::App for OndApp {
         // The rest of this frame reads the preferences as they are now.
         self.read_prefs();
         let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
+        // Saved in the background: a failure there is told here, once.
+        if let Some(e) = self.prefs.take_write_error() {
+            self.show_error(format!("Your settings couldn't be saved ({e}). Changes made now may be lost when Ond quits."));
+        }
         let (theme, diagnostics) = (self.ui.prefs.theme, self.ui.prefs.diagnostics_bar);
         if let Some(menu) = self.menu.as_mut() {
             menu.sync(queue, self.bit_perfect, theme);
