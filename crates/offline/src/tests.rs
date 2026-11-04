@@ -606,6 +606,82 @@ fn a_move_reports_the_originals_it_kept() {
     assert!(move_store(&to, &base.path().join("newer")).unwrap().kept.is_empty());
 }
 
+#[test]
+fn a_finished_file_whose_done_was_never_saved_is_not_downloaded_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(50_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    s.pin(Pin::Album("al".into()), "Album", vec![track("t", body.len()), track("short", body.len())]);
+    drop(s);
+    // A download renamed its file into place, and then the app stopped
+    // before the pins recording it reached the disk.
+    std::fs::write(dir.path().join("t.flac"), &body).unwrap();
+    // This one is the wrong size, so it isn't the pinned file.
+    std::fs::write(dir.path().join("short.flac"), &body[..1000]).unwrap();
+
+    let s = store(dir.path(), &rt);
+    assert!(s.snapshot().is_done("t"));
+    assert!(!s.snapshot().is_done("short"));
+    s.set_source(Some(server.url()));
+    wait_for("the other download", || s.snapshot().is_done("short"));
+    assert_eq!(server.requests(), [None], "only the wrong-sized one is fetched");
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+    assert_eq!(std::fs::read(s.local_path("short").unwrap()).unwrap(), body);
+}
+
+#[test]
+fn a_finished_file_without_a_size_is_checked_against_the_server_not_fetched_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(200_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    s.pin(Pin::Track("t".into()), "T", vec![TrackRef::new("t", Some("flac".into()), None)]);
+    drop(s);
+    std::fs::write(dir.path().join("t.flac"), &body).unwrap();
+
+    let s = store(dir.path(), &rt);
+    assert!(!s.snapshot().is_done("t"), "nothing says this file is whole");
+    assert!(dir.path().join("t.flac.part").exists(), "it's a partial download again");
+    s.set_source(Some(server.url()));
+    wait_for("the check", || s.snapshot().is_done("t"));
+    assert_eq!(server.requests(), [Some(body.len() as u64 - RESUME_OVERLAP)], "only the overlap is asked for");
+    assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
+fn dropping_the_store_waits_for_its_file_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(4_000_000);
+    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(2), ..OPTS });
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    wait_for("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 0));
+    let io = s.inner.io.clone();
+    drop(s);
+    assert_eq!(io.running(), 0, "no write is still going after the drop");
+    let len = std::fs::metadata(dir.path().join("t.flac.part")).unwrap().len();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(std::fs::metadata(dir.path().join("t.flac.part")).unwrap().len(), len, "the partial file stays as it was");
+}
+
+#[test]
+fn the_snapshot_never_measures_free_space_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let s = store(dir.path(), &rt);
+    assert!(s.snapshot().free_bytes.is_some(), "measured at open");
+    // A reading gone stale is shown while the deleter thread measures again.
+    s.inner.lock().free = Some((Instant::now() - FREE_SPACE_EVERY, Some(1)));
+    s.retry_failed();
+    assert_eq!(s.snapshot().free_bytes, Some(1));
+    wait_for("a new reading", || s.snapshot().free_bytes != Some(1));
+}
+
 /// Time budgets in these tests are tight on purpose (they guard real
 /// performance), but shared CI runners are slower and noisier: allow 10× there.
 fn slack(d: std::time::Duration) -> std::time::Duration {
