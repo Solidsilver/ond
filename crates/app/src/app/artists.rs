@@ -3,7 +3,7 @@
 //! how many albums, or by when they started. The photos are the server's
 //! (Settings › Appearance › Lists can turn them off).
 
-use super::browse::{Collection, GAP_X, GAP_Y, LABEL_H, collection_menu, grid_metrics};
+use super::browse::{Collection, GAP_X, GAP_Y, LABEL_H, collection_menu, grid_metrics, heading_bar};
 use super::table::{Head, Width};
 use super::track_row::{TrackRow, col};
 use super::view_ctx::ViewCtx;
@@ -16,7 +16,7 @@ use crate::nav::Route;
 use crate::search::ArtistEntry;
 use crate::settings::ViewMode;
 use crate::theme::{Tokens, semibold};
-use crate::widgets::{choice, elide, view_picker};
+use crate::widgets::elide;
 use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
 
@@ -39,21 +39,13 @@ impl ViewCtx<'_> {
         // The server's artists (with ids) once synced, else album-artist names.
         let artists = Arc::clone(&index.artists);
         let mut view = self.ui.prefs.artist_view;
-        ui.horizontal(|ui| {
-            self.heading(ui, "Artists", Some(artists.len().to_string()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if view_picker(ui, &mut view) {
-                    self.actions.push(Action::Prefs(PrefsAction::ArtistView(view)));
-                }
-                ui.add_space(8.0);
-                // Right-to-left layout: the pill itself still reads left to right.
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    if choice(ui, &ArtistSort::ALL, &mut self.ui.artist_sort, None, |s| s.label().into()) {
-                        self.ui.artist_desc = false;
-                    }
-                });
-            });
-        });
+        let sort = Some((&ArtistSort::ALL[..], &mut self.ui.artist_sort));
+        if heading_bar(ui, "Artists", Some(artists.len().to_string()), Some(&mut view), sort, |s| s.label().into()) {
+            self.ui.artist_desc = false;
+        }
+        if view != self.ui.prefs.artist_view {
+            self.actions.push(Action::Prefs(PrefsAction::ArtistView(view)));
+        }
         let order = self.artist_order(&artists);
         let marks = self.artist_marks(&artists, &order);
         match view {

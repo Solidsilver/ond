@@ -119,23 +119,14 @@ impl OndApp {
             _ => ("Recently added".to_owned(), None),
         };
         let mut view = self.ui.prefs.album_view;
-        ui.horizontal(|ui| {
-            self.view().heading(ui, &title, sub);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if view_picker(ui, &mut view) {
-                    self.actions.push(Action::Prefs(PrefsAction::AlbumView(view)));
-                }
-                if *route == Route::Albums {
-                    ui.add_space(8.0);
-                    // Right-to-left layout: the pill itself still reads left to right.
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        if choice(ui, &AlbumSort::ALL, &mut self.ui.sort, None, |s| s.label().into()) {
-                            self.ui.sort_desc = false;
-                        }
-                    });
-                }
-            });
-        });
+        // Only Albums sorts; the other pages keep their order.
+        let sort = (*route == Route::Albums).then_some((&AlbumSort::ALL[..], &mut self.ui.sort));
+        if heading_bar(ui, &title, sub, Some(&mut view), sort, |s| s.label().into()) {
+            self.ui.sort_desc = false;
+        }
+        if view != self.ui.prefs.album_view {
+            self.actions.push(Action::Prefs(PrefsAction::AlbumView(view)));
+        }
         match view {
             ViewMode::Grid => self.view().grid_place(ui, route),
             ViewMode::List => self.view().album_list(ui, route),
@@ -265,6 +256,49 @@ impl OndApp {
     }
 }
 
+/// A page's title, large, with a muted note beside it (a count, a kind).
+pub(super) fn page_heading(ui: &mut Ui, title: &str, sub: Option<String>) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
+        if let Some(sub) = sub {
+            ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
+        }
+    });
+    ui.add_space(10.0);
+}
+
+/// A page's heading with its controls at the right: the grid/list picker
+/// when the page has one (`view`), and just left of it a pill of `tabs` (a
+/// sort, or which list to show). True when the pill changed.
+pub(super) fn heading_bar<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    title: &str,
+    sub: Option<String>,
+    view: Option<&mut ViewMode>,
+    tabs: Option<(&[T], &mut T)>,
+    label: impl Fn(T) -> String,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        page_heading(ui, title, sub);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let picker = view.is_some();
+            if let Some(view) = view {
+                view_picker(ui, view);
+            }
+            if let Some((all, current)) = tabs {
+                if picker {
+                    ui.add_space(8.0);
+                }
+                // Right-to-left layout: the pill itself still reads left to right.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| changed = choice(ui, all, current, None, label));
+            }
+        });
+    });
+    changed
+}
+
 /// Columns and tile width that fill `width`.
 pub fn grid_metrics(width: f32) -> (usize, f32) {
     let cols = (((width + GAP_X) / (TILE_MIN + GAP_X)).floor() as usize).max(1);
@@ -352,14 +386,7 @@ pub fn offline_item(ui: &mut Ui, kept: bool, shortcut: Option<&str>, what: impl 
 
 impl ViewCtx<'_> {
     pub(super) fn heading(&self, ui: &mut Ui, title: &str, sub: Option<String>) {
-        let t = Tokens::of(ui);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
-            if let Some(sub) = sub {
-                ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
-            }
-        });
-        ui.add_space(10.0);
+        page_heading(ui, title, sub);
     }
 
     pub(super) fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
