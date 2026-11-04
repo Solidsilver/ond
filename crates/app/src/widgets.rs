@@ -4,7 +4,7 @@
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align2, Color32, FontId, Galley, Rect, Response, Sense, Ui, vec2};
+use egui::{Color32, FontId, Galley, Rect, Response, Sense, Ui, vec2};
 use std::sync::Arc;
 
 /// One line of text cut to `width` with an ellipsis. The one way the app
@@ -78,6 +78,16 @@ struct Fill {
     pad: f32,
 }
 
+/// An accent ring just outside `rect` while `resp` has keyboard focus, for
+/// the controls that paint themselves. A click never focuses them, so the
+/// ring shows only when Tab got there.
+pub fn focus_ring(ui: &Ui, resp: &Response, rect: Rect, radius: f32) {
+    if resp.has_focus() {
+        let ring = egui::Stroke::new(1.5, Tokens::of(ui).accent);
+        ui.painter().rect_stroke(rect.expand(2.0), radius + 2.0, ring, egui::StrokeKind::Inside);
+    }
+}
+
 /// The body every filled button shares: an optional icon, then the label.
 fn filled(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str, f: Fill) -> Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), f.text);
@@ -85,6 +95,7 @@ fn filled(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str, f: Fill) ->
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + icon_w + f.pad, 30.0), Sense::click());
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, 6.0, if resp.hovered() { f.hover } else { f.rest });
+        focus_ring(ui, &resp, rect, 6.0);
         let mut x = rect.left() + f.pad / 2.0;
         if let Some(icon) = icon {
             crate::icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(x + 5.0, rect.center().y), vec2(10.0, 10.0)), icon, f.text);
@@ -122,11 +133,14 @@ pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
 pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: bool, glyph: f32, label: &str) -> Response {
     let t = Tokens::of(ui);
     let resp = ui.interact(rect, id, Sense::click());
-    if loved || reveal || resp.hovered() {
-        let (icon, color) =
-            if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if resp.hovered() { t.text } else { t.muted }) };
+    // Focused, it shows (as when hovered), or Tab would land on nothing.
+    let hot = resp.hovered() || resp.has_focus();
+    if loved || reveal || hot {
+        let (icon, color) = if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if hot { t.text } else { t.muted }) };
         crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
     }
+    let side = glyph + 6.0;
+    focus_ring(ui, &resp, Rect::from_center_size(rect.center(), vec2(side, side)), side / 2.0);
     let label = crate::keys::shown(label).into_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
@@ -270,6 +284,7 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
         } else if resp.hovered() {
             ui.painter().rect_filled(r, 5.0, t.hover);
         }
+        focus_ring(ui, &resp, r.shrink(2.0), 3.0);
         let color = if i == selected { t.text } else { t.muted };
         let g = elide(ui, opt, font.clone(), color, w - 6.0);
         ui.painter().galley(r.center() - g.size() / 2.0, g, color);
@@ -281,60 +296,6 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
         x += w;
     }
     clicked
-}
-
-/// How far along something is on its way to this computer.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mark {
-    Done,
-    /// 0..=1; 0 while waiting its turn.
-    Progress(f32),
-    Failed,
-}
-
-impl Mark {
-    pub fn of_track(state: Option<&offline::TrackState>) -> Option<Mark> {
-        Some(match state? {
-            offline::TrackState::Done { .. } => Mark::Done,
-            offline::TrackState::Queued => Mark::Progress(0.0),
-            offline::TrackState::Downloading { done, total } => Mark::Progress(total.map_or(0.0, |t| *done as f32 / t.max(1) as f32)),
-            offline::TrackState::Failed { .. } => Mark::Failed,
-        })
-    }
-
-    pub fn of_pin(sum: Option<&offline::PinSummary>) -> Option<Mark> {
-        let sum = sum?;
-        Some(if sum.complete() {
-            Mark::Done
-        } else if sum.failed > 0 && !sum.downloading && sum.done + sum.failed == sum.total {
-            Mark::Failed
-        } else {
-            Mark::Progress(sum.fraction())
-        })
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Mark::Done => "Downloaded",
-            Mark::Progress(f) if f > 0.0 => "Downloading",
-            Mark::Progress(_) => "Waiting to download",
-            Mark::Failed => "Download failed",
-        }
-    }
-}
-
-/// The small glyph for a [`Mark`], centred at `center`, about `size` across.
-pub fn mark(ui: &Ui, center: egui::Pos2, size: f32, m: Mark) {
-    let t = Tokens::of(ui);
-    let r = size / 2.0;
-    match m {
-        Mark::Done => crate::icons::paint(ui.painter(), Rect::from_center_size(center, vec2(size, size)), crate::icons::Icon::Downloaded, t.muted),
-        Mark::Progress(f) => crate::icons::progress_ring(ui.painter(), center, r * 0.8, f, t.accent, t.hairline),
-        Mark::Failed => {
-            ui.painter().circle_stroke(center, r * 0.8, egui::Stroke::new(1.3, t.warn));
-            ui.painter().text(center, Align2::CENTER_CENTER, "!", FontId::new(size * 0.7, semibold()), t.warn);
-        }
-    }
 }
 
 /// A small pill of tinted text (a finding worth a glance, not an alarm).
@@ -504,6 +465,7 @@ pub fn switch_tinted(ui: &mut Ui, on: &mut bool, label: &str, on_color: Color32)
         ui.painter().rect_filled(sw, 9.0, track);
         let x = egui::lerp(sw.left() + 9.0..=sw.right() - 9.0, how_on);
         ui.painter().circle_filled(egui::pos2(x, sw.center().y), 7.0, Color32::WHITE);
+        focus_ring(ui, &resp, sw, 9.0);
     }
     let (on, label) = (*on, label.to_owned());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, true, on, &label));
@@ -552,9 +514,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tab_shows_which_painted_control_has_focus() {
+        // One of each control that paints itself, and whether its ring is drawn.
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
+            |ui, on: &mut bool| {
+                segmented_wide(ui, &["Off", "On"], 0, 120.0);
+                switch(ui, on, "Shuffle");
+                hover_heart(ui, Rect::from_min_size(ui.cursor().min, vec2(24.0, 24.0)), ui.scope_id().with("heart"), false, false, 14.0, "Love");
+            },
+            false,
+        );
+        let rings = |h: &egui_kittest::Harness<'_, bool>| {
+            let accent = Tokens::of_ctx(&h.ctx).accent;
+            h.output().shapes.iter().filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.stroke.color == accent && r.stroke.width == 1.5)).count()
+        };
+        h.run();
+        assert_eq!(rings(&h), 0, "nothing focused, no ring");
+        for _ in 0..4 {
+            h.key_press(egui::Key::Tab);
+            h.run();
+            assert_eq!(rings(&h), 1, "one control focused, one ring");
+        }
+    }
+
+    #[test]
     fn two_controls_with_the_same_label_click_separately() {
         use egui_kittest::kittest::Queryable;
-        let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).build_ui_state(
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
             |ui, picks: &mut (usize, usize)| {
                 choice(ui, &[0, 1, 2], &mut picks.0, Some(300.0), |i| ["Off", "Auto", "Album"][i].into());
                 choice(ui, &[0, 1, 2], &mut picks.1, Some(300.0), |i| ["Original", "Auto", "Transcoded"][i].into());

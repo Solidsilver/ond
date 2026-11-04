@@ -6,10 +6,10 @@
 //! for a few seconds when it starts. Drawn on the GPU (see `visuals::gpu`),
 //! or with the painter where there's no wgpu renderer to hand.
 
-use super::widgets::elide_job;
 use super::{Action, OndApp, WindowAction};
 use crate::visuals::visualizer::{Dot, Input, Kind, Pick, Picture, Rng, Scene, caption_alpha, name_alpha};
 use crate::visuals::{EVERY_FRAME, gpu};
+use crate::widgets::elide_job;
 use egui::{Align2, Color32, FontId, Galley, Key, Modifiers, Rect, Ui, pos2, vec2};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -169,6 +169,14 @@ impl OndApp {
         let Some(v) = self.ui.visualizer.take() else { return };
         if v.fullscreen {
             self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        // Its pipelines and pictures stay in egui-wgpu's resources until
+        // something takes them out; this frame's callback does. When it was
+        // closed after drawing this frame, that last picture goes blank, but
+        // the repaint below replaces it straight away.
+        if self.gpu.is_some() {
+            let corner = Rect::from_min_size(self.ctx.content_rect().min, vec2(1.0, 1.0));
+            self.ctx.layer_painter(egui::LayerId::background()).add(gpu::release(corner));
         }
         // Closed after this frame was drawn (a menu, a command): draw the
         // window again now, not at the next input.

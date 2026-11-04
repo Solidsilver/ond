@@ -4,13 +4,14 @@
 //! header sorts by it, as the sort pill does; the other pages keep their
 //! own order.
 
+use super::offline_page::Mark;
 use super::table::{HEAD_H, Head};
 use super::track_row::{TrackRow, col};
 use super::view_ctx::ViewCtx;
-use super::widgets::{Mark, elide};
 use super::{Action, AlbumSort, QueueAction};
 use crate::nav::Route;
 use crate::theme::Tokens;
+use crate::widgets::elide;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 const ROW_H: f32 = 40.0;
@@ -95,7 +96,7 @@ impl ViewCtx<'_> {
             let mark_w = if mark.is_some() { 18.0 } else { 0.0 };
             let w = row.line(ui, x, c.title.right() - col::INSET - x - mark_w, &album.name, FontId::proportional(13.0), t.text);
             if let Some(m) = mark {
-                super::widgets::mark(ui, pos2(x + w + 10.0, row.cy()), col::MARK, m);
+                super::offline_page::mark(ui, pos2(x + w + 10.0, row.cy()), col::MARK, m);
             }
             let cell = |ui: &Ui, r: Rect, text: &str| {
                 row.line(ui, r.left() + col::INSET, r.width() - 2.0 * col::INSET, text, FontId::proportional(13.0), t.muted);

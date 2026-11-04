@@ -143,7 +143,7 @@ impl ViewCtx<'_> {
             } else {
                 ("No songs yet", "They appear once the library has synced with your server.")
             };
-            super::widgets::empty_state(ui, crate::icons::Icon::Note, title, body);
+            crate::widgets::empty_state(ui, crate::icons::Icon::Note, title, body);
             return;
         }
         let order = self.songs_order();
@@ -207,7 +207,7 @@ impl ViewCtx<'_> {
         if ui.is_rect_visible(row.rect) {
             row.fill(ui, t, selected, row.pointer_on());
             let c = columns(row.rect);
-            let color = super::widgets::track_color(t, playing, self.playable(tr));
+            let color = crate::widgets::track_color(t, playing, self.playable(tr));
             row.mark(ui, c.time.left() + col::INSET, self.downloads.snap.track(&tr.id));
             let mut title_x = c.title.left() + col::INSET;
             if playing {

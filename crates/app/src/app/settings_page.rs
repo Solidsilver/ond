@@ -4,7 +4,6 @@
 //! account) lives here; the popovers keep only what's needed in the moment.
 
 use super::seek::{WaveGrid, paint_wave};
-use super::widgets::{choice, menu_label, secondary, secondary_danger, section, switch, switch_tinted, thin_slider};
 use super::{Action, OndApp};
 use super::{AnalysisAction, OfflineAction, OutputAction, PrefsAction, WindowAction};
 use crate::icons::{self, Icon};
@@ -13,6 +12,7 @@ use crate::queue::{AddAt, ClearWhat, NextAt, OnPlay, Preset};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
 use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
+use crate::widgets::{choice, menu_label, secondary, secondary_danger, section, switch, switch_tinted, thin_slider};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -202,7 +202,7 @@ impl OndApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 18.0;
                 for (text, url) in [("Source code", crate::updates::REPO.to_owned()), ("Report a problem", format!("{}/issues", crate::updates::REPO))] {
-                    if super::widgets::link(ui, text, FontId::proportional(13.0), t.accent).clicked() {
+                    if crate::widgets::link(ui, text, FontId::proportional(13.0), t.accent).clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                     }
                 }
@@ -218,7 +218,7 @@ impl OndApp {
             let skipped = self.prefs.get(|s| s.skipped_update.as_deref() == Some(&v.to_string()));
             let hint = if skipped { format!("You have {current}. You skipped this version.") } else { format!("You have {current}.") };
             setting(ui, &format!("Ond {v} is available"), &hint, |ui| {
-                if super::widgets::primary(ui, Some(Icon::Download), "Download").clicked() {
+                if crate::widgets::primary(ui, Some(Icon::Download), "Download").clicked() {
                     self.actions.push(Action::Update(super::UpdateAction::Open(v)));
                 }
                 if !skipped && secondary(ui, "Skip").clicked() {
@@ -281,7 +281,7 @@ impl OndApp {
                 }
             }
             ui.add_space(4.0);
-            if super::widgets::link(ui, "Release page", FontId::proportional(13.0), t.accent).clicked() {
+            if crate::widgets::link(ui, "Release page", FontId::proportional(13.0), t.accent).clicked() {
                 self.actions.push(Action::Update(super::UpdateAction::Open(v)));
             }
         });
@@ -1006,7 +1006,7 @@ fn row_text(ui: &mut Ui, head: Head<'_>, at: egui::Pos2, room: f32) -> f32 {
     if !head.hint.is_empty() {
         let hint = crate::keys::shown(head.hint);
         if head.path {
-            let g = super::widgets::elide(&text, &hint, FontId::proportional(12.0), t.muted, room);
+            let g = crate::widgets::elide(&text, &hint, FontId::proportional(12.0), t.muted, room);
             text.add(egui::Label::new(g));
         } else {
             text.add(egui::Label::new(egui::RichText::new(hint).size(12.0).color(t.muted)).wrap());

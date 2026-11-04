@@ -81,6 +81,7 @@ mod layout;
 mod now_playing_view;
 mod offline_page;
 mod palette;
+mod playlist_page;
 mod queue_panel;
 mod seek;
 mod settings_page;
@@ -89,14 +90,18 @@ mod songs;
 mod table;
 mod toasts;
 mod toolbar;
+mod track_list;
 mod track_row;
 mod visualizer_view;
-mod widgets;
 
+#[cfg(test)]
+mod fixture;
 #[cfg(test)]
 mod snapshots;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ui_tests;
 
 use crate::analyze;
 use crate::art::Art;
@@ -120,7 +125,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
-// What the tests (here and in `snapshots`) build their fixtures from.
+// What the tests (here, in `fixture` and its users) build their fixtures from.
 #[cfg(test)]
 use {
     crate::bridge::{LibraryMsg, ListKey, OfflineMsg},
@@ -147,7 +152,6 @@ pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
 pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, UiState};
-pub(crate) use widgets::{choice, elide as elide_text, link as link_text, switch_tinted, thin_slider, thin_slider_marked};
 pub use window_state::WindowAction;
 
 use data::Pending;

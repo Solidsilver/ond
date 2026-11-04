@@ -1,14 +1,14 @@
 //! Favorites: loved songs, albums and artists, one kind at a time.
 
 use super::Action;
-use super::album_page::ListOpts;
 use super::browse::grid_metrics;
+use super::track_list::ListOpts;
 use super::view_ctx::ViewCtx;
-use super::widgets::{choice, elide};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::queue::Source;
 use crate::theme::Tokens;
+use crate::widgets::{choice, elide};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,7 +42,7 @@ impl ViewCtx<'_> {
                 });
             });
         });
-        let empty = |ui: &mut Ui, text: &str| super::widgets::empty_state(ui, Icon::Heart, "Nothing loved yet", text);
+        let empty = |ui: &mut Ui, text: &str| crate::widgets::empty_state(ui, Icon::Heart, "Nothing loved yet", text);
         if !self.favorites.loaded && self.session.client.is_some() {
             ui.label(egui::RichText::new("Loading…").color(t.muted));
             return;

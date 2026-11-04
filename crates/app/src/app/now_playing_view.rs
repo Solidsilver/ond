@@ -8,7 +8,6 @@
 use super::WindowAction;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
-use super::widgets::{elide, heart_button, link, link_line};
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -16,6 +15,7 @@ use crate::lyrics::{self, Fetch, Lyrics};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
 use crate::visuals::over_art::OnArt;
+use crate::widgets::{elide, heart_button, link, link_line};
 use crate::window::WindowMode;
 use audio::PlayState;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -329,7 +329,7 @@ impl ViewCtx<'_> {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for (k, v) in rows {
-                super::widgets::kv_text(ui, k, &v);
+                crate::widgets::kv_text(ui, k, &v);
             }
         });
     }

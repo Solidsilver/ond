@@ -7,11 +7,11 @@
 use super::QueueEdit;
 use super::track_row::{TrackRow, col, length};
 use super::view_ctx::ViewCtx;
-use super::widgets::{choice, elide};
 use super::{Action, Focus, QueueTab};
 use crate::icons::{self, Icon};
 use crate::queue::{EndAction, Item, Source, clock_label, end_offset, start_offsets};
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{choice, elide};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 /// Groups longer than this start folded (except the first).
@@ -112,7 +112,7 @@ impl ViewCtx<'_> {
                     EndAction::RepeatQueue => "Repeat queue",
                 };
                 let mut end = self.player.queue.end;
-                let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text).on_hover_text("What happens when the queue runs out");
+                let button = crate::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text).on_hover_text("What happens when the queue runs out");
                 egui::Popup::menu(&button).show(|ui| {
                     ui.selectable_value(&mut end, EndAction::Stop, label(EndAction::Stop));
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
@@ -127,7 +127,7 @@ impl ViewCtx<'_> {
                     };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text(hint).clicked() {
+                        if crate::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text(hint).clicked() {
                             self.actions.push(Action::Queue(QueueEdit::Clear));
                         }
                     });
@@ -262,7 +262,7 @@ impl ViewCtx<'_> {
             let x = art.right() + col::INSET;
             let text_w = rect.right() - col::INSET - right_g.size().x - col::RIGHT_GAP - x;
             ui.painter().galley(pos2(rect.right() - col::INSET - right_g.size().x, row.cy() - right_g.size().y / 2.0), right_g, t.muted);
-            let color = super::widgets::track_color(t, false, available);
+            let color = crate::widgets::track_color(t, false, available);
             row.two_lines(
                 ui,
                 x,

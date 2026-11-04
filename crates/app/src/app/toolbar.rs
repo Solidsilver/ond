@@ -5,13 +5,13 @@ use super::WindowAction;
 use super::playing::Origin;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
-use super::widgets::elide;
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::output::Readout;
 use crate::theme::{Tokens, semibold};
+use crate::widgets::elide;
 use audio::PlayState;
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
@@ -231,7 +231,7 @@ impl ViewCtx<'_> {
         // Always clickable: the heart sits over the display, so while the pointer
         // is on it the display itself doesn't count as hovered.
         let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
-        let heart_resp = super::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
+        let heart_resp = crate::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
         if heart_resp.clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }
