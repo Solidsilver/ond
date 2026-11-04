@@ -107,7 +107,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config mesa-vulkan-drivers
+          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
