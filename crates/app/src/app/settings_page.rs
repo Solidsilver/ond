@@ -128,37 +128,16 @@ impl OndApp {
 
     fn general_settings(&mut self, ui: &mut Ui) {
         group(ui, "Listening", |ui| {
-            let mut scrobble = self.ui.prefs.scrobble;
-            if managed(ui, self.prefs.managed("scrobble"), |ui| {
-                switch_row(ui, "Scrobble plays", "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.", &mut scrobble)
-            }) {
-                self.actions.push(Action::Prefs(PrefsAction::Scrobble(scrobble)));
-            }
+            let hint = "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.";
+            self.pref_switch(ui, "scrobble", "Scrobble plays", hint, self.ui.prefs.scrobble, PrefsAction::Scrobble);
         });
         group(ui, "Advanced", |ui| {
-            let mut shown = self.ui.prefs.diagnostics_bar;
-            if managed(ui, self.prefs.managed("diagnostics_bar"), |ui| {
-                switch_row(
-                    ui,
-                    "Show diagnostics bar",
-                    "The signal path, buffer, downloads, sync and server timing, in a thin bar along the bottom (⌥⌘I).",
-                    &mut shown,
-                )
-            }) {
-                self.actions.push(Action::Prefs(PrefsAction::Diagnostics(shown)));
-            }
+            let hint = "The signal path, buffer, downloads, sync and server timing, in a thin bar along the bottom (⌥⌘I).";
+            self.pref_switch(ui, "diagnostics_bar", "Show diagnostics bar", hint, self.ui.prefs.diagnostics_bar, PrefsAction::Diagnostics);
             if crate::csd::SUPPORTED {
-                let mut system = self.ui.prefs.system_title_bar;
-                if managed(ui, self.prefs.managed("window.system_title_bar"), |ui| {
-                    switch_row(
-                        ui,
-                        "Use the system title bar",
-                        "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.",
-                        &mut system,
-                    )
-                }) {
-                    self.actions.push(Action::Window(WindowAction::SetSystemTitleBar(system)));
-                }
+                let hint = "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.";
+                let on = self.ui.prefs.system_title_bar;
+                self.pref_switch(ui, "window.system_title_bar", "Use the system title bar", hint, on, WindowAction::SetSystemTitleBar);
             }
         });
     }
@@ -183,13 +162,12 @@ impl OndApp {
         let newer = self.updates.latest.filter(|v| *v > current);
         group(ui, "Updates", |ui| match crate::updates::channel() {
             crate::updates::Channel::GitHub => {
-                let mut on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
-                if managed(ui, self.prefs.managed("updates"), |ui| {
-                    switch_row(ui, "Check for updates", "Once a day, Ond looks on GitHub for a newer version and tells you when there is one.", &mut on)
-                }) {
+                let on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
+                let hint = "Once a day, Ond looks on GitHub for a newer version and tells you when there is one.";
+                self.pref_switch(ui, "updates", "Check for updates", hint, on, |on| {
                     let check = if on { crate::settings::UpdateCheck::Notify } else { crate::settings::UpdateCheck::Off };
-                    self.actions.push(Action::Update(super::UpdateAction::Check(check)));
-                }
+                    Action::Update(super::UpdateAction::Check(check))
+                });
                 self.update_status(ui, current, newer);
             }
             crate::updates::Channel::Packaged(by) => setting(ui, &format!("Updates come from {by}"), "", |_| ()),
@@ -292,42 +270,24 @@ impl OndApp {
     fn appearance_settings(&mut self, ui: &mut Ui) {
         group(ui, "Colors", |ui| {
             let mut theme = self.ui.prefs.theme;
-            if managed(ui, self.prefs.managed("theme"), |ui| setting(ui, "Theme", "", |ui| choice(ui, &ThemePref::ALL, &mut theme, None, |p| p.label().into())))
-            {
+            if choice_row(ui, self.prefs.managed("theme"), "Theme", "", &ThemePref::ALL, &mut theme, |p| p.label().into()) {
                 self.actions.push(Action::Prefs(PrefsAction::Theme(theme)));
             }
             let mut accent = self.ui.prefs.accent;
             if managed(ui, self.prefs.managed("accent"), |ui| setting(ui, "Accent color", "", |ui| accent_swatches(ui, &mut accent))) {
                 self.actions.push(Action::Prefs(PrefsAction::Accent(accent)));
             }
-            let mut adapt = self.ui.prefs.adapt_colors;
-            if managed(ui, self.prefs.managed("adapt_colors"), |ui| {
-                switch_row(
-                    ui,
-                    "Adapt colors to the album art",
-                    "The accent, the Player and the now-playing display follow the playing album's cover, and an album's or artist's page follows its own art.",
-                    &mut adapt,
-                )
-            }) {
-                self.actions.push(Action::Prefs(PrefsAction::AdaptColors(adapt)));
-            }
+            let hint =
+                "The accent, the Player and the now-playing display follow the playing album's cover, and an album's or artist's page follows its own art.";
+            self.pref_switch(ui, "adapt_colors", "Adapt colors to the album art", hint, self.ui.prefs.adapt_colors, PrefsAction::AdaptColors);
         });
         group(ui, "Artwork", |ui| {
-            let mut on = self.ui.prefs.backdrop;
-            if managed(ui, self.prefs.managed("backdrop"), |ui| {
-                switch_row(ui, "Blurred artwork", "A soft, dimmed copy of the cover behind the Player and Mini.", &mut on)
-            }) {
-                self.actions.push(Action::Prefs(PrefsAction::Backdrop(on)));
-            }
+            let hint = "A soft, dimmed copy of the cover behind the Player and Mini.";
+            self.pref_switch(ui, "backdrop", "Blurred artwork", hint, self.ui.prefs.backdrop, PrefsAction::Backdrop);
         });
         group(ui, "Seek bar", |ui| {
-            let mut on = self.ui.prefs.waveform;
-            if managed(ui, self.prefs.managed("waveform"), |ui| {
-                switch_row(ui, "Waveform", "Draws the track's shape in the seek bar. Ond reads each file once in the background.", &mut on)
-            }) {
-                self.actions.push(Action::Prefs(PrefsAction::Waveform(on)));
-            }
-            if on {
+            let hint = "Draws the track's shape in the seek bar. Ond reads each file once in the background.";
+            if self.pref_switch(ui, "waveform", "Waveform", hint, self.ui.prefs.waveform, PrefsAction::Waveform) {
                 let mut bars = self.ui.prefs.waveform_bars;
                 let locks = [self.prefs.managed("waveform_bars.rounded"), self.prefs.managed("waveform_bars.width"), self.prefs.managed("waveform_bars.gap")];
                 waveform_bar_settings(ui, &mut bars, locks);
@@ -337,28 +297,10 @@ impl OndApp {
             }
         });
         group(ui, "Lists", |ui| {
-            let mut on = self.ui.prefs.alpha_rail;
-            if managed(ui, self.prefs.managed("alpha_rail"), |ui| {
-                switch_row(
-                    ui,
-                    "Alphabet rail",
-                    "Letters beside Albums, Artists and Songs when they're sorted by name. Click or drag along them to jump.",
-                    &mut on,
-                )
-            }) {
-                self.actions.push(Action::Prefs(PrefsAction::AlphaRail(on)));
-            }
-            let mut on = self.ui.prefs.artist_photos;
-            if managed(ui, self.prefs.managed("artist_photos"), |ui| {
-                switch_row(
-                    ui,
-                    "Artist photos",
-                    "Each artist's photo from the server beside their name in Artists, or their initial when the server has none.",
-                    &mut on,
-                )
-            }) {
-                self.actions.push(Action::Prefs(PrefsAction::ArtistPhotos(on)));
-            }
+            let hint = "Letters beside Albums, Artists and Songs when they're sorted by name. Click or drag along them to jump.";
+            self.pref_switch(ui, "alpha_rail", "Alphabet rail", hint, self.ui.prefs.alpha_rail, PrefsAction::AlphaRail);
+            let hint = "Each artist's photo from the server beside their name in Artists, or their initial when the server has none.";
+            self.pref_switch(ui, "artist_photos", "Artist photos", hint, self.ui.prefs.artist_photos, PrefsAction::ArtistPhotos);
         });
     }
 
@@ -367,9 +309,7 @@ impl OndApp {
         let before = p.clone();
         group(ui, "Volume", |ui| {
             let hint = if self.bit_perfect { format!("{}. Bypassed while bit-perfect is on.", p.replay_gain.hint()) } else { p.replay_gain.hint().to_owned() };
-            managed(ui, self.prefs.managed("playback.replay_gain"), |ui| {
-                setting(ui, "ReplayGain", &hint, |ui| choice(ui, &RgMode::ALL, &mut p.replay_gain, None, |m| m.label().into()))
-            });
+            choice_row(ui, self.prefs.managed("playback.replay_gain"), "ReplayGain", &hint, &RgMode::ALL, &mut p.replay_gain, |m| m.label().into());
             if p.replay_gain != RgMode::Off {
                 managed(ui, self.prefs.managed("playback.preamp_db"), |ui| db_row(ui, "Pre-amp", "", &mut p.preamp_db, -12.0..=12.0));
                 managed(ui, self.prefs.managed("playback.untagged_db"), |ui| {
@@ -378,26 +318,21 @@ impl OndApp {
             }
         });
         group(ui, "Streaming", |ui| {
-            managed(ui, self.prefs.managed("playback.quality"), |ui| {
-                setting(ui, "Quality", p.quality.hint(), |ui| choice(ui, &QualityMode::ALL, &mut p.quality, None, |q| q.label().into()))
-            });
+            let hint = p.quality.hint();
+            choice_row(ui, self.prefs.managed("playback.quality"), "Quality", hint, &QualityMode::ALL, &mut p.quality, |q| q.label().into());
             if p.quality != QualityMode::Original {
-                managed(ui, self.prefs.managed("playback.format"), |ui| {
-                    let hint = if p.format == TranscodeFormat::Opus {
-                        "Opus sounds best for its size. Your server needs an Opus transcoding; Navidrome has one unless it was removed."
-                    } else {
-                        ""
-                    };
-                    setting(ui, "Format", hint, |ui| choice(ui, &TranscodeFormat::ALL, &mut p.format, None, |f| f.label().into()))
-                });
+                let hint = if p.format == TranscodeFormat::Opus {
+                    "Opus sounds best for its size. Your server needs an Opus transcoding; Navidrome has one unless it was removed."
+                } else {
+                    ""
+                };
+                choice_row(ui, self.prefs.managed("playback.format"), "Format", hint, &TranscodeFormat::ALL, &mut p.format, |f| f.label().into());
                 let network = crate::fmt::capitalize(self.output.network().label());
                 let now = match p.transcode(self.output.network()) {
                     Some(t) => format!("{network} · new tracks stream as {}", t.label()),
                     None => format!("{network} · new tracks stream as original files"),
                 };
-                managed(ui, self.prefs.managed("playback.kbps"), |ui| {
-                    setting(ui, "Bitrate", &now, |ui| choice(ui, &BITRATES, &mut p.kbps, None, |k| k.to_string()))
-                });
+                choice_row(ui, self.prefs.managed("playback.kbps"), "Bitrate", &now, &BITRATES, &mut p.kbps, |k| k.to_string());
             }
         });
         if p != before {
@@ -419,18 +354,14 @@ impl OndApp {
             if setting(ui, "Style", hint, |ui| choice(ui, shown, &mut preset, None, |p| p.label().into())) {
                 q = preset.prefs().unwrap_or(q);
             }
-            managed(ui, self.prefs.managed("queue.play_next"), |ui| {
-                setting(ui, "Play next", q.play_next.hint(), |ui| choice(ui, &NextAt::ALL, &mut q.play_next, None, |n| n.label().into()))
-            });
-            managed(ui, self.prefs.managed("queue.add"), |ui| {
-                setting(ui, "Add to queue", q.add.hint(), |ui| choice(ui, &AddAt::ALL, &mut q.add, None, |a| a.label().into()))
-            });
-            managed(ui, self.prefs.managed("queue.on_play"), |ui| {
-                setting(ui, "Playing something new", q.on_play.hint(), |ui| choice(ui, &OnPlay::ALL, &mut q.on_play, None, |o| o.label().into()))
-            });
-            managed(ui, self.prefs.managed("queue.clear"), |ui| {
-                setting(ui, "Clear removes", q.clear.hint(), |ui| choice(ui, &ClearWhat::ALL, &mut q.clear, None, |c| c.label().into()))
-            });
+            let hint = q.play_next.hint();
+            choice_row(ui, self.prefs.managed("queue.play_next"), "Play next", hint, &NextAt::ALL, &mut q.play_next, |n| n.label().into());
+            let hint = q.add.hint();
+            choice_row(ui, self.prefs.managed("queue.add"), "Add to queue", hint, &AddAt::ALL, &mut q.add, |a| a.label().into());
+            let hint = q.on_play.hint();
+            choice_row(ui, self.prefs.managed("queue.on_play"), "Playing something new", hint, &OnPlay::ALL, &mut q.on_play, |o| o.label().into());
+            let hint = q.clear.hint();
+            choice_row(ui, self.prefs.managed("queue.clear"), "Clear removes", hint, &ClearWhat::ALL, &mut q.clear, |c| c.label().into());
             note(ui, "Tracks you add show under “You added” in the queue. When they end up in more than one group, right-click one to bring them together.");
         });
         if q != before {
@@ -483,39 +414,22 @@ impl OndApp {
         group(ui, "Volume and notices", |ui| {
             let (mut green, mut db, mut toast) = self.prefs.get(|s| (s.device_volume_green, s.device_volume_db, s.device_change_toast));
             let before = (green, db, toast);
-            managed(ui, self.prefs.managed("device_volume_green"), |ui| {
-                switch_row(
-                    ui,
-                    "Green dot on the slider in bit-perfect",
-                    "When the volume sets the device's own level, a green dot in the slider's knob says so.",
-                    &mut green,
-                )
+            let hint = "When the volume sets the device's own level, a green dot in the slider's knob says so.";
+            managed_switch(ui, self.prefs.managed("device_volume_green"), "Green dot on the slider in bit-perfect", hint, &mut green);
+            let hint = "The device's own level beside the slider, in bit-perfect.";
+            choice_row(ui, self.prefs.managed("device_volume_db"), "Show the level in dB", hint, &crate::settings::DbReadout::ALL, &mut db, |d| {
+                d.label().into()
             });
-            managed(ui, self.prefs.managed("device_volume_db"), |ui| {
-                setting(ui, "Show the level in dB", "The device's own level beside the slider, in bit-perfect.", |ui| {
-                    choice(ui, &crate::settings::DbReadout::ALL, &mut db, None, |d| d.label().into())
-                })
-            });
-            managed(ui, self.prefs.managed("device_change_toast"), |ui| {
-                switch_row(ui, "Notify when the output changes", "A notice names the device whenever playback moves to another.", &mut toast)
-            });
+            let hint = "A notice names the device whenever playback moves to another.";
+            managed_switch(ui, self.prefs.managed("device_change_toast"), "Notify when the output changes", hint, &mut toast);
             if (green, db, toast) != before {
                 self.actions.push(Action::Output(OutputAction::Show { green, db, toast }));
             }
         });
         if cfg!(target_os = "macos") {
             group(ui, "Normal mode", |ui| {
-                let mut on = self.output.match_rate();
-                if managed(ui, self.prefs.managed("output_match_rate"), |ui| {
-                    switch_row(
-                        ui,
-                        "Match each song's sample rate",
-                        "Switches the device to the song's rate, as bit-perfect does, while other apps keep sharing it. Off, the device stays as macOS has it and Ond converts the rate.",
-                        &mut on,
-                    )
-                }) {
-                    self.actions.push(Action::Output(OutputAction::MatchRate(on)));
-                }
+                let hint = "Switches the device to the song's rate, as bit-perfect does, while other apps keep sharing it. Off, the device stays as macOS has it and Ond converts the rate.";
+                self.pref_switch(ui, "output_match_rate", "Match each song's sample rate", hint, self.output.match_rate(), OutputAction::MatchRate);
                 note(ui, "A few seconds after playback stops, Ond puts the device back the way it found it.");
             });
         }
@@ -643,25 +557,12 @@ impl OndApp {
             ui.add_space(28.0);
         }
         group(ui, "Without the server", |ui| {
-            let mut on = self.session.work_offline;
-            if managed(ui, self.prefs.managed("work_offline"), |ui| {
-                switch_row(
-                    ui,
-                    "Offline mode",
-                    "Don't connect to the server. Show only music that plays without it: downloads, and songs streamed recently enough to still be cached.",
-                    &mut on,
-                )
-            }) {
-                self.actions.push(Action::Offline(OfflineAction::WorkOffline(on)));
-            }
+            let hint = "Don't connect to the server. Show only music that plays without it: downloads, and songs streamed recently enough to still be cached.";
+            self.pref_switch(ui, "work_offline", "Offline mode", hint, self.session.work_offline, OfflineAction::WorkOffline);
             let mut unplayable = self.prefs.get(|s| s.offline_unplayable);
-            let before = unplayable;
-            managed(ui, self.prefs.managed("offline_unplayable"), |ui| {
-                setting(ui, "Songs that aren't downloaded", "What playback does with them while the server can't be reached.", |ui| {
-                    choice(ui, &crate::settings::Unplayable::ALL, &mut unplayable, None, |u| u.label().into())
-                })
-            });
-            if unplayable != before {
+            let hint = "What playback does with them while the server can't be reached.";
+            let locked = self.prefs.managed("offline_unplayable");
+            if choice_row(ui, locked, "Songs that aren't downloaded", hint, &crate::settings::Unplayable::ALL, &mut unplayable, |u| u.label().into()) {
                 self.actions.push(Action::Offline(OfflineAction::Unplayable(unplayable)));
             }
         });
@@ -794,12 +695,8 @@ impl OndApp {
         } else {
             setting(ui, "Library analysis", "Available once the library has synced.", |_| ());
         }
-        let mut playing = self.ui.prefs.analyze_playing;
-        if managed(ui, self.prefs.managed("analyze_playing"), |ui| {
-            switch_row(ui, "Analyze tracks as they play", "Each track is measured once it has downloaded for playback.", &mut playing)
-        }) {
-            self.actions.push(Action::Analysis(AnalysisAction::AnalyzePlaying(playing)));
-        }
+        let hint = "Each track is measured once it has downloaded for playback.";
+        self.pref_switch(ui, "analyze_playing", "Analyze tracks as they play", hint, self.ui.prefs.analyze_playing, AnalysisAction::AnalyzePlaying);
         note(
             ui,
             "Measures loudness and dynamic range, and checks for upsampled or lossy-sourced files. Runs in the background and pauses while playback needs the network.",
@@ -816,26 +713,15 @@ impl OndApp {
         );
         ui.add_space(24.0);
         group(ui, "Live audio", |ui| {
-            managed(ui, self.prefs.managed("experimental.spectrum"), |ui| {
-                switch_row(ui, "Live spectrum", "In the now-playing display and the Player. Uses more battery while music plays.", &mut x.spectrum)
-            });
-            managed(ui, self.prefs.managed("experimental.spectrogram"), |ui| {
-                switch_row(
-                    ui,
-                    "Spectrogram in Info",
-                    "Frequency over time, scrolling in the Info tab. Uses more battery while music plays.",
-                    &mut x.spectrogram,
-                )
-            });
-            managed(ui, self.prefs.managed("experimental.visualizer"), |ui| {
-                switch_row(ui, "Visualizer", "A full-window light show: ⌘T opens it, Esc leaves. Keeps the graphics card busy while open.", &mut x.visualizer)
-            });
+            let hint = "In the now-playing display and the Player. Uses more battery while music plays.";
+            managed_switch(ui, self.prefs.managed("experimental.spectrum"), "Live spectrum", hint, &mut x.spectrum);
+            let hint = "Frequency over time, scrolling in the Info tab. Uses more battery while music plays.";
+            managed_switch(ui, self.prefs.managed("experimental.spectrogram"), "Spectrogram in Info", hint, &mut x.spectrogram);
+            let hint = "A full-window light show: ⌘T opens it, Esc leaves. Keeps the graphics card busy while open.";
+            managed_switch(ui, self.prefs.managed("experimental.visualizer"), "Visualizer", hint, &mut x.visualizer);
             if x.visualizer {
-                managed(ui, self.prefs.managed("experimental.visualizer_pick"), |ui| {
-                    setting(ui, "Show", "Shuffle picks a different one each track. Inside the visualizer, ← and → switch.", |ui| {
-                        choice(ui, &Pick::ALL, &mut x.visualizer_pick, None, |p| p.label().into());
-                    })
-                });
+                let hint = "Shuffle picks a different one each track. Inside the visualizer, ← and → switch.";
+                choice_row(ui, self.prefs.managed("experimental.visualizer_pick"), "Show", hint, &Pick::ALL, &mut x.visualizer_pick, |p| p.label().into());
             }
         });
         if x != before {
@@ -1020,6 +906,30 @@ fn switch_row(ui: &mut Ui, label: &str, hint: &str, on: &mut bool) -> bool {
     setting(ui, label, hint, |ui| switch(ui, on, label)).changed()
 }
 
+/// A [`switch_row`] for a setting that managed.json may lock. True when it changed.
+fn managed_switch(ui: &mut Ui, locked: bool, label: &str, hint: &str, on: &mut bool) -> bool {
+    managed(ui, locked, |ui| switch_row(ui, label, hint, on))
+}
+
+/// A [`setting`] whose control is a segmented choice among `all`, for a
+/// setting that managed.json may lock. True when it changed.
+fn choice_row<T: Copy + PartialEq>(ui: &mut Ui, locked: bool, label: &str, hint: &str, all: &[T], value: &mut T, name: impl Fn(T) -> String) -> bool {
+    managed(ui, locked, |ui| setting(ui, label, hint, |ui| choice(ui, all, value, None, name)))
+}
+
+impl OndApp {
+    /// A switch for one setting, `on` as it stands and `key` its name in
+    /// managed.json. Flipping it pushes `act` with the new value. Returns
+    /// the switch's value as shown, changed this frame or not.
+    fn pref_switch<A: Into<Action>>(&mut self, ui: &mut Ui, key: &str, label: &str, hint: &str, on: bool, act: impl FnOnce(bool) -> A) -> bool {
+        let mut on = on;
+        if managed_switch(ui, self.prefs.managed(key), label, hint, &mut on) {
+            self.actions.push(act(on).into());
+        }
+        on
+    }
+}
+
 /// A value read out on the right of a row.
 fn value(ui: &mut Ui, text: &str, color: egui::Color32) {
     ui.label(egui::RichText::new(text).size(13.0).color(color));
@@ -1170,9 +1080,7 @@ fn waveform_bar_settings(ui: &mut Ui, bars: &mut Bars, locks: [bool; 3]) {
     ui.add_space(ROW_PAD + 3.0);
     waveform_preview(ui, *bars, ui.available_width());
     ui.add_space(ROW_PAD + 3.0);
-    managed(ui, locks[0], |ui| {
-        setting(ui, "Bars", "", |ui| choice(ui, &[false, true], &mut bars.rounded, None, |r| if r { "Rounded" } else { "Square" }.into()))
-    });
+    choice_row(ui, locks[0], "Bars", "", &[false, true], &mut bars.rounded, |r| if r { "Rounded" } else { "Square" }.into());
     managed(ui, locks[1], |ui| step_row(ui, "Thickness", &mut bars.width, Bars::WIDTHS, half_points));
     managed(ui, locks[2], |ui| step_row(ui, "Spacing", &mut bars.gap, Bars::GAPS, half_points));
 }
