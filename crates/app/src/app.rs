@@ -43,14 +43,18 @@
 //! 1. A field in `Settings`, with `#[serde(default)]`.
 //! 2. A field in `PrefsView` if a frame reads it, and a `PrefsAction`
 //!    variant with its arm in `apply_prefs`.
-//! 3. Its path in `locked()` (`prefs_view.rs`) and in `managed::ALLOWED`
-//!    if managed.json may set it.
+//! 3. An arm in `locked()` (`prefs_view.rs`) and its path in
+//!    `managed::ALLOWED` if managed.json may set it.
 //! 4. A row in `settings_page.rs`.
 //!
 //! A view:
 //! 1. `app/<view>.rs`, drawing from a `ViewCtx` and pushing `Action`s.
 //! 2. A `Route` for it in `nav.rs`, and its arm in `main_view` (`browse.rs`).
-//! 3. An entry in `every_view_draws` in `app/tests.rs`.
+//! 3. An entry in `every_view_draws` in `app/tests.rs` and a route in
+//!    `every_view_names_its_controls` in `app/ui_tests.rs` (every painted
+//!    control needs a `widget_info`), and a scene in `snapshots/scenes.rs`.
+//!    Reuse `virtual_list`, `track_list`, `browse::heading_bar` and
+//!    `widgets::empty_state` rather than drawing those again.
 
 // The app's parts.
 mod analyzing;
@@ -141,7 +145,7 @@ use {
     ui_state::QueueUi,
 };
 
-pub use crate::lyrics::SongStats;
+use crate::lyrics::SongStats;
 pub use crate::player::QueueAction;
 pub use analyzing::{Analysis, AnalysisAction};
 pub use commands::PlaylistAction;

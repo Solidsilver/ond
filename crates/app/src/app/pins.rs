@@ -297,7 +297,7 @@ impl Downloads {
             // The app applies these itself (`apply_offline`); listed so a new
             // variant has to be placed in one or the other.
             OfflineAction::Keep(..) | OfflineAction::Move | OfflineAction::WorkOffline(_) | OfflineAction::Unplayable(_) => {
-                return Err("This isn't a download action".to_owned());
+                unreachable!("applied by the app; see apply_offline")
             }
         }
         Ok(())

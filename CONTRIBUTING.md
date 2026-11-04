@@ -23,7 +23,7 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-CI runs the same on macOS, Linux and Windows, plus a Nix build on Linux. If your change touches audio output, device handling, the offline store's files, or anything in [TESTING.md](TESTING.md), say which checklist items you ran and on what hardware. Some can only be run by the maintainer; that's fine, just say so.
+CI runs the same on macOS, Linux and Windows (the docs build on Linux only), plus a Nix build on Linux. If your change touches audio output, device handling, the offline store's files, or anything in [TESTING.md](TESTING.md), say which checklist items you ran and on what hardware. Some can only be run by the maintainer; that's fine, just say so.
 
 For UI changes, render the screens: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes PNGs to `target/snapshots/`. Attach the ones that changed.
 

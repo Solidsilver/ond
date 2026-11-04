@@ -232,8 +232,9 @@ impl OndApp {
 
     /// Forgets lyrics and play counts still on their way. Called when the
     /// bridge session ends without a change of account: the fetches deliver
-    /// nothing now, so their `Loading` would stay for good. What arrived
-    /// already stays.
+    /// nothing now, so their `Loading` would stay for good. Lyrics that
+    /// arrived stay; play counts can't tell "loading" from "the server
+    /// couldn't say" (both `None`), so those are asked for again.
     pub(super) fn forget_in_flight(&mut self) {
         self.lyrics.retain(|_, f| *f != crate::lyrics::Fetch::Loading);
         self.song_stats.retain(|_, s| s.is_some());

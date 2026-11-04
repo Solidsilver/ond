@@ -103,7 +103,8 @@ impl CacheKey {
 
 /// `<escaped id>.<suffix>`: how the stream cache and the offline store name a
 /// track's file. Both use this, so a finished cache file can be hard-linked
-/// into the offline store under the name it expects.
+/// into the offline store under the name it expects. `NameBuf` builds the
+/// same name on the stack for lookups; a change here changes it too.
 pub fn file_name(id: &str, suffix: Option<&str>) -> String {
     let mut name = escape_id(id);
     if let Some(s) = suffix {

@@ -183,7 +183,7 @@ impl Prefs {
 
     /// Why saving the settings failed, the first time it does in a run (the
     /// app polls this each frame and says so once; later failures are only
-    /// logged). Cheap when nothing failed.
+    /// logged). An uncontended lock per frame until then; a flag after.
     pub fn take_write_error(&self) -> Option<String> {
         let shared = &self.handle.shared;
         if shared.write_error_told.load(Ordering::Acquire) {

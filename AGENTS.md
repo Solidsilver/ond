@@ -31,10 +31,10 @@ Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for 
 
 ## How the app is wired
 
-- **Views don't change state.** A view gets a `ViewCtx` and pushes `Action`s; `apply` runs them after the frame. Views written as `OndApp` methods are the older style. `output/panel.rs` is the known exception (it edits prefs and sends engine commands while drawing); don't add more.
-- **Background work posts `Msg`s.** Every `Bridge` method returns at once; results come back as a `Msg` on the inbox, each followed by a repaint request. Messages are grouped by the part of the app that handles them (`Msg::Library(..)`, `Msg::Offline(..)`, ...), so a variant in the wrong group is a compile error.
+- **Views don't change state.** A view gets a `ViewCtx` and pushes `Action`s; `apply` runs them after the frame. Views written as `OndApp` methods (the toolbar, the sidebar, Settings) are the older style. Two known exceptions change things while drawing: `output/panel.rs` edits prefs and sends engine commands, and `visualizer_view.rs` saves the visual it switches to. Don't add more.
+- **Background work posts `Msg`s.** Every `Bridge` method returns at once; results come back as a `Msg` on the inbox, each followed by a repaint request. Messages are grouped by the part of the app that handles them (`Msg::Library(..)`, `Msg::Offline(..)`, ...), so a variant in the wrong group is a compile error. Errors cross as a `Failure`: `Network` ones make the app check on the server and stay quiet while it's known to be offline; `Server` and `Local` ones are always shown. "Not connected" for something the user asked for is `Local`.
 - **Sessions scope results.** `Bridge::scoped()` ties work to the current sign-in; a result from before a sign-out, a Work Offline toggle or an account switch is dropped by `send()`. New background work that can outlive a session must be scoped.
-- **Prefs is the one copy of settings**, saved in the background. Read through `PrefsView` once per frame; don't lock `Prefs` inside a draw.
+- **Prefs is the one copy of settings**, saved in the background. Frames read it through `PrefsView`, one copy per frame; a view shouldn't lock `Prefs` while drawing (the Settings page still does, and is the known holdout).
 - **Idle is idle.** Repaints are requested only while playing or buffering; `snapshots/perf.rs` asserts zero idle frames. A new animation goes through `visuals::Live`.
 - **Derived data is memoised on versioned keys** (`memo.rs`, `TrackSet`, `search.generation`, the album and analysis versions). Never key a memo on an `Arc`'s address without holding that `Arc` in the memo's value.
 
@@ -42,7 +42,8 @@ Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for 
 
 - **A server call:** a method on `Bridge` (scoped), a `Msg` variant in the right group, a handler in the matching `src/app/*.rs`. Errors cross the bridge typed as network, server or local; only network failures trigger a reachability probe.
 - **A preference:** a field on `Settings` (with `#[serde(default)]` and a lenient fallback if it's an enum), a `PrefsView` field, a `PrefsAction` variant and its `apply_prefs` arm, a `locked()` arm in `prefs_view.rs` if Home Manager may manage it, a row in `settings_page.rs`, and a line in `docs/home-manager.md`.
-- **A view:** `src/app/<view>.rs` taking `ViewCtx`, a `Route`, an entry in `every_view_draws` in `src/app/tests.rs`, and a scene in `snapshots/scenes.rs`.
+- **A view:** `src/app/<view>.rs` taking `ViewCtx`, a `Route`, an entry in `every_view_draws` in `src/app/tests.rs`, a route in `every_view_names_its_controls` in `src/app/ui_tests.rs` (every painted control needs a `widget_info`), and a scene in `snapshots/scenes.rs`. Reuse what's there: `virtual_list` for long lists, `track_list` for tracks, `browse::heading_bar` for a page heading with its picker and sort, `widgets::empty_state` for an empty list.
+- **Test data:** `test_tracks::track(id, album, title)` builds a `Track` for any test; `app/fixture.rs` has the UI's fixture library and harness helpers.
 - **A queue or playback behaviour:** `queue.rs` is pure data with its own tests; `player.rs` drives the engine and is tested with fakes. Keep them that way.
 
 ## Invariants the compiler can't see
