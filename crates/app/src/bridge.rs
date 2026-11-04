@@ -1009,7 +1009,7 @@ impl Bridge {
 
     /// Makes a playlist of `song_ids`; the app opens it when it's there.
     pub fn create_playlist(&self, client: Option<Client>, name: String, song_ids: Vec<String>) {
-        let Some(client) = client else { return self.send(Msg::Error(Failure::Network("Not connected to a server".into()))) };
+        let Some(client) = client else { return self.send(Msg::Error(Failure::Local("Not connected to a server".into()))) };
         let this = self.scoped();
         self.rt.spawn(async move {
             match client.create_playlist(&name, &song_ids).await {
@@ -1025,7 +1025,7 @@ impl Bridge {
     /// Sends one edit, then reloads the playlist list and the playlist (which
     /// also undoes the app's optimistic copy if the edit failed).
     pub fn edit_playlist(&self, client: Option<Client>, id: String, edit: PlaylistEdit) {
-        let Some(client) = client else { return self.send(Msg::Error(Failure::Network("Not connected to a server".into()))) };
+        let Some(client) = client else { return self.send(Msg::Error(Failure::Local("Not connected to a server".into()))) };
         let this = self.scoped();
         self.rt.spawn(async move {
             let result = match &edit {
