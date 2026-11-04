@@ -152,7 +152,7 @@ impl RingInput {
     }
 
     /// Whether what plays now may be off a `device_bits`-bit integer grid and
-    /// need requantizing (see [`needs_dither`](crate::dither::needs_dither)).
+    /// need requantizing, by the rule in `dither::needs_dither`.
     pub fn needs_dither(&self, device_bits: u32) -> bool {
         needs_dither(Some(device_bits), self.treatment(self.gain * self.rg != 1.0))
     }
