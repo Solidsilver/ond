@@ -4,7 +4,7 @@
 
 use super::fixture::*;
 use super::*;
-use egui::{pos2, vec2};
+use egui::{Vec2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use std::path::Path;
@@ -15,16 +15,7 @@ use std::path::Path;
 #[test]
 fn info_stays_inside_its_column_after_a_long_song() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
     let check = |h: &mut Harness<'_, Option<OndApp>>, what: &str| {
         let right = app_mut(h).prefs_now().columns.right;
         let column = egui::Rect::from_x_y_ranges(FULL.x - right..=FULL.x, 0.0..=FULL.y);
@@ -61,16 +52,7 @@ fn info_stays_inside_its_column_after_a_long_song() {
 #[test]
 fn column_edges_drag_and_persist() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     // (The harness's own panel has an 8 pt margin around the app.)
     let edge = pos2(8.0 + super::layout::LEFT_DEFAULT, 400.0);
@@ -108,16 +90,7 @@ fn column_edges_drag_and_persist() {
 #[test]
 fn live_visuals_ask_for_frames_only_while_playing() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
     let soon = |h: &mut Harness<'_, Option<OndApp>>| h.output().viewport_output.values().any(|v| v.repaint_delay <= Duration::from_millis(50));
     reset(&mut h, FULL, Route::Recent);
     h.run_steps(3);
@@ -144,16 +117,7 @@ fn live_visuals_ask_for_frames_only_while_playing() {
 #[test]
 fn the_now_playing_heart_toggles_both_ways() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     let id = app_mut(&mut h).player.queue.current.as_ref().unwrap().track.id.clone();
     let loved = |h: &mut Harness<'_, Option<OndApp>>| app_mut(h).favorites.is_on(StarKind::Song, &id);
@@ -176,17 +140,10 @@ fn the_now_playing_heart_toggles_both_ways() {
 #[test]
 fn leaving_a_maximized_window_resizes_after_it_lets_go() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-                app.track_window(ui.ctx());
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = window(dir.path(), FULL, |ui, app| {
+        app.main_ui(ui);
+        app.track_window(ui.ctx());
+    });
     reset(&mut h, FULL, Route::Recent);
     let set_max = |h: &mut Harness<'_, Option<OndApp>>, on: bool| {
         h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().maximized = Some(on);
@@ -224,16 +181,7 @@ fn leaving_a_maximized_window_resizes_after_it_lets_go() {
 #[test]
 fn a_long_album_name_doesnt_push_the_player_down() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(vec2(380.0, 880.0)).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = window(dir.path(), vec2(380.0, 880.0), |ui, app| app.main_ui(ui));
     reset(&mut h, vec2(380.0, 880.0), Route::Recent);
     app_mut(&mut h).edit_windows(|w| w.mode = WindowMode::Player);
     h.run_steps(3);
@@ -254,16 +202,7 @@ fn a_long_album_name_doesnt_push_the_player_down() {
 #[test]
 fn the_play_button_on_an_album_cover_plays_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     h.run_steps(2);
     let target = album_id(1);
@@ -292,16 +231,8 @@ fn the_play_button_on_an_album_cover_plays_it() {
 #[test]
 fn our_window_frame_leaves_the_content_working() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
+    let mut h = full_window(dir.path());
     let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
     crate::csd::preview(&ctx, true);
     crate::csd::set_window(&ctx, true, true);
     reset(&mut h, FULL, Route::Recent);
@@ -348,16 +279,7 @@ fn our_window_frame_leaves_the_content_working() {
 #[test]
 fn list_keys_stay_with_an_open_sheet() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
 
     // Songs with a selection, Settings open on top.
     reset(&mut h, FULL, Route::Songs);
@@ -434,10 +356,15 @@ fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
 
 /// The full window with the fixture library, for the behaviour tests below.
 fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
+    window(dir, FULL, |ui, app| app.main_ui(ui))
+}
+
+/// A window `size` big with the fixture library, drawn by `draw`.
+fn window(dir: &Path, size: Vec2, draw: fn(&mut egui::Ui, &mut OndApp)) -> Harness<'static, Option<OndApp>> {
+    let mut h = Harness::builder().with_size(size).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+        move |ui, app: &mut Option<OndApp>| {
             if let Some(app) = app {
-                app.main_ui(ui);
+                draw(ui, app);
             }
         },
         None,
@@ -656,16 +583,7 @@ fn a_long_playlist_reorders_reveals_and_follows_the_keys() {
 #[test]
 fn dragging_the_volume_slider_doesnt_move_the_window() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     h.run_steps(2);
 
@@ -700,16 +618,7 @@ fn managed_settings_cant_be_changed_in_the_app() {
     )
     .unwrap();
     std::fs::write(dir.path().join("managed.json"), MANAGED).unwrap();
-    let mut h = Harness::builder().with_size(FULL).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
-        |ui, app: &mut Option<OndApp>| {
-            if let Some(app) = app {
-                app.main_ui(ui);
-            }
-        },
-        None,
-    );
-    let ctx = h.ctx.clone();
-    *h.state_mut() = Some(populated(&ctx, dir.path()));
+    let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     let app = app_mut(&mut h);
     let s = app.prefs_now();
