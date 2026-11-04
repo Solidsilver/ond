@@ -205,7 +205,7 @@ pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -
 }
 
 /// Runs a full sync pass. `progress` is called after every page or album.
-/// Nothing is stored once `live` turns false (see [`write`]); a cancelled
+/// Nothing is stored once `live` turns false (see [`write()`]); a cancelled
 /// pass still stores what's already on its way.
 pub async fn run<F: Fetch>(lib: Arc<Library>, fetch: F, cancel: Arc<AtomicBool>, live: impl Fn() -> bool, progress: impl Fn(Progress)) -> Outcome {
     match run_inner(&lib, fetch, &cancel, &live, &progress).await {

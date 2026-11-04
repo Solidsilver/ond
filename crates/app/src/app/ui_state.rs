@@ -93,7 +93,7 @@ impl ArtistSort {
 #[derive(Default)]
 pub struct QueueUi {
     pub tab: QueueTab,
-    /// Per-group open/closed choices, by [`Source::key`].
+    /// Per-group open/closed choices, by [`Source::key`](crate::queue::Source::key).
     pub open: HashMap<String, bool>,
     pub selected: Option<u64>,
 }

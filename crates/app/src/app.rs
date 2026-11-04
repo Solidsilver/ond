@@ -20,6 +20,37 @@
 //! - `ui_state`, `frame`: what the window shows, and the work each frame does
 //!   around the drawing
 //! - `view_ctx` and the views: what a view gets, and the views themselves
+//!
+//! New views take a [`ViewCtx`](view_ctx::ViewCtx) and push `Action`s. Views
+//! written as `OndApp` methods (the toolbar, the sidebar, Settings) are the
+//! older style, not a pattern to follow. Two places still change things while
+//! drawing, and they're known exceptions: the output panel (`output/panel.rs`)
+//! edits preferences and sends engine commands, and the visualizer saves the
+//! visual it switches to (`visualizer_view.rs`).
+//!
+//! # Adding things
+//!
+//! A server call:
+//! 1. A `Bridge` method that does the work in the background and posts the
+//!    result. Use `self.scoped()` so a result for an account that signed out
+//!    is dropped.
+//! 2. A `Msg` variant for the result, inside the group it belongs to
+//!    (`LibraryMsg`, `OfflineMsg`, `AnalysisMsg`) if any. Failures go as a
+//!    `Failure`, so only network ones make the app check on the server.
+//! 3. A handler for it in the matching `app/*.rs` (`data.rs` for the library).
+//!
+//! A preference:
+//! 1. A field in `Settings`, with `#[serde(default)]`.
+//! 2. A field in `PrefsView` if a frame reads it, and a `PrefsAction`
+//!    variant with its arm in `apply_prefs`.
+//! 3. Its path in `locked()` (`prefs_view.rs`) and in `managed::ALLOWED`
+//!    if managed.json may set it.
+//! 4. A row in `settings_page.rs`.
+//!
+//! A view:
+//! 1. `app/<view>.rs`, drawing from a `ViewCtx` and pushing `Action`s.
+//! 2. A `Route` for it in `nav.rs`, and its arm in `main_view` (`browse.rs`).
+//! 3. An entry in `every_view_draws` in `app/tests.rs`.
 
 // The app's parts.
 mod analyzing;
@@ -326,6 +357,10 @@ impl Drop for AppRuntime {
 }
 
 pub struct OndApp {
+    /// Must stay the first field. Fields drop in order, so the runtime shuts
+    /// down (and its tasks are dropped) before anything declared after it.
+    /// Nothing declared below may need the runtime in its `Drop`: by then it
+    /// is gone, and a `block_on` or `spawn` there would panic or do nothing.
     _rt: AppRuntime,
     /// The window's egui context (for theme changes and window commands).
     ctx: egui::Context,

@@ -169,8 +169,8 @@ fn strip_tickets(line: &str) -> String {
     kept
 }
 
-/// Splits bracketed section markers out of a line: "a heart divided[Chorus]"
-/// → ["a heart divided", "[Chorus]"]. Other brackets ("[laughs]") stay put.
+/// Splits bracketed section markers out of a line: `"a heart divided[Chorus]"`
+/// → `["a heart divided", "[Chorus]"]`. Other brackets (`"[laughs]"`) stay put.
 fn split_markers(line: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut rest = line;
