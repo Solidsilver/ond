@@ -52,12 +52,21 @@ use serde::{Deserialize, Serialize};
 /// Bumped when an algorithm changes, so stored results are redone.
 /// v2: DR as dr14_t.meter computes it (trailing partial block, 44.1 kHz block
 /// size); "upsampled" needs a sharp edge.
-pub const ANALYSIS_VERSION: u16 = 2;
+/// v3: "lossy source" needs a sharp edge too, and a cutoff at or below 16 kHz
+/// is only a possibility (see `BAND_OF_32K_HZ`).
+pub const ANALYSIS_VERSION: u16 = 3;
 
 /// The least drop across a cutoff's middle 800 Hz (see `spectrum::Edge`) that
 /// reads as a filter's brickwall: about 45 dB per kHz. Natural rolloffs are
 /// far gentler; resampler and ADC filters far steeper.
 const SHARP_EDGE_DB: f64 = 25.0;
+
+/// The top of a 32 kHz recording's band (radio broadcasts, DAT long play,
+/// some early digital masters): its Nyquist frequency, where its own
+/// anti-alias filter has already cut everything. Resampled to 44.1 kHz it
+/// shows a brickwall below this, measured within about 150 Hz of the filter's
+/// real edge, just where low-bitrate MP3 and AAC encoders cut too.
+const BAND_OF_32K_HZ: u32 = 16_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Confidence {
@@ -106,6 +115,10 @@ impl Verdict {
             ),
             VerdictKind::LossySource { cutoff_hz } if *cutoff_hz >= 19_500 => format!(
                 "Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy, though some early digital recordings stop there too.",
+                khz(*cutoff_hz)
+            ),
+            VerdictKind::LossySource { cutoff_hz } if *cutoff_hz <= BAND_OF_32K_HZ => format!(
+                "Sharp cutoff at {} kHz, where MP3 and AAC encoders cut the treble. The file may come from a lossy copy, or from a 32 kHz recording such as a radio broadcast, which stops there too.",
                 khz(*cutoff_hz)
             ),
             VerdictKind::LossySource { cutoff_hz } => {
@@ -353,8 +366,18 @@ impl Analyzer {
                 verdicts.push(Verdict { kind: VerdictKind::Upsampled { from_hz, cutoff_hz: edge.cutoff_hz }, confidence });
                 cutoff_hz = Some(edge.cutoff_hz);
             }
-            if lossless && (10_000..=20_300).contains(&edge.cutoff_hz) && nyquist.saturating_sub(edge.cutoff_hz) >= 1_500 && edge.drop_db >= 30.0 {
-                let confidence = if edge.cutoff_hz <= 19_200 && edge.drop_db >= 40.0 { Confidence::High } else { Confidence::Medium };
+            // An encoder's lowpass is a brickwall too, so the same steepness
+            // test keeps a deep natural rolloff from reading as one. Below
+            // 16 kHz a brickwall is also what a 32 kHz master's resampling
+            // leaves, so there it's only a possibility.
+            if lossless
+                && (10_000..=20_300).contains(&edge.cutoff_hz)
+                && nyquist.saturating_sub(edge.cutoff_hz) >= 1_500
+                && edge.drop_db >= 30.0
+                && edge.sharp_db >= SHARP_EDGE_DB
+            {
+                let confidence =
+                    if edge.cutoff_hz > BAND_OF_32K_HZ && edge.cutoff_hz <= 19_200 && edge.drop_db >= 40.0 { Confidence::High } else { Confidence::Medium };
                 verdicts.push(Verdict { kind: VerdictKind::LossySource { cutoff_hz: edge.cutoff_hz }, confidence });
                 cutoff_hz = Some(edge.cutoff_hz);
             }

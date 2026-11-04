@@ -173,6 +173,26 @@ fn natural_rolloff_is_not_a_cutoff() {
 }
 
 #[test]
+fn a_deep_but_gradual_rolloff_is_not_a_lossy_cutoff() {
+    // 30 dB per kHz above 14 kHz falls over 40 dB, which used to read as a
+    // lossy source with high confidence. An encoder's lowpass is far steeper.
+    let n = shaped_noise(44_100, 20.0, -20.0, |hz| 10f64.powf(-(hz - 14_000.0).max(0.0) / 1000.0 * 30.0 / 20.0));
+    let a = run(44_100, Some(16), &n);
+    assert!(a.verdicts.is_empty(), "{:?}", a.verdicts);
+}
+
+#[test]
+fn a_32_khz_source_is_not_called_lossy_with_high_confidence() {
+    // A 32 kHz broadcast resampled to 44.1 kHz: its anti-alias filter's
+    // brickwall, passing 95% of its 16 kHz band.
+    let n = shaped_noise(44_100, 20.0, -20.0, |hz| if hz < 15_200.0 { 1.0 } else { 0.0 });
+    let a = run(44_100, Some(16), &n);
+    let lossy: Vec<_> = a.verdicts.iter().filter(|v| matches!(v.kind, VerdictKind::LossySource { .. })).collect();
+    assert!(lossy.iter().all(|v| v.confidence < Confidence::High), "{lossy:?}");
+    assert!(lossy.iter().all(|v| v.evidence().contains("32 kHz")), "{lossy:?}");
+}
+
+#[test]
 fn lossy_files_are_not_accused_of_being_lossy() {
     let n = shaped_noise(44_100, 20.0, -20.0, |hz| if hz < 16_000.0 { 1.0 } else { 0.0 });
     assert!(run(44_100, None, &n).verdicts.is_empty());
