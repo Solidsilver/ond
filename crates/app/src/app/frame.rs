@@ -65,7 +65,7 @@ impl OndApp {
             return;
         }
         let Some(track) = self.player.queue.current.as_ref().map(|c| &c.track) else { return };
-        let (downloads, cache, transcode) = (&self.downloads, &self.cache, self.output.transcode());
+        let (downloads, cache, transcode) = (&self.downloads, &self.cache, self.ui.transcode.as_ref());
         self.waveforms.want(&track.id, track.suffix.as_deref(), || {
             downloads
                 .local_path(&track.id)
