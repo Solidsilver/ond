@@ -50,6 +50,7 @@ mod layout;
 mod now_playing_view;
 mod offline_page;
 mod palette;
+mod playlist_page;
 mod queue_panel;
 mod seek;
 mod settings_page;
@@ -58,6 +59,7 @@ mod songs;
 mod table;
 mod toasts;
 mod toolbar;
+mod track_list;
 mod track_row;
 mod visualizer_view;
 

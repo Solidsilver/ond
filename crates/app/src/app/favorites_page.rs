@@ -1,8 +1,8 @@
 //! Favorites: loved songs, albums and artists, one kind at a time.
 
 use super::Action;
-use super::album_page::ListOpts;
 use super::browse::grid_metrics;
+use super::track_list::ListOpts;
 use super::view_ctx::ViewCtx;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
