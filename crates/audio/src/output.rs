@@ -573,7 +573,9 @@ impl OutputBackend for CpalBackend {
         let closing_in = closing.clone();
         // cpal streams are !Send on some platforms, so each lives on its own thread
         // until told to close.
-        let (card, returning) = (self.card, self.card_returning.take());
+        // The wait for a returning card holds until a stream opens, so a retry
+        // after a failed open waits for the card too instead of playing elsewhere.
+        let (card, returning) = (self.card, self.card_returning);
         let handle = thread::Builder::new()
             .name("audio-output".into())
             .spawn(move || match start_stream(format, input, status, drained, card, returning, closing_in) {
@@ -600,6 +602,7 @@ impl OutputBackend for CpalBackend {
         };
         self.name = format!("cpal · {device}");
         self.ctl = Some((ctl_tx, handle, closing));
+        self.card_returning = None;
         Ok(())
     }
 
