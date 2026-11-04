@@ -53,7 +53,9 @@ impl Analysis {
                 prefs.edit(|s| s.analysis_resume = false);
             }
             AnalysisAction::AnalyzePlaying(on) => prefs.edit(|s| s.analyze_playing = on),
-            _ => unreachable!("not an analysis action"),
+            // The app applies these itself (`apply_analysis`), since they need
+            // the library; listed so a new variant has to be placed.
+            AnalysisAction::Tracks(_) | AnalysisAction::Library => {}
         }
     }
 
@@ -68,7 +70,7 @@ impl OndApp {
         match action {
             AnalysisAction::Tracks(tracks) => self.analyze(&tracks),
             AnalysisAction::Library => self.analyze_library(),
-            other => self.analysis.apply(other, &self.prefs),
+            a @ (AnalysisAction::Pause(_) | AnalysisAction::Stop | AnalysisAction::AnalyzePlaying(_)) => self.analysis.apply(a, &self.prefs),
         }
     }
 
