@@ -934,6 +934,52 @@ fn saved_values_keep_their_tag() {
     assert_eq!(row.value(), [0xa5, 1, a, b, c, d, 1], "the saved row layout changed: older copies would read as missing or wrong");
 }
 
+#[test]
+fn an_unchanged_artist_list_writes_nothing() {
+    let lib = Library::in_memory().unwrap();
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    assert!(lib.replace_artists([artist("1", "Bill Evans"), artist("2", "Øystein Sevåg")]).unwrap());
+    assert!(!lib.replace_artists([artist("2", "Øystein Sevåg"), artist("1", "Bill Evans")]).unwrap(), "same artists, another order");
+    assert_eq!(lib.artists().unwrap().len(), 2);
+    // Any difference writes the whole list: a field, a missing artist, a new one.
+    let mut more = artist("1", "Bill Evans");
+    more.album_count = 2;
+    assert!(lib.replace_artists([more.clone(), artist("2", "Øystein Sevåg")]).unwrap());
+    assert_eq!(lib.artists().unwrap()[0].album_count, 2);
+    assert!(lib.replace_artists([more.clone()]).unwrap());
+    assert!(lib.replace_artists([more, artist("3", "Nina Simone")]).unwrap());
+    let names: Vec<_> = lib.artists().unwrap().into_iter().map(|a| a.name).collect();
+    assert_eq!(names, ["Bill Evans", "Nina Simone"]);
+}
+
+#[test]
+fn lists_come_out_in_index_order() {
+    let lib = Library::in_memory().unwrap();
+    // Folding, equal sort keys told apart by id, years before titles, and
+    // album ids that are prefixes of each other.
+    lib.upsert_albums([
+        album("b", "Same", "Björk", 2001),
+        album("a", "Same", "bjork", 2001),
+        album("c", "Alpha", "BJORK", 2004),
+        album("d", "Zed", "Øystein Sevåg", 1989),
+        album("d2", "Anything", "Air", 1998),
+    ])
+    .unwrap();
+    lib.store_songs(vec![song("t3", "d", 2, 1), song("t1", "d", 1, 9), song("t2", "d2", 1, 1), song("t0", "d", 1, 9), song("t4", "a", 1, 1)]).unwrap();
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    lib.replace_artists([artist("2", "eagles"), artist("1", "Eagles"), artist("3", "Émile"), artist("4", "Øystein")]).unwrap();
+
+    let rt = lib.db.begin_read().unwrap();
+    let album_idx: Vec<String> = rt.open_table(ALBUMS_BY_SORT).unwrap().iter().unwrap().map(|e| e.unwrap().0.value().3.to_owned()).collect();
+    let track_idx: Vec<String> = rt.open_table(TRACKS_BY_ALBUM).unwrap().iter().unwrap().map(|e| e.unwrap().0.value().3.to_owned()).collect();
+    let artist_idx: Vec<String> = rt.open_table(ARTISTS_BY_NAME).unwrap().iter().unwrap().map(|e| e.unwrap().0.value().1.to_owned()).collect();
+    assert_eq!(lib.albums().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), album_idx);
+    assert_eq!(lib.all_tracks().unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(), track_idx);
+    assert_eq!(lib.artists().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), artist_idx);
+    assert_eq!(album_idx, ["d2", "a", "b", "c", "d"]);
+    assert_eq!(track_idx, ["t4", "t0", "t1", "t3", "t2"]);
+}
+
 /// An album with two credited tracks, then its album row and its first
 /// track's row overwritten with bytes that don't decode.
 fn library_with_unreadable_rows() -> Library {

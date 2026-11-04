@@ -296,21 +296,45 @@ impl Library {
         Ok(cleared)
     }
 
-    /// Replaces the whole artist list with what the server returned.
-    pub fn replace_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
+    /// Replaces the whole artist list with what the server returned. Returns
+    /// whether anything changed. Every sync sends the full list and it rarely
+    /// differs, so an identical list writes nothing.
+    pub fn replace_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<bool> {
+        let artists: Vec<(Artist, Vec<u8>)> = artists
+            .into_iter()
+            .map(|a| {
+                let a = Artist::from(a);
+                encode(&a).map(|bytes| (a, bytes))
+            })
+            .collect::<Result<_>>()?;
         let wt = self.db.begin_write()?;
+        let unchanged = {
+            let rows = wt.open_table(ARTISTS)?;
+            let mut same = rows.len()? == artists.len() as u64;
+            for (a, bytes) in &artists {
+                if !same {
+                    break;
+                }
+                same = rows.get(a.id.as_str())?.is_some_and(|g| g.value() == bytes.as_slice());
+            }
+            same
+        };
+        if unchanged {
+            wt.abort()?;
+            return Ok(false);
+        }
         {
             let mut rows = wt.open_table(ARTISTS)?;
             let mut idx = wt.open_table(ARTISTS_BY_NAME)?;
             rows.retain(|_, _| false)?;
             idx.retain(|_, _| false)?;
-            for a in artists {
-                let a = Artist::from(a);
-                rows.insert(a.id.as_str(), encode(&a)?.as_slice())?;
+            for (a, bytes) in &artists {
+                rows.insert(a.id.as_str(), bytes.as_slice())?;
                 idx.insert((a.sort_name().as_str(), a.id.as_str()), ())?;
             }
         }
-        Ok(wt.commit()?)
+        wt.commit()?;
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -475,16 +499,17 @@ impl Library {
         Ok(self.db.begin_read()?.open_table(TRACKS)?.len()?)
     }
 
-    /// Every stored track, grouped by album in disc/track order.
+    /// Every stored track, grouped by album in disc/track order: the order of
+    /// `TRACKS_BY_ALBUM`, rebuilt in memory. Walking the index costs a lookup
+    /// per track, while one pass over the rows and a sort is far cheaper.
     pub fn all_tracks(&self) -> Result<Vec<Track>> {
         let rt = self.db.begin_read()?;
-        let rows = rt.open_table(TRACKS)?;
-        let idx = rt.open_table(TRACKS_BY_ALBUM)?;
-        let mut out = Vec::with_capacity(idx.len()? as usize);
-        for entry in idx.iter()? {
-            let (key, _) = entry?;
-            out.extend(get_row_or_skip(&rows, key.value().3)?);
+        let mut out: Vec<Track> = all_rows(&rt.open_table(TRACKS)?)?;
+        fn key(t: &Track) -> (&str, u32, u32, &str) {
+            let (disc, no) = t.order_parts();
+            (&t.album_id, disc, no, &t.id)
         }
+        out.sort_by(|a, b| key(a).cmp(&key(b)));
         Ok(out)
     }
 
@@ -533,16 +558,12 @@ impl Library {
         Ok(existed)
     }
 
-    /// All albums ordered by artist, then year, then title.
+    /// All albums ordered by artist, then year, then title: the order of
+    /// `ALBUMS_BY_SORT`, rebuilt in memory like [`all_tracks`](Self::all_tracks).
     pub fn albums(&self) -> Result<Vec<Album>> {
         let rt = self.db.begin_read()?;
-        let rows = rt.open_table(ALBUMS)?;
-        let idx = rt.open_table(ALBUMS_BY_SORT)?;
-        let mut out = Vec::with_capacity(idx.len()? as usize);
-        for entry in idx.iter()? {
-            let (key, _) = entry?;
-            out.extend(get_row_or_skip(&rows, key.value().3)?);
-        }
+        let mut out: Vec<Album> = all_rows(&rt.open_table(ALBUMS)?)?;
+        out.sort_by_cached_key(|a| (a.sort_parts(), a.id.clone()));
         Ok(out)
     }
 
@@ -558,15 +579,12 @@ impl Library {
         track_ids(&rt, album_id)?.iter().filter_map(|id| get_row_or_skip(&rows, id).transpose()).collect()
     }
 
+    /// All artists by folded sort name: the order of `ARTISTS_BY_NAME`,
+    /// rebuilt in memory like [`all_tracks`](Self::all_tracks).
     pub fn artists(&self) -> Result<Vec<Artist>> {
         let rt = self.db.begin_read()?;
-        let rows = rt.open_table(ARTISTS)?;
-        let idx = rt.open_table(ARTISTS_BY_NAME)?;
-        let mut out = Vec::with_capacity(idx.len()? as usize);
-        for entry in idx.iter()? {
-            let (key, _) = entry?;
-            out.extend(get_row_or_skip(&rows, key.value().1)?);
-        }
+        let mut out: Vec<Artist> = all_rows(&rt.open_table(ARTISTS)?)?;
+        out.sort_by_cached_key(|a| (a.sort_name(), a.id.clone()));
         Ok(out)
     }
 
@@ -765,6 +783,20 @@ fn get_row_or_skip<T: DeserializeOwned>(table: &impl ReadableTable<&'static str,
             Ok(None)
         }
     }
+}
+
+/// Every row of `table` in one pass, skipping those that don't decode like
+/// [`get_row_or_skip`] does.
+fn all_rows<T: DeserializeOwned>(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<Vec<T>> {
+    let mut out = Vec::with_capacity(table.len()? as usize);
+    for entry in table.iter()? {
+        let (id, bytes) = entry?;
+        match decode(bytes.value()) {
+            Ok(row) => out.push(row),
+            Err(e) => tracing::warn!("library: skipping row {} that can't be read: {e}", id.value()),
+        }
+    }
+    Ok(out)
 }
 
 fn track_ids(rt: &ReadTransaction, album_id: &str) -> Result<Vec<String>> {
