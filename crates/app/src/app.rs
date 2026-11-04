@@ -92,6 +92,7 @@ mod toasts;
 mod toolbar;
 mod track_list;
 mod track_row;
+mod virtual_list;
 mod visualizer_view;
 
 #[cfg(test)]

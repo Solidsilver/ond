@@ -4,9 +4,10 @@
 //! Rows act like the album page's: double-click (or ⏎) plays the track's
 //! album from that track, ⌥⏎ plays next, ⇧⏎ adds, right-click has the rest.
 
-use super::table::Head;
+use super::table::{Head, Width};
 use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
+use super::virtual_list::VirtualList;
 use super::{Action, Focus, QueueAction};
 use crate::memo::Memo;
 use crate::queue::Source;
@@ -151,8 +152,7 @@ impl ViewCtx<'_> {
         self.songs_keys(ui, &order);
 
         // Header, over the columns (clear of the alphabet rail).
-        let rail_w = if marks.is_some() { super::alpha::RAIL_W } else { 0.0 };
-        let (head_rect, _) = ui.allocate_exact_size(vec2(ui.available_width() - rail_w, super::table::HEAD_H), Sense::hover());
+        let head_rect = super::table::head_rect(ui, marks.is_some());
         let cols = columns(head_rect);
         let head = |label, rect, right, col| Head { label, rect, right, sorts: Some(col) };
         let heads = [
@@ -169,32 +169,17 @@ impl ViewCtx<'_> {
         let (data, player) = (self.data, self.player);
         let tracks = &data.tracks.all;
         let current = player.queue.current.as_ref().map(|c| c.track.id.as_str());
-        super::layout::into_gutter(ui, |ui| {
-            // Rows sit flush: the scroll area places them by the same height.
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let area = ui.available_rect_before_wrap();
-            let mut scroll = egui::ScrollArea::vertical().id_salt("songs").auto_shrink(false);
-            scroll = scroll.content_margin(if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() });
-            if let Some(y) = super::alpha::take_jump(ui, "songs") {
-                scroll = scroll.vertical_scroll_offset(y);
+        VirtualList::table("songs", marks.as_deref(), ROW_H, order.len()).show(ui, |ui, range| {
+            // The keys moved the selection: bring its row into view, once. It
+            // may be off screen (and not laid out), so place it by its index.
+            if std::mem::take(&mut self.ui.songs.scroll_to_selected)
+                && let Some(sel) = self.ui.songs.selected
+            {
+                let top = ui.cursor().top() + (sel as f32 - range.start as f32) * ROW_H;
+                ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(ui.available_width(), ROW_H)), None);
             }
-            let mut top = 0;
-            let out = scroll.show_rows(ui, ROW_H, order.len(), |ui, range| {
-                top = range.start;
-                // The keys moved the selection: bring its row into view, once. It
-                // may be off screen (and not laid out), so place it by its index.
-                if std::mem::take(&mut self.ui.songs.scroll_to_selected)
-                    && let Some(sel) = self.ui.songs.selected
-                {
-                    let top = ui.cursor().top() + (sel as f32 - range.start as f32) * ROW_H;
-                    ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(ui.available_width(), ROW_H)), None);
-                }
-                for i in range {
-                    self.songs_row(ui, &t, &tracks[order[i]], i, current);
-                }
-            });
-            if let Some(marks) = marks {
-                super::alpha::rail(ui, "songs", area, &out, &marks, top, |i| i, ROW_H);
+            for i in range {
+                self.songs_row(ui, &t, &tracks[order[i]], i, current);
             }
         });
     }
@@ -281,15 +266,8 @@ struct Columns {
 
 /// Title gets what's left after fixed time/format and proportional artist/album.
 fn columns(row: Rect) -> Columns {
-    let flex = (row.width() - TIME_W - FORMAT_W).max(0.0);
-    let title_w = flex * 0.4;
-    let other_w = flex * 0.3;
-    let col = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
-    let title = col(row.left(), title_w);
-    let artist = col(title.right(), other_w);
-    let album = col(artist.right(), other_w);
-    let time = col(album.right(), TIME_W);
-    let format = col(time.right(), FORMAT_W);
+    let [title, artist, album, time, format] =
+        super::table::columns(row, [Width::Share(0.4), Width::Share(0.3), Width::Share(0.3), Width::Fixed(TIME_W), Width::Fixed(FORMAT_W)]);
     Columns { title, artist, album, time, format }
 }
 

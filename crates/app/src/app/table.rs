@@ -4,13 +4,48 @@
 //! an arrow.
 
 use crate::theme::{Tokens, semibold};
-use egui::{Align2, FontId, Rect, Sense, Stroke, Ui, pos2};
+use egui::{Align2, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 /// The header's height.
 pub const HEAD_H: f32 = 26.0;
 /// Text starts this far in from a cell's left edge (or ends this far in from
 /// its right).
 const INSET: f32 = 10.0;
+
+/// A column's width: fixed, or a share of what the fixed ones leave.
+#[derive(Clone, Copy)]
+pub enum Width {
+    Fixed(f32),
+    Share(f32),
+}
+
+/// `row` cut into columns `widths` wide, left to right.
+pub fn columns<const N: usize>(row: Rect, widths: [Width; N]) -> [Rect; N] {
+    let flex = widths
+        .iter()
+        .fold(row.width(), |left, w| match w {
+            Width::Fixed(w) => left - w,
+            Width::Share(_) => left,
+        })
+        .max(0.0);
+    let mut x = row.left();
+    widths.map(|w| {
+        let w = match w {
+            Width::Fixed(w) => w,
+            Width::Share(s) => flex * s,
+        };
+        let col = Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
+        x = col.right();
+        col
+    })
+}
+
+/// Room for a table's header across the page, clear of the alphabet rail
+/// beside the rows when there is one.
+pub fn head_rect(ui: &mut Ui, rail: bool) -> Rect {
+    let rail_w = if rail { super::alpha::RAIL_W } else { 0.0 };
+    ui.allocate_exact_size(vec2(ui.available_width() - rail_w, HEAD_H), Sense::hover()).0
+}
 
 /// One column's header: its label and place, whether it's right-aligned, and
 /// what clicking it sorts by (`None`: it doesn't sort).

@@ -4,6 +4,7 @@
 use super::OfflineAction;
 use super::offline_page::Mark;
 use super::view_ctx::ViewCtx;
+use super::virtual_list::VirtualList;
 use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
@@ -376,35 +377,22 @@ impl ViewCtx<'_> {
             return;
         }
         let marks = self.grid_marks(route);
-        let margin = if marks.is_some() { super::alpha::margin() } else { super::layout::gutter() };
+        let margin = super::virtual_list::margin(marks.is_some());
         let (cols, tile) = grid_metrics(ui.available_width() - f32::from(margin.right) + super::layout::GUTTER);
         let rows = ids.len().div_ceil(cols);
         let row_h = tile + LABEL_H + GAP_Y;
-        super::layout::into_gutter(ui, |ui| {
-            let area = ui.available_rect_before_wrap();
-            let row_spacing = ui.spacing().item_spacing.y;
-            let mut top = 0;
-            let mut scroll = egui::ScrollArea::vertical().id_salt(("grid", route)).auto_shrink(false).content_margin(margin);
-            if let Some(y) = super::alpha::take_jump(ui, ("grid", route)) {
-                scroll = scroll.vertical_scroll_offset(y);
+        VirtualList::grid(("grid", route), marks.as_deref(), row_h, rows, cols).show(ui, |ui, range| {
+            let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
+            for row in range.clone() {
+                self.grid_row(ui, row_ids(row), tile);
             }
-            let out = scroll.show_rows(ui, row_h, rows, |ui, range| {
-                top = range.start * cols;
-                let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
-                for row in range.clone() {
-                    self.grid_row(ui, row_ids(row), tile);
-                }
-                // The rows just above and below load next, after what's on screen.
-                for row in [range.start.checked_sub(1), Some(range.end).filter(|&r| r < rows)].into_iter().flatten() {
-                    for &i in row_ids(row) {
-                        if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
-                            self.art.prefetch(cover, tile);
-                        }
+            // The rows just above and below load next, after what's on screen.
+            for row in super::virtual_list::near(&range, 1, rows) {
+                for &i in row_ids(row) {
+                    if let Some(cover) = self.data.albums[i].cover_art.as_deref() {
+                        self.art.prefetch(cover, tile);
                     }
                 }
-            });
-            if let Some(marks) = marks {
-                super::alpha::rail(ui, ("grid", route), area, &out, &marks, top, |i| i / cols, row_h + row_spacing);
             }
         });
     }
