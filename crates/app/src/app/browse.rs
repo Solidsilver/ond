@@ -455,20 +455,10 @@ impl ViewCtx<'_> {
             if let Some(m) = mark {
                 super::offline_page::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
             }
-            // The button sits on the tile, so with the pointer on it the tile
-            // itself doesn't read as hovered: it's there whenever either is.
             let play = Rect::from_center_size(pos2(art.left() + 24.0, art.bottom() - 24.0), vec2(32.0, 32.0));
-            let play_resp = ui.interact(play, ui.scope_id().with(("tile-play", id)), Sense::click());
-            if resp.hovered() || play_resp.hovered() {
-                let fill = if play_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
-                let fg = if play_resp.hovered() { t.on_accent } else { t.text };
-                ui.painter().circle_filled(play.center(), 16.0, fill);
-                icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(1.0, 0.0), vec2(12.0, 12.0)), Icon::Play, fg);
-                play_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Play album"));
-                if play_resp.clicked() {
-                    self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
-                    return;
-                }
+            if crate::widgets::tile_button(ui, t, play, ui.scope_id().with(("tile-play", id)), resp.hovered(), Icon::Play, "Play album") {
+                self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
+                return;
             }
         }
         resp.widget_info(|| {

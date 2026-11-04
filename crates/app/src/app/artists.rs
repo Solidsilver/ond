@@ -10,7 +10,7 @@ use super::view_ctx::ViewCtx;
 use super::virtual_list::{VirtualList, near};
 use super::{Action, ArtistSort, PrefsAction, QueueAction};
 use crate::art::Art;
-use crate::icons::{self, Icon};
+use crate::icons::Icon;
 use crate::memo::Memo;
 use crate::nav::Route;
 use crate::search::ArtistEntry;
@@ -122,17 +122,10 @@ impl ViewCtx<'_> {
             // On the circle's edge, low on the left, where the album tiles have theirs.
             let at = photo.center() + vec2(-1.0, 1.0) * (tile / 2.0 * std::f32::consts::FRAC_1_SQRT_2);
             let shuffle = Rect::from_center_size(at, vec2(32.0, 32.0));
-            let shuffle_resp = ui.interact(shuffle, ui.scope_id().with(("artist-shuffle", &a.name)), Sense::click());
-            if resp.hovered() || shuffle_resp.hovered() {
-                let fill = if shuffle_resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
-                let fg = if shuffle_resp.hovered() { t.on_accent } else { t.text };
-                ui.painter().circle_filled(shuffle.center(), 16.0, fill);
-                icons::paint(ui.painter(), Rect::from_center_size(shuffle.center(), vec2(13.0, 13.0)), Icon::Shuffle, fg);
-                shuffle_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Shuffle artist"));
-                if shuffle_resp.clicked() {
-                    self.actions.push(Action::Artist(a.name.clone(), QueueAction::Play { start: 0 }));
-                    return;
-                }
+            let id = ui.scope_id().with(("artist-shuffle", &a.name));
+            if crate::widgets::tile_button(ui, t, shuffle, id, resp.hovered(), Icon::Shuffle, "Shuffle artist") {
+                self.actions.push(Action::Artist(a.name.clone(), QueueAction::Play { start: 0 }));
+                return;
             }
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a.name));

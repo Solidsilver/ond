@@ -491,6 +491,29 @@ pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
     resp
 }
 
+/// The round button on a tile's art (play on an album, shuffle on an
+/// artist), 32 points across at `at`. It's there while the tile or the
+/// button itself is hovered (on the button, the tile doesn't read as
+/// hovered), filled with the accent under the pointer. True when clicked.
+pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bool, icon: Icon, label: &str) -> bool {
+    let resp = ui.interact(at, id, Sense::click());
+    if !(tile_hovered || resp.hovered()) {
+        return false;
+    }
+    let fill = if resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
+    let fg = if resp.hovered() { t.on_accent } else { t.text };
+    ui.painter().circle_filled(at.center(), 16.0, fill);
+    // The play triangle sits a point right of centre so it looks centred.
+    let glyph = if matches!(icon, Icon::Play) {
+        Rect::from_center_size(at.center() + vec2(1.0, 0.0), vec2(12.0, 12.0))
+    } else {
+        Rect::from_center_size(at.center(), vec2(13.0, 13.0))
+    };
+    icons::paint(ui.painter(), glyph, icon, fg);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.clicked()
+}
+
 /// The one empty-state layout: a muted glyph, a short title, a line or two
 /// of how to fill it. Centred, with the same spacing everywhere.
 pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &str) {
