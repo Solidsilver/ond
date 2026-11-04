@@ -4,7 +4,7 @@
 
 use super::OndApp;
 use crate::analyze;
-use crate::bridge::Msg;
+use crate::bridge::AnalysisMsg;
 use crate::prefs::Prefs;
 use library::Track;
 use std::collections::HashMap;
@@ -73,19 +73,18 @@ impl OndApp {
     }
 
     /// A result came in, or the stored ones were read.
-    pub(super) fn analysis_msg(&mut self, msg: Msg) {
+    pub(super) fn analysis_msg(&mut self, msg: AnalysisMsg) {
         match msg {
-            Msg::Analyzed { track_id, record } => {
+            AnalysisMsg::Analyzed { track_id, record } => {
                 self.analysis.records.insert(track_id, record);
                 self.analysis.version += 1;
             }
-            Msg::AnalysesLoaded(rows) => {
+            AnalysisMsg::Loaded(rows) => {
                 self.analysis.records.extend(rows);
                 self.analysis.version += 1;
                 self.analysis.loaded = true;
                 self.resume_library_analysis();
             }
-            _ => unreachable!("not an analysis message"),
         }
     }
 

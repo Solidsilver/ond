@@ -4,7 +4,7 @@
 
 use super::OndApp;
 use super::dialogs::Overlay;
-use crate::bridge::{ListKey, Msg};
+use crate::bridge::{LibraryMsg, ListKey};
 use crate::player::QueueAction;
 use crate::queue::{OnPlay, Source};
 use crate::search::SearchIndex;
@@ -156,22 +156,22 @@ pub(super) struct Pending {
 
 impl OndApp {
     /// A message about the library, its sync or a track list that loaded.
-    pub(super) fn library_msg(&mut self, msg: Msg) {
+    pub(super) fn library_msg(&mut self, msg: LibraryMsg) {
         match msg {
-            Msg::SearchIndex { generation, index } => {
+            LibraryMsg::SearchIndex { generation, index } => {
                 if generation == self.search.generation {
                     self.install_search(*index);
                 }
             }
-            Msg::Albums(a) => {
+            LibraryMsg::Albums(a) => {
                 self.data.set_albums(a);
                 self.search.stale = true;
             }
-            Msg::Artists(a) => {
+            LibraryMsg::Artists(a) => {
                 self.data.artists = Arc::new(a);
                 self.search.stale = true;
             }
-            Msg::AllTracks(set) => {
+            LibraryMsg::AllTracks(set) => {
                 self.data.set_tracks(*set);
                 self.search.stale = true;
                 // A sync may have added tracks to pinned albums. The library can be
@@ -186,12 +186,12 @@ impl OndApp {
                 }
                 self.resume_library_analysis();
             }
-            Msg::TrackSync(p) => {
+            LibraryMsg::TrackSync(p) => {
                 self.sync.tracks = true;
                 self.sync.progress = Some(p);
                 self.sync.label = p.label();
             }
-            Msg::TrackSyncDone(outcome) => {
+            LibraryMsg::TrackSyncDone(outcome) => {
                 self.sync.tracks = false;
                 self.sync.progress = None;
                 let albums = self.data.albums.len();
@@ -208,17 +208,17 @@ impl OndApp {
                     }
                 };
             }
-            Msg::AlbumUpdated(a) => self.data.update_album(a),
-            Msg::SyncProgress(n) => {
+            LibraryMsg::AlbumUpdated(a) => self.data.update_album(*a),
+            LibraryMsg::SyncProgress(n) => {
                 self.sync.albums = true;
                 self.sync.label = format!("Syncing… {n}");
             }
-            Msg::AlbumSyncDone(Ok(n)) => {
+            LibraryMsg::AlbumSyncDone(Ok(n)) => {
                 self.sync.albums = false;
                 self.sync.label = format!("{n} albums");
                 self.sync.tracks = true;
             }
-            Msg::AlbumSyncDone(Err(e)) => {
+            LibraryMsg::AlbumSyncDone(Err(e)) => {
                 // Nothing more follows (no artist or track sync): stop saying "syncing".
                 self.sync.albums = false;
                 self.sync.label = "Sync failed".into();
@@ -227,7 +227,7 @@ impl OndApp {
                     self.show_error(e);
                 }
             }
-            Msg::LoadFailed { key, error } => {
+            LibraryMsg::LoadFailed { key, error } => {
                 // One that only waited for a complete listing plays what's stored.
                 if let Some(at) = self.pending.iter().position(|p| p.key == key && p.fresh) {
                     self.pending[at].fresh = false;
@@ -244,7 +244,7 @@ impl OndApp {
                     }
                 }
             }
-            Msg::Tracks { album_id, mut tracks, fresh } => {
+            LibraryMsg::Tracks { album_id, mut tracks, fresh } => {
                 if self.session.work_offline {
                     tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
                 }
@@ -252,16 +252,16 @@ impl OndApp {
                 self.data.tracks.set_album(&album_id, tracks);
                 self.run_pending(&ListKey::Album(album_id), fresh);
             }
-            Msg::Newest(ids) => {
+            LibraryMsg::Newest(ids) => {
                 self.data.served.newest = true;
                 self.data.newest = ids;
                 self.data.version += 1;
             }
-            Msg::Playlists(p) => {
+            LibraryMsg::Playlists(p) => {
                 self.data.served.playlists = true;
                 self.data.playlists = p;
             }
-            Msg::Saved(saved) => {
+            LibraryMsg::Saved(saved) => {
                 if let Some(ids) = saved.newest.filter(|_| !self.data.served.newest) {
                     self.data.newest = ids;
                     self.data.version += 1;
@@ -273,7 +273,7 @@ impl OndApp {
                     self.favorites.load(s.starred, s.ratings);
                 }
             }
-            Msg::PlaylistTracks { id, mut tracks, fresh } => {
+            LibraryMsg::PlaylistTracks { id, mut tracks, fresh } => {
                 if self.session.work_offline {
                     tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
                 }
@@ -282,16 +282,15 @@ impl OndApp {
                 self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 self.run_pending(&ListKey::Playlist(id), fresh);
             }
-            Msg::Credited { name, album_ids } => {
+            LibraryMsg::Credited { name, album_ids } => {
                 self.data.credited.insert(name, album_ids);
             }
-            Msg::TrackBatch { key, tracks } => {
+            LibraryMsg::TrackBatch { key, tracks } => {
                 if let Some(at) = self.pending.iter().position(|p| p.key == key) {
                     let p = self.pending.remove(at);
                     self.queue_tracks(tracks, p.source, p.action);
                 }
             }
-            _ => unreachable!("not a library message"),
         }
     }
 

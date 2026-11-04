@@ -3,7 +3,7 @@
 //! messages and actions about them.
 
 use super::{Action, OndApp, Session};
-use crate::bridge::{Bridge, ListKey, Msg};
+use crate::bridge::{Bridge, ListKey, OfflineMsg};
 use crate::prefs::Prefs;
 use library::Track;
 use offline::{OfflineStore, Pin, TrackRef};
@@ -172,7 +172,7 @@ impl Downloads {
     /// bridge's offline queue: reading its pins and checking its files takes a
     /// while with thousands of downloads. With `move_from`, the downloads are
     /// first moved from there into `base`. The store arrives as
-    /// `Msg::OfflineStore`, for [`opened`](Self::opened).
+    /// `OfflineMsg::Store`, for [`opened`](Self::opened).
     pub(super) fn open_in_background(&mut self, limit: Option<u64>, move_from: Option<PathBuf>, bridge: &Bridge) {
         self.generation += 1;
         self.opening = true;
@@ -188,16 +188,16 @@ impl Downloads {
                 let moved = offline::move_store_with(&from, &base, &mut |p| {
                     if posted.is_none_or(|at| at.elapsed() >= MOVE_PROGRESS_EVERY) {
                         posted = Some(std::time::Instant::now());
-                        b.post(Msg::OfflineMoving(p));
+                        b.post(OfflineMsg::Moving(p));
                     }
                 });
                 if let Err(e) = &moved {
                     tracing::warn!("moving downloads from {}: {e}", from.display());
                 }
-                b.post(Msg::OfflineMoved(moved.map_err(|e| e.to_string())));
+                b.post(OfflineMsg::Moved(moved.map_err(|e| e.to_string())));
             }
             let store = Self::dir_for(&base, account).map_err(anyhow::Error::from).and_then(|dir| open(dir, limit));
-            b.post(Msg::OfflineStore { generation, store: store.map_err(|e| format!("{e:#}")) });
+            b.post(OfflineMsg::Store { generation, store: store.map_err(|e| format!("{e:#}")) });
         });
     }
 
@@ -317,14 +317,14 @@ impl OndApp {
     }
 
     /// A message about the offline store: it opened, or its folder moved.
-    pub(super) fn offline_msg(&mut self, msg: Msg) {
+    pub(super) fn offline_msg(&mut self, msg: OfflineMsg) {
         match msg {
-            Msg::OfflineFolder(dir) => {
+            OfflineMsg::Folder(dir) => {
                 if let Some(notice) = self.downloads.move_to(dir, &self.prefs) {
                     self.show_notice(notice);
                 }
             }
-            Msg::OfflineStore { generation, store } => match self.downloads.opened(generation, store, &self.bridge) {
+            OfflineMsg::Store { generation, store } => match self.downloads.opened(generation, store, &self.bridge) {
                 Ok(true) => {
                     if let Some(client) = self.session.live().cloned() {
                         self.connect_downloads(&client);
@@ -348,11 +348,11 @@ impl OndApp {
                     }
                 }
             },
-            Msg::OfflineMoving(p) => {
+            OfflineMsg::Moving(p) => {
                 let text = format!("Moving downloads to {}: {} of {}", self.downloads.base.display(), crate::fmt::bytes(p.done), crate::fmt::bytes(p.total));
                 self.moving_notice(text, false);
             }
-            Msg::OfflineMoved(result) => {
+            OfflineMsg::Moved(result) => {
                 let base = self.downloads.base.display().to_string();
                 match result {
                     Ok(()) => {
@@ -364,7 +364,6 @@ impl OndApp {
                 }
                 self.downloads.moving = None;
             }
-            _ => unreachable!("not an offline message"),
         }
     }
 
@@ -488,7 +487,7 @@ impl OndApp {
         let bridge = self.bridge.clone();
         crate::folder::pick("Choose where to keep downloaded music", &start, move |chosen| {
             if let Some(dir) = chosen {
-                bridge.post(Msg::OfflineFolder(dir));
+                bridge.post(OfflineMsg::Folder(dir));
             }
         });
     }

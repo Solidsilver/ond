@@ -267,7 +267,7 @@ fn palette_opens_searches_and_queues() {
     assert_eq!(app.pending.len(), 1);
     // ...and runs when they arrive.
     let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
-    app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
+    app.handle(LibraryMsg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
     assert_eq!(app.player.queue.upcoming.len(), before + 3);
     assert!(app.pending.is_empty());
     // Played next: at the top of the queue.
@@ -307,18 +307,18 @@ fn the_search_index_is_built_off_the_ui_thread_and_stale_builds_are_dropped() {
         genres: Vec::new(),
         artists: Vec::new(),
     };
-    app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz")]));
+    app.handle(LibraryMsg::Albums(vec![album("a1", "Portrait in Jazz")]));
     app.after_messages();
     assert!(!app.search.stale, "the rebuild was handed off");
     let first = app.search.generation;
     // Before the first build lands, the library changes again.
-    app.handle(Msg::Albums(vec![album("a1", "Portrait in Jazz"), album("a2", "Explorations")]));
+    app.handle(LibraryMsg::Albums(vec![album("a1", "Portrait in Jazz"), album("a2", "Explorations")]));
     app.after_messages();
     assert_eq!(app.search.generation, first + 1);
     until(&mut app, |a| a.search.index.as_ref().is_some_and(|s| s.albums.len() == 2));
     // The older build, if it lands now, doesn't replace the newer index.
     let stale = SearchIndex::new(&[album("x", "Old")], &[], &[]);
-    app.handle(Msg::SearchIndex { generation: first, index: Box::new(stale) });
+    app.handle(LibraryMsg::SearchIndex { generation: first, index: Box::new(stale) });
     assert_eq!(app.search.index.as_ref().map(|s| s.albums.len()), Some(2));
 }
 
@@ -340,7 +340,7 @@ fn a_load_that_fails_drops_what_waited_for_it() {
     until(&mut app, |a| a.pending.is_empty() && a.downloads.pending_pins.is_empty());
     // The tracks turn up later anyway (browsing, a sync): nothing plays or pins.
     let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
-    app.handle(Msg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
+    app.handle(LibraryMsg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
     assert_eq!(app.player.queue.upcoming.len(), before, "a stale action played");
     assert!(!app.downloads.store().is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
 }
@@ -352,7 +352,7 @@ fn a_failed_album_sync_stops_saying_syncing() {
     let mut app = app(&ctx, dir.path());
     app.session.online = true;
     app.sync.albums = true;
-    app.handle(Msg::AlbumSyncDone(Err("sync: timed out".into())));
+    app.handle(LibraryMsg::AlbumSyncDone(Err("sync: timed out".into())));
     assert!(!app.sync.albums && !app.sync.tracks);
     assert!(app.ui.toasts.texts().contains(&"sync: timed out"));
     // While an album sync runs, Sync now doesn't start a second one.
@@ -575,7 +575,7 @@ fn store_opened(app: &mut OndApp) {
     while app.downloads.store.is_none() || app.downloads.opening {
         assert!(std::time::Instant::now() < deadline, "the offline store never opened");
         match app.inbox.recv_timeout(Duration::from_millis(20)) {
-            Ok(m @ (Msg::OfflineStore { .. } | Msg::OfflineMoving(_) | Msg::OfflineMoved(_))) => app.handle(m),
+            Ok(m @ Msg::Offline(OfflineMsg::Store { .. } | OfflineMsg::Moving(_) | OfflineMsg::Moved(_))) => app.handle(m),
             Ok(m) => others.push(m),
             Err(_) => {}
         }
@@ -722,8 +722,8 @@ fn a_library_analysis_resumes_once_the_server_answers() {
     app.prefs.edit(|s| s.analysis_resume = true);
     // Startup: the library and the stored results load well before the
     // server answers (or offline, never). Nothing has run, so nothing finished.
-    app.handle(Msg::AnalysesLoaded(Vec::new()));
-    app.handle(Msg::AllTracks(Box::new(TrackSet::new(app.data.tracks.all.to_vec()))));
+    app.handle(AnalysisMsg::Loaded(Vec::new()));
+    app.handle(LibraryMsg::AllTracks(Box::new(TrackSet::new(app.data.tracks.all.to_vec()))));
     for _ in 0..3 {
         app.check_library_analysis();
     }
@@ -895,9 +895,9 @@ fn playing_an_album_stored_only_in_part_waits_for_the_server() {
     app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
     assert_eq!(queued(&app), 0, "waits");
     // The stored copy arrives first: still waiting.
-    app.handle(Msg::Tracks { album_id: "al-3".into(), tracks: all[..5].to_vec(), fresh: false });
+    app.handle(LibraryMsg::Tracks { album_id: "al-3".into(), tracks: all[..5].to_vec(), fresh: false });
     assert_eq!(queued(&app), 0);
-    app.handle(Msg::Tracks { album_id: "al-3".into(), tracks: all.clone(), fresh: true });
+    app.handle(LibraryMsg::Tracks { album_id: "al-3".into(), tracks: all.clone(), fresh: true });
     assert_eq!(queued(&app), 20);
     assert!(app.pending.is_empty());
 
@@ -905,7 +905,7 @@ fn playing_an_album_stored_only_in_part_waits_for_the_server() {
     app.player.queue = crate::queue::Queue::default();
     app.data.tracks.set_album("al-3", all[..5].to_vec());
     app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
-    app.handle(Msg::LoadFailed { key: ListKey::Album("al-3".into()), error: Some("timed out".into()) });
+    app.handle(LibraryMsg::LoadFailed { key: ListKey::Album("al-3".into()), error: Some("timed out".into()) });
     assert_eq!(queued(&app), 5);
     assert!(app.pending.is_empty());
 
@@ -960,18 +960,18 @@ fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
     app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-5".into()), true)));
     assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
     let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
-    app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
     assert!(app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
     assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
     // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
     app.downloads.snap = app.downloads.store().snapshot();
-    app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
     // (The stored album now lists only y-1; a library-wide refresh sees that.)
     let all = app.data.tracks.all.to_vec();
-    app.handle(Msg::AllTracks(Box::new(TrackSet::new(all))));
+    app.handle(LibraryMsg::AllTracks(Box::new(TrackSet::new(all))));
     assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
     // The album changed on the server: the pin follows.
-    app.handle(Msg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
     assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
     download(&mut app, dir.path(), "t-3");
 
@@ -1194,8 +1194,8 @@ fn saved_lists_fill_in_only_what_the_server_hasnt_sent() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let pl = |id: &str| subsonic::Playlist { id: id.into(), name: id.into(), song_count: 0, duration: 0, cover_art: None, owner: None };
-    app.handle(Msg::Playlists(vec![pl("fresh")]));
-    app.handle(Msg::Saved(Box::new(crate::bridge::Saved { newest: Some(vec!["al-1".into()]), playlists: Some(vec![pl("saved")]), starred: None })));
+    app.handle(LibraryMsg::Playlists(vec![pl("fresh")]));
+    app.handle(LibraryMsg::Saved(Box::new(crate::bridge::Saved { newest: Some(vec!["al-1".into()]), playlists: Some(vec![pl("saved")]), starred: None })));
     assert_eq!(app.data.playlists.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["fresh"]);
     assert_eq!(app.data.newest, ["al-1"]);
 }
@@ -1218,7 +1218,7 @@ fn working_offline_stops_connecting_and_hides_what_cant_play() {
     assert_ne!(app.bridge.session(), before, "connects in flight are dropped");
     // An album opened now shows only what plays.
     let tracks = app.data.tracks.by_album["al-0"].to_vec();
-    app.handle(Msg::Tracks { album_id: "al-0".into(), tracks, fresh: false });
+    app.handle(LibraryMsg::Tracks { album_id: "al-0".into(), tracks, fresh: false });
     assert_eq!(app.data.tracks.by_album["al-0"].iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-2"]);
     frame(&ctx, &mut app, Vec::new());
 

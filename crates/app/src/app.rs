@@ -69,7 +69,7 @@ mod tests;
 
 use crate::analyze;
 use crate::art::Art;
-use crate::bridge::{Bridge, Msg};
+use crate::bridge::{AnalysisMsg, Bridge, Msg};
 use crate::favorites::{Favorites, StarKind};
 use crate::keys::{Cmd, EditCmd};
 use crate::nav::Route;
@@ -91,8 +91,16 @@ use std::time::Duration;
 // What the tests (here and in `snapshots`) build their fixtures from.
 #[cfg(test)]
 use {
-    crate::bridge::ListKey, crate::nav::Nav, crate::search::SearchIndex, crate::settings::Settings, crate::theme::ThemePref, crate::tracks::TrackSet,
-    library::Album, offline::TrackRef, pins::track_ref, ui_state::QueueUi,
+    crate::bridge::{LibraryMsg, ListKey, OfflineMsg},
+    crate::nav::Nav,
+    crate::search::SearchIndex,
+    crate::settings::Settings,
+    crate::theme::ThemePref,
+    crate::tracks::TrackSet,
+    library::Album,
+    offline::TrackRef,
+    pins::track_ref,
+    ui_state::QueueUi,
 };
 
 pub use crate::lyrics::SongStats;
@@ -488,7 +496,7 @@ impl OndApp {
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
-                on_result: Arc::new(move |track_id, record| results.post(Msg::Analyzed { track_id, record })),
+                on_result: Arc::new(move |track_id, record| results.post(AnalysisMsg::Analyzed { track_id, record })),
                 on_progress: ticks,
             })
         };
@@ -549,8 +557,8 @@ impl OndApp {
         })
     }
 
-    fn handle(&mut self, msg: Msg) {
-        match msg {
+    fn handle(&mut self, msg: impl Into<Msg>) {
+        match msg.into() {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
             Msg::Connected { client, settings, server, new_account, password_saved, .. } => {
@@ -559,27 +567,11 @@ impl OndApp {
             Msg::ConnectFailed(e) => self.connect_failed(e),
             Msg::Unreachable { username, error, .. } => self.unreachable(username, error),
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
-            m @ (Msg::SearchIndex { .. }
-            | Msg::Albums(_)
-            | Msg::Artists(_)
-            | Msg::AllTracks(_)
-            | Msg::TrackSync(_)
-            | Msg::TrackSyncDone(_)
-            | Msg::AlbumUpdated(_)
-            | Msg::SyncProgress(_)
-            | Msg::AlbumSyncDone(_)
-            | Msg::LoadFailed { .. }
-            | Msg::Tracks { .. }
-            | Msg::Newest(_)
-            | Msg::Playlists(_)
-            | Msg::PlaylistTracks { .. }
-            | Msg::Saved(_)
-            | Msg::Credited { .. }
-            | Msg::TrackBatch { .. }) => self.library_msg(m),
-            m @ (Msg::Analyzed { .. } | Msg::AnalysesLoaded(_)) => self.analysis_msg(m),
+            Msg::Library(m) => self.library_msg(m),
+            Msg::Analysis(m) => self.analysis_msg(m),
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
-            m @ (Msg::OfflineFolder(_) | Msg::OfflineStore { .. } | Msg::OfflineMoving(_) | Msg::OfflineMoved(_)) => self.offline_msg(m),
+            Msg::Offline(m) => self.offline_msg(m),
             Msg::Starred { starred, ratings } => {
                 self.data.served.starred = true;
                 self.favorites.load(starred, ratings);
