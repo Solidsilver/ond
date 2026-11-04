@@ -279,6 +279,23 @@ fn album_summary_averages_dr_and_energy() {
 }
 
 #[test]
+fn a_few_analysed_tracks_do_not_label_the_whole_album() {
+    let lossy = Verdict { kind: VerdictKind::LossySource { cutoff_hz: 16_000 }, confidence: Confidence::High };
+    let flagged = fake(9.0, -10.0, 100.0, vec![lossy.clone()]);
+    // One track of twelve analysed, and flagged: that's one track, not the album.
+    let s = summarize(&[&flagged], 12);
+    assert_eq!(s.verdict, None);
+    assert!(!s.complete());
+    // Five of twelve flagged is still under half the album.
+    assert_eq!(summarize(&[&flagged; 5], 12).verdict, None);
+    // Six of twelve is half, analysed or not.
+    assert_eq!(summarize(&[&flagged; 6], 12).verdict, Some((lossy.clone(), 6)));
+    // A total below what was analysed counts as what was analysed.
+    let s = summarize(&[&flagged, &flagged], 0);
+    assert_eq!((s.total, s.verdict), (2, Some((lossy, 2))));
+}
+
+#[test]
 fn records_round_trip_and_stamps_track_the_file() {
     let r = Record { stamp: stamp(Some(10), Some("flac"), Some(24), Some(96_000), Some(240)), analysis: fake(9.0, -14.0, 60.0, vec![]) };
     assert_eq!(Record::decode(&r.encode()), Some(r.clone()));

@@ -229,8 +229,10 @@ pub struct AlbumSummary {
     /// Duration-weighted energy mean of the tracks' integrated loudness.
     pub lufs: Option<f64>,
     pub true_peak_dbtp: Option<f64>,
-    /// The most common finding, when at least half the analysed tracks share it,
-    /// with how many tracks had it.
+    /// The most common finding, when at least half the album's tracks have
+    /// it, with how many do. Half of `total`, not of the analysed tracks:
+    /// one flagged track out of one analysed says nothing about the other
+    /// eleven.
     pub verdict: Option<(Verdict, usize)>,
 }
 
@@ -240,6 +242,8 @@ impl AlbumSummary {
     }
 }
 
+/// Sums up the analysed `tracks` of an album that has `total` tracks in all.
+/// A `total` below the number of analysed tracks counts as that number.
 pub fn summarize(tracks: &[&TrackAnalysis], total: usize) -> AlbumSummary {
     let drs: Vec<f64> = tracks.iter().filter_map(|t| t.dr).collect();
     let dr = (!drs.is_empty()).then(|| (drs.iter().sum::<f64>() / drs.len() as f64).round().max(0.0) as u32);
@@ -267,7 +271,8 @@ pub fn summarize(tracks: &[&TrackAnalysis], total: usize) -> AlbumSummary {
             None => groups.push((v.clone(), 1)),
         }
     }
-    let verdict = groups.into_iter().filter(|(_, n)| n * 2 >= tracks.len().max(1)).max_by_key(|(_, n)| *n);
+    let total = total.max(tracks.len());
+    let verdict = groups.into_iter().filter(|(_, n)| n * 2 >= total.max(1)).max_by_key(|(_, n)| *n);
 
     AlbumSummary { analyzed: tracks.len(), total, dr, lufs, true_peak_dbtp, verdict }
 }
