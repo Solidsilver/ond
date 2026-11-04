@@ -1067,34 +1067,39 @@ impl Bridge {
     }
 
     /// Gathers the tracks of `album_ids` in order: stored ones straight from the
-    /// db, the rest from the server (and stored on the way).
-    pub fn fetch_tracks(&self, client: Option<Client>, key: ListKey, album_ids: Vec<String>) {
+    /// db, the rest from the server ([`sync::CONCURRENCY`] at a time, stored on
+    /// the way). Offline, an album that isn't stored just isn't there to play.
+    pub fn fetch_tracks<F: sync::Fetch>(&self, client: Option<F>, key: ListKey, album_ids: Vec<String>) {
         let this = self.scoped();
         self.rt.spawn(async move {
-            let mut all = Vec::new();
+            let ids = album_ids.clone();
+            let stored = this.db(move |l| ids.iter().map(|id| l.album_tracks(id)).collect::<library::Result<Vec<_>>>()).await;
+            // Each album's tracks in `album_ids` order; `None` until known.
+            let mut lists: Vec<Option<Vec<Track>>> = match stored {
+                Ok(s) => s.into_iter().map(|t| (!t.is_empty()).then_some(t)).collect(),
+                Err(_) => vec![None; album_ids.len()],
+            };
             let mut missed = 0;
             let mut failed: Option<Failure> = None;
-            for id in album_ids {
-                let lookup = id.clone();
-                let stored = this.db(move |l| l.album_tracks(&lookup)).await.unwrap_or_default();
-                if !stored.is_empty() {
-                    all.extend(stored);
-                    continue;
-                }
-                // Offline, an album that isn't stored just isn't there to play.
-                let Some(client) = &client else { continue };
-                let fetched = match client.album(&id).await {
-                    Ok(album) => this.db(move |l| l.upsert_album_tracks(album).and_then(|_| l.album_tracks(&id))).await.map_err(Failure::Local),
-                    Err(e) => Err(Failure::from(e)),
-                };
-                match fetched {
-                    Ok(tracks) => all.extend(tracks),
-                    Err(e) => {
-                        tracing::warn!("fetching an album's tracks: {e}");
-                        missed += 1;
-                        // One request that got no answer makes it the network's.
-                        if failed.as_ref().is_none_or(|f| !f.is_network()) {
-                            failed = Some(e);
+            if let Some(client) = client {
+                let mut todo = album_ids.into_iter().enumerate().filter(|(i, _)| lists[*i].is_none()).collect::<Vec<_>>().into_iter();
+                let mut running = tokio::task::JoinSet::new();
+                loop {
+                    while running.len() < sync::CONCURRENCY {
+                        let Some((i, id)) = todo.next() else { break };
+                        let (me, client) = (this.clone(), client.clone());
+                        running.spawn(async move { (i, me.fetch_album(&client, id).await) });
+                    }
+                    let Some(joined) = running.join_next().await else { break };
+                    match joined.map_err(|e| Failure::Local(e.to_string())).and_then(|(i, r)| r.map(|t| (i, t))) {
+                        Ok((i, tracks)) => lists[i] = Some(tracks),
+                        Err(e) => {
+                            tracing::warn!("fetching an album's tracks: {e}");
+                            missed += 1;
+                            // One request that got no answer makes it the network's.
+                            if failed.as_ref().is_none_or(|f| !f.is_network()) {
+                                failed = Some(e);
+                            }
                         }
                     }
                 }
@@ -1103,8 +1108,15 @@ impl Bridge {
                 let albums = if missed == 1 { "1 album".to_owned() } else { format!("{missed} albums") };
                 this.send(Msg::Error(failed.retold(format!("Couldn't load the songs of {albums}"))));
             }
-            this.send(LibraryMsg::TrackBatch { key, tracks: all });
+            let tracks = lists.into_iter().flatten().flatten().collect();
+            this.send(LibraryMsg::TrackBatch { key, tracks });
         });
+    }
+
+    /// One album's tracks from the server, stored, as the library has them.
+    async fn fetch_album<F: sync::Fetch>(&self, client: &F, id: String) -> Result<Vec<Track>, Failure> {
+        let album = client.album(id.clone()).await?;
+        self.db(move |l| l.upsert_album_tracks(album).and_then(|_| l.album_tracks(&id))).await.map_err(Failure::Local)
     }
 }
 
@@ -1149,6 +1161,8 @@ mod tests {
         gate: Option<Arc<Semaphore>>,
         /// The album list fails (after the gate).
         list_fails: bool,
+        /// This album answers last (after the gate).
+        slow: Option<String>,
         /// Requests that reached the server, and ones it answered.
         asked: Arc<AtomicUsize>,
         answered: Arc<AtomicUsize>,
@@ -1177,6 +1191,9 @@ mod tests {
         }
         async fn album(&self, id: String) -> Result<subsonic::AlbumWithSongs, Failure> {
             self.wait().await;
+            if self.slow.as_deref() == Some(id.as_str()) {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
             let a = self.albums.iter().find(|a| a.id == id).cloned().ok_or(Failure::Server("not found".into()))?;
             let songs = (1..=a.song_count).map(|n| song(format!("{id}-{n}"), &id, n)).collect();
             self.answered.fetch_add(1, Ordering::SeqCst);
@@ -1321,6 +1338,31 @@ mod tests {
         until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Latency(_))));
         got.retain(|m| !matches!(m, Msg::Latency(_)));
         assert!(got.is_empty(), "the old account's library arrived: {:?}", names(&got));
+    }
+
+    #[test]
+    fn an_artists_albums_are_fetched_together_and_kept_in_order() {
+        let albums: Vec<_> = (0..4).map(|i| album(&format!("a{i}"), 2)).collect();
+        let (rt, bridge, rx) = rig(&albums);
+        // One is stored already; the other three come from the server.
+        let stored = Server { albums: albums.clone(), ..Default::default() };
+        let one = rt.block_on(sync::Fetch::album(&stored, "a2".into())).unwrap();
+        bridge.library.upsert_album_tracks(one).unwrap();
+        let gate = Arc::new(Semaphore::new(0));
+        // The first album answers last.
+        let server = Server { albums, gate: Some(gate.clone()), slow: Some("a0".into()), ..Default::default() };
+        let key = ListKey::Artist("Artist".into());
+        bridge.fetch_tracks(Some(server.clone()), key.clone(), vec!["a0".into(), "a1".into(), "a2".into(), "a3".into()]);
+        let mut got = Vec::new();
+        // All three requests are out before any answers.
+        until(&rt, &rx, &mut got, |_| server.asked.load(Ordering::SeqCst) == 3);
+        assert_eq!(server.answered.load(Ordering::SeqCst), 0);
+        gate.add_permits(3);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::TrackBatch { .. }))));
+        let Some(Msg::Library(LibraryMsg::TrackBatch { key: k, tracks })) = got.pop() else { panic!("expected the batch last") };
+        assert_eq!(k, key);
+        let ids: Vec<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["a0-1", "a0-2", "a1-1", "a1-2", "a2-1", "a2-2", "a3-1", "a3-2"], "in the order asked for");
     }
 
     #[test]
