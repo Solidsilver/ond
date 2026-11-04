@@ -119,12 +119,12 @@ pub struct UiState {
     pub grid: crate::memo::Memo<(Route, AlbumSort, bool, u64), Vec<usize>>,
     /// Where each letter starts in that list, for the alphabet rail.
     pub grid_marks: crate::memo::Memo<(Route, AlbumSort, bool, u64), super::alpha::Marks>,
-    /// How Artists is sorted, the order that gives (by the artists' list's
-    /// address), and where each letter starts in it.
+    /// How Artists is sorted, the order that gives (for the artists' list
+    /// it was built from), and where each letter starts in it.
     pub artist_sort: ArtistSort,
     pub artist_desc: bool,
-    pub artist_order: crate::memo::Memo<(usize, ArtistSort, bool), Vec<usize>>,
-    pub artist_marks: crate::memo::Memo<(usize, bool), super::alpha::Marks>,
+    pub artist_order: crate::memo::Memo<(super::artists::SameList, ArtistSort, bool), Vec<usize>>,
+    pub artist_marks: crate::memo::Memo<(super::artists::SameList, bool), super::alpha::Marks>,
     /// The album page's "Album details" is unfolded (for this session).
     pub album_details_open: bool,
     /// Narrow windows: the queue opens as a sheet over the content instead.

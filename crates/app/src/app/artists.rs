@@ -11,6 +11,7 @@ use super::widgets::{choice, elide, view_picker};
 use super::{Action, ArtistSort, PrefsAction, QueueAction};
 use crate::art::Art;
 use crate::icons::{self, Icon};
+use crate::memo::Memo;
 use crate::nav::Route;
 use crate::search::ArtistEntry;
 use crate::settings::ViewMode;
@@ -60,23 +61,8 @@ impl ViewCtx<'_> {
         }
     }
 
-    /// Indices into `artists` in the order Artists is sorted by. By name it's
-    /// the list's own; ties keep that order too.
     fn artist_order(&mut self, artists: &Arc<Vec<ArtistEntry>>) -> Arc<Vec<usize>> {
-        let (by, desc) = (self.ui.artist_sort, self.ui.artist_desc);
-        self.ui.artist_order.get((Arc::as_ptr(artists) as usize, by, desc), || {
-            let mut order: Vec<usize> = (0..artists.len()).collect();
-            match by {
-                ArtistSort::Name => {}
-                ArtistSort::Albums => order.sort_by_key(|&i| std::cmp::Reverse(artists[i].albums)),
-                // Those without a year last.
-                ArtistSort::Year => order.sort_by_key(|&i| artists[i].years.map_or(i32::MAX, |y| y.0)),
-            }
-            if desc {
-                order.reverse();
-            }
-            order
-        })
+        artist_order(&mut self.ui.artist_order, artists, self.ui.artist_sort, self.ui.artist_desc)
     }
 
     /// Where each letter starts, sorted by name; `None` sorted otherwise, or
@@ -85,7 +71,7 @@ impl ViewCtx<'_> {
         if !self.ui.prefs.alpha_rail || self.ui.artist_sort != ArtistSort::Name {
             return None;
         }
-        let key = (Arc::as_ptr(artists) as usize, self.ui.artist_desc);
+        let key = (SameList(Arc::clone(artists)), self.ui.artist_desc);
         Some(self.ui.artist_marks.get(key, || super::alpha::Marks::new(order.iter().map(|&i| artists[i].sort.as_str()))))
     }
 
@@ -248,6 +234,36 @@ impl ViewCtx<'_> {
     }
 }
 
+/// The artists' list as a memo key: equal only to the same list. It holds
+/// the list, so while an order built from it is cached its address can't be
+/// handed to the next index the library builds (a stale order would index a
+/// different, maybe shorter, list).
+pub(crate) struct SameList(Arc<Vec<ArtistEntry>>);
+
+impl PartialEq for SameList {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Indices into `artists` in the order Artists is sorted by. By name it's
+/// the list's own; ties keep that order too.
+fn artist_order(memo: &mut Memo<(SameList, ArtistSort, bool), Vec<usize>>, artists: &Arc<Vec<ArtistEntry>>, by: ArtistSort, desc: bool) -> Arc<Vec<usize>> {
+    memo.get((SameList(Arc::clone(artists)), by, desc), || {
+        let mut order: Vec<usize> = (0..artists.len()).collect();
+        match by {
+            ArtistSort::Name => {}
+            ArtistSort::Albums => order.sort_by_key(|&i| std::cmp::Reverse(artists[i].albums)),
+            // Those without a year last.
+            ArtistSort::Year => order.sort_by_key(|&i| artists[i].years.map_or(i32::MAX, |y| y.0)),
+        }
+        if desc {
+            order.reverse();
+        }
+        order
+    })
+}
+
 /// "1979–1990", or the one year; `None` without any.
 fn years(a: &ArtistEntry) -> Option<String> {
     a.years.map(|(from, to)| if from == to { from.to_string() } else { format!("{from}–{to}") })
@@ -295,4 +311,26 @@ fn columns(row: Rect) -> Columns {
     let albums = col(genre.right(), ALBUMS_W);
     let years = col(albums.right(), YEARS_W);
     Columns { name, genre, albums, years }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, albums: usize) -> ArtistEntry {
+        ArtistEntry { id: None, name: name.into(), sort: name.into(), albums, cover: None, years: None, genre: None }
+    }
+
+    #[test]
+    fn a_new_artist_list_never_reuses_the_old_order() {
+        let mut memo = Memo::default();
+        let first = Arc::new(vec![entry("A", 1), entry("B", 3), entry("C", 2)]);
+        assert_eq!(*artist_order(&mut memo, &first, ArtistSort::Albums, false), [1, 2, 0]);
+        // The index is rebuilt and the old list let go of. A same-sized
+        // allocation is the allocator's first pick for the new one, so an
+        // order keyed by address alone would come back for it.
+        drop(first);
+        let second = Arc::new(vec![entry("D", 1)]);
+        assert_eq!(*artist_order(&mut memo, &second, ArtistSort::Albums, false), [0]);
+    }
 }
