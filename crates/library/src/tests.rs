@@ -718,3 +718,58 @@ fn saved_copies_read_back_and_unreadable_ones_read_as_missing() {
     lib.save("odd", &7u8).unwrap();
     assert_eq!(lib.saved::<Vec<(String, String)>>("odd").unwrap(), None);
 }
+
+/// An album with two credited tracks, then its album row and its first
+/// track's row overwritten with bytes that don't decode.
+fn library_with_unreadable_rows() -> Library {
+    let lib = Library::in_memory().unwrap();
+    let mut a = song("s-1", "al-1", 1, 1);
+    a.display_composer = Some("Cole Porter".into());
+    let mut b = song("s-2", "al-1", 1, 2);
+    b.display_composer = Some("Gershwin".into());
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al-1", "A", "X", 2000), song: vec![a, b] }).unwrap();
+    let wt = lib.db.begin_write().unwrap();
+    {
+        wt.open_table(ALBUMS).unwrap().insert("al-1", [0xffu8; 3].as_slice()).unwrap();
+        wt.open_table(TRACKS).unwrap().insert("s-1", [0xffu8; 3].as_slice()).unwrap();
+    }
+    wt.commit().unwrap();
+    lib
+}
+
+#[test]
+fn a_write_over_an_undecodable_row_succeeds_and_leaves_indexes_consistent() {
+    let lib = library_with_unreadable_rows();
+    // A new year moves the album's sort key, and a new track number the
+    // track's: the old entries can only be found by id.
+    lib.upsert_albums([album("al-1", "A", "X", 2001)]).unwrap();
+    let mut moved = song("s-1", "al-1", 2, 7);
+    moved.display_composer = Some("Ellington".into());
+    lib.store_songs(vec![moved]).unwrap();
+    assert_consistent(&lib);
+    assert_eq!(lib.albums().unwrap()[0].year, Some(2001));
+    assert_eq!(lib.album_tracks("al-1").unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(), ["s-2", "s-1"]);
+    assert!(lib.albums_crediting("Cole Porter").unwrap().is_empty());
+    assert_eq!(lib.albums_crediting("Ellington").unwrap(), ["al-1"]);
+
+    // A whole-album resync goes through the same rows.
+    let lib = library_with_unreadable_rows();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al-1", "A", "X", 1999), song: vec![song("s-1", "al-1", 1, 1)] }).unwrap();
+    assert_consistent(&lib);
+    assert_eq!(lib.album_tracks("al-1").unwrap().len(), 1);
+}
+
+#[test]
+fn removing_an_undecodable_row_succeeds_and_leaves_indexes_consistent() {
+    let lib = library_with_unreadable_rows();
+    assert!(lib.remove_album("al-1").unwrap());
+    assert_consistent(&lib);
+    assert_eq!(lib.album_count().unwrap(), 0);
+    assert_eq!(lib.track_count().unwrap(), 0);
+    assert!(lib.albums_crediting("Cole Porter").unwrap().is_empty());
+
+    let lib = library_with_unreadable_rows();
+    assert_eq!(lib.retain_albums(&HashSet::new()).unwrap(), 1);
+    assert_consistent(&lib);
+    assert_eq!(lib.track_count().unwrap(), 0);
+}

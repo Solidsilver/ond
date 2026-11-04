@@ -750,11 +750,46 @@ fn collect_track_ids(idx: &impl ReadableTable<(&'static str, u32, u32, &'static 
     Ok(ids)
 }
 
-fn put_album(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut Table<(&'static str, i32, &'static str, &'static str), ()>, a: &Album) -> Result<()> {
-    if let Some(old) = rows.insert(a.id.as_str(), encode(a)?.as_slice())? {
-        let old: Album = decode(old.value())?;
-        let (artist, year, title) = old.sort_parts();
-        idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
+/// An old row that a write replaces or removes.
+enum Old<T> {
+    Row(T),
+    /// The row didn't decode. Its index entries can't be worked out from it,
+    /// so they're found by id instead.
+    Unreadable,
+}
+
+/// Decodes the old row a write is about to drop. One that can't be read is
+/// logged and doesn't fail the write. The write replaces or removes it anyway,
+/// and failing would leave it in place to fail every later sync too.
+fn decode_old<T: DeserializeOwned>(id: &str, bytes: &[u8]) -> Old<T> {
+    match decode(bytes) {
+        Ok(row) => Old::Row(row),
+        Err(e) => {
+            tracing::warn!("library: dropping row {id} that can't be read: {e}");
+            Old::Unreadable
+        }
+    }
+}
+
+type AlbumIndex<'t> = Table<'t, (&'static str, i32, &'static str, &'static str), ()>;
+
+/// Removes album `id`'s sort index entry. The old row gives the key when it
+/// could be read; otherwise the index is scanned for the id.
+fn unindex_album(idx: &mut AlbumIndex, id: &str, old: &Old<Album>) -> Result<()> {
+    match old {
+        Old::Row(old) => {
+            let (artist, year, title) = old.sort_parts();
+            idx.remove((artist.as_str(), year, title.as_str(), id))?;
+        }
+        Old::Unreadable => idx.retain(|(_, _, _, i), ()| i != id)?,
+    }
+    Ok(())
+}
+
+fn put_album(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut AlbumIndex, a: &Album) -> Result<()> {
+    let old = rows.insert(a.id.as_str(), encode(a)?.as_slice())?.map(|g| decode_old(&a.id, g.value()));
+    if let Some(old) = &old {
+        unindex_album(idx, &a.id, old)?;
     }
     let (artist, year, title) = a.sort_parts();
     idx.insert((artist.as_str(), year, title.as_str(), a.id.as_str()), ())?;
@@ -764,7 +799,7 @@ fn put_album(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut Table<(&'s
 /// The tables removing an album touches, opened once per transaction.
 struct AlbumTables<'t> {
     rows: Table<'t, &'static str, &'static [u8]>,
-    idx: Table<'t, (&'static str, i32, &'static str, &'static str), ()>,
+    idx: AlbumIndex<'t>,
     stamps: Table<'t, &'static str, u64>,
     tracks: TrackTables<'t>,
 }
@@ -779,10 +814,9 @@ impl<'t> AlbumTables<'t> {
     fn remove(&mut self, id: &str) -> Result<bool> {
         self.tracks.remove_album(id)?;
         self.stamps.remove(id)?;
-        let old = self.rows.remove(id)?.map(|g| decode::<Album>(g.value())).transpose()?;
+        let old = self.rows.remove(id)?.map(|g| decode_old::<Album>(id, g.value()));
         if let Some(old) = &old {
-            let (artist, year, title) = old.sort_parts();
-            self.idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
+            unindex_album(&mut self.idx, id, old)?;
         }
         Ok(old.is_some())
     }
@@ -803,9 +837,9 @@ impl<'t> TrackTables<'t> {
     fn put(&mut self, t: &Track) -> Result<()> {
         // A track the server moved to another album leaves its old index entries
         // behind unless we drop them here.
-        let old = self.rows.insert(t.id.as_str(), encode(t)?.as_slice())?.map(|g| decode::<Track>(g.value())).transpose()?;
+        let old = self.rows.insert(t.id.as_str(), encode(t)?.as_slice())?.map(|g| decode_old(&t.id, g.value()));
         if let Some(old) = old {
-            self.unindex(&old)?;
+            self.unindex(&t.id, &old)?;
         }
         let (disc, no) = t.order_parts();
         self.by_album.insert((t.album_id.as_str(), disc, no, t.id.as_str()), ())?;
@@ -815,20 +849,30 @@ impl<'t> TrackTables<'t> {
         Ok(())
     }
 
-    fn unindex(&mut self, old: &Track) -> Result<()> {
-        let (disc, no) = old.order_parts();
-        self.by_album.remove((old.album_id.as_str(), disc, no, old.id.as_str()))?;
-        for name in old.credited_names() {
-            self.credits.remove((name.as_str(), old.album_id.as_str(), old.id.as_str()))?;
+    /// Removes track `id`'s index entries: the ones its old row names, or
+    /// every entry for the id when the old row can't be read.
+    fn unindex(&mut self, id: &str, old: &Old<Track>) -> Result<()> {
+        match old {
+            Old::Row(old) => {
+                let (disc, no) = old.order_parts();
+                self.by_album.remove((old.album_id.as_str(), disc, no, id))?;
+                for name in old.credited_names() {
+                    self.credits.remove((name.as_str(), old.album_id.as_str(), id))?;
+                }
+            }
+            Old::Unreadable => {
+                self.by_album.retain(|(_, _, _, i), ()| i != id)?;
+                self.credits.retain(|(_, _, i), ()| i != id)?;
+            }
         }
         Ok(())
     }
 
     fn remove_album(&mut self, album_id: &str) -> Result<()> {
         for id in collect_track_ids(&self.by_album, album_id)? {
-            let old = self.rows.remove(id.as_str())?.map(|g| decode::<Track>(g.value())).transpose()?;
+            let old = self.rows.remove(id.as_str())?.map(|g| decode_old(&id, g.value()));
             if let Some(old) = old {
-                self.unindex(&old)?;
+                self.unindex(&id, &old)?;
             }
         }
         Ok(())
