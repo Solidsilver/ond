@@ -361,7 +361,7 @@ fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
 
 /// A window `size` big with the fixture library, drawn by `draw`.
 fn window(dir: &Path, size: Vec2, draw: fn(&mut egui::Ui, &mut OndApp)) -> Harness<'static, Option<OndApp>> {
-    let mut h = Harness::builder().with_size(size).with_accessibility_check(false).allow_missing_glyphs().build_ui_state(
+    let mut h = Harness::builder().with_size(size).allow_missing_glyphs().build_ui_state(
         move |ui, app: &mut Option<OndApp>| {
             if let Some(app) = app {
                 draw(ui, app);
@@ -643,4 +643,50 @@ fn managed_settings_cant_be_changed_in_the_app() {
     assert_eq!((&file["scrobble"], &file["accent"]), (&serde_json::json!(true), &serde_json::json!("rose")), "the user's own values are kept: {file}");
     assert!(file.get("alpha_rail").is_none(), "and off, as theirs was (not written when off): {file}");
     assert_eq!(file["theme"], "dark");
+}
+
+/// Every control in every view has a name a screen reader can read out (and
+/// a test can find it by). The harness checks this only after `run`, which
+/// most tests here don't call, so this walks the views and asks each time.
+#[test]
+fn every_view_names_its_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    let routes = [
+        Route::Recent,
+        Route::Albums,
+        Route::Artists,
+        Route::Songs,
+        Route::Favorites,
+        Route::Offline,
+        Route::Album(album_id(0)),
+        Route::Album(album_id(1)),
+        Route::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() },
+        Route::Artist { name: "Bill Evans".into(), id: None },
+    ];
+    for route in routes {
+        reset(&mut h, FULL, route);
+        h.check_accessibility();
+    }
+    for section in [
+        settings_page::Section::General,
+        settings_page::Section::Appearance,
+        settings_page::Section::Playback,
+        settings_page::Section::Output,
+        settings_page::Section::Offline,
+        settings_page::Section::Experimental,
+    ] {
+        reset(&mut h, FULL, Route::Recent);
+        app_mut(&mut h).actions.push(Action::OpenSettings(section));
+        h.run_steps(2);
+        h.check_accessibility();
+    }
+    for (mode, size) in [(WindowMode::Player, vec2(380.0, 880.0)), (WindowMode::Mini, vec2(280.0, 280.0))] {
+        reset(&mut h, size, Route::Recent);
+        app_mut(&mut h).edit_windows(|w| w.mode = mode);
+        h.hover_at(pos2(size.x / 2.0, size.y / 2.0));
+        h.run_steps(3);
+        h.check_accessibility();
+    }
+    *h.state_mut() = None;
 }
