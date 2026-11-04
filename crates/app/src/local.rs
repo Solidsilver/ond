@@ -7,7 +7,7 @@ use library::{Album, Artist, Track};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use streamcache::{CacheKey, StreamCache};
+use streamcache::{CacheKey, CacheKeyRef, StreamCache};
 
 /// `track`'s file in the stream cache, if it was streamed whole: the
 /// original, else as `transcode` converts it.
@@ -15,6 +15,13 @@ pub fn cached(cache: &StreamCache, transcode: Option<&audio::Transcode>, track: 
     cache
         .complete_path(&CacheKey::original(track.id.clone(), track.suffix.clone()))
         .or_else(|| transcode.and_then(|t| cache.complete_path(&CacheKey::transcode(&track.id, &t.format, t.kbps))))
+}
+
+/// Whether [`cached`] would find a file, without building its path: the
+/// answer views want for every visible row.
+pub fn is_cached(cache: &StreamCache, transcode: Option<&audio::Transcode>, track: &Track) -> bool {
+    cache.is_complete(CacheKeyRef::Original { id: &track.id, suffix: track.suffix.as_deref() })
+        || transcode.is_some_and(|t| cache.is_complete(CacheKeyRef::Transcode { id: &track.id, format: &t.format, kbps: t.kbps }))
 }
 
 /// What can play without the server: downloaded, or streamed whole and
@@ -28,7 +35,7 @@ pub struct Playable {
 
 impl Playable {
     pub fn track(&self, t: &Track) -> bool {
-        self.downloads.is_done(&t.id) || cached(&self.cache, self.transcode.as_ref(), t).is_some()
+        self.downloads.is_done(&t.id) || is_cached(&self.cache, self.transcode.as_ref(), t)
     }
 }
 

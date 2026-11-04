@@ -67,7 +67,7 @@ pub(super) fn playable(
     transcode: Option<&audio::Transcode>,
     track: &Track,
 ) -> bool {
-    session.expected() || downloads.snap.is_done(&track.id) || crate::local::cached(cache, transcode, track).is_some()
+    session.expected() || downloads.snap.is_done(&track.id) || crate::local::is_cached(cache, transcode, track)
 }
 
 /// Offline downloads, and their state as of this frame.
@@ -294,7 +294,11 @@ impl Downloads {
                 store()?.remove_set_aside();
                 self.refresh();
             }
-            _ => unreachable!("not a download action"),
+            // The app applies these itself (`apply_offline`); listed so a new
+            // variant has to be placed in one or the other.
+            OfflineAction::Keep(..) | OfflineAction::Move | OfflineAction::WorkOffline(_) | OfflineAction::Unplayable(_) => {
+                return Err("This isn't a download action".to_owned());
+            }
         }
         Ok(())
     }
@@ -342,8 +346,14 @@ impl OndApp {
                 self.prefs.edit(|s| s.offline_unplayable = u);
                 self.player.stop_on_unplayable = u == crate::settings::Unplayable::Pause;
             }
-            other => {
-                if let Err(e) = self.downloads.apply(other, &self.prefs) {
+            a @ (OfflineAction::Unpin(_)
+            | OfflineAction::Pause(_)
+            | OfflineAction::Retry
+            | OfflineAction::SetLimit(_)
+            | OfflineAction::Reveal
+            | OfflineAction::RevealSetAside
+            | OfflineAction::RemoveSetAside) => {
+                if let Err(e) = self.downloads.apply(a, &self.prefs) {
                     self.show_error(e);
                 }
             }
