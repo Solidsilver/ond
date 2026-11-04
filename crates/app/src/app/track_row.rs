@@ -86,9 +86,11 @@ impl TrackRow {
         self.rect.center().y
     }
 
-    /// The background: the selection, else the hover tint, else none.
+    /// The background: the selection, else the hover tint, else none; and
+    /// the focus ring when Tab is on the row.
     pub fn fill(&self, ui: &Ui, t: &Tokens, selected: bool, hovered: bool) {
         ui.painter().rect_filled(self.rect, col::RADIUS, row_fill(t, selected, hovered));
+        crate::widgets::focus_ring(ui, &self.resp, self.rect.shrink(2.0), col::RADIUS - 2.0);
     }
 
     /// The playing triangle at `x`; returns where the title starts after it.

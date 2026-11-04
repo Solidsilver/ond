@@ -471,6 +471,7 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::offline_page::M
             egui::Color32::TRANSPARENT
         };
         ui.painter().rect_filled(rect, 6.0, fill);
+        crate::widgets::focus_ring(ui, &resp, rect.shrink(2.0), 4.0);
         let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
         let room = if mark.is_some() { MARK_ROOM } else { 0.0 };
         let g = crate::widgets::elide(ui, label, font, t.text, rect.width() - 16.0 - room);
@@ -495,6 +496,7 @@ fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
         if resp.hovered() {
             ui.painter().rect_filled(rect, 5.0, t.hover);
         }
+        crate::widgets::focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
         ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
         if !keys.is_empty() {
             ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), t.muted);
