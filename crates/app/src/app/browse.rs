@@ -2,13 +2,14 @@
 //! Artists, an artist's page, and albums by genre / year / label.
 
 use super::OfflineAction;
+use super::offline_page::Mark;
 use super::view_ctx::ViewCtx;
-use super::widgets::{Mark, choice, elide, view_picker};
 use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::settings::ViewMode;
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{choice, elide, view_picker};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
 
@@ -168,7 +169,7 @@ impl OndApp {
                 if i + 1 == n {
                     ui.label(egui::RichText::new(label).size(12.0).color(t.text));
                 } else {
-                    if super::widgets::link(ui, label, FontId::proportional(12.0), t.muted).clicked() {
+                    if crate::widgets::link(ui, label, FontId::proportional(12.0), t.muted).clicked() {
                         self.actions.push(Action::BackBy(n - 1 - i));
                     }
                     let (r, _) = ui.allocate_exact_size(vec2(8.0, 12.0), Sense::hover());
@@ -239,17 +240,17 @@ impl OndApp {
         self.view().heading(ui, name, sub);
         if albums {
             ui.horizontal(|ui| {
-                if super::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
+                if crate::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
                     self.actions.push(Action::Artist(name.to_owned(), QueueAction::Play { start: 0 }));
                 }
                 ui.add_space(4.0);
-                if super::widgets::secondary(ui, "Play next").clicked() {
+                if crate::widgets::secondary(ui, "Play next").clicked() {
                     self.actions.push(Action::Artist(name.to_owned(), QueueAction::PlayNext));
                 }
                 // Only artists the server knows by id can be loved.
                 if let Route::Artist { id: Some(id), .. } = route {
                     let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
-                    if super::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
+                    if crate::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
                         self.actions.push(Action::ToggleStar {
                             kind: crate::favorites::StarKind::Artist,
                             id: id.clone(),
@@ -324,11 +325,11 @@ pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: bool, shor
 /// The Play and Shuffle buttons at the head of a list; which was clicked.
 pub fn play_shuffle(ui: &mut Ui) -> Option<QueueAction> {
     let mut picked = None;
-    if super::widgets::primary(ui, Some(Icon::Play), "Play").clicked() {
+    if crate::widgets::primary(ui, Some(Icon::Play), "Play").clicked() {
         picked = Some(QueueAction::Play { start: 0 });
     }
     ui.add_space(4.0);
-    if super::widgets::secondary(ui, "Shuffle").clicked() {
+    if crate::widgets::secondary(ui, "Shuffle").clicked() {
         picked = Some(QueueAction::Shuffle);
     }
     picked
@@ -464,7 +465,7 @@ impl ViewCtx<'_> {
             let sub = elide(ui, album.artist.as_deref().unwrap_or_default(), FontId::proportional(12.0), t.muted, tile - mark_w);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
             if let Some(m) = mark {
-                super::widgets::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
+                super::offline_page::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
             }
             // The button sits on the tile, so with the pointer on it the tile
             // itself doesn't read as hovered: it's there whenever either is.

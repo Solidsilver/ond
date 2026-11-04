@@ -81,7 +81,7 @@ impl Outputs {
                     None => {
                         let mut level = volume;
                         let resp = ui
-                            .add_enabled_ui(!*bit_perfect, |ui| crate::app::thin_slider(ui, &mut level, w, "Volume"))
+                            .add_enabled_ui(!*bit_perfect, |ui| crate::widgets::thin_slider(ui, &mut level, w, "Volume"))
                             .inner
                             .on_disabled_hover_text(format!("Bit-perfect: Ond doesn't change the level. Use {name}'s own volume."));
                         if resp.changed() {
@@ -161,7 +161,7 @@ impl Outputs {
             if v.muted == Some(true) {
                 ui.multiply_opacity(0.4);
             }
-            crate::app::thin_slider_marked(ui, pos, w, "Device volume", mark)
+            crate::widgets::thin_slider_marked(ui, pos, w, "Device volume", mark)
         })
         .inner
         .on_hover_text(device_volume_hover(name, v))
@@ -191,7 +191,7 @@ impl Outputs {
             ui.add_enabled_ui(!locked, |ui| {
                 let mut system = following;
                 let labels = |b: bool| if b { "System output".to_owned() } else { "Choose a device".to_owned() };
-                if crate::app::choice(ui, &[true, false], &mut system, Some(POPUP_W - 20.0), labels) {
+                if crate::widgets::choice(ui, &[true, false], &mut system, Some(POPUP_W - 20.0), labels) {
                     if system {
                         self.choose(None, engine);
                     } else {
@@ -235,7 +235,7 @@ impl Outputs {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(10.0);
-            if crate::app::link_text(ui, "Playback settings…", egui::FontId::proportional(12.0), t.accent).clicked() {
+            if crate::widgets::link(ui, "Playback settings…", egui::FontId::proportional(12.0), t.accent).clicked() {
                 self.wants_settings = true;
                 ui.close();
             }
@@ -283,7 +283,7 @@ impl Outputs {
             None => 0.0,
         };
         let name_w = rect.width() - CARD_INDENT - pill_w - PILL_INSET - 8.0;
-        let name = crate::app::elide_text(ui, &d.name, egui::FontId::new(13.0, crate::theme::semibold()), t.text, name_w);
+        let name = crate::widgets::elide(ui, &d.name, egui::FontId::new(13.0, crate::theme::semibold()), t.text, name_w);
         ui.painter().galley(egui::pos2(rect.left() + CARD_INDENT, rect.center().y - name.size().y / 2.0), name, t.text);
         // Only when it isn't what was asked for.
         if let Some((text, color)) = path.as_ref().and_then(|p| warning(p, &t)) {
@@ -322,7 +322,7 @@ impl Outputs {
         );
         let area = egui::Rect::from_min_max(egui::pos2(row.right() - SWITCH_W, row.top()), egui::pos2(row.right() - PILL_INSET, row.bottom()));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        let sw = child.add_enabled_ui(!locked, |ui| crate::app::switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).inner;
+        let sw = child.add_enabled_ui(!locked, |ui| crate::widgets::switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).inner;
         if label.on_hover_text(&help).clicked() {
             on = !on;
         }
@@ -356,7 +356,7 @@ impl Outputs {
             let g = egui::Rect::from_center_size(egui::pos2(rect.left() + LIST_ICON_X, rect.center().y), egui::vec2(14.0, 14.0));
             icons::paint(ui.painter(), g, kind_icon(Some(d.kind)), t.muted);
             let x = rect.left() + LIST_INDENT;
-            let name = crate::app::elide_text(ui, &d.name, egui::FontId::proportional(13.0), t.text, rect.right() - CARD_INDENT - x);
+            let name = crate::widgets::elide(ui, &d.name, egui::FontId::proportional(13.0), t.text, rect.right() - CARD_INDENT - x);
             ui.painter().galley(egui::pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
             // Set to bit-perfect: a green dot where the card's pill has its own.
             if opens && self.device_mode(d) == PlaybackMode::BitPerfect {
@@ -464,7 +464,7 @@ impl Outputs {
                 None => {
                     let mut level = volume;
                     let w = (ui.available_width() - PERCENT_W).max(100.0);
-                    if crate::app::thin_slider(ui, &mut level, w, "Volume").changed() {
+                    if crate::widgets::thin_slider(ui, &mut level, w, "Volume").changed() {
                         out.volume = Some(level);
                     }
                     ui.label(egui::RichText::new(format!("{:.0}%", level * 100.0)).size(11.0).color(t.muted));

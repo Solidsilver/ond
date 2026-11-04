@@ -2,8 +2,8 @@
 //! format, what changes on the way, and the output.
 
 use super::playing::Origin;
-use super::widgets::kv_text;
 use crate::theme::Tokens;
+use crate::widgets::kv_text;
 use audio::{BitPerfectStatus, SignalPath};
 use library::Track;
 
@@ -40,8 +40,8 @@ pub(super) fn popover(resp: &egui::Response, origin: Option<&Origin>, track: &Tr
             BitPerfectStatus::Requested { reason } => (format!("Bit-perfect, not verified ({reason})"), t.muted),
             BitPerfectStatus::Unavailable { reason, .. } => (format!("Not bit-perfect ({reason})"), t.warn),
         };
-        super::widgets::kv_row(ui, "Mode", |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(mode).size(super::widgets::KV_VALUE).color(color)).wrap());
+        crate::widgets::kv_row(ui, "Mode", |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(mode).size(crate::widgets::KV_VALUE).color(color)).wrap());
         });
         if underruns > 0 {
             kv_text(ui, "Dropouts", &crate::fmt::thousands(underruns as usize));

@@ -355,7 +355,7 @@ impl OndApp {
                     if form.closable && !form.busy {
                         ui.add_space(16.0);
                         ui.vertical_centered(|ui| {
-                            if super::widgets::link(ui, "Keep browsing offline", egui::FontId::proportional(12.0), t.accent).clicked() {
+                            if crate::widgets::link(ui, "Keep browsing offline", egui::FontId::proportional(12.0), t.accent).clicked() {
                                 close = true;
                             }
                         });

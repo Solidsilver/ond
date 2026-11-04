@@ -6,7 +6,6 @@
 
 use super::track_row::{TrackRow, col, length, title_font};
 use super::view_ctx::ViewCtx;
-use super::widgets::{chip, elide, heart_button, link};
 use super::{Action, DragTracks, Focus, Keep, Overlay, PlaylistAction, QueueAction};
 use super::{AnalysisAction, OfflineAction};
 use crate::favorites::StarKind;
@@ -14,6 +13,7 @@ use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::queue::Source;
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{chip, elide, heart_button, link};
 use analysis::TrackAnalysis;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use library::Track;
@@ -413,7 +413,7 @@ impl ViewCtx<'_> {
             ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;
             if !facts.credits.is_empty() {
-                super::widgets::kv_section(ui, "Credits");
+                crate::widgets::kv_section(ui, "Credits");
                 for c in &facts.credits {
                     super::info_panel::links_row(
                         self.actions,
@@ -423,11 +423,11 @@ impl ViewCtx<'_> {
                     );
                 }
             }
-            super::widgets::kv_section(ui, "Analysis");
+            crate::widgets::kv_section(ui, "Analysis");
             let analysis = self.analysis;
             let found: Vec<Option<&TrackAnalysis>> = tracks.iter().map(|t| analysis.of(t)).collect();
             if found.iter().all(Option::is_none) {
-                super::widgets::kv_row(ui, "Loudness", |ui| {
+                crate::widgets::kv_row(ui, "Loudness", |ui| {
                     if analysing {
                         ui.label(egui::RichText::new("Analyzing…").size(12.5).color(t.muted));
                     } else if link(ui, "Analyze album", FontId::proportional(12.5), t.accent)
@@ -516,7 +516,7 @@ impl ViewCtx<'_> {
             } else {
                 "Its owner hasn’t added any songs."
             };
-            super::widgets::empty_state(ui, Icon::Note, "This playlist is empty", hint);
+            crate::widgets::empty_state(ui, Icon::Note, "This playlist is empty", hint);
             return;
         }
         let scroll = egui::ScrollArea::vertical().id_salt(("playlist", id)).auto_shrink(false).content_margin(super::layout::gutter());
@@ -748,7 +748,7 @@ impl ViewCtx<'_> {
         let mut x = rect.left() + col::INSET;
         // Offline, what isn't downloaded is dimmed rather than hidden.
         let available = self.playable(tr);
-        let color = super::widgets::track_color(t, playing, available);
+        let color = crate::widgets::track_color(t, playing, available);
         row.mark(ui, rect.right() - col::MARK_FROM_RIGHT, self.downloads.snap.track(&tr.id));
         if opts.numbers {
             if playing {
@@ -768,7 +768,7 @@ impl ViewCtx<'_> {
         let heart = Rect::from_center_size(pos2(rect.right() - col::HEART_FROM_RIGHT, cy), vec2(col::HEART_BOX, col::HEART_BOX));
         if loved || hovered {
             let label = if loved { "Unlove" } else { "Love" };
-            let hr = super::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
+            let hr = crate::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
             if hr.on_hover_text(label).clicked() {
                 self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
             }
@@ -856,7 +856,7 @@ impl ViewCtx<'_> {
         ui.menu_button("Rating", |ui| {
             let current = self.favorites.rating(&tr.id);
             for r in 1..=5u8 {
-                if super::widgets::rating_choice(ui, r, current == r).clicked() {
+                if crate::widgets::rating_choice(ui, r, current == r).clicked() {
                     self.actions.push(Action::Rate(tr.id.clone(), r));
                     ui.close();
                 }

@@ -7,7 +7,6 @@ use super::browse::{Collection, GAP_X, GAP_Y, LABEL_H, collection_menu, grid_met
 use super::table::{HEAD_H, Head};
 use super::track_row::{TrackRow, col};
 use super::view_ctx::ViewCtx;
-use super::widgets::{choice, elide, view_picker};
 use super::{Action, ArtistSort, PrefsAction, QueueAction};
 use crate::art::Art;
 use crate::icons::{self, Icon};
@@ -16,6 +15,7 @@ use crate::nav::Route;
 use crate::search::ArtistEntry;
 use crate::settings::ViewMode;
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{choice, elide, view_picker};
 use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
 

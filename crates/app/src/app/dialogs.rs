@@ -3,10 +3,10 @@
 //! settings (⌘,). One at a time; Esc or a click outside closes it.
 
 use super::commands::PlaylistAction;
-use super::widgets::{danger, primary, secondary};
 use super::{Action, OndApp};
 use crate::keys::{BINDINGS, GROUPS};
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{danger, primary, secondary};
 use egui::{FontId, Key, Modifiers, vec2};
 use library::Track;
 

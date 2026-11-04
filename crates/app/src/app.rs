@@ -60,7 +60,6 @@ mod toasts;
 mod toolbar;
 mod track_row;
 mod visualizer_view;
-mod widgets;
 
 #[cfg(test)]
 mod snapshots;
@@ -106,7 +105,6 @@ pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
 pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, SongStats, UiState};
-pub(crate) use widgets::{choice, elide as elide_text, link as link_text, switch_tinted, thin_slider, thin_slider_marked};
 pub use window_state::WindowAction;
 
 use data::Pending;

@@ -6,11 +6,11 @@
 use super::AnalysisAction;
 use super::album_page::{Credit, credits};
 use super::view_ctx::ViewCtx;
-use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use super::{Action, SongStats};
 use crate::icons::Icon;
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use egui::{FontId, Sense, Ui, vec2};
 use library::Track;
 

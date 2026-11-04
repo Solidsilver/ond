@@ -39,6 +39,7 @@ mod theme;
 mod tracks;
 mod updates;
 mod visuals;
+mod widgets;
 mod window;
 
 fn main() -> eframe::Result {

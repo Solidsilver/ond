@@ -5,12 +5,12 @@
 
 use super::WindowAction;
 use super::seek::SeekStyle;
-use super::widgets::elide;
 use super::{Action, OndApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::visuals::backdrop::Blurred;
 use crate::visuals::over_art::{self, OnArt};
+use crate::widgets::elide;
 use crate::window::WindowMode;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, ViewportCommand, pos2, vec2};
 

@@ -6,10 +6,10 @@
 //! for a few seconds when it starts. Drawn on the GPU (see `visuals::gpu`),
 //! or with the painter where there's no wgpu renderer to hand.
 
-use super::widgets::elide_job;
 use super::{Action, OndApp, WindowAction};
 use crate::visuals::visualizer::{Dot, Input, Kind, Pick, Picture, Rng, Scene, caption_alpha, name_alpha};
 use crate::visuals::{EVERY_FRAME, gpu};
+use crate::widgets::elide_job;
 use egui::{Align2, Color32, FontId, Galley, Key, Modifiers, Rect, Ui, pos2, vec2};
 use std::collections::VecDeque;
 use std::sync::Arc;

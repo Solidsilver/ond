@@ -5,12 +5,12 @@
 use super::OfflineAction;
 use super::browse::grid_metrics;
 use super::view_ctx::ViewCtx;
-use super::widgets::{Mark, danger, elide, link, secondary};
 use super::{Action, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
-use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use crate::widgets::{danger, elide, link, secondary};
+use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 use offline::{Pin, PinSummary, SetAside, Snapshot};
 
 /// Storage caps offered in the limit menu, in GB.
@@ -135,7 +135,7 @@ impl ViewCtx<'_> {
         let Some(m) = Mark::of_pin(Some(s)) else { return };
         let t = Tokens::of(ui);
         let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-        super::widgets::mark(ui, r.center(), 12.0, m);
+        mark(ui, r.center(), 12.0, m);
         resp.on_hover_text(m.hint());
         ui.label(egui::RichText::new(pin_text(&self.downloads.snap, s)).size(12.0).color(t.muted));
     }
@@ -173,7 +173,7 @@ impl ViewCtx<'_> {
         }
 
         if snap.pins.is_empty() {
-            super::widgets::empty_state(
+            crate::widgets::empty_state(
                 ui,
                 Icon::Download,
                 "Nothing downloaded yet",
@@ -190,7 +190,7 @@ impl ViewCtx<'_> {
                     ui.add_space(22.0);
                 }
                 if !albums.is_empty() {
-                    super::widgets::section(ui, "Albums");
+                    crate::widgets::section(ui, "Albums");
                     ui.add_space(8.0);
                     let (cols, tile) = grid_metrics(ui.available_width());
                     let ids: Vec<usize> = albums.iter().map(|(i, _)| *i).collect();
@@ -200,7 +200,7 @@ impl ViewCtx<'_> {
                 }
                 if !playlists.is_empty() {
                     ui.add_space(6.0);
-                    super::widgets::section(ui, "Playlists");
+                    crate::widgets::section(ui, "Playlists");
                     ui.add_space(6.0);
                     for p in &playlists {
                         self.pin_row(ui, &snap, p);
@@ -208,7 +208,7 @@ impl ViewCtx<'_> {
                     ui.add_space(16.0);
                 }
                 if !songs.is_empty() {
-                    super::widgets::section(ui, "Songs");
+                    crate::widgets::section(ui, "Songs");
                     ui.add_space(6.0);
                     for p in &songs {
                         self.pin_row(ui, &snap, p);
@@ -253,7 +253,7 @@ impl ViewCtx<'_> {
     pub(super) fn in_progress(&mut self, ui: &mut Ui, snap: &Snapshot, pins: &[&PinSummary]) {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
-            super::widgets::section(ui, "In progress");
+            crate::widgets::section(ui, "In progress");
             ui.add_space(10.0);
             let (label, pause) = if snap.paused { ("Resume", false) } else { ("Pause", true) };
             if link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
@@ -321,7 +321,7 @@ impl ViewCtx<'_> {
                 ui.painter().rect_filled(fill, 1.5, if snap.paused { t.muted } else { t.accent });
             }
             if let Some(m) = Mark::of_pin(Some(p)) {
-                super::widgets::mark(ui, pos2(rect.right() - 14.0, rect.center().y), 12.0, m);
+                mark(ui, pos2(rect.right() - 14.0, rect.center().y), 12.0, m);
             }
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
@@ -345,5 +345,60 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::Offline(OfflineAction::Unpin(p.pin.clone())));
             }
         });
+    }
+}
+
+/// How far along something is on its way to this computer, as the lists,
+/// tiles and sidebar mark it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mark {
+    Done,
+    /// 0..=1; 0 while waiting its turn.
+    Progress(f32),
+    Failed,
+}
+
+impl Mark {
+    pub fn of_track(state: Option<&offline::TrackState>) -> Option<Mark> {
+        Some(match state? {
+            offline::TrackState::Done { .. } => Mark::Done,
+            offline::TrackState::Queued => Mark::Progress(0.0),
+            offline::TrackState::Downloading { done, total } => Mark::Progress(total.map_or(0.0, |t| *done as f32 / t.max(1) as f32)),
+            offline::TrackState::Failed { .. } => Mark::Failed,
+        })
+    }
+
+    pub fn of_pin(sum: Option<&offline::PinSummary>) -> Option<Mark> {
+        let sum = sum?;
+        Some(if sum.complete() {
+            Mark::Done
+        } else if sum.failed > 0 && !sum.downloading && sum.done + sum.failed == sum.total {
+            Mark::Failed
+        } else {
+            Mark::Progress(sum.fraction())
+        })
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Mark::Done => "Downloaded",
+            Mark::Progress(f) if f > 0.0 => "Downloading",
+            Mark::Progress(_) => "Waiting to download",
+            Mark::Failed => "Download failed",
+        }
+    }
+}
+
+/// The small glyph for a [`Mark`], centred at `center`, about `size` across.
+pub fn mark(ui: &Ui, center: egui::Pos2, size: f32, m: Mark) {
+    let t = Tokens::of(ui);
+    let r = size / 2.0;
+    match m {
+        Mark::Done => crate::icons::paint(ui.painter(), Rect::from_center_size(center, vec2(size, size)), crate::icons::Icon::Downloaded, t.muted),
+        Mark::Progress(f) => crate::icons::progress_ring(ui.painter(), center, r * 0.8, f, t.accent, t.hairline),
+        Mark::Failed => {
+            ui.painter().circle_stroke(center, r * 0.8, egui::Stroke::new(1.3, t.warn));
+            ui.painter().text(center, Align2::CENTER_CENTER, "!", FontId::new(size * 0.7, semibold()), t.warn);
+        }
     }
 }
