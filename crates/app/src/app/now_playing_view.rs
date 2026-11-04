@@ -262,12 +262,7 @@ impl ViewCtx<'_> {
     pub(super) fn big_transport(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let state = self.engine.status.state();
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some() || self.player.held;
-        let (icon, label) = match state {
-            _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
-            PlayState::Playing => (Icon::Pause, "Pause"),
-            _ => (Icon::Play, "Play"),
-        };
+        let (icon, label) = super::playing::play_pause(state, self.player);
         let row_w = 44.0 + 24.0 + 52.0 + 24.0 + 44.0;
         ui.horizontal(|ui| {
             ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));

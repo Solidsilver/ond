@@ -12,7 +12,6 @@ use crate::nav::Route;
 use crate::output::Readout;
 use crate::theme::{Tokens, semibold};
 use crate::widgets::elide;
-use audio::PlayState;
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
 /// The toolbar's height; on macOS the traffic lights sit centred in it.
@@ -130,12 +129,7 @@ impl OndApp {
         if icons::sized_button(ui, Icon::Previous, "Previous", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Previous);
         }
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some() || self.player.held;
-        let (icon, label) = match state {
-            _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
-            PlayState::Playing => (Icon::Pause, "Pause"),
-            _ => (Icon::Play, "Play"),
-        };
+        let (icon, label) = super::playing::play_pause(state, &self.player);
         if icons::sized_button(ui, icon, label, vec2(36.0, 32.0), 17.0, Some(color.unwrap_or(t.text))).clicked() {
             self.actions.push(Action::PlayPause);
         }

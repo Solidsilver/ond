@@ -13,6 +13,20 @@ use offline::OfflineStore;
 use streamcache::StreamCache;
 use subsonic::Client;
 
+/// The play/pause button's glyph and name: a spinner while the track is
+/// still on its way (buffering, loading, a seek or a hold pending), pause
+/// while it plays, play otherwise.
+pub(super) fn play_pause(state: audio::PlayState, player: &Player) -> (crate::icons::Icon, &'static str) {
+    use crate::icons::Icon;
+    use audio::PlayState;
+    let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || player.pending_seek.is_some() || player.held;
+    match state {
+        _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
+        PlayState::Playing => (Icon::Pause, "Pause"),
+        _ => (Icon::Play, "Play"),
+    }
+}
+
 /// Where queue items play from: a downloaded file first (instant, no
 /// network), else the server while it's reachable (original or transcoded).
 struct AppSources<'a> {
