@@ -541,7 +541,7 @@ fn another_account_gets_its_own_library_and_downloads() {
     let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
     let connect = |app: &mut OndApp, user: &str, new_account: bool| {
         let session = app.bridge.session();
-        app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account });
+        app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account, password_saved: true });
     };
     connect(&mut app, "luke", false);
     store_opened(&mut app);
@@ -594,7 +594,7 @@ fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
     let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
     let connect = |app: &mut OndApp, user: &str| {
         let session = app.bridge.session();
-        app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account: false });
+        app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account: false, password_saved: true });
     };
     connect(&mut app, "luke");
     // Signed in as someone else before luke's store came: it's dropped unused.
@@ -685,7 +685,14 @@ fn offline_the_queue_plays_only_what_is_downloaded() {
 
     // Back online: everything plays again, downloaded songs still from disk.
     let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
-    app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     assert!(app.session.online);
     assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
     assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
@@ -723,7 +730,14 @@ fn a_library_analysis_resumes_once_the_server_answers() {
     assert!(app.prefs_now().analysis_resume, "the run is still due");
     assert!(!app.analysis.runner.progress().active());
 
-    app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     assert_eq!(app.analysis.runner.progress().total, 20, "the whole library is queued");
     app.check_library_analysis();
     assert!(app.prefs_now().analysis_resume);
@@ -733,7 +747,14 @@ fn a_library_analysis_resumes_once_the_server_answers() {
     assert!(!app.analysis.runner.progress().active());
     app.check_library_analysis();
     assert!(app.prefs_now().analysis_resume);
-    app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     assert_eq!(app.analysis.runner.progress().total, 20);
 
     // The queue runs dry: done, and not resumed at the next launch.
@@ -748,7 +769,14 @@ fn signing_out_forgets_lyrics_and_song_stats() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
-    app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     let t = app.data.tracks.all[0].clone();
     // Asked for, still on their way when the user signs out.
     app.apply(Action::NeedLyrics(Box::new(t.clone())));
@@ -758,14 +786,91 @@ fn signing_out_forgets_lyrics_and_song_stats() {
     app.sign_out();
     assert!(app.lyrics.is_empty() && app.song_stats.is_empty(), "nothing left loading for good, nor for the next account");
     // Signed in again: asked for afresh.
-    app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     app.apply(Action::NeedLyrics(Box::new(t.clone())));
     assert!(matches!(app.lyrics.get(&t.id), Some(crate::lyrics::Fetch::Loading)));
     // Another account: what was fetched for the last one goes too.
     app.handle(Msg::Lyrics { track_id: t.id.clone(), lyrics: None });
     app.handle(Msg::SongStats { track_id: t.id.clone(), stats: None });
-    app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: true });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: true,
+        password_saved: true,
+    });
     assert!(app.lyrics.is_empty() && app.song_stats.is_empty());
+}
+
+#[test]
+fn working_offline_forgets_lyrics_and_song_stats_still_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    let (a, b) = (app.data.tracks.all[0].clone(), app.data.tracks.all[1].clone());
+    app.apply(Action::NeedLyrics(Box::new(a.clone())));
+    app.apply(Action::NeedSongStats(a.id.clone()));
+    // One song's came back already.
+    app.apply(Action::NeedLyrics(Box::new(b.clone())));
+    app.apply(Action::NeedSongStats(b.id.clone()));
+    app.handle(Msg::Lyrics { track_id: b.id.clone(), lyrics: None });
+    app.handle(Msg::SongStats { track_id: b.id.clone(), stats: Some(SongStats { plays: Some(3), last_played: None }) });
+    // Working offline ends the session, so `a`'s fetches deliver nothing.
+    app.set_work_offline(true);
+    assert!(!app.lyrics.contains_key(&a.id) && !app.song_stats.contains_key(&a.id), "nothing stays loading for good");
+    assert_eq!(app.lyrics.get(&b.id), Some(&crate::lyrics::Fetch::Done(None)), "what arrived stays");
+    assert!(matches!(app.song_stats.get(&b.id), Some(Some(_))));
+}
+
+#[test]
+fn another_account_ends_the_old_accounts_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    // The same account: the library read at start-up still counts.
+    let first = app.bridge.session();
+    app.handle(Msg::Connected { session: first, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    assert_eq!(app.bridge.session(), first);
+    // Signed in again as someone else, without signing out first: the old
+    // account's work in flight (its library read, its sync) is now stale.
+    app.handle(Msg::Connected { session: first, client: client(), settings: Box::default(), server: "test".into(), new_account: true, password_saved: true });
+    assert_ne!(app.bridge.session(), first);
+    assert!(app.session.online && app.data.albums.is_empty());
+}
+
+#[test]
+fn a_password_the_keychain_refused_is_mentioned() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: false,
+    });
+    assert!(app.ui.toasts.texts().iter().any(|t| t.contains("keychain")), "{:?}", app.ui.toasts.texts());
 }
 
 #[test]
@@ -818,7 +923,7 @@ fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
     let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
     // Signed in, then the server went away: a reconnect loop is running.
     let before = app.bridge.session();
-    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
     assert!(app.session.online && app.session.client.is_some());
     app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
     assert!(app.session.unreachable);
@@ -829,13 +934,20 @@ fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
     assert_ne!(app.bridge.session(), before, "sign-out ends the session");
 
     // The old loop reaches the server after all: stale, ignored.
-    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
     app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
     assert!(app.login.is_some(), "still on the login screen");
     assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
 
     // A fresh sign-in in the new session works.
-    app.handle(Msg::Connected { session: app.bridge.session(), client: client(), settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     assert!(app.login.is_none() && app.session.online);
 }
 
@@ -1048,7 +1160,14 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
     assert_eq!(app.login.as_ref().and_then(|f| f.error.as_deref()), Some("Couldn't reach the server."));
 
     let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
-    app.handle(Msg::Connected { session: app.bridge.session(), client, settings: Box::default(), server: "test".into(), new_account: false });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     assert!(app.login.is_none() && app.session.sign_in.is_none() && app.session.online);
 }
 
@@ -1088,7 +1207,7 @@ fn working_offline_stops_connecting_and_hides_what_cant_play() {
     let mut app = app(&ctx, dir.path());
     let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
     let settings = Box::new(Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
-    app.handle(Msg::Connected { session: app.bridge.session(), client, settings, server: "test".into(), new_account: false });
+    app.handle(Msg::Connected { session: app.bridge.session(), client, settings, server: "test".into(), new_account: false, password_saved: true });
     store_opened(&mut app);
     download(&mut app, dir.path(), "t-2");
 

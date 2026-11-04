@@ -62,9 +62,19 @@ impl Session {
 
 impl OndApp {
     /// Signed in: the session starts (or resumes after an outage).
-    pub(super) fn connected(&mut self, client: Client, settings: Box<Settings>, server: String, new_account: bool) {
+    pub(super) fn connected(&mut self, client: Client, settings: Box<Settings>, server: String, new_account: bool, password_saved: bool) {
         if new_account {
+            // Work still running for the old account (the library read at
+            // start-up, a sync from before signing in again) would land its
+            // results in the new one's library: from here on it delivers
+            // nothing. The database was cleared for this account, so there's
+            // nothing to read again; the sync below fills it. (A second read
+            // could land after the sync's albums and blank them.)
+            self.bridge.end_session();
             self.forget_library();
+        }
+        if !password_saved {
+            self.show_notice("Ond couldn't save your password in the system keychain, so it will ask for it again next time.");
         }
         let limit = self.prefs.snapshot().offline_limit_gb.map(|gb| gb * 1_000_000_000);
         self.downloads.switch_account(settings.account_id(), limit, &self.bridge);
@@ -136,6 +146,7 @@ impl OndApp {
         if on {
             // Connects and reconnects in flight stop; what they'd deliver is dropped.
             self.bridge.end_session();
+            self.forget_in_flight();
             self.set_offline();
             self.session.connecting = false;
             self.session.unreachable = false;
@@ -217,6 +228,15 @@ impl OndApp {
         self.song_stats.clear();
         self.ui.nav = Nav::default();
         self.cache.clear();
+    }
+
+    /// Forgets lyrics and play counts still on their way. Called when the
+    /// bridge session ends without a change of account: the fetches deliver
+    /// nothing now, so their `Loading` would stay for good. What arrived
+    /// already stays.
+    pub(super) fn forget_in_flight(&mut self) {
+        self.lyrics.retain(|_, f| *f != crate::lyrics::Fetch::Loading);
+        self.song_stats.retain(|_, s| s.is_some());
     }
 
     /// The server's gone: browse what's stored, play what's downloaded.

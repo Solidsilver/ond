@@ -552,7 +552,9 @@ impl OndApp {
         match msg {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
-            Msg::Connected { client, settings, server, new_account, .. } => self.connected(client, settings, server, new_account),
+            Msg::Connected { client, settings, server, new_account, password_saved, .. } => {
+                self.connected(client, settings, server, new_account, password_saved)
+            }
             Msg::ConnectFailed(e) => self.connect_failed(e),
             Msg::Unreachable { username, error, .. } => self.unreachable(username, error),
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),

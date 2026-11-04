@@ -16,13 +16,16 @@ pub enum Msg {
     /// `session`: the bridge's session when the connect began; the app drops
     /// it if the user signed out since.
     /// Signed in. `new_account` means the local library belonged to another
-    /// server or user and was cleared for this one.
+    /// server or user and was cleared for this one. `password_saved` is false
+    /// when the keychain wouldn't take the password just typed, so the next
+    /// launch will ask for it again.
     Connected {
         session: u64,
         client: Client,
         settings: Box<Settings>,
         server: String,
         new_account: bool,
+        password_saved: bool,
     },
     ConnectFailed(String),
     /// The server can't be reached (saved login, so the app opens offline);
@@ -423,7 +426,7 @@ impl Bridge {
     /// Builds the search index on a worker (tens of ms on a big library) and
     /// sends it back tagged with `generation`, so a stale build can be dropped.
     pub fn build_search(&self, generation: u64, albums: Arc<Vec<Album>>, artists: Arc<Vec<library::Artist>>, tracks: Arc<Vec<Track>>) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn_blocking(move || {
             let index = crate::search::SearchIndex::new(&albums, &artists, &tracks);
             this.send(Msg::SearchIndex { generation, index: Box::new(index) });
@@ -431,9 +434,13 @@ impl Bridge {
     }
 
     /// Loads the cached library from disk without touching the network.
+            if !this.current() {
+                return;
+            }
     /// Reads the stored library and the saved copies of the playlists,
     /// favorites and Recently added. With `keep` (working offline), only
-    /// what can play: the rest isn't sent.
+    /// what can play: the rest isn't sent. Scoped to the session: once
+    /// another account signs in, a read still running sends nothing.
     pub fn load_local(&self, keep: Option<crate::local::Playable>) {
         let this = self.clone();
         self.rt.spawn_blocking(move || {
@@ -547,16 +554,20 @@ impl Bridge {
             }
             match pinged {
                 Ok(server) => {
+                            false
                     // The account itself is recorded by the app (in its preferences)
                     // when `Connected` arrives for a live session.
                     let s = settings.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if let Err(e) = s.store_password(&password) {
+                    let stored = tokio::task::spawn_blocking(move || match s.store_password(&password) {
+                        Ok(()) => true,
+                        Err(e) => {
                             tracing::warn!("keychain: {e}");
                         }
                     })
                     .await;
-                    this.connected(session, client, settings, server).await;
+                    // A saved login's password came from the keychain: nothing to store.
+                    let password_saved = saved || stored.unwrap_or(false);
+                    this.connected(session, client, settings, server, password_saved).await;
                 }
                 Err(PingError::Unreachable(e)) if saved => {
                     this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
@@ -570,7 +581,7 @@ impl Bridge {
     /// Claims the local library for this account (clearing another account's
     /// mirror) and reports the sign-in. Nothing happens once `session` has
     /// ended (the keychain write before this can wait on a prompt for a while).
-    async fn connected(&self, session: u64, client: Client, settings: Settings, server: String) {
+    async fn connected(&self, session: u64, client: Client, settings: Settings, server: String, password_saved: bool) {
         let this = self.scoped_to(session);
         if !this.current() {
             return;
@@ -586,7 +597,7 @@ impl Bridge {
             },
             None => false,
         };
-        this.send(Msg::Connected { session, client, settings: Box::new(settings), server, new_account });
+        this.send(Msg::Connected { session, client, settings: Box::new(settings), server, new_account, password_saved });
     }
 
     /// Times one ping (for the server popover and the diagnostics bar).
@@ -668,7 +679,7 @@ impl Bridge {
                 match pinged {
                     Ok(server) => {
                         this.reconnecting.store(false, Ordering::Relaxed);
-                        return this.connected(session, client, settings, server).await;
+                        return this.connected(session, client, settings, server, true).await;
                     }
                     Err(PingError::Unreachable(_)) => delay = (delay * 2).min(Duration::from_secs(30)),
                     Err(PingError::Refused(e)) => {
@@ -934,7 +945,7 @@ impl Bridge {
         let this = self.scoped();
         self.rt.spawn(async move {
             let stats = match client.song(&track_id).await {
-                Ok(s) => Some(crate::app::SongStats { plays: s.play_count, last_played: s.played }),
+                Ok(s) => Some(crate::lyrics::SongStats { plays: s.play_count, last_played: s.played }),
                 Err(e) => {
                     tracing::debug!("getSong {track_id}: {e}");
                     None
@@ -1239,6 +1250,37 @@ mod tests {
         bridge.end_session();
         scoped.send(Msg::Error("after".into()));
         // Copies of a copy keep the session they were made for.
+
+    #[test]
+    fn a_library_read_held_up_until_another_account_signs_in_sends_nothing() {
+        // One blocking thread, so a job holding it holds up the read too.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let lib = Library::in_memory().unwrap();
+        lib.upsert_albums(vec![album("old", 1)]).unwrap();
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib));
+        let mut got = Vec::new();
+        // Unhindered, the read sends the stored library.
+        bridge.load_local(None);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::AllTracks(_))));
+        assert!(names(&got).contains(&"Albums"));
+        got.clear();
+
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        bridge.offline_job(move |_| {
+            let _ = held.recv();
+        });
+        bridge.load_local(None);
+        // The saved login turned out to be another account: its session ends
+        // (see `OndApp::connected`) while the read still waits.
+        bridge.end_session();
+        release.send(()).unwrap();
+        // Queued behind the read, so once it's here the read has run.
+        bridge.offline_job(|b| b.post(Msg::Latency(None)));
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Latency(_))));
+        got.retain(|m| !matches!(m, Msg::Latency(_)));
+        assert!(got.is_empty(), "the old account's library arrived: {:?}", names(&got));
+    }
         scoped.scoped().send(Msg::Error("after, again".into()));
         bridge.scoped().send(Msg::Error("the new session".into()));
         let texts: Vec<String> = rx.try_iter().filter_map(|m| if let Msg::Error(e) = m { Some(e) } else { None }).collect();
