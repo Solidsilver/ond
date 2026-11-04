@@ -253,7 +253,7 @@ impl ViewCtx<'_> {
     }
 }
 
-/// "https://music.example.com:4533/" → "music.example.com".
+/// `https://music.example.com:4533/` → `music.example.com`.
 pub fn server_host(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);

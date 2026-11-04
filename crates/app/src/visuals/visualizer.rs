@@ -1,10 +1,10 @@
 //! The visualizer's scenes, and what they hand the GPU each frame.
 //!
-//! There are three, each in its own module: [`flow`](super::flow), the
+//! There are three, each in its own module: [`flow`], the
 //! classic one (shapes smeared into silk by a drifting flow field, through a
-//! colour map); [`particles`](super::particles), thousands of glowing
+//! colour map); [`particles`], thousands of glowing
 //! particles pushed around by charged spheres; and
-//! [`ribbons`](super::ribbons), ribbons of light in the album's colors.
+//! [`ribbons`], ribbons of light in the album's colors.
 //!
 //! A scene is plain arithmetic, run on the UI thread each frame: it turns
 //! the time step and the music's feel into a [`Picture`]: how last frame's
