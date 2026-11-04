@@ -709,3 +709,65 @@ fn opus_streams_decode() {
     play_to_end(&s, &mut dev);
     assert!(dev.played.len() > 80_000, "{} samples played", dev.played.len());
 }
+
+/// One half of a 1 kHz sine cut in two, 0.4 s each. Made with
+/// `ffmpeg -f lavfi -i sine=frequency=1000:sample_rate=R` (`volume=4`,
+/// stereo), cut with `atrim` and encoded by libmp3lame at 64 kbps (`mp3`,
+/// R = 44100) or libopus at 48 kbps (`opus`, R = 48000). Each MP3's LAME tag
+/// gives 576 frames of encoder delay and 1,368 of padding; each Opus file has
+/// a 312-frame pre-skip and an end trim in its last granule position.
+fn lossy_half(name: &str, suffix: &str) -> TrackSource {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata").join(format!("{name}.{suffix}"));
+    TrackSource { id: name.into(), url: format!("file://{}", path.display()), suffix: Some(suffix.into()), ..Default::default() }
+}
+
+#[test]
+fn mp3_tracks_drop_encoder_delay_and_padding_and_join_without_a_gap() {
+    join_halves("mp3", 17_640);
+}
+
+#[test]
+fn opus_tracks_drop_pre_skip_and_end_trim_and_join_without_a_gap() {
+    join_halves("opus", 19_200);
+}
+
+/// Plays `sine-a` then `sine-b` (`frames` each) gaplessly and checks the
+/// decoder queued exactly the encoded audio, joined on the next sample.
+fn join_halves(suffix: &str, frames: usize) {
+    let s = Session::start(lossy_half("sine-a", suffix), None, config(0.05), bit_perfect_status(), None, None, Arc::default());
+    s.set_next(0, Some(lossy_half("sine-b", suffix)));
+    let (mut input, _) = wait_ring(&s);
+    // Read the ring directly: every sample the decoder queued, silence included.
+    let (mut out, mut boundary) = (Vec::new(), None);
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    loop {
+        assert!(Instant::now() < deadline, "decoding stalled");
+        if let Ok(m) = input.markers.pop() {
+            boundary = Some(m.at as usize);
+        }
+        let n = input.samples.slots();
+        if n == 0 {
+            if input.input_done.load(Ordering::Acquire) && input.samples.slots() == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        let chunk = input.samples.read_chunk(n).unwrap();
+        let (a, b) = chunk.as_slices();
+        out.extend_from_slice(a);
+        out.extend_from_slice(b);
+        chunk.commit_all();
+    }
+    assert_eq!(boundary, Some(frames * 2), "the second track starts right after the first one's last real frame");
+    assert_eq!(out.len(), frames * 2 * 2, "both tracks, without delay or padding");
+    // A 1 kHz tone at half scale is never near zero for more than a sample;
+    // delay or padding left in would be over a thousand frames of it.
+    let mut longest = 0;
+    let mut run = 0;
+    for frame in out.chunks(2) {
+        run = if frame[0].abs() < 0.02 { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    assert!(longest <= 2, "a silent stretch of {longest} frames");
+}
