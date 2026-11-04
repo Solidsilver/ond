@@ -61,6 +61,10 @@ pub enum Error {
         "The library database comes from a newer version of Ond (schema v{found}; this build reads v{SCHEMA_VERSION}). Update Ond, or delete the file to sync again"
     )]
     NewerSchema { found: u32 },
+    /// A build bug: `SCHEMA_VERSION` was bumped without a step in `migrate`.
+    /// Not damage, so the file is left alone for a build that can upgrade it.
+    #[error("This build of Ond can't upgrade the library database from schema v{from}. Update Ond, or delete the file to sync again")]
+    NoMigration { from: u32 },
 }
 
 macro_rules! from_redb {
@@ -85,7 +89,7 @@ impl Error {
                 _ => false,
             },
             Error::Codec(_) => true,
-            Error::NewerSchema { .. } => false,
+            Error::NewerSchema { .. } | Error::NoMigration { .. } => false,
         }
     }
 }
@@ -208,8 +212,11 @@ impl Library {
             let found = meta.get(SCHEMA_KEY)?.map(|v| v.value());
             match found {
                 Some(v) if v > SCHEMA_VERSION => return Err(Error::NewerSchema { found: v }),
-                Some(v) if v < SCHEMA_VERSION => migrate(&wt, v)?,
-                _ => {}
+                Some(v) if v < SCHEMA_VERSION => migrate(&wt, v, SCHEMA_VERSION)?,
+                Some(_) => {}
+                // No stamp means the file was just created. The meta table and
+                // its stamp date from schema v1, so no older database lacks one.
+                None => {}
             }
             meta.insert(SCHEMA_KEY, SCHEMA_VERSION)?;
             wt.open_table(ARTISTS)?;
@@ -619,8 +626,6 @@ impl Library {
     }
 }
 
-/// Schema upgrades, run inside the opening write transaction. Each step takes
-/// the db from `from` to `from + 1`.
 /// Moves an unreadable database file out of the way as `<name>.bad-<unix secs>`.
 fn set_aside(path: &Path) -> Result<PathBuf> {
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -642,11 +647,13 @@ fn analysis_rows(db: &Database) -> Result<Vec<(String, Vec<u8>)>> {
     Ok(out)
 }
 
-fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
-    for v in from..SCHEMA_VERSION {
+/// Schema upgrades from `from` to `to`, run inside the opening write
+/// transaction. Each step takes the db from `v` to `v + 1`. A step with no arm
+/// is an error, not a no-op: stamping old rows with the new version would
+/// leave them unreadable or wrong for good.
+fn migrate(wt: &WriteTransaction, from: u32, to: u32) -> Result<()> {
+    for v in from..to {
         match v {
-            // 0 => only possible for a db created before the meta table existed; nothing to do.
-            0 => {}
             // v2 adds labels/genres to albums and credits/composer/cover to tracks.
             // Index keys don't change, so rows are rewritten in place; the new
             // fields fill in the next time an album is synced.
@@ -666,7 +673,8 @@ fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
             // Rows don't change, so stamps stay; every key made by `fold` is
             // rebuilt from them.
             3 => rebuild_folded_indexes(wt)?,
-            _ => {}
+            // Version 0 never existed: the first schema already stamped itself.
+            _ => return Err(Error::NoMigration { from: v }),
         }
     }
     Ok(())

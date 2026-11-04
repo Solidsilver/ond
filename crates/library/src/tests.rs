@@ -719,6 +719,89 @@ fn saved_copies_read_back_and_unreadable_ones_read_as_missing() {
     assert_eq!(lib.saved::<Vec<(String, String)>>("odd").unwrap(), None);
 }
 
+/// Writes a database as schema `version` left it: rows in that version's shape
+/// and index entries made the way it made them.
+fn database_at_version(path: &std::path::Path, version: u32) {
+    let db = redb::Database::create(path).unwrap();
+    let wt = db.begin_write().unwrap();
+    {
+        wt.open_table(META).unwrap().insert(SCHEMA_KEY, version).unwrap();
+        let v1 = AlbumV1 {
+            id: "al-1".into(),
+            name: "Link".into(),
+            sort: None,
+            artist: Some("Øystein Sevåg".into()),
+            artist_ref: None,
+            year: Some(1989),
+            genre: Some("New Age".into()),
+            song_count: 1,
+            duration_secs: 300,
+            cover_art: None,
+            created: None,
+        };
+        let t1 = TrackV1 {
+            id: "s-1".into(),
+            album_id: "al-1".into(),
+            title: "Link".into(),
+            artist: Some("Øystein Sevåg".into()),
+            track: Some(1),
+            disc: Some(1),
+            duration_secs: Some(300),
+            suffix: None,
+            content_type: None,
+            size: None,
+            bit_rate_kbps: None,
+            bit_depth: None,
+            sample_rate: None,
+            channels: None,
+            track_gain: None,
+            album_gain: None,
+            track_peak: None,
+            album_peak: None,
+        };
+        let (album, track) = match version {
+            1 => (encode(&v1).unwrap(), encode(&t1).unwrap()),
+            2 => (encode(&AlbumV2::from(v1)).unwrap(), encode(&TrackV2::from(t1)).unwrap()),
+            3 => (encode(&AlbumV3::from(AlbumV2::from(v1))).unwrap(), encode(&TrackV3::from(TrackV2::from(t1))).unwrap()),
+            v => panic!("no fixture for schema v{v}: add one here, and a step for it in `migrate`"),
+        };
+        wt.open_table(ALBUMS).unwrap().insert("al-1", album.as_slice()).unwrap();
+        wt.open_table(TRACKS).unwrap().insert("s-1", track.as_slice()).unwrap();
+        // Keys from the `fold` of v1 to v3, which left ø as it was.
+        wt.open_table(ALBUMS_BY_SORT).unwrap().insert(("øystein sevag", 1989, "link", "al-1"), ()).unwrap();
+        wt.open_table(TRACKS_BY_ALBUM).unwrap().insert(("al-1", 1, 1, "s-1"), ()).unwrap();
+        if version >= 3 {
+            wt.open_table(CREDITS).unwrap().insert(("øystein sevag", "al-1", "s-1"), ()).unwrap();
+        }
+    }
+    wt.commit().unwrap();
+}
+
+#[test]
+fn every_old_schema_version_has_a_migration() {
+    for version in 1..SCHEMA_VERSION {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.redb");
+        database_at_version(&path, version);
+        let lib = Library::open(&path).unwrap_or_else(|e| panic!("schema v{version} doesn't open: {e}"));
+        assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_consistent(&lib);
+        assert_eq!(lib.albums().unwrap()[0].name, "Link", "v{version}");
+        assert_eq!(lib.album_tracks("al-1").unwrap()[0].title, "Link", "v{version}");
+        assert_eq!(lib.albums_crediting("Oystein Sevag").unwrap(), ["al-1"], "v{version}");
+    }
+}
+
+#[test]
+fn a_schema_step_without_a_migration_is_an_error() {
+    let lib = Library::in_memory().unwrap();
+    let wt = lib.db.begin_write().unwrap();
+    let err = migrate(&wt, SCHEMA_VERSION, SCHEMA_VERSION + 1).unwrap_err();
+    assert!(matches!(err, Error::NoMigration { from } if from == SCHEMA_VERSION), "{err}");
+    assert!(!err.is_damage(), "a missing step is a build bug, not a reason to move the file aside");
+    assert!(matches!(migrate(&wt, 0, 1), Err(Error::NoMigration { from: 0 })));
+}
+
 /// An album with two credited tracks, then its album row and its first
 /// track's row overwritten with bytes that don't decode.
 fn library_with_unreadable_rows() -> Library {
