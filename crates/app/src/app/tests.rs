@@ -213,6 +213,13 @@ fn every_view_draws() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
+    // Something loved of each kind, so Favorites' tabs have lists to draw.
+    let loved = crate::favorites::Starred {
+        songs: app.data.tracks.all[..4].to_vec(),
+        albums: vec!["al-0".into(), "al-3".into()],
+        artists: vec![("ar-1".into(), "Bill Evans Trio".into())],
+    };
+    app.favorites.load(loved, Vec::new());
     let routes = [
         Route::Recent,
         Route::Albums,
@@ -224,10 +231,17 @@ fn every_view_draws() {
         Route::Playlist { id: "pl-1".into(), name: "Late night".into() },
         Route::Filter { kind: FilterKind::Genre, value: "Cool Jazz".into() },
         Route::Filter { kind: FilterKind::Label, value: "Nobody".into() },
+        Route::Favorites,
+        Route::Favorites,
+        Route::Favorites,
         Route::Offline,
         Route::Songs,
     ];
+    let mut tabs = [favorites_page::FavTab::Songs, favorites_page::FavTab::Albums, favorites_page::FavTab::Artists].into_iter();
     for (k, r) in routes.into_iter().enumerate() {
+        if r == Route::Favorites {
+            app.ui.fav_tab = tabs.next().expect("a tab for each visit");
+        }
         app.ui.nav.go(r);
         // Hover somewhere different each time so hover-only details draw too.
         let at = egui::pos2(300.0 + 37.0 * k as f32, 180.0 + 41.0 * k as f32);
