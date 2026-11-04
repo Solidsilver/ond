@@ -17,6 +17,23 @@
 //! and the app plays from it first (as a `file://` source). Both name files
 //! with [`file_name`], so pinning a track that's complete here can hard-link
 //! it instead of downloading it again.
+//!
+//! # Locking
+//!
+//! There are three kinds of lock. Take them in this order, never the reverse.
+//!
+//! 1. The prefetch slot. Nothing else is locked under it. Dropping a `Hold`
+//!    takes the index lock, so a `Hold` taken out of the slot is dropped after
+//!    the slot is unlocked.
+//! 2. The cache index.
+//! 3. One download's state.
+//!
+//! Code holding a download's state lock never takes the index lock. `finish`
+//! unlocks the index before it marks the download done, and `release` takes
+//! the state lock while it already holds the index lock. A download's holder
+//! count changes only under the index lock. That keeps a download found in
+//! the index alive while it's handed out. [`Abort`] runs under a download's
+//! state lock, so it must not call back into the cache.
 
 pub mod disk;
 mod download;
@@ -99,6 +116,106 @@ pub fn file_name(id: &str, suffix: Option<&str>) -> String {
     name
 }
 
+/// A [`CacheKey`] made of borrowed parts, for checking the cache without
+/// allocating (see [`StreamCache::is_complete`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheKeyRef<'a> {
+    /// Like [`CacheKey::original`].
+    Original { id: &'a str, suffix: Option<&'a str> },
+    /// Like [`CacheKey::transcode`].
+    Transcode { id: &'a str, format: &'a str, kbps: u32 },
+}
+
+/// Longest file name the cache can hold. Every filesystem we target caps a
+/// name at 255 bytes (NTFS at 255 UTF-16 units, the same for ASCII), and our
+/// names are ASCII, so a longer name can't be a file in the cache.
+const NAME_MAX: usize = 255;
+
+/// A file name built on the stack, the way [`file_name`] builds one.
+struct NameBuf {
+    buf: [u8; NAME_MAX],
+    len: usize,
+    /// The name didn't fit, so no such file can exist.
+    overflow: bool,
+}
+
+impl NameBuf {
+    fn of(key: CacheKeyRef<'_>) -> Self {
+        let mut name = Self { buf: [0; NAME_MAX], len: 0, overflow: false };
+        match key {
+            CacheKeyRef::Original { id, suffix } => {
+                name.push_escaped(id.as_bytes());
+                if let Some(s) = suffix {
+                    name.push_suffix(s);
+                }
+            }
+            CacheKeyRef::Transcode { id, format, kbps } => {
+                // `{id}~{format}{kbps}`, as `CacheKey::transcode` spells it.
+                name.push_escaped(id.as_bytes());
+                name.push_escaped(b"~");
+                name.push_escaped(format.as_bytes());
+                let mut digits = [0u8; 10];
+                let mut n = kbps;
+                let mut i = digits.len();
+                loop {
+                    i -= 1;
+                    digits[i] = b'0' + (n % 10) as u8;
+                    n /= 10;
+                    if n == 0 {
+                        break;
+                    }
+                }
+                name.push_escaped(&digits[i..]);
+                name.push_suffix(format);
+            }
+        }
+        name
+    }
+
+    fn push(&mut self, b: u8) {
+        match self.buf.get_mut(self.len) {
+            Some(slot) => {
+                *slot = b;
+                self.len += 1;
+            }
+            None => self.overflow = true,
+        }
+    }
+
+    /// Appends `bytes` escaped as [`escape_id`] does.
+    fn push_escaped(&mut self, bytes: &[u8]) {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        for &b in bytes {
+            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+                self.push(b);
+            } else {
+                self.push(b'%');
+                self.push(HEX[usize::from(b >> 4)]);
+                self.push(HEX[usize::from(b & 0xF)]);
+            }
+        }
+    }
+
+    /// Appends `.suffix` as [`file_name`] does.
+    fn push_suffix(&mut self, suffix: &str) {
+        let mut kept = suffix.bytes().filter(u8::is_ascii_alphanumeric).take(8).peekable();
+        if kept.peek().is_some() {
+            self.push(b'.');
+            for b in kept {
+                self.push(b.to_ascii_lowercase());
+            }
+        }
+    }
+
+    /// The name, unless it was too long to be a file.
+    fn as_str(&self) -> Option<&str> {
+        if self.overflow {
+            return None;
+        }
+        std::str::from_utf8(&self.buf[..self.len]).ok()
+    }
+}
+
 /// An id made filesystem-safe: ids are opaque server strings, so anything
 /// outside `[A-Za-z0-9_-]` is percent-escaped. The result never contains `.`.
 pub fn escape_id(id: &str) -> String {
@@ -125,7 +242,7 @@ pub struct Progress {
 ///
 /// Called while the download's state lock is held, every 50 ms while an open
 /// or a read waits. Keep it to loading a flag: it must not block or call
-/// into the cache.
+/// into the cache (see the crate's locking order).
 pub type Abort = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Clone)]
@@ -207,11 +324,16 @@ impl StreamCache {
     /// download fails, or `abort` returns true.
     pub fn open(&self, key: &CacheKey, url: &str, abort: Abort) -> io::Result<CachedSource> {
         let name = key.file_name();
-        if let Some(file) = self.inner.open_complete(&name) {
-            let len = file.metadata()?.len();
-            return Ok(CachedSource::File { file, len });
-        }
-        let dl = self.inner.acquire(&name, url);
+        let dl = loop {
+            if let Some(file) = self.inner.open_complete(&name) {
+                let len = file.metadata()?.len();
+                return Ok(CachedSource::File { file, len });
+            }
+            // `None` means a download finished the file since we looked, so open that.
+            if let Some(dl) = self.inner.acquire(&name, url) {
+                break dl;
+            }
+        };
         let hold = Hold { dl: dl.clone(), inner: self.inner.clone() };
 
         let mut st = dl.lock();
@@ -234,11 +356,7 @@ impl StreamCache {
     /// (and, if nothing else holds it, cancelling) the previous prefetch.
     pub fn prefetch(&self, key: &CacheKey, url: &str) {
         let name = key.file_name();
-        let hold = if self.inner.lock_index().complete.contains_key(&name) {
-            None
-        } else {
-            Some(Hold { dl: self.inner.acquire(&name, url), inner: self.inner.clone() })
-        };
+        let hold = self.inner.acquire(&name, url).map(|dl| Hold { dl, inner: self.inner.clone() });
         let old = std::mem::replace(&mut *self.inner.lock_prefetch(), hold);
         drop(old);
     }
@@ -277,6 +395,13 @@ impl StreamCache {
     pub fn complete_path(&self, key: &CacheKey) -> Option<PathBuf> {
         let name = key.file_name();
         self.inner.lock_index().complete.contains_key(&name).then(|| self.inner.cfg.dir.join(name))
+    }
+
+    /// Whether `key` is cached in full. It doesn't allocate, so the app can
+    /// ask every frame. It agrees with [`complete_path`](Self::complete_path).
+    pub fn is_complete(&self, key: CacheKeyRef<'_>) -> bool {
+        let name = NameBuf::of(key);
+        name.as_str().is_some_and(|name| self.inner.lock_index().complete.contains_key(name))
     }
 
     /// Forgets every completed file and deletes it (in the background), for
@@ -335,15 +460,23 @@ impl Inner {
         }
     }
 
-    /// Returns the active download for `name`, starting one if needed, with one more holder.
+    /// Returns the active download for `name`, starting one if needed, with
+    /// one more holder. Returns `None` if `name` is complete.
     ///
     /// Cancelling a download takes it out of `active` under the same lock, so
     /// one found here is live; a cancelled one is replaced all the same.
-    fn acquire(self: &Arc<Self>, name: &str, url: &str) -> Arc<Download> {
+    /// Completeness is checked under the lock too, so a download that finished
+    /// after the caller last looked isn't started again.
+    fn acquire(self: &Arc<Self>, name: &str, url: &str) -> Option<Arc<Download>> {
         let mut idx = self.lock_index();
+        if idx.complete.contains_key(name) {
+            return None;
+        }
         if let Some(dl) = idx.active.get(name).filter(|dl| !dl.is_cancelled()) {
-            dl.holders.fetch_add(1, Ordering::Relaxed);
-            return dl.clone();
+            // Whoever started it holds it until it leaves `active`.
+            let before = dl.holders.fetch_add(1, Ordering::Relaxed);
+            debug_assert!(before > 0, "{name}: an active download without holders");
+            return Some(dl.clone());
         }
         let dl = Arc::new(Download::new(
             name.to_owned(),
@@ -360,12 +493,14 @@ impl Inner {
             // Renaming and evicting touch the disk: keep them off the async workers.
             let _ = tokio::task::spawn_blocking(move || inner.finish(&task_dl, result)).await;
         });
-        dl
+        Some(dl)
     }
 
     fn release(&self, dl: &Arc<Download>) {
         let mut idx = self.lock_index();
-        if dl.holders.fetch_sub(1, Ordering::Relaxed) == 1 && !dl.lock().complete {
+        let before = dl.holders.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(before > 0, "{}: released more holds than were taken", dl.name);
+        if before == 1 && !dl.lock().complete {
             // Nobody wants the rest of this file; stop fetching it. The task deletes the `.part`.
             dl.cancel();
             if idx.active.get(&dl.name).is_some_and(|a| Arc::ptr_eq(a, dl)) {
@@ -380,7 +515,8 @@ impl Inner {
             idx.active.remove(&dl.name);
         }
         // Renamed under the index lock, like `remove` moves files away, so a
-        // late delete of an evicted copy can't land on this one.
+        // late delete of an evicted copy can't land on this one. `run` already
+        // synced the data, so only the rename waits on the disk here.
         let result = result.and_then(|len| {
             std::fs::rename(&dl.part_path, &dl.final_path).map_err(|e| format!("cache file: {e}"))?;
             Ok(len)

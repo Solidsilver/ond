@@ -4,10 +4,10 @@
 //! [`OfflineStore`] keeps the pins (see [`pins`]) in `offline.json` next to the
 //! files and runs a small download queue on the tokio runtime: two at a time,
 //! resumed with `Range` after an interruption or a restart (when the server's
-//! file is provably still the same, see [`RESUME_OVERLAP`]), retried with
-//! backoff, and checked against the size the server reported. A track that's
-//! already complete in the stream cache is hard-linked (or copied) instead of
-//! downloaded again.
+//! file is provably still the same, because the last 64 KB on disk match what
+//! it sends again), retried with backoff, and checked against the size the
+//! server reported. A track that's already complete in the stream cache is
+//! hard-linked (or copied) instead of downloaded again.
 //!
 //! Files are named by [`streamcache::file_name`], exactly as in the stream
 //! cache, with `.part` appended while downloading. The engine plays a finished one as a
@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
-use streamcache::disk::{PartFile, blocking};
+use streamcache::disk::{InFlight, PartFile, blocking_tracked};
 use streamcache::fetch::{self, FetchError};
 use tokio::sync::Notify;
 
@@ -41,6 +41,10 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(150);
 /// appends only if those bytes match: proof that the server's file is still
 /// the one the partial download came from.
 const RESUME_OVERLAP: u64 = 64 * 1024;
+/// How long dropping the store waits for its saves and file writes to finish.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+/// How long a free-space reading is shown before it's measured again.
+const FREE_SPACE_EVERY: Duration = Duration::from_secs(5);
 
 /// Makes the stream URL for a track id. The store holds one only while the
 /// server is reachable (see [`OfflineStore::set_source`]).
@@ -123,7 +127,7 @@ pub struct Snapshot {
     pub active: usize,
     pub failed: usize,
     /// A state file that couldn't be read was set aside, so files the pins
-    /// don't name are kept (see [`load_pins`]); `None` normally.
+    /// don't name are kept (see [`SetAside`]); `None` normally.
     pub set_aside: Option<SetAside>,
 }
 
@@ -163,7 +167,7 @@ impl Snapshot {
 }
 
 /// A handle to the store; copies share it. The store shuts down when the last
-/// copy is dropped (see [`Owner`]).
+/// copy is dropped.
 #[derive(Clone)]
 pub struct OfflineStore {
     inner: Arc<Inner>,
@@ -184,12 +188,22 @@ impl Drop for Owner {
     /// account) is the only one writing there. Then waits for saves already
     /// queued to reach the disk, so reopening (or moving) the store right after
     /// sees them.
+    ///
+    /// Downloads can't start new file calls from then on, and it waits for the
+    /// calls the aborted downloads left running on the blocking pool. A write
+    /// landing after a new store here read the `.part` length would corrupt
+    /// that store's resume. Both waits share one budget.
     fn drop(&mut self) {
+        let deadline = Instant::now() + SHUTDOWN_BUDGET;
+        self.inner.io.close();
         self.inner.close();
         for w in &self.workers {
             w.abort();
         }
-        self.inner.flush.wait_for(self.inner.flush.requested.load(Ordering::Acquire), Duration::from_secs(5));
+        self.inner.flush.wait_for(self.inner.flush.requested.load(Ordering::Acquire), SHUTDOWN_BUDGET);
+        if !self.inner.io.wait_idle(deadline.saturating_duration_since(Instant::now())) {
+            tracing::warn!("offline: closing {} with file writes still running", self.inner.dir.display());
+        }
     }
 }
 
@@ -211,6 +225,9 @@ struct Inner {
     /// Pins to write, saved on a thread of their own for the same reason.
     saves: Mutex<Sender<Save>>,
     flush: Arc<Flush>,
+    /// Downloads' file calls on the blocking pool, which outlive an aborted
+    /// worker. Dropping the store waits for them.
+    io: Arc<InFlight>,
 }
 
 /// A copy of the pins to write, taken under the state lock and written after it.
@@ -252,7 +269,12 @@ struct State {
     limit_reached: bool,
     version: u64,
     snapshot: Arc<Snapshot>,
+    /// Free space on the volume and when it was measured. The deleter thread
+    /// measures it, because statting a sleeping network volume can take
+    /// seconds and the snapshot is built under this lock on the UI thread.
     free: Option<(Instant, Option<u64>)>,
+    /// The deleter has been asked to measure the free space again.
+    measuring_free: bool,
     /// Bumped by every change to `pins` that needs saving.
     pins_revision: u64,
     /// The last handle is gone: nothing more is claimed, saved or deleted.
@@ -284,6 +306,8 @@ enum Chore {
     Delete(Vec<String>),
     /// [`Inner::sweep`].
     Sweep,
+    /// Measure the free space for the snapshot.
+    FreeSpace,
 }
 
 struct Active {
@@ -326,10 +350,15 @@ impl OfflineStore {
         std::fs::create_dir_all(&cfg.dir)?;
         remove_moving(&cfg.dir);
         let (mut pins, trusted) = load_pins(&cfg.dir);
-        // A finished file that's gone (deleted by hand) downloads again.
         for s in pins.tracks.values_mut() {
-            if s.done.is_some() && !cfg.dir.join(file_name(&s.r)).is_file() {
-                s.done = None;
+            let path = cfg.dir.join(file_name(&s.r));
+            if s.done.is_some() {
+                // A finished file that's gone (deleted by hand) downloads again.
+                if !path.is_file() {
+                    s.done = None;
+                }
+            } else {
+                s.done = reconcile(&path, s.r.size);
             }
         }
         let set_aside = if trusted {
@@ -342,10 +371,13 @@ impl OfflineStore {
         let (doomed, doomed_rx) = std::sync::mpsc::channel();
         let (saves, saves_rx) = std::sync::mpsc::channel();
         let flush = Arc::new(Flush::default());
+        // Measured here, off the UI thread, so the first snapshot has it.
+        let free = Some((Instant::now(), free_space(&cfg.dir)));
         let inner = Arc::new(Inner {
             doomed: Mutex::new(doomed),
             saves: Mutex::new(saves),
             flush: flush.clone(),
+            io: Arc::default(),
             // Offline downloads aren't waited on by playback: a slow server gets longer.
             http: fetch::client(Duration::from_secs(60)).map_err(io::Error::other)?,
             dir: cfg.dir,
@@ -361,7 +393,8 @@ impl OfflineStore {
                 limit_reached: false,
                 version: 1,
                 snapshot: Arc::new(Snapshot::default()),
-                free: None,
+                free,
+                measuring_free: false,
                 pins_revision: 0,
                 closed: false,
                 deleting: HashSet::new(),
@@ -628,7 +661,7 @@ impl Inner {
         }
     }
 
-    /// The pins as they are now, to [`write`](Self::write) once the lock is released.
+    /// The pins as they are now, for the [`saver`] thread to write once the lock is released.
     fn save(&self, st: &mut State) -> Option<Save> {
         st.pins_revision += 1;
         match serde_json::to_vec(&st.pins) {
@@ -805,15 +838,11 @@ impl Inner {
                 sum
             })
             .collect();
-        let now = Instant::now();
-        let free = match st.free {
-            Some((at, free)) if now.duration_since(at) < Duration::from_secs(5) => free,
-            _ => {
-                let free = free_space(&self.dir);
-                st.free = Some((now, free));
-                free
-            }
-        };
+        // A stale reading is shown until the deleter thread brings a new one.
+        let free = st.free.and_then(|(_, free)| free);
+        if st.free.is_none_or(|(at, _)| at.elapsed() >= FREE_SPACE_EVERY) && !st.measuring_free {
+            st.measuring_free = self.doomed.lock().unwrap_or_else(|e| e.into_inner()).send(Chore::FreeSpace).is_ok();
+        }
         let set_aside = st.set_aside.as_ref().map(|a| {
             // Rare and short-lived, so the names are worked out each time.
             let known = known_names(&st.pins);
@@ -876,7 +905,7 @@ async fn run(inner: &Inner, job: &Job) -> Result<u64, JobError> {
     if let Some(src) = &job.from_cache {
         // A copy across volumes can take a while: not on the async workers.
         let (src, size, part, dest) = (src.clone(), job.r.size, job.part.clone(), job.dest.clone());
-        match blocking(move || promote(&src, size, &part, &dest)).await {
+        match blocking_tracked(&inner.io, move || promote(&src, size, &part, &dest)).await {
             Ok(size) => return Ok(size),
             Err(e) => tracing::debug!("promote {} from cache: {e}", job.r.id),
         }
@@ -886,9 +915,41 @@ async fn run(inner: &Inner, job: &Job) -> Result<u64, JobError> {
 }
 
 /// Deletes `path` (if it's there) on the blocking pool.
-async fn remove_file(path: &Path) {
+async fn remove_file(inner: &Inner, path: &Path) {
     let path = path.to_owned();
-    let _ = blocking(move || std::fs::remove_file(path)).await;
+    let _ = blocking_tracked(&inner.io, move || std::fs::remove_file(path)).await;
+}
+
+/// At open, for a track the pins don't record as done: whether its finished
+/// file at `path` is there anyway, with its size.
+///
+/// A download renames its `.part` into place before the store records it, and
+/// the pins reach the disk later still, so a crash in between leaves a whole
+/// file the pins don't know is done. Without this it would be downloaded again
+/// from byte 0. With the pin's size known, a file of that size is taken as
+/// done. A file of another size is left for the download to replace.
+///
+/// Without a size there's nothing to check the file against, and it might be
+/// a copy of an older version of the track. It goes back to being the
+/// `.part`, unless one is already there. The resume then asks the server for
+/// the last [`RESUME_OVERLAP`] bytes again and keeps the file only if they
+/// match. That costs one small request instead of the whole file.
+fn reconcile(path: &Path, size: Option<u64>) -> Option<u64> {
+    let len = std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file)?.len();
+    match size {
+        Some(size) => (len == size).then_some(len),
+        None => {
+            let mut part = path.as_os_str().to_owned();
+            part.push(".part");
+            let part = PathBuf::from(part);
+            if !part.exists()
+                && let Err(e) = std::fs::rename(path, &part)
+            {
+                tracing::warn!("offline: making {} a partial download again: {e}", path.display());
+            }
+            None
+        }
+    }
 }
 
 /// Takes a complete stream-cache file: a hard link where possible (same
@@ -909,16 +970,17 @@ fn promote(src: &Path, size: Option<u64>, part: &Path, dest: &Path) -> io::Resul
     Ok(len)
 }
 
-/// Every touch of the disk here runs on the blocking pool (see [`blocking`]).
+/// Every touch of the disk here runs on the blocking pool, counted in
+/// `Inner::io` (see [`blocking_tracked`]).
 async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> {
     let part = job.part.clone();
-    let mut have = blocking(move || std::fs::metadata(part)).await.map_or(0, |m| m.len());
+    let mut have = blocking_tracked(&inner.io, move || std::fs::metadata(part)).await.map_or(0, |m| m.len());
     if job.r.size.is_some_and(|s| have > s) {
         have = 0;
     }
     loop {
         match fetch_into_part(inner, job, url, have).await? {
-            Some(have) => return finish(job, have).await,
+            Some(have) => return finish(inner, job, have).await,
             // Never twice: from byte 0 there's nothing to match.
             None => {
                 tracing::info!("offline: {} changed on the server since its partial download; starting over", job.r.id);
@@ -942,13 +1004,13 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
             return Ok(None);
         }
         Err(FetchError::RangeNotSatisfiable) => {
-            remove_file(&job.part).await;
+            remove_file(inner, &job.part).await;
             return Err(JobError::Failed("server rejected the resume; starting over".into()));
         }
         Err(FetchError::BadRange(e)) => {
             // The server answered the resume from somewhere else: the partial
             // file can't be trusted to line up. Start over.
-            remove_file(&job.part).await;
+            remove_file(inner, &job.part).await;
             return Err(JobError::Failed(e));
         }
         Err(e) => return Err(JobError::Failed(e.to_string())),
@@ -964,13 +1026,13 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
             return Ok(None);
         }
         let part = job.part.clone();
-        tail = streamcache::disk::blocking(move || read_tail(&part, overlap)).await?;
+        tail = blocking_tracked(&inner.io, move || read_tail(&part, overlap)).await?;
         expect = &tail;
     }
     let total = body.total;
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).append(have > 0).truncate(have == 0);
-    let file = PartFile::open(options, job.part.clone()).await?;
+    let file = PartFile::open_tracked(options, job.part.clone(), inner.io.clone()).await?;
     let mut last_note = Instant::now();
     inner.progress(&job.r.id, have, total, true);
     loop {
@@ -1025,15 +1087,15 @@ fn read_tail(path: &Path, len: u64) -> io::Result<Vec<u8>> {
 }
 
 /// Checks the size and moves the finished `.part` into place.
-async fn finish(job: &Job, have: u64) -> Result<u64, JobError> {
+async fn finish(inner: &Inner, job: &Job, have: u64) -> Result<u64, JobError> {
     if let Some(expected) = job.r.size
         && have != expected
     {
-        remove_file(&job.part).await;
+        remove_file(inner, &job.part).await;
         return Err(JobError::Failed(format!("size mismatch: got {have} bytes, server said {expected}")));
     }
     let (part, dest) = (job.part.clone(), job.dest.clone());
-    blocking(move || std::fs::rename(part, dest)).await?;
+    blocking_tracked(&inner.io, move || std::fs::rename(part, dest)).await?;
     Ok(have)
 }
 
@@ -1079,11 +1141,23 @@ fn saver(dir: PathBuf, saves: Receiver<Save>, flush: Arc<Flush>) {
 fn deleter(store: Weak<Inner>, dir: PathBuf, chores: Receiver<Chore>) {
     while let Ok(first) = chores.recv() {
         // Anything else that piled up goes in the same directory scan.
-        let (mut ids, mut sweep) = (Vec::new(), false);
+        let (mut ids, mut sweep, mut measure) = (Vec::new(), false, false);
         for chore in std::iter::once(first).chain(chores.try_iter()) {
             match chore {
                 Chore::Delete(batch) => ids.extend(batch),
                 Chore::Sweep => sweep = true,
+                Chore::FreeSpace => measure = true,
+            }
+        }
+        if measure {
+            // Not under the state lock: this can take seconds.
+            let free = free_space(&dir);
+            let Some(inner) = store.upgrade() else { return };
+            let mut st = inner.lock();
+            st.measuring_free = false;
+            let old = st.free.replace((Instant::now(), free));
+            if old.is_none_or(|(_, was)| was != free) {
+                inner.changed(st);
             }
         }
         if !ids.is_empty() {
@@ -1368,30 +1442,49 @@ pub struct MoveProgress {
     pub total: u64,
 }
 
+/// What a move left behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MoveOutcome {
+    /// Files still where they came from, because a file of another size had
+    /// the same name at the destination. The destination's file wins, and the
+    /// original stays, since nothing proves it's a stray. Their folder stays
+    /// too. Empty when everything moved.
+    pub kept: Vec<PathBuf>,
+}
+
 /// Moves a store's files from `from` to `to` (run before opening it at `to`),
 /// including the per-account stores in folders under it. Renames where it can,
-/// copies across volumes. Files already at `to` win.
+/// copies across volumes. Files already at `to` win, and the originals that
+/// lost are listed in the outcome.
 ///
 /// Stopping it anywhere (quitting, a crash) loses nothing, and running it again
-/// finishes the job: a copy is made under a temporary name (see
-/// [`moving_name`]) and renamed into place before the original goes, and a file
-/// found at both ends with the same size is one whose copy was done.
-pub fn move_store(from: &Path, to: &Path) -> io::Result<()> {
+/// finishes the job. A copy is made under a temporary name and renamed into
+/// place before the original goes, and a file found at both ends with the same
+/// size is one whose copy was done.
+pub fn move_store(from: &Path, to: &Path) -> io::Result<MoveOutcome> {
     move_store_with(from, to, &mut |_| {})
 }
 
 /// [`move_store`], telling `progress` after each file. It can take a while
-/// across volumes: run it off the UI thread.
-pub fn move_store_with(from: &Path, to: &Path, progress: &mut dyn FnMut(MoveProgress)) -> io::Result<()> {
+/// across volumes, so run it off the UI thread.
+pub fn move_store_with(from: &Path, to: &Path, progress: &mut dyn FnMut(MoveProgress)) -> io::Result<MoveOutcome> {
+    let mut outcome = MoveOutcome::default();
     if from == to || !from.is_dir() {
-        return Ok(());
+        return Ok(outcome);
     }
     let mut at = MoveProgress { done: 0, total: tree_size(from) };
     progress(at);
-    move_files(from, to, true, &mut |bytes| {
-        at.done += bytes;
-        progress(at);
-    })
+    move_files(
+        from,
+        to,
+        true,
+        &mut |bytes| {
+            at.done += bytes;
+            progress(at);
+        },
+        &mut outcome,
+    )?;
+    Ok(outcome)
 }
 
 /// Bytes in the files under `dir`.
@@ -1412,24 +1505,52 @@ fn tree_size(dir: &Path) -> u64 {
 /// else never fetches the old pins with the new server's URLs, and switching
 /// back finds them again. A store kept directly in `base` by an older version
 /// becomes this account's the first time.
+///
+/// That adoption moves files one by one, in no set order, so a crash can stop
+/// it after `offline.json` moved and before the downloads did. So an account
+/// that has its own `offline.json` also takes any file still in `base`, and
+/// the move carries on where it stopped. An account without one leaves them,
+/// so a new account never picks up another's half-moved downloads. A second
+/// `offline.json` in `base` while this account has its own is another store,
+/// and it stays put rather than mixing two sets of pins.
 pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
     let dir = base.join(format!("{account:08x}"));
-    if base.join(STATE_FILE).is_file() && !dir.join(STATE_FILE).exists() {
-        move_files(base, &dir, false, &mut |_| {})?;
+    let (theirs, mine) = (base.join(STATE_FILE).is_file(), dir.join(STATE_FILE).exists());
+    let start = theirs && !mine;
+    let resume = !theirs && mine && has_leftovers(base);
+    if start || resume {
+        let mut outcome = MoveOutcome::default();
+        move_files(base, &dir, false, &mut |_| {}, &mut outcome)?;
+        for kept in &outcome.kept {
+            tracing::warn!("offline: kept {}, as {} already has a different file by that name", kept.display(), dir.display());
+        }
     }
     Ok(dir)
 }
 
+/// `dir` holds files an adoption into an account folder still has to move: any
+/// but hidden ones (a `.DS_Store`), apart from copies a move left unfinished.
+fn has_leftovers(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            e.file_type().is_ok_and(|t| t.is_file()) && (!name.starts_with('.') || is_moving(&name))
+        })
+    })
+}
+
 /// Moves the files in `from` (with `folders`, the folders in it too) to `to`,
-/// calling `moved` with each file's size once it's dealt with.
-fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64)) -> io::Result<()> {
+/// calling `moved` with each file's size once it's dealt with. Originals kept
+/// because `to` has a different file by the same name go in `outcome`.
+fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64), outcome: &mut MoveOutcome) -> io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let kind = e.file_type()?;
         if kind.is_dir() {
             if folders {
-                move_files(&e.path(), &to.join(e.file_name()), true, moved)?;
+                move_files(&e.path(), &to.join(e.file_name()), true, moved, outcome)?;
             }
             continue;
         }
@@ -1448,6 +1569,8 @@ fn move_files(from: &Path, to: &Path, folders: bool, moved: &mut dyn FnMut(u64))
             if there.is_file() && there.len() == len {
                 // Copied, but the move stopped before the original went.
                 std::fs::remove_file(e.path())?;
+            } else {
+                outcome.kept.push(e.path());
             }
             moved(len);
             continue;

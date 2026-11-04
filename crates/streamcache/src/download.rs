@@ -13,7 +13,9 @@ use tokio::sync::Notify;
 /// A reader asking for bytes this close ahead of the download cursor waits for
 /// them instead of starting a new request.
 const LOOKAHEAD: u64 = 512 * 1024;
-/// Consecutive failed requests before the download gives up.
+/// Consecutive failed requests before the download gives up. A response that
+/// breaks or ends without adding new bytes counts as a failure too. Otherwise
+/// a server that keeps sending the same short body would retry forever.
 const MAX_FAILURES: u32 = 4;
 
 #[derive(Debug, Default)]
@@ -101,11 +103,26 @@ impl Download {
 ///
 /// The file is written on the blocking pool (see [`PartFile`]), and a chunk's
 /// range is only published to readers once its write has returned.
+///
+/// A finished file is synced to disk before this returns. The `.part` is
+/// preallocated, so if the rename that follows reached the disk before the
+/// data did, a power loss could leave a right-sized file of zeros. The next
+/// startup scan would index it as complete.
 pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> Result<u64, String> {
-    let io = |e: std::io::Error| format!("cache file: {e}");
     let mut options = OpenOptions::new();
     options.create(true).write(true).truncate(true);
     let file = PartFile::open(options, dl.part_path.clone()).await.map_err(io)?;
+    let len = fill(dl, client, url, &file).await?;
+    file.sync_all().await.map_err(io)?;
+    Ok(len)
+}
+
+fn io(e: std::io::Error) -> String {
+    format!("cache file: {e}")
+}
+
+/// [`run`]'s download loop, writing into `file`.
+async fn fill(dl: &Download, client: &reqwest::Client, url: &str, file: &PartFile) -> Result<u64, String> {
     let mut ranged: Option<bool> = None;
     let mut sized = false;
     let mut start = 0u64;
@@ -149,6 +166,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                 if failures > MAX_FAILURES {
                     return Err(FetchError::RangeNotSatisfiable.to_string());
                 }
+                backoff(dl, failures).await;
                 start = 0;
                 continue;
             }
@@ -193,6 +211,7 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
 
         // Stream this response until it ends, runs into bytes already on disk,
         // or the next request should start somewhere else.
+        let mut fresh = false;
         let stop = loop {
             // Dropping `body.chunk()` when the other branch wins loses nothing:
             // it only polls the body for its next frame, which stays queued.
@@ -214,10 +233,17 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
                     let end = pos + bytes.len() as u64;
                     file.write_at(pos, bytes).await.map_err(io)?;
                     let mut st = dl.lock();
+                    let before = st.ranges.total();
                     st.ranges.insert(pos, end);
                     pos = end;
                     st.cursor = pos;
-                    failures = 0;
+                    // Only new bytes reset the count. A sequential restart
+                    // re-reads what is on disk, and a body that falls short
+                    // of its length would otherwise reset it on every pass.
+                    if st.ranges.total() > before {
+                        fresh = true;
+                        failures = 0;
+                    }
                     let relocate = relocation(&mut st, pos, ranged == Some(true));
                     let ran_into_data = ranged == Some(true) && st.ranges.available_from(pos) > 0 && st.len.is_none_or(|l| pos < l);
                     drop(st);
@@ -246,26 +272,37 @@ pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> R
         start = match stop {
             Stop::Restart(at) => at,
             Stop::Ended | Stop::RanIntoData => {
-                let mut st = dl.lock();
-                let learned = matches!(stop, Stop::Ended) && st.len.is_none();
-                if learned {
-                    // No length given, and a request for everything from here
-                    // on ran out: the file ends here. Bytes skipped by an
-                    // earlier relocation may still be missing below.
-                    st.len = Some(pos);
-                }
-                let gap = match st.len {
-                    Some(len) => match st.ranges.first_gap(pos, len).or_else(|| st.ranges.first_gap(0, len)) {
-                        Some((gap, _)) => gap,
-                        None => return Ok(len),
-                    },
-                    // Ran into bytes from a relocated request with the end
-                    // still unknown: carry on after them.
-                    None => pos + st.ranges.available_from(pos),
+                let (gap, learned) = {
+                    let mut st = dl.lock();
+                    let learned = matches!(stop, Stop::Ended) && st.len.is_none();
+                    if learned {
+                        // No length given, and a request for everything from here
+                        // on ran out: the file ends here. Bytes skipped by an
+                        // earlier relocation may still be missing below.
+                        st.len = Some(pos);
+                    }
+                    let gap = match st.len {
+                        Some(len) => match st.ranges.first_gap(pos, len).or_else(|| st.ranges.first_gap(0, len)) {
+                            Some((gap, _)) => gap,
+                            None => return Ok(len),
+                        },
+                        // Ran into bytes from a relocated request with the end
+                        // still unknown: carry on after them.
+                        None => pos + st.ranges.available_from(pos),
+                    };
+                    (gap, learned)
                 };
-                drop(st);
                 if learned {
                     dl.cond.notify_all();
+                }
+                if !fresh {
+                    // A whole response added nothing, and the file still has
+                    // a gap below its length.
+                    failures += 1;
+                    if failures > MAX_FAILURES {
+                        return Err("the server keeps sending less than the file's length".into());
+                    }
+                    backoff(dl, failures).await;
                 }
                 if ranged == Some(true) { gap } else { 0 }
             }
