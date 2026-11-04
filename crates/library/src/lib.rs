@@ -42,8 +42,9 @@ const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_sta
 /// A new table rather than a schema bump: older builds simply ignore it.
 const ANALYSIS: TableDefinition<&str, &[u8]> = TableDefinition::new("analysis");
 /// Name → a copy of something the server lists outside the library (the
-/// playlists, favorites, Recently added), kept for starting offline. Opaque
-/// here; a new table rather than a schema bump, like `ANALYSIS`.
+/// playlists, favorites, Recently added), kept for starting offline. Each
+/// value is postcard behind [`saved_tag`]. A new table rather than a schema
+/// bump, like `ANALYSIS`.
 const SAVED: TableDefinition<&str, &[u8]> = TableDefinition::new("saved");
 
 const SCHEMA_KEY: &str = "schema_version";
@@ -396,20 +397,36 @@ impl Library {
     }
 
     /// Keeps a copy of `value` under `name` (see [`saved`](Self::saved)).
+    ///
+    /// The copy is tagged with [`SCHEMA_VERSION`], which covers the library's
+    /// own types ([`Track`] and the rest). A type defined elsewhere that
+    /// changes shape needs a new `name`: the tag can't see that change.
     pub fn save<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
-        let bytes = encode(value)?;
+        let mut bytes = saved_tag().to_vec();
+        bytes.extend(encode(value)?);
         let wt = self.db.begin_write()?;
         wt.open_table(SAVED)?.insert(name, bytes.as_slice())?;
         Ok(wt.commit()?)
     }
 
-    /// The copy saved under `name`. One written by a build whose types
-    /// differed reads as missing: it's a copy, and the server has the original.
+    /// The copy saved under `name`. It's a copy and the server has the
+    /// original, so anything doubtful reads as missing: another tag (another
+    /// schema, or no tag from a build before tags), bytes that don't decode,
+    /// or bytes left over after decoding, which is how a type that lost a
+    /// trailing field shows.
     pub fn saved<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
         let rt = self.db.begin_read()?;
         let Some(row) = rt.open_table(SAVED)?.get(name)? else { return Ok(None) };
-        match decode(row.value()) {
-            Ok(v) => Ok(Some(v)),
+        let Some(body) = row.value().strip_prefix(saved_tag().as_slice()) else {
+            tracing::debug!("saved {name}: written by another schema");
+            return Ok(None);
+        };
+        match postcard::take_from_bytes(body) {
+            Ok((v, [])) => Ok(Some(v)),
+            Ok((_, rest)) => {
+                tracing::debug!("saved {name}: {} bytes left over", rest.len());
+                Ok(None)
+            }
             Err(e) => {
                 tracing::debug!("saved {name}: {e}");
                 Ok(None)
@@ -624,6 +641,14 @@ impl Library {
         }
         Ok(problems)
     }
+}
+
+/// The prefix of every saved value: a marker byte, the layout of the saved
+/// row (this one, 1), and the schema the value's library types come from.
+/// Rows saved before the tag have none, and read as missing.
+fn saved_tag() -> [u8; 6] {
+    let [a, b, c, d] = SCHEMA_VERSION.to_le_bytes();
+    [0xa5, 1, a, b, c, d]
 }
 
 /// Moves an unreadable database file out of the way as `<name>.bad-<unix secs>`.

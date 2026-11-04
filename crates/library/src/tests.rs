@@ -899,6 +899,41 @@ fn track_v3_keeps_its_wire_format() {
     assert_eq!(decode::<Track>(BYTES).unwrap(), full_track());
 }
 
+#[test]
+fn saved_copies_from_another_schema_or_shape_read_as_missing() {
+    let lib = Library::in_memory().unwrap();
+    let put_raw = |name: &str, bytes: &[u8]| {
+        let wt = lib.db.begin_write().unwrap();
+        wt.open_table(SAVED).unwrap().insert(name, bytes).unwrap();
+        wt.commit().unwrap();
+    };
+    let value = vec!["al-1".to_owned()];
+    // Untagged, as builds before the tag wrote them.
+    put_raw("untagged", &encode(&value).unwrap());
+    assert_eq!(lib.saved::<Vec<String>>("untagged").unwrap(), None);
+    // Tagged by another schema, whose Track may have had another shape.
+    let mut other = saved_tag();
+    other[2] = other[2].wrapping_add(1);
+    put_raw("other", &[other.as_slice(), &encode(&value).unwrap()].concat());
+    assert_eq!(lib.saved::<Vec<String>>("other").unwrap(), None);
+    // A type that lost a trailing field decodes, with bytes to spare.
+    lib.save("wider", &(value.clone(), 7u32)).unwrap();
+    assert_eq!(lib.saved::<Vec<String>>("wider").unwrap(), None);
+    lib.save("same", &value).unwrap();
+    assert_eq!(lib.saved::<Vec<String>>("same").unwrap(), Some(value));
+}
+
+#[test]
+fn saved_values_keep_their_tag() {
+    let lib = Library::in_memory().unwrap();
+    lib.save("n", &1u8).unwrap();
+    let rt = lib.db.begin_read().unwrap();
+    let row = rt.open_table(SAVED).unwrap().get("n").unwrap().unwrap();
+    // Marker, layout 1, SCHEMA_VERSION as little-endian u32, then the value.
+    let [a, b, c, d] = SCHEMA_VERSION.to_le_bytes();
+    assert_eq!(row.value(), [0xa5, 1, a, b, c, d, 1], "the saved row layout changed: older copies would read as missing or wrong");
+}
+
 /// An album with two credited tracks, then its album row and its first
 /// track's row overwritten with bytes that don't decode.
 fn library_with_unreadable_rows() -> Library {
