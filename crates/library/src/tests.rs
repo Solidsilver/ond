@@ -899,6 +899,114 @@ fn track_v3_keeps_its_wire_format() {
     assert_eq!(decode::<Track>(BYTES).unwrap(), full_track());
 }
 
+/// What to do when a frozen version's golden-bytes test fails.
+const FROZEN_CHANGED: &str = "a frozen row version changed shape. Rows written by older builds are decoded as this type by \
+    `migrate`, so it must stay exactly as it was when that schema was current; make the change in the current version instead";
+
+fn full_album_v1() -> AlbumV1 {
+    AlbumV1 {
+        id: "al-1".into(),
+        name: "Sunday".into(),
+        sort: Some("Sunday at".into()),
+        artist: Some("Bill Evans Trio".into()),
+        artist_ref: Some("ar-2".into()),
+        year: Some(1961),
+        genre: Some("Jazz".into()),
+        song_count: 5,
+        duration_secs: 2400,
+        cover_art: Some("al-1_0".into()),
+        created: Some("2024-01-02".into()),
+    }
+}
+
+fn full_album_v2() -> AlbumV2 {
+    AlbumV2 { labels: vec!["Riverside".into()], genres: vec!["Jazz".into()], ..AlbumV2::from(full_album_v1()) }
+}
+
+fn full_track_v1() -> TrackV1 {
+    TrackV1 {
+        id: "s-1".into(),
+        album_id: "al-1".into(),
+        title: "Gloria's Step".into(),
+        artist: Some("Bill Evans Trio".into()),
+        track: Some(1),
+        disc: Some(2),
+        duration_secs: Some(370),
+        suffix: Some("flac".into()),
+        content_type: Some("audio/flac".into()),
+        size: Some(300_000),
+        bit_rate_kbps: Some(900),
+        bit_depth: Some(24),
+        sample_rate: Some(96_000),
+        channels: Some(2),
+        track_gain: Some(-1.5),
+        album_gain: Some(-2.0),
+        track_peak: Some(0.5),
+        album_peak: Some(1.0),
+    }
+}
+
+fn full_track_v2() -> TrackV2 {
+    TrackV2 {
+        artist_ref: Some("ar-2".into()),
+        composer: Some("Scott LaFaro".into()),
+        contributors: vec![Contributor {
+            role: "performer".into(),
+            sub_role: Some("bass".into()),
+            name: "Scott LaFaro".into(),
+            artist_id: Some("ar-3".into()),
+        }],
+        cover_art: Some("s-1_0".into()),
+        ..TrackV2::from(full_track_v1())
+    }
+}
+
+#[test]
+fn frozen_album_v1_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+        32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
+        48, 49, 45, 48, 50,
+    ];
+    assert_eq!(encode(&full_album_v1()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<AlbumV1>(BYTES).unwrap(), full_album_v1());
+}
+
+#[test]
+fn frozen_album_v2_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+        32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
+        48, 49, 45, 48, 50, 1, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 1, 4, 74, 97, 122, 122,
+    ];
+    assert_eq!(encode(&full_album_v2()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<AlbumV2>(BYTES).unwrap(), full_album_v2());
+}
+
+#[test]
+fn frozen_track_v1_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        3, 115, 45, 49, 4, 97, 108, 45, 49, 13, 71, 108, 111, 114, 105, 97, 39, 115, 32, 83, 116, 101, 112, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110,
+        115, 32, 84, 114, 105, 111, 1, 1, 1, 2, 1, 242, 2, 1, 4, 102, 108, 97, 99, 1, 10, 97, 117, 100, 105, 111, 47, 102, 108, 97, 99, 1, 224, 167, 18, 1,
+        132, 7, 1, 24, 1, 128, 238, 5, 1, 2, 1, 0, 0, 192, 191, 1, 0, 0, 0, 192, 1, 0, 0, 0, 63, 1, 0, 0, 128, 63,
+    ];
+    assert_eq!(encode(&full_track_v1()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<TrackV1>(BYTES).unwrap(), full_track_v1());
+}
+
+#[test]
+fn frozen_track_v2_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        3, 115, 45, 49, 4, 97, 108, 45, 49, 13, 71, 108, 111, 114, 105, 97, 39, 115, 32, 83, 116, 101, 112, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110,
+        115, 32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 1, 1, 2, 1, 242, 2, 1, 4, 102, 108, 97, 99, 1, 10, 97, 117, 100, 105, 111, 47, 102, 108, 97, 99,
+        1, 224, 167, 18, 1, 132, 7, 1, 24, 1, 128, 238, 5, 1, 2, 1, 0, 0, 192, 191, 1, 0, 0, 0, 192, 1, 0, 0, 0, 63, 1, 0, 0, 128, 63, 1, 12, 83, 99, 111, 116,
+        116, 32, 76, 97, 70, 97, 114, 111, 1, 9, 112, 101, 114, 102, 111, 114, 109, 101, 114, 1, 4, 98, 97, 115, 115, 12, 83, 99, 111, 116, 116, 32, 76, 97,
+        70, 97, 114, 111, 1, 4, 97, 114, 45, 51, 1, 5, 115, 45, 49, 95, 48,
+    ];
+    assert_eq!(encode(&full_track_v2()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<TrackV2>(BYTES).unwrap(), full_track_v2());
+}
+
 #[test]
 fn saved_copies_from_another_schema_or_shape_read_as_missing() {
     let lib = Library::in_memory().unwrap();
