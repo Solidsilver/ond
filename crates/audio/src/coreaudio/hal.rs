@@ -255,21 +255,47 @@ pub fn make_mixable(dev: Id) -> Result<bool> {
     if !is_lpcm(&current) || is_mixable(&current) {
         return Ok(false);
     }
+    let Some(format) = mixable_replacement(&physical_formats(stream), &current) else { return Err("no mixable format to switch to".into()) };
+    set_physical_format(stream, &format)?;
+    Ok(true)
+}
+
+/// The format [`make_mixable`] moves a non-mixable `current` to, picked from
+/// the stream's `formats`: mixable linear PCM with the same channel count at
+/// `current`'s rate. Same bit depth first, then integer over float, then the
+/// widest.
+pub fn mixable_replacement(formats: &[AudioStreamRangedDescription], current: &AudioStreamBasicDescription) -> Option<AudioStreamBasicDescription> {
     let rate = current.mSampleRate;
-    let best = physical_formats(stream)
-        .into_iter()
+    let mut best = formats
+        .iter()
         .filter(|f| {
             let r = &f.mSampleRateRange;
             r.mMinimum - 0.5 <= rate && rate <= r.mMaximum + 0.5 || (f.mFormat.mSampleRate - rate).abs() < 0.5
         })
         .map(|f| f.mFormat)
         .filter(|f| is_lpcm(f) && is_mixable(f) && f.mChannelsPerFrame == current.mChannelsPerFrame)
-        // Same bit depth first, then integer over float, then the widest.
-        .max_by_key(|f| (f.mBitsPerChannel == current.mBitsPerChannel, is_int(f), f.mBitsPerChannel));
-    let Some(mut format) = best else { return Err("no mixable format to switch to".into()) };
-    format.mSampleRate = rate;
-    set_physical_format(stream, &format)?;
-    Ok(true)
+        .max_by_key(|f| (f.mBitsPerChannel == current.mBitsPerChannel, is_int(f), f.mBitsPerChannel))?;
+    best.mSampleRate = rate;
+    Some(best)
+}
+
+/// The widest mixable integer format among `formats` that carries `channels`
+/// at `rate`, set to `rate` (see `CoreAudioBackend::set_integer_format` for
+/// why never a non-mixable one).
+pub fn widest_integer_format(formats: &[AudioStreamRangedDescription], rate: u32, channels: u16) -> Option<AudioStreamBasicDescription> {
+    let r = rate as f64;
+    let mut best = formats
+        .iter()
+        .filter(|f| {
+            is_int(&f.mFormat)
+                && f.mFormat.mChannelsPerFrame >= channels as u32
+                && is_mixable(&f.mFormat)
+                && (f.mSampleRateRange.mMinimum <= r && r <= f.mSampleRateRange.mMaximum || f.mFormat.mSampleRate as u32 == rate)
+        })
+        .max_by_key(|f| f.mFormat.mBitsPerChannel)?
+        .mFormat;
+    best.mSampleRate = r;
+    Some(best)
 }
 
 /// Output-scope elements carrying `selector` that we may set: the main one,

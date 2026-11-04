@@ -152,7 +152,7 @@ impl RingInput {
     }
 
     /// Whether what plays now may be off a `device_bits`-bit integer grid and
-    /// need requantizing (see [`needs_dither`](crate::dither::needs_dither)).
+    /// need requantizing, by the rule in `dither::needs_dither`.
     pub fn needs_dither(&self, device_bits: u32) -> bool {
         needs_dither(Some(device_bits), self.treatment(self.gain * self.rg != 1.0))
     }
@@ -573,7 +573,9 @@ impl OutputBackend for CpalBackend {
         let closing_in = closing.clone();
         // cpal streams are !Send on some platforms, so each lives on its own thread
         // until told to close.
-        let (card, returning) = (self.card, self.card_returning.take());
+        // The wait for a returning card holds until a stream opens, so a retry
+        // after a failed open waits for the card too instead of playing elsewhere.
+        let (card, returning) = (self.card, self.card_returning);
         let handle = thread::Builder::new()
             .name("audio-output".into())
             .spawn(move || match start_stream(format, input, status, drained, card, returning, closing_in) {
@@ -600,6 +602,7 @@ impl OutputBackend for CpalBackend {
         };
         self.name = format!("cpal · {device}");
         self.ctl = Some((ctl_tx, handle, closing));
+        self.card_returning = None;
         Ok(())
     }
 
