@@ -91,7 +91,12 @@ impl Data {
         track.cover_art.as_deref().or_else(|| self.album(&track.album_id).and_then(|a| a.cover_art.as_deref()))
     }
 
-    pub(super) fn update_album(&mut self, album: Album) {
+    /// `false` when the row was already exactly this (an album opened again),
+    /// so nothing built from the list needs redoing.
+    pub(super) fn update_album(&mut self, album: Album) -> bool {
+        if self.by_id.get(&album.id).is_some_and(|&i| self.albums[i] == album) {
+            return false;
+        }
         // Copies the list only if a search index is still being built from it.
         let albums = Arc::make_mut(&mut self.albums);
         match self.by_id.get(&album.id) {
@@ -102,6 +107,7 @@ impl Data {
             }
         }
         self.version += 1;
+        true
     }
 }
 
@@ -209,8 +215,10 @@ impl OndApp {
                 };
             }
             LibraryMsg::AlbumUpdated(a) => {
-                self.data.update_album(*a);
-                self.search.stale = true;
+                // A rebuilt index is tens of ms off-thread; only when the row changed.
+                if self.data.update_album(*a) {
+                    self.search.stale = true;
+                }
             }
             LibraryMsg::SyncProgress(n) => {
                 self.sync.albums = true;
@@ -247,10 +255,12 @@ impl OndApp {
                     tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, transcode.as_ref(), t));
                 }
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
-                self.data.tracks.set_album(&album_id, tracks);
                 // The server's listing may have songs the last sync didn't:
-                // searchable now, not after the next sync.
-                if fresh {
+                // searchable now, not after the next sync (and only then, since
+                // every album opened comes through here).
+                let unknown = fresh && tracks.iter().any(|t| self.data.tracks.track(&t.id).is_none());
+                self.data.tracks.set_album(&album_id, tracks);
+                if unknown {
                     self.search.stale = true;
                 }
                 self.run_pending(&ListKey::Album(album_id), fresh);
