@@ -64,9 +64,13 @@ mod track_row;
 mod visualizer_view;
 
 #[cfg(test)]
+mod fixture;
+#[cfg(test)]
 mod snapshots;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ui_tests;
 
 use crate::analyze;
 use crate::art::Art;
@@ -89,7 +93,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
-// What the tests (here and in `snapshots`) build their fixtures from.
+// What the tests (here, in `fixture` and its users) build their fixtures from.
 #[cfg(test)]
 use {
     crate::bridge::ListKey, crate::nav::Nav, crate::search::SearchIndex, crate::settings::Settings, crate::theme::ThemePref, crate::tracks::TrackSet,
