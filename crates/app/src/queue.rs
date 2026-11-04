@@ -246,6 +246,10 @@ pub struct Group<'a> {
     pub len: usize,
 }
 
+/// Played items kept for the History tab and Previous. A day of listening
+/// stays well under it; looping a playlist for a week doesn't grow without end.
+pub const HISTORY_CAP: usize = 500;
+
 #[derive(Debug, Default)]
 pub struct Queue {
     pub history: Vec<Item>,
@@ -271,6 +275,19 @@ impl Queue {
     fn retire_current(&mut self) {
         if let Some(c) = self.current.take() {
             self.history.push(c);
+            self.trim_history();
+        }
+    }
+
+    /// Drops the oldest history beyond [`HISTORY_CAP`]. With "repeat queue"
+    /// the pass being repeated stays whole however long it is, since
+    /// it's what plays again; only what came before it goes.
+    fn trim_history(&mut self) {
+        let over = self.history.len().saturating_sub(HISTORY_CAP);
+        let drop = if self.end == EndAction::RepeatQueue { over.min(self.cycle_start) } else { over };
+        if drop > 0 {
+            self.history.drain(..drop);
+            self.cycle_start = self.cycle_start.saturating_sub(drop);
         }
     }
 
@@ -438,6 +455,7 @@ impl Queue {
         self.retire_current();
         let skipped: Vec<Item> = self.upcoming.drain(..at).collect();
         self.history.extend(skipped);
+        self.trim_history();
         self.current = Some(self.upcoming.remove(0));
         true
     }
@@ -701,6 +719,50 @@ mod tests {
         q.advance();
         assert_eq!(q.advance().map(|i| i.track.id.clone()), Some("a1".into()));
         assert!(!ids(&q.upcoming).contains(&"old"));
+    }
+
+    #[test]
+    fn history_keeps_only_the_latest_plays() {
+        let names: Vec<String> = (0..HISTORY_CAP + 50).map(|i| format!("t{i}")).collect();
+        let mut q = Queue::default();
+        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        while q.advance().is_some() {}
+        assert_eq!(q.history.len(), HISTORY_CAP);
+        assert_eq!(q.history[0].track.id, format!("t{}", 50), "the oldest went");
+        assert_eq!(q.history.last().map(|i| i.track.id.as_str()), names.last().map(String::as_str));
+    }
+
+    #[test]
+    fn repeating_a_queue_for_days_keeps_history_capped() {
+        let mut q = Queue::default();
+        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.end = EndAction::RepeatQueue;
+        for _ in 0..HISTORY_CAP * 3 {
+            q.advance();
+        }
+        assert!(q.history.len() <= HISTORY_CAP, "{}", q.history.len());
+        // Still the same pass, in order.
+        assert_eq!(q.pass_len(), 3);
+        let at = cur(&q).unwrap().to_owned();
+        q.advance();
+        q.advance();
+        q.advance();
+        assert_eq!(cur(&q), Some(at.as_str()));
+    }
+
+    #[test]
+    fn a_repeated_pass_longer_than_the_cap_stays_whole() {
+        let names: Vec<String> = (0..HISTORY_CAP + 20).map(|i| format!("t{i}")).collect();
+        let mut q = Queue::default();
+        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        q.end = EndAction::RepeatQueue;
+        for _ in 0..names.len() - 1 {
+            q.advance();
+        }
+        assert_eq!(cur(&q), names.last().map(String::as_str));
+        assert_eq!(q.pass_len(), names.len(), "every track is still in the pass");
+        // Around again from the first.
+        assert_eq!(q.advance().map(|i| i.track.id.clone()), Some("t0".into()));
     }
 
     #[test]
