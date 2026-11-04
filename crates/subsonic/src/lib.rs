@@ -1,7 +1,12 @@
 //! Minimal OpenSubsonic client for Navidrome.
 //!
-//! Auth uses the token + salt scheme (`t = md5(password + salt)`), with a fresh
-//! salt per request. Every response is requested as JSON and unwrapped from the
+//! Auth uses the token + salt scheme (`t = md5(password + salt)`). Every URL
+//! gets a fresh salt when it's built. API calls build theirs per request, but
+//! a stream or cover URL keeps its token and salt for as long as it's used,
+//! a whole download included. Such a URL is as good as the password for
+//! that time, so it never goes in a log or an error message.
+//!
+//! Every response is requested as JSON and unwrapped from the
 //! `subsonic-response` envelope before the payload is decoded.
 
 mod auth;
@@ -164,8 +169,13 @@ impl Client {
     }
 
     /// Builds a signed endpoint URL; `params` are appended after the auth params.
-    pub fn endpoint(&self, method: &str, params: &[(&str, &str)]) -> Url {
-        let mut url = self.base.join(&format!("rest/{method}")).expect("method names are valid path segments");
+    ///
+    /// `method` is an API method name written into the code, like `"ping"`.
+    /// It's joined onto the server address as a relative path, which can't
+    /// fail for a plain name: [`new`](Self::new) made sure the address can
+    /// take a path. Being `'static` keeps it from coming from user input.
+    pub fn endpoint(&self, method: &'static str, params: &[(&str, &str)]) -> Url {
+        let mut url = self.base.join(&format!("rest/{method}")).expect("a method name joins onto a base URL");
         let token = self.creds.token();
         url.query_pairs_mut()
             .append_pair("u", &self.creds.username)
@@ -196,7 +206,7 @@ impl Client {
         }
     }
 
-    async fn call<T: DeserializeOwned>(&self, method: &str, params: &[(&str, &str)]) -> Result<(ServerInfo, T)> {
+    async fn call<T: DeserializeOwned>(&self, method: &'static str, params: &[(&str, &str)]) -> Result<(ServerInfo, T)> {
         let resp = self.http.get(self.endpoint(method, params)).timeout(self.call_timeout).send().await?;
         let bytes = check_status(resp).await?.bytes().await?;
         parse_response(&bytes)
