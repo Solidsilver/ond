@@ -58,7 +58,8 @@ impl From<subsonic::Error> for Failure {
     fn from(e: subsonic::Error) -> Self {
         match e {
             subsonic::Error::Http(_) => Failure::Network(e.to_string()),
-            subsonic::Error::Url(_) | subsonic::Error::Decode(_) | subsonic::Error::Api { .. } => Failure::Server(e.to_string()),
+            // A login page where the API should be is the server's (or its proxy's) doing, not the network's.
+            subsonic::Error::Url(_) | subsonic::Error::Decode(_) | subsonic::Error::NotApi(_) | subsonic::Error::Api { .. } => Failure::Server(e.to_string()),
         }
     }
 }
