@@ -13,6 +13,7 @@
 //! Progress is saved as it goes (the bulk offset in the db's meta table, stamps
 //! per album), so a sync cut short by quitting picks up where it stopped.
 
+use crate::failure::Failure;
 use library::{Album, Library};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -49,28 +50,28 @@ const BULK_OFFSET: &str = "tracks_bulk_offset";
 /// Where the tracks come from; [`Client`] in the app, a fake in tests.
 pub trait Fetch: Clone + Send + Sync + 'static {
     /// One page of the album list, alphabetical by artist.
-    fn album_page(&self, size: u32, offset: u32) -> impl Future<Output = Result<Vec<subsonic::Album>, String>> + Send;
-    fn artists(&self) -> impl Future<Output = Result<Vec<subsonic::Artist>, String>> + Send;
-    fn album(&self, id: String) -> impl Future<Output = Result<AlbumWithSongs, String>> + Send;
+    fn album_page(&self, size: u32, offset: u32) -> impl Future<Output = Result<Vec<subsonic::Album>, Failure>> + Send;
+    fn artists(&self) -> impl Future<Output = Result<Vec<subsonic::Artist>, Failure>> + Send;
+    fn album(&self, id: String) -> impl Future<Output = Result<AlbumWithSongs, Failure>> + Send;
     /// One page of every song in the library.
-    fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> impl Future<Output = Result<Vec<Song>, String>> + Send;
+    fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> impl Future<Output = Result<Vec<Song>, Failure>> + Send;
 }
 
 impl Fetch for Client {
-    async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, String> {
-        self.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await.map_err(|e| e.to_string())
+    async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, Failure> {
+        self.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await.map_err(Failure::from)
     }
 
-    async fn artists(&self) -> Result<Vec<subsonic::Artist>, String> {
-        Client::artists(self).await.map_err(|e| e.to_string())
+    async fn artists(&self) -> Result<Vec<subsonic::Artist>, Failure> {
+        Client::artists(self).await.map_err(Failure::from)
     }
 
-    async fn album(&self, id: String) -> Result<AlbumWithSongs, String> {
-        Client::album(self, &id).await.map_err(|e| e.to_string())
+    async fn album(&self, id: String) -> Result<AlbumWithSongs, Failure> {
+        Client::album(self, &id).await.map_err(Failure::from)
     }
 
-    async fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> Result<Vec<Song>, String> {
-        self.search_songs(query, count, offset).await.map_err(|e| e.to_string())
+    async fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> Result<Vec<Song>, Failure> {
+        self.search_songs(query, count, offset).await.map_err(Failure::from)
     }
 }
 
@@ -104,7 +105,7 @@ pub enum Outcome {
         bulk: bool,
     },
     Cancelled,
-    Failed(String),
+    Failed(Failure),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,11 +158,11 @@ async fn write<T: Send + 'static>(
     lib: &Arc<Library>,
     live: &impl Fn() -> bool,
     f: impl FnOnce(&Library) -> library::Result<T> + Send + 'static,
-) -> Result<T, String> {
+) -> Result<T, Failure> {
     if !live() {
-        return Err("Signed out".into());
+        return Err(Failure::Local("Signed out".into()));
     }
-    blocking(lib, f).await
+    blocking(lib, f).await.map_err(Failure::Local)
 }
 
 /// Pages through the server's album list into the library; `progress` gets
@@ -171,14 +172,14 @@ async fn write<T: Send + 'static>(
 ///
 /// A page shorter than [`ALBUM_PAGE`] ends the list (Navidrome serves full
 /// pages until the last).
-pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool, progress: impl Fn(usize)) -> Result<Vec<Album>, String> {
+pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool, progress: impl Fn(usize)) -> Result<Vec<Album>, Failure> {
     let mut offset = 0;
     let mut seen = HashSet::new();
     loop {
-        let page = fetch.album_page(ALBUM_PAGE, offset).await.map_err(|e| format!("Sync failed: {e}"))?;
+        let page = fetch.album_page(ALBUM_PAGE, offset).await.map_err(|e| e.context("Sync failed"))?;
         seen.extend(page.iter().map(|a| a.id.clone()));
         let n = page.len() as u32;
-        write(lib, live, move |l| l.upsert_albums(page)).await.map_err(|e| format!("Couldn't save the album list: {e}"))?;
+        write(lib, live, move |l| l.upsert_albums(page)).await.map_err(|e| e.context("Couldn't save the album list"))?;
         // Only an empty page ends the list: a server may cap pages below what
         // was asked for, and stopping early would prune everything after it.
         if n == 0 {
@@ -198,8 +199,8 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() ->
 }
 
 /// Replaces the stored artists with the server's; returns them as stored.
-pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool) -> Result<Vec<library::Artist>, String> {
-    let artists = fetch.artists().await.map_err(|e| format!("Couldn't load artists: {e}"))?;
+pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool) -> Result<Vec<library::Artist>, Failure> {
+    let artists = fetch.artists().await.map_err(|e| e.context("Couldn't load artists"))?;
     write(lib, live, move |l| l.replace_artists(artists).and_then(|_| l.artists())).await
 }
 
@@ -219,8 +220,9 @@ async fn run_inner<F: Fetch>(
     cancel: &AtomicBool,
     live: &impl Fn() -> bool,
     progress: &impl Fn(Progress),
-) -> Result<Outcome, String> {
-    let (albums, stamps, done, offset) = blocking(lib, |l| Ok((l.albums()?, l.album_stamps()?, l.meta(BULK_DONE)?.is_some(), l.meta(BULK_OFFSET)?))).await?;
+) -> Result<Outcome, Failure> {
+    let (albums, stamps, done, offset) =
+        blocking(lib, |l| Ok((l.albums()?, l.album_stamps()?, l.meta(BULK_DONE)?.is_some(), l.meta(BULK_OFFSET)?))).await.map_err(Failure::Local)?;
     let mut bulk = false;
     if let Plan::Bulk { from } = plan(&albums, &stamps, done, offset) {
         let total = albums.iter().map(|a| a.song_count as usize).sum();
@@ -243,7 +245,7 @@ async fn run_inner<F: Fetch>(
     }
     // Whatever is still stale: everything when bulk isn't supported, else the
     // few the bulk pass couldn't vouch for.
-    let stamps = blocking(lib, |l| l.album_stamps()).await?;
+    let stamps = blocking(lib, |l| l.album_stamps()).await.map_err(Failure::Local)?;
     let todo = stale(&albums, &stamps);
     match per_album(lib, &fetch, cancel, live, progress, todo).await? {
         Some(fetched) => Ok(Outcome::Done { fetched, bulk }),
@@ -269,7 +271,7 @@ async fn bulk_pass<F: Fetch>(
     progress: &impl Fn(Progress),
     from: u32,
     total: usize,
-) -> Result<BulkEnd, String> {
+) -> Result<BulkEnd, Failure> {
     // Navidrome takes an empty query; some versions want a literal `""`.
     let mut query = "";
     let mut offset = from;
@@ -286,7 +288,7 @@ async fn bulk_pass<F: Fetch>(
             Err(e) => {
                 failures += 1;
                 if failures >= BULK_RETRIES {
-                    return Err(format!("Track sync failed: {e}"));
+                    return Err(e.context("Track sync failed"));
                 }
                 // A hiccup gets a moment to clear instead of three retries in
                 // the same millisecond.
@@ -325,7 +327,7 @@ async fn per_album<F: Fetch>(
     live: &impl Fn() -> bool,
     progress: &impl Fn(Progress),
     ids: Vec<String>,
-) -> Result<Option<usize>, String> {
+) -> Result<Option<usize>, Failure> {
     let total = ids.len();
     let mut queue = ids.into_iter();
     let mut running = JoinSet::new();
@@ -333,7 +335,7 @@ async fn per_album<F: Fetch>(
     let mut done = 0;
     let mut stored = 0;
     let mut failures = 0;
-    let mut last_error = String::new();
+    let mut last_error = Failure::Local(String::new());
     loop {
         while running.len() < CONCURRENCY && !cancel.load(Ordering::Relaxed) {
             let Some(id) = queue.next() else { break };
@@ -342,7 +344,7 @@ async fn per_album<F: Fetch>(
         }
         let Some(joined) = running.join_next().await else { break };
         done += 1;
-        match joined.map_err(|e| e.to_string()).and_then(|r| r) {
+        match joined.map_err(|e| Failure::Local(e.to_string())).and_then(|r| r) {
             Ok(album) => {
                 failures = 0;
                 batch.push(album);
@@ -360,7 +362,7 @@ async fn per_album<F: Fetch>(
         progress(Progress { done, total, unit: Unit::Albums });
         if failures >= MAX_FAILURES {
             running.abort_all();
-            return Err(format!("Track sync failed: {last_error}"));
+            return Err(last_error.context("Track sync failed"));
         }
     }
     stored += batch.len();
@@ -474,25 +476,25 @@ pub(crate) mod tests {
     }
 
     impl Fetch for Fake {
-        async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, String> {
+        async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, Failure> {
             if self.list_fails_at.is_some_and(|at| offset >= at) {
-                return Err("server went away".into());
+                return Err(Failure::Network("server went away".into()));
             }
             let size = self.page_cap.map_or(size, |cap| size.min(cap));
             Ok(self.albums.lock().unwrap().iter().skip(offset as usize).take(size as usize).cloned().collect())
         }
 
-        async fn artists(&self) -> Result<Vec<subsonic::Artist>, String> {
+        async fn artists(&self) -> Result<Vec<subsonic::Artist>, Failure> {
             Ok(vec![subsonic::Artist { id: "ar1".into(), name: "Bill Evans".into(), album_count: 3, cover_art: None, sort_name: None }])
         }
 
-        async fn album(&self, id: String) -> Result<AlbumWithSongs, String> {
+        async fn album(&self, id: String) -> Result<AlbumWithSongs, Failure> {
             self.album_calls.lock().unwrap().push(id.clone());
-            let a = self.albums.lock().unwrap().iter().find(|a| a.id == id).cloned().ok_or("not found")?;
+            let a = self.albums.lock().unwrap().iter().find(|a| a.id == id).cloned().ok_or(Failure::Server("not found".into()))?;
             Ok(AlbumWithSongs { song: Fake::songs_of(&a), album: a })
         }
 
-        async fn all_songs(&self, _query: &'static str, count: u32, offset: u32) -> Result<Vec<Song>, String> {
+        async fn all_songs(&self, _query: &'static str, count: u32, offset: u32) -> Result<Vec<Song>, Failure> {
             let pages = self.page_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if let Some((after, cancel)) = &self.cancel_after_pages
                 && pages > *after
@@ -665,7 +667,7 @@ pub(crate) mod tests {
         // The fake knows none of these albums: every getAlbum fails.
         let fake = Fake::new(Vec::new(), false);
         let out = rt().block_on(run(lib, fake, Arc::default(), || true, |_| {}));
-        assert!(matches!(out, Outcome::Failed(e) if e.contains("not found")));
+        assert!(matches!(out, Outcome::Failed(e) if e.message().contains("not found")));
     }
 
     fn stored_ids(lib: &Library) -> Vec<String> {
@@ -705,7 +707,7 @@ pub(crate) mod tests {
         let mut fake = Fake::new(server, false);
         fake.list_fails_at = Some(500);
         let err = rt().block_on(albums(&lib, &fake, &|| true, |_| {})).unwrap_err();
-        assert!(err.contains("server went away"), "{err}");
+        assert!(err.message().contains("server went away"), "{err}");
         let ids = stored_ids(&lib);
         assert_eq!(ids.len(), 501, "the first page is stored");
         assert!(ids.contains(&"zz-kept".to_owned()), "nothing pruned on an incomplete list");

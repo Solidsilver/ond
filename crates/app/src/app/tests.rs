@@ -352,7 +352,7 @@ fn a_failed_album_sync_stops_saying_syncing() {
     let mut app = app(&ctx, dir.path());
     app.session.online = true;
     app.sync.albums = true;
-    app.handle(LibraryMsg::AlbumSyncDone(Err("sync: timed out".into())));
+    app.handle(LibraryMsg::AlbumSyncDone(Err(Failure::Network("sync: timed out".into()))));
     assert!(!app.sync.albums && !app.sync.tracks);
     assert!(app.ui.toasts.texts().contains(&"sync: timed out"));
     // While an album sync runs, Sync now doesn't start a second one.
@@ -705,10 +705,23 @@ fn errors_in_one_batch_are_all_shown() {
     let mut app = app(&ctx, dir.path());
     app.session.online = true;
     // Two failures handled before the next frame: both get a toast.
-    app.handle(Msg::Error("playlists: timed out".into()));
-    app.handle(Msg::Error("favorites: timed out".into()));
+    app.handle(Msg::Error(Failure::Network("playlists: timed out".into())));
+    app.handle(Msg::Error(Failure::Network("favorites: timed out".into())));
     let shown = app.ui.toasts.texts();
     assert!(shown.contains(&"playlists: timed out") && shown.contains(&"favorites: timed out"), "{shown:?}");
+}
+
+#[test]
+fn offline_a_network_failure_is_quiet_and_a_local_one_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert!(!app.session.online);
+    // The offline pill says it already.
+    app.handle(Msg::Error(Failure::Network("Couldn't load playlists: timed out".into())));
+    // Nothing to do with the server, so worth saying either way.
+    app.handle(Msg::Error(Failure::Local("Couldn't read the library: disk I/O".into())));
+    assert_eq!(app.ui.toasts.texts(), ["Couldn't read the library: disk I/O"]);
 }
 
 #[test]
@@ -905,7 +918,7 @@ fn playing_an_album_stored_only_in_part_waits_for_the_server() {
     app.player.queue = crate::queue::Queue::default();
     app.data.tracks.set_album("al-3", all[..5].to_vec());
     app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
-    app.handle(LibraryMsg::LoadFailed { key: ListKey::Album("al-3".into()), error: Some("timed out".into()) });
+    app.handle(LibraryMsg::LoadFailed { key: ListKey::Album("al-3".into()), error: Some(Failure::Network("timed out".into())) });
     assert_eq!(queued(&app), 5);
     assert!(app.pending.is_empty());
 

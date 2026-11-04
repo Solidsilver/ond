@@ -12,6 +12,7 @@ mod art;
 mod bridge;
 mod chrome;
 mod csd;
+mod failure;
 mod favorites;
 mod fmt;
 mod folder;

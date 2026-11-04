@@ -203,7 +203,7 @@ impl OndApp {
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
                     crate::sync::Outcome::Failed(e) => {
-                        self.show_error(e);
+                        self.show_failure(e);
                         format!("{albums} albums · {tracks} tracks")
                     }
                 };
@@ -222,10 +222,7 @@ impl OndApp {
                 // Nothing more follows (no artist or track sync): stop saying "syncing".
                 self.sync.albums = false;
                 self.sync.label = "Sync failed".into();
-                self.probe();
-                if self.session.online {
-                    self.show_error(e);
-                }
+                self.show_failure(e);
             }
             LibraryMsg::LoadFailed { key, error } => {
                 // One that only waited for a complete listing plays what's stored.
@@ -238,10 +235,7 @@ impl OndApp {
                 self.pending.retain(|p| p.key != key);
                 self.downloads.pending_pins.retain(|(k, _)| *k != key);
                 if let Some(e) = error {
-                    self.probe();
-                    if self.session.online {
-                        self.show_error(e);
-                    }
+                    self.show_failure(e);
                 }
             }
             LibraryMsg::Tracks { album_id, mut tracks, fresh } => {

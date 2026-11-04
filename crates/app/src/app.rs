@@ -70,6 +70,7 @@ mod tests;
 use crate::analyze;
 use crate::art::Art;
 use crate::bridge::{AnalysisMsg, Bridge, Msg};
+use crate::failure::Failure;
 use crate::favorites::{Favorites, StarKind};
 use crate::keys::{Cmd, EditCmd};
 use crate::nav::Route;
@@ -599,14 +600,22 @@ impl OndApp {
                     *slot = Some(notes);
                 }
             }
-            Msg::Error(e) => {
-                self.probe();
-                // Offline, network errors are expected and the offline pill already says so.
-                if self.session.online {
-                    self.show_error(e);
-                }
+            Msg::Error(e) => self.show_failure(e),
+        }
+    }
+
+    /// Shows what failed. A request that got no answer has the server
+    /// checked on (it may be gone); offline those are expected, and the
+    /// offline pill already says so. A database that won't read says
+    /// nothing about the server, so it's only shown.
+    pub(crate) fn show_failure(&mut self, e: Failure) {
+        if e.is_network() {
+            self.probe();
+            if !self.session.online {
+                return;
             }
         }
+        self.show_error(e.into_message());
     }
 
     /// Shows an error. Every message gets its own toast, so two failures in
