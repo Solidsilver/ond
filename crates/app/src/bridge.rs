@@ -454,10 +454,10 @@ impl Bridge {
 
     /// Builds the search index on a worker (tens of ms on a big library) and
     /// sends it back tagged with `generation`, so a stale build can be dropped.
-    pub fn build_search(&self, generation: u64, albums: Arc<Vec<Album>>, artists: Arc<Vec<library::Artist>>, tracks: Arc<Vec<Track>>) {
+    pub fn build_search(&self, generation: u64, albums: Arc<Vec<Album>>, artists: Arc<Vec<library::Artist>>, tracks: crate::tracks::Searchable) {
         let this = self.clone();
         self.rt.spawn_blocking(move || {
-            let index = crate::search::SearchIndex::new(&albums, &artists, &tracks);
+            let index = crate::search::SearchIndex::new(&albums, &artists, tracks.iter());
             this.send(LibraryMsg::SearchIndex { generation, index: Box::new(index) });
         });
     }

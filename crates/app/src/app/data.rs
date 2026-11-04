@@ -208,7 +208,10 @@ impl OndApp {
                     }
                 };
             }
-            LibraryMsg::AlbumUpdated(a) => self.data.update_album(*a),
+            LibraryMsg::AlbumUpdated(a) => {
+                self.data.update_album(*a);
+                self.search.stale = true;
+            }
             LibraryMsg::SyncProgress(n) => {
                 self.sync.albums = true;
                 self.sync.label = format!("Syncing… {n}");
@@ -244,6 +247,11 @@ impl OndApp {
                 }
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
                 self.data.tracks.set_album(&album_id, tracks);
+                // The server's listing may have songs the last sync didn't:
+                // searchable now, not after the next sync.
+                if fresh {
+                    self.search.stale = true;
+                }
                 self.run_pending(&ListKey::Album(album_id), fresh);
             }
             LibraryMsg::Newest(ids) => {
@@ -293,14 +301,14 @@ impl OndApp {
     pub(super) fn after_messages(&mut self) {
         if std::mem::take(&mut self.search.stale) {
             self.search.generation += 1;
-            self.bridge.build_search(self.search.generation, Arc::clone(&self.data.albums), Arc::clone(&self.data.artists), Arc::clone(&self.data.tracks.all));
+            self.bridge.build_search(self.search.generation, Arc::clone(&self.data.albums), Arc::clone(&self.data.artists), self.data.tracks.searchable());
         }
     }
 
     /// Builds the index here and now (fixtures and tests).
     #[cfg(test)]
     pub(super) fn rebuild_search(&mut self) {
-        self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.tracks.all));
+        self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, self.data.tracks.searchable().iter()));
     }
 
     /// Swaps in a freshly built index; an open palette re-runs its query on it.

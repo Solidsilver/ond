@@ -93,6 +93,15 @@ impl TrackSet {
         set
     }
 
+    /// Every track once, as it is now: `all`, with the albums fetched since
+    /// in place of their stored copies (what the search index is built from).
+    /// Cheap to call: the albums fetched since are handed over as shared
+    /// slices, and [`Searchable::iter`] does the walking.
+    pub fn searchable(&self) -> Searchable {
+        let fetched = self.by_album.iter().filter(|(_, s)| !Arc::ptr_eq(&s.all, &self.all)).map(|(id, s)| (id.clone(), s.clone())).collect();
+        Searchable { all: Arc::clone(&self.all), fetched }
+    }
+
     /// Replaces one album's tracks (fresh from the server).
     pub fn set_album(&mut self, album_id: &str, tracks: Vec<Track>) {
         if let Some(old) = self.by_album.get(album_id) {
@@ -138,6 +147,23 @@ impl TrackSet {
     pub fn track(&self, id: &str) -> Option<&Track> {
         let &(slot, i) = self.index.get(id)?;
         self.by_album.get(self.album_ids.get(slot as usize)?)?.get(i)
+    }
+}
+
+/// The tracks a [`TrackSet`] holds, shared, for walking off the UI thread.
+pub struct Searchable {
+    all: Arc<Vec<Track>>,
+    /// Albums whose tracks aren't a run of `all`: fetched since, or joined.
+    fetched: Vec<(String, TrackSlice)>,
+}
+
+impl Searchable {
+    /// Each track once: the stored ones of albums not fetched since, then
+    /// the fetched albums'.
+    pub fn iter(&self) -> impl Iterator<Item = &Track> {
+        let replaced: std::collections::HashSet<&str> = self.fetched.iter().map(|(id, _)| id.as_str()).collect();
+        let stored = self.all.iter().filter(move |t| replaced.is_empty() || !replaced.contains(t.album_id.as_str()));
+        stored.chain(self.fetched.iter().flat_map(|(_, s)| s.iter()))
     }
 }
 
@@ -203,6 +229,17 @@ mod tests {
         set.set_album("c", vec![t("9", "c")]);
         assert_eq!(set.track("9").map(|t| t.album_id.as_str()), Some("c"));
         assert_eq!(set.track("3").map(|t| t.album_id.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn what_search_sees_has_albums_fetched_since_and_each_track_once() {
+        let mut set = TrackSet::new(vec![t("1", "a"), t("2", "b"), t("3", "a")]);
+        set.set_album("b", vec![t("2", "b"), t("4", "b")]);
+        set.set_album("c", vec![t("9", "c")]);
+        let searchable = set.searchable();
+        let mut ids: Vec<&str> = searchable.iter().map(|t| t.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["1", "2", "3", "4", "9"]);
     }
 
     #[test]

@@ -165,7 +165,7 @@ type Scored = (Rank, u32, i64, usize);
 impl SearchIndex {
     /// `artists` are the server's artist entities; when there are none yet
     /// (older server, not synced), artists are derived from album artists.
-    pub fn new(albums: &[Album], artists: &[Artist], tracks: &[Track]) -> Self {
+    pub fn new<'a>(albums: &[Album], artists: &[Artist], tracks: impl IntoIterator<Item = &'a Track>) -> Self {
         // Each artist's span of years and their albums' genres, by id and by
         // name: the albums an artist's page shows (see `Album::has_artist`).
         let mut years: HashMap<&str, (i32, i32)> = HashMap::new();
@@ -225,7 +225,7 @@ impl SearchIndex {
         let albums: Vec<AlbumEntry> =
             albums.iter().map(|a| AlbumEntry { id: a.id.clone(), title: a.name.clone(), artist: a.artist.clone().unwrap_or_default(), year: a.year }).collect();
         let tracks: Vec<TrackEntry> = tracks
-            .iter()
+            .into_iter()
             .map(|t| TrackEntry {
                 id: t.id.clone(),
                 album_id: t.album_id.clone(),

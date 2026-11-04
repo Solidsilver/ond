@@ -323,6 +323,38 @@ fn the_search_index_is_built_off_the_ui_thread_and_stale_builds_are_dropped() {
 }
 
 #[test]
+fn an_opened_album_is_searchable_before_the_next_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    // Only the index builds: the start-up read of the (empty) library
+    // mustn't replace the fixture meanwhile.
+    let rebuilt = |app: &mut OndApp| {
+        app.after_messages();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "no index arrived");
+            if let Ok(m @ Msg::Library(LibraryMsg::SearchIndex { .. })) = app.inbox.recv_timeout(Duration::from_millis(20)) {
+                app.handle(m);
+                return;
+            }
+        }
+    };
+    let mut fresh = track("new-1", "al-7", 1);
+    fresh.title = "Peri's Scope".into();
+    // Opening the album brought a song the last sync didn't have.
+    app.handle(LibraryMsg::Tracks { album_id: "al-7".into(), tracks: vec![fresh], fresh: true });
+    rebuilt(&mut app);
+    assert!(app.search.index.as_ref().is_some_and(|s| s.tracks.iter().any(|t| t.id == "new-1")));
+    // A refreshed album row is picked up too.
+    let mut row = app.data.album("al-7").unwrap().clone();
+    row.name = "Explorations".into();
+    app.handle(LibraryMsg::AlbumUpdated(Box::new(row)));
+    rebuilt(&mut app);
+    assert!(app.search.index.as_ref().is_some_and(|s| s.albums.iter().any(|al| al.title == "Explorations")));
+}
+
+#[test]
 fn a_load_that_fails_drops_what_waited_for_it() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
