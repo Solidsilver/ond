@@ -31,11 +31,11 @@ const GROUP_NAME_CLEAR: f32 = 80.0;
 /// The space after an open group's tracks.
 const GROUP_GAP: f32 = 4.0;
 
-/// A line of Up Next, as laid out: a group's heading (its index, and
-/// whether it's open), a track (its place in `upcoming`), the gap after a
+/// A line of Up Next, as laid out: a group's heading (and whether it's
+/// open), a track (its place in `upcoming`), the gap after a
 /// group, or how many tracks past `MAX_ROWS` aren't shown.
 enum Line<'q> {
-    Group(usize, Group<'q>, bool),
+    Group(Group<'q>, bool),
     Track(usize),
     Gap,
     More(usize),
@@ -185,8 +185,8 @@ impl ViewCtx<'_> {
         super::virtual_list::visible_lines(ui, viewport, &heights, |ui, k| match &lines[k] {
             // Each line in its own id scope: which lines are laid out changes
             // as the list scrolls, and a drag or a menu must keep its row.
-            Line::Group(gi, g, open) => {
-                ui.push_id(("queue-group", gi), |ui| self.queue_group(ui, &t, g, *open, split));
+            Line::Group(g, open) => {
+                ui.push_id(("queue-group", queue.upcoming[g.start].uid), |ui| self.queue_group(ui, &t, g, *open, split));
             }
             Line::Track(i) => {
                 let item = &queue.upcoming[*i];
@@ -208,7 +208,7 @@ impl ViewCtx<'_> {
             let foldable = g.len > FOLD_OVER && gi > 0;
             let open = *self.ui.queue_ui.open.get(&g.source.key()).unwrap_or(&!foldable);
             let range = g.start..g.start + g.len;
-            lines.push(Line::Group(gi, g, open));
+            lines.push(Line::Group(g, open));
             if !open {
                 continue;
             }
