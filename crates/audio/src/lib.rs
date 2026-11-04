@@ -594,7 +594,10 @@ impl Engine {
             Command::Resume => {
                 if self.status.state() == PlayState::Paused {
                     self.status.paused.store(false, Ordering::Relaxed);
-                    self.status.set_state(PlayState::Playing);
+                    // Paused while loading: still loading. `open_ring` makes it
+                    // Playing once there's a stream.
+                    let state = if self.ring.is_some() { PlayState::Playing } else { PlayState::Loading };
+                    self.status.set_state(state);
                 }
             }
             Command::Stop => {

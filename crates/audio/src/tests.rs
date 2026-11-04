@@ -237,6 +237,26 @@ fn pause_while_loading_holds_once_the_track_opens() {
 }
 
 #[test]
+fn resume_while_still_loading_stays_loading_until_the_track_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
+    let engine = spawn(config, Box::new(FakeBackend::new(caps(Some(24), 96_000))), None);
+    // The decoder stalls before its first audio, so nothing is open yet.
+    engine.send(Command::Play(file_source(&dir, "late-resume", &pcm(2 * 44_100 * 2, 0))));
+    engine.send(Command::Pause);
+    wait_late("late-resume", false);
+    engine.send(Command::Resume);
+    // The engine handles commands in order: once it answers the next one, Resume is done.
+    engine.send(Command::RefreshDevices);
+    events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert_eq!(engine.status.state(), PlayState::Loading, "nothing is playing yet");
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert!(matches!(engine.status.state(), PlayState::Playing | PlayState::Buffering), "then it plays");
+    events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    engine.send(Command::Shutdown);
+}
+
+#[test]
 fn a_decoder_panic_is_an_error_not_a_hang() {
     let config = EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 };
     let engine = spawn(config, Box::new(FakeBackend::new(caps(Some(24), 96_000))), None);
