@@ -240,8 +240,8 @@ fn perf() {
         // Grouping and indexing the tracks is the bridge's job (a worker thread).
         let set = Box::new(crate::tracks::TrackSet::new(tracks.clone()));
         let t = Instant::now();
-        app.handle(Msg::Albums(albums.clone()));
-        app.handle(Msg::AllTracks(set));
+        app.handle(LibraryMsg::Albums(albums.clone()));
+        app.handle(LibraryMsg::AllTracks(set));
         app.after_messages();
         sync_ui.push(t.elapsed());
     }

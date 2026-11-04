@@ -38,9 +38,9 @@ pub struct Outputs {
     /// The device's own volume, while bit-perfect holds a device that has one.
     device_volume: Option<DeviceVolume>,
     /// The level we last asked for and when: until the device reports it
-    /// (see [`SETTLE`]), other reports don't move the slider.
+    /// (see `volume::SETTLE`), other reports don't move the slider.
     awaiting: Option<(f32, Instant)>,
-    /// A level not yet sent (see [`SEND_EVERY`]), and when the last one was.
+    /// A level not yet sent (see `volume::SEND_EVERY`), and when the last one was.
     unsent: Option<f32>,
     sent_at: Option<Instant>,
     /// The slider was hovered or dragged last frame (for the dB readout).

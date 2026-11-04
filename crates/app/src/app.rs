@@ -20,6 +20,37 @@
 //! - `ui_state`, `frame`: what the window shows, and the work each frame does
 //!   around the drawing
 //! - `view_ctx` and the views: what a view gets, and the views themselves
+//!
+//! New views take a [`ViewCtx`](view_ctx::ViewCtx) and push `Action`s. Views
+//! written as `OndApp` methods (the toolbar, the sidebar, Settings) are the
+//! older style, not a pattern to follow. Two places still change things while
+//! drawing, and they're known exceptions: the output panel (`output/panel.rs`)
+//! edits preferences and sends engine commands, and the visualizer saves the
+//! visual it switches to (`visualizer_view.rs`).
+//!
+//! # Adding things
+//!
+//! A server call:
+//! 1. A `Bridge` method that does the work in the background and posts the
+//!    result. Use `self.scoped()` so a result for an account that signed out
+//!    is dropped.
+//! 2. A `Msg` variant for the result, inside the group it belongs to
+//!    (`LibraryMsg`, `OfflineMsg`, `AnalysisMsg`) if any. Failures go as a
+//!    `Failure`, so only network ones make the app check on the server.
+//! 3. A handler for it in the matching `app/*.rs` (`data.rs` for the library).
+//!
+//! A preference:
+//! 1. A field in `Settings`, with `#[serde(default)]`.
+//! 2. A field in `PrefsView` if a frame reads it, and a `PrefsAction`
+//!    variant with its arm in `apply_prefs`.
+//! 3. Its path in `locked()` (`prefs_view.rs`) and in `managed::ALLOWED`
+//!    if managed.json may set it.
+//! 4. A row in `settings_page.rs`.
+//!
+//! A view:
+//! 1. `app/<view>.rs`, drawing from a `ViewCtx` and pushing `Action`s.
+//! 2. A `Route` for it in `nav.rs`, and its arm in `main_view` (`browse.rs`).
+//! 3. An entry in `every_view_draws` in `app/tests.rs`.
 
 // The app's parts.
 mod analyzing;
@@ -69,7 +100,8 @@ mod tests;
 
 use crate::analyze;
 use crate::art::Art;
-use crate::bridge::{Bridge, Msg};
+use crate::bridge::{AnalysisMsg, Bridge, Msg};
+use crate::failure::Failure;
 use crate::favorites::{Favorites, StarKind};
 use crate::keys::{Cmd, EditCmd};
 use crate::nav::Route;
@@ -91,10 +123,19 @@ use std::time::Duration;
 // What the tests (here and in `snapshots`) build their fixtures from.
 #[cfg(test)]
 use {
-    crate::bridge::ListKey, crate::nav::Nav, crate::search::SearchIndex, crate::settings::Settings, crate::theme::ThemePref, crate::tracks::TrackSet,
-    library::Album, offline::TrackRef, pins::track_ref, ui_state::QueueUi,
+    crate::bridge::{LibraryMsg, ListKey, OfflineMsg},
+    crate::nav::Nav,
+    crate::search::SearchIndex,
+    crate::settings::Settings,
+    crate::theme::ThemePref,
+    crate::tracks::TrackSet,
+    library::Album,
+    offline::TrackRef,
+    pins::track_ref,
+    ui_state::QueueUi,
 };
 
+pub use crate::lyrics::SongStats;
 pub use crate::player::QueueAction;
 pub use analyzing::{Analysis, AnalysisAction};
 pub use commands::PlaylistAction;
@@ -105,7 +146,7 @@ pub use pins::{Downloads, Keep, OfflineAction};
 pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
-pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, SongStats, UiState};
+pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, UiState};
 pub(crate) use widgets::{choice, elide as elide_text, link as link_text, switch_tinted, thin_slider, thin_slider_marked};
 pub use window_state::WindowAction;
 
@@ -316,6 +357,10 @@ impl Drop for AppRuntime {
 }
 
 pub struct OndApp {
+    /// Must stay the first field. Fields drop in order, so the runtime shuts
+    /// down (and its tasks are dropped) before anything declared after it.
+    /// Nothing declared below may need the runtime in its `Drop`: by then it
+    /// is gone, and a `block_on` or `spawn` there would panic or do nothing.
     _rt: AppRuntime,
     /// The window's egui context (for theme changes and window commands).
     ctx: egui::Context,
@@ -487,7 +532,7 @@ impl OndApp {
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
-                on_result: Arc::new(move |track_id, record| results.post(Msg::Analyzed { track_id, record })),
+                on_result: Arc::new(move |track_id, record| results.post(AnalysisMsg::Analyzed { track_id, record })),
                 on_progress: ticks,
             })
         };
@@ -548,35 +593,21 @@ impl OndApp {
         })
     }
 
-    fn handle(&mut self, msg: Msg) {
-        match msg {
+    fn handle(&mut self, msg: impl Into<Msg>) {
+        match msg.into() {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
-            Msg::Connected { client, settings, server, new_account, .. } => self.connected(client, settings, server, new_account),
+            Msg::Connected { client, settings, server, new_account, password_saved, .. } => {
+                self.connected(client, settings, server, new_account, password_saved)
+            }
             Msg::ConnectFailed(e) => self.connect_failed(e),
             Msg::Unreachable { username, error, .. } => self.unreachable(username, error),
             Msg::Latency(rtt) => self.diagnostics.set_latency(rtt),
-            m @ (Msg::SearchIndex { .. }
-            | Msg::Albums(_)
-            | Msg::Artists(_)
-            | Msg::AllTracks(_)
-            | Msg::TrackSync(_)
-            | Msg::TrackSyncDone(_)
-            | Msg::AlbumUpdated(_)
-            | Msg::SyncProgress(_)
-            | Msg::AlbumSyncDone(_)
-            | Msg::LoadFailed { .. }
-            | Msg::Tracks { .. }
-            | Msg::Newest(_)
-            | Msg::Playlists(_)
-            | Msg::PlaylistTracks { .. }
-            | Msg::Saved(_)
-            | Msg::Credited { .. }
-            | Msg::TrackBatch { .. }) => self.library_msg(m),
-            m @ (Msg::Analyzed { .. } | Msg::AnalysesLoaded(_)) => self.analysis_msg(m),
+            Msg::Library(m) => self.library_msg(m),
+            Msg::Analysis(m) => self.analysis_msg(m),
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Remote(r) => self.remote(r),
-            m @ (Msg::OfflineFolder(_) | Msg::OfflineStore { .. } | Msg::OfflineMoving(_) | Msg::OfflineMoved(_)) => self.offline_msg(m),
+            Msg::Offline(m) => self.offline_msg(m),
             Msg::Starred { starred, ratings } => {
                 self.data.served.starred = true;
                 self.favorites.load(starred, ratings);
@@ -604,14 +635,22 @@ impl OndApp {
                     *slot = Some(notes);
                 }
             }
-            Msg::Error(e) => {
-                self.probe();
-                // Offline, network errors are expected and the offline pill already says so.
-                if self.session.online {
-                    self.show_error(e);
-                }
+            Msg::Error(e) => self.show_failure(e),
+        }
+    }
+
+    /// Shows what failed. A request that got no answer has the server
+    /// checked on (it may be gone); offline those are expected, and the
+    /// offline pill already says so. A database that won't read says
+    /// nothing about the server, so it's only shown.
+    pub(crate) fn show_failure(&mut self, e: Failure) {
+        if e.is_network() {
+            self.probe();
+            if !self.session.online {
+                return;
             }
         }
+        self.show_error(e.into_message());
     }
 
     /// Shows an error. Every message gets its own toast, so two failures in
@@ -817,6 +856,10 @@ impl OndApp {
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui) {
+        // `logic` took this frame's copy just before; nothing between there
+        // and here changes the preferences. Tests draw frames without
+        // `logic`, so they take it here.
+        #[cfg(test)]
         self.read_prefs();
         let ctx = ui.ctx().clone();
         self.art.poll();
@@ -1019,6 +1062,10 @@ impl eframe::App for OndApp {
         self.output.tick(ctx, &self.engine);
         // The rest of this frame reads the preferences as they are now.
         self.read_prefs();
+        // Saved in the background: a failure there is told here, once.
+        if let Some(e) = self.prefs.take_write_error() {
+            self.show_error(format!("Your settings couldn't be saved ({e}). Changes made now may be lost when Ond quits."));
+        }
         let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
         let (theme, diagnostics) = (self.ui.prefs.theme, self.ui.prefs.diagnostics_bar);
         if let Some(menu) = self.menu.as_mut() {

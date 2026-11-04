@@ -224,7 +224,7 @@ fn get<'a>(v: &'a Value, path: &[String]) -> Option<&'a Value> {
 }
 
 /// Sets `path` in `v`, making the objects on the way.
-fn set(v: &mut Value, path: &[String], value: Value) {
+pub(crate) fn set(v: &mut Value, path: &[String], value: Value) {
     let Some((last, parents)) = path.split_last() else { return };
     let mut at = v;
     for k in parents {

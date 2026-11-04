@@ -3,10 +3,11 @@
 //! messages and actions about them.
 
 use super::{Action, OndApp, Session};
-use crate::bridge::{Bridge, ListKey, Msg};
+use crate::bridge::{Bridge, ListKey, OfflineMsg};
 use crate::prefs::Prefs;
 use library::Track;
 use offline::{OfflineStore, Pin, TrackRef};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,8 +58,16 @@ impl OfflineAction {
 
 /// Whether `track` can play right now: the server is there (or connecting),
 /// or it's downloaded, or it was streamed whole and is still cached.
-pub(super) fn playable(session: &Session, downloads: &Downloads, cache: &streamcache::StreamCache, output: &crate::output::Outputs, track: &Track) -> bool {
-    session.expected() || downloads.snap.is_done(&track.id) || super::playing::cached(cache, output, track).is_some()
+/// `transcode` is what streams are converted to (see `Outputs::transcode`),
+/// worked out once by the caller rather than for each track.
+pub(super) fn playable(
+    session: &Session,
+    downloads: &Downloads,
+    cache: &streamcache::StreamCache,
+    transcode: Option<&audio::Transcode>,
+    track: &Track,
+) -> bool {
+    session.expected() || downloads.snap.is_done(&track.id) || crate::local::cached(cache, transcode, track).is_some()
 }
 
 /// Offline downloads, and their state as of this frame.
@@ -85,6 +94,9 @@ pub struct Downloads {
     /// The notice showing the downloads folder's move, while it moves.
     moving: Option<String>,
     pub(super) open: OpenStore,
+    /// Where each kept album is in `snap.pins`, for the snapshot it was
+    /// made from (see [`album_pin`](Self::album_pin)).
+    album_pins: (Arc<offline::Snapshot>, HashMap<String, usize>),
 }
 
 /// Opens the offline store kept in a folder, with an optional size limit.
@@ -94,6 +106,27 @@ type OpenStore = Arc<dyn Fn(PathBuf, Option<u64>) -> anyhow::Result<OfflineStore
 const MOVE_PROGRESS_EVERY: Duration = Duration::from_millis(500);
 
 impl Downloads {
+    /// Indexes the kept albums of the snapshot in use, if it changed since
+    /// (the app calls this before lending the downloads to a view).
+    pub(super) fn index_album_pins(&mut self) {
+        if Arc::ptr_eq(&self.album_pins.0, &self.snap) {
+            return;
+        }
+        let at = self.snap.pins.iter().enumerate().filter_map(|(i, p)| if let Pin::Album(id) = &p.pin { Some((id.clone(), i)) } else { None }).collect();
+        self.album_pins = (Arc::clone(&self.snap), at);
+    }
+
+    /// The album's download, when it's kept offline. A lookup, not a walk
+    /// through the pins: the grid asks for every tile, every frame. Before
+    /// [`index_album_pins`](Self::index_album_pins) catches up with a new
+    /// snapshot, it walks them.
+    pub fn album_pin(&self, id: &str) -> Option<&offline::PinSummary> {
+        if Arc::ptr_eq(&self.album_pins.0, &self.snap) {
+            return self.album_pins.1.get(id).and_then(|&i| self.snap.pins.get(i));
+        }
+        self.snap.pins.iter().find(|p| matches!(&p.pin, Pin::Album(a) if a == id))
+    }
+
     /// How a store is opened: in a folder, with a size limit, the stream
     /// cache to link finished streams from, and the window to wake.
     pub(super) fn opener(rt: tokio::runtime::Handle, ctx: egui::Context, cache: streamcache::StreamCache) -> OpenStore {
@@ -129,6 +162,7 @@ impl Downloads {
             deferred: Vec::new(),
             moving: None,
             open,
+            album_pins: Default::default(),
         };
         match move_from {
             // A new location chosen last time: the downloads move there
@@ -172,7 +206,7 @@ impl Downloads {
     /// bridge's offline queue: reading its pins and checking its files takes a
     /// while with thousands of downloads. With `move_from`, the downloads are
     /// first moved from there into `base`. The store arrives as
-    /// `Msg::OfflineStore`, for [`opened`](Self::opened).
+    /// `OfflineMsg::Store`, for [`opened`](Self::opened).
     pub(super) fn open_in_background(&mut self, limit: Option<u64>, move_from: Option<PathBuf>, bridge: &Bridge) {
         self.generation += 1;
         self.opening = true;
@@ -188,16 +222,16 @@ impl Downloads {
                 let moved = offline::move_store_with(&from, &base, &mut |p| {
                     if posted.is_none_or(|at| at.elapsed() >= MOVE_PROGRESS_EVERY) {
                         posted = Some(std::time::Instant::now());
-                        b.post(Msg::OfflineMoving(p));
+                        b.post(OfflineMsg::Moving(p));
                     }
                 });
                 if let Err(e) = &moved {
                     tracing::warn!("moving downloads from {}: {e}", from.display());
                 }
-                b.post(Msg::OfflineMoved(moved.map(drop).map_err(|e| e.to_string())));
+                b.post(OfflineMsg::Moved(moved.map(drop).map_err(|e| e.to_string())));
             }
             let store = Self::dir_for(&base, account).map_err(anyhow::Error::from).and_then(|dir| open(dir, limit));
-            b.post(Msg::OfflineStore { generation, store: store.map_err(|e| format!("{e:#}")) });
+            b.post(OfflineMsg::Store { generation, store: store.map_err(|e| format!("{e:#}")) });
         });
     }
 
@@ -317,14 +351,14 @@ impl OndApp {
     }
 
     /// A message about the offline store: it opened, or its folder moved.
-    pub(super) fn offline_msg(&mut self, msg: Msg) {
+    pub(super) fn offline_msg(&mut self, msg: OfflineMsg) {
         match msg {
-            Msg::OfflineFolder(dir) => {
+            OfflineMsg::Folder(dir) => {
                 if let Some(notice) = self.downloads.move_to(dir, &self.prefs) {
                     self.show_notice(notice);
                 }
             }
-            Msg::OfflineStore { generation, store } => match self.downloads.opened(generation, store, &self.bridge) {
+            OfflineMsg::Store { generation, store } => match self.downloads.opened(generation, store, &self.bridge) {
                 Ok(true) => {
                     if let Some(client) = self.session.live().cloned() {
                         self.connect_downloads(&client);
@@ -348,11 +382,11 @@ impl OndApp {
                     }
                 }
             },
-            Msg::OfflineMoving(p) => {
+            OfflineMsg::Moving(p) => {
                 let text = format!("Moving downloads to {}: {} of {}", self.downloads.base.display(), crate::fmt::bytes(p.done), crate::fmt::bytes(p.total));
                 self.moving_notice(text, false);
             }
-            Msg::OfflineMoved(result) => {
+            OfflineMsg::Moved(result) => {
                 let base = self.downloads.base.display().to_string();
                 match result {
                     Ok(()) => {
@@ -364,7 +398,6 @@ impl OndApp {
                 }
                 self.downloads.moving = None;
             }
-            _ => unreachable!("not an offline message"),
         }
     }
 
@@ -488,7 +521,7 @@ impl OndApp {
         let bridge = self.bridge.clone();
         crate::folder::pick("Choose where to keep downloaded music", &start, move |chosen| {
             if let Some(dir) = chosen {
-                bridge.post(Msg::OfflineFolder(dir));
+                bridge.post(OfflineMsg::Folder(dir));
             }
         });
     }

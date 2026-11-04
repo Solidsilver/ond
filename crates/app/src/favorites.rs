@@ -16,6 +16,14 @@ pub struct Starred {
     pub artists: Vec<(String, String)>,
 }
 
+/// The favorites and the ratings seen with them, as saved for starting
+/// offline.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SavedStarred {
+    pub starred: Starred,
+    pub ratings: Vec<(String, u8)>,
+}
+
 /// Per-song facts seen while loading an album or playlist.
 #[derive(Debug, Default, Clone)]
 pub struct UserMeta {
@@ -25,7 +33,9 @@ pub struct UserMeta {
 
 #[derive(Debug, Default)]
 pub struct Favorites {
-    on: HashSet<(StarKind, String)>,
+    /// What's loved, by kind: [`is_on`](Self::is_on) asks for every visible
+    /// row, and a set of `(kind, id)` would need a `String` made per ask.
+    on: HashMap<StarKind, HashSet<String>>,
     ratings: HashMap<String, u8>,
     /// Changes sent but not yet confirmed, by the sequence number of the latest
     /// one per item: a snapshot from the server taken before them mustn't undo
@@ -41,7 +51,7 @@ pub struct Favorites {
 
 impl Favorites {
     pub fn is_on(&self, kind: StarKind, id: &str) -> bool {
-        self.on.contains(&(kind, id.to_owned()))
+        self.on.get(&kind).is_some_and(|ids| ids.contains(id))
     }
 
     pub fn rating(&self, id: &str) -> u8 {
@@ -60,10 +70,9 @@ impl Favorites {
     }
 
     fn set(&mut self, kind: StarKind, id: &str, on: bool, track: Option<&Track>, name: Option<&str>) {
-        let key = (kind, id.to_owned());
         let v = Arc::make_mut(&mut self.view);
         if on {
-            self.on.insert(key);
+            self.on.entry(kind).or_default().insert(id.to_owned());
             match kind {
                 StarKind::Song => {
                     if let Some(t) = track
@@ -84,7 +93,9 @@ impl Favorites {
                 }
             }
         } else {
-            self.on.remove(&key);
+            if let Some(ids) = self.on.get_mut(&kind) {
+                ids.remove(id);
+            }
             match kind {
                 StarKind::Song => v.songs.retain(|s| s.id != id),
                 StarKind::Album => v.albums.retain(|a| a != id),
@@ -149,11 +160,12 @@ impl Favorites {
     /// Replaces everything with the server's `getStarred2`, except changes
     /// still in flight.
     pub fn load(&mut self, starred: Starred, ratings: Vec<(String, u8)>) {
-        let keep: Vec<((StarKind, String), bool)> = self.pending.keys().map(|k| (k.clone(), self.on.contains(k))).collect();
-        self.on.clear();
-        self.on.extend(starred.songs.iter().map(|s| (StarKind::Song, s.id.clone())));
-        self.on.extend(starred.albums.iter().map(|a| (StarKind::Album, a.clone())));
-        self.on.extend(starred.artists.iter().map(|(a, _)| (StarKind::Artist, a.clone())));
+        let keep: Vec<((StarKind, String), bool)> = self.pending.keys().map(|k| (k.clone(), self.is_on(k.0, &k.1))).collect();
+        self.on = HashMap::from([
+            (StarKind::Song, starred.songs.iter().map(|s| s.id.clone()).collect()),
+            (StarKind::Album, starred.albums.iter().cloned().collect()),
+            (StarKind::Artist, starred.artists.iter().map(|(a, _)| a.clone()).collect()),
+        ]);
         self.view = Arc::new(starred);
         for ((kind, id), on) in keep {
             let track = self.view.songs.iter().find(|s| s.id == id).cloned();

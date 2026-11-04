@@ -2,7 +2,7 @@
 //! loads through [`Playable`] (off the UI thread), so only what can play
 //! shows.
 
-use crate::bridge::SavedStarred;
+use crate::favorites::SavedStarred;
 use library::{Album, Artist, Track};
 use std::collections::HashSet;
 use std::path::PathBuf;

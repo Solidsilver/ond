@@ -179,8 +179,10 @@ impl OndApp {
         PrefsView::read(&self.prefs)
     }
 
-    /// Takes this frame's copy of the preferences.
+    /// Takes this frame's copy of the preferences, and of what streams are
+    /// converted to.
     pub(super) fn read_prefs(&mut self) {
         self.ui.prefs = self.prefs_now();
+        self.ui.transcode = self.output.transcode();
     }
 }

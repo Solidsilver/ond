@@ -83,7 +83,7 @@ impl<'a> ViewCtx<'a> {
 
     /// Whether `track` can play right now (see [`super::playable`]).
     pub fn playable(&self, track: &Track) -> bool {
-        super::playable(self.session, self.downloads, self.cache, self.output, track)
+        super::playable(self.session, self.downloads, self.cache, self.ui.transcode.as_ref(), track)
     }
 
     /// This frame's spectrum of what's playing, for a visual on screen;
@@ -100,11 +100,10 @@ impl<'a> ViewCtx<'a> {
         Some(self.ui.listener.frame(&self.engine.status.tap, pass, now).clone())
     }
 
-    /// The album's download, when it's kept offline (found without making a
-    /// `Pin` to compare with: the grid asks for every tile, every frame).
+    /// The album's download, when it's kept offline (see [`Downloads::album_pin`]).
     pub fn album_pin(&self, id: &str) -> Option<&'a offline::PinSummary> {
         let downloads: &'a Downloads = self.downloads;
-        downloads.snap.pins.iter().find(|p| matches!(&p.pin, offline::Pin::Album(a) if a == id))
+        downloads.album_pin(id)
     }
 
     /// A track's analysis, if there is one for the file as it is now.
@@ -116,6 +115,7 @@ impl<'a> ViewCtx<'a> {
 impl OndApp {
     /// Lends the parts a view works with.
     pub(super) fn view(&mut self) -> ViewCtx<'_> {
+        self.downloads.index_album_pins();
         ViewCtx {
             data: &self.data,
             player: &self.player,
