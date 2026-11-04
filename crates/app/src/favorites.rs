@@ -16,6 +16,14 @@ pub struct Starred {
     pub artists: Vec<(String, String)>,
 }
 
+/// The favorites and the ratings seen with them, as saved for starting
+/// offline.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SavedStarred {
+    pub starred: Starred,
+    pub ratings: Vec<(String, u8)>,
+}
+
 /// Per-song facts seen while loading an album or playlist.
 #[derive(Debug, Default, Clone)]
 pub struct UserMeta {

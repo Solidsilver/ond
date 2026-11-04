@@ -26,6 +26,15 @@ pub enum Fetch {
     Done(Option<Lyrics>),
 }
 
+/// A song's plays as the server counts them, for the Info tab. Fetched
+/// like lyrics, once per song when a view first wants it, so it lives here.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SongStats {
+    pub plays: Option<u64>,
+    /// RFC 3339, as the server sends it.
+    pub last_played: Option<String>,
+}
+
 /// The best of the server's versions: synced over unsynced, then the one with
 /// the most words (a sidecar `.lrc` usually beats a stub tag).
 pub fn pick(versions: Vec<subsonic::StructuredLyrics>) -> Option<Lyrics> {

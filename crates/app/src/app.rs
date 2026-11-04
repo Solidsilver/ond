@@ -95,6 +95,7 @@ use {
     library::Album, offline::TrackRef, pins::track_ref, ui_state::QueueUi,
 };
 
+pub use crate::lyrics::SongStats;
 pub use crate::player::QueueAction;
 pub use analyzing::{Analysis, AnalysisAction};
 pub use commands::PlaylistAction;
@@ -105,7 +106,7 @@ pub use pins::{Downloads, Keep, OfflineAction};
 pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
-pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, SongStats, UiState};
+pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, UiState};
 pub(crate) use widgets::{choice, elide as elide_text, link as link_text, switch_tinted, thin_slider, thin_slider_marked};
 pub use window_state::WindowAction;
 
@@ -1021,11 +1022,11 @@ impl eframe::App for OndApp {
         self.output.tick(ctx, &self.engine);
         // The rest of this frame reads the preferences as they are now.
         self.read_prefs();
-        let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
         // Saved in the background: a failure there is told here, once.
         if let Some(e) = self.prefs.take_write_error() {
             self.show_error(format!("Your settings couldn't be saved ({e}). Changes made now may be lost when Ond quits."));
         }
+        let queue = if self.ui.queue_narrow { self.ui.queue_sheet } else { self.ui.prefs.show_queue };
         let (theme, diagnostics) = (self.ui.prefs.theme, self.ui.prefs.diagnostics_bar);
         if let Some(menu) = self.menu.as_mut() {
             menu.sync(queue, self.bit_perfect, theme);

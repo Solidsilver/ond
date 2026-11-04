@@ -1,7 +1,7 @@
 //! Background work for the UI. Every function here returns immediately; results
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
-use crate::favorites::{StarKind, Starred, UserMeta};
+use crate::favorites::{SavedStarred, StarKind, Starred, UserMeta};
 use crate::settings::Settings;
 use crate::sync;
 use library::{Album, Library, Track};
@@ -127,7 +127,7 @@ pub enum Msg {
     /// couldn't say).
     SongStats {
         track_id: String,
-        stats: Option<crate::app::SongStats>,
+        stats: Option<crate::lyrics::SongStats>,
     },
     /// Hearts and ratings seen while loading an album or playlist.
     UserMeta {
@@ -169,13 +169,6 @@ pub struct Saved {
     pub newest: Option<Vec<String>>,
     pub playlists: Option<Vec<subsonic::Playlist>>,
     pub starred: Option<SavedStarred>,
-}
-
-/// The favorites and the ratings seen with them, as saved.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct SavedStarred {
-    pub starred: Starred,
-    pub ratings: Vec<(String, u8)>,
 }
 
 /// Names of the saved copies (see [`library::Library::save`]).
@@ -426,7 +419,7 @@ impl Bridge {
     /// Builds the search index on a worker (tens of ms on a big library) and
     /// sends it back tagged with `generation`, so a stale build can be dropped.
     pub fn build_search(&self, generation: u64, albums: Arc<Vec<Album>>, artists: Arc<Vec<library::Artist>>, tracks: Arc<Vec<Track>>) {
-        let this = self.scoped();
+        let this = self.clone();
         self.rt.spawn_blocking(move || {
             let index = crate::search::SearchIndex::new(&albums, &artists, &tracks);
             this.send(Msg::SearchIndex { generation, index: Box::new(index) });
@@ -434,16 +427,16 @@ impl Bridge {
     }
 
     /// Loads the cached library from disk without touching the network.
-            if !this.current() {
-                return;
-            }
     /// Reads the stored library and the saved copies of the playlists,
     /// favorites and Recently added. With `keep` (working offline), only
     /// what can play: the rest isn't sent. Scoped to the session: once
     /// another account signs in, a read still running sends nothing.
     pub fn load_local(&self, keep: Option<crate::local::Playable>) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn_blocking(move || {
+            if !this.current() {
+                return;
+            }
             let l = &this.library;
             let mut saved = Saved {
                 newest: l.saved(SAVED_NEWEST).ok().flatten(),
@@ -554,7 +547,6 @@ impl Bridge {
             }
             match pinged {
                 Ok(server) => {
-                            false
                     // The account itself is recorded by the app (in its preferences)
                     // when `Connected` arrives for a live session.
                     let s = settings.clone();
@@ -562,6 +554,7 @@ impl Bridge {
                         Ok(()) => true,
                         Err(e) => {
                             tracing::warn!("keychain: {e}");
+                            false
                         }
                     })
                     .await;
@@ -1250,6 +1243,13 @@ mod tests {
         bridge.end_session();
         scoped.send(Msg::Error("after".into()));
         // Copies of a copy keep the session they were made for.
+        scoped.scoped().send(Msg::Error("after, again".into()));
+        bridge.scoped().send(Msg::Error("the new session".into()));
+        let texts: Vec<String> = rx.try_iter().filter_map(|m| if let Msg::Error(e) = m { Some(e) } else { None }).collect();
+        assert_eq!(texts, ["before", "the new session"]);
+        let stored = rt.block_on(scoped.db(|l| l.albums()));
+        assert_eq!(stored.unwrap_err(), "Signed out", "nor reads or writes the library");
+    }
 
     #[test]
     fn a_library_read_held_up_until_another_account_signs_in_sends_nothing() {
@@ -1280,13 +1280,6 @@ mod tests {
         until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Latency(_))));
         got.retain(|m| !matches!(m, Msg::Latency(_)));
         assert!(got.is_empty(), "the old account's library arrived: {:?}", names(&got));
-    }
-        scoped.scoped().send(Msg::Error("after, again".into()));
-        bridge.scoped().send(Msg::Error("the new session".into()));
-        let texts: Vec<String> = rx.try_iter().filter_map(|m| if let Msg::Error(e) = m { Some(e) } else { None }).collect();
-        assert_eq!(texts, ["before", "the new session"]);
-        let stored = rt.block_on(scoped.db(|l| l.albums()));
-        assert_eq!(stored.unwrap_err(), "Signed out", "nor reads or writes the library");
     }
 
     #[test]

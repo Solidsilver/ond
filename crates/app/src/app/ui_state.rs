@@ -38,14 +38,6 @@ impl QueueTab {
     }
 }
 
-/// A song's plays as the server counts them, for the Info tab.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SongStats {
-    pub plays: Option<u64>,
-    /// RFC 3339, as the server sends it.
-    pub last_played: Option<String>,
-}
-
 /// Which side keyboard navigation applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
