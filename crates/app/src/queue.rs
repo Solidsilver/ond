@@ -513,31 +513,7 @@ mod tests {
     use super::*;
 
     fn t(id: &str, secs: u32) -> Track {
-        Track {
-            id: id.into(),
-            album_id: "al".into(),
-            title: id.into(),
-            artist: None,
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: Some(secs),
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        }
+        Track { duration_secs: Some(secs), ..crate::test_tracks::track(id, "al", id) }
     }
 
     fn album(ids: &[&str]) -> Vec<Track> {

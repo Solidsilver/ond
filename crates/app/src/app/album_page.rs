@@ -407,32 +407,14 @@ mod tests {
 
     fn track(contributors: &[(&str, Option<&str>, &str)]) -> Track {
         Track {
-            id: "t".into(),
-            album_id: "a".into(),
-            title: "t".into(),
-            artist: None,
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: None,
             suffix: Some("flac".into()),
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
             bit_depth: Some(16),
             sample_rate: Some(44_100),
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
             contributors: contributors
                 .iter()
                 .map(|(role, sub, name)| Contributor { role: (*role).into(), sub_role: sub.map(Into::into), name: (*name).into(), artist_id: None })
                 .collect(),
-            cover_art: None,
-            artists: Vec::new(),
+            ..crate::test_tracks::track("t", "a", "t")
         }
     }
 

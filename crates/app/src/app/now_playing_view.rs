@@ -687,31 +687,7 @@ mod tests {
 
     #[test]
     fn details_only_say_what_is_known() {
-        let mut t = Track {
-            id: "t".into(),
-            album_id: "a".into(),
-            title: "x".into(),
-            artist: None,
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: None,
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        };
+        let mut t = crate::test_tracks::track("t", "a", "x");
         assert!(details_rows(&t, None, None).is_empty());
         t.suffix = Some("flac".into());
         t.bit_depth = Some(24);

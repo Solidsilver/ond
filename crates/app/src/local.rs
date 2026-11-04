@@ -93,31 +93,7 @@ mod tests {
     use super::*;
 
     fn track(id: &str, album: &str, artist: &str) -> Track {
-        Track {
-            id: id.into(),
-            album_id: album.into(),
-            title: id.into(),
-            artist: None,
-            artist_ref: Some(artist.into()),
-            track: None,
-            disc: None,
-            duration_secs: None,
-            suffix: Some("flac".into()),
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        }
+        Track { artist_ref: Some(artist.into()), suffix: Some("flac".into()), ..crate::test_tracks::track(id, album, id) }
     }
 
     fn album(id: &str, artist: &str) -> Album {

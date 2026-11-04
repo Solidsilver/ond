@@ -331,31 +331,7 @@ mod tests {
     }
 
     fn track(id: &str, album_id: &str, title: &str, artist: &str) -> Track {
-        Track {
-            id: id.into(),
-            album_id: album_id.into(),
-            title: title.into(),
-            artist: Some(artist.into()),
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: None,
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        }
+        Track { artist: Some(artist.into()), ..crate::test_tracks::track(id, album_id, title) }
     }
 
     fn index() -> SearchIndex {

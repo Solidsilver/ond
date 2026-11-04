@@ -23,32 +23,20 @@ impl audio::OutputBackend for NullOutput {
 
 fn track(id: &str, album: &str, n: u32) -> Track {
     Track {
-        id: id.into(),
-        album_id: album.into(),
-        title: format!("Track {n} with a fairly long title that has to be cut"),
         artist: Some("Bill Evans Trio".into()),
-        artist_ref: None,
         track: Some(n),
         disc: Some(1 + n / 8),
         duration_secs: Some(240 + n),
         suffix: Some("flac".into()),
-        content_type: None,
-        size: None,
-        bit_rate_kbps: None,
         bit_depth: Some(16),
         sample_rate: Some(44_100),
         channels: Some(2),
-        track_gain: None,
-        album_gain: None,
-        track_peak: None,
-        album_peak: None,
         composer: Some("Scott LaFaro".into()),
         contributors: vec![
             library::Contributor { role: "performer".into(), sub_role: Some("piano".into()), name: "Bill Evans".into(), artist_id: None },
             library::Contributor { role: "composer".into(), sub_role: None, name: "Scott LaFaro".into(), artist_id: None },
         ],
-        cover_art: None,
-        artists: Vec::new(),
+        ..crate::test_tracks::track(id, album, &format!("Track {n} with a fairly long title that has to be cut"))
     }
 }
 

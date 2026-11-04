@@ -318,29 +318,15 @@ mod tests {
 
     fn track(id: &str, album: &str, title: &str, artist: &str, n: u32, secs: u32, depth: u32) -> Track {
         Track {
-            id: id.into(),
-            album_id: album.into(),
-            title: title.into(),
             artist: Some(artist.into()),
-            artist_ref: None,
             track: Some(n),
             disc: Some(1),
             duration_secs: Some(secs),
             suffix: Some("flac".into()),
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
             bit_depth: Some(depth),
             sample_rate: Some(44_100),
             channels: Some(2),
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
+            ..crate::test_tracks::track(id, album, title)
         }
     }
 
