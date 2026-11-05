@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::decode::tests::{file_source, pcm, slack, wait_late};
+use crate::dither::Tpdf;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -32,6 +33,11 @@ struct FakeBackend {
     dropped: Arc<AtomicBool>,
     /// The device's own volume, reported while a stream is open (as a held device's is).
     volume: Option<DeviceVolume>,
+    /// While set, the device stops asking for audio (a stuck or starved
+    /// device): nothing is played and no flush is serviced.
+    stalled: Arc<AtomicBool>,
+    /// The open ring's controls, as the device sees them.
+    ring_ctl: Arc<Mutex<Option<Arc<RingCtl>>>>,
 }
 
 impl Drop for FakeBackend {
@@ -60,6 +66,8 @@ impl FakeBackend {
             own_rate: None,
             dropped: Arc::default(),
             volume: None,
+            stalled: Arc::default(),
+            ring_ctl: Arc::default(),
         }
     }
 
@@ -145,6 +153,8 @@ impl OutputBackend for FakeBackend {
         }
         self.opens.fetch_add(1, Ordering::Relaxed);
         self.open_dev = self.target().map(|d| d.uid);
+        *self.ring_ctl.lock().unwrap() = Some(input.ctl.clone());
+        let stalled = self.stalled.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let drained = Arc::new(AtomicBool::new(false));
         self.drained = drained.clone();
@@ -166,6 +176,10 @@ impl OutputBackend for FakeBackend {
                 }
                 if rendered {
                     played.lock().unwrap().extend(buf.iter().filter(|s| **s != 0.0));
+                }
+                rendered = false;
+                if stalled.load(Ordering::Relaxed) {
+                    continue;
                 }
                 if input.fill_for_device(&mut buf, channels, format.sample_rate, &status, device_bits, &mut dither) {
                     drained.store(true, Ordering::Release);
@@ -201,6 +215,21 @@ fn caps(max_bits: Option<u32>, max_rate: u32) -> DeviceCaps {
         shared_reason: Some("shared mode (fake)".into()),
         integer: true,
         ..Default::default()
+    }
+}
+
+/// Waits until the engine's decoder is on track `seq` of its session or past it.
+fn wait_decoding(engine: &EngineHandle, seq: u64) {
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    loop {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        engine.send(Command::Decoding(tx));
+        let at = rx.recv_timeout(slack(Duration::from_secs(5))).expect("the engine answers");
+        if at.is_some_and(|at| at >= seq) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the decoder never reached track {seq} (on {at:?})");
+        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -737,8 +766,7 @@ fn a_seek_after_the_decoder_moved_on_keeps_pause() {
     engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
     engine.send(Command::Pause);
-    // Give the decoder time to finish "a" and move on to "b".
-    thread::sleep(Duration::from_millis(200));
+    wait_decoding(&engine, 1);
     engine.send(Command::Seek(Duration::from_secs(2)));
     events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
     thread::sleep(Duration::from_millis(50));
@@ -758,8 +786,8 @@ fn the_same_track_twice_is_told_apart_and_restarts_are_flagged() {
     engine.send(Command::Play(first));
     engine.send(Command::SetNext(Some(again)));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    // The decoder is on the second copy by now: this seek restarts the first.
-    thread::sleep(Duration::from_millis(200));
+    // Once the decoder is on the second copy, this seek restarts the first.
+    wait_decoding(&engine, 1);
     engine.send(Command::Seek(Duration::from_secs(1)));
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
     let started: Vec<(u64, bool, bool)> = seen
@@ -853,8 +881,8 @@ fn a_next_named_while_the_decoder_opens_the_old_one_is_honoured() {
     let slow_b = TrackSource { url: b.url.replacen("file://", "test-slow://", 1), ..b };
     engine.send(Command::SetNext(Some(slow_b)));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    // All of A is decoded within a few ms; by now the decoder is opening B.
-    thread::sleep(Duration::from_millis(50));
+    // All of A is decoded within a few ms; then the decoder is opening B.
+    wait_decoding(&engine, 1);
     engine.send(Command::SetNext(Some(file_source(&dir, "c", &c))));
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
     let ids: Vec<_> = starts(&seen).into_iter().map(|(id, ..)| id).collect();
@@ -947,9 +975,9 @@ fn a_seek_past_the_end_after_the_decoder_moved_on_starts_the_next_track() {
     engine.send(Command::Play(file_source(&dir, "a", &a)));
     engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    // Both fit the buffer: by now the decoder is done with A and on B, so the
+    // Both fit the buffer: once the decoder is done with A and on B, the
     // seek restarts A past its end, which has no audio left: B takes over.
-    thread::sleep(Duration::from_millis(100));
+    wait_decoding(&engine, 1);
     engine.send(Command::Seek(Duration::from_secs(100)));
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
     assert_eq!(starts(&seen), [("b".to_owned(), false, false)], "B starts as itself, not as a restart: {seen:?}");
@@ -1323,4 +1351,175 @@ fn engine_on_a_real_device() {
     println!("final position {:.2}", engine.status.position_secs());
     assert!(engine.status.position_secs() > secs as f64 - 2.5, "it played");
     engine.shutdown(Duration::from_secs(3));
+}
+
+#[test]
+fn a_device_switch_while_the_track_is_still_loading_plays_that_track_from_where_it_was_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = file_source(&dir, "a", &pcm(2 * 44_100 * 4, 26));
+    // A slow server: the track takes half a second to open, so it's still loading below.
+    let a = TrackSource { url: a.url.replacen("file://", "test-slow://", 1), ..a };
+    let backend = FakeBackend::new(caps(Some(24), 192_000));
+    *backend.devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    engine.send(Command::Play(a));
+    engine.send(Command::Seek(Duration::from_secs(2)));
+    engine.send(Command::SelectDevice(Some("dac".into())));
+    let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    assert!(matches!(seen.last(), Some(Event::Devices { current: Some(d), .. }) if d == "dac"), "{seen:?}");
+    assert_eq!(engine.status.state(), PlayState::Loading, "the track is opened again on the new device, not dropped");
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. } | Event::Ended { .. }));
+    // Its first start as far as the UI knows: not flagged as a restart.
+    assert_eq!(starts(&seen), [("a".to_owned(), false, false)], "{seen:?}");
+    assert!(engine.status.position_secs() >= 1.9, "from the seek made while loading: {:.2} s", engine.status.position_secs());
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "a"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_seek_superseded_while_the_decoder_finishes_the_one_before_is_not_left_holding() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = pcm(2 * 44_100 * 10, 27);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let (stalled, ring_ctl) = (backend.stalled.clone(), backend.ring_ctl.clone());
+    // A is longer than the buffer: the decoder is still on it when the seeks come.
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    // The device stops servicing the ring, so the decoder's first seek waits on
+    // its flush while the second goes in.
+    stalled.store(true, Ordering::Relaxed);
+    engine.send(Command::Seek(Duration::from_secs(100)));
+    let ctl = ring_ctl.lock().unwrap().clone().expect("a ring is open");
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while !ctl.flush_pending() {
+        assert!(Instant::now() < deadline, "the decoder never took the first seek");
+        thread::sleep(Duration::from_millis(1));
+    }
+    engine.send(Command::Seek(Duration::from_secs(1)));
+    // Handled in order: once this is answered, the second seek is on hold.
+    engine.send(Command::RefreshDevices);
+    events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    // The first seek, past the end, finishes the track: the decoder exits
+    // without reading the second. The output is still holding for it.
+    stalled.store(false, Ordering::Relaxed);
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. } | Event::Error { .. }));
+    assert!(seen.iter().any(|e| matches!(e, Event::Seeked { position_secs, .. } if *position_secs == 1.0)), "the second seek landed: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "a"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn naming_the_same_next_again_after_the_decoder_moved_on_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 8, 28), pcm(2 * 44_100, 29));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let opens = backend.opens.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    wait_decoding(&engine, 1);
+    // The UI says it again (a queue edit that left the next track as it was).
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("b".to_owned(), true, false)], "no restart, B follows gaplessly: {seen:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn clearing_the_next_after_the_decoder_moved_on_restarts_the_current_track_where_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (pcm(2 * 44_100 * 8, 30), pcm(2 * 44_100, 31));
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &b))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    wait_decoding(&engine, 1);
+    // B was taken off the queue: A must end the queue instead.
+    engine.send(Command::SetNext(None));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("a".to_owned(), false, true)], "A starts over as a restart, B never plays: {seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "a"), "{seen:?}");
+    engine.send(Command::Shutdown);
+}
+
+/// A stream cache over a fresh directory, and the runtime it downloads on.
+fn net_cache() -> (StreamCache, tokio::runtime::Runtime, tempfile::TempDir) {
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(streamcache::CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    (cache, rt, dir)
+}
+
+/// `samples` at `rate`, served slowly over HTTP as track `id`.
+fn net_source(id: &str, rate: u32, samples: &[i16]) -> TrackSource {
+    let url = crate::decode::tests::slow_server(crate::decode::tests::wav(rate, 2, samples));
+    TrackSource { id: id.into(), url, suffix: Some("wav".into()), ..Default::default() }
+}
+
+/// Waits until the cache has started on `src`, and returns what it has.
+fn wait_fetching(cache: &StreamCache, src: &TrackSource, mut meanwhile: impl FnMut()) -> streamcache::Progress {
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    loop {
+        if let Some(p) = cache.progress(&src.cache_key()) {
+            return p;
+        }
+        meanwhile();
+        assert!(Instant::now() < deadline, "{} was never fetched", src.id);
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_long_tracks_next_is_prefetched_once_its_own_download_completes() {
+    let (cache, _rt, _dir) = net_cache();
+    // 32 s at 8 kHz (1 MB, about 2 s to arrive): longer than the prefetch lead,
+    // and paused at its start, so only the finished download starts the next one.
+    let a = net_source("a", 8_000, &pcm(2 * 8_000 * 32, 32));
+    let (b, c) = (net_source("b", 8_000, &pcm(2 * 8_000, 33)), net_source("c", 8_000, &pcm(2 * 8_000, 34)));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(FakeBackend::new(caps(None, 192_000))), Some(cache.clone()));
+    play_paused(&engine, a);
+    engine.send(Command::SetNext(Some(b.clone())));
+    let mut seen_downloading = false;
+    wait_fetching(&cache, &b, || {
+        let status = &engine.status;
+        seen_downloading |= status.needs_network() && status.downloading() && status.fetched_fraction().is_some_and(|f| f < 1.0);
+    });
+    assert!(seen_downloading, "the current track's download was reported while it ran");
+    assert_eq!(engine.status.fetched_fraction(), Some(1.0), "the next track waited for the current one");
+
+    // The next track changes: the new one is fetched in its place.
+    engine.send(Command::SetNext(Some(c.clone())));
+    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    while !wait_fetching(&cache, &c, || {}).complete {
+        assert!(Instant::now() < deadline, "c never finished");
+        thread::sleep(Duration::from_millis(5));
+    }
+    // A paused engine looks at the network a few times a second, not every tick.
+    while engine.status.needs_network() {
+        assert!(Instant::now() < deadline, "still using the network once everything is down");
+        thread::sleep(Duration::from_millis(5));
+    }
+    engine.send(Command::Shutdown);
+}
+
+#[test]
+fn a_short_tracks_next_is_prefetched_while_it_is_still_downloading() {
+    let (cache, _rt, _dir) = net_cache();
+    // 5 s (880 KB, at least 1.6 s to arrive): within the prefetch lead of its
+    // end from the start, so the next one doesn't wait for the download.
+    let a = net_source("a", 44_100, &pcm(2 * 44_100 * 5, 35));
+    let b = net_source("b", 44_100, &pcm(2 * 4_410, 36));
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(FakeBackend::new(caps(None, 192_000))), Some(cache.clone()));
+    play_paused(&engine, a);
+    engine.send(Command::SetNext(Some(b.clone())));
+    wait_fetching(&cache, &b, || {});
+    let fetched = engine.status.fetched_fraction();
+    assert!(fetched.is_some_and(|f| f < 1.0), "the current track was still downloading: {fetched:?}");
+    assert!(engine.status.needs_network());
+    engine.send(Command::Shutdown);
 }

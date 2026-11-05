@@ -31,7 +31,7 @@ pub(crate) fn needs_dither(device_bits: Option<u32>, t: Treatment) -> bool {
 
 /// Triangular-PDF dither source. Realtime-safe: no allocation, no locks.
 #[derive(Debug, Clone)]
-pub struct Tpdf {
+pub(crate) struct Tpdf {
     state: u32,
 }
 

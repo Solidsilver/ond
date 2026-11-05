@@ -125,6 +125,10 @@ pub struct CoreAudioBackend {
     /// Nothing has played since then: devices go back once it's long enough ago.
     idle_since: Option<Instant>,
     drained: Arc<AtomicBool>,
+    /// The open unit wouldn't start again after a mode change. Left alone it
+    /// plays nothing while the engine reports Playing, so the engine is asked
+    /// to open a new stream (see `wants_reopen`).
+    unit_failed: bool,
     devices_changed: Arc<AtomicBool>,
     default_changed: Arc<AtomicBool>,
     _listeners: Vec<hal::Listener>,
@@ -160,6 +164,7 @@ impl CoreAudioBackend {
             originals: Originals::default(),
             idle_since: None,
             drained: Arc::new(AtomicBool::new(false)),
+            unit_failed: false,
             devices_changed,
             default_changed,
             _listeners: listeners,
@@ -322,8 +327,10 @@ impl CoreAudioBackend {
 
     /// Stops the stream, keeping any exclusive access.
     fn stop_unit(&mut self) {
+        self.unit_failed = false;
         if let Some(mut open) = self.open.take() {
             // Stopping is synchronous: no render callback runs after it returns.
+            // The unit is dropped either way; a failure leaves nothing to undo.
             let _ = open.unit.stop();
         }
     }
@@ -502,14 +509,19 @@ impl OutputBackend for CoreAudioBackend {
                 // device yet: note how it is now, or there's nothing to go back to.
                 self.remember(dev);
                 // Pause the unit around taking the device, then settle the integer format.
-                if let Some(o) = self.open.as_mut() {
-                    let _ = o.unit.stop();
+                if let Some(o) = self.open.as_mut()
+                    && let Err(e) = o.unit.stop()
+                {
+                    tracing::warn!("output unit didn't pause to take the device: {e}");
                 }
                 self.take_hog(dev);
                 let bits = self.set_integer_format(dev, format.sample_rate, format.channels);
                 if let Some(o) = self.open.as_mut() {
                     o.set_bits(bits);
-                    let _ = o.unit.start();
+                    if let Err(e) = o.unit.start() {
+                        tracing::warn!("output unit didn't start again after taking the device: {e}; reopening");
+                        self.unit_failed = true;
+                    }
                 }
             }
             PlaybackMode::Normal => {
@@ -607,6 +619,12 @@ impl OutputBackend for CoreAudioBackend {
         self.drained.load(Ordering::Acquire)
     }
 
+    /// The engine asks after every mode change, and starts the track over
+    /// where it is on a new stream.
+    fn wants_reopen(&mut self) -> bool {
+        self.unit_failed
+    }
+
     /// Stops the stream and lets go of the device: an idle player never keeps
     /// other apps (or system sounds) off it. The next `open` takes it again.
     fn close(&mut self) {
@@ -634,10 +652,8 @@ fn bit_perfect_self_check() -> Result<(), String> {
     let samples: Vec<f32> = pattern.iter().map(|v| *v as f32 / (1 << 23) as f32).collect();
 
     let run = |bits: u32, resampled: bool| -> Vec<f32> {
-        let (mut p, c) = rtrb::RingBuffer::new(samples.len());
-        p.push_entire_slice(&samples).expect("ring fits the pattern");
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), resampled);
+        let (_p, _m, input) = crate::output::tests::ring(&samples, true);
+        let input = input.with_source(Some(24), resampled);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         let mut render = Render { input, status, device_bits: Arc::new(AtomicU32::new(bits)), dither: Tpdf::default() };
@@ -672,10 +688,8 @@ mod tests {
     fn the_callback_dithers_to_the_format_in_effect_now() {
         // 24-bit audio, bit-perfect: a 16-bit device needs it requantized, a 24-bit one doesn't.
         let samples: Vec<f32> = (0..1_024i64).map(|i| ((i * 2_654_435) % (1 << 24) - (1 << 23)) as f32 / (1 << 23) as f32).collect();
-        let (mut p, c) = rtrb::RingBuffer::new(samples.len());
-        p.push_entire_slice(&samples).unwrap();
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), false);
+        let (_p, _m, input) = crate::output::tests::ring(&samples, true);
+        let input = input.with_source(Some(24), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         let bits = Arc::new(AtomicU32::new(16));
@@ -855,10 +869,8 @@ mod tests {
         let before = (hal::nominal_rate(dev), hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel)));
         b.set_mode(PlaybackMode::BitPerfect);
         let format = StreamFormat { sample_rate: rate, channels: 2, bits_per_sample: Some(16) };
-        let (mut p, c) = rtrb::RingBuffer::new(rate as usize * 2);
-        p.push_entire_slice(&vec![0.0f32; rate as usize * 2]).unwrap();
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(16), false);
+        let (_p, _m, input) = crate::output::tests::ring(&vec![0.0f32; rate as usize * 2], true);
+        let input = input.with_source(Some(16), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         b.open(format, input, status).unwrap();
@@ -900,10 +912,8 @@ mod tests {
         let before = snapshot();
         let rate = before.0.unwrap_or(48_000.0).round() as u32;
         let format = StreamFormat { sample_rate: rate, channels: 2, bits_per_sample: Some(16) };
-        let (mut p, c) = rtrb::RingBuffer::new(rate as usize * 2);
-        p.push_entire_slice(&vec![0.0f32; rate as usize * 2]).unwrap();
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(16), false);
+        let (_p, _m, input) = crate::output::tests::ring(&vec![0.0f32; rate as usize * 2], true);
+        let input = input.with_source(Some(16), false);
         b.open(format, input, Arc::new(Status::default())).unwrap();
         b.set_mode(PlaybackMode::BitPerfect);
         println!("during {:?}", snapshot());

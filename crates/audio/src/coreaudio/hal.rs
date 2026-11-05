@@ -44,16 +44,26 @@ fn check(status: i32, what: &str) -> Result<()> {
     if status == 0 { Ok(()) } else { Err(format!("{what}: OSStatus {status}")) }
 }
 
-/// Reads a fixed-size property.
-fn get<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<T> {
-    let a = addr(selector, scope);
+/// Reads a fixed-size property at `a`; the error is the HAL's status.
+///
+/// SAFETY (a precondition on every caller, which the `Copy` bound doesn't
+/// express: a `bool` or a reference is `Copy` too): `T` is plain data for
+/// which all-zero bytes, and any bytes the HAL writes over them, are a valid
+/// value. That holds for the integers, floats and C structs the HAL's
+/// properties are made of, which is all this file reads. The HAL may write
+/// fewer than `size_of::<T>()` bytes, so the rest stay zero.
+fn read<T: Copy>(obj: Id, a: &AudioObjectPropertyAddress) -> std::result::Result<T, i32> {
     let mut value = MaybeUninit::<T>::zeroed();
     let mut size = size_of::<T>() as u32;
-    // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
-    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
-    check(status, "get property")?;
-    // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
-    Ok(unsafe { value.assume_init() })
+    // SAFETY: valid pointers to stack values; the HAL writes at most `size` bytes into `value`.
+    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
+    // SAFETY: zeroed, then (partly) overwritten by the HAL: a valid T by the precondition above.
+    if status == 0 { Ok(unsafe { value.assume_init() }) } else { Err(status) }
+}
+
+/// Reads a fixed-size property.
+fn get<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<T> {
+    read(obj, &addr(selector, scope)).map_err(|status| format!("get property: OSStatus {status}"))
 }
 
 /// Reads an array property.
@@ -318,13 +328,7 @@ fn settable_elements(dev: Id, selector: u32) -> Vec<u32> {
 }
 
 fn get_at<T: Copy>(obj: Id, selector: u32, element: u32) -> Option<T> {
-    let a = addr_at(selector, OUTPUT, element);
-    let mut value = MaybeUninit::<T>::zeroed();
-    let mut size = size_of::<T>() as u32;
-    // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
-    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
-    // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
-    (status == 0).then(|| unsafe { value.assume_init() })
+    read(obj, &addr_at(selector, OUTPUT, element)).ok()
 }
 
 fn set_at<T>(obj: Id, selector: u32, element: u32, value: &T) -> Result<()> {
@@ -379,10 +383,6 @@ pub struct Listener {
     obj: Id,
     addr: AudioObjectPropertyAddress,
 }
-
-// SAFETY: the slot is Sync (a Mutex around a Send callback); the rest is plain
-// data identifying the registration.
-unsafe impl Send for Listener {}
 
 impl Listener {
     pub fn new(obj: Id, selector: u32, scope: u32, callback: impl FnMut() + Send + 'static) -> Result<Self> {

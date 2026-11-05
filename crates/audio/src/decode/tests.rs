@@ -430,7 +430,7 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     let s = Session::start(src, None, config(1.0), status.clone(), Some(cache), None, Arc::default());
     let (input, _) = wait_ring(&s);
     let capacity = input.samples.buffer().capacity();
-    let target = ((crate::PREBUFFER_SECS * RATE as f32) as usize * 2).min(capacity / 2);
+    let target = ((crate::output::PREBUFFER_SECS * RATE as f32) as usize * 2).min(capacity / 2);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     // Play a little of the start (it buffers first, like any track start).
     let deadline = Instant::now() + slack(Duration::from_secs(20));

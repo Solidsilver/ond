@@ -269,10 +269,8 @@ mod tests {
     fn the_ring_reaches_the_device_untouched() {
         let ints = pattern(24);
         let samples: Vec<f32> = ints.iter().flat_map(|v| [*v as f32 / (1 << 23) as f32; 2]).collect();
-        let (mut p, c) = rtrb::RingBuffer::new(samples.len());
-        p.push_entire_slice(&samples).unwrap();
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let mut input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), false);
+        let (_p, _m, input) = crate::output::tests::ring(&samples, true);
+        let mut input = input.with_source(Some(24), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         let mut out = vec![0.0f32; samples.len()];
