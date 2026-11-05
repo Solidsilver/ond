@@ -55,6 +55,8 @@ pub struct Memos {
     pub(super) album: Memo<super::album_page::AlbumKey, super::album_page::AlbumFacts>,
     /// The playing track's lyrics as rows (stanzas, labels, breaks).
     pub(super) lyrics: Memo<super::now_playing_view::LyricsKey, Vec<crate::lyrics::Row>>,
+    /// The albums crediting the artist whose page is open.
+    pub(super) credited: Memo<super::browse::CreditedKey, Vec<usize>>,
     /// The Info tab's rows for the playing song.
     pub(super) info: Memo<super::info_panel::InfoKey, super::info_panel::InfoFacts>,
 }

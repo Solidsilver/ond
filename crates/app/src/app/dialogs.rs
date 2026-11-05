@@ -1,4 +1,4 @@
-//! Sheets over the window: naming a playlist, confirming a delete, asking
+//! Sheets over the window: naming a playlist, confirming a delete or a sign-out, asking
 //! whether to keep the tracks you added, the keyboard shortcut list (⌘/) and
 //! settings (⌘,). One at a time; Esc or a click outside closes it.
 
@@ -25,6 +25,12 @@ pub enum Overlay {
     Delete {
         id: String,
         name: String,
+    },
+    /// Sign out of `host` (its name, without the scheme)? Asked from
+    /// Settings, a No goes back there.
+    SignOut {
+        host: String,
+        from_settings: bool,
     },
     /// Playing something new while the user has added tracks: keep them or
     /// clear them? (Settings › Queue › Playing something new: Ask.)
@@ -115,6 +121,33 @@ impl OndApp {
                         done = Some(Some(Action::TracksAnswered { tracks: std::mem::take(tracks), source: source.clone(), action: *action, keep }));
                     }
                 }
+                Overlay::SignOut { host, .. } => {
+                    ui.set_width(DIALOG_W);
+                    let title = if host.is_empty() { "Sign out?".to_owned() } else { format!("Sign out of {host}?") };
+                    ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Playback stops and the queue clears. Ond forgets the password. Downloads stay on this computer.")
+                                .size(12.0)
+                                .color(t.muted),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(18.0);
+                    let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if danger(ui, "Sign out").clicked() || enter {
+                                done = Some(Some(Action::SignOut));
+                            }
+                            ui.add_space(4.0);
+                            if secondary(ui, "Cancel").clicked() {
+                                done = Some(None);
+                            }
+                        });
+                    });
+                }
                 Overlay::Delete { id, name } => {
                     ui.set_width(DIALOG_W);
                     ui.label(egui::RichText::new(format!("Delete “{name}”?")).font(FontId::new(15.0, semibold())).color(t.text));
@@ -146,7 +179,8 @@ impl OndApp {
         }
         if let Some(action) = done {
             ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));
-            self.ui.overlay = None;
+            let back_to_settings = action.is_none() && matches!(self.ui.overlay, Some(Overlay::SignOut { from_settings: true, .. }));
+            self.ui.overlay = back_to_settings.then_some(Overlay::Settings);
             if let Some(a) = action {
                 self.actions.push(a);
             }

@@ -12,7 +12,7 @@ use crate::queue::{AddAt, ClearWhat, NextAt, OnPlay, Preset};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
 use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
-use crate::widgets::{choice, menu_label, secondary, secondary_danger, section, switch, switch_tinted, thin_slider};
+use crate::widgets::{Head, ROW_PAD, choice, divider, group, managed, menu_label, row_with, secondary, secondary_danger, setting, switch, thin_slider};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -68,59 +68,67 @@ impl OndApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         let w = (screen.width() - 64.0).clamp(480.0, 760.0);
-        let h = (screen.height() - 96.0).clamp(340.0, 540.0);
+        // Below the toolbar, so a narrow window's display keeps its times.
+        let h = (screen.height() - 96.0).clamp(340.0, 540.0).min((screen.height() - super::toolbar::TOOLBAR_H - 16.0).max(200.0));
         let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::ZERO).corner_radius(12);
-        let modal = egui::Modal::new(egui::Id::unique("settings-window")).frame(frame).show(ctx, |ui| {
-            let t = Tokens::of(ui);
-            let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-            let side = Rect::from_min_size(rect.min, vec2(NAV_W, h));
-            ui.painter().rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ..Default::default() }, t.sidebar);
-            ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
+        let modal = egui::Modal::new(egui::Id::unique("settings-window"))
+            .frame(frame)
+            .area(
+                egui::Modal::default_area(egui::Id::unique("settings-window")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, super::toolbar::TOOLBAR_H / 2.0)),
+            )
+            .show(ctx, |ui| {
+                let t = Tokens::of(ui);
+                let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                let esc = ui.painter().layout_no_wrap("esc".into(), FontId::proportional(11.0), t.muted);
+                ui.painter().galley(pos2(rect.right() - 14.0 - esc.size().x, rect.top() + 16.0), esc, t.muted);
+                let side = Rect::from_min_size(rect.min, vec2(NAV_W, h));
+                ui.painter().rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ..Default::default() }, t.sidebar);
+                ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
 
-            // Section list.
-            let mut nav = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(vec2(10.0, 16.0))).layout(egui::Layout::top_down(egui::Align::Min)));
-            nav.spacing_mut().item_spacing.y = 2.0;
-            nav.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Settings").font(FontId::new(15.0, semibold())).color(t.text));
-            });
-            nav.add_space(12.0);
-            for s in Section::ALL {
-                if self.place(&mut nav, s.label(), self.ui.settings_section == s).clicked() {
-                    self.ui.settings_section = s;
+                // Section list.
+                let mut nav = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(vec2(10.0, 16.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+                nav.spacing_mut().item_spacing.y = 2.0;
+                nav.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Settings").font(FontId::new(15.0, semibold())).color(t.text));
+                });
+                nav.add_space(12.0);
+                for s in Section::ALL {
+                    if self.place(&mut nav, s.label(), self.ui.settings_section == s).clicked() {
+                        self.ui.settings_section = s;
+                    }
                 }
-            }
 
-            // The pane.
-            let pane = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
-            let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(pane).layout(egui::Layout::top_down(egui::Align::Min)));
-            egui::ScrollArea::vertical().id_salt(("settings-pane", self.ui.settings_section)).auto_shrink(false).show(&mut ui, |ui| {
-                ui.add_space(20.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(PANE_PAD);
-                    ui.vertical(|ui| {
-                        let width = pane.width() - PANE_PAD * 2.0;
-                        ui.set_width(width);
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(egui::RichText::new(self.ui.settings_section.label()).font(FontId::new(20.0, semibold())).color(t.text));
-                        ui.add_space(16.0);
-                        match self.ui.settings_section {
-                            Section::General => self.general_settings(ui),
-                            Section::Appearance => self.appearance_settings(ui),
-                            Section::Playback => self.playback_settings(ui),
-                            Section::Queue => self.queue_settings(ui),
-                            Section::Output => self.output_settings(ui),
-                            Section::Offline => self.offline_settings(ui),
-                            Section::Library => self.library_settings(ui),
-                            Section::Account => self.account_settings(ui),
-                            Section::Experimental => self.experimental_settings(ui),
-                            Section::About => self.about(ui),
-                        }
-                        ui.add_space(24.0);
+                // The pane.
+                let pane = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
+                let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(pane).layout(egui::Layout::top_down(egui::Align::Min)));
+                egui::ScrollArea::vertical().id_salt(("settings-pane", self.ui.settings_section)).auto_shrink(false).show(&mut ui, |ui| {
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(PANE_PAD);
+                        ui.vertical(|ui| {
+                            let width = pane.width() - PANE_PAD * 2.0;
+                            ui.set_width(width);
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.label(egui::RichText::new(self.ui.settings_section.label()).font(FontId::new(20.0, semibold())).color(t.text));
+                            ui.add_space(16.0);
+                            match self.ui.settings_section {
+                                Section::General => self.general_settings(ui),
+                                Section::Appearance => self.appearance_settings(ui),
+                                Section::Playback => self.playback_settings(ui),
+                                Section::Queue => self.queue_settings(ui),
+                                Section::Output => self.output_settings(ui),
+                                Section::Offline => self.offline_settings(ui),
+                                Section::Library => self.library_settings(ui),
+                                Section::Account => self.account_settings(ui),
+                                Section::Experimental => self.experimental_settings(ui),
+                                Section::About => self.about(ui),
+                            }
+                            ui.add_space(24.0);
+                        });
                     });
                 });
             });
-        });
         if modal.should_close() {
             self.ui.overlay = None;
         }
@@ -408,14 +416,14 @@ impl OndApp {
             ui.add_space(6.0);
             note(
                 ui,
-                "With bit-perfect off, Ond shares the device with other apps, like any music app. On, it takes the device for Ond alone while it plays: other apps and system sounds go to another device, and samples reach it untouched. It's offered for DACs and other outputs that take the file's samples as they are; speakers, Bluetooth, AirPlay and software devices can't play bit-perfect.",
+                "Bit-perfect keeps a device for Ond alone while it plays and sends it the samples untouched. Speakers, Bluetooth, AirPlay and software devices can't play bit-perfect.",
             );
         });
         group(ui, "Volume and notices", |ui| {
             let (mut green, mut db, mut toast) = self.prefs.get(|s| (s.device_volume_green, s.device_volume_db, s.device_change_toast));
             let before = (green, db, toast);
-            let hint = "When the volume sets the device's own level, a green dot in the slider's knob says so.";
-            managed_switch(ui, self.prefs.managed("device_volume_green"), "Green dot on the slider in bit-perfect", hint, &mut green);
+            let hint = "A green dot in the volume slider's knob, in bit-perfect, when the slider sets the device's own level.";
+            managed_switch(ui, self.prefs.managed("device_volume_green"), "Show when the device sets the volume", hint, &mut green);
             let hint = "The device's own level beside the slider, in bit-perfect.";
             choice_row(ui, self.prefs.managed("device_volume_db"), "Show the level in dB", hint, &crate::settings::DbReadout::ALL, &mut db, |d| {
                 d.label().into()
@@ -501,13 +509,11 @@ impl OndApp {
         let inner = ui
             .scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(rect.left() + 54.0, top), pos2(rect.right() - 12.0, top + 400.0))), |ui| {
                 if d.can_bit_perfect() {
-                    // The same switch as the output panel's, green when on.
-                    let mut on = self.output.device_mode(d) == audio::PlaybackMode::BitPerfect;
+                    let mut mode = self.output.device_mode(d);
                     let changed = managed(ui, self.output.mode_locked(Some(&d.uid)), |ui| {
-                        setting(ui, "Bit-perfect", "", |ui| switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).changed()
+                        setting(ui, "Bit-perfect", "", |ui| crate::widgets::bit_perfect_switch(ui, &d.name, &mut mode)).changed()
                     });
                     if changed {
-                        let mode = if on { audio::PlaybackMode::BitPerfect } else { audio::PlaybackMode::Normal };
                         self.actions.push(Action::Output(OutputAction::DeviceMode(d.uid.clone(), mode)));
                     }
                 }
@@ -594,7 +600,9 @@ impl OndApp {
                     self.actions.push(Action::Offline(OfflineAction::Reveal));
                 }
             });
-            note(ui, "Downloads move to a new location the next time Ond starts.");
+            if let Some(to) = self.prefs.get(|s| s.offline_move_from.is_some().then(|| s.offline_dir.clone()).flatten()) {
+                note(ui, &format!("Downloads move to {} the next time Ond starts.", to.display()));
+            }
         });
     }
 
@@ -617,7 +625,8 @@ impl OndApp {
                     }
                 } else {
                     let can = self.session.client.is_some() && self.session.online;
-                    if ui.add_enabled_ui(can, |ui| secondary(ui, "Sync now")).inner.clicked() {
+                    let why = if self.session.work_offline { "Offline mode" } else { "Not connected" };
+                    if ui.add_enabled_ui(can, |ui| secondary(ui, "Sync now")).inner.on_disabled_hover_text(why).clicked() {
                         self.actions.push(Action::SyncNow);
                     }
                 }
@@ -744,162 +753,27 @@ impl OndApp {
             if !self.session.server_info.is_empty() {
                 setting(ui, "Version", "", |ui| value(ui, &self.session.server_info, t.muted));
             }
-            let (text, color) = if self.session.online { ("Connected", t.ok) } else { ("Can't reach the server", t.warn) };
+            let (text, color) = if self.session.work_offline {
+                ("Offline mode", t.muted)
+            } else if self.session.online {
+                ("Connected", t.ok)
+            } else {
+                ("Can't reach the server", t.warn)
+            };
             setting(ui, "Status", "", |ui| value(ui, text, color));
         });
         group(ui, "Signed in", |ui| {
             setting(ui, &user, "Signing out forgets the saved password. Downloads stay on this computer.", |ui| {
-                if secondary_danger(ui, "Sign out").clicked() {
-                    self.actions.push(Action::SignOut);
-                    self.ui.overlay = None;
+                if secondary_danger(ui, "Sign out…").clicked() {
+                    self.actions.push(Action::AskSignOut);
                 }
             });
         });
     }
 }
 
-/// A titled block of rows with hairlines between them: the title, 4, the
-/// rows, 20 to the next.
-fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
-    section(ui, title);
-    ui.add_space(4.0);
-    ui.data_mut(|d| d.insert_temp(first_row(), true));
-    body(ui);
-    ui.add_space(20.0);
-}
-
-/// Set by a [`group`] and cleared by its first row, which has no hairline above.
-fn first_row() -> egui::Id {
-    egui::Id::unique("settings-first-row")
-}
-
-/// The hairline above a row, unless it's the first in its group.
-fn divider(ui: &mut Ui) {
-    let first = ui.data_mut(|d| std::mem::replace(d.get_temp_mut_or(first_row(), true), false));
-    if !first {
-        let t = Tokens::of(ui);
-        let (x, y) = (ui.cursor().left(), ui.cursor().top());
-        ui.painter().hline(x..=x + ui.available_width(), y, egui::Stroke::new(1.0, t.hairline));
-    }
-}
-
-/// Every control fits this height (a button is the tallest).
-const CONTROL_H: f32 = 30.0;
-/// Space above and below a row's content.
-const ROW_PAD: f32 = 6.0;
-/// The least room between a row's text and its control.
-const ROW_GAP: f32 = 24.0;
-/// The most of a name a row keeps beside its control before putting the
-/// control under it (longer names wrap).
-const NAME_W: f32 = 160.0;
 /// Sliders in rows (with their readout beside them).
 const SLIDER_W: f32 = 160.0;
-
-/// What a row says on its left.
-#[derive(Default, Clone, Copy)]
-struct Head<'a> {
-    label: &'a str,
-    /// A small accent note after the label ("in use").
-    tag: Option<&'a str>,
-    /// Muted text under the label, wrapped; empty for none.
-    hint: &'a str,
-    /// The hint is a path: one line, elided, never wrapped.
-    path: bool,
-}
-
-/// One setting: its name and a short hint on the left, its control on the
-/// right, level with the name. Every page is built from these, so controls
-/// share one right edge and hints never run under them. The control is added
-/// right to left (its last part first).
-fn setting<R>(ui: &mut Ui, label: &str, hint: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
-    row_with(ui, Head { label, hint, ..Default::default() }, control)
-}
-
-/// A row for a setting set in managed.json when `locked`: greyed, tagged
-/// as set there, and its control can't be used.
-fn managed<R>(ui: &mut Ui, locked: bool, row: impl FnOnce(&mut Ui) -> R) -> R {
-    if !locked {
-        return row(ui);
-    }
-    ui.scope(|ui| {
-        ui.disable();
-        row(ui)
-    })
-    .inner
-}
-
-/// [`setting`] with the whole [`Head`].
-fn row_with<R>(ui: &mut Ui, mut head: Head<'_>, control: impl FnOnce(&mut Ui) -> R) -> R {
-    // Rows are only ever disabled whole by `managed`.
-    if !ui.is_enabled() && head.tag.is_none() {
-        head.tag = Some(crate::managed::LOCKED);
-    }
-    let t = Tokens::of(ui);
-    divider(ui);
-    let (left, top, width) = (ui.cursor().left(), ui.cursor().top(), ui.available_width());
-    // The name's first line level with the control, and as much room below
-    // the text as above it.
-    let line = ui.ctx().fonts_mut(|f| f.row_height(&FontId::proportional(13.0)));
-    let inset = (CONTROL_H - line) / 2.0;
-    // The control goes beside the name when both fit (it did last frame), and
-    // under it in a narrow window.
-    let key = ui.scope_id().with(("setting", head.label));
-    let name_w = ui.painter().layout_no_wrap(head.label.to_owned(), FontId::proportional(13.0), t.text).size().x.min(NAME_W);
-    let fits = |w: f32| w + ROW_GAP + name_w <= width;
-    let beside = fits(ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(0.0));
-    let (out, used, bottom) = if beside {
-        let strip = Rect::from_min_size(pos2(left, top + ROW_PAD), vec2(width, CONTROL_H));
-        let (out, used) = row_control(ui, strip, control);
-        let room = (width - if used > 0.0 { used + ROW_GAP } else { 0.0 }).max(80.0);
-        let text = row_text(ui, head, pos2(left, strip.top() + inset), room);
-        (out, used, (text + inset).max(strip.bottom()) + ROW_PAD)
-    } else {
-        let text = row_text(ui, head, pos2(left, top + ROW_PAD + inset), width);
-        let strip = Rect::from_min_size(pos2(left, text + 8.0), vec2(width, CONTROL_H));
-        let (out, used) = row_control(ui, strip, control);
-        (out, used, strip.bottom() + ROW_PAD)
-    };
-    ui.data_mut(|d| d.insert_temp(key, used));
-    if fits(used) != beside {
-        ui.ctx().request_discard("a setting's control moved beside or under its name");
-    }
-    ui.advance_cursor_after_rect(Rect::from_min_max(pos2(left, top), pos2(left + width, bottom)));
-    out
-}
-
-/// A row's control, right-aligned in `strip`, and how wide it came out.
-fn row_control<R>(ui: &mut Ui, strip: Rect, control: impl FnOnce(&mut Ui) -> R) -> (R, f32) {
-    let mut right = ui.new_child(egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::right_to_left(egui::Align::Center)));
-    right.spacing_mut().item_spacing.x = 6.0;
-    let out = control(&mut right);
-    (out, right.min_rect().width())
-}
-
-/// A row's name (and tag) and hint from `at`, `room` wide. Returns where they end.
-fn row_text(ui: &mut Ui, head: Head<'_>, at: egui::Pos2, room: f32) -> f32 {
-    let t = Tokens::of(ui);
-    let mut text =
-        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(at, vec2(room, f32::INFINITY))).layout(egui::Layout::top_down(egui::Align::Min)));
-    text.spacing_mut().item_spacing.y = 3.0;
-    let mut job = egui::text::LayoutJob::default();
-    job.append(head.label, 0.0, egui::TextFormat::simple(FontId::proportional(13.0), t.text));
-    if let Some(tag) = head.tag {
-        job.append(tag, 6.0, egui::TextFormat::simple(FontId::proportional(11.0), t.accent));
-    }
-    job.wrap.max_width = room;
-    let label = text.painter().layout_job(job);
-    text.add(egui::Label::new(label));
-    if !head.hint.is_empty() {
-        let hint = crate::keys::shown(head.hint);
-        if head.path {
-            let g = crate::widgets::elide(&text, &hint, FontId::proportional(12.0), t.muted, room);
-            text.add(egui::Label::new(g));
-        } else {
-            text.add(egui::Label::new(egui::RichText::new(hint).size(12.0).color(t.muted)).wrap());
-        }
-    }
-    text.min_rect().bottom()
-}
 
 /// A [`setting`] that's a switch. True when it changed.
 fn switch_row(ui: &mut Ui, label: &str, hint: &str, on: &mut bool) -> bool {

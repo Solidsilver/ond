@@ -257,7 +257,7 @@ impl OndApp {
                     Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
                     None => "Connected".to_owned(),
                 },
-                ServerState::Offline { .. } => "Can't reach server · retrying".to_owned(),
+                ServerState::Offline { .. } => "Can't reach the server · retrying".to_owned(),
                 ServerState::Connecting { .. } => "Connecting…".to_owned(),
                 ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
                 ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
@@ -313,15 +313,20 @@ impl OndApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…", "") {
+            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…") {
                 self.actions.push(Action::SignInAgain);
             }
             let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
-            if !self.prefs.managed("work_offline") && menu_item(ui, label, "") {
+            if !self.prefs.managed("work_offline") && menu_item(ui, label) {
                 self.actions.push(Action::Offline(super::OfflineAction::WorkOffline(on)));
             }
-            if menu_item(ui, "Sign out", "") {
-                self.actions.push(Action::SignOut);
+            // Apart from "Go offline", which it sits under: one is undone
+            // with a click, the other with the password.
+            ui.add_space(2.0);
+            ui.separator();
+            ui.add_space(2.0);
+            if menu_item(ui, "Sign out…") {
+                self.actions.push(Action::AskSignOut);
             }
             ui.add_space(2.0);
         });
@@ -488,8 +493,8 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::offline_page::M
     resp
 }
 
-/// A menu row with a right-aligned shortcut hint. True when chosen.
-fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
+/// A row in the server menu. True when chosen.
+fn menu_item(ui: &mut Ui, label: &str) -> bool {
     let t = Tokens::of(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -498,9 +503,6 @@ fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
         }
         crate::widgets::focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
         ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
-        if !keys.is_empty() {
-            ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), t.muted);
-        }
     }
     let label = label.to_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
@@ -569,7 +571,7 @@ impl ServerState {
         match self {
             ServerState::Connected { host } => host,
             ServerState::Syncing { label, .. } => label,
-            ServerState::Offline { .. } => "Can't reach server",
+            ServerState::Offline { .. } => "Can't reach the server",
             ServerState::Connecting { .. } => "Connecting…",
             ServerState::SignIn { .. } => "Sign in again",
             ServerState::WorkingOffline { .. } => "Offline mode",
@@ -600,7 +602,13 @@ impl ServerState {
             ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
             ServerState::Syncing { fraction: None, .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                ui.ctx().request_repaint_after(SPIN);
+                // A sync with no progress to report can stall for good; the
+                // spinner stops rather than holding the window at 20 fps.
+                let now = ui.input(|i| i.time);
+                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(syncing_since_id(), || now));
+                if now - since < SYNC_SPIN_SECS {
+                    ui.ctx().request_repaint_after(SPIN);
+                }
             }
             ServerState::Connecting { .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
@@ -620,6 +628,9 @@ impl ServerState {
         if !matches!(self, ServerState::Connecting { .. }) {
             ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));
         }
+        if !matches!(self, ServerState::Syncing { fraction: None, .. }) {
+            ui.data_mut(|d| d.remove::<f64>(syncing_since_id()));
+        }
     }
 }
 
@@ -627,6 +638,14 @@ impl ServerState {
 const SPIN: std::time::Duration = std::time::Duration::from_millis(50);
 /// How long the Connecting spinner turns (the ping gives up after 10 s).
 const CONNECT_SPIN_SECS: f64 = 15.0;
+
+/// How long the indeterminate Syncing spinner turns before it goes still.
+const SYNC_SPIN_SECS: f64 = 30.0;
+
+/// When the footer started showing an indeterminate Syncing.
+fn syncing_since_id() -> egui::Id {
+    egui::Id::unique("server-syncing-since")
+}
 
 /// When the footer started showing Connecting.
 fn connecting_since_id() -> egui::Id {

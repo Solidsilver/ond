@@ -30,6 +30,9 @@ const GROUP_COUNT_FROM_RIGHT: f32 = 22.0;
 const GROUP_NAME_CLEAR: f32 = 80.0;
 /// The space after an open group's tracks.
 const GROUP_GAP: f32 = 4.0;
+/// "until 8:05 PM" in from the right, level with the chevrons and durations
+/// below it rather than against the column's edge.
+const UNTIL_INSET: f32 = 8.0;
 
 /// A line of Up Next, as laid out: a group's heading (and whether it's
 /// open), a track (its place in `upcoming`), the gap after a
@@ -82,8 +85,9 @@ impl ViewCtx<'_> {
             if let Some(until) = &until {
                 // Beside the switch when there's room, else on its own line.
                 let w = ui.painter().layout_no_wrap(until.clone(), FontId::proportional(11.0), t.muted).size().x;
-                if ui.available_width() >= w + 8.0 {
+                if ui.available_width() >= w + 8.0 + UNTIL_INSET {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(UNTIL_INSET);
                         ui.label(egui::RichText::new(until).size(11.0).color(t.muted)).on_hover_text("When the queue runs out");
                     });
                 } else {
@@ -94,7 +98,7 @@ impl ViewCtx<'_> {
         if let Some(until) = until.filter(|_| until_below) {
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                ui.add_space(4.0);
+                ui.add_space(UNTIL_INSET);
                 ui.label(egui::RichText::new(until).size(11.0).color(t.muted)).on_hover_text("When the queue runs out");
             });
         }
@@ -159,11 +163,7 @@ impl ViewCtx<'_> {
     pub(super) fn up_next(&mut self, ui: &mut Ui, viewport: Rect, now: chrono::NaiveTime, remaining: f64) {
         let t = Tokens::of(ui);
         if self.player.queue.upcoming.is_empty() {
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Nothing up next").color(t.muted));
-                ui.label(egui::RichText::new(crate::keys::shown("⌥⏎ play next · ⇧⏎ add to queue")).size(11.0).color(t.muted));
-            });
+            crate::widgets::empty_state(ui, Icon::Queue, "Nothing up next", "⌥⏎ play next · ⇧⏎ add to queue");
             return;
         }
         // Borrowed from the player, not from `self`, so rows can take `&mut self`.
@@ -281,8 +281,7 @@ impl ViewCtx<'_> {
     pub(super) fn history(&mut self, ui: &mut Ui, viewport: Rect) {
         let t = Tokens::of(ui);
         if self.player.queue.history.is_empty() {
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| ui.label(egui::RichText::new("Nothing played yet").color(t.muted)));
+            crate::widgets::empty_state(ui, Icon::Clock, "Nothing played yet", "");
             return;
         }
         let player = self.player;

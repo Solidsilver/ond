@@ -148,9 +148,10 @@ impl OndApp {
         ] {
             // Until the cover's look is known: the dark disc that suits any cover.
             let on = under(blurred, r, rect).map_or(OnArt { fg: ON_ART, scrim: Some(scrim()) }, |u| OnArt::pick(u, ON_ART, over_art::ICON));
-            if let Some(scrim) = on.scrim {
-                ui.painter().circle_filled(r.center(), 13.0, scrim);
-            }
+            // A faint disc in the opposite tone even when the glyph reads on the
+            // art alone: the corners then look like buttons on any cover.
+            let disc = on.scrim.unwrap_or_else(|| if on.fg == ON_ART { scrim().gamma_multiply(0.35) } else { over_art::LIGHT.gamma_multiply(0.45) });
+            ui.painter().circle_filled(r.center(), 13.0, disc);
             let mut b = ui.new_child(UiBuilder::new().max_rect(r));
             on.apply(&mut b);
             if icons::sized_button(&mut b, icon, label, r.size(), 10.0, Some(on.fg)).clicked() {
@@ -168,7 +169,7 @@ impl OndApp {
             .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, Some(crate::output::SLIDER_W));
+                    let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.output_control(), Some(crate::output::SLIDER_W));
                     self.output_control_out(out);
                     // The same few characters of signal path as the full window's display.
                     let origin = self.player.playing_from.as_ref().map(|s| super::playing::origin(s, &self.cache));
@@ -183,7 +184,9 @@ impl OndApp {
                         if !self.session.online && self.session.settings.is_some() {
                             let (g, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                             icons::paint(ui.painter(), g, Icon::Offline, t.muted);
-                            resp.on_hover_text("Can't reach the server. Downloaded music still plays.");
+                            // Offline by choice isn't a failure to reach the server.
+                            let why = if self.session.work_offline { "Offline mode" } else { "Can't reach the server" };
+                            resp.on_hover_text(format!("{why}. Downloaded music still plays."));
                         }
                     });
                 });

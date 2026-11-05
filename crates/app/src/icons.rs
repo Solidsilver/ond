@@ -32,7 +32,7 @@ pub enum Icon {
     MiniPlayer,
     /// Arrows pointing out to the corners: back to the full window.
     Expand,
-    /// A tall window with artwork on top and lines below: the Player.
+    /// A square window with the cover and a seek line under it: the Player.
     Player,
     /// Settings.
     Gear,
@@ -46,8 +46,6 @@ pub enum Icon {
     Lyrics,
     /// Offline.
     Download,
-    /// A filled circle with a down arrow: on this computer.
-    Downloaded,
     /// A cloud with a slash: the server can't be reached.
     Offline,
     /// Love, not yet given.
@@ -101,13 +99,13 @@ fn heart_points(n: usize) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// Paints `icon` centred in `rect`.
 /// A speaker's body and cone, for the volume icons. Filled in two convex
 /// parts: as one shape it isn't convex, and a convex fill draws it wrong.
 fn speaker(tri: &impl Fn(Vec<Pos2>) -> Shape, p: &impl Fn(f32, f32) -> Pos2) -> [Shape; 2] {
     [tri(vec![p(-0.95, -0.28), p(-0.5, -0.28), p(-0.5, 0.28), p(-0.95, 0.28)]), tri(vec![p(-0.55, -0.28), p(-0.1, -0.72), p(-0.1, 0.72), p(-0.55, 0.28)])]
 }
 
+/// Paints `icon` centred in `rect`.
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let r = rect.width().min(rect.height()) / 2.0;
@@ -207,11 +205,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
             painter.rect_filled(Rect::from_min_max(p(0.05, 0.05), p(0.6, 0.45)), r * 0.08, color);
         }
+        // The Player's own layout in a square window: the cover, then the
+        // seek line under it. A tall outline read as a phone.
         Icon::Player => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.6, -0.9), p(0.6, 0.9)), r * 0.15, line, egui::StrokeKind::Middle);
-            painter.rect_filled(Rect::from_min_max(p(-0.35, -0.65), p(0.35, 0.05)), r * 0.06, color);
-            painter.line_segment([p(-0.35, 0.35), p(0.35, 0.35)], line);
-            painter.line_segment([p(-0.35, 0.62), p(0.15, 0.62)], line);
+            painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.85), p(0.85, 0.85)), r * 0.2, line, egui::StrokeKind::Middle);
+            painter.rect_filled(Rect::from_min_max(p(-0.45, -0.55), p(0.45, 0.2)), r * 0.08, color);
+            painter.line_segment([p(-0.45, 0.5), p(0.45, 0.5)], line);
         }
         Icon::Expand => {
             painter.add(Shape::line(vec![p(0.15, -0.8), p(0.8, -0.8), p(0.8, -0.15)], line));
@@ -335,12 +334,6 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.0, -0.85), p(0.0, 0.3)], line);
             painter.add(Shape::line(vec![p(-0.45, -0.15), p(0.0, 0.3), p(0.45, -0.15)], line));
             painter.add(Shape::line(vec![p(-0.8, 0.35), p(-0.8, 0.8), p(0.8, 0.8), p(0.8, 0.35)], line));
-        }
-        Icon::Downloaded => {
-            let thin = Stroke::new((r * 0.16).max(1.0), color);
-            painter.circle_stroke(c, r * 0.88, thin);
-            painter.line_segment([p(0.0, -0.45), p(0.0, 0.38)], thin);
-            painter.add(Shape::line(vec![p(-0.32, 0.08), p(0.0, 0.4), p(0.32, 0.08)], thin));
         }
         Icon::Offline => {
             // The slash crosses the cloud with a gap either side of it.

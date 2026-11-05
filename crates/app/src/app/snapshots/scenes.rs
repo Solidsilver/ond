@@ -40,7 +40,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).player.playing_from = Some(audio::TrackSource { url: "file:///downloads/t.flac".into(), ..Default::default() });
     h.run_steps(4);
     if !click_label(h, "Signal path", egui::Rect::from_min_size(pos2(0.0, player.y - 40.0), vec2(player.x, 40.0))) {
-        eprintln!("  (player's format pill not found)");
+        panic!("(player's format pill not found)");
     }
     h.run_steps(4);
     s.shoot(h, "player-signal-path");
@@ -257,7 +257,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Album(album_id(0)));
     let header = egui::Rect::from_min_max(pos2(216.0, 52.0), pos2(1120.0, 300.0));
     if !hover_label(h, "likely upsampled", header) {
-        eprintln!("  (verdict chip not found by label)");
+        panic!("(verdict chip not found by label)");
     }
     h.run_steps(30);
     s.shoot(h, "album-verdict-hover");
@@ -331,7 +331,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
             h.hover_at(p);
             h.run_steps(6);
         }
-        None => eprintln!("  (track menu didn't open; add-to-playlist shows the page)"),
+        None => panic!("(track menu didn't open; add-to-playlist shows the page)"),
     }
     s.shoot(h, "add-to-playlist");
 
@@ -347,7 +347,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
             h.hover_at(p);
             h.run_steps(6);
         }
-        None => eprintln!("  (track menu didn't open; rating-menu shows the page)"),
+        None => panic!("(track menu didn't open; rating-menu shows the page)"),
     }
     s.shoot(h, "rating-menu");
 
@@ -385,6 +385,10 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).ui.overlay = Some(Overlay::Delete { id: "pl-0".into(), name: "Late night, low volume".into() });
     s.shoot(h, "delete-playlist");
 
+    reset(h, FULL, Route::Recent);
+    app_mut(h).ui.overlay = Some(Overlay::SignOut { host: "music.example.com".into(), from_settings: false });
+    s.shoot(h, "sign-out");
+
     // Settings › Queue › Playing something new: Ask.
     reset(h, FULL, Route::Recent);
     app_mut(h).ui.overlay =
@@ -395,14 +399,14 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 900.0));
     if !click_label(h, "Connected to", sidebar) {
-        eprintln!("  (server status not found by label)");
+        panic!("(server status not found by label)");
     }
     h.run_steps(3);
     s.shoot(h, "server-popover");
 
     reset(h, FULL, Route::Recent);
     if !hover_label(h, "Keyboard shortcuts", sidebar) {
-        eprintln!("  (help button not found by label)");
+        panic!("(help button not found by label)");
     }
     h.run_steps(30);
     s.shoot(h, "footer-help-hover");
@@ -444,7 +448,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "origin-downloaded");
     if !click_label(h, "Signal path", egui::Rect::from_min_size(Pos2::ZERO, vec2(FULL.x, 60.0))) {
-        eprintln!("  (format pill not found)");
+        panic!("(format pill not found)");
     }
     h.run_steps(4);
     s.shoot(h, "origin-downloaded-path");
@@ -466,7 +470,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "diagnostics-bar");
     let bar = egui::Rect::from_min_max(pos2(0.0, 870.0), pos2(1440.0, 900.0));
     if !hover_label(h, "Engine:", bar) {
-        eprintln!("  (diagnostics segment not found by label)");
+        panic!("(diagnostics segment not found by label)");
     }
     h.run_steps(30);
     s.shoot(h, "diagnostics-bar-hover");
@@ -505,7 +509,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     ));
     h.run_steps(2);
     if !click_label(h, "Ond 0.5.0 is available", egui::Rect::from_min_size(Pos2::ZERO, vec2(320.0, FULL.y))) {
-        eprintln!("  (update notice not found)");
+        panic!("(update notice not found)");
     }
     h.run_steps(4);
     s.shoot(h, "update-available-about");
@@ -595,6 +599,14 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).data.tracks.all = all;
 
     reset(h, FULL, Route::Offline);
+    s.shoot(h, "offline-pins");
+
+    reset(h, FULL, Route::Offline);
+    {
+        let app = app_mut(h);
+        let snap = offline::Snapshot { pins: Vec::new(), used_bytes: 0, ..(*app.downloads.snap).clone() };
+        app.downloads.snap = Arc::new(snap);
+    }
     s.shoot(h, "offline-empty");
 
     // The list of downloads couldn't be read: a made-up snapshot, with the
@@ -604,7 +616,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).downloads.snap = Arc::new(set_aside_snapshot(&app_mut(h).downloads.snap));
     s.shoot(h, "offline-set-aside");
     if !click_label(h, "Remove them", egui::Rect::EVERYTHING) {
-        eprintln!("  (Remove them not found by label)");
+        panic!("(Remove them not found by label)");
     }
     s.shoot(h, "offline-set-aside-confirm");
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Offline));
@@ -717,7 +729,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     reset(h, FULL, Route::Recent);
     if !hover_label(h, "Signal path", lcd) {
-        eprintln!("  (readout not found by label)");
+        panic!("(readout not found by label)");
     }
     h.run_steps(30);
     s.shoot(h, "lcd-readout-hover");
@@ -731,7 +743,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "sidebar-syncing");
     let side = egui::Rect::from_min_max(pos2(0.0, 700.0), pos2(216.0, 900.0));
     if !hover_label(h, "Syncing tracks", side) {
-        eprintln!("  (sync status not found by label)");
+        panic!("(sync status not found by label)");
     }
     h.run_steps(30);
     s.shoot(h, "sidebar-syncing-hover");

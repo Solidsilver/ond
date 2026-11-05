@@ -7,6 +7,7 @@ mod panel;
 mod readout;
 mod volume;
 
+pub use panel::ControlIn;
 pub use readout::{Readout, paint_readout};
 
 use crate::icons::Icon;
@@ -33,7 +34,7 @@ pub struct Outputs {
     devices: Vec<DeviceInfo>,
     current: Option<String>,
     signal: Option<SignalPath>,
-    /// "Playback settings…" was clicked in the popup this frame.
+    /// "Output settings…" was clicked in the popup this frame.
     wants_settings: bool,
     /// The device's own volume, while bit-perfect holds a device that has one.
     device_volume: Option<DeviceVolume>,
@@ -59,7 +60,7 @@ pub struct Outputs {
 /// What the output control asks of the app this frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct ControlOut {
-    /// "Playback settings…" was chosen.
+    /// "Output settings…" was chosen.
     pub settings: bool,
     /// Ond's own volume (Normal mode), 0..=1.
     pub volume: Option<f32>,

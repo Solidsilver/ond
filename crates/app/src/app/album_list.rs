@@ -9,7 +9,7 @@ use super::table::{Head, Width};
 use super::track_row::{TrackRow, col};
 use super::view_ctx::ViewCtx;
 use super::virtual_list::{VirtualList, near};
-use super::{Action, AlbumSort, QueueAction};
+use super::{Action, AlbumSort};
 use crate::nav::Route;
 use crate::theme::Tokens;
 use crate::widgets::elide;
@@ -62,8 +62,8 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// One album's row. Click opens it, double-click plays it, right-click
-    /// has the rest (as its tile does).
+    /// One album's row. Click opens it, right-click has the rest (Play
+    /// among them) (as its tile does).
     fn album_row(&mut self, ui: &mut Ui, t: &Tokens, idx: usize) {
         let row = TrackRow::new(ui, ROW_H, Sense::click());
         // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
@@ -96,9 +96,7 @@ impl ViewCtx<'_> {
             ui.painter().galley(pos2(c.added.left() + col::INSET, row.cy() - g.size().y / 2.0), g, t.muted);
         }
         row.describe(false, || format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist")));
-        if row.resp.double_clicked() {
-            self.actions.push(Action::Album(album.id.clone(), QueueAction::Play { start: 0 }));
-        } else if row.resp.clicked() {
+        if row.resp.clicked() {
             self.actions.push(Action::Go(Route::Album(album.id.clone())));
         }
         let kept = pin.is_some();

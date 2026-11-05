@@ -4,7 +4,7 @@
 //! (show a notice, analyse a track, check the connection) comes back as
 //! [`Note`]s.
 
-use crate::queue::{Queue, Source};
+use crate::queue::{OnPlay, Queue, Source};
 use audio::{Command, EngineHandle, PlayState, TrackSource};
 use library::Track;
 use std::time::Duration;
@@ -183,8 +183,13 @@ impl Player {
             }
             audio::Event::Seeked { .. } => self.pending_seek = None,
             // The engine ran out of queued tracks. If the queue has more (the next one
-            // was named too late to play gaplessly), carry on from there.
-            audio::Event::Ended { .. } => {
+            // was named too late to play gaplessly), carry on from there. Only
+            // for the current item: the user may have started another in the
+            // moment between the engine draining the old one and this arriving.
+            audio::Event::Ended { token, .. } => {
+                if self.queue.current.as_ref().is_none_or(|c| c.uid != *token) {
+                    return;
+                }
                 if self.queue.advance().is_some() {
                     self.start_current(cx);
                 } else {
@@ -362,18 +367,34 @@ impl Player {
 
     /// Applies a queue action once the tracks are known.
     pub fn queue_tracks(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, cx: &mut Ctx<'_>) {
+        self.enqueue(tracks, source, action, None, cx);
+    }
+
+    /// [`queue_tracks`](Self::queue_tracks), with what playing now does to
+    /// the tracks the user added given for this once (the answer when the
+    /// queue asks).
+    pub fn queue_tracks_with(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, on_play: OnPlay, cx: &mut Ctx<'_>) {
+        self.enqueue(tracks, source, action, Some(on_play), cx);
+    }
+
+    /// `on_play`: `None` plays now as the queue's preference says.
+    fn enqueue(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, on_play: Option<OnPlay>, cx: &mut Ctx<'_>) {
         if tracks.is_empty() {
             return;
         }
+        let play_now = |q: &mut Queue, tracks: Vec<Track>, start: usize, source: Source| match on_play {
+            Some(on_play) => q.play_now_with(tracks, start, source, on_play),
+            None => q.play_now(tracks, start, source),
+        };
         match action {
             QueueAction::Play { start } => {
-                self.queue.play_now(tracks, start, source);
+                play_now(&mut self.queue, tracks, start, source);
                 self.start_current(cx);
             }
             QueueAction::Shuffle => {
                 let mut tracks = tracks;
                 shuffle(&mut tracks);
-                self.queue.play_now(tracks, 0, source);
+                play_now(&mut self.queue, tracks, 0, source);
                 self.start_current(cx);
             }
             QueueAction::PlayNext => {
@@ -559,6 +580,10 @@ mod tests {
             let q = &self.player.queue;
             q.current.iter().chain(q.upcoming.iter()).find(|i| i.track.id == id).map(|i| i.uid).unwrap()
         }
+        /// The engine's word that `id`, a current or upcoming item, played out.
+        fn ended(&self, id: &str) -> audio::Event {
+            audio::Event::Ended { track_id: id.into(), token: self.uid_of(id) }
+        }
     }
 
     #[test]
@@ -655,7 +680,7 @@ mod tests {
         r.player.stop_on_unplayable = true;
         r.sources.unplayable = ["b".to_owned()].into();
         r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
-        let ended = audio::Event::Ended { track_id: "a".into(), token: 0 };
+        let ended = r.ended("a");
         r.run(|p, cx| p.handle_engine(&ended, cx));
         assert_eq!(r.engine.played(), ["a"]);
         assert!(r.engine.stopped());
@@ -677,11 +702,30 @@ mod tests {
     fn ended_carries_on_with_the_queue_or_stops() {
         let mut r = Rig::new();
         r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
-        let ended = audio::Event::Ended { track_id: "a".into(), token: 0 };
+        let ended = r.ended("a");
         r.run(|p, cx| p.handle_engine(&ended, cx));
         assert_eq!(r.engine.played(), ["a", "b"]);
+        let ended = r.ended("b");
         r.run(|p, cx| p.handle_engine(&ended, cx));
         assert_eq!(r.engine.played(), ["a", "b"], "nothing after the last");
+        assert!(r.player.queue.current.is_none());
+    }
+
+    #[test]
+    fn an_end_of_a_track_no_longer_playing_does_not_move_the_queue() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        let stale = r.ended("a");
+        // The user picks something else before the engine's word on `a` is read.
+        r.run(|p, cx| p.queue_tracks(tracks(&["x", "y"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.handle_engine(&stale, cx));
+        assert_eq!(r.engine.played(), ["a", "x"]);
+        assert_eq!(r.player.queue.current.as_ref().map(|c| c.track.id.as_str()), Some("x"), "still on what was picked");
+        assert_eq!(r.player.sent_next(), Some(r.uid_of("y")), "and y is still lined up");
+        // The new track's own end still carries on.
+        let ended = r.ended("x");
+        r.run(|p, cx| p.handle_engine(&ended, cx));
+        assert_eq!(r.engine.played(), ["a", "x", "y"]);
     }
 
     #[test]
@@ -698,6 +742,48 @@ mod tests {
         r.player.pending_seek = None;
         r.run(|p, cx| p.previous(cx));
         assert_eq!(r.engine.played(), ["a", "b", "a"]);
+    }
+
+    #[test]
+    fn previous_on_the_first_track_restarts_it_even_early_on() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.engine.state.set(Some(PlayState::Playing));
+        r.engine.position.set(1.0);
+        r.run(|p, cx| p.previous(cx));
+        assert!(matches!(r.engine.sent.borrow().last(), Some(Command::Seek(d)) if d.is_zero()));
+        assert_eq!(r.engine.played(), ["a"], "nothing to go back to");
+        assert_eq!(r.player.queue.current.as_ref().map(|c| c.track.id.as_str()), Some("a"));
+    }
+
+    #[test]
+    fn reset_stops_and_forgets_everything() {
+        let mut r = Rig::new();
+        r.sources.unplayable = ["a".to_owned()].into();
+        r.sources.waiting = true;
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        assert!(r.player.held);
+        r.player.pending_seek = Some(5.0);
+        r.run(|p, cx| p.reset(cx));
+        assert!(r.engine.stopped());
+        assert!(r.player.queue.current.is_none() && r.player.queue.upcoming.is_empty());
+        assert!(!r.player.held && r.player.pending_seek.is_none() && r.player.playing_from.is_none());
+        assert_eq!(r.player.sent_next(), None);
+        // Nothing held comes back when the server answers.
+        r.sources = FakeSources::default();
+        r.run(|p, cx| p.resume_held(cx));
+        assert!(r.engine.played().is_empty());
+    }
+
+    #[test]
+    fn with_nothing_playing_queue_edits_tell_the_engine_nothing() {
+        let mut r = Rig::new();
+        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Add, cx));
+        let mut sel = None;
+        r.run(|p, cx| p.edit(QueueEdit::Clear, &mut sel, cx));
+        assert!(r.player.queue.current.is_none());
+        assert!(r.engine.sent.borrow().is_empty(), "no next named with no current track");
+        assert_eq!(r.player.sent_next(), None);
     }
 
     #[test]
@@ -854,14 +940,11 @@ mod tests {
         // b starts and ends; then c, the last, fails to open: nothing to skip to, so it stays current.
         let b = r.uid_of("b");
         r.started(b, false);
-        r.run(|p, cx| p.handle_engine(&ended_of("b"), cx));
+        let ended = r.ended("b");
+        r.run(|p, cx| p.handle_engine(&ended, cx));
         r.run(|p, cx| p.handle_engine(&error(Some("c")), cx));
         assert_eq!(r.engine.played(), ["a", "b", "c"]);
         assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "c", "the last one stays current");
-    }
-
-    fn ended_of(id: &str) -> audio::Event {
-        audio::Event::Ended { track_id: id.into(), token: 0 }
     }
 
     #[test]

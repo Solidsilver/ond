@@ -215,7 +215,7 @@ impl OndApp {
     /// Acts on what the output control asked for this frame.
     pub(super) fn output_control_out(&mut self, out: crate::output::ControlOut) {
         if out.settings {
-            self.actions.push(Action::OpenSettings(super::settings_page::Section::Playback));
+            self.actions.push(Action::OpenSettings(super::settings_page::Section::Output));
         }
         if let Some(level) = out.volume {
             self.actions.push(Action::Output(OutputAction::Volume(level)));

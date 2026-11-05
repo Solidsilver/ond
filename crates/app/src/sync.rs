@@ -170,19 +170,21 @@ async fn write<T: Send + 'static>(
 /// server are removed. Returns every stored album. A failure part-way stores
 /// what came but removes nothing (an incomplete list proves nothing).
 ///
-/// A page shorter than [`ALBUM_PAGE`] ends the list (Navidrome serves full
-/// pages until the last).
+/// An empty page, or one with no album not already seen, ends the list.
 pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool, progress: impl Fn(usize)) -> Result<Vec<Album>, Failure> {
     let mut offset = 0;
     let mut seen = HashSet::new();
     loop {
         let page = fetch.album_page(ALBUM_PAGE, offset).await.map_err(|e| e.context("Sync failed"))?;
+        let before = seen.len();
         seen.extend(page.iter().map(|a| a.id.clone()));
         let n = page.len() as u32;
         write(lib, live, move |l| l.upsert_albums(page)).await.map_err(|e| e.context("Couldn't save the album list"))?;
-        // Only an empty page ends the list: a server may cap pages below what
-        // was asked for, and stopping early would prune everything after it.
-        if n == 0 {
+        // An empty page ends the list, not a short one: a server may cap pages
+        // below what was asked for, and stopping early would prune everything
+        // after it. A page with nothing new ends it too: a server that ignores
+        // `offset` would otherwise repeat the first page for ever.
+        if n == 0 || seen.len() == before {
             break;
         }
         offset += n;
@@ -319,7 +321,8 @@ async fn bulk_pass<F: Fetch>(
 }
 
 /// Fetches `ids` with [`CONCURRENCY`] requests in flight, storing them in
-/// batches. `None` when cancelled (what was fetched so far is kept).
+/// batches. `None` when cancelled; on cancel or on giving up after
+/// [`MAX_FAILURES`] failures in a row, what was fetched so far is kept.
 async fn per_album<F: Fetch>(
     lib: &Arc<Library>,
     fetch: &F,
@@ -362,6 +365,10 @@ async fn per_album<F: Fetch>(
         progress(Progress { done, total, unit: Unit::Albums });
         if failures >= MAX_FAILURES {
             running.abort_all();
+            // What was fetched before the server went away is still good.
+            if !batch.is_empty() {
+                write(lib, live, move |l| l.upsert_albums_tracks(batch)).await?;
+            }
             return Err(last_error.context("Track sync failed"));
         }
     }
@@ -454,6 +461,12 @@ pub(crate) mod tests {
         list_fails_at: Option<u32>,
         /// The server hands out at most this many albums per page.
         page_cap: Option<u32>,
+        /// The album list ignores `offset` and answers every request with the first page.
+        ignores_offset: bool,
+        /// The next this-many `search3` requests fail.
+        song_failures: Arc<AtomicUsize>,
+        /// `getAlbum` fails for these.
+        failing_albums: Arc<Mutex<HashSet<String>>>,
     }
 
     impl Fake {
@@ -467,6 +480,9 @@ pub(crate) mod tests {
                 cancel_after_pages: None,
                 list_fails_at: None,
                 page_cap: None,
+                ignores_offset: false,
+                song_failures: Arc::default(),
+                failing_albums: Arc::default(),
             }
         }
 
@@ -481,6 +497,7 @@ pub(crate) mod tests {
                 return Err(Failure::Network("server went away".into()));
             }
             let size = self.page_cap.map_or(size, |cap| size.min(cap));
+            let offset = if self.ignores_offset { 0 } else { offset };
             Ok(self.albums.lock().unwrap().iter().skip(offset as usize).take(size as usize).cloned().collect())
         }
 
@@ -490,6 +507,9 @@ pub(crate) mod tests {
 
         async fn album(&self, id: String) -> Result<AlbumWithSongs, Failure> {
             self.album_calls.lock().unwrap().push(id.clone());
+            if self.failing_albums.lock().unwrap().contains(&id) {
+                return Err(Failure::Network("server went away".into()));
+            }
             let a = self.albums.lock().unwrap().iter().find(|a| a.id == id).cloned().ok_or(Failure::Server("not found".into()))?;
             Ok(AlbumWithSongs { song: Fake::songs_of(&a), album: a })
         }
@@ -500,6 +520,9 @@ pub(crate) mod tests {
                 && pages > *after
             {
                 cancel.store(true, Ordering::SeqCst);
+            }
+            if self.song_failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                return Err(Failure::Network("hiccup".into()));
             }
             if !self.bulk {
                 return Ok(Vec::new());
@@ -668,6 +691,65 @@ pub(crate) mod tests {
         let fake = Fake::new(Vec::new(), false);
         let out = rt().block_on(run(lib, fake, Arc::default(), || true, |_| {}));
         assert!(matches!(out, Outcome::Failed(e) if e.message().contains("not found")));
+    }
+
+    #[test]
+    fn a_server_that_ignores_the_offset_ends_the_album_list() {
+        let lib = library(&[]);
+        let mut fake = Fake::new(many(600, 1), false);
+        fake.ignores_offset = true;
+        let stored = rt().block_on(albums(&lib, &fake, &|| true, |_| {})).unwrap();
+        assert_eq!(stored.len(), 500, "the one page it has, read once");
+    }
+
+    #[test]
+    fn a_bulk_page_that_fails_now_and_then_is_retried() {
+        let albums = many(300, 1);
+        let lib = library(&albums);
+        let fake = Fake::new(albums, true);
+        fake.song_failures.store(BULK_RETRIES - 1, Ordering::SeqCst);
+        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |_| {}));
+        assert_eq!(out, Outcome::Done { fetched: 0, bulk: true });
+        assert_eq!(fake.page_calls.load(Ordering::SeqCst), BULK_RETRIES, "the failures, then the page");
+        assert_eq!(lib.track_count().unwrap(), 300);
+    }
+
+    #[test]
+    fn a_bulk_page_that_keeps_failing_gives_up_and_keeps_its_place() {
+        let albums = many(300, 1);
+        let lib = library(&albums);
+        let fake = Fake::new(albums, true);
+        fake.song_failures.store(100, Ordering::SeqCst);
+        let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |_| {}));
+        assert!(matches!(&out, Outcome::Failed(e) if e.message().contains("hiccup")), "{out:?}");
+        assert_eq!(fake.page_calls.load(Ordering::SeqCst), BULK_RETRIES, "no more tries than allowed");
+        assert_eq!(lib.track_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn failures_between_successes_never_add_up_to_giving_up() {
+        // Every other album fails: far more than MAX_FAILURES in all, never in a row.
+        let albums = many(40, 1);
+        let lib = library(&albums);
+        let fake = Fake::new(albums.clone(), false);
+        fake.failing_albums.lock().unwrap().extend(albums.iter().step_by(2).map(|a| a.id.clone()));
+        let out = rt().block_on(run(lib.clone(), fake, Arc::default(), || true, |_| {}));
+        assert_eq!(out, Outcome::Done { fetched: 20, bulk: false });
+        assert_eq!(lib.track_count().unwrap(), 20);
+    }
+
+    #[test]
+    fn giving_up_still_stores_the_albums_fetched_before() {
+        // Five good albums, then every one fails: fewer than a write batch, so
+        // they are only stored if giving up flushes them.
+        let albums = many(30, 1);
+        let lib = library(&albums);
+        let fake = Fake::new(albums.clone(), false);
+        fake.failing_albums.lock().unwrap().extend(albums.iter().skip(5).map(|a| a.id.clone()));
+        let out = rt().block_on(run(lib.clone(), fake, Arc::default(), || true, |_| {}));
+        assert!(matches!(&out, Outcome::Failed(e) if e.message().contains("server went away")), "{out:?}");
+        assert_eq!(lib.track_count().unwrap(), 5);
+        assert_eq!(lib.album_stamps().unwrap().len(), 5);
     }
 
     fn stored_ids(lib: &Library) -> Vec<String> {

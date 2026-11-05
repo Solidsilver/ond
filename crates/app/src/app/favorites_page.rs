@@ -1,15 +1,18 @@
 //! Favorites: loved songs, albums and artists, one kind at a time.
 
 use super::Action;
-use super::browse::grid_metrics;
 use super::track_list::ListOpts;
 use super::view_ctx::ViewCtx;
+use super::virtual_list::VirtualList;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::queue::Source;
 use crate::theme::Tokens;
 use crate::widgets::elide;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+
+/// A loved artist's row.
+const ARTIST_ROW_H: f32 = 32.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FavTab {
@@ -61,24 +64,16 @@ impl ViewCtx<'_> {
                 if ids.is_empty() {
                     return empty(ui, "Albums you love show up here. Use the heart next to Play on an album.");
                 }
-                let (cols, tile) = grid_metrics(ui.available_width());
-                super::layout::into_gutter(ui, |ui| {
-                    egui::ScrollArea::vertical().id_salt("favorite-albums").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-                        for chunk in ids.chunks(cols) {
-                            self.grid_row(ui, chunk, tile);
-                        }
-                    })
-                });
+                self.album_grid(ui, "favorite-albums", None, &ids);
             }
             FavTab::Artists => {
                 if v.artists.is_empty() {
                     return empty(ui, "Artists you love show up here. Use the heart on an artist's page.");
                 }
-                super::layout::into_gutter(ui, |ui| {
-                    egui::ScrollArea::vertical().id_salt("favorite-artists").auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        for (id, name) in &v.artists {
-                            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), 32.0), Sense::click());
+                VirtualList::table("favorite-artists", None, ARTIST_ROW_H, v.artists.len()).show(ui, |ui, range| {
+                    for (id, name) in &v.artists[range] {
+                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), ARTIST_ROW_H), Sense::click());
+                        if ui.is_rect_visible(rect) {
                             if resp.hovered() {
                                 ui.painter().rect_filled(rect, 6.0, t.hover);
                             }
@@ -90,12 +85,12 @@ impl ViewCtx<'_> {
                                 Icon::HeartFilled,
                                 t.accent,
                             );
-                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-                            if resp.clicked() {
-                                self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: Some(id.clone()) }));
-                            }
                         }
-                    })
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+                        if resp.clicked() {
+                            self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: Some(id.clone()) }));
+                        }
+                    }
                 });
             }
         }

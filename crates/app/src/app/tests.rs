@@ -714,7 +714,8 @@ fn offline_the_queue_plays_only_what_is_downloaded() {
     // Nothing after it can play, so the engine isn't told about a next track.
     assert_eq!(app.player.sent_next(), None);
     // When it ends, the rest is skipped and playback stops cleanly.
-    app.handle_engine(audio::Event::Ended { track_id: "t-2".into(), token: 0 });
+    let token = app.player.queue.current.as_ref().unwrap().uid;
+    app.handle_engine(audio::Event::Ended { track_id: "t-2".into(), token });
     assert!(app.player.queue.current.is_none());
 
     // Back online: everything plays again, downloaded songs still from disk.
@@ -999,6 +1000,81 @@ fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
 }
 
 #[test]
+fn cancelling_a_sign_in_drops_what_the_connect_answers_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.login = Some(session::LoginForm { server: "http://127.0.0.1:9".into(), username: "u".into(), password: "p".into(), ..Default::default() });
+    let before = app.bridge.session();
+    app.apply(Action::SignIn);
+    assert!(app.login.as_ref().is_some_and(|f| f.busy));
+
+    app.apply(Action::CancelSignIn);
+    let form = app.login.as_ref().expect("still on the login screen");
+    assert!(!form.busy && form.error.is_none());
+    assert_eq!(form.password, "p", "kept, to try again as typed");
+    assert_ne!(app.bridge.session(), before, "the connect's session is over");
+
+    // The server answers at last, either way: stale, ignored.
+    app.handle(Msg::ConnectFailed { session: before, error: "The server didn't answer".into() });
+    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    let form = app.login.as_ref().expect("still on the login screen");
+    assert!(!form.busy && form.error.is_none());
+    assert!(!app.session.online && app.session.client.is_none());
+}
+
+#[test]
+fn a_failed_connect_from_before_a_sign_out_leaves_the_next_sign_in_online() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    // A connect waits on a keychain prompt; meanwhile the user signs out and in again.
+    let before = app.bridge.session();
+    app.sign_out();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    assert!(app.login.is_none() && app.session.online);
+    // The prompt is answered "deny" at last: stale, ignored.
+    app.handle(Msg::ConnectFailed { session: before, error: "No saved password. Sign in again.".into() });
+    assert!(app.session.online && app.session.client.is_some(), "still online");
+    assert!(app.login.is_none() && app.session.sign_in.is_none());
+}
+
+#[test]
+fn a_play_or_pin_waiting_for_tracks_is_dropped_on_sign_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    // Album 5's tracks aren't loaded: the play and the pin wait for them.
+    app.apply(Action::Album("al-5".into(), QueueAction::Play { start: 0 }));
+    app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-5".into()), true)));
+    assert!(!app.pending.is_empty() && !app.downloads.pending_pins.is_empty());
+
+    app.sign_out();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    // Back in, the user opens the album page: its tracks load.
+    let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks, fresh: true });
+    assert!(app.player.queue.current.is_none() && app.player.queue.upcoming.is_empty(), "nothing plays");
+    assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())), "nor is it downloaded");
+}
+
+#[test]
 fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
@@ -1196,7 +1272,7 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
     let playable = |app: &OndApp| super::playable(&app.session, &app.downloads, &app.cache, app.output.transcode().as_ref(), &t);
     assert!(playable(&app), "connecting counts as online");
 
-    app.handle(Msg::ConnectFailed("Wrong username or password.".into()));
+    app.handle(Msg::ConnectFailed { session: app.bridge.session(), error: "Wrong username or password.".into() });
     assert!(app.login.is_none(), "the library stays up");
     assert_eq!(app.session.sign_in.as_deref(), Some("Wrong username or password."));
     assert!(!app.session.connecting && !playable(&app));
@@ -1207,7 +1283,7 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
     assert!(form.closable && form.username == "luke");
     assert_eq!(form.error.as_deref(), Some("Wrong username or password."));
     // A sign-in from the form that fails stays on it.
-    app.handle(Msg::ConnectFailed("Couldn't reach the server.".into()));
+    app.handle(Msg::ConnectFailed { session: app.bridge.session(), error: "Couldn't reach the server.".into() });
     assert_eq!(app.login.as_ref().and_then(|f| f.error.as_deref()), Some("Couldn't reach the server."));
 
     let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();

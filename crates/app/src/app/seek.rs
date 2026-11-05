@@ -38,7 +38,7 @@ impl ViewCtx<'_> {
         let dur = self.duration_secs().filter(|d| *d > 0.0);
         let seekable = dur.is_some() && matches!(state, PlayState::Playing | PlayState::Paused | PlayState::Buffering);
         let resp = ui.interact(strip, ui.scope_id().with(id), if seekable { Sense::click_and_drag() } else { Sense::hover() });
-        let frac_at = |x: f32| f64::from(((x - bar.left()) / bar.width()).clamp(0.0, 1.0));
+        let frac_at = |x: f32| fraction_at(bar, x);
         if let Some(d) = dur {
             if (resp.dragged() || resp.drag_started())
                 && let Some(p) = resp.interact_pointer_pos()
@@ -111,6 +111,16 @@ impl ViewCtx<'_> {
     }
 }
 
+/// How far along `bar` the pointer at `x` is, 0 to 1. A bar with no width
+/// (Mini in a very narrow window) reads as 0, not NaN, which `clamp` would
+/// pass straight into a seek.
+fn fraction_at(bar: Rect, x: f32) -> f64 {
+    if bar.width() <= 0.0 {
+        return 0.0;
+    }
+    f64::from(((x - bar.left()) / bar.width()).clamp(0.0, 1.0))
+}
+
 /// Elapsed and remaining in whole seconds that add up to the length as the
 /// lists show it (whole seconds too): "2:21" and "−4:02" for 6:23.
 fn seek_times(shown: f64, duration: Option<f64>) -> (String, String) {
@@ -179,6 +189,17 @@ pub(super) fn paint_wave(painter: &egui::Painter, line: Rect, grid: &WaveGrid, b
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bar_with_no_width_seeks_to_the_start_not_nan() {
+        let flat = super::Rect::from_min_max(super::pos2(10.0, 0.0), super::pos2(10.0, 4.0));
+        let inverted = super::Rect::from_min_max(super::pos2(10.0, 0.0), super::pos2(4.0, 4.0));
+        assert_eq!(super::fraction_at(flat, 10.0), 0.0);
+        assert_eq!(super::fraction_at(inverted, 7.0), 0.0);
+        let bar = super::Rect::from_min_max(super::pos2(0.0, 0.0), super::pos2(100.0, 4.0));
+        assert_eq!(super::fraction_at(bar, 50.0), 0.5);
+        assert_eq!(super::fraction_at(bar, 500.0), 1.0);
+    }
+
     use super::*;
 
     #[test]

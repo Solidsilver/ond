@@ -40,6 +40,8 @@ struct Shared {
     write_error: Mutex<Option<String>>,
     /// A failure has been handed to the app; later ones are only logged.
     write_error_told: AtomicBool,
+    /// How long the writer waits for a burst of changes to end.
+    debounce: Duration,
 }
 
 /// The managed settings (see [`crate::managed`]) and what they lie over.
@@ -75,6 +77,12 @@ impl Prefs {
     /// at all is moved aside, never silently overwritten, and the defaults
     /// used instead.
     pub fn open(path: impl Into<PathBuf>) -> (Self, Loaded) {
+        Self::open_debounced(path, DEBOUNCE)
+    }
+
+    /// [`open`](Self::open) with the wait for a burst of changes to end set by
+    /// the caller, so a test needn't race the real one against the clock.
+    fn open_debounced(path: impl Into<PathBuf>, debounce: Duration) -> (Self, Loaded) {
         let path = path.into();
         let (settings, loaded) = match std::fs::read(&path) {
             Err(_) => (Settings::default(), Loaded::Missing),
@@ -101,7 +109,7 @@ impl Prefs {
         }
         managed.apply(&mut settings);
         let offline_was = adopted.iter().find(|(key, _)| key == "offline_dir").map(|(_, old)| serde_json::from_value(old.clone()).ok().flatten());
-        let prefs = Self::with(settings, path, Overlay { managed, users, offline_was });
+        let prefs = Self::with(settings, path, Overlay { managed, users, offline_was }, debounce);
         if !adopted.is_empty() {
             // Saved with what was adopted.
             prefs.lock().revision += 1;
@@ -110,7 +118,7 @@ impl Prefs {
         (prefs, loaded)
     }
 
-    fn with(settings: Settings, path: PathBuf, overlay: Overlay) -> Self {
+    fn with(settings: Settings, path: PathBuf, overlay: Overlay, debounce: Duration) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State { settings, revision: 0, written: 0, closing: false }),
             wake: Condvar::new(),
@@ -118,6 +126,7 @@ impl Prefs {
             overlay,
             write_error: Mutex::new(None),
             write_error_told: AtomicBool::new(false),
+            debounce,
         });
         let writer_shared = shared.clone();
         let writer = std::thread::Builder::new().name("settings-writer".into()).spawn(move || writer_loop(&writer_shared)).ok();
@@ -225,7 +234,7 @@ fn writer_loop(shared: &Shared) {
         }
         // Let a burst of changes settle: each new change restarts the wait.
         let seen = state.revision;
-        let (next, timeout) = shared.wake.wait_timeout(state, DEBOUNCE).unwrap_or_else(|e| e.into_inner());
+        let (next, timeout) = shared.wake.wait_timeout(state, shared.debounce).unwrap_or_else(|e| e.into_inner());
         state = next;
         if state.closing || !timeout.timed_out() || state.revision != seen {
             continue;
@@ -451,16 +460,31 @@ mod tests {
 
     #[test]
     fn a_burst_of_changes_is_one_write() {
+        // An hour's wait can't end mid-burst however the scheduler stalls; the
+        // last value reaches the file only when the handle goes away.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let (prefs, _) = Prefs::open(&path);
+        let (prefs, _) = Prefs::open_debounced(&path, Duration::from_secs(3600));
         for i in 0..50 {
             prefs.edit(|s| s.volume = i as f32 / 50.0);
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(!path.exists(), "nothing written while changes keep coming");
-        std::thread::sleep(DEBOUNCE * 3);
-        assert_eq!(read(&path).volume, 49.0 / 50.0, "the last value, once things settle");
+        drop(prefs);
+        assert_eq!(read(&path).volume, 49.0 / 50.0, "the last value, once the burst is over");
+    }
+
+    #[test]
+    fn a_change_is_written_once_the_wait_is_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let (prefs, _) = Prefs::open_debounced(&path, Duration::from_millis(10));
+        prefs.edit(|s| s.volume = 0.25);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(read(&path).volume, 0.25, "the writer thread saved it without a flush");
     }
 
     #[test]

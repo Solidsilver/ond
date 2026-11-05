@@ -3,6 +3,7 @@
 
 use super::{Action, OndApp, OutputAction, PrefsAction, WindowAction, sidebar};
 use crate::bridge::PlaylistEdit;
+use crate::failure::Failure;
 use crate::favorites::StarKind;
 use crate::keys::{Cmd, EditCmd};
 use crate::nav::Route;
@@ -142,23 +143,23 @@ impl OndApp {
         self.bridge.set_rating(self.session.client.clone(), id, rating, previous, seq);
     }
 
-    pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, seq: u64, error: Option<String>) {
+    pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, seq: u64, error: Option<Failure>) {
         match error {
             None => self.favorites.settled(kind, &id, seq),
             Some(e) => {
                 let track = self.favorites.view.songs.iter().find(|t| t.id == id).cloned().or_else(|| self.find_track(&id));
                 self.favorites.failed(kind, &id, on, seq, track.as_ref(), None);
-                self.show_error(format!("Couldn't save the heart: {e}"));
+                self.show_failure(e.context("Couldn't save the heart"));
             }
         }
     }
 
-    pub(super) fn rating_done(&mut self, id: String, previous: u8, seq: u64, error: Option<String>) {
+    pub(super) fn rating_done(&mut self, id: String, previous: u8, seq: u64, error: Option<Failure>) {
         match error {
             None => self.favorites.rating_settled(&id, seq),
             Some(e) => {
                 self.favorites.rating_failed(&id, previous, seq);
-                self.show_error(format!("Couldn't save the rating: {e}"));
+                self.show_failure(e.context("Couldn't save the rating"));
             }
         }
     }

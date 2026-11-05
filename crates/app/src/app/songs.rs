@@ -155,8 +155,11 @@ impl ViewCtx<'_> {
         let head_rect = super::table::head_rect(ui, marks.is_some());
         let cols = columns(head_rect);
         let head = |label, rect, right, col| Head { label, rect, right, sorts: Some(col) };
+        // The title column starts after the playing marker's gutter, so the
+        // header sits over the text.
+        let title_head = Rect::from_min_max(cols.title.min + vec2(col::PLAYING_W, 0.0), cols.title.max);
         let heads = [
-            head("Title", cols.title, false, Column::Title),
+            head("Title", title_head, false, Column::Title),
             head("Artist", cols.artist, false, Column::Artist),
             head("Album", cols.album, false, Column::Album),
             head("Time", cols.time, true, Column::Time),
@@ -194,10 +197,12 @@ impl ViewCtx<'_> {
             let c = columns(row.rect);
             let color = crate::widgets::track_color(t, playing, self.playable(tr));
             row.mark(ui, c.time.left() + col::INSET, self.downloads.snap.track(&tr.id));
+            // The marker has a gutter of its own, so titles line up whether or not one is playing.
             let mut title_x = c.title.left() + col::INSET;
             if playing {
-                title_x = row.playing(ui, t, title_x);
+                row.playing(ui, t, title_x);
             }
+            title_x += col::PLAYING_W;
             // A cell's text, inset at both ends.
             let cell = |ui: &Ui, text: &str, x: f32, w: f32, font: FontId, color| {
                 row.line(ui, x, w - 2.0 * col::INSET, text, font, color);

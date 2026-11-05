@@ -467,7 +467,11 @@ impl Gpu {
 
     /// Makes the two pictures at `size` (black) when the size changes, and
     /// hands back the old ones: this frame's feedback pass reads the last
-    /// picture from them, scaled, so a resize doesn't blank the view.
+    /// picture from them, scaled, so a resize doesn't blank the view. The
+    /// caller needn't keep the old pictures' views or bind group alive past
+    /// the encoder: `old` drops when the caller's frame ends, but wgpu's
+    /// refcounting keeps whatever a recorded pass references alive until the
+    /// submission finishes, so dropping them early is safe.
     fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) -> Option<Pictures> {
         if self.pictures.as_ref().is_none_or(|p| p.size != size) {
             let view = || {

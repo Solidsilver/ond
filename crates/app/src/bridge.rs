@@ -18,13 +18,13 @@ use subsonic::{AlbumListType, Client, Credentials};
 /// that part's handler matches its own group whole, so a message added to a
 /// group can't be left unhandled.
 pub enum Msg {
-    /// `session`: the bridge's session when the connect began; the app drops
-    /// it if the user signed out since.
     /// Signed in. `new_account` means the local library belonged to another
     /// server or user and was cleared for this one. `password_saved` is false
     /// when the keychain wouldn't take the password just typed, so the next
     /// launch will ask for it again.
     Connected {
+        /// The bridge's session when the connect began; the app drops the
+        /// message if the user signed out since.
         session: u64,
         client: Client,
         settings: Box<Settings>,
@@ -32,7 +32,13 @@ pub enum Msg {
         new_account: bool,
         password_saved: bool,
     },
-    ConnectFailed(String),
+    /// The sign-in didn't work, and `error` says why.
+    ConnectFailed {
+        /// As for `Connected`: a failure from an ended session is dropped,
+        /// so it can't knock the one signed in since offline.
+        session: u64,
+        error: String,
+    },
     /// The server can't be reached (saved login, so the app opens offline);
     /// reconnecting continues in the background and ends with `Connected`.
     Unreachable {
@@ -78,13 +84,13 @@ pub enum Msg {
         id: String,
         on: bool,
         seq: u64,
-        error: Option<String>,
+        error: Option<Failure>,
     },
     RatingDone {
         id: String,
         previous: u8,
         seq: u64,
-        error: Option<String>,
+        error: Option<Failure>,
     },
     /// A playlist was made; the app opens it.
     PlaylistCreated {
@@ -268,8 +274,10 @@ const SLEPT: Duration = Duration::from_secs(5);
 /// What the user sees when connecting fails: the gist, without the plumbing.
 pub fn connect_error(e: &subsonic::Error) -> String {
     match e {
-        // 40: wrong credentials; 41: token auth not allowed for LDAP users.
-        subsonic::Error::Api { code: 40 | 41, .. } => "Wrong username or password.".into(),
+        subsonic::Error::Api { code: 40, .. } => "Wrong username or password.".into(),
+        // Token sign-in turned away (LDAP-backed accounts): Ond signs in no
+        // other way, so asking for the password again won't help.
+        subsonic::Error::Api { code: 41, .. } => "This server doesn't allow the way Ond signs in.".into(),
         subsonic::Error::Api { message, .. } if !message.is_empty() => format!("The server said: {message}"),
         subsonic::Error::Url(_) => "That doesn't look like a server address. Try something like https://music.example.com.".into(),
         subsonic::Error::Http(h) if h.is_connect() || h.is_timeout() => "Couldn't reach the server. Check the address and that it's running.".into(),
@@ -303,6 +311,9 @@ fn song_meta(songs: &[subsonic::Song]) -> UserMeta {
 
 /// Wakes the UI so it reads what was sent (a repaint, in the app).
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
+
+/// What a server request the user asked for says when there's no server.
+const NOT_CONNECTED: &str = "Not connected to a server";
 
 /// The [`Bridge::after_previous`] chain offline store jobs run on.
 const OFFLINE_JOBS: &str = "offline";
@@ -559,23 +570,26 @@ impl Bridge {
     /// With a saved login (`password` is `None`) an unreachable server isn't a
     /// login failure: the app opens offline and keeps retrying until it's back.
     pub fn connect(&self, settings: Settings, password: Option<String>) {
-        let this = self.clone();
         let session = self.session();
+        // Scoped: the keychain can hold this up behind a prompt for as long
+        // as the user likes, and a sign-out and new sign-in may come first.
+        let this = self.scoped_to(session);
         self.rt.spawn(async move {
             let saved = password.is_none();
+            let failed = |error| Msg::ConnectFailed { session, error };
             let password = match password {
                 Some(p) => p,
                 None => {
                     let s = settings.clone();
                     match tokio::task::spawn_blocking(move || s.load_password()).await.ok().flatten() {
                         Some(p) => p,
-                        None => return this.send(Msg::ConnectFailed("No saved password. Sign in again.".into())),
+                        None => return this.send(failed("No saved password. Sign in again.".into())),
                     }
                 }
             };
             let client = match Client::new(&settings.server, Credentials::new(&settings.username, &password)) {
                 Ok(c) => c,
-                Err(e) => return this.send(Msg::ConnectFailed(connect_error(&e))),
+                Err(e) => return this.send(failed(connect_error(&e))),
             };
             let pinged = ping(&client).await;
             if !this.live(session) {
@@ -586,11 +600,20 @@ impl Bridge {
                     // The account itself is recorded by the app (in its preferences)
                     // when `Connected` arrives for a live session.
                     let s = settings.clone();
-                    let stored = tokio::task::spawn_blocking(move || match s.store_password(&password) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::warn!("keychain: {e}");
-                            false
+                    let me = this.clone();
+                    let stored = tokio::task::spawn_blocking(move || {
+                        // Checked again here, just before the write: the
+                        // blocking pool may have queued it behind other work,
+                        // and a signed-out account's password mustn't be kept.
+                        if !me.live(session) {
+                            return false;
+                        }
+                        match s.store_password(&password) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::warn!("keychain: {e}");
+                                false
+                            }
                         }
                     })
                     .await;
@@ -602,7 +625,7 @@ impl Bridge {
                     this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
                     this.reconnect(client, settings, session);
                 }
-                Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(Msg::ConnectFailed(e)),
+                Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(failed(e)),
             }
         });
     }
@@ -631,7 +654,7 @@ impl Bridge {
 
     /// Times one ping (for the server popover and the diagnostics bar).
     pub fn measure_latency(&self, client: Client) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn(async move {
             let start = std::time::Instant::now();
             let ok = ping(&client).await.is_ok();
@@ -645,8 +668,8 @@ impl Bridge {
         if self.reconnecting.load(Ordering::Relaxed) {
             return;
         }
-        let this = self.clone();
         let session = self.session();
+        let this = self.scoped_to(session);
         self.rt.spawn(async move {
             if let Err(PingError::Unreachable(e)) = ping(&client).await
                 && this.live(session)
@@ -691,7 +714,7 @@ impl Bridge {
         if !self.live(session) || self.reconnecting.swap(true, Ordering::Relaxed) {
             return;
         }
-        let this = self.clone();
+        let this = self.scoped_to(session);
         self.rt.spawn(async move {
             let mut delay = Duration::from_secs(5);
             loop {
@@ -714,7 +737,7 @@ impl Bridge {
                     Err(PingError::Refused(e)) => {
                         // Reachable but turning us away (password changed): back to the login form.
                         this.reconnecting.store(false, Ordering::Relaxed);
-                        return this.send(Msg::ConnectFailed(e));
+                        return this.send(Msg::ConnectFailed { session, error: e });
                     }
                 }
             }
@@ -775,12 +798,19 @@ impl Bridge {
         self.rt.spawn(async move {
             // At most ~10 progress repaints a second, however fast albums arrive.
             let last = Mutex::new(Instant::now() - Duration::from_secs(1));
+            // Whether the pass got anywhere before it was cancelled or failed.
+            // Progress follows each page of songs stored and each album
+            // answered, so a pass that never got that far stored nothing.
+            // (Albums that only failed count too: `Outcome` doesn't say how
+            // many were kept, and a needless reload is the safe way to be wrong.)
+            let progressed = AtomicBool::new(false);
             let outcome = sync::run(
                 this.library.clone(),
                 client,
                 cancel.clone(),
                 || this.current(),
                 |p| {
+                    progressed.store(true, Ordering::Relaxed);
                     let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
                     if (p.done == p.total || last.elapsed() >= Duration::from_millis(100)) && this.is_current(&cancel) {
                         *last = Instant::now();
@@ -789,7 +819,13 @@ impl Bridge {
                 },
             )
             .await;
-            let stored = outcome != (sync::Outcome::Done { fetched: 0, bulk: false });
+            // Whether the library may have changed. A pass that stopped early
+            // keeps what it fetched, but one that died before anything came
+            // back stored nothing and isn't worth reloading every track for.
+            let stored = match &outcome {
+                sync::Outcome::Done { fetched, bulk } => *fetched > 0 || *bulk,
+                sync::Outcome::Cancelled | sync::Outcome::Failed(_) => progressed.load(Ordering::Relaxed),
+            };
             // A newer sync took over: it reports, and shows what this one
             // stored, for itself.
             if !this.is_current(&cancel) {
@@ -798,8 +834,7 @@ impl Bridge {
                 }
                 return;
             }
-            // Show what was stored, unless nothing changed. A cancelled sync
-            // still stored something worth showing.
+            // Show what was stored, unless nothing changed.
             if this.reload_owed.swap(false, Ordering::AcqRel) || stored {
                 let me = this.clone();
                 let _ = tokio::task::spawn_blocking(move || {
@@ -989,8 +1024,8 @@ impl Bridge {
         let this = self.scoped();
         self.after_previous(format!("star:{kind:?}:{id}"), async move {
             let error = match &client {
-                Some(c) => c.set_starred(kind, &id, on).await.err().map(|e| e.to_string()),
-                None => Some("Not connected to a server".into()),
+                Some(c) => c.set_starred(kind, &id, on).await.err().map(Failure::from),
+                None => Some(Failure::Local(NOT_CONNECTED.into())),
             };
             this.send(Msg::StarDone { kind, id, on, seq, error });
         });
@@ -1000,8 +1035,8 @@ impl Bridge {
         let this = self.scoped();
         self.after_previous(format!("rating:{id}"), async move {
             let error = match &client {
-                Some(c) => c.set_rating(&id, rating).await.err().map(|e| e.to_string()),
-                None => Some("Not connected to a server".into()),
+                Some(c) => c.set_rating(&id, rating).await.err().map(Failure::from),
+                None => Some(Failure::Local(NOT_CONNECTED.into())),
             };
             this.send(Msg::RatingDone { id, previous, seq, error });
         });
@@ -1009,7 +1044,7 @@ impl Bridge {
 
     /// Makes a playlist of `song_ids`; the app opens it when it's there.
     pub fn create_playlist(&self, client: Option<Client>, name: String, song_ids: Vec<String>) {
-        let Some(client) = client else { return self.send(Msg::Error(Failure::Local("Not connected to a server".into()))) };
+        let Some(client) = client else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
         let this = self.scoped();
         self.rt.spawn(async move {
             match client.create_playlist(&name, &song_ids).await {
@@ -1025,7 +1060,7 @@ impl Bridge {
     /// Sends one edit, then reloads the playlist list and the playlist (which
     /// also undoes the app's optimistic copy if the edit failed).
     pub fn edit_playlist(&self, client: Option<Client>, id: String, edit: PlaylistEdit) {
-        let Some(client) = client else { return self.send(Msg::Error(Failure::Local("Not connected to a server".into()))) };
+        let Some(client) = client else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
         let this = self.scoped();
         self.rt.spawn(async move {
             let result = match &edit {
@@ -1058,7 +1093,7 @@ impl Bridge {
 
     /// Looks up which stored albums credit `name` (composer, performer, ...).
     pub fn find_credited(&self, name: String) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn_blocking(move || {
             if let Ok(album_ids) = this.library.albums_crediting(&name) {
                 this.send(LibraryMsg::Credited { name, album_ids });
@@ -1258,16 +1293,30 @@ mod tests {
         // Its three album requests are out, waiting on the server.
         until(&rt, &rx, &mut got, |_| slow.asked.load(Ordering::SeqCst) == 3);
         // Sync now: a new sync takes over and finishes.
-        bridge.sync_tracks(Server { albums, ..Default::default() });
+        let fresh = Server { albums, ..Default::default() };
+        bridge.sync_tracks(fresh.clone());
         until(&rt, &rx, &mut got, |m| matches!(m.last(), Some(Msg::Library(LibraryMsg::TrackSyncDone(_)))));
         assert!(matches!(got.last(), Some(Msg::Library(LibraryMsg::TrackSyncDone(sync::Outcome::Done { fetched: 3, .. })))));
         got.clear();
         // The old one's answers come in now: it stores them, but says nothing,
         // and leaves the reload to the next sync.
         gate.add_permits(3);
-        until(&rt, &rx, &mut got, |_| bridge.reload_owed.load(Ordering::Acquire));
-        assert_eq!(slow.answered.load(Ordering::SeqCst), 3);
-        assert!(got.is_empty(), "the replaced sync sent {:?}", names(&got));
+        until(&rt, &rx, &mut got, |_| slow.answered.load(Ordering::SeqCst) == 3);
+        // The next sync has nothing to fetch, yet shows what the old one
+        // stored. One started before the old one has finished storing has
+        // nothing to show, so sync until one does.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(got.is_empty(), "the replaced sync sent {:?}", names(&got));
+            bridge.sync_tracks(fresh.clone());
+            until(&rt, &rx, &mut got, |m| matches!(m.last(), Some(Msg::Library(LibraryMsg::TrackSyncDone(_)))));
+            if names(&got) == ["Albums", "AllTracks", "TrackSyncDone"] {
+                break;
+            }
+            assert_eq!(names(&got), ["TrackSyncDone"], "nothing to fetch, nothing owed yet");
+            assert!(Instant::now() < deadline, "no sync showed what the replaced one stored");
+            got.clear();
+        }
     }
 
     #[test]
@@ -1287,9 +1336,9 @@ mod tests {
         got.clear();
         // The old request finally fails: no "Sync failed" after reconnecting.
         gate.add_permits(1);
+        // Nothing in that task awaits after the answer, so it ran to its end
+        // in the same poll.
         until(&rt, &rx, &mut got, |_| old.answered.load(Ordering::SeqCst) == 1);
-        // (Nothing in that task awaits after the answer: it has finished.)
-        until(&rt, &rx, &mut got, |_| true);
         assert!(got.is_empty(), "the replaced pass sent {:?}", names(&got));
     }
 
@@ -1422,6 +1471,8 @@ mod tests {
     fn connect_errors_read_plainly() {
         let wrong = subsonic::Error::Api { code: 40, message: "Wrong username or password".into() };
         assert_eq!(connect_error(&wrong), "Wrong username or password.");
+        let no_token = subsonic::Error::Api { code: 41, message: "Token authentication not supported for LDAP users.".into() };
+        assert_eq!(connect_error(&no_token), "This server doesn't allow the way Ond signs in.");
         let other = subsonic::Error::Api { code: 50, message: "Not allowed".into() };
         assert_eq!(connect_error(&other), "The server said: Not allowed");
         let url = subsonic::Client::new("not a url", subsonic::Credentials::new("a", "b")).err().unwrap();

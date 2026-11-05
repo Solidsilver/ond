@@ -116,11 +116,12 @@ impl OndApp {
                 };
                 (value.clone(), Some(what.to_owned()))
             }
-            _ => ("Recently added".to_owned(), None),
+            _ => ("Recently added".to_owned(), Some(self.view().cached_grid(route).len().to_string())),
         };
         let mut view = self.ui.prefs.album_view;
-        // Only Albums sorts; the other pages keep their order.
-        let sort = (*route == Route::Albums).then_some((&AlbumSort::ALL[..], &mut self.ui.sort));
+        // Only Albums sorts; the other pages keep their order. The list's
+        // column headers sort too, so the pill shows only over the grid.
+        let sort = (*route == Route::Albums && view == ViewMode::Grid).then_some((&AlbumSort::ALL[..], &mut self.ui.sort));
         if heading_bar(ui, &title, sub, Some(&mut view), sort, |s| s.label().into()) {
             self.ui.sort_desc = false;
         }
@@ -177,13 +178,7 @@ impl OndApp {
     fn artist_page(&mut self, ui: &mut Ui, route: &Route, name: &str) {
         let t = Tokens::of(ui);
         let own = self.view().cached_grid(route);
-        let own_ids: std::collections::HashSet<&str> = own.iter().map(|&i| self.data.albums[i].id.as_str()).collect();
-        let credited: Vec<usize> = self
-            .data
-            .credited
-            .get(name)
-            .map(|ids| ids.iter().filter(|id| !own_ids.contains(id.as_str())).filter_map(|id| self.data.by_id.get(id).copied()).collect())
-            .unwrap_or_default();
+        let credited = credited_albums(&mut self.ui.memos.credited, route, name, &own, &self.data);
         let sub = match own.len() {
             0 => None,
             1 => Some("1 album".to_owned()),
@@ -204,26 +199,44 @@ impl OndApp {
             ui.vertical(|ui| self.artist_header(ui, route, name, sub, !own.is_empty()));
         });
         ui.add_space(14.0);
+        if own.is_empty() && credited.is_empty() {
+            let (title, body) = if self.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
+            crate::widgets::empty_state(ui, Icon::Disc, title, body);
+            return;
+        }
         let (cols, tile) = grid_metrics(ui.available_width());
+        let row_h = tile + LABEL_H + GAP_Y;
+        // Two grids with a heading between: lines of two heights, so the
+        // virtual list's variable-height layout rather than its grid.
+        let (own_rows, credited_rows) = (own.len().div_ceil(cols), credited.len().div_ceil(cols));
+        let head = if credited_rows > 0 { 1 } else { 0 };
+        let mut heights = vec![row_h; own_rows + head + credited_rows];
+        if head > 0 {
+            heights[own_rows] = CREDITED_HEAD_H;
+        }
         super::layout::into_gutter(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {
-                for chunk in own.chunks(cols) {
-                    self.view().grid_row(ui, chunk, tile);
-                }
-                if !credited.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new("Also credited on").font(FontId::new(15.0, semibold())).color(t.text));
-                    ui.add_space(8.0);
-                    for chunk in credited.chunks(cols) {
-                        self.view().grid_row(ui, chunk, tile);
-                    }
-                }
-                if own.is_empty() && credited.is_empty() {
-                    let (title, body) =
-                        if self.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
-                    crate::widgets::empty_state(ui, Icon::Disc, title, body);
-                }
-            })
+            egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show_viewport(
+                ui,
+                |ui, viewport| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    super::virtual_list::visible_lines(ui, viewport, &heights, |ui, k| {
+                        ui.push_id(k, |ui| {
+                            if k < own_rows {
+                                self.view().grid_row(ui, &own[k * cols..((k + 1) * cols).min(own.len())], tile);
+                            } else if k == own_rows && head > 0 {
+                                ui.allocate_ui_with_layout(vec2(ui.available_width(), CREDITED_HEAD_H), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    ui.set_min_height(CREDITED_HEAD_H);
+                                    ui.add_space(6.0);
+                                    ui.label(egui::RichText::new("Also credited on").font(FontId::new(15.0, semibold())).color(t.text));
+                                });
+                            } else {
+                                let r = k - own_rows - head;
+                                self.view().grid_row(ui, &credited[r * cols..((r + 1) * cols).min(credited.len())], tile);
+                            }
+                        });
+                    });
+                },
+            )
         });
     }
 
@@ -298,6 +311,30 @@ pub(super) fn heading_bar<T: Copy + PartialEq>(
         });
     });
     changed
+}
+
+/// The "Also credited on" line between an artist's own albums and the rest.
+const CREDITED_HEAD_H: f32 = 34.0;
+
+/// The artist page's memo key for the albums crediting them: the grid's own
+/// route and library version, and a hash of the credited ids, which arrive
+/// without bumping the version.
+pub(super) type CreditedKey = (Route, u64, u64);
+
+/// The albums that credit `name` and aren't among their `own`, built once
+/// per route, library version and credit list.
+fn credited_albums(memo: &mut crate::memo::Memo<CreditedKey, Vec<usize>>, route: &Route, name: &str, own: &[usize], data: &Data) -> Arc<Vec<usize>> {
+    let ids = data.credited.get(name);
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        ids.hash(&mut h);
+        h.finish()
+    };
+    memo.get((route.clone(), data.version, hash), || {
+        let own_ids: std::collections::HashSet<&str> = own.iter().map(|&i| data.albums[i].id.as_str()).collect();
+        ids.map(|ids| ids.iter().filter(|id| !own_ids.contains(id.as_str())).filter_map(|id| data.by_id.get(id).copied()).collect()).unwrap_or_default()
+    })
 }
 
 /// Columns and tile width that fill `width`.
@@ -405,11 +442,17 @@ impl ViewCtx<'_> {
             return;
         }
         let marks = self.grid_marks(route);
+        self.album_grid(ui, ("grid", route), marks.as_deref(), &ids);
+    }
+
+    /// `ids` as a virtualized grid named `list`, the rail beside it when
+    /// there are `marks`.
+    pub(super) fn album_grid<L: std::hash::Hash + std::fmt::Debug + Copy>(&mut self, ui: &mut Ui, list: L, marks: Option<&super::alpha::Marks>, ids: &[usize]) {
         let margin = super::virtual_list::margin(marks.is_some());
         let (cols, tile) = grid_metrics(ui.available_width() - f32::from(margin.right) + super::layout::GUTTER);
         let rows = ids.len().div_ceil(cols);
         let row_h = tile + LABEL_H + GAP_Y;
-        VirtualList::grid(("grid", route), marks.as_deref(), row_h, rows, cols).show(ui, |ui, range| {
+        VirtualList::grid(list, marks, row_h, rows, cols).show(ui, |ui, range| {
             let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
             for row in range.clone() {
                 self.grid_row(ui, row_ids(row), tile);
@@ -461,8 +504,7 @@ impl ViewCtx<'_> {
         ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
     }
 
-    /// Cover, title and artist. Click opens; double-click or the hover play
-    /// button plays; right-click has the queue actions.
+    /// Cover, title and artist. Click opens; the hover play button plays; right-click has the queue actions.
     pub(super) fn album_tile(&mut self, ui: &mut Ui, t: &Tokens, idx: usize, tile: f32) {
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
         // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
@@ -492,9 +534,7 @@ impl ViewCtx<'_> {
         resp.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}", album.name, album.artist.as_deref().unwrap_or("Unknown artist")))
         });
-        if resp.double_clicked() {
-            self.actions.push(Action::Album(id.to_owned(), QueueAction::Play { start: 0 }));
-        } else if resp.clicked() {
+        if resp.clicked() {
             self.actions.push(Action::Go(Route::Album(id.to_owned())));
         }
         let kept = pin.is_some();
@@ -557,6 +597,19 @@ mod tests {
         assert_eq!(names(&d, &grid_ids(&Route::Recent, AlbumSort::Artist, false, &d)), ["Portrait in Jazz", "Explorations", "Kind of Blue"]);
         d.newest = vec!["b".into(), "missing".into(), "a".into()];
         assert_eq!(names(&d, &grid_ids(&Route::Recent, AlbumSort::Artist, false, &d)), ["Kind of Blue", "Portrait in Jazz"]);
+    }
+
+    #[test]
+    fn credits_that_arrive_later_show_on_an_open_artist_page() {
+        let mut d = data();
+        let mut memo = crate::memo::Memo::default();
+        let artist = Route::Artist { name: "Bill Evans".into(), id: None };
+        let own = grid_ids(&artist, AlbumSort::Title, false, &d);
+        assert!(credited_albums(&mut memo, &artist, "Bill Evans", &own, &d).is_empty());
+        // Credits come in on their own, without a new library version.
+        d.credited.insert("Bill Evans".into(), vec!["a".into(), "b".into()]);
+        let credited = credited_albums(&mut memo, &artist, "Bill Evans", &own, &d);
+        assert_eq!(names(&d, &credited), ["Kind of Blue"], "their own albums aren't counted twice");
     }
 
     #[test]

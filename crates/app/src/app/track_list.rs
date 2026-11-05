@@ -181,7 +181,7 @@ impl ViewCtx<'_> {
             self.ui.track_sel = Some(i);
             self.ui.focus = Focus::Main;
         }
-        resp.context_menu(|ui| self.track_row_menu(ui, tr, i, list.source, list.opts.playlist.as_deref()));
+        resp.context_menu(|ui| self.track_row_menu(ui, list, i));
         drop_at
     }
 
@@ -241,8 +241,12 @@ impl ViewCtx<'_> {
                 row.right_text(ui, x + col::NUMBER_RIGHT, n, FontId::proportional(12.0), t.muted);
             }
             x += col::NUMBER_W;
-        } else if playing {
-            x = row.playing(ui, t, x);
+        } else {
+            // A gutter of its own, so titles line up whether or not one is playing.
+            if playing {
+                row.playing(ui, t, x);
+            }
+            x += col::PLAYING_W;
         }
         row.right_text(ui, rect.right() - col::INSET, length(tr), FontId::proportional(12.0), t.muted);
         // The heart sits just left of the duration: always when loved,
@@ -306,16 +310,20 @@ impl ViewCtx<'_> {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)));
         child.spacing_mut().item_spacing.x = 4.0;
         let more = icons::sized_button(&mut child, Icon::More, "More", vec2(24.0, 22.0), 11.0, Some(t.muted));
-        egui::Popup::menu(&more).show(|ui| self.track_row_menu(ui, tr, i, list.source, list.opts.playlist.as_deref()));
+        egui::Popup::menu(&more).show(|ui| self.track_row_menu(ui, list, i));
         if child.add(egui::Button::new(egui::RichText::new("Play next").size(11.0)).corner_radius(11.0).stroke(egui::Stroke::new(1.0, t.hairline))).clicked() {
             self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: list.source.clone(), action: QueueAction::PlayNext });
         }
     }
 
     /// [`track_menu`](Self::track_menu), plus Remove from Playlist in the user's own.
-    pub(super) fn track_row_menu(&mut self, ui: &mut Ui, tr: &Track, index: usize, source: &Source, playlist: Option<&str>) {
-        self.track_menu(ui, tr, source);
-        if let Some(pid) = playlist {
+    fn track_row_menu(&mut self, ui: &mut Ui, list: &List, index: usize) {
+        let tr = &list.tracks[index];
+        if ui.button("Play").clicked() {
+            self.actions.push(Action::Tracks { tracks: list.tracks.to_vec(), source: list.source.clone(), action: QueueAction::Play { start: index } });
+        }
+        self.track_menu(ui, tr, list.source);
+        if let Some(pid) = list.opts.playlist.as_deref() {
             ui.separator();
             if ui.button("Remove from playlist").clicked() {
                 self.actions.push(Action::PlaylistEdit(PlaylistAction::Remove { id: pid.to_owned(), index }));

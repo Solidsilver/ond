@@ -38,7 +38,8 @@ impl ViewCtx<'_> {
         // The server's artists (with ids) once synced, else album-artist names.
         let artists = Arc::clone(&index.artists);
         let mut view = self.ui.prefs.artist_view;
-        let sort = Some((&ArtistSort::ALL[..], &mut self.ui.artist_sort));
+        // The list's column headers sort too, so the pill shows only over the grid.
+        let sort = (view == ViewMode::Grid).then_some((&ArtistSort::ALL[..], &mut self.ui.artist_sort));
         if heading_bar(ui, "Artists", Some(artists.len().to_string()), Some(&mut view), sort, |s| s.label().into()) {
             self.ui.artist_desc = false;
         }
@@ -99,7 +100,7 @@ impl ViewCtx<'_> {
     }
 
     /// An artist's photo, name and albums. Click opens them; the hover button
-    /// (or a double-click) shuffles them; right-click has the rest.
+    /// shuffles them; right-click has the rest.
     fn artist_tile(&mut self, ui: &mut Ui, t: &Tokens, a: &ArtistEntry, tile: f32) {
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
         if ui.is_rect_visible(rect) {
@@ -120,9 +121,7 @@ impl ViewCtx<'_> {
             }
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a.name));
-        if resp.double_clicked() {
-            self.actions.push(Action::Artist(a.name.clone(), QueueAction::Play { start: 0 }));
-        } else if resp.clicked() {
+        if resp.clicked() {
             self.open_artist(a);
         }
         resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, false, None, self.actions));
@@ -174,9 +173,7 @@ impl ViewCtx<'_> {
             cell(ui, c.years, &years(a).unwrap_or_default());
         }
         row.describe(false, || a.name.clone());
-        if row.resp.double_clicked() {
-            self.actions.push(Action::Artist(a.name.clone(), QueueAction::Play { start: 0 }));
-        } else if row.resp.clicked() {
+        if row.resp.clicked() {
             self.open_artist(a);
         }
         row.resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, false, None, self.actions));

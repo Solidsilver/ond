@@ -354,6 +354,59 @@ fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
     *h.state_mut() = None;
 }
 
+/// Sign out in the server popover asks first: Cancel keeps the session, and
+/// only the dialog's own Sign out signs out.
+#[test]
+fn signing_out_from_the_server_popover_waits_for_the_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let ask = |h: &mut Harness<'static, Option<OndApp>>| {
+        h.get_by_label("Connected to music.example.com. Click for details.").click();
+        h.run_steps(2);
+        // A frame with the pointer over it first: the popover settles where it
+        // goes, and the click lands on the item and not where it was.
+        h.get_by_label("Sign out…").hover();
+        h.run_steps(1);
+        h.get_by_label("Sign out…").click();
+        h.run_steps(3);
+    };
+    ask(&mut h);
+    let app = app_mut(&mut h);
+    assert!(matches!(&app.ui.overlay, Some(dialogs::Overlay::SignOut { host, from_settings: false }) if host == "music.example.com"));
+    assert!(app.login.is_none() && app.session.online, "not signed out yet");
+    h.get_by_label("Sign out of music.example.com?");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.ui.overlay.is_none() && app.login.is_none() && app.session.online, "Cancel keeps the session");
+
+    ask(&mut h);
+    h.get_by_label("Sign out").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.login.is_some() && !app.session.online, "signed out once confirmed");
+    *h.state_mut() = None;
+}
+
+#[test]
+fn cancelling_a_sign_out_asked_from_settings_goes_back_to_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Account));
+    h.run_steps(2);
+    h.get_by_label("Sign out…").click();
+    h.run_steps(3);
+    assert!(matches!(app_mut(&mut h).ui.overlay, Some(dialogs::Overlay::SignOut { from_settings: true, .. })));
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(matches!(app.ui.overlay, Some(dialogs::Overlay::Settings)), "Settings is back");
+    assert!(app.login.is_none() && app.session.online, "still signed in");
+    *h.state_mut() = None;
+}
+
 /// The full window with the fixture library, for the behaviour tests below.
 fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
     window(dir, FULL, |ui, app| app.main_ui(ui))
@@ -668,13 +721,83 @@ fn every_view_names_its_controls() {
         reset(&mut h, FULL, route);
         h.check_accessibility();
     }
+    // The Offline page needs pins for `pin_row` to draw: one finished, one
+    // on its way, one of each kind of thing that can be kept.
+    {
+        let pin = |pin: offline::Pin, label: &str, done: usize| offline::PinSummary {
+            pin,
+            label: label.into(),
+            total: 12,
+            done,
+            failed: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            downloading: done < 12,
+        };
+        let app = app_mut(&mut h);
+        let pins = vec![
+            pin(offline::Pin::Album(album_id(0)), "Album pin", 12),
+            pin(offline::Pin::Playlist("pl-0".into()), "Playlist pin", 5),
+            pin(offline::Pin::Track("t-3".into()), "Song pin", 12),
+        ];
+        app.downloads.snap = std::sync::Arc::new(offline::Snapshot { pins, ..(*app.downloads.snap).clone() });
+    }
+    reset(&mut h, FULL, Route::Offline);
+    assert!(h.query_all_by_label_contains("Playlist pin").next().is_some(), "the pinned rows drew");
+    h.check_accessibility();
+    for tab in [QueueTab::UpNext, QueueTab::History, QueueTab::Lyrics, QueueTab::Info] {
+        reset(&mut h, FULL, Route::Recent);
+        app_mut(&mut h).ui.queue_ui.tab = tab;
+        h.run_steps(3);
+        h.check_accessibility();
+        // And the empty state each of the queue's tabs shows with nothing in it.
+        let q = &mut app_mut(&mut h).player.queue;
+        q.upcoming.clear();
+        q.history.clear();
+        q.current = None;
+        h.run_steps(3);
+        h.check_accessibility();
+    }
+    reset(&mut h, FULL, Route::Album(album_id(0)));
+    app_mut(&mut h).actions.push(Action::OpenPalette);
+    h.run_steps(2);
+    {
+        let app = app_mut(&mut h);
+        if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
+            p.query = "bob".into();
+            p.refresh(index);
+        }
+    }
+    h.run_steps(2);
+    assert!(app_mut(&mut h).ui.palette.is_some(), "the palette is open");
+    h.check_accessibility();
+    for form in [
+        session::LoginForm { server: "http://localhost:4533".into(), ..Default::default() },
+        session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() },
+    ] {
+        reset(&mut h, FULL, Route::Recent);
+        app_mut(&mut h).login = Some(form);
+        h.run_steps(2);
+        h.check_accessibility();
+    }
+    reset(&mut h, FULL, Route::Recent);
+    experiment(&mut h, |x| x.visualizer = true);
+    app_mut(&mut h).toggle_visualizer();
+    h.run_steps(3);
+    assert!(app_mut(&mut h).ui.visualizer.is_some(), "the visualizer is open");
+    h.check_accessibility();
+    app_mut(&mut h).ui.visualizer = None;
     for section in [
         settings_page::Section::General,
         settings_page::Section::Appearance,
         settings_page::Section::Playback,
+        settings_page::Section::Queue,
         settings_page::Section::Output,
         settings_page::Section::Offline,
+        settings_page::Section::Library,
+        settings_page::Section::Account,
         settings_page::Section::Experimental,
+        settings_page::Section::About,
     ] {
         reset(&mut h, FULL, Route::Recent);
         app_mut(&mut h).actions.push(Action::OpenSettings(section));
@@ -688,5 +811,32 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    *h.state_mut() = None;
+}
+
+/// With nothing queued and nothing playing, the album grid still stops at the
+/// queue column: the column's empty state doesn't hand its room to the page.
+#[test]
+fn an_empty_queue_keeps_its_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    {
+        let app = app_mut(&mut h);
+        app.player.queue = crate::queue::Queue::default();
+        app.engine.status.preview(PlayState::Stopped, 0.0, 0.0, 0.0);
+    }
+    h.run_steps(4);
+    let right = app_mut(&mut h).prefs_now().columns.right;
+    let edge = FULL.x - right;
+    assert!(h.query_by_label("Up next").is_some_and(|n| n.rect().left() >= edge), "the queue's tabs are in its column");
+    let mut tiles = 0;
+    for (title, ..) in ALBUMS {
+        for n in h.query_all_by_label_contains(title).filter(|n| n.rect().left() < edge) {
+            tiles += 1;
+            assert!(n.rect().right() <= edge, "“{title}” at {:?} reaches into the queue column (from x {edge})", n.rect());
+        }
+    }
+    assert!(tiles > 0, "the grid was drawn");
     *h.state_mut() = None;
 }

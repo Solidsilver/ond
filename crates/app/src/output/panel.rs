@@ -16,6 +16,9 @@ const POPUP_W: f32 = 320.0;
 const CONTROL_H: f32 = 28.0;
 /// The device icon with its ▾.
 const ICON_W: f32 = 40.0;
+/// A speaker before the device icon when the toolbar has no slider, so the
+/// button reads as the way to the volume too.
+const VOLUME_GLYPH_W: f32 = 18.0;
 /// The card's text and controls, in from the panel's left: past the device's icon.
 const CARD_INDENT: f32 = 36.0;
 /// A listed device's icon, centred here, and its name, past the ▸ and the icon.
@@ -33,8 +36,7 @@ const GAP: f32 = 6.0;
 const ROW_H: f32 = 32.0;
 /// The list shows about three and a half devices before it scrolls.
 const LIST_H: f32 = ROW_H * 3.5;
-const BIT_PERFECT_HELP: &str =
-    "Bit-perfect sends samples untouched and keeps other apps off the device while Ond plays. The volume then sets the device's own level, when it has one.";
+const BIT_PERFECT_HELP: &str = "Samples go to the device untouched, and only Ond can use it while playing. Volume sets the device's own level.";
 /// The format pill's (and the list's bit-perfect dots') inset from the panel's right.
 const PILL_INSET: f32 = 10.0;
 /// Where the pill's dot sits, in from its right edge.
@@ -48,23 +50,36 @@ const SCROLL_NOTCH: f32 = 24.0;
 /// Room beside the slider for "−24.0 dB".
 const DB_W: f32 = 52.0;
 
+/// What the output control draws with, from the frame's copy of the
+/// preferences: the control takes no lock on them while it draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControlIn {
+    /// Ond's own volume, 0..=1.
+    pub volume: f32,
+    /// When the device's level shows in dB.
+    pub readout: DbReadout,
+    /// The green dot on the device slider's knob in bit-perfect.
+    pub green: bool,
+}
+
 impl Outputs {
     /// The room the output control takes (to centre it in the toolbar). The
     /// same in every mode, so nothing moves when the mode does.
-    pub fn control_width(&self, slider_w: Option<f32>) -> f32 {
-        let db = self.prefs.get(|s| s.device_volume_db) == DbReadout::Always;
-        ICON_W + slider_w.map_or(0.0, |w| w + GAP + if db { DB_W } else { 0.0 })
+    pub fn control_width(&self, slider_w: Option<f32>, readout: DbReadout) -> f32 {
+        let db = readout == DbReadout::Always;
+        ICON_W + slider_w.map_or(VOLUME_GLYPH_W, |w| w + GAP + if db { DB_W } else { 0.0 })
     }
 
     /// The output control: (given `slider_w`) the volume slider, then the
-    /// device's icon with its status dot and a ▾, which opens the panel. The
+    /// device's icon with its status dot and a ▾, which opens the panel
+    /// (without a slider, a speaker leads the icon: the volume is in there). The
     /// slider is Ond's volume, or in bit-perfect the device's own when it has
     /// one (unusable when it doesn't).
-    pub fn control_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, slider_w: Option<f32>) -> ControlOut {
+    pub fn control_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, input: ControlIn, slider_w: Option<f32>) -> ControlOut {
         let mut out = ControlOut::default();
         let hw = self.device_volume.filter(|_| *bit_perfect);
-        let readout = self.prefs.get(|s| s.device_volume_db);
-        let width = self.control_width(slider_w);
+        let (volume, readout) = (input.volume, input.readout);
+        let width = self.control_width(slider_w, readout);
         ui.allocate_ui_with_layout(egui::vec2(width, CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             if let Some(w) = slider_w {
@@ -72,7 +87,7 @@ impl Outputs {
                 let (resp, label) = match hw {
                     Some(v) => {
                         let mut pos = slider_pos(&v);
-                        let resp = self.device_slider(ui, &mut pos, w, &name, &v);
+                        let resp = self.device_slider(ui, &mut pos, w, &name, &v, input.green);
                         if resp.changed() {
                             self.set_device_volume(slider_db(&v, pos), engine);
                         }
@@ -115,11 +130,11 @@ impl Outputs {
                 }
                 self.adjusting = adjusting;
             }
-            let icon = self.icon_button(ui);
+            let icon = self.icon_button(ui, slider_w.is_none());
             egui::Popup::menu(&icon)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .width(POPUP_W)
-                .show(|ui| self.popup_ui(ui, engine, bit_perfect, volume, slider_w.is_none(), &mut out));
+                .show(|ui| self.popup_ui(ui, engine, bit_perfect, input, slider_w.is_none(), &mut out));
         });
         out.settings = std::mem::take(&mut self.wants_settings);
         out
@@ -128,16 +143,21 @@ impl Outputs {
     /// The device's icon with the status dot at its corner (bit-perfect's
     /// verdict; none in Normal mode), and a ▾. Its id is fixed, so the panel
     /// stays open whatever moves beside it.
-    fn icon_button(&self, ui: &mut egui::Ui) -> egui::Response {
+    fn icon_button(&self, ui: &mut egui::Ui, volume: bool) -> egui::Response {
         let t = Tokens::of(ui);
         let dot = self.dot_color(ui);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(ICON_W, CONTROL_H), egui::Sense::hover());
+        let speaker_w = if volume { VOLUME_GLYPH_W } else { 0.0 };
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ICON_W + speaker_w, CONTROL_H), egui::Sense::hover());
         let resp = ui.interact(rect, egui::Id::unique("output-control-icon"), egui::Sense::click());
         if ui.is_rect_visible(rect) {
             if resp.hovered() {
                 ui.painter().rect_filled(rect, 6.0, t.hover);
             }
-            let glyph = egui::Rect::from_center_size(egui::pos2(rect.left() + 14.0, rect.center().y), egui::vec2(15.0, 15.0));
+            if volume {
+                let speaker = egui::Rect::from_center_size(egui::pos2(rect.left() + 12.0, rect.center().y), egui::vec2(13.0, 13.0));
+                icons::paint(ui.painter(), speaker, Icon::Volume, t.text);
+            }
+            let glyph = egui::Rect::from_center_size(egui::pos2(rect.left() + speaker_w + 14.0, rect.center().y), egui::vec2(15.0, 15.0));
             icons::paint(ui.painter(), glyph, kind_icon(self.in_use().map(|d| d.kind)), t.text);
             if let Some(dot) = dot {
                 ui.painter().circle(egui::pos2(glyph.right() + 1.0, glyph.top() + 1.0), 3.5, dot, egui::Stroke::new(1.5, t.bg));
@@ -146,17 +166,20 @@ impl Outputs {
             icons::paint(ui.painter(), chevron, Icon::ChevronDown, t.muted);
         }
         let name = self.in_use_name().unwrap_or("System output").to_owned();
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, format!("Output: {name}")));
+        let what = if volume { "Volume and output" } else { "Output" };
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, format!("{what}: {name}")));
         let hover = match &self.signal {
             Some(p) => format!("{name}\n{}", hover_text(p)),
             None => name,
         };
+        let hover = if volume { format!("Volume and output\n{hover}") } else { hover };
         resp.on_hover_text(hover)
     }
 
-    /// The device volume's slider: dimmed while the device is muted (moving it unmutes).
-    fn device_slider(&self, ui: &mut egui::Ui, pos: &mut f32, w: f32, name: &str, v: &DeviceVolume) -> egui::Response {
-        let mark = self.mark(ui);
+    /// The device volume's slider: dimmed while the device is muted (moving
+    /// it unmutes). Its knob has a green dot (`green`) to say bit-perfect.
+    fn device_slider(&self, ui: &mut egui::Ui, pos: &mut f32, w: f32, name: &str, v: &DeviceVolume, green: bool) -> egui::Response {
+        let mark = green.then(|| Tokens::of(ui).ok);
         ui.scope(|ui| {
             if v.muted == Some(true) {
                 ui.multiply_opacity(0.4);
@@ -167,16 +190,11 @@ impl Outputs {
         .on_hover_text(device_volume_hover(name, v))
     }
 
-    /// The slider knob's mark in bit-perfect mode: a green dot, unless turned off.
-    fn mark(&self, ui: &egui::Ui) -> Option<egui::Color32> {
-        self.prefs.get(|s| s.device_volume_green).then(|| Tokens::of(ui).ok)
-    }
-
     /// The panel: System output or a chosen device, the device in use (with
     /// its mode and volume), the other devices (grouped, scrolling), and the
     /// way to Settings.
     /// `volume_here`: the toolbar has no slider (narrow), so Ond's volume is here.
-    fn popup_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, volume_here: bool, out: &mut ControlOut) {
+    fn popup_ui(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, input: ControlIn, volume_here: bool, out: &mut ControlOut) {
         let t = Tokens::of(ui);
         ui.set_width(POPUP_W);
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -208,7 +226,7 @@ impl Outputs {
             });
             ui.add_space(4.0);
         }
-        self.in_use_card(ui, engine, bit_perfect, volume, volume_here, out);
+        self.in_use_card(ui, engine, bit_perfect, input, volume_here, out);
         ui.add_space(8.0);
         ui.separator();
         // Following the system, the system picks: no list (the tab above leaves it).
@@ -235,7 +253,7 @@ impl Outputs {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(10.0);
-            if crate::widgets::link(ui, "Playback settings…", egui::FontId::proportional(12.0), t.accent).clicked() {
+            if crate::widgets::link(ui, "Output settings…", egui::FontId::proportional(12.0), t.accent).clicked() {
                 self.wants_settings = true;
                 ui.close();
             }
@@ -246,7 +264,7 @@ impl Outputs {
     /// The device in use, at a glance: its icon and name with its mode switch,
     /// what's playing through it, and the volume when it's the device's own
     /// (or the toolbar has none). Details are in the hovers.
-    fn in_use_card(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, volume: f32, volume_here: bool, out: &mut ControlOut) {
+    fn in_use_card(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: &mut bool, input: ControlIn, volume_here: bool, out: &mut ControlOut) {
         let t = Tokens::of(ui);
         let following = self.following_system();
         if let Some((name, instead)) = self.waiting_for() {
@@ -299,7 +317,7 @@ impl Outputs {
         }
         if (*bit_perfect && !following) || volume_here {
             ui.add_space(6.0);
-            self.volume_row(ui, engine, *bit_perfect, volume, out);
+            self.volume_row(ui, engine, *bit_perfect, input, out);
         }
     }
 
@@ -307,8 +325,8 @@ impl Outputs {
     /// switch (green when on) at the right; the label switches too.
     fn mode_switch(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, d: &DeviceInfo, bit_perfect: &mut bool, row: egui::Rect, indent: f32) {
         let t = Tokens::of(ui);
-        let was = self.device_mode(d) == PlaybackMode::BitPerfect;
-        let mut on = was;
+        let was = self.device_mode(d);
+        let mut mode = was;
         let locked = self.mode_locked(Some(&d.uid));
         let help = if locked { crate::managed::LOCKED.to_owned() } else { BIT_PERFECT_HELP.to_owned() };
         let label_rect = egui::Rect::from_min_max(egui::pos2(row.left() + indent, row.top()), egui::pos2(row.right() - SWITCH_W, row.bottom()));
@@ -318,20 +336,17 @@ impl Outputs {
             egui::Align2::LEFT_CENTER,
             "Bit-perfect",
             egui::FontId::proportional(12.0),
-            if on { t.text } else { t.muted },
+            if was == PlaybackMode::BitPerfect { t.text } else { t.muted },
         );
         let area = egui::Rect::from_min_max(egui::pos2(row.right() - SWITCH_W, row.top()), egui::pos2(row.right() - PILL_INSET, row.bottom()));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        let sw = child.add_enabled_ui(!locked, |ui| crate::widgets::switch_tinted(ui, &mut on, &format!("Bit-perfect on {}", d.name), t.ok)).inner;
+        let sw = child.add_enabled_ui(!locked, |ui| crate::widgets::bit_perfect_switch(ui, &d.name, &mut mode)).inner;
         if label.on_hover_text(&help).clicked() {
-            on = !on;
+            mode = if was == PlaybackMode::BitPerfect { PlaybackMode::Normal } else { PlaybackMode::BitPerfect };
         }
         sw.on_hover_text(help);
-        if on != was {
-            let mode = if on { PlaybackMode::BitPerfect } else { PlaybackMode::Normal };
-            if self.set_device_mode(&d.uid, mode, engine) {
-                *bit_perfect = on;
-            }
+        if mode != was && self.set_device_mode(&d.uid, mode, engine) {
+            *bit_perfect = mode == PlaybackMode::BitPerfect;
         }
     }
 
@@ -400,7 +415,7 @@ impl Outputs {
     /// its whole range, with its exact dB (↑↓ step 0.5 dB, ⇧ 0.1; scrolling
     /// too) and mute; Ond's volume when the toolbar has no slider; or a word
     /// on using the device's own control when it has none Ond can set.
-    fn volume_row(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: bool, volume: f32, out: &mut ControlOut) {
+    fn volume_row(&mut self, ui: &mut egui::Ui, engine: &EngineHandle, bit_perfect: bool, input: ControlIn, out: &mut ControlOut) {
         let t = Tokens::of(ui);
         let name = self.in_use_name().unwrap_or("the device").to_owned();
         ui.horizontal(|ui| {
@@ -410,7 +425,7 @@ impl Outputs {
                 Some(v) => {
                     let mut pos = (v.db - v.min_db) / (v.max_db - v.min_db).max(0.01);
                     let w = (ui.available_width() - FIELD_MUTE_W).max(100.0);
-                    let resp = self.device_slider(ui, &mut pos, w, &name, &v);
+                    let resp = self.device_slider(ui, &mut pos, w, &name, &v, input.green);
                     if resp.changed() {
                         self.set_device_volume(v.min_db + pos * (v.max_db - v.min_db), engine);
                     }
@@ -462,7 +477,7 @@ impl Outputs {
                     ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
                 }
                 None => {
-                    let mut level = volume;
+                    let mut level = input.volume;
                     let w = (ui.available_width() - PERCENT_W).max(100.0);
                     if crate::widgets::thin_slider(ui, &mut level, w, "Volume").changed() {
                         out.volume = Some(level);

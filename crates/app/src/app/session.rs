@@ -20,6 +20,8 @@ pub(super) struct LoginForm {
     /// Opened over the library (signing in again): it can be closed to keep
     /// browsing what's stored.
     pub(super) closable: bool,
+    /// The first empty field was given focus: once, so the user can move it.
+    pub(super) focused: bool,
 }
 
 /// The server connection and who's signed in.
@@ -124,6 +126,7 @@ impl OndApp {
         match self.login.as_mut() {
             Some(form) => {
                 form.busy = false;
+                form.password.clear();
                 form.error = Some(e);
             }
             None => {
@@ -147,6 +150,7 @@ impl OndApp {
             // Connects and reconnects in flight stop; what they'd deliver is dropped.
             self.bridge.end_session();
             self.forget_in_flight();
+            self.forget_waiting();
             self.set_offline();
             self.session.connecting = false;
             self.session.unreachable = false;
@@ -222,12 +226,21 @@ impl OndApp {
         self.with_player(|p, cx| p.reset(cx));
         self.data.clear();
         self.search.stale = true;
-        self.pending.clear();
+        self.forget_waiting();
         self.favorites = Favorites::default();
         self.lyrics.clear();
         self.song_stats.clear();
         self.ui.nav = Nav::default();
         self.cache.clear();
+    }
+
+    /// Drops plays and pins still waiting for an album's or a playlist's
+    /// tracks. Whatever was loading them belonged to a session that's over
+    /// and delivers nothing, so they'd wait until the user next opened that
+    /// list and then play or download it unbidden.
+    pub(super) fn forget_waiting(&mut self) {
+        self.pending.clear();
+        self.downloads.pending_pins.clear();
     }
 
     /// Forgets lyrics and play counts still on their way. Called when the
@@ -252,6 +265,16 @@ impl OndApp {
         self.sync.progress = None;
     }
 
+    /// Asks before signing out: it stops what's playing and the password has
+    /// to be typed again.
+    pub(super) fn ask_sign_out(&mut self) {
+        let server = self.session.settings.as_ref().map_or_else(|| self.prefs.snapshot().server, |s| s.server.clone());
+        let host = super::diagnostics::server_host(&server);
+        self.ui.palette = None;
+        let from_settings = matches!(self.ui.overlay, Some(super::dialogs::Overlay::Settings));
+        self.ui.overlay = Some(super::dialogs::Overlay::SignOut { host, from_settings });
+    }
+
     /// Stops playback, forgets the saved password and shows the login screen
     /// with the server and username filled in.
     pub(super) fn sign_out(&mut self) {
@@ -263,6 +286,7 @@ impl OndApp {
         // in flight now delivers nothing, so its `Loading` would stay for good.
         self.lyrics.clear();
         self.song_stats.clear();
+        self.forget_waiting();
         self.bridge.cancel_sync();
         // Reconnect loops and connects in flight stop; anything they still
         // deliver is ignored. Downloads lose their server (and its credentials).
@@ -296,8 +320,21 @@ impl OndApp {
 
     pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
         let Some(form) = self.login.as_mut() else { return };
-        let locked = (self.prefs.managed("server"), self.prefs.managed("username"));
-        let (mut submit, mut close) = (false, false);
+        let locked = (self.ui.prefs.server_managed, self.ui.prefs.username_managed);
+        let (mut submit, mut close, mut cancel) = (false, false, false);
+        // The first field that wants typing, focused when the form appears.
+        let first = if !form.focused && !form.busy {
+            form.focused = true;
+            Some(if form.server.trim().is_empty() && !locked.0 {
+                0
+            } else if form.username.trim().is_empty() && !locked.1 {
+                1
+            } else {
+                2
+            })
+        } else {
+            None
+        };
         let t = Tokens::of(ui);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
             // The top strip is the title bar here too.
@@ -315,7 +352,7 @@ impl OndApp {
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("Ond").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Connect to your Navidrome server").size(13.0).color(t.muted));
+                ui.label(egui::RichText::new("Connect to your server").size(13.0).color(t.muted));
                 ui.add_space(24.0);
             });
             ui.horizontal(|ui| {
@@ -325,15 +362,27 @@ impl OndApp {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     let mut enter = false;
                     ui.add_enabled_ui(!form.busy, |ui| {
-                        let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool, locked: bool| {
+                        let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool, locked: bool, focus: bool| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
                                 if locked {
                                     ui.label(egui::RichText::new(crate::managed::LOCKED).size(11.0).color(t.muted));
                                 }
                             });
-                            let r = ui.add_enabled(
-                                !locked,
+                            if locked {
+                                // Set by the system's configuration: a value to read, not
+                                // a greyed-out field that looks empty.
+                                egui::Frame::new()
+                                    .fill(t.field)
+                                    .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+                                    .inner_margin(egui::Margin::symmetric(10, 7))
+                                    .show(ui, |ui| {
+                                        ui.set_width(W - 20.0);
+                                        ui.add(egui::Label::new(egui::RichText::new(text.as_str()).color(t.text)).truncate());
+                                    });
+                                return false;
+                            }
+                            let r = ui.add(
                                 egui::TextEdit::singleline(text)
                                     .hint_text(hint)
                                     .password(password)
@@ -341,14 +390,19 @@ impl OndApp {
                                     .margin(egui::vec2(10.0, 7.0))
                                     .background_color(t.field),
                             );
+                            if focus {
+                                r.request_focus();
+                            }
                             r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
                         };
-                        enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false, locked.0);
-                        ui.label(egui::RichText::new("Your Navidrome address, for example https://music.example.com").size(11.0).color(t.muted));
+                        enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false, locked.0, first == Some(0));
+                        if !locked.0 {
+                            ui.label(egui::RichText::new("Your server's address, for example https://music.example.com").size(11.0).color(t.muted));
+                        }
                         ui.add_space(10.0);
-                        enter |= field(ui, "Username", &mut form.username, "", false, locked.1);
+                        enter |= field(ui, "Username", &mut form.username, "", false, locked.1, first == Some(1));
                         ui.add_space(10.0);
-                        enter |= field(ui, "Password", &mut form.password, "", true, false);
+                        enter |= field(ui, "Password", &mut form.password, "", true, false, first == Some(2));
                     });
                     ui.add_space(18.0);
                     let label = if form.busy { "Connecting…" } else { "Connect" };
@@ -373,8 +427,18 @@ impl OndApp {
                         ui.add_space(12.0);
                         ui.add(egui::Label::new(egui::RichText::new(e).size(12.0).color(ui.visuals().error_fg_color)).wrap());
                     }
-                    if form.closable && !form.busy {
+                    // A server that takes the connection and then says nothing
+                    // would hold the form until the request times out.
+                    if form.busy {
                         ui.add_space(16.0);
+                        ui.vertical_centered(|ui| {
+                            if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
+                                cancel = true;
+                            }
+                        });
+                    }
+                    if form.closable {
+                        ui.add_space(if form.busy { 8.0 } else { 16.0 });
                         ui.vertical_centered(|ui| {
                             if crate::widgets::link(ui, "Keep browsing offline", egui::FontId::proportional(12.0), t.accent).clicked() {
                                 close = true;
@@ -384,16 +448,41 @@ impl OndApp {
                 });
             });
         });
+        let busy = form.busy;
         if close {
-            self.login = None;
-            return;
+            if busy {
+                self.actions.push(super::Action::CancelSignIn);
+            }
+            self.actions.push(super::Action::CloseLogin);
+        } else if cancel {
+            self.actions.push(super::Action::CancelSignIn);
+        } else if submit && !busy {
+            self.actions.push(super::Action::SignIn);
         }
-        if submit && !form.busy {
-            form.busy = true;
-            form.error = None;
-            let settings =
-                Settings { server: form.server.trim().to_owned(), username: form.username.trim().to_owned(), signed_out: false, ..self.prefs.snapshot() };
-            self.bridge.connect(settings, Some(std::mem::take(&mut form.password)));
-        }
+    }
+
+    /// Connects with what the login form holds (its Connect button).
+    pub(super) fn sign_in(&mut self) {
+        let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
+        form.busy = true;
+        form.error = None;
+        let settings =
+            Settings { server: form.server.trim().to_owned(), username: form.username.trim().to_owned(), signed_out: false, ..self.prefs.snapshot() };
+        // Kept in the form until it's answered, so a cancelled connect can be tried again as typed.
+        self.bridge.connect(settings, Some(form.password.clone()));
+    }
+
+    /// Gives up on the login form's connect. The session ends, as on signing
+    /// out: the connect's result is stale when it arrives and is dropped
+    /// (`send` and the session check in `handle`), and a password it was about
+    /// to save in the keychain isn't saved.
+    pub(super) fn cancel_sign_in(&mut self) {
+        let Some(form) = self.login.as_mut().filter(|f| f.busy) else { return };
+        form.busy = false;
+        self.bridge.end_session();
+        // Work for the ended session delivers nothing now.
+        self.forget_in_flight();
+        self.forget_waiting();
+        self.session.connecting = false;
     }
 }

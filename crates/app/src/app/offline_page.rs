@@ -16,9 +16,9 @@ use offline::{Pin, PinSummary, SetAside, Snapshot};
 /// Storage caps offered in the limit menu, in GB.
 const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
 
-/// "4.2 GB on this computer · 180 GB free".
+/// "4.2 GB on this computer · 180 GB free", or "Nothing downloaded yet · 180 GB free".
 pub(super) fn storage_used(snap: &Snapshot) -> String {
-    let mut text = format!("{} on this computer", crate::fmt::bytes(snap.used_bytes));
+    let mut text = if snap.used_bytes == 0 { "Nothing downloaded yet".to_owned() } else { format!("{} on this computer", crate::fmt::bytes(snap.used_bytes)) };
     if let Some(free) = snap.free_bytes {
         text.push_str(&format!(" · {} free", crate::fmt::bytes(free)));
     }
@@ -143,11 +143,24 @@ impl ViewCtx<'_> {
     pub(super) fn offline_page(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let snap = self.downloads.snap.clone();
-        let albums: Vec<(usize, &PinSummary)> =
-            snap.pins.iter().filter_map(|p| if let Pin::Album(id) = &p.pin { self.data.by_id.get(id).map(|&i| (i, p)) } else { None }).collect();
-        let playlists: Vec<&PinSummary> = snap.pins.iter().filter(|p| matches!(p.pin, Pin::Playlist(_))).collect();
-        let songs: Vec<&PinSummary> = snap.pins.iter().filter(|p| matches!(p.pin, Pin::Track(_))).collect();
+        let albums: Vec<(usize, &PinSummary)> = snap
+            .pins
+            .iter()
+            .filter_map(|p| {
+                if let Pin::Album(id) = &p.pin
+                    && p.complete()
+                {
+                    self.data.by_id.get(id).map(|&i| (i, p))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let playlists: Vec<&PinSummary> = snap.pins.iter().filter(|p| matches!(p.pin, Pin::Playlist(_)) && p.complete()).collect();
+        let songs: Vec<&PinSummary> = snap.pins.iter().filter(|p| matches!(p.pin, Pin::Track(_)) && p.complete()).collect();
 
+        // Something still on its way is listed once, under "In progress", and
+        // moves to its own group when it's done.
         let mut parts = Vec::new();
         for (n, word) in [(albums.len(), "album"), (playlists.len(), "playlist"), (songs.len(), "song")] {
             if n > 0 {
@@ -156,10 +169,17 @@ impl ViewCtx<'_> {
         }
         self.heading(ui, "Offline", (!parts.is_empty()).then(|| parts.join(" · ")));
 
-        if !self.session.online && self.session.settings.is_some() {
+        let notice = if self.session.work_offline {
+            Some("Offline mode. Downloaded music still plays.")
+        } else if !self.session.online && self.session.settings.is_some() {
+            Some("Can't reach the server. Downloaded music still plays.")
+        } else {
+            None
+        };
+        if let Some(notice) = notice {
             ui.horizontal(|ui| {
                 icons::inline(ui, Icon::Offline, t.muted);
-                ui.label(egui::RichText::new("Can't reach the server. Downloaded music still plays.").size(12.5).color(t.muted));
+                ui.label(egui::RichText::new(notice).size(12.5).color(t.muted));
             });
             ui.add_space(10.0);
         }
@@ -224,8 +244,13 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.label(egui::RichText::new(storage_used(snap)).size(12.0).color(t.muted));
-            ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
+            // Before the first download the empty state below already says
+            // so; only the free space is worth a line then.
+            let used = if snap.used_bytes == 0 { snap.free_bytes.map(|free| format!("{} free", crate::fmt::bytes(free))) } else { Some(storage_used(snap)) };
+            if let Some(used) = used {
+                ui.label(egui::RichText::new(used).size(12.0).color(t.muted));
+                ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
+            }
             let limit = match snap.limit {
                 Some(b) => format!("Limit {}", crate::fmt::bytes(b)),
                 None => "No limit".to_owned(),
@@ -273,7 +298,7 @@ impl ViewCtx<'_> {
     }
 
     /// One kept album / playlist / song: art, name, status, and a thin bar
-    /// while it's on its way. Click opens it; right-click removes.
+    /// while it's on its way. Click opens it; right-click plays or removes.
     pub(super) fn pin_row(&mut self, ui: &mut Ui, snap: &Snapshot, p: &PinSummary) {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(760.0), 48.0), Sense::click());
@@ -293,54 +318,54 @@ impl ViewCtx<'_> {
                 (cover, p.label.clone(), tr.map(|t| Route::Album(t.album_id.clone())))
             }
         };
-        if ui.is_rect_visible(rect) {
-            if resp.hovered() {
-                ui.painter().rect_filled(rect, 6.0, t.hover);
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 6.0, t.hover);
+        }
+        let art = Rect::from_min_size(pos2(rect.left() + 6.0, rect.top() + 6.0), vec2(36.0, 36.0));
+        match (&p.pin, cover) {
+            (Pin::Playlist(_), _) => {
+                ui.painter().rect_filled(art, 4.0, t.field);
+                icons::paint(ui.painter(), art.shrink(11.0), Icon::List, t.muted);
             }
-            let art = Rect::from_min_size(pos2(rect.left() + 6.0, rect.top() + 6.0), vec2(36.0, 36.0));
-            match (&p.pin, cover) {
-                (Pin::Playlist(_), _) => {
-                    ui.painter().rect_filled(art, 4.0, t.field);
-                    icons::paint(ui.painter(), art.shrink(11.0), Icon::List, t.muted);
-                }
-                (_, cover) => self.art.paint(ui, art, cover.as_deref(), 4.0),
-            }
-            let x = art.right() + 12.0;
-            let right_w = 150.0;
-            let w = rect.right() - x - right_w - 10.0;
-            let g = elide(ui, &name, FontId::proportional(13.0), t.text, w);
-            ui.painter().galley(pos2(x, rect.center().y - g.size().y), g, t.text);
-            let status = pin_text(snap, p);
-            let g = elide(ui, &status, FontId::proportional(12.0), t.muted, w);
-            ui.painter().galley(pos2(x, rect.center().y + 1.0), g, t.muted);
-            if !p.complete() {
-                let bar = Rect::from_min_size(pos2(rect.right() - right_w, rect.center().y - 1.5), vec2(right_w - 34.0, 3.0));
-                ui.painter().rect_filled(bar, 1.5, t.hairline);
-                let mut fill = bar;
-                fill.set_width(bar.width() * p.fraction());
-                ui.painter().rect_filled(fill, 1.5, if snap.paused { t.muted } else { t.accent });
-            }
-            if let Some(m) = Mark::of_pin(Some(p)) {
-                mark(ui, pos2(rect.right() - 14.0, rect.center().y), 12.0, m);
-            }
+            (_, cover) => self.art.paint(ui, art, cover.as_deref(), 4.0),
+        }
+        let x = art.right() + 12.0;
+        let right_w = 150.0;
+        let w = rect.right() - x - right_w - 10.0;
+        let g = elide(ui, &name, FontId::proportional(13.0), t.text, w);
+        ui.painter().galley(pos2(x, rect.center().y - g.size().y), g, t.text);
+        let status = pin_text(snap, p);
+        let g = elide(ui, &status, FontId::proportional(12.0), t.muted, w);
+        ui.painter().galley(pos2(x, rect.center().y + 1.0), g, t.muted);
+        if !p.complete() {
+            let bar = Rect::from_min_size(pos2(rect.right() - right_w, rect.center().y - 1.5), vec2(right_w - 34.0, 3.0));
+            ui.painter().rect_filled(bar, 1.5, t.hairline);
+            let mut fill = bar;
+            fill.set_width(bar.width() * p.fraction());
+            ui.painter().rect_filled(fill, 1.5, if snap.paused { t.muted } else { t.accent });
+        }
+        if let Some(m) = Mark::of_pin(Some(p)) {
+            mark(ui, pos2(rect.right() - 14.0, rect.center().y), 12.0, m);
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
-        if resp.double_clicked() {
-            match &p.pin {
-                Pin::Album(id) => self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 })),
-                Pin::Playlist(id) => self.actions.push(Action::Playlist(id.clone(), QueueAction::Play { start: 0 })),
-                Pin::Track(id) => {
-                    if let Some(tr) = self.data.track(id).cloned() {
-                        self.play_from_album(&tr, QueueAction::Play { start: 0 });
-                    }
-                }
-            }
-        } else if resp.clicked()
+        if resp.clicked()
             && let Some(route) = open
         {
             self.actions.push(Action::Go(route));
         }
         resp.context_menu(|ui| {
+            if ui.button("Play").clicked() {
+                match &p.pin {
+                    Pin::Album(id) => self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 })),
+                    Pin::Playlist(id) => self.actions.push(Action::Playlist(id.clone(), QueueAction::Play { start: 0 })),
+                    Pin::Track(id) => {
+                        if let Some(tr) = self.data.track(id).cloned() {
+                            self.play_from_album(&tr, QueueAction::Play { start: 0 });
+                        }
+                    }
+                }
+                ui.close();
+            }
             if ui.button("Remove download").clicked() {
                 self.actions.push(Action::Offline(OfflineAction::Unpin(p.pin.clone())));
             }
@@ -394,7 +419,13 @@ pub fn mark(ui: &Ui, center: egui::Pos2, size: f32, m: Mark) {
     let t = Tokens::of(ui);
     let r = size / 2.0;
     match m {
-        Mark::Done => crate::icons::paint(ui.painter(), Rect::from_center_size(center, vec2(size, size)), crate::icons::Icon::Downloaded, t.muted),
+        // A check in a ring: "downloaded", where the Download icon's arrow reads as the action.
+        Mark::Done => {
+            let stroke = egui::Stroke::new(1.2, t.muted);
+            ui.painter().circle_stroke(center, r * 0.88, stroke);
+            let p = |x: f32, y: f32| center + vec2(x, y) * r;
+            ui.painter().add(egui::Shape::line(vec![p(-0.4, 0.0), p(-0.1, 0.32), p(0.42, -0.28)], stroke));
+        }
         Mark::Progress(f) => crate::icons::progress_ring(ui.painter(), center, r * 0.8, f, t.accent, t.hairline),
         Mark::Failed => {
             ui.painter().circle_stroke(center, r * 0.8, egui::Stroke::new(1.3, t.warn));
