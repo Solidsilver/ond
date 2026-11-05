@@ -52,7 +52,7 @@ impl InFlight {
         calls.running == 0
     }
 
-    /// Calls running now.
+    /// Calls running now. Only the owners' tests look at this.
     pub fn running(&self) -> usize {
         self.lock().running
     }

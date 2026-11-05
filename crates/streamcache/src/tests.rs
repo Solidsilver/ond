@@ -333,6 +333,32 @@ fn a_subsonic_error_reply_is_not_cached_as_audio() {
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     assert!(!dir.path().join("old.flac").exists());
 
+    let url = fixed_reply("application/json", br#"{"subsonic-response":{"status":"failed","error":{"code":40}}}"#);
+    let key = CacheKey::new("bad", Some("flac".into()));
+    // The open waits for the headers or a failure, so it ends in the error.
+    let err = cache.open(&key, &url, never()).err().expect("an error reply opened as audio");
+    assert!(!err.to_string().is_empty());
+    assert!(!dir.path().join("bad.flac").exists());
+    assert!(!cache.progress(&key).is_some_and(|p| p.complete));
+}
+
+/// A reverse proxy's login page, answered 200 on the stream URL, is no track.
+#[test]
+fn a_html_page_answering_200_is_not_cached_as_audio() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let url = fixed_reply("text/html; charset=utf-8", b"<!DOCTYPE html><html><head><title>Sign in</title></head><body>SSO</body></html>");
+    let key = CacheKey::new("sso", Some("flac".into()));
+    let err = cache.open(&key, &url, never()).err().expect("a page opened as audio");
+    assert!(err.to_string().contains("Sign in"), "{err}");
+    assert!(!dir.path().join("sso.flac").exists());
+    assert!(cache.complete_path(&key).is_none());
+    assert_eq!(cache.size(), 0);
+}
+
+/// A server that answers every request with one fixed 200 body.
+fn fixed_reply(content_type: &'static str, body: &'static [u8]) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rest/stream?id=x", listener.local_addr().unwrap());
     thread::spawn(move || {
@@ -343,21 +369,57 @@ fn a_subsonic_error_reply_is_not_cached_as_audio() {
             while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
                 line.clear();
             }
-            let body: &[u8] = br#"{"subsonic-response":{"status":"failed","error":{"code":40}}}"#;
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
             let _ = conn.write_all(head.as_bytes());
             let _ = conn.write_all(body);
         }
     });
-    let key = CacheKey::new("bad", Some("flac".into()));
-    // Either the open or the first read reports the failure; neither yields audio.
-    if let Ok(mut src) = cache.open(&key, &url, never()) {
-        let mut out = Vec::new();
-        assert!(src.read_to_end(&mut out).is_err(), "read {} bytes of an error reply as audio", out.len());
+    url
+}
+
+#[test]
+fn starting_over_the_cap_evicts_the_least_recently_used_files() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let base = SystemTime::now() - Duration::from_secs(1_000);
+    for (i, name) in ["old", "mid", "new"].into_iter().enumerate() {
+        let path = dir.path().join(name);
+        std::fs::write(&path, vec![7u8; 100]).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(base + Duration::from_secs(100 * i as u64)).unwrap();
     }
-    thread::sleep(Duration::from_millis(100));
-    assert!(!dir.path().join("bad.flac").exists());
-    assert!(!cache.progress(&key).is_some_and(|p| p.complete));
+    let cfg = CacheConfig { max_bytes: 250, ..CacheConfig::new(dir.path()) };
+    let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
+    assert_eq!(cache.size(), 200);
+    assert!(cache.complete_path(&CacheKey::new("old", None)).is_none());
+    assert!(cache.complete_path(&CacheKey::new("mid", None)).is_some());
+    assert!(cache.complete_path(&CacheKey::new("new", None)).is_some());
+    assert!(!dir.path().join("old").exists(), "the evicted file is deleted before new() returns");
+}
+
+#[test]
+fn a_cached_file_deleted_behind_our_back_is_downloaded_again() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let body = data(5_000);
+    let server = Server::start(body.clone(), FAST);
+    let key = CacheKey::new("gone", Some("flac".into()));
+    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    src.read_to_end(&mut Vec::new()).unwrap();
+    wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    drop(src);
+    assert_eq!(server.requests().len(), 1);
+
+    std::fs::remove_file(dir.path().join("gone.flac")).unwrap();
+    let mut again = cache.open(&key, &server.url, never()).unwrap();
+    let mut out = Vec::new();
+    again.read_to_end(&mut out).unwrap();
+    assert_eq!(out, body);
+    assert_eq!(server.requests().len(), 2, "it went back to the server");
+    wait_until("the second completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    assert_eq!(cache.size(), 5_000, "the stale entry's bytes aren't counted twice");
+    assert_eq!(std::fs::read(dir.path().join("gone.flac")).unwrap(), body);
 }
 
 /// A connection that goes quiet mid-body (half-open TCP, a stuck proxy) must

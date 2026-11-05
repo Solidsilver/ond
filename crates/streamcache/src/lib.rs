@@ -335,6 +335,8 @@ impl StreamCache {
                 break dl;
             }
         };
+        // Declared before `st` on purpose: the early returns below drop `st`
+        // first, so `Hold::drop` takes the index lock without the download's.
         let hold = Hold { dl: dl.clone(), inner: self.inner.clone() };
 
         let mut st = dl.lock();
@@ -439,26 +441,32 @@ impl Inner {
     }
 
     fn open_complete(&self, name: &str) -> Option<File> {
-        let mut idx = self.lock_index();
-        let entry = idx.complete.get_mut(name)?;
         let path = self.cfg.dir.join(name);
-        match File::open(&path) {
-            Ok(f) => {
-                let now = SystemTime::now();
-                entry.last_used = now;
-                // Persist recency for the next startup scan; best effort.
-                if let Ok(w) = std::fs::OpenOptions::new().write(true).open(&path) {
-                    let _ = w.set_modified(now);
+        let now = SystemTime::now();
+        // The read-open stays under the index lock so "indexed but gone" is
+        // settled against the same view `is_complete` reads.
+        let file = {
+            let mut idx = self.lock_index();
+            let entry = idx.complete.get_mut(name)?;
+            match File::open(&path) {
+                Ok(f) => {
+                    entry.last_used = now;
+                    f
                 }
-                Some(f)
+                Err(_) => {
+                    // Deleted behind our back: forget it and download again.
+                    let size = idx.complete.remove(name).map_or(0, |e| e.size);
+                    idx.total -= size;
+                    return None;
+                }
             }
-            Err(_) => {
-                // Deleted behind our back: forget it and download again.
-                let size = idx.complete.remove(name).map_or(0, |e| e.size);
-                idx.total -= size;
-                None
-            }
+        };
+        // Persist recency for the next startup scan; best effort, and off the
+        // lock that every `is_complete` call takes.
+        if let Ok(w) = std::fs::OpenOptions::new().write(true).open(&path) {
+            let _ = w.set_modified(now);
         }
+        Some(file)
     }
 
     /// Returns the active download for `name`, starting one if needed, with
