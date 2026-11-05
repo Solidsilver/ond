@@ -50,14 +50,27 @@ pub struct PrefsView {
     pub experimental: Experimental,
     /// Software volume, 0..=1.
     pub volume: f32,
+    /// When the device's level shows in dB beside its slider.
+    pub device_volume_db: crate::settings::DbReadout,
+    /// The green dot on the device slider's knob in bit-perfect.
+    pub device_volume_green: bool,
     /// Analyse each track as it plays (it's in the playback cache by then).
     pub analyze_playing: bool,
     /// A library-wide analysis should be running (resumed after a restart).
     pub analysis_resume: bool,
+    /// The login form's server and username are set in managed.json.
+    pub server_managed: bool,
+    pub username_managed: bool,
 }
 
 impl PrefsView {
+    /// What the output control draws with this frame.
+    pub fn output_control(&self) -> crate::output::ControlIn {
+        crate::output::ControlIn { volume: self.volume, readout: self.device_volume_db, green: self.device_volume_green }
+    }
+
     pub fn read(prefs: &Prefs) -> Self {
+        let (server_managed, username_managed) = (prefs.managed("server"), prefs.managed("username"));
         prefs.get(|s| Self {
             mode: s.window.mode,
             lyrics_open: s.window.lyrics_open,
@@ -78,8 +91,12 @@ impl PrefsView {
             diagnostics_bar: s.diagnostics_bar,
             experimental: s.experimental,
             volume: s.volume,
+            device_volume_db: s.device_volume_db,
+            device_volume_green: s.device_volume_green,
             analyze_playing: s.analyze_playing,
             analysis_resume: s.analysis_resume,
+            server_managed,
+            username_managed,
         })
     }
 }
@@ -179,8 +196,10 @@ impl OndApp {
         PrefsView::read(&self.prefs)
     }
 
-    /// Takes this frame's copy of the preferences.
+    /// Takes this frame's copy of the preferences, and of what streams are
+    /// converted to.
     pub(super) fn read_prefs(&mut self) {
         self.ui.prefs = self.prefs_now();
+        self.ui.transcode = self.output.transcode();
     }
 }

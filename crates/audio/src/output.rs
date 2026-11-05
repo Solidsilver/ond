@@ -2,8 +2,10 @@
 //! realtime callback drains it through [`RingInput::fill`].
 //!
 //! [`CpalBackend`] works everywhere (shared mode). On macOS the native
-//! [`crate::coreaudio::CoreAudioBackend`] adds device choice, rate switching, hog
-//! mode and integer formats; see [`crate::default_backend`].
+//! CoreAudio backend (`coreaudio`) adds device choice, rate switching, hog
+//! mode and integer formats. On Linux the ALSA backend (`alsa`) adds device
+//! choice and exclusive hardware access in bit-perfect mode, and plays
+//! through the sound server with cpal otherwise. See [`crate::default_backend`].
 
 use crate::device::{DeviceEvent, DeviceInfo};
 use crate::dither::{Tpdf, Treatment, needs_dither};
@@ -24,7 +26,7 @@ const GAIN_RAMP_SECS: f32 = 0.015;
 const SEEK_FADE_SECS: f32 = 0.004;
 /// After a seek, a track start or an underrun, output stays silent until this
 /// much audio is queued (or the input ends first).
-pub const PREBUFFER_SECS: f32 = 0.4;
+pub(crate) const PREBUFFER_SECS: f32 = 0.4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamFormat {
@@ -56,7 +58,7 @@ pub enum OutputError {
 ///   the ring and reset its position counters, and releases the hold in the same
 ///   step (`pending_release` becomes `released_gen` when the flush is serviced).
 #[derive(Debug, Default)]
-pub struct RingCtl {
+pub(crate) struct RingCtl {
     hold_gen: AtomicU64,
     released_gen: AtomicU64,
     pending_release: AtomicU64,
@@ -83,18 +85,24 @@ impl RingCtl {
     pub(crate) fn flushed(&self, generation: u64) -> bool {
         self.flush_acked.load(Ordering::Acquire) >= generation
     }
+
+    /// The decoder has asked for a flush the callback hasn't serviced yet.
+    #[cfg(test)]
+    pub(crate) fn flush_pending(&self) -> bool {
+        self.flush_requested.load(Ordering::Acquire) > self.flush_acked.load(Ordering::Acquire)
+    }
 }
 
 /// Where the next track begins in a ring, and what the callback needs to know
 /// about it from its first sample on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Marker {
+pub(crate) struct Marker {
     /// Sample position (since the ring started or was last flushed).
-    pub at: u64,
+    pub(crate) at: u64,
     /// The track's bit depth, when it has one: tracks of different depths
     /// share a ring (it only needs the same rate and layout), and whether
     /// one needs dither depends on its own depth.
-    pub source_bits: Option<u32>,
+    pub(crate) source_bits: Option<u32>,
 }
 
 /// Track boundaries a ring can hold at once. The decoder waits for room once
@@ -104,14 +112,15 @@ pub struct Marker {
 pub(crate) const MARKER_CAP: usize = 16;
 
 /// What a backend reads from: interleaved f32 samples, track-boundary markers
-/// and the state the realtime callback keeps between calls.
+/// and the state the realtime callback keeps between calls. Opaque outside
+/// this crate: a backend elsewhere (a test's) only passes it along.
 pub struct RingInput {
-    pub samples: Consumer<f32>,
+    pub(crate) samples: Consumer<f32>,
     /// Where the next tracks begin. Pushed by the decoder when it continues gaplessly.
-    pub markers: Consumer<Marker>,
+    pub(crate) markers: Consumer<Marker>,
     /// Set by the decoder after its last push; starvation after this is the end, not an underrun.
-    pub input_done: Arc<AtomicBool>,
-    pub ctl: Arc<RingCtl>,
+    pub(crate) input_done: Arc<AtomicBool>,
+    pub(crate) ctl: Arc<RingCtl>,
     /// Samples consumed since the ring started or was last flushed.
     pos: u64,
     /// Current volume gain (ramps toward the volume).
@@ -138,22 +147,23 @@ impl std::fmt::Debug for RingInput {
 }
 
 impl RingInput {
-    pub fn new(samples: Consumer<f32>, markers: Consumer<Marker>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
+    pub(crate) fn new(samples: Consumer<f32>, markers: Consumer<Marker>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
         Self { samples, markers, input_done, ctl, pos: 0, gain: 1.0, rg: 1.0, buffering: true, faded: 0, source_bits: None, processed: false }
     }
 
     /// Describes what's in the ring, for the dither decision: the first
     /// track's bit depth (later tracks bring theirs in their [`Marker`]), and
     /// whether the decoder recomputes the samples (resamples or downmixes).
-    pub fn with_source(mut self, first_bits: Option<u32>, processed: bool) -> Self {
+    pub(crate) fn with_source(mut self, first_bits: Option<u32>, processed: bool) -> Self {
         self.source_bits = first_bits;
         self.processed = processed;
         self
     }
 
     /// Whether what plays now may be off a `device_bits`-bit integer grid and
-    /// need requantizing (see [`needs_dither`](crate::dither::needs_dither)).
-    pub fn needs_dither(&self, device_bits: u32) -> bool {
+    /// need requantizing, by the rule in `dither::needs_dither`.
+    #[cfg(test)]
+    pub(crate) fn needs_dither(&self, device_bits: u32) -> bool {
         needs_dither(Some(device_bits), self.treatment(self.gain * self.rg != 1.0))
     }
 
@@ -166,7 +176,15 @@ impl RingInput {
     /// each stretch that needs it (a gain ramp, a track of another depth:
     /// one buffer can hold both kinds). With `device_bits` `None` (float
     /// device) samples pass through untouched.
-    pub fn fill_for_device(&mut self, out: &mut [f32], channels: usize, rate: u32, status: &Status, device_bits: Option<u32>, dither: &mut Tpdf) -> bool {
+    pub(crate) fn fill_for_device(
+        &mut self,
+        out: &mut [f32],
+        channels: usize,
+        rate: u32,
+        status: &Status,
+        device_bits: Option<u32>,
+        dither: &mut Tpdf,
+    ) -> bool {
         self.fill_with(out, channels, rate, status, |stretch, treatment| {
             if let Some(bits) = device_bits
                 && needs_dither(device_bits, treatment)
@@ -177,7 +195,7 @@ impl RingInput {
     }
 
     /// Drops everything queued if a flush was requested. Realtime-safe.
-    pub fn service_flush(&mut self) {
+    pub(crate) fn service_flush(&mut self) {
         let requested = self.ctl.flush_requested.load(Ordering::Acquire);
         if requested != self.ctl.flush_acked.load(Ordering::Relaxed) {
             self.discard();
@@ -204,7 +222,7 @@ impl RingInput {
     /// this call had nothing left to write. (The call that writes the last
     /// samples returns false: the device has yet to play that buffer, and
     /// closing it now would cut them off.)
-    pub fn fill<T>(&mut self, out: &mut [T], channels: usize, rate: u32, status: &Status) -> bool
+    pub(crate) fn fill<T>(&mut self, out: &mut [T], channels: usize, rate: u32, status: &Status) -> bool
     where
         T: SizedSample + FromSample<f32>,
     {
@@ -428,8 +446,9 @@ pub trait OutputBackend: Send {
         let _ = on;
     }
     /// The open stream no longer fits the mode and the backend can't switch it
-    /// in place (ALSA: exclusive hardware vs. the sound server): the engine
-    /// starts the track over where it is.
+    /// in place (ALSA: exclusive hardware vs. the sound server), or switching
+    /// it failed (CoreAudio: the unit wouldn't start again): the engine starts
+    /// the track over where it is. Asked after each [`set_mode`](Self::set_mode).
     fn wants_reopen(&mut self) -> bool {
         false
     }
@@ -466,7 +485,7 @@ pub trait OutputBackend: Send {
 /// rate when the stream opens, so matching rates works, but it shares the
 /// device (no hog mode) and always runs the float mixer path, so it can never
 /// verify bit-perfect output.
-pub struct CpalBackend {
+pub(crate) struct CpalBackend {
     name: String,
     /// Tells the stream's thread to close; the flag is set first, so the
     /// stream ending under us isn't reported as an error.
@@ -573,7 +592,9 @@ impl OutputBackend for CpalBackend {
         let closing_in = closing.clone();
         // cpal streams are !Send on some platforms, so each lives on its own thread
         // until told to close.
-        let (card, returning) = (self.card, self.card_returning.take());
+        // The wait for a returning card holds until a stream opens, so a retry
+        // after a failed open waits for the card too instead of playing elsewhere.
+        let (card, returning) = (self.card, self.card_returning);
         let handle = thread::Builder::new()
             .name("audio-output".into())
             .spawn(move || match start_stream(format, input, status, drained, card, returning, closing_in) {
@@ -600,6 +621,7 @@ impl OutputBackend for CpalBackend {
         };
         self.name = format!("cpal · {device}");
         self.ctl = Some((ctl_tx, handle, closing));
+        self.card_returning = None;
         Ok(())
     }
 
@@ -694,7 +716,8 @@ where
     device.build_output_stream(config, callback, on_error, None)
 }
 
-/// Frames the cpal callback converts at a time (larger than any buffer it asks for).
+/// Frames the cpal callback converts at a time. A device may ask for more in
+/// one buffer: [`fill_converted`] then fills it in chunks of this size.
 const SCRATCH_FRAMES: usize = 16_384;
 
 /// Fills `out` from the ring. For an integer device (`device_bits`) the samples
@@ -730,15 +753,16 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const RATE: u32 = 1000;
 
-    /// A ring with `samples` queued. Prebuffering is skipped (the ring is small),
-    /// unless the test turns it back on.
-    fn ring(samples: &[f32], done: bool) -> (rtrb::Producer<f32>, rtrb::Producer<Marker>, RingInput) {
-        let (mut p, c) = rtrb::RingBuffer::new(64);
+    /// A ring with `samples` queued (and room for 64 at least), for any test
+    /// that drives a callback. Prebuffering is skipped, unless the test turns
+    /// it back on.
+    pub(crate) fn ring(samples: &[f32], done: bool) -> (rtrb::Producer<f32>, rtrb::Producer<Marker>, RingInput) {
+        let (mut p, c) = rtrb::RingBuffer::new(samples.len().max(64));
         p.push_entire_slice(samples).unwrap();
         let (m, mc) = rtrb::RingBuffer::new(4);
         let mut input = RingInput::new(c, mc, Arc::new(AtomicBool::new(done)), Arc::default());
@@ -1116,6 +1140,18 @@ mod tests {
         assert!(!drained, "the chunks after the end don't hide that this buffer has the last samples");
         let drained = fill_converted(&mut input, &mut out, &mut scratch, 2, RATE, &status, Some(16), &mut Tpdf::default());
         assert!(drained && out == [0; 20]);
+    }
+
+    #[test]
+    fn the_alsa_card_is_read_from_each_form_of_device_path() {
+        let paths = [("front:1", Some(1)), ("hw:2,0", Some(2)), ("hdmi:3,2", Some(3)), ("surround51:CARD=4", Some(4)), ("hw:12,3", Some(12))];
+        for (path, card) in paths {
+            assert_eq!(alsa_card_of(path), card, "{path}");
+        }
+        // A card by name, or no card at all, isn't an index.
+        for path in ["hw:CARD=Intel,0", "default", "pipewire:", ""] {
+            assert_eq!(alsa_card_of(path), None, "{path}");
+        }
     }
 
     #[test]

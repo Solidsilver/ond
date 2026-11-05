@@ -1,7 +1,12 @@
 //! Minimal OpenSubsonic client for Navidrome.
 //!
-//! Auth uses the token + salt scheme (`t = md5(password + salt)`), with a fresh
-//! salt per request. Every response is requested as JSON and unwrapped from the
+//! Auth uses the token + salt scheme (`t = md5(password + salt)`). Every URL
+//! gets a fresh salt when it's built. API calls build theirs per request, but
+//! a stream or cover URL keeps its token and salt for as long as it's used,
+//! a whole download included. Such a URL is as good as the password for
+//! that time, so it never goes in a log or an error message.
+//!
+//! Every response is requested as JSON and unwrapped from the
 //! `subsonic-response` envelope before the payload is decoded.
 
 mod auth;
@@ -29,6 +34,15 @@ pub enum Error {
     Decode(#[from] serde_json::Error),
     #[error("server error {code}: {message}")]
     Api { code: i32, message: String },
+    /// A success status with a body that isn't JSON at all. That's usually a
+    /// web page, like the login page of a reverse proxy or a single sign-on
+    /// gate in front of the server. Holds what the page says (its `<title>`,
+    /// or its first line) when it says anything.
+    #[error("{}", match .0 {
+        Some(said) => format!("the server answered with a page instead of the API: {said}"),
+        None => "the server answered with something other than the API".to_owned(),
+    })]
+    NotApi(Option<String>),
 }
 
 impl From<reqwest::Error> for Error {
@@ -92,21 +106,31 @@ async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response> {
 /// HTML page's `<title>`, or the first line of anything else, at most 200
 /// characters. `None` when the body says nothing.
 fn status_text(body: &[u8]) -> Option<String> {
-    let found = if let Err(Error::Api { message, .. }) = parse_response::<serde_json::Value>(body) {
-        message
+    match parse_response::<serde_json::Value>(body) {
+        Err(Error::Api { message, .. }) => tidy(&message),
+        _ => page_text(body),
+    }
+}
+
+/// What a body that isn't a Subsonic reply says: an HTML page's `<title>`, or
+/// the first line of anything else, at most 200 characters. `None` when it
+/// says nothing.
+fn page_text(body: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(&body[..body.len().min(4096)]);
+    let text = text.trim();
+    if text.starts_with('<') {
+        let lower = text.to_ascii_lowercase();
+        let start = lower.find("<title>")? + "<title>".len();
+        let end = lower[start..].find("</title>").map_or(text.len(), |i| start + i);
+        tidy(&text[start..end])
     } else {
-        let text = String::from_utf8_lossy(&body[..body.len().min(4096)]);
-        let text = text.trim();
-        if text.starts_with('<') {
-            let lower = text.to_ascii_lowercase();
-            let start = lower.find("<title>")? + "<title>".len();
-            let end = lower[start..].find("</title>").map_or(text.len(), |i| start + i);
-            text[start..end].to_owned()
-        } else {
-            text.lines().next().unwrap_or_default().to_owned()
-        }
-    };
-    let found: String = found.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
+        tidy(text.lines().next().unwrap_or_default())
+    }
+}
+
+/// `text` on one line, its whitespace collapsed, at most 200 characters.
+fn tidy(text: &str) -> Option<String> {
+    let found: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
     (!found.is_empty()).then_some(found)
 }
 
@@ -164,8 +188,13 @@ impl Client {
     }
 
     /// Builds a signed endpoint URL; `params` are appended after the auth params.
-    pub fn endpoint(&self, method: &str, params: &[(&str, &str)]) -> Url {
-        let mut url = self.base.join(&format!("rest/{method}")).expect("method names are valid path segments");
+    ///
+    /// `method` is an API method name written into the code, like `"ping"`.
+    /// It's joined onto the server address as a relative path, which can't
+    /// fail for a plain name: [`new`](Self::new) made sure the address can
+    /// take a path. Being `'static` keeps it from coming from user input.
+    pub fn endpoint(&self, method: &'static str, params: &[(&str, &str)]) -> Url {
+        let mut url = self.base.join(&format!("rest/{method}")).expect("a method name joins onto a base URL");
         let token = self.creds.token();
         url.query_pairs_mut()
             .append_pair("u", &self.creds.username)
@@ -196,7 +225,7 @@ impl Client {
         }
     }
 
-    async fn call<T: DeserializeOwned>(&self, method: &str, params: &[(&str, &str)]) -> Result<(ServerInfo, T)> {
+    async fn call<T: DeserializeOwned>(&self, method: &'static str, params: &[(&str, &str)]) -> Result<(ServerInfo, T)> {
         let resp = self.http.get(self.endpoint(method, params)).timeout(self.call_timeout).send().await?;
         let bytes = check_status(resp).await?.bytes().await?;
         parse_response(&bytes)
@@ -346,16 +375,23 @@ impl Client {
     }
 }
 
-/// Whether a response is a Subsonic error envelope (JSON or XML) rather than
-/// the file asked for. Subsonic sends those with status 200, so a download
-/// must check before keeping the bytes. `head` is the start of the body.
+/// Whether a response is something other than the file asked for: a Subsonic
+/// error envelope (JSON or XML), or a page (a reverse proxy's login, an SSO
+/// gate). Subsonic sends errors with status 200, so a download must check
+/// before keeping the bytes. Any `text/*` type counts, since no audio or
+/// image is ever served as text. `head` is the start of the body.
 pub fn is_error_reply(content_type: Option<&str>, head: &[u8]) -> bool {
-    if content_type.is_some_and(|ct| ct.contains("json") || ct.contains("xml")) {
+    if content_type.is_some_and(|ct| ct.trim_start().to_ascii_lowercase().starts_with("text/") || ct.contains("json") || ct.contains("xml")) {
         return true;
     }
     let text = String::from_utf8_lossy(&head[..head.len().min(512)]);
     let text = text.trim_start();
-    (text.starts_with('{') && text.contains("subsonic-response")) || text.starts_with("<?xml") || text.starts_with("<subsonic-response")
+    let lower = text.get(..15).unwrap_or(text).to_ascii_lowercase();
+    (text.starts_with('{') && text.contains("subsonic-response"))
+        || text.starts_with("<?xml")
+        || text.starts_with("<subsonic-response")
+        || lower.starts_with("<!doctype html")
+        || lower.starts_with("<html")
 }
 
 /// A short, readable form of an error envelope for messages: the server's
@@ -364,6 +400,10 @@ pub fn error_text(body: &[u8]) -> String {
     if let Err(Error::Api { message, .. }) = parse_response::<serde_json::Value>(body) {
         return message;
     }
+    // A page: its title says more than its markup.
+    if let Err(Error::NotApi(Some(title))) = parse_response::<serde_json::Value>(body) {
+        return title;
+    }
     let text = String::from_utf8_lossy(&body[..body.len().min(200)]);
     match text.split_once("message=\"").and_then(|(_, rest)| rest.split_once('"')) {
         Some((message, _)) => message.to_owned(),
@@ -371,16 +411,36 @@ pub fn error_text(body: &[u8]) -> String {
     }
 }
 
-/// Unwraps the `subsonic-response` envelope, surfacing API-level failures as [`Error::Api`].
+/// Unwraps the `subsonic-response` envelope, surfacing API-level failures as
+/// [`Error::Api`]. A body that isn't JSON at all is [`Error::NotApi`].
+///
+/// A reply fails when its `status` isn't `ok`, or when it has no `status` but
+/// carries an `error`. A failure without an `error`, or one without a `code`,
+/// still counts, with code -1.
 pub fn parse_response<T: DeserializeOwned>(bytes: &[u8]) -> Result<(ServerInfo, T)> {
-    let env: Envelope = serde_json::from_slice(bytes)?;
+    let env: Envelope = match serde_json::from_slice(bytes) {
+        Ok(env) => env,
+        Err(e) if (e.is_syntax() || e.is_eof()) && !looks_like_json(bytes) => return Err(Error::NotApi(page_text(bytes))),
+        Err(e) => return Err(e.into()),
+    };
     let body = env.response;
-    if body.status != "ok" {
-        let err = body.error.unwrap_or(ApiError { code: -1, message: "unknown error".into() });
-        return Err(Error::Api { code: err.code, message: err.message });
+    let failed = match &body.status {
+        Some(status) => !status.trim().eq_ignore_ascii_case("ok"),
+        None => body.error.is_some(),
+    };
+    if failed {
+        let err = body.error.unwrap_or_default();
+        return Err(Error::Api { code: err.code.unwrap_or(-1), message: err.message.unwrap_or_else(|| "unknown error".into()) });
     }
     let payload = serde_json::from_value(serde_json::Value::Object(body.rest))?;
     Ok((body.info, payload))
+}
+
+/// The body starts like a JSON object or array, so a parse error is a broken
+/// reply rather than something else answering.
+fn looks_like_json(bytes: &[u8]) -> bool {
+    let start = bytes.strip_prefix(b"\xEF\xBB\xBF".as_slice()).unwrap_or(bytes);
+    matches!(start.iter().find(|b| !b.is_ascii_whitespace()), Some(b'{' | b'['))
 }
 
 #[cfg(test)]

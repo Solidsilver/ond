@@ -201,7 +201,8 @@ mod tests {
         std::fs::write(&path, wav()).unwrap();
         w.looked = None;
         w.want("t", Some("wav"), || Some(path.clone()));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous: the read runs on a thread that a busy machine (CI, a parallel build) may starve.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let bars = loop {
             w.poll();
             if let Some(b) = w.bars("t", 10) {
@@ -225,7 +226,8 @@ mod tests {
         std::fs::write(&path, b"not audio").unwrap();
         let mut w = Waveforms::new(egui::Context::default());
         w.want("bad", Some("flac"), || Some(path.clone()));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous: the read runs on a thread that a busy machine (CI, a parallel build) may starve.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while !w.failed.contains("bad") {
             w.poll();
             assert!(Instant::now() < deadline);

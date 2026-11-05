@@ -4,7 +4,7 @@
 
 use super::OndApp;
 use super::dialogs::Overlay;
-use crate::bridge::{ListKey, Msg};
+use crate::bridge::{LibraryMsg, ListKey};
 use crate::player::QueueAction;
 use crate::queue::{OnPlay, Source};
 use crate::search::SearchIndex;
@@ -91,7 +91,12 @@ impl Data {
         track.cover_art.as_deref().or_else(|| self.album(&track.album_id).and_then(|a| a.cover_art.as_deref()))
     }
 
-    pub(super) fn update_album(&mut self, album: Album) {
+    /// `false` when the row was already exactly this (an album opened again),
+    /// so nothing built from the list needs redoing.
+    pub(super) fn update_album(&mut self, album: Album) -> bool {
+        if self.by_id.get(&album.id).is_some_and(|&i| self.albums[i] == album) {
+            return false;
+        }
         // Copies the list only if a search index is still being built from it.
         let albums = Arc::make_mut(&mut self.albums);
         match self.by_id.get(&album.id) {
@@ -102,6 +107,7 @@ impl Data {
             }
         }
         self.version += 1;
+        true
     }
 }
 
@@ -156,22 +162,22 @@ pub(super) struct Pending {
 
 impl OndApp {
     /// A message about the library, its sync or a track list that loaded.
-    pub(super) fn library_msg(&mut self, msg: Msg) {
+    pub(super) fn library_msg(&mut self, msg: LibraryMsg) {
         match msg {
-            Msg::SearchIndex { generation, index } => {
+            LibraryMsg::SearchIndex { generation, index } => {
                 if generation == self.search.generation {
                     self.install_search(*index);
                 }
             }
-            Msg::Albums(a) => {
+            LibraryMsg::Albums(a) => {
                 self.data.set_albums(a);
                 self.search.stale = true;
             }
-            Msg::Artists(a) => {
+            LibraryMsg::Artists(a) => {
                 self.data.artists = Arc::new(a);
                 self.search.stale = true;
             }
-            Msg::AllTracks(set) => {
+            LibraryMsg::AllTracks(set) => {
                 self.data.set_tracks(*set);
                 self.search.stale = true;
                 // A sync may have added tracks to pinned albums. The library can be
@@ -186,12 +192,12 @@ impl OndApp {
                 }
                 self.resume_library_analysis();
             }
-            Msg::TrackSync(p) => {
+            LibraryMsg::TrackSync(p) => {
                 self.sync.tracks = true;
                 self.sync.progress = Some(p);
                 self.sync.label = p.label();
             }
-            Msg::TrackSyncDone(outcome) => {
+            LibraryMsg::TrackSyncDone(outcome) => {
                 self.sync.tracks = false;
                 self.sync.progress = None;
                 let albums = self.data.albums.len();
@@ -203,31 +209,33 @@ impl OndApp {
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
                     crate::sync::Outcome::Failed(e) => {
-                        self.show_error(e);
+                        self.show_failure(e);
                         format!("{albums} albums · {tracks} tracks")
                     }
                 };
             }
-            Msg::AlbumUpdated(a) => self.data.update_album(a),
-            Msg::SyncProgress(n) => {
+            LibraryMsg::AlbumUpdated(a) => {
+                // A rebuilt index is tens of ms off-thread; only when the row changed.
+                if self.data.update_album(*a) {
+                    self.search.stale = true;
+                }
+            }
+            LibraryMsg::SyncProgress(n) => {
                 self.sync.albums = true;
                 self.sync.label = format!("Syncing… {n}");
             }
-            Msg::AlbumSyncDone(Ok(n)) => {
+            LibraryMsg::AlbumSyncDone(Ok(n)) => {
                 self.sync.albums = false;
                 self.sync.label = format!("{n} albums");
                 self.sync.tracks = true;
             }
-            Msg::AlbumSyncDone(Err(e)) => {
+            LibraryMsg::AlbumSyncDone(Err(e)) => {
                 // Nothing more follows (no artist or track sync): stop saying "syncing".
                 self.sync.albums = false;
                 self.sync.label = "Sync failed".into();
-                self.probe();
-                if self.session.online {
-                    self.show_error(e);
-                }
+                self.show_failure(e);
             }
-            Msg::LoadFailed { key, error } => {
+            LibraryMsg::LoadFailed { key, error } => {
                 // One that only waited for a complete listing plays what's stored.
                 if let Some(at) = self.pending.iter().position(|p| p.key == key && p.fresh) {
                     self.pending[at].fresh = false;
@@ -238,30 +246,35 @@ impl OndApp {
                 self.pending.retain(|p| p.key != key);
                 self.downloads.pending_pins.retain(|(k, _)| *k != key);
                 if let Some(e) = error {
-                    self.probe();
-                    if self.session.online {
-                        self.show_error(e);
-                    }
+                    self.show_failure(e);
                 }
             }
-            Msg::Tracks { album_id, mut tracks, fresh } => {
+            LibraryMsg::Tracks { album_id, mut tracks, fresh } => {
                 if self.session.work_offline {
-                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
+                    let transcode = self.output.transcode();
+                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, transcode.as_ref(), t));
                 }
                 self.refresh_pin(Pin::Album(album_id.clone()), &tracks, fresh);
+                // The server's listing may have songs the last sync didn't:
+                // searchable now, not after the next sync (and only then, since
+                // every album opened comes through here).
+                let unknown = fresh && tracks.iter().any(|t| self.data.tracks.track(&t.id).is_none());
                 self.data.tracks.set_album(&album_id, tracks);
+                if unknown {
+                    self.search.stale = true;
+                }
                 self.run_pending(&ListKey::Album(album_id), fresh);
             }
-            Msg::Newest(ids) => {
+            LibraryMsg::Newest(ids) => {
                 self.data.served.newest = true;
                 self.data.newest = ids;
                 self.data.version += 1;
             }
-            Msg::Playlists(p) => {
+            LibraryMsg::Playlists(p) => {
                 self.data.served.playlists = true;
                 self.data.playlists = p;
             }
-            Msg::Saved(saved) => {
+            LibraryMsg::Saved(saved) => {
                 if let Some(ids) = saved.newest.filter(|_| !self.data.served.newest) {
                     self.data.newest = ids;
                     self.data.version += 1;
@@ -273,25 +286,25 @@ impl OndApp {
                     self.favorites.load(s.starred, s.ratings);
                 }
             }
-            Msg::PlaylistTracks { id, mut tracks, fresh } => {
+            LibraryMsg::PlaylistTracks { id, mut tracks, fresh } => {
                 if self.session.work_offline {
-                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, &self.output, t));
+                    let transcode = self.output.transcode();
+                    tracks.retain(|t| super::playable(&self.session, &self.downloads, &self.cache, transcode.as_ref(), t));
                 }
                 // Only the server's own listing may drop songs from a download.
                 self.refresh_pin(Pin::Playlist(id.clone()), &tracks, fresh);
                 self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 self.run_pending(&ListKey::Playlist(id), fresh);
             }
-            Msg::Credited { name, album_ids } => {
+            LibraryMsg::Credited { name, album_ids } => {
                 self.data.credited.insert(name, album_ids);
             }
-            Msg::TrackBatch { key, tracks } => {
+            LibraryMsg::TrackBatch { key, tracks } => {
                 if let Some(at) = self.pending.iter().position(|p| p.key == key) {
                     let p = self.pending.remove(at);
                     self.queue_tracks(tracks, p.source, p.action);
                 }
             }
-            _ => unreachable!("not a library message"),
         }
     }
 
@@ -300,14 +313,14 @@ impl OndApp {
     pub(super) fn after_messages(&mut self) {
         if std::mem::take(&mut self.search.stale) {
             self.search.generation += 1;
-            self.bridge.build_search(self.search.generation, Arc::clone(&self.data.albums), Arc::clone(&self.data.artists), Arc::clone(&self.data.tracks.all));
+            self.bridge.build_search(self.search.generation, Arc::clone(&self.data.albums), Arc::clone(&self.data.artists), self.data.tracks.searchable());
         }
     }
 
     /// Builds the index here and now (fixtures and tests).
     #[cfg(test)]
     pub(super) fn rebuild_search(&mut self) {
-        self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, &self.data.tracks.all));
+        self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, self.data.tracks.searchable().iter()));
     }
 
     /// Swaps in a freshly built index; an open palette re-runs its query on it.
@@ -334,10 +347,8 @@ impl OndApp {
     /// Plays what was asked about: keeping the added tracks (after the new
     /// music) or clearing them.
     pub(super) fn queue_tracks_answered(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, keep: bool) {
-        let prefs = self.player.queue.prefs;
-        self.player.queue.prefs.on_play = if keep { OnPlay::KeepAfter } else { OnPlay::Clear };
-        self.with_player(|p, cx| p.queue_tracks(tracks, source, action, cx));
-        self.player.queue.prefs = prefs;
+        let on_play = if keep { OnPlay::KeepAfter } else { OnPlay::Clear };
+        self.with_player(|p, cx| p.queue_tracks_with(tracks, source, action, on_play, cx));
     }
 
     /// Holds `p` until its tracks load. A newer action for the same list

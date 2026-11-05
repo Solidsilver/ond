@@ -170,7 +170,7 @@ impl OndApp {
         }
         let glyph = egui::pos2(rect.left() + 12.0, rect.center().y);
         state.paint_glyph(ui, glyph);
-        let g = crate::app::elide_text(ui, state.label(), FontId::proportional(11.5), t.muted, rect.width() - 30.0);
+        let g = crate::widgets::elide(ui, state.label(), FontId::proportional(11.5), t.muted, rect.width() - 30.0);
         ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, t.muted);
         self.server_popover(&resp, &state);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, state.tooltip()));
@@ -257,7 +257,7 @@ impl OndApp {
                     Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
                     None => "Connected".to_owned(),
                 },
-                ServerState::Offline { .. } => "Can't reach server · retrying".to_owned(),
+                ServerState::Offline { .. } => "Can't reach the server · retrying".to_owned(),
                 ServerState::Connecting { .. } => "Connecting…".to_owned(),
                 ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
                 ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
@@ -300,7 +300,7 @@ impl OndApp {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
-                    if super::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
+                    if crate::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
                         if self.sync.tracks {
                             self.actions.push(Action::StopSync);
                         } else {
@@ -313,15 +313,20 @@ impl OndApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…", "") {
+            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…") {
                 self.actions.push(Action::SignInAgain);
             }
             let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
-            if !self.prefs.managed("work_offline") && menu_item(ui, label, "") {
+            if !self.prefs.managed("work_offline") && menu_item(ui, label) {
                 self.actions.push(Action::Offline(super::OfflineAction::WorkOffline(on)));
             }
-            if menu_item(ui, "Sign out", "") {
-                self.actions.push(Action::SignOut);
+            // Apart from "Go offline", which it sits under: one is undone
+            // with a click, the other with the password.
+            ui.add_space(2.0);
+            ui.separator();
+            ui.add_space(2.0);
+            if menu_item(ui, "Sign out…") {
+                self.actions.push(Action::AskSignOut);
             }
             ui.add_space(2.0);
         });
@@ -375,7 +380,7 @@ impl OndApp {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            super::widgets::section(ui, text);
+            crate::widgets::section(ui, text);
         });
         ui.add_space(4.0);
     }
@@ -402,7 +407,7 @@ impl ViewCtx<'_> {
         for (i, p) in data.playlists.iter().enumerate() {
             let mine = owns(self.session, p);
             // Downloaded (or on its way): the same mark as on album cards.
-            let mark = super::widgets::Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())));
+            let mark = super::offline_page::Mark::of_pin(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())));
             let resp = place(ui, &p.name, active == Some(i), mark);
             // A drop target for songs dragged from any list.
             if mine && dragging {
@@ -459,7 +464,7 @@ const MARK_ROOM: f32 = 16.0;
 
 /// A place in the sidebar: its name, highlighted when `on`, and a download
 /// mark at the right end when it has one.
-fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::widgets::Mark>) -> egui::Response {
+fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::offline_page::Mark>) -> egui::Response {
     let t = Tokens::of(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -471,12 +476,13 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::widgets::Mark>)
             egui::Color32::TRANSPARENT
         };
         ui.painter().rect_filled(rect, 6.0, fill);
+        crate::widgets::focus_ring(ui, &resp, rect.shrink(2.0), 4.0);
         let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
         let room = if mark.is_some() { MARK_ROOM } else { 0.0 };
-        let g = super::widgets::elide(ui, label, font, t.text, rect.width() - 16.0 - room);
+        let g = crate::widgets::elide(ui, label, font, t.text, rect.width() - 16.0 - room);
         ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, t.text);
         if let Some(m) = mark {
-            super::widgets::mark(ui, pos2(rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, rect.center().y), 11.0, m);
+            super::offline_page::mark(ui, pos2(rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, rect.center().y), 11.0, m);
         }
     }
     let label = match mark {
@@ -487,18 +493,16 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::widgets::Mark>)
     resp
 }
 
-/// A menu row with a right-aligned shortcut hint. True when chosen.
-fn menu_item(ui: &mut Ui, label: &str, keys: &str) -> bool {
+/// A row in the server menu. True when chosen.
+fn menu_item(ui: &mut Ui, label: &str) -> bool {
     let t = Tokens::of(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
             ui.painter().rect_filled(rect, 5.0, t.hover);
         }
+        crate::widgets::focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
         ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
-        if !keys.is_empty() {
-            ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), t.muted);
-        }
     }
     let label = label.to_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
@@ -567,7 +571,7 @@ impl ServerState {
         match self {
             ServerState::Connected { host } => host,
             ServerState::Syncing { label, .. } => label,
-            ServerState::Offline { .. } => "Can't reach server",
+            ServerState::Offline { .. } => "Can't reach the server",
             ServerState::Connecting { .. } => "Connecting…",
             ServerState::SignIn { .. } => "Sign in again",
             ServerState::WorkingOffline { .. } => "Offline mode",
@@ -598,7 +602,13 @@ impl ServerState {
             ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
             ServerState::Syncing { fraction: None, .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                ui.ctx().request_repaint_after(SPIN);
+                // A sync with no progress to report can stall for good; the
+                // spinner stops rather than holding the window at 20 fps.
+                let now = ui.input(|i| i.time);
+                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(syncing_since_id(), || now));
+                if now - since < SYNC_SPIN_SECS {
+                    ui.ctx().request_repaint_after(SPIN);
+                }
             }
             ServerState::Connecting { .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
@@ -613,10 +623,13 @@ impl ServerState {
             ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted)
             }
-            ServerState::SignIn { .. } => super::widgets::mark(ui, c, 12.0, super::widgets::Mark::Failed),
+            ServerState::SignIn { .. } => super::offline_page::mark(ui, c, 12.0, super::offline_page::Mark::Failed),
         }
         if !matches!(self, ServerState::Connecting { .. }) {
             ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));
+        }
+        if !matches!(self, ServerState::Syncing { fraction: None, .. }) {
+            ui.data_mut(|d| d.remove::<f64>(syncing_since_id()));
         }
     }
 }
@@ -625,6 +638,14 @@ impl ServerState {
 const SPIN: std::time::Duration = std::time::Duration::from_millis(50);
 /// How long the Connecting spinner turns (the ping gives up after 10 s).
 const CONNECT_SPIN_SECS: f64 = 15.0;
+
+/// How long the indeterminate Syncing spinner turns before it goes still.
+const SYNC_SPIN_SECS: f64 = 30.0;
+
+/// When the footer started showing an indeterminate Syncing.
+fn syncing_since_id() -> egui::Id {
+    egui::Id::unique("server-syncing-since")
+}
 
 /// When the footer started showing Connecting.
 fn connecting_since_id() -> egui::Id {

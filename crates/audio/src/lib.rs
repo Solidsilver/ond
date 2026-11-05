@@ -22,16 +22,104 @@
 //! device supports it, else the decoder resamples (see [`choose_rate`]). Which
 //! device, and which mode each device gets, is the engine's call too: the UI
 //! hands it the remembered per-device modes and is told what happened.
+//!
+//! # The life of a seek
+//!
+//! A seek crosses three threads. The engine silences the output at once, the
+//! decoder repositions when it can (which may mean waiting on the network),
+//! and the callback lets audio through again only after the decoder says so.
+//!
+//! 1. [`Command::Seek`] reaches [`Engine::seek`]. If the decoder has exited or
+//!    is already on a later track than the output, it can't reposition the
+//!    output's track, so [`Engine::restart_at`] starts a new session at the
+//!    target instead and the steps below don't happen.
+//! 2. The engine calls [`RingCtl::hold`] on the open ring, sets
+//!    `Status::buffering`, and records the target in
+//!    [`held_seek`](Engine::held_seek). From the next callback on,
+//!    [`RingInput::fill_with`] fades out the first few milliseconds (Normal
+//!    mode only), throws away whatever is queued and plays silence. With no
+//!    ring open yet there is nothing to hold, and the decoder applies the
+//!    seek before it queues any audio.
+//! 3. [`Session::seek`] queues the request and then raises the session's seek
+//!    flag. A decoder blocked on a full ring or a slow read gives up on it
+//!    when it sees the flag.
+//! 4. On the decode thread, [`Ctx::seek`](decode::Ctx::seek) takes the newest
+//!    request. One meant for a track the decoder has left becomes a
+//!    [`DecoderMsg::SeekMiss`], and the engine restarts at the target.
+//!    Otherwise it repositions the reader and resets the codec. Whether or
+//!    not that worked, it then calls [`RingCtl::request_flush`] with the
+//!    hold's generation, so the output never stays silent.
+//! 5. The callback's [`RingInput::service_flush`] empties the ring and its
+//!    markers, rewinds its position and ends the hold, all in one step. The
+//!    decoder waits for that acknowledgement before it queues anything, so no
+//!    new audio is thrown away with the old.
+//! 6. The decoder writes the new `Status::frames_played` and sends
+//!    [`DecoderMsg::Seeked`]. It drops decoded frames before the target, and
+//!    the callback prebuffers [`PREBUFFER_SECS`](output::PREBUFFER_SECS) before it plays (with a
+//!    fade-in in Normal mode).
+//! 7. [`Engine::poll_session`] clears `held_seek` if the report carries the
+//!    hold's generation, and sends [`Event::Seeked`].
+//!
+//! `held_seek` is cleared in three places in [`Engine::poll_session`], plus
+//! whenever the session stops: when the decoder reports the seek it holds for
+//! done (step 7; a report for an earlier seek leaves a later one standing);
+//! when the output crosses into the next track, because a hold that's
+//! still on record then belongs to a track that has ended; and when the
+//! decoder exits with a hold still standing, because nothing would ever
+//! release it, so the track restarts at the target.
+//!
+//! # The life of a track boundary
+//!
+//! The decoder runs ahead of the output by up to the buffer's length. A track
+//! boundary happens on the decode thread first and on the device later, and
+//! the engine reports it only when the device gets there.
+//!
+//! 1. [`Command::SetNext`] reaches [`Engine::set_next`], which passes the
+//!    track to [`Session::set_next`] while the decoder is still on the
+//!    output's track. Meanwhile [`Engine::poll_fetch`] prefetches the next
+//!    file into the cache.
+//! 2. At the end of a track, [`Ctx::linger`](decode::Ctx::linger) holds the
+//!    decoder until the next track is set or the output is nearly through.
+//!    [`Ctx::run`](decode::Ctx::run) then takes the next track under the lock
+//!    `Session::set_next` checks, so a choice that arrives later is refused
+//!    rather than lost.
+//! 3. With the next track's first packet decoded,
+//!    [`Ctx::start_track`](decode::Ctx::start_track) publishes its ReplayGain
+//!    into `Status::gains`, then [`Ctx::attach`](decode::Ctx::attach) places
+//!    it. A track with the ring's rate and layout gets a [`Marker`](output::Marker) at the
+//!    sample where it begins, and the device stream carries on. Any other
+//!    format ends the ring. The decoder marks it done, waits for the callback
+//!    to play it out, and sends a new ring ([`DecoderMsg::Ring`]) once that
+//!    holds audio. Either way the decoder sends [`DecoderMsg::Track`] before
+//!    it queues the track's audio.
+//! 4. Gapless: when [`RingInput::fill_with`] reaches the marker it zeroes
+//!    `Status::frames_played`, bumps `Status::track_seq` and switches to the
+//!    new track's ReplayGain on that exact sample.
+//! 5. [`Engine::poll_session`] sees `track_seq` ahead of its own count,
+//!    advances to the new track, forgets the old next track (the UI names the
+//!    new one when it hears) and sends [`Event::TrackStarted`] with `gapless`
+//!    set through [`Engine::announce`].
+//! 6. New ring: [`Engine::open_ring`] waits (briefly) for the device to play
+//!    the old ring's last buffer, closes with
+//!    [`OutputBackend::close_for_reopen`] so an exclusive device stays held,
+//!    opens the new format and announces the track as not gapless.
+//! 7. With no next track the decoder marks the ring done and exits. Once the
+//!    device has drained it, the engine stops and sends [`Event::Ended`].
+
+// This crate's docs are for its contributors (it isn't published) and are
+// built with `--document-private-items`: the walkthroughs above link to the
+// private steps they describe.
+#![allow(rustdoc::private_intra_doc_links)]
 
 #[cfg(target_os = "linux")]
-pub mod alsa;
+mod alsa;
 mod channels;
 #[cfg(target_os = "macos")]
-pub mod coreaudio;
+mod coreaudio;
 mod decode;
 mod device;
 mod dither;
-pub mod output;
+mod output;
 pub mod replaygain;
 mod resample;
 mod signal;
@@ -40,10 +128,11 @@ pub mod tap;
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind, DeviceVolume};
-pub use dither::Tpdf;
-pub use output::{CpalBackend, Marker, OutputBackend, OutputError, PREBUFFER_SECS, RingCtl, RingInput, StreamFormat};
+pub(crate) use output::{CpalBackend, RingCtl};
+pub use output::{OutputBackend, OutputError, RingInput, StreamFormat};
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
-pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, adjust, assess, choose_rate, describe, khz};
+pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, describe, khz};
+pub(crate) use signal::{adjust, assess, choose_rate};
 use streamcache::{CacheKey, StreamCache};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
@@ -169,6 +258,10 @@ pub enum Command {
     /// Ask for an [`Event::Devices`].
     RefreshDevices,
     Shutdown,
+    /// Answers with the track the session's decoder is on (`None`: no
+    /// session), so a test can wait for it to move on instead of sleeping.
+    #[cfg(test)]
+    Decoding(Sender<Option<u64>>),
 }
 
 #[derive(Debug, Clone)]
@@ -266,9 +359,9 @@ pub struct Status {
     /// Decoded frames queued ahead of the output (the ring's fill), as of the
     /// last callback. Callback.
     pub(crate) buffered_frames: AtomicU64,
-    /// Bytes of the current track on disk, and its size (0 when unknown or
-    /// local). Engine.
+    /// Bytes of the current track on disk (0 when local). Engine.
     pub(crate) fetched_bytes: AtomicU64,
+    /// The current track's size in bytes (0 when unknown or local). Engine.
     pub(crate) total_bytes: AtomicU64,
     /// Playback is downloading: the current track (whatever its size, known or
     /// not, as with a transcode) or the next one's prefetch isn't complete. Engine.
@@ -476,6 +569,7 @@ pub fn spawn(config: EngineConfig, backend: Box<dyn OutputBackend>, cache: Optio
                 prefetched: None,
                 opening: None,
                 held_seek: None,
+                opening_at: Duration::ZERO,
                 device_modes: HashMap::new(),
                 current_device: None,
                 known: Vec::new(),
@@ -517,6 +611,16 @@ struct OpenRing {
     ctl: Arc<RingCtl>,
 }
 
+/// Where to start a track over: from [`Engine::take_position`], or a seek
+/// target.
+struct Resume {
+    src: TrackSource,
+    at: Duration,
+    paused: bool,
+    /// The UI has heard this track start, so its new start is a restart.
+    announced: bool,
+}
+
 struct Engine {
     config: EngineConfig,
     backend: Box<dyn OutputBackend>,
@@ -537,8 +641,12 @@ struct Engine {
     prefetched: Option<String>,
     /// The track the session started with: what ends if it never produces audio.
     opening: Option<TrackSource>,
-    /// A seek the output is holding for, until the decoder reports it done.
-    held_seek: Option<Duration>,
+    /// A seek the output is holding for, until the decoder reports it done:
+    /// the hold's generation and the target.
+    held_seek: Option<(u64, Duration)>,
+    /// Where the session started (or was last sought to) before its first
+    /// track reported in: what a restart while it's still loading picks up.
+    opening_at: Duration,
     device_modes: HashMap<String, PlaybackMode>,
     /// UID of the device in use, when the backend can tell.
     current_device: Option<String>,
@@ -594,7 +702,10 @@ impl Engine {
             Command::Resume => {
                 if self.status.state() == PlayState::Paused {
                     self.status.paused.store(false, Ordering::Relaxed);
-                    self.status.set_state(PlayState::Playing);
+                    // Paused while loading: still loading. `open_ring` makes it
+                    // Playing once there's a stream.
+                    let state = if self.ring.is_some() { PlayState::Playing } else { PlayState::Loading };
+                    self.status.set_state(state);
                 }
             }
             Command::Stop => {
@@ -657,6 +768,10 @@ impl Engine {
                 self.send_devices();
             }
             Command::Shutdown => unreachable!("handled in run"),
+            #[cfg(test)]
+            Command::Decoding(reply) => {
+                let _ = reply.send(self.session.as_ref().map(Session::decoding));
+            }
         }
     }
 
@@ -682,7 +797,6 @@ impl Engine {
             return;
         }
         if let Some(at) = self.take_position() {
-            self.stop();
             self.resume(at);
         }
     }
@@ -690,17 +804,31 @@ impl Engine {
     /// Starts a new session at `src`, optionally from `start_at`.
     fn start(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.stop();
+        self.begin(src, start_at);
+    }
+
+    /// Starts a new session once the old one is stopped.
+    fn begin(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.restarting = false;
         self.status.set_state(PlayState::Loading);
         self.status.paused.store(false, Ordering::Relaxed);
         let caps = self.backend.device_caps();
         self.opening = Some(src.clone());
+        self.opening_at = start_at.unwrap_or_default();
         let session = Session::start(src, start_at, self.config.clone(), self.status.clone(), self.cache.clone(), caps, self.gain.clone());
         session.set_next(0, self.next.clone());
         self.session = Some(session);
     }
 
     fn stop(&mut self) {
+        self.halt(false);
+    }
+
+    /// Stops the session and the stream. With `reopen`, a new session for the
+    /// same device follows at once, so the backend may keep exclusive access
+    /// (see [`OutputBackend::close_for_reopen`]). If that session never opens a
+    /// stream, it ends in a plain [`stop`](Self::stop), which lets go.
+    fn halt(&mut self, reopen: bool) {
         self.held_seek = None;
         self.opening = None;
         // From here on the old decode thread leaves `Status` alone (it may
@@ -710,7 +838,11 @@ impl Engine {
         }
         // Synchronous: no callback runs after this. With the decoder silenced
         // too, the counters below stay reset.
-        self.backend.close();
+        if reopen {
+            self.backend.close_for_reopen();
+        } else {
+            self.backend.close();
+        }
         self.ring = None;
         self.tracks.clear();
         self.out_seq = 0;
@@ -748,15 +880,33 @@ impl Engine {
             }
             return;
         }
+        if self.current().is_none() {
+            // Still loading: the decoder applies this before any audio, and a
+            // restart before then should start here too.
+            self.opening_at = to;
+        }
         // Silence the output now; the decoder releases it once it has repositioned.
         let hold = self.ring.as_ref().map_or(0, |r| r.ctl.hold());
         if hold > 0 {
             self.status.buffering.store(true, Ordering::Relaxed);
-            self.held_seek = Some(to);
+            self.held_seek = Some((hold, to));
         }
         session.seek(self.out_seq, to, hold);
     }
 
+    /// Records what the UI wants after the output's track and gets it to the
+    /// decoder, which may already be past the point where it could change course.
+    ///
+    /// | Decoder | What it moved on to, against `next` | Outcome |
+    /// |---|---|---|
+    /// | no session | n/a | kept for the next session's start |
+    /// | still on the output's track | n/a | it takes `next` (`None` clears its choice) |
+    /// | exited without moving on | n/a | handed over and never read; [`Event::Ended`] follows and the UI starts the next track |
+    /// | moved on (a reported track, else the one it was last told) | the same track (id and token) | nothing to do |
+    /// | moved on | another track, or `next` is `None` | the output's track restarts where it is (if playing or paused), so the decoder can follow `next` |
+    ///
+    /// A different track than the one handed to the cache also resets the
+    /// prefetch, so [`poll_fetch`](Self::poll_fetch) starts the new one.
     fn set_next(&mut self, next: Option<TrackSource>) {
         if next.as_ref().map(|n| &n.id) != self.prefetched.as_ref() {
             self.prefetched = None;
@@ -791,29 +941,40 @@ impl Engine {
         self.prefetched = None;
     }
 
-    /// The current track and position, if something is playing or paused.
-    fn take_position(&self) -> Option<(TrackSource, Duration, bool)> {
+    /// The current track and position, if something is playing, paused or
+    /// loading. A track still loading has no audio yet: it's the one being
+    /// opened, at the position the session was asked to start from.
+    fn take_position(&self) -> Option<Resume> {
         let state = self.status.state();
         if self.session.is_none() || state == PlayState::Stopped {
             return None;
         }
-        let src = self.current().map(|t| t.src.clone())?;
-        Some((src, Duration::from_secs_f64(self.status.position_secs()), state == PlayState::Paused))
+        let paused = state == PlayState::Paused;
+        if let Some(t) = self.current() {
+            let at = Duration::from_secs_f64(self.status.position_secs());
+            return Some(Resume { src: t.src.clone(), at, paused, announced: true });
+        }
+        // The UI hasn't heard this track start, unless this session is itself
+        // a restart of one it has.
+        let src = self.opening.clone()?;
+        Some(Resume { src, at: self.opening_at, paused, announced: self.restarting })
     }
 
     /// Starts `src` over at `to`, staying paused if playback was paused.
     fn restart_at(&mut self, src: TrackSource, to: Duration) {
         let paused = self.status.state() == PlayState::Paused;
         let track_id = src.id.clone();
-        self.resume((src, to, paused));
+        self.resume(Resume { src, at: to, paused, announced: true });
         // The new session's own report would arrive before it knows its track.
         let _ = self.events.send(Event::Seeked { track_id, position_secs: to.as_secs_f64() });
     }
 
     /// Restarts at a position from [`take_position`](Self::take_position), keeping pause.
-    fn resume(&mut self, (src, at, paused): (TrackSource, Duration, bool)) {
-        self.start(src, Some(at));
-        self.restarting = true;
+    /// The device stays claimed for the reopen.
+    fn resume(&mut self, Resume { src, at, paused, announced }: Resume) {
+        self.halt(true);
+        self.begin(src, Some(at));
+        self.restarting = announced;
         if paused {
             self.status.paused.store(true, Ordering::Relaxed);
             self.status.set_state(PlayState::Paused);
@@ -1005,8 +1166,15 @@ impl Engine {
                         return;
                     }
                 }
-                DecoderMsg::Seeked { seq, position_secs } => {
-                    self.held_seek = None;
+                DecoderMsg::Seeked { seq, position_secs, hold } => {
+                    // Only the seek being held for ends the hold. One the decoder
+                    // finished before a newer seek came in (a seek past the end,
+                    // after which it exits without reading the next) must leave
+                    // the newer one on record: the callback is still holding for
+                    // it, and the restart below is all that would release it.
+                    if self.held_seek.is_some_and(|(held, _)| hold >= held) {
+                        self.held_seek = None;
+                    }
                     if let Some(t) = self.tracks.get(seq as usize) {
                         let track_id = t.src.id.clone();
                         let _ = self.events.send(Event::Seeked { track_id, position_secs });
@@ -1031,7 +1199,7 @@ impl Engine {
 
         // The decoder exited just as a seek went in (it had finished the last
         // track), so nothing will release the output: start over at the target.
-        if finished && let Some(to) = self.held_seek.take() {
+        if finished && let Some((_, to)) = self.held_seek.take() {
             if let Some(src) = self.current().map(|t| t.src.clone()) {
                 self.restart_at(src, to);
             }

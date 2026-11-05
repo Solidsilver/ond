@@ -8,7 +8,6 @@
 use super::WindowAction;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
-use super::widgets::{elide, heart_button, link, link_line};
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
@@ -16,6 +15,7 @@ use crate::lyrics::{self, Fetch, Lyrics};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
 use crate::visuals::over_art::OnArt;
+use crate::widgets::{elide, heart_button, link, link_line};
 use crate::window::WindowMode;
 use audio::PlayState;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -262,12 +262,7 @@ impl ViewCtx<'_> {
     pub(super) fn big_transport(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let state = self.engine.status.state();
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some() || self.player.held;
-        let (icon, label) = match state {
-            _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
-            PlayState::Playing => (Icon::Pause, "Pause"),
-            _ => (Icon::Play, "Play"),
-        };
+        let (icon, label) = super::playing::play_pause(state, self.player);
         let row_w = 44.0 + 24.0 + 52.0 + 24.0 + 44.0;
         ui.horizontal(|ui| {
             ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));
@@ -329,7 +324,7 @@ impl ViewCtx<'_> {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for (k, v) in rows {
-                super::widgets::kv_text(ui, k, &v);
+                crate::widgets::kv_text(ui, k, &v);
             }
         });
     }
@@ -355,7 +350,7 @@ impl ViewCtx<'_> {
 
         match l {
             Lyrics::Synced(lines) => {
-                let rows = self.ui.memos.lyrics.get(lyrics_key(track, lines.as_ptr() as usize, lines.len(), true), || lyrics::rows_synced(lines));
+                let rows = lyrics_rows(&mut self.ui.memos.lyrics, track, l);
                 let cur = lyrics::current(lines, pos_ms);
                 // The line last followed, and the pass it was seen on: a stale
                 // entry (the view was closed meanwhile) re-places it on reopening.
@@ -441,8 +436,8 @@ impl ViewCtx<'_> {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(s));
                 }
             }
-            Lyrics::Plain(lines) => {
-                let rows = self.ui.memos.lyrics.get(lyrics_key(track, lines.as_ptr() as usize, lines.len(), false), || lyrics::rows_plain(lines));
+            Lyrics::Plain(_) => {
+                let rows = lyrics_rows(&mut self.ui.memos.lyrics, track, l);
                 let font = FontId::proportional(size);
                 egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -488,12 +483,38 @@ impl ViewCtx<'_> {
     }
 }
 
-/// The lyrics rows' memo key: the track, the lines' address and count (a
-/// fetch replaces them), and whether they're synced.
-pub(super) type LyricsKey = (u64, usize, usize, bool);
+/// The lyrics rows' memo key: the track and a hash of the words and their
+/// timing. Not the lines' address: the memo doesn't hold the lines, so a
+/// refetch after they're let go of can land at the same address with the
+/// same length and different words. Hashing a song's lyrics is a few
+/// kilobytes a frame.
+pub(super) type LyricsKey = (u64, u64);
 
-fn lyrics_key(track: &Track, lines: usize, len: usize, synced: bool) -> LyricsKey {
-    (super::view_ctx::hash_str(&track.id), lines, len, synced)
+fn lyrics_key(track: &Track, l: &Lyrics) -> LyricsKey {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match l {
+        Lyrics::Synced(lines) => {
+            true.hash(&mut h);
+            for line in lines {
+                line.start_ms.hash(&mut h);
+                line.text.hash(&mut h);
+            }
+        }
+        Lyrics::Plain(lines) => {
+            false.hash(&mut h);
+            lines.hash(&mut h);
+        }
+    }
+    (super::view_ctx::hash_str(&track.id), h.finish())
+}
+
+/// `l` as rows, built once per track and set of words.
+fn lyrics_rows(memo: &mut crate::memo::Memo<LyricsKey, Vec<lyrics::Row>>, track: &Track, l: &Lyrics) -> std::sync::Arc<Vec<lyrics::Row>> {
+    memo.get(lyrics_key(track, l), || match l {
+        Lyrics::Synced(lines) => lyrics::rows_synced(lines),
+        Lyrics::Plain(lines) => lyrics::rows_plain(lines),
+    })
 }
 
 /// Soft fades at the top and bottom of a scrolling column, so lines dissolve
@@ -687,31 +708,7 @@ mod tests {
 
     #[test]
     fn details_only_say_what_is_known() {
-        let mut t = Track {
-            id: "t".into(),
-            album_id: "a".into(),
-            title: "x".into(),
-            artist: None,
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: None,
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        };
+        let mut t = crate::test_tracks::track("t", "a", "x");
         assert!(details_rows(&t, None, None).is_empty());
         t.suffix = Some("flac".into());
         t.bit_depth = Some(24);
@@ -721,5 +718,22 @@ mod tests {
         assert_eq!(rows[0], ("Format", "FLAC 24/96".into()));
         assert_eq!(rows[1], ("ReplayGain", "track −6.3 dB".into()));
         assert_eq!(rows[2], ("Playback", "24/96 · bit-perfect".into()));
+    }
+
+    #[test]
+    fn refetched_lyrics_for_the_same_song_are_rowed_again() {
+        let track = crate::test_tracks::track("t", "a", "x");
+        let line = |text: &str| lyrics::Line { start_ms: 0, text: text.into() };
+        let mut memo = crate::memo::Memo::default();
+        let first = Lyrics::Synced(vec![line("old words")]);
+        let rows = lyrics_rows(&mut memo, &track, &first);
+        assert!(rows.iter().any(|r| matches!(r, lyrics::Row::Text { text, .. } if text == "old words")));
+        // Cleared and fetched again: a same-sized allocation is the
+        // allocator's first pick for the new lines, so rows keyed by address
+        // and length would come back for them.
+        drop(first);
+        let second = Lyrics::Synced(vec![line("new words")]);
+        let rows = lyrics_rows(&mut memo, &track, &second);
+        assert!(rows.iter().any(|r| matches!(r, lyrics::Row::Text { text, .. } if text == "new words")));
     }
 }

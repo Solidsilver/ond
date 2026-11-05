@@ -38,14 +38,6 @@ impl QueueTab {
     }
 }
 
-/// A song's plays as the server counts them, for the Info tab.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SongStats {
-    pub plays: Option<u64>,
-    /// RFC 3339, as the server sends it.
-    pub last_played: Option<String>,
-}
-
 /// Which side keyboard navigation applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
@@ -101,7 +93,7 @@ impl ArtistSort {
 #[derive(Default)]
 pub struct QueueUi {
     pub tab: QueueTab,
-    /// Per-group open/closed choices, by [`Source::key`].
+    /// Per-group open/closed choices, by [`Source::key`](crate::queue::Source::key).
     pub open: HashMap<String, bool>,
     pub selected: Option<u64>,
 }
@@ -119,12 +111,12 @@ pub struct UiState {
     pub grid: crate::memo::Memo<(Route, AlbumSort, bool, u64), Vec<usize>>,
     /// Where each letter starts in that list, for the alphabet rail.
     pub grid_marks: crate::memo::Memo<(Route, AlbumSort, bool, u64), super::alpha::Marks>,
-    /// How Artists is sorted, the order that gives (by the artists' list's
-    /// address), and where each letter starts in it.
+    /// How Artists is sorted, the order that gives (for the artists' list
+    /// it was built from), and where each letter starts in it.
     pub artist_sort: ArtistSort,
     pub artist_desc: bool,
-    pub artist_order: crate::memo::Memo<(usize, ArtistSort, bool), Vec<usize>>,
-    pub artist_marks: crate::memo::Memo<(usize, bool), super::alpha::Marks>,
+    pub artist_order: crate::memo::Memo<(super::artists::SameList, ArtistSort, bool), Vec<usize>>,
+    pub artist_marks: crate::memo::Memo<(super::artists::SameList, bool), super::alpha::Marks>,
     /// The album page's "Album details" is unfolded (for this session).
     pub album_details_open: bool,
     /// Narrow windows: the queue opens as a sheet over the content instead.
@@ -188,6 +180,10 @@ pub struct UiState {
     pub memos: view_ctx::Memos,
     /// The preferences as of this frame (see [`PrefsView`]).
     pub prefs: PrefsView,
+    /// What streams are converted to as of this frame (see
+    /// `Outputs::transcode`), taken with `prefs`: rows ask whether their
+    /// track can play, and working it out locks the preferences.
+    pub transcode: Option<audio::Transcode>,
     /// Devices open in Settings › Output, by UID.
     pub output_open: std::collections::HashSet<String>,
     /// Group names being typed in Settings › Output, by device UID.
@@ -198,6 +194,7 @@ impl UiState {
     pub(super) fn new(notices: Vec<String>, prefs: PrefsView) -> Self {
         Self {
             prefs,
+            transcode: None,
             output_open: Default::default(),
             group_drafts: Default::default(),
             nav: Nav::default(),

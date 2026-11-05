@@ -36,13 +36,13 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
 
-      # ALSA and PipeWire headers for audio output, clang for PipeWire's
-      # bindings, and Mesa's software Vulkan for the offscreen UI snapshots.
+      # ALSA and PipeWire headers for audio output, and clang for PipeWire's
+      # bindings. The UI tests render headless, so no GPU libraries are needed.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config mesa-vulkan-drivers
+          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
@@ -52,9 +52,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Hardware-dependent tests are #[ignore]d and stay skipped here.
+      # Hardware-dependent and PNG-rendering tests are #[ignore]d and stay skipped here.
       - name: Test
         run: cargo test --workspace --no-fail-fast
+
+      # Broken intra-doc links are errors: the module docs are the map contributors read.
+      - name: Docs
+        if: runner.os == 'Linux'
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   # Builds the flake's package on Linux (the build the README's Nix
   # instructions run) and checks the dev shell evaluates everywhere.

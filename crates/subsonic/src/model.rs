@@ -11,9 +11,14 @@ pub(crate) struct Envelope {
     pub response: Body,
 }
 
+/// The envelope's own fields are read leniently: a server that leaves out
+/// `status`, or sends an error without a `code`, still gets its error across
+/// as [`Error::Api`](crate::Error::Api) instead of a decode failure.
 #[derive(Deserialize)]
 pub(crate) struct Body {
-    pub status: String,
+    #[serde(default, deserialize_with = "lenient::opt_text")]
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "lenient::opt")]
     pub error: Option<ApiError>,
     #[serde(flatten)]
     pub info: ServerInfo,
@@ -22,11 +27,12 @@ pub(crate) struct Body {
     pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct ApiError {
-    pub code: i32,
-    #[serde(default)]
-    pub message: String,
+    #[serde(default, deserialize_with = "lenient::opt_int")]
+    pub code: Option<i32>,
+    #[serde(default, deserialize_with = "lenient::opt_text")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

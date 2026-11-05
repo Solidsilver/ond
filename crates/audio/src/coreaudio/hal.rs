@@ -44,16 +44,26 @@ fn check(status: i32, what: &str) -> Result<()> {
     if status == 0 { Ok(()) } else { Err(format!("{what}: OSStatus {status}")) }
 }
 
-/// Reads a fixed-size property.
-fn get<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<T> {
-    let a = addr(selector, scope);
+/// Reads a fixed-size property at `a`; the error is the HAL's status.
+///
+/// SAFETY (a precondition on every caller, which the `Copy` bound doesn't
+/// express: a `bool` or a reference is `Copy` too): `T` is plain data for
+/// which all-zero bytes, and any bytes the HAL writes over them, are a valid
+/// value. That holds for the integers, floats and C structs the HAL's
+/// properties are made of, which is all this file reads. The HAL may write
+/// fewer than `size_of::<T>()` bytes, so the rest stay zero.
+fn read<T: Copy>(obj: Id, a: &AudioObjectPropertyAddress) -> std::result::Result<T, i32> {
     let mut value = MaybeUninit::<T>::zeroed();
     let mut size = size_of::<T>() as u32;
-    // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
-    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
-    check(status, "get property")?;
-    // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
-    Ok(unsafe { value.assume_init() })
+    // SAFETY: valid pointers to stack values; the HAL writes at most `size` bytes into `value`.
+    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
+    // SAFETY: zeroed, then (partly) overwritten by the HAL: a valid T by the precondition above.
+    if status == 0 { Ok(unsafe { value.assume_init() }) } else { Err(status) }
+}
+
+/// Reads a fixed-size property.
+fn get<T: Copy>(obj: Id, selector: u32, scope: u32) -> Result<T> {
+    read(obj, &addr(selector, scope)).map_err(|status| format!("get property: OSStatus {status}"))
 }
 
 /// Reads an array property.
@@ -255,21 +265,47 @@ pub fn make_mixable(dev: Id) -> Result<bool> {
     if !is_lpcm(&current) || is_mixable(&current) {
         return Ok(false);
     }
+    let Some(format) = mixable_replacement(&physical_formats(stream), &current) else { return Err("no mixable format to switch to".into()) };
+    set_physical_format(stream, &format)?;
+    Ok(true)
+}
+
+/// The format [`make_mixable`] moves a non-mixable `current` to, picked from
+/// the stream's `formats`: mixable linear PCM with the same channel count at
+/// `current`'s rate. Same bit depth first, then integer over float, then the
+/// widest.
+pub fn mixable_replacement(formats: &[AudioStreamRangedDescription], current: &AudioStreamBasicDescription) -> Option<AudioStreamBasicDescription> {
     let rate = current.mSampleRate;
-    let best = physical_formats(stream)
-        .into_iter()
+    let mut best = formats
+        .iter()
         .filter(|f| {
             let r = &f.mSampleRateRange;
             r.mMinimum - 0.5 <= rate && rate <= r.mMaximum + 0.5 || (f.mFormat.mSampleRate - rate).abs() < 0.5
         })
         .map(|f| f.mFormat)
         .filter(|f| is_lpcm(f) && is_mixable(f) && f.mChannelsPerFrame == current.mChannelsPerFrame)
-        // Same bit depth first, then integer over float, then the widest.
-        .max_by_key(|f| (f.mBitsPerChannel == current.mBitsPerChannel, is_int(f), f.mBitsPerChannel));
-    let Some(mut format) = best else { return Err("no mixable format to switch to".into()) };
-    format.mSampleRate = rate;
-    set_physical_format(stream, &format)?;
-    Ok(true)
+        .max_by_key(|f| (f.mBitsPerChannel == current.mBitsPerChannel, is_int(f), f.mBitsPerChannel))?;
+    best.mSampleRate = rate;
+    Some(best)
+}
+
+/// The widest mixable integer format among `formats` that carries `channels`
+/// at `rate`, set to `rate` (see `CoreAudioBackend::set_integer_format` for
+/// why never a non-mixable one).
+pub fn widest_integer_format(formats: &[AudioStreamRangedDescription], rate: u32, channels: u16) -> Option<AudioStreamBasicDescription> {
+    let r = rate as f64;
+    let mut best = formats
+        .iter()
+        .filter(|f| {
+            is_int(&f.mFormat)
+                && f.mFormat.mChannelsPerFrame >= channels as u32
+                && is_mixable(&f.mFormat)
+                && (f.mSampleRateRange.mMinimum <= r && r <= f.mSampleRateRange.mMaximum || f.mFormat.mSampleRate as u32 == rate)
+        })
+        .max_by_key(|f| f.mFormat.mBitsPerChannel)?
+        .mFormat;
+    best.mSampleRate = r;
+    Some(best)
 }
 
 /// Output-scope elements carrying `selector` that we may set: the main one,
@@ -292,13 +328,7 @@ fn settable_elements(dev: Id, selector: u32) -> Vec<u32> {
 }
 
 fn get_at<T: Copy>(obj: Id, selector: u32, element: u32) -> Option<T> {
-    let a = addr_at(selector, OUTPUT, element);
-    let mut value = MaybeUninit::<T>::zeroed();
-    let mut size = size_of::<T>() as u32;
-    // SAFETY: the HAL writes at most `size` bytes into `value`, a plain-data T.
-    let status = unsafe { AudioObjectGetPropertyData(obj, NonNull::from(&a), 0, null(), NonNull::from(&mut size), NonNull::from(&mut value).cast()) };
-    // SAFETY: zero-initialised and (partly) overwritten by the HAL; T is plain data.
-    (status == 0).then(|| unsafe { value.assume_init() })
+    read(obj, &addr_at(selector, OUTPUT, element)).ok()
 }
 
 fn set_at<T>(obj: Id, selector: u32, element: u32, value: &T) -> Result<()> {
@@ -353,10 +383,6 @@ pub struct Listener {
     obj: Id,
     addr: AudioObjectPropertyAddress,
 }
-
-// SAFETY: the slot is Sync (a Mutex around a Send callback); the rest is plain
-// data identifying the registration.
-unsafe impl Send for Listener {}
 
 impl Listener {
     pub fn new(obj: Id, selector: u32, scope: u32, callback: impl FnMut() + Send + 'static) -> Result<Self> {

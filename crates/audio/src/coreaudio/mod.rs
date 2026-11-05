@@ -63,6 +63,29 @@ struct Original {
     format: Option<AudioStreamBasicDescription>,
 }
 
+/// Devices we've changed, each as it was before the first change. Only the
+/// first snapshot counts: one taken later would record our own format as the
+/// device's, and restoring would put that back.
+#[derive(Default)]
+struct Originals(HashMap<hal::Id, Original>);
+
+impl Originals {
+    /// Records `dev` as `now` reads it, unless it's on record already.
+    fn remember(&mut self, dev: hal::Id, now: impl FnOnce() -> Original) {
+        self.0.entry(dev).or_insert_with(now);
+    }
+
+    /// Hands back how `dev` was, and forgets it: restoring is done once.
+    fn take(&mut self, dev: hal::Id) -> Option<Original> {
+        self.0.remove(&dev)
+    }
+
+    /// Every device on record except `keep`.
+    fn except(&self, keep: Option<hal::Id>) -> Vec<hal::Id> {
+        self.0.keys().copied().filter(|d| Some(*d) != keep).collect()
+    }
+}
+
 /// The stream that's playing.
 struct Open {
     dev: hal::Id,
@@ -98,10 +121,14 @@ pub struct CoreAudioBackend {
     /// Normal mode switches the device to the song's rate (true) or leaves it be.
     match_rate: bool,
     /// Devices we've changed, as they were before.
-    originals: HashMap<hal::Id, Original>,
+    originals: Originals,
     /// Nothing has played since then: devices go back once it's long enough ago.
     idle_since: Option<Instant>,
     drained: Arc<AtomicBool>,
+    /// The open unit wouldn't start again after a mode change. Left alone it
+    /// plays nothing while the engine reports Playing, so the engine is asked
+    /// to open a new stream (see `wants_reopen`).
+    unit_failed: bool,
     devices_changed: Arc<AtomicBool>,
     default_changed: Arc<AtomicBool>,
     _listeners: Vec<hal::Listener>,
@@ -134,9 +161,10 @@ impl CoreAudioBackend {
             hogged: None,
             pinned_default: None,
             match_rate: false,
-            originals: HashMap::new(),
+            originals: Originals::default(),
             idle_since: None,
             drained: Arc::new(AtomicBool::new(false)),
+            unit_failed: false,
             devices_changed,
             default_changed,
             _listeners: listeners,
@@ -168,7 +196,7 @@ impl CoreAudioBackend {
 
     /// Notes how `dev` is set up, before the first change we make to it.
     fn remember(&mut self, dev: hal::Id) {
-        self.originals.entry(dev).or_insert_with(|| {
+        self.originals.remember(dev, || {
             let stream = hal::output_streams(dev).first().copied();
             Original { rate: hal::nominal_rate(dev), stream, format: stream.and_then(hal::physical_format) }
         });
@@ -177,7 +205,7 @@ impl CoreAudioBackend {
     /// Puts `dev`'s format and rate back the way we found them. Not while we
     /// hold it exclusively, and never into a format nobody can share.
     fn restore(&mut self, dev: hal::Id) {
-        let Some(o) = self.originals.remove(&dev) else { return };
+        let Some(o) = self.originals.take(dev) else { return };
         if let (Some(stream), Some(format)) = (o.stream, o.format)
             && hal::is_mixable(&format)
             && let Err(e) = hal::set_physical_format(stream, &format)
@@ -193,8 +221,7 @@ impl CoreAudioBackend {
 
     /// Restores every device we changed, except the one `keep`.
     fn restore_all(&mut self, keep: Option<hal::Id>) {
-        let devs: Vec<hal::Id> = self.originals.keys().copied().filter(|d| Some(*d) != keep).collect();
-        for dev in devs {
+        for dev in self.originals.except(keep) {
             self.restore(dev);
         }
     }
@@ -242,22 +269,10 @@ impl CoreAudioBackend {
     /// float → integer step changes nothing.
     fn set_integer_format(&self, dev: hal::Id, rate: u32, channels: u16) -> Option<u32> {
         let stream = *hal::output_streams(dev).first()?;
-        let best = hal::physical_formats(stream)
-            .into_iter()
-            .filter(|f| {
-                let r = rate as f64;
-                hal::is_int(&f.mFormat)
-                    && f.mFormat.mChannelsPerFrame >= channels as u32
-                    && hal::is_mixable(&f.mFormat)
-                    && (f.mSampleRateRange.mMinimum <= r && r <= f.mSampleRateRange.mMaximum || f.mFormat.mSampleRate as u32 == rate)
-            })
-            .max_by_key(|f| f.mFormat.mBitsPerChannel);
-        if let Some(f) = best {
-            let mut format = f.mFormat;
-            format.mSampleRate = rate as f64;
-            if let Err(e) = hal::set_physical_format(stream, &format) {
-                tracing::warn!("integer format: {e}");
-            }
+        if let Some(format) = hal::widest_integer_format(&hal::physical_formats(stream), rate, channels)
+            && let Err(e) = hal::set_physical_format(stream, &format)
+        {
+            tracing::warn!("integer format: {e}");
         }
         hal::physical_format(stream).filter(hal::is_int).map(|f| f.mBitsPerChannel)
     }
@@ -312,8 +327,10 @@ impl CoreAudioBackend {
 
     /// Stops the stream, keeping any exclusive access.
     fn stop_unit(&mut self) {
+        self.unit_failed = false;
         if let Some(mut open) = self.open.take() {
             // Stopping is synchronous: no render callback runs after it returns.
+            // The unit is dropped either way; a failure leaves nothing to undo.
             let _ = open.unit.stop();
         }
     }
@@ -488,15 +505,23 @@ impl OutputBackend for CoreAudioBackend {
         let (dev, format) = (open.dev, open.format);
         match mode {
             PlaybackMode::BitPerfect if self.hogged != Some(dev) => {
+                // A stream opened in Normal mode may not have touched the
+                // device yet: note how it is now, or there's nothing to go back to.
+                self.remember(dev);
                 // Pause the unit around taking the device, then settle the integer format.
-                if let Some(o) = self.open.as_mut() {
-                    let _ = o.unit.stop();
+                if let Some(o) = self.open.as_mut()
+                    && let Err(e) = o.unit.stop()
+                {
+                    tracing::warn!("output unit didn't pause to take the device: {e}");
                 }
                 self.take_hog(dev);
                 let bits = self.set_integer_format(dev, format.sample_rate, format.channels);
                 if let Some(o) = self.open.as_mut() {
                     o.set_bits(bits);
-                    let _ = o.unit.start();
+                    if let Err(e) = o.unit.start() {
+                        tracing::warn!("output unit didn't start again after taking the device: {e}; reopening");
+                        self.unit_failed = true;
+                    }
                 }
             }
             PlaybackMode::Normal => {
@@ -594,6 +619,12 @@ impl OutputBackend for CoreAudioBackend {
         self.drained.load(Ordering::Acquire)
     }
 
+    /// The engine asks after every mode change, and starts the track over
+    /// where it is on a new stream.
+    fn wants_reopen(&mut self) -> bool {
+        self.unit_failed
+    }
+
     /// Stops the stream and lets go of the device: an idle player never keeps
     /// other apps (or system sounds) off it. The next `open` takes it again.
     fn close(&mut self) {
@@ -621,10 +652,8 @@ fn bit_perfect_self_check() -> Result<(), String> {
     let samples: Vec<f32> = pattern.iter().map(|v| *v as f32 / (1 << 23) as f32).collect();
 
     let run = |bits: u32, resampled: bool| -> Vec<f32> {
-        let (mut p, c) = rtrb::RingBuffer::new(samples.len());
-        p.push_entire_slice(&samples).expect("ring fits the pattern");
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), resampled);
+        let (_p, _m, input) = crate::output::tests::ring(&samples, true);
+        let input = input.with_source(Some(24), resampled);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         let mut render = Render { input, status, device_bits: Arc::new(AtomicU32::new(bits)), dither: Tpdf::default() };
@@ -659,10 +688,8 @@ mod tests {
     fn the_callback_dithers_to_the_format_in_effect_now() {
         // 24-bit audio, bit-perfect: a 16-bit device needs it requantized, a 24-bit one doesn't.
         let samples: Vec<f32> = (0..1_024i64).map(|i| ((i * 2_654_435) % (1 << 24) - (1 << 23)) as f32 / (1 << 23) as f32).collect();
-        let (mut p, c) = rtrb::RingBuffer::new(samples.len());
-        p.push_entire_slice(&samples).unwrap();
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(24), false);
+        let (_p, _m, input) = crate::output::tests::ring(&samples, true);
+        let input = input.with_source(Some(24), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         let bits = Arc::new(AtomicU32::new(16));
@@ -676,6 +703,84 @@ mod tests {
         render.fill(&mut out, 2, 96_000);
         let exact = out.iter().zip(&samples[512..]).all(|(a, b)| a.to_bits() == b.to_bits());
         assert!(exact, "24-bit device: untouched");
+    }
+
+    use objc2_core_audio::AudioStreamRangedDescription;
+    use objc2_core_audio_types::{
+        AudioValueRange, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonMixable, kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM,
+    };
+
+    /// Linear PCM: `bits` integer (0: float), over a rate range.
+    fn pcm(bits: u32, channels: u32, min: f64, max: f64, mixable: bool) -> AudioStreamRangedDescription {
+        let kind = if bits == 0 { kAudioFormatFlagIsFloat } else { kAudioFormatFlagIsSignedInteger };
+        let flags = kind | if mixable { 0 } else { kAudioFormatFlagIsNonMixable };
+        AudioStreamRangedDescription {
+            mFormat: AudioStreamBasicDescription {
+                mSampleRate: min,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: flags,
+                mBytesPerPacket: 0,
+                mFramesPerPacket: 1,
+                mBytesPerFrame: 0,
+                mChannelsPerFrame: channels,
+                mBitsPerChannel: if bits == 0 { 32 } else { bits },
+                mReserved: 0,
+            },
+            mSampleRateRange: AudioValueRange { mMinimum: min, mMaximum: max },
+        }
+    }
+
+    #[test]
+    fn the_integer_format_is_the_widest_mixable_one_at_the_rate() {
+        let formats = [
+            pcm(16, 2, 44_100.0, 192_000.0, true),
+            pcm(32, 2, 44_100.0, 192_000.0, false),
+            pcm(24, 2, 44_100.0, 96_000.0, true),
+            pcm(0, 2, 44_100.0, 192_000.0, true),
+        ];
+        let f = hal::widest_integer_format(&formats, 88_200, 2).unwrap();
+        assert_eq!((f.mBitsPerChannel, f.mSampleRate), (24, 88_200.0), "non-mixable and float formats are passed over");
+        let f = hal::widest_integer_format(&formats, 176_400, 2).unwrap();
+        assert_eq!(f.mBitsPerChannel, 16, "the 24-bit format stops at 96 kHz");
+        assert!(hal::widest_integer_format(&formats, 44_100, 6).is_none(), "nothing carries six channels");
+        assert!(hal::widest_integer_format(&[pcm(0, 2, 44_100.0, 192_000.0, true)], 48_000, 2).is_none(), "a float-only device stays float");
+    }
+
+    #[test]
+    fn an_exclusive_only_format_gives_way_to_its_closest_mixable_one() {
+        let current = pcm(24, 2, 96_000.0, 96_000.0, false).mFormat;
+        let formats = [
+            pcm(24, 2, 44_100.0, 96_000.0, false),
+            pcm(16, 2, 44_100.0, 96_000.0, true),
+            pcm(0, 2, 44_100.0, 96_000.0, true),
+            pcm(32, 8, 44_100.0, 96_000.0, true),
+        ];
+        let f = hal::mixable_replacement(&formats, &current).unwrap();
+        assert!(hal::is_int(&f) && hal::is_mixable(&f), "integer over float");
+        assert_eq!((f.mBitsPerChannel, f.mChannelsPerFrame, f.mSampleRate), (16, 2, 96_000.0), "same channel count, at the rate it's at");
+        let same_depth = [pcm(16, 2, 44_100.0, 96_000.0, true), pcm(24, 2, 96_000.0, 96_000.0, true)];
+        assert_eq!(hal::mixable_replacement(&same_depth, &current).unwrap().mBitsPerChannel, 24, "the same depth wins first");
+        assert!(hal::mixable_replacement(&[pcm(16, 2, 44_100.0, 48_000.0, true)], &current).is_none(), "nothing mixable at 96 kHz");
+    }
+
+    #[test]
+    fn a_mid_stream_bit_perfect_toggle_puts_back_the_format_found_before_it() {
+        let as_found = Original { rate: Some(48_000.0), stream: Some(7), format: Some(pcm(0, 2, 48_000.0, 48_000.0, true).mFormat) };
+        let ours = Original { rate: Some(44_100.0), stream: Some(7), format: Some(pcm(24, 2, 44_100.0, 44_100.0, true).mFormat) };
+        let mut originals = Originals::default();
+        // Normal mode left the device alone; switching to bit-perfect records it before changing it.
+        originals.remember(3, || as_found);
+        // The engine then reopens the track at its own rate: the device is in our format by now.
+        originals.remember(3, || ours);
+        assert_eq!(originals.except(None), [3]);
+        // Back to Normal: the format put back is the one from before the toggle, once.
+        let back = originals.take(3).expect("on record");
+        assert_eq!(back.rate, Some(48_000.0));
+        assert!(back.format.is_some_and(|f| !hal::is_int(&f)), "the float format it had");
+        assert!(originals.take(3).is_none() && originals.except(None).is_empty(), "nothing left to restore");
+        // A second toggle starts over from how the device is then.
+        originals.remember(3, || ours);
+        assert_eq!(originals.take(3).and_then(|o| o.rate), Some(44_100.0));
     }
 
     /// Needs real hardware: lists output devices and what we'd report for them.
@@ -764,10 +869,8 @@ mod tests {
         let before = (hal::nominal_rate(dev), hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel)));
         b.set_mode(PlaybackMode::BitPerfect);
         let format = StreamFormat { sample_rate: rate, channels: 2, bits_per_sample: Some(16) };
-        let (mut p, c) = rtrb::RingBuffer::new(rate as usize * 2);
-        p.push_entire_slice(&vec![0.0f32; rate as usize * 2]).unwrap();
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(16), false);
+        let (_p, _m, input) = crate::output::tests::ring(&vec![0.0f32; rate as usize * 2], true);
+        let input = input.with_source(Some(16), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         b.open(format, input, status).unwrap();
@@ -789,6 +892,36 @@ mod tests {
         b.set_mode(PlaybackMode::Normal);
         drop(b);
         let after = (hal::nominal_rate(dev), hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel)));
+        println!("before {before:?}\nafter  {after:?}");
+        assert_eq!(after, before, "the device is back the way it was");
+    }
+
+    /// Needs real hardware: opens in Normal mode on the default device (or
+    /// `OND_TEST_DEVICE`), switches to bit-perfect mid-stream and back, and
+    /// checks the device ends up as it was. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "needs audio hardware"]
+    fn a_mid_stream_bit_perfect_toggle_leaves_the_device_as_it_was() {
+        let mut b = CoreAudioBackend::new().unwrap();
+        if let Ok(uid) = std::env::var("OND_TEST_DEVICE") {
+            b.select_device(Some(&uid)).unwrap();
+        }
+        let dev = b.resolve().unwrap();
+        let stream = hal::output_streams(dev)[0];
+        let snapshot = || (hal::nominal_rate(dev), hal::physical_format(stream).map(|f| (f.mSampleRate, f.mFormatFlags, f.mBitsPerChannel)));
+        let before = snapshot();
+        let rate = before.0.unwrap_or(48_000.0).round() as u32;
+        let format = StreamFormat { sample_rate: rate, channels: 2, bits_per_sample: Some(16) };
+        let (_p, _m, input) = crate::output::tests::ring(&vec![0.0f32; rate as usize * 2], true);
+        let input = input.with_source(Some(16), false);
+        b.open(format, input, Arc::new(Status::default())).unwrap();
+        b.set_mode(PlaybackMode::BitPerfect);
+        println!("during {:?}", snapshot());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        b.set_mode(PlaybackMode::Normal);
+        b.close();
+        drop(b);
+        let after = snapshot();
         println!("before {before:?}\nafter  {after:?}");
         assert_eq!(after, before, "the device is back the way it was");
     }

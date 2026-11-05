@@ -7,6 +7,7 @@ mod panel;
 mod readout;
 mod volume;
 
+pub use panel::ControlIn;
 pub use readout::{Readout, paint_readout};
 
 use crate::icons::Icon;
@@ -33,14 +34,14 @@ pub struct Outputs {
     devices: Vec<DeviceInfo>,
     current: Option<String>,
     signal: Option<SignalPath>,
-    /// "Playback settings…" was clicked in the popup this frame.
+    /// "Output settings…" was clicked in the popup this frame.
     wants_settings: bool,
     /// The device's own volume, while bit-perfect holds a device that has one.
     device_volume: Option<DeviceVolume>,
     /// The level we last asked for and when: until the device reports it
-    /// (see [`SETTLE`]), other reports don't move the slider.
+    /// (see `volume::SETTLE`), other reports don't move the slider.
     awaiting: Option<(f32, Instant)>,
-    /// A level not yet sent (see [`SEND_EVERY`]), and when the last one was.
+    /// A level not yet sent (see `volume::SEND_EVERY`), and when the last one was.
     unsent: Option<f32>,
     sent_at: Option<Instant>,
     /// The slider was hovered or dragged last frame (for the dB readout).
@@ -59,7 +60,7 @@ pub struct Outputs {
 /// What the output control asks of the app this frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct ControlOut {
-    /// "Playback settings…" was chosen.
+    /// "Output settings…" was chosen.
     pub settings: bool,
     /// Ond's own volume (Normal mode), 0..=1.
     pub volume: Option<f32>,

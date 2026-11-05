@@ -173,6 +173,29 @@ fn natural_rolloff_is_not_a_cutoff() {
 }
 
 #[test]
+fn a_deep_but_gradual_rolloff_is_not_a_lossy_cutoff() {
+    // 20 dB per kHz above 14 kHz falls over 40 dB, which used to read as a
+    // lossy source with high confidence. An encoder's lowpass is far steeper
+    // (the sharpness window is ±400 Hz, so this leaves the gate a clear margin).
+    let n = shaped_noise(44_100, 20.0, -20.0, |hz| 10f64.powf(-(hz - 14_000.0).max(0.0) / 1000.0 * 20.0 / 20.0));
+    let a = run(44_100, Some(16), &n);
+    assert!(a.verdicts.is_empty(), "{:?}", a.verdicts);
+}
+
+#[test]
+fn a_32_khz_source_is_not_called_lossy_with_high_confidence() {
+    // A 32 kHz broadcast resampled to 44.1 kHz: its anti-alias filter's
+    // brickwall, passing 95% of its 16 kHz band.
+    let n = shaped_noise(44_100, 20.0, -20.0, |hz| if hz < 15_200.0 { 1.0 } else { 0.0 });
+    let a = run(44_100, Some(16), &n);
+    let lossy: Vec<_> = a.verdicts.iter().filter(|v| matches!(v.kind, VerdictKind::LossySource { .. })).collect();
+    // A brickwall is still a brickwall: the verdict stays, with its confidence capped.
+    assert!(!lossy.is_empty(), "{:?}", a.verdicts);
+    assert!(lossy.iter().all(|v| v.confidence < Confidence::High), "{lossy:?}");
+    assert!(lossy.iter().all(|v| v.evidence().contains("32 kHz")), "{lossy:?}");
+}
+
+#[test]
 fn lossy_files_are_not_accused_of_being_lossy() {
     let n = shaped_noise(44_100, 20.0, -20.0, |hz| if hz < 16_000.0 { 1.0 } else { 0.0 });
     assert!(run(44_100, None, &n).verdicts.is_empty());
@@ -259,6 +282,23 @@ fn album_summary_averages_dr_and_energy() {
 }
 
 #[test]
+fn a_few_analysed_tracks_do_not_label_the_whole_album() {
+    let lossy = Verdict { kind: VerdictKind::LossySource { cutoff_hz: 16_000 }, confidence: Confidence::High };
+    let flagged = fake(9.0, -10.0, 100.0, vec![lossy.clone()]);
+    // One track of twelve analysed, and flagged: that's one track, not the album.
+    let s = summarize(&[&flagged], 12);
+    assert_eq!(s.verdict, None);
+    assert!(!s.complete());
+    // Five of twelve flagged is still under half the album.
+    assert_eq!(summarize(&[&flagged; 5], 12).verdict, None);
+    // Six of twelve is half, analysed or not.
+    assert_eq!(summarize(&[&flagged; 6], 12).verdict, Some((lossy.clone(), 6)));
+    // A total below what was analysed counts as what was analysed.
+    let s = summarize(&[&flagged, &flagged], 0);
+    assert_eq!((s.total, s.verdict), (2, Some((lossy, 2))));
+}
+
+#[test]
 fn records_round_trip_and_stamps_track_the_file() {
     let r = Record { stamp: stamp(Some(10), Some("flac"), Some(24), Some(96_000), Some(240)), analysis: fake(9.0, -14.0, 60.0, vec![]) };
     assert_eq!(Record::decode(&r.encode()), Some(r.clone()));
@@ -266,6 +306,69 @@ fn records_round_trip_and_stamps_track_the_file() {
     // Same size and format, another length: another file.
     assert_ne!(r.stamp, stamp(Some(10), Some("flac"), Some(24), Some(96_000), Some(241)));
     assert!(r.stamp.starts_with(&format!("v{ANALYSIS_VERSION}:")));
+}
+
+/// A record with every field set and every verdict kind, for the golden bytes.
+/// Literal stamp and version, so a new `ANALYSIS_VERSION` doesn't move them.
+fn full_record() -> Record {
+    Record {
+        stamp: "v2:30000000:flac:24:96000:240".into(),
+        analysis: TrackAnalysis {
+            version: 2,
+            duration_secs: 240.5,
+            sample_rate: 96_000,
+            channels: 2,
+            bits: Some(24),
+            integrated_lufs: Some(-14.25),
+            loudness_range_lu: Some(6.5),
+            true_peak_dbtp: Some(-0.75),
+            sample_peak_dbfs: Some(-1.0),
+            dr: Some(9.5),
+            effective_bits: Some(16),
+            cutoff_hz: Some(21_000),
+            verdicts: vec![
+                Verdict { kind: VerdictKind::PaddedBits { bits: 24, effective: 16 }, confidence: Confidence::High },
+                Verdict { kind: VerdictKind::Upsampled { from_hz: 44_100, cutoff_hz: 21_000 }, confidence: Confidence::Medium },
+                Verdict { kind: VerdictKind::LossySource { cutoff_hz: 16_000 }, confidence: Confidence::Low },
+            ],
+        },
+    }
+}
+
+#[test]
+fn records_keep_their_wire_format() {
+    const BYTES: &[u8] = &[
+        0, 1, 29, 118, 50, 58, 51, 48, 48, 48, 48, 48, 48, 48, 58, 102, 108, 97, 99, 58, 50, 52, 58, 57, 54, 48, 48, 48, 58, 50, 52, 48, 2, 0, 0, 0, 0, 0, 16,
+        110, 64, 128, 238, 5, 2, 1, 24, 1, 0, 0, 0, 0, 0, 128, 44, 192, 1, 0, 0, 0, 0, 0, 0, 26, 64, 1, 0, 0, 0, 0, 0, 0, 232, 191, 1, 0, 0, 0, 0, 0, 0, 240,
+        191, 1, 0, 0, 0, 0, 0, 0, 35, 64, 1, 16, 1, 136, 164, 1, 3, 0, 24, 16, 2, 1, 196, 216, 2, 136, 164, 1, 1, 2, 128, 125, 0,
+    ];
+    assert_eq!(
+        full_record().encode(),
+        BYTES,
+        "the stored shape of a Record changed, so stored results would read wrong or not at all. Don't edit the bytes to match: \
+         bump RECORD_LAYOUT, keep a frozen copy of the old types and read layout {RECORD_LAYOUT} with it in Record::decode \
+         (see \"Stored records\" in lib.rs), then pin the new bytes as the new layout's test"
+    );
+    assert_eq!(Record::decode(BYTES), Some(full_record()));
+}
+
+#[test]
+fn records_from_before_the_layout_byte_still_read() {
+    // Exactly what older builds stored: the bare postcard record.
+    let old = postcard::to_stdvec(&full_record()).unwrap();
+    assert_ne!(old[0], 0, "a stamp is never empty, so an old record never starts with the mark");
+    assert_eq!(Record::decode(&old), Some(full_record()));
+}
+
+#[test]
+fn records_of_an_unknown_layout_or_shape_read_as_missing() {
+    let mut newer = full_record().encode();
+    newer[1] = RECORD_LAYOUT + 1;
+    assert_eq!(Record::decode(&newer), None);
+    let mut longer = full_record().encode();
+    longer.push(0);
+    assert_eq!(Record::decode(&longer), None, "bytes left over mean another shape");
+    assert_eq!(Record::decode(&[]), None);
 }
 
 #[test]
@@ -461,4 +564,46 @@ fn opus_files_analyze() {
     assert_eq!((a.sample_rate, a.channels, a.bits), (48_000, 2, None));
     assert!((a.duration_secs - 1.0).abs() < 0.05, "{a:?}");
     assert!(a.integrated_lufs.is_some(), "{a:?}");
+}
+
+/// A 16-bit mono PCM WAV of `samples` (in [-1, 1]).
+fn mono_wav_16(rate: u32, samples: &[f32]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|&x| ((x * 32767.0).round() as i16).to_le_bytes()).collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&data);
+    wav
+}
+
+#[test]
+fn peaks_of_a_decoded_wav_follow_its_loudness() {
+    let rate = 8000;
+    // One second quiet, one second loud: fifty windows each.
+    let samples: Vec<f32> = (0..2 * rate).map(|i| if i < rate { 0.25 } else { -0.5 }).collect();
+    let wav = mono_wav_16(rate, &samples);
+    let len = wav.len() as u64;
+
+    let p = peaks_reader(std::io::Cursor::new(wav.clone()), Some(len), Some("wav"), &|| false).unwrap();
+    assert_eq!(p.values.len(), 2 * crate::peaks::PEAKS_PER_SEC as usize);
+    assert!(p.values[..50].iter().all(|&v| v == 64), "{:?}", &p.values[..50]);
+    assert!(p.values[50..].iter().all(|&v| v == 128), "{:?}", &p.values[50..]);
+    let bars = p.bars(2);
+    assert_eq!(bars, [0.5, 1.0]);
+
+    // The boxed-source entry point agrees, and cancelling stops it.
+    let again = peaks(Box::new(std::io::Cursor::new(wav.clone())), Some("wav"), &|| false).unwrap();
+    assert_eq!(again, p);
+    assert!(peaks(Box::new(std::io::Cursor::new(wav)), Some("wav"), &|| true).is_err());
+    assert!(peaks_reader(std::io::Cursor::new(vec![0u8; 64]), Some(64), Some("wav"), &|| false).is_err());
 }

@@ -504,10 +504,8 @@ mod tests {
         let caps = b.device_caps().unwrap();
         println!("before opening: {caps:?}");
         let format = StreamFormat { sample_rate: rate, channels: 2, bits_per_sample: Some(16) };
-        let (mut p, c) = rtrb::RingBuffer::new(rate as usize * 2);
-        p.push_entire_slice(&vec![0.0f32; rate as usize * 2]).unwrap();
-        let (_m, mc) = rtrb::RingBuffer::new(4);
-        let input = RingInput::new(c, mc, Arc::new(AtomicBool::new(true)), Arc::default()).with_source(Some(16), false);
+        let (_p, _m, input) = crate::output::tests::ring(&vec![0.0f32; rate as usize * 2], true);
+        let input = input.with_source(Some(16), false);
         let status = Arc::new(Status::default());
         status.bit_perfect.store(true, Ordering::Relaxed);
         b.open(format, input, status).unwrap();

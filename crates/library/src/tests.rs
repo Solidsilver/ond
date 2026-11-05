@@ -530,6 +530,40 @@ fn v2_rows_migrate_to_v3_with_credits_index() {
 }
 
 #[test]
+fn check_indexes_notices_a_missing_artist_entry() {
+    let lib = Library::in_memory().unwrap();
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    lib.upsert_artists([artist("1", "Eagles"), artist("2", "Zappa")]).unwrap();
+    assert!(lib.check_indexes().unwrap().is_empty());
+    let wt = lib.db.begin_write().unwrap();
+    wt.open_table(ARTISTS_BY_NAME).unwrap().remove(("eagles", "1")).unwrap();
+    wt.commit().unwrap();
+    let problems = lib.check_indexes().unwrap();
+    assert!(problems.iter().any(|p| p.contains("artist 1 missing")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("artist index has 1 entries for 2 rows")), "{problems:?}");
+}
+
+#[test]
+fn an_unreadable_analysis_database_is_set_aside_and_a_fresh_one_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("analysis.redb");
+    std::fs::write(&path, vec![0xAB; 8192]).unwrap();
+
+    let (store, aside) = AnalysisStore::open_or_recover(&path).unwrap();
+    let aside = aside.expect("the damaged file was moved aside");
+    assert!(aside.file_name().unwrap().to_string_lossy().starts_with("analysis.redb.bad-"));
+    assert_eq!(std::fs::read(&aside).unwrap(), vec![0xAB; 8192], "kept byte for byte");
+    assert!(store.records().unwrap().is_empty());
+    store.put("s-1", b"one").unwrap();
+    assert_eq!(store.records().unwrap(), [("s-1".to_owned(), b"one".to_vec())]);
+
+    drop(store);
+    let (again, aside) = AnalysisStore::open_or_recover(&path).unwrap();
+    assert!(aside.is_none(), "a healthy file stays where it is");
+    assert_eq!(again.records().unwrap().len(), 1);
+}
+
+#[test]
 fn analysis_records_persist_and_replace() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("analysis.redb");
@@ -717,4 +751,429 @@ fn saved_copies_read_back_and_unreadable_ones_read_as_missing() {
     // Saved by a build with another type: missing, not an error.
     lib.save("odd", &7u8).unwrap();
     assert_eq!(lib.saved::<Vec<(String, String)>>("odd").unwrap(), None);
+}
+
+/// Writes a database as schema `version` left it: rows in that version's shape
+/// and index entries made the way it made them.
+fn database_at_version(path: &std::path::Path, version: u32) {
+    let db = redb::Database::create(path).unwrap();
+    let wt = db.begin_write().unwrap();
+    {
+        wt.open_table(META).unwrap().insert(SCHEMA_KEY, version).unwrap();
+        let v1 = AlbumV1 {
+            id: "al-1".into(),
+            name: "Link".into(),
+            sort: None,
+            artist: Some("Øystein Sevåg".into()),
+            artist_ref: None,
+            year: Some(1989),
+            genre: Some("New Age".into()),
+            song_count: 1,
+            duration_secs: 300,
+            cover_art: None,
+            created: None,
+        };
+        let t1 = TrackV1 {
+            id: "s-1".into(),
+            album_id: "al-1".into(),
+            title: "Link".into(),
+            artist: Some("Øystein Sevåg".into()),
+            track: Some(1),
+            disc: Some(1),
+            duration_secs: Some(300),
+            suffix: None,
+            content_type: None,
+            size: None,
+            bit_rate_kbps: None,
+            bit_depth: None,
+            sample_rate: None,
+            channels: None,
+            track_gain: None,
+            album_gain: None,
+            track_peak: None,
+            album_peak: None,
+        };
+        let (album, track) = match version {
+            1 => (encode(&v1).unwrap(), encode(&t1).unwrap()),
+            2 => (encode(&AlbumV2::from(v1)).unwrap(), encode(&TrackV2::from(t1)).unwrap()),
+            3 => (encode(&AlbumV3::from(AlbumV2::from(v1))).unwrap(), encode(&TrackV3::from(TrackV2::from(t1))).unwrap()),
+            v => panic!("no fixture for schema v{v}: add one here, and a step for it in `migrate`"),
+        };
+        wt.open_table(ALBUMS).unwrap().insert("al-1", album.as_slice()).unwrap();
+        wt.open_table(TRACKS).unwrap().insert("s-1", track.as_slice()).unwrap();
+        // Keys from the `fold` of v1 to v3, which left ø as it was.
+        wt.open_table(ALBUMS_BY_SORT).unwrap().insert(("øystein sevag", 1989, "link", "al-1"), ()).unwrap();
+        wt.open_table(TRACKS_BY_ALBUM).unwrap().insert(("al-1", 1, 1, "s-1"), ()).unwrap();
+        if version >= 3 {
+            wt.open_table(CREDITS).unwrap().insert(("øystein sevag", "al-1", "s-1"), ()).unwrap();
+        }
+    }
+    wt.commit().unwrap();
+}
+
+#[test]
+fn every_old_schema_version_has_a_migration() {
+    for version in 1..SCHEMA_VERSION {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.redb");
+        database_at_version(&path, version);
+        let lib = Library::open(&path).unwrap_or_else(|e| panic!("schema v{version} doesn't open: {e}"));
+        assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_consistent(&lib);
+        assert_eq!(lib.albums().unwrap()[0].name, "Link", "v{version}");
+        assert_eq!(lib.album_tracks("al-1").unwrap()[0].title, "Link", "v{version}");
+        assert_eq!(lib.albums_crediting("Oystein Sevag").unwrap(), ["al-1"], "v{version}");
+    }
+}
+
+#[test]
+fn a_schema_step_without_a_migration_is_an_error() {
+    let lib = Library::in_memory().unwrap();
+    let wt = lib.db.begin_write().unwrap();
+    let err = migrate(&wt, SCHEMA_VERSION, SCHEMA_VERSION + 1).unwrap_err();
+    assert!(matches!(err, Error::NoMigration { from } if from == SCHEMA_VERSION), "{err}");
+    assert!(!err.is_damage(), "a missing step is a build bug, not a reason to move the file aside");
+    assert!(matches!(migrate(&wt, 0, 1), Err(Error::NoMigration { from: 0 })));
+}
+
+fn full_artist() -> Artist {
+    Artist { id: "ar-1".into(), name: "Bill Evans".into(), sort: Some("Evans, Bill".into()), album_count: 3, cover_art: Some("ar-1_0".into()) }
+}
+
+fn full_album() -> Album {
+    Album {
+        id: "al-1".into(),
+        name: "Sunday".into(),
+        sort: Some("Sunday at".into()),
+        artist: Some("Bill Evans Trio".into()),
+        artist_ref: Some("ar-2".into()),
+        year: Some(1961),
+        genre: Some("Jazz".into()),
+        song_count: 5,
+        duration_secs: 2400,
+        cover_art: Some("al-1_0".into()),
+        created: Some("2024-01-02".into()),
+        labels: vec!["Riverside".into(), "Fantasy".into()],
+        genres: vec!["Bebop".into(), "Modal".into()],
+        artists: vec![ArtistLink { id: Some("ar-2".into()), name: "Bill Evans Trio".into() }],
+    }
+}
+
+fn full_track() -> Track {
+    Track {
+        id: "s-1".into(),
+        album_id: "al-1".into(),
+        title: "Gloria's Step".into(),
+        artist: Some("Bill Evans Trio".into()),
+        artist_ref: Some("ar-2".into()),
+        track: Some(1),
+        disc: Some(2),
+        duration_secs: Some(370),
+        suffix: Some("flac".into()),
+        content_type: Some("audio/flac".into()),
+        size: Some(300_000),
+        bit_rate_kbps: Some(900),
+        bit_depth: Some(24),
+        sample_rate: Some(96_000),
+        channels: Some(2),
+        track_gain: Some(-1.5),
+        album_gain: Some(-2.0),
+        track_peak: Some(0.5),
+        album_peak: Some(1.0),
+        composer: Some("Scott LaFaro".into()),
+        contributors: vec![Contributor {
+            role: "performer".into(),
+            sub_role: Some("bass".into()),
+            name: "Scott LaFaro".into(),
+            artist_id: Some("ar-3".into()),
+        }],
+        cover_art: Some("s-1_0".into()),
+        artists: vec![ArtistLink { id: None, name: "Bill Evans".into() }],
+    }
+}
+
+/// What to do when a golden-bytes test fails.
+const SHAPE_CHANGED: &str = "the stored shape of a library row changed, so rows already on disk no longer decode as this type. \
+    Don't edit the bytes to match: freeze the old struct (and every type inside it) as the previous version, \
+    add the next version, bump SCHEMA_VERSION and add a step to `migrate` (see the rules in model.rs). \
+    Then add the new bytes as the new version's test";
+
+#[test]
+fn artist_v1_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 114, 45, 49, 10, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115, 1, 11, 69, 118, 97, 110, 115, 44, 32, 66, 105, 108, 108, 3, 1, 6, 97, 114, 45,
+        49, 95, 48,
+    ];
+    assert_eq!(encode(&full_artist()).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<Artist>(BYTES).unwrap(), full_artist());
+}
+
+#[test]
+fn album_v3_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+        32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
+        48, 49, 45, 48, 50, 2, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 7, 70, 97, 110, 116, 97, 115, 121, 2, 5, 66, 101, 98, 111, 112, 5, 77, 111, 100,
+        97, 108, 1, 1, 4, 97, 114, 45, 50, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115, 32, 84, 114, 105, 111,
+    ];
+    assert_eq!(encode(&full_album()).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<Album>(BYTES).unwrap(), full_album());
+}
+
+#[test]
+fn track_v3_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        3, 115, 45, 49, 4, 97, 108, 45, 49, 13, 71, 108, 111, 114, 105, 97, 39, 115, 32, 83, 116, 101, 112, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110,
+        115, 32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 1, 1, 2, 1, 242, 2, 1, 4, 102, 108, 97, 99, 1, 10, 97, 117, 100, 105, 111, 47, 102, 108, 97, 99,
+        1, 224, 167, 18, 1, 132, 7, 1, 24, 1, 128, 238, 5, 1, 2, 1, 0, 0, 192, 191, 1, 0, 0, 0, 192, 1, 0, 0, 0, 63, 1, 0, 0, 128, 63, 1, 12, 83, 99, 111, 116,
+        116, 32, 76, 97, 70, 97, 114, 111, 1, 9, 112, 101, 114, 102, 111, 114, 109, 101, 114, 1, 4, 98, 97, 115, 115, 12, 83, 99, 111, 116, 116, 32, 76, 97,
+        70, 97, 114, 111, 1, 4, 97, 114, 45, 51, 1, 5, 115, 45, 49, 95, 48, 1, 0, 10, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+    ];
+    assert_eq!(encode(&full_track()).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<Track>(BYTES).unwrap(), full_track());
+}
+
+/// What to do when a frozen version's golden-bytes test fails.
+const FROZEN_CHANGED: &str = "a frozen row version changed shape. Rows written by older builds are decoded as this type by \
+    `migrate`, so it must stay exactly as it was when that schema was current; make the change in the current version instead";
+
+fn full_album_v1() -> AlbumV1 {
+    AlbumV1 {
+        id: "al-1".into(),
+        name: "Sunday".into(),
+        sort: Some("Sunday at".into()),
+        artist: Some("Bill Evans Trio".into()),
+        artist_ref: Some("ar-2".into()),
+        year: Some(1961),
+        genre: Some("Jazz".into()),
+        song_count: 5,
+        duration_secs: 2400,
+        cover_art: Some("al-1_0".into()),
+        created: Some("2024-01-02".into()),
+    }
+}
+
+fn full_album_v2() -> AlbumV2 {
+    AlbumV2 { labels: vec!["Riverside".into(), "Fantasy".into()], genres: vec!["Bebop".into(), "Modal".into()], ..AlbumV2::from(full_album_v1()) }
+}
+
+fn full_track_v1() -> TrackV1 {
+    TrackV1 {
+        id: "s-1".into(),
+        album_id: "al-1".into(),
+        title: "Gloria's Step".into(),
+        artist: Some("Bill Evans Trio".into()),
+        track: Some(1),
+        disc: Some(2),
+        duration_secs: Some(370),
+        suffix: Some("flac".into()),
+        content_type: Some("audio/flac".into()),
+        size: Some(300_000),
+        bit_rate_kbps: Some(900),
+        bit_depth: Some(24),
+        sample_rate: Some(96_000),
+        channels: Some(2),
+        track_gain: Some(-1.5),
+        album_gain: Some(-2.0),
+        track_peak: Some(0.5),
+        album_peak: Some(1.0),
+    }
+}
+
+fn full_track_v2() -> TrackV2 {
+    TrackV2 {
+        artist_ref: Some("ar-2".into()),
+        composer: Some("Scott LaFaro".into()),
+        contributors: vec![Contributor {
+            role: "performer".into(),
+            sub_role: Some("bass".into()),
+            name: "Scott LaFaro".into(),
+            artist_id: Some("ar-3".into()),
+        }],
+        cover_art: Some("s-1_0".into()),
+        ..TrackV2::from(full_track_v1())
+    }
+}
+
+#[test]
+fn frozen_album_v1_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+        32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
+        48, 49, 45, 48, 50,
+    ];
+    assert_eq!(encode(&full_album_v1()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<AlbumV1>(BYTES).unwrap(), full_album_v1());
+}
+
+#[test]
+fn frozen_album_v2_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
+        32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
+        48, 49, 45, 48, 50, 2, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 7, 70, 97, 110, 116, 97, 115, 121, 2, 5, 66, 101, 98, 111, 112, 5, 77, 111, 100,
+        97, 108,
+    ];
+    assert_eq!(encode(&full_album_v2()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<AlbumV2>(BYTES).unwrap(), full_album_v2());
+}
+
+#[test]
+fn frozen_track_v1_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        3, 115, 45, 49, 4, 97, 108, 45, 49, 13, 71, 108, 111, 114, 105, 97, 39, 115, 32, 83, 116, 101, 112, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110,
+        115, 32, 84, 114, 105, 111, 1, 1, 1, 2, 1, 242, 2, 1, 4, 102, 108, 97, 99, 1, 10, 97, 117, 100, 105, 111, 47, 102, 108, 97, 99, 1, 224, 167, 18, 1,
+        132, 7, 1, 24, 1, 128, 238, 5, 1, 2, 1, 0, 0, 192, 191, 1, 0, 0, 0, 192, 1, 0, 0, 0, 63, 1, 0, 0, 128, 63,
+    ];
+    assert_eq!(encode(&full_track_v1()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<TrackV1>(BYTES).unwrap(), full_track_v1());
+}
+
+#[test]
+fn frozen_track_v2_keeps_its_wire_format() {
+    const BYTES: &[u8] = &[
+        3, 115, 45, 49, 4, 97, 108, 45, 49, 13, 71, 108, 111, 114, 105, 97, 39, 115, 32, 83, 116, 101, 112, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110,
+        115, 32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 1, 1, 2, 1, 242, 2, 1, 4, 102, 108, 97, 99, 1, 10, 97, 117, 100, 105, 111, 47, 102, 108, 97, 99,
+        1, 224, 167, 18, 1, 132, 7, 1, 24, 1, 128, 238, 5, 1, 2, 1, 0, 0, 192, 191, 1, 0, 0, 0, 192, 1, 0, 0, 0, 63, 1, 0, 0, 128, 63, 1, 12, 83, 99, 111, 116,
+        116, 32, 76, 97, 70, 97, 114, 111, 1, 9, 112, 101, 114, 102, 111, 114, 109, 101, 114, 1, 4, 98, 97, 115, 115, 12, 83, 99, 111, 116, 116, 32, 76, 97,
+        70, 97, 114, 111, 1, 4, 97, 114, 45, 51, 1, 5, 115, 45, 49, 95, 48,
+    ];
+    assert_eq!(encode(&full_track_v2()).unwrap(), BYTES, "{FROZEN_CHANGED}");
+    assert_eq!(decode::<TrackV2>(BYTES).unwrap(), full_track_v2());
+}
+
+#[test]
+fn saved_copies_from_another_schema_or_shape_read_as_missing() {
+    let lib = Library::in_memory().unwrap();
+    let put_raw = |name: &str, bytes: &[u8]| {
+        let wt = lib.db.begin_write().unwrap();
+        wt.open_table(SAVED).unwrap().insert(name, bytes).unwrap();
+        wt.commit().unwrap();
+    };
+    let value = vec!["al-1".to_owned()];
+    // Untagged, as builds before the tag wrote them.
+    put_raw("untagged", &encode(&value).unwrap());
+    assert_eq!(lib.saved::<Vec<String>>("untagged").unwrap(), None);
+    // Tagged by another schema, whose Track may have had another shape.
+    let mut other = saved_tag();
+    other[2] = other[2].wrapping_add(1);
+    put_raw("other", &[other.as_slice(), &encode(&value).unwrap()].concat());
+    assert_eq!(lib.saved::<Vec<String>>("other").unwrap(), None);
+    // A type that lost a trailing field decodes, with bytes to spare.
+    lib.save("wider", &(value.clone(), 7u32)).unwrap();
+    assert_eq!(lib.saved::<Vec<String>>("wider").unwrap(), None);
+    lib.save("same", &value).unwrap();
+    assert_eq!(lib.saved::<Vec<String>>("same").unwrap(), Some(value));
+}
+
+#[test]
+fn saved_values_keep_their_tag() {
+    let lib = Library::in_memory().unwrap();
+    lib.save("n", &1u8).unwrap();
+    let rt = lib.db.begin_read().unwrap();
+    let row = rt.open_table(SAVED).unwrap().get("n").unwrap().unwrap();
+    // Marker, layout 1, SCHEMA_VERSION as little-endian u32, then the value.
+    let [a, b, c, d] = SCHEMA_VERSION.to_le_bytes();
+    assert_eq!(row.value(), [0xa5, 1, a, b, c, d, 1], "the saved row layout changed: older copies would read as missing or wrong");
+}
+
+#[test]
+fn an_unchanged_artist_list_writes_nothing() {
+    let lib = Library::in_memory().unwrap();
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    assert!(lib.replace_artists([artist("1", "Bill Evans"), artist("2", "Øystein Sevåg")]).unwrap());
+    assert!(!lib.replace_artists([artist("2", "Øystein Sevåg"), artist("1", "Bill Evans")]).unwrap(), "same artists, another order");
+    assert_eq!(lib.artists().unwrap().len(), 2);
+    // Any difference writes the whole list: a field, a missing artist, a new one.
+    let mut more = artist("1", "Bill Evans");
+    more.album_count = 2;
+    assert!(lib.replace_artists([more.clone(), artist("2", "Øystein Sevåg")]).unwrap());
+    assert_eq!(lib.artists().unwrap()[0].album_count, 2);
+    assert!(lib.replace_artists([more.clone()]).unwrap());
+    assert!(lib.replace_artists([more, artist("3", "Nina Simone")]).unwrap());
+    let names: Vec<_> = lib.artists().unwrap().into_iter().map(|a| a.name).collect();
+    assert_eq!(names, ["Bill Evans", "Nina Simone"]);
+}
+
+#[test]
+fn lists_come_out_in_index_order() {
+    let lib = Library::in_memory().unwrap();
+    // Folding, equal sort keys told apart by id, years before titles, and
+    // album ids that are prefixes of each other.
+    lib.upsert_albums([
+        album("b", "Same", "Björk", 2001),
+        album("a", "Same", "bjork", 2001),
+        album("c", "Alpha", "BJORK", 2004),
+        album("d", "Zed", "Øystein Sevåg", 1989),
+        album("d2", "Anything", "Air", 1998),
+    ])
+    .unwrap();
+    lib.store_songs(vec![song("t3", "d", 2, 1), song("t1", "d", 1, 9), song("t2", "d2", 1, 1), song("t0", "d", 1, 9), song("t4", "a", 1, 1)]).unwrap();
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    lib.replace_artists([artist("2", "eagles"), artist("1", "Eagles"), artist("3", "Émile"), artist("4", "Øystein")]).unwrap();
+
+    let rt = lib.db.begin_read().unwrap();
+    let album_idx: Vec<String> = rt.open_table(ALBUMS_BY_SORT).unwrap().iter().unwrap().map(|e| e.unwrap().0.value().3.to_owned()).collect();
+    let track_idx: Vec<String> = rt.open_table(TRACKS_BY_ALBUM).unwrap().iter().unwrap().map(|e| e.unwrap().0.value().3.to_owned()).collect();
+    let artist_idx: Vec<String> = rt.open_table(ARTISTS_BY_NAME).unwrap().iter().unwrap().map(|e| e.unwrap().0.value().1.to_owned()).collect();
+    assert_eq!(lib.albums().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), album_idx);
+    assert_eq!(lib.all_tracks().unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(), track_idx);
+    assert_eq!(lib.artists().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), artist_idx);
+    assert_eq!(album_idx, ["d2", "a", "b", "c", "d"]);
+    assert_eq!(track_idx, ["t4", "t0", "t1", "t3", "t2"]);
+}
+
+/// An album with two credited tracks, then its album row and its first
+/// track's row overwritten with bytes that don't decode.
+fn library_with_unreadable_rows() -> Library {
+    let lib = Library::in_memory().unwrap();
+    let mut a = song("s-1", "al-1", 1, 1);
+    a.display_composer = Some("Cole Porter".into());
+    let mut b = song("s-2", "al-1", 1, 2);
+    b.display_composer = Some("Gershwin".into());
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al-1", "A", "X", 2000), song: vec![a, b] }).unwrap();
+    let wt = lib.db.begin_write().unwrap();
+    {
+        wt.open_table(ALBUMS).unwrap().insert("al-1", [0xffu8; 3].as_slice()).unwrap();
+        wt.open_table(TRACKS).unwrap().insert("s-1", [0xffu8; 3].as_slice()).unwrap();
+    }
+    wt.commit().unwrap();
+    lib
+}
+
+#[test]
+fn a_write_over_an_undecodable_row_succeeds_and_leaves_indexes_consistent() {
+    let lib = library_with_unreadable_rows();
+    // A new year moves the album's sort key, and a new track number the
+    // track's: the old entries can only be found by id.
+    lib.upsert_albums([album("al-1", "A", "X", 2001)]).unwrap();
+    let mut moved = song("s-1", "al-1", 2, 7);
+    moved.display_composer = Some("Ellington".into());
+    lib.store_songs(vec![moved]).unwrap();
+    assert_consistent(&lib);
+    assert_eq!(lib.albums().unwrap()[0].year, Some(2001));
+    assert_eq!(lib.album_tracks("al-1").unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(), ["s-2", "s-1"]);
+    assert!(lib.albums_crediting("Cole Porter").unwrap().is_empty());
+    assert_eq!(lib.albums_crediting("Ellington").unwrap(), ["al-1"]);
+
+    // A whole-album resync goes through the same rows.
+    let lib = library_with_unreadable_rows();
+    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al-1", "A", "X", 1999), song: vec![song("s-1", "al-1", 1, 1)] }).unwrap();
+    assert_consistent(&lib);
+    assert_eq!(lib.album_tracks("al-1").unwrap().len(), 1);
+}
+
+#[test]
+fn removing_an_undecodable_row_succeeds_and_leaves_indexes_consistent() {
+    let lib = library_with_unreadable_rows();
+    assert!(lib.remove_album("al-1").unwrap());
+    assert_consistent(&lib);
+    assert_eq!(lib.album_count().unwrap(), 0);
+    assert_eq!(lib.track_count().unwrap(), 0);
+    assert!(lib.albums_crediting("Cole Porter").unwrap().is_empty());
+
+    let lib = library_with_unreadable_rows();
+    assert_eq!(lib.retain_albums(&HashSet::new()).unwrap(), 1);
+    assert_consistent(&lib);
+    assert_eq!(lib.track_count().unwrap(), 0);
 }

@@ -10,7 +10,10 @@
 
 mod model;
 
-pub use model::*;
+/// Only the current versions are public. The frozen ones exist to read old
+/// rows and stay inside the crate.
+pub use model::{Album, Artist, ArtistLink, Contributor, Track, fold};
+use model::{AlbumV1, AlbumV2, AlbumV3, TrackV1, TrackV2, TrackV3};
 
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata, Table, TableDefinition, WriteTransaction};
 use serde::{Serialize, de::DeserializeOwned};
@@ -19,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bump when a model or index layout changes, and handle the step in `migrate`.
-pub const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
 const ARTISTS: TableDefinition<&str, &[u8]> = TableDefinition::new("artists");
@@ -39,11 +42,15 @@ const CREDITS: TableDefinition<(&str, &str, &str), ()> = TableDefinition::new("c
 /// album id → [`Album::sync_stamp`] of the album when its tracks were last stored.
 const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_stamps");
 /// Track id → an analysis record, opaque here (the `analysis` crate owns the format).
-/// A new table rather than a schema bump: older builds simply ignore it.
+/// Legacy in the library database: builds before [`AnalysisStore`] kept records
+/// here, and [`AnalysisStore::adopt`] moves them out. `init` still creates the
+/// table so `adopt` can open it; the live records are in the store's own database,
+/// which uses the same definition.
 const ANALYSIS: TableDefinition<&str, &[u8]> = TableDefinition::new("analysis");
 /// Name → a copy of something the server lists outside the library (the
-/// playlists, favorites, Recently added), kept for starting offline. Opaque
-/// here; a new table rather than a schema bump, like `ANALYSIS`.
+/// playlists, favorites, Recently added), kept for starting offline. Each
+/// value is postcard behind [`saved_tag`]. A new table rather than a schema
+/// bump, like `ANALYSIS`.
 const SAVED: TableDefinition<&str, &[u8]> = TableDefinition::new("saved");
 
 const SCHEMA_KEY: &str = "schema_version";
@@ -61,6 +68,10 @@ pub enum Error {
         "The library database comes from a newer version of Ond (schema v{found}; this build reads v{SCHEMA_VERSION}). Update Ond, or delete the file to sync again"
     )]
     NewerSchema { found: u32 },
+    /// A build bug: `SCHEMA_VERSION` was bumped without a step in `migrate`.
+    /// Not damage, so the file is left alone for a build that can upgrade it.
+    #[error("This build of Ond can't upgrade the library database from schema v{from}. Update Ond, or delete the file to sync again")]
+    NoMigration { from: u32 },
 }
 
 macro_rules! from_redb {
@@ -85,7 +96,7 @@ impl Error {
                 _ => false,
             },
             Error::Codec(_) => true,
-            Error::NewerSchema { .. } => false,
+            Error::NewerSchema { .. } | Error::NoMigration { .. } => false,
         }
     }
 }
@@ -112,17 +123,26 @@ pub struct AnalysisStore {
 }
 
 impl AnalysisStore {
-    /// Opens (or creates) the store at `path`. An unreadable file is moved
-    /// aside (`<name>.bad-<unix secs>`) and a fresh store started.
+    /// [`open_or_recover`](Self::open_or_recover) for a caller that has
+    /// nothing to tell the user about the old file (it is logged).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::open_or_recover(path)?.0)
+    }
+
+    /// Opens (or creates) the store at `path`. An unreadable file is moved
+    /// aside (`<name>.bad-<unix secs>`) and a fresh store started; the second
+    /// value is where the old file went, so the caller can say so. Unlike the
+    /// library mirror, these records can't be rebuilt by a sync.
+    pub fn open_or_recover(path: impl AsRef<Path>) -> Result<(Self, Option<PathBuf>)> {
         let path = path.as_ref();
         let open = |p: &Path| Self::init(Database::create(p)?);
         match open(path) {
             Err(e) if e.is_damage() => {
-                set_aside(path)?;
-                open(path)
+                let aside = set_aside(path)?;
+                tracing::warn!("analysis database was unreadable; moved to {} and starting fresh", aside.display());
+                Ok((open(path)?, Some(aside)))
             }
-            other => other,
+            other => other.map(|store| (store, None)),
         }
     }
 
@@ -208,8 +228,11 @@ impl Library {
             let found = meta.get(SCHEMA_KEY)?.map(|v| v.value());
             match found {
                 Some(v) if v > SCHEMA_VERSION => return Err(Error::NewerSchema { found: v }),
-                Some(v) if v < SCHEMA_VERSION => migrate(&wt, v)?,
-                _ => {}
+                Some(v) if v < SCHEMA_VERSION => migrate(&wt, v, SCHEMA_VERSION)?,
+                Some(_) => {}
+                // No stamp means the file was just created. The meta table and
+                // its stamp date from schema v1, so no older database lacks one.
+                None => {}
             }
             meta.insert(SCHEMA_KEY, SCHEMA_VERSION)?;
             wt.open_table(ARTISTS)?;
@@ -285,21 +308,45 @@ impl Library {
         Ok(cleared)
     }
 
-    /// Replaces the whole artist list with what the server returned.
-    pub fn replace_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
+    /// Replaces the whole artist list with what the server returned. Returns
+    /// whether anything changed. Every sync sends the full list and it rarely
+    /// differs, so an identical list writes nothing.
+    pub fn replace_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<bool> {
+        let artists: Vec<(Artist, Vec<u8>)> = artists
+            .into_iter()
+            .map(|a| {
+                let a = Artist::from(a);
+                encode(&a).map(|bytes| (a, bytes))
+            })
+            .collect::<Result<_>>()?;
         let wt = self.db.begin_write()?;
+        let unchanged = {
+            let rows = wt.open_table(ARTISTS)?;
+            let mut same = rows.len()? == artists.len() as u64;
+            for (a, bytes) in &artists {
+                if !same {
+                    break;
+                }
+                same = rows.get(a.id.as_str())?.is_some_and(|g| g.value() == bytes.as_slice());
+            }
+            same
+        };
+        if unchanged {
+            wt.abort()?;
+            return Ok(false);
+        }
         {
             let mut rows = wt.open_table(ARTISTS)?;
             let mut idx = wt.open_table(ARTISTS_BY_NAME)?;
             rows.retain(|_, _| false)?;
             idx.retain(|_, _| false)?;
-            for a in artists {
-                let a = Artist::from(a);
-                rows.insert(a.id.as_str(), encode(&a)?.as_slice())?;
+            for (a, bytes) in &artists {
+                rows.insert(a.id.as_str(), bytes.as_slice())?;
                 idx.insert((a.sort_name().as_str(), a.id.as_str()), ())?;
             }
         }
-        Ok(wt.commit()?)
+        wt.commit()?;
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -389,20 +436,36 @@ impl Library {
     }
 
     /// Keeps a copy of `value` under `name` (see [`saved`](Self::saved)).
+    ///
+    /// The copy is tagged with the schema version, which covers the library's
+    /// own types ([`Track`] and the rest). A type defined elsewhere that
+    /// changes shape needs a new `name`: the tag can't see that change.
     pub fn save<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
-        let bytes = encode(value)?;
+        let mut bytes = saved_tag().to_vec();
+        bytes.extend(encode(value)?);
         let wt = self.db.begin_write()?;
         wt.open_table(SAVED)?.insert(name, bytes.as_slice())?;
         Ok(wt.commit()?)
     }
 
-    /// The copy saved under `name`. One written by a build whose types
-    /// differed reads as missing: it's a copy, and the server has the original.
+    /// The copy saved under `name`. It's a copy and the server has the
+    /// original, so anything doubtful reads as missing: another tag (another
+    /// schema, or no tag from a build before tags), bytes that don't decode,
+    /// or bytes left over after decoding, which is how a type that lost a
+    /// trailing field shows.
     pub fn saved<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
         let rt = self.db.begin_read()?;
         let Some(row) = rt.open_table(SAVED)?.get(name)? else { return Ok(None) };
-        match decode(row.value()) {
-            Ok(v) => Ok(Some(v)),
+        let Some(body) = row.value().strip_prefix(saved_tag().as_slice()) else {
+            tracing::debug!("saved {name}: written by another schema");
+            return Ok(None);
+        };
+        match postcard::take_from_bytes(body) {
+            Ok((v, [])) => Ok(Some(v)),
+            Ok((_, rest)) => {
+                tracing::debug!("saved {name}: {} bytes left over", rest.len());
+                Ok(None)
+            }
             Err(e) => {
                 tracing::debug!("saved {name}: {e}");
                 Ok(None)
@@ -448,16 +511,17 @@ impl Library {
         Ok(self.db.begin_read()?.open_table(TRACKS)?.len()?)
     }
 
-    /// Every stored track, grouped by album in disc/track order.
+    /// Every stored track, grouped by album in disc/track order: the order of
+    /// `TRACKS_BY_ALBUM`, rebuilt in memory. Walking the index costs a lookup
+    /// per track, while one pass over the rows and a sort is far cheaper.
     pub fn all_tracks(&self) -> Result<Vec<Track>> {
         let rt = self.db.begin_read()?;
-        let rows = rt.open_table(TRACKS)?;
-        let idx = rt.open_table(TRACKS_BY_ALBUM)?;
-        let mut out = Vec::with_capacity(idx.len()? as usize);
-        for entry in idx.iter()? {
-            let (key, _) = entry?;
-            out.extend(get_row_or_skip(&rows, key.value().3)?);
+        let mut out: Vec<Track> = all_rows(&rt.open_table(TRACKS)?)?;
+        fn key(t: &Track) -> (&str, u32, u32, &str) {
+            let (disc, no) = t.order_parts();
+            (&t.album_id, disc, no, &t.id)
         }
+        out.sort_by(|a, b| key(a).cmp(&key(b)));
         Ok(out)
     }
 
@@ -498,7 +562,8 @@ impl Library {
     }
 
     /// Deletes an album, its tracks and all their index entries. Returns whether
-    /// the album existed.
+    /// the album existed. Syncs go through `retain_albums`.
+    #[cfg(test)]
     pub fn remove_album(&self, id: &str) -> Result<bool> {
         let wt = self.db.begin_write()?;
         let existed = AlbumTables::open(&wt)?.remove(id)?;
@@ -506,16 +571,12 @@ impl Library {
         Ok(existed)
     }
 
-    /// All albums ordered by artist, then year, then title.
+    /// All albums ordered by artist, then year, then title: the order of
+    /// `ALBUMS_BY_SORT`, rebuilt in memory like [`all_tracks`](Self::all_tracks).
     pub fn albums(&self) -> Result<Vec<Album>> {
         let rt = self.db.begin_read()?;
-        let rows = rt.open_table(ALBUMS)?;
-        let idx = rt.open_table(ALBUMS_BY_SORT)?;
-        let mut out = Vec::with_capacity(idx.len()? as usize);
-        for entry in idx.iter()? {
-            let (key, _) = entry?;
-            out.extend(get_row_or_skip(&rows, key.value().3)?);
-        }
+        let mut out: Vec<Album> = all_rows(&rt.open_table(ALBUMS)?)?;
+        out.sort_by_cached_key(|a| (a.sort_parts(), a.id.clone()));
         Ok(out)
     }
 
@@ -531,15 +592,12 @@ impl Library {
         track_ids(&rt, album_id)?.iter().filter_map(|id| get_row_or_skip(&rows, id).transpose()).collect()
     }
 
+    /// All artists by folded sort name: the order of `ARTISTS_BY_NAME`,
+    /// rebuilt in memory like [`all_tracks`](Self::all_tracks).
     pub fn artists(&self) -> Result<Vec<Artist>> {
         let rt = self.db.begin_read()?;
-        let rows = rt.open_table(ARTISTS)?;
-        let idx = rt.open_table(ARTISTS_BY_NAME)?;
-        let mut out = Vec::with_capacity(idx.len()? as usize);
-        for entry in idx.iter()? {
-            let (key, _) = entry?;
-            out.extend(get_row_or_skip(&rows, key.value().1)?);
-        }
+        let mut out: Vec<Artist> = all_rows(&rt.open_table(ARTISTS)?)?;
+        out.sort_by_cached_key(|a| (a.sort_name(), a.id.clone()));
         Ok(out)
     }
 
@@ -600,6 +658,19 @@ impl Library {
             problems.push(format!("track index has {} entries for {} rows", track_idx.len()?, tracks.len()?));
         }
 
+        let artists = rt.open_table(ARTISTS)?;
+        let artist_idx = rt.open_table(ARTISTS_BY_NAME)?;
+        for entry in artists.iter()? {
+            let (id, bytes) = entry?;
+            let a: Artist = decode(bytes.value())?;
+            if artist_idx.get((a.sort_name().as_str(), id.value()))?.is_none() {
+                problems.push(format!("artist {} missing from index", id.value()));
+            }
+        }
+        if artist_idx.len()? != artists.len()? {
+            problems.push(format!("artist index has {} entries for {} rows", artist_idx.len()?, artists.len()?));
+        }
+
         let credits = rt.open_table(CREDITS)?;
         let mut expected = 0u64;
         for entry in tracks.iter()? {
@@ -619,8 +690,14 @@ impl Library {
     }
 }
 
-/// Schema upgrades, run inside the opening write transaction. Each step takes
-/// the db from `from` to `from + 1`.
+/// The prefix of every saved value: a marker byte, the layout of the saved
+/// row (this one, 1), and the schema the value's library types come from.
+/// Rows saved before the tag have none, and read as missing.
+fn saved_tag() -> [u8; 6] {
+    let [a, b, c, d] = SCHEMA_VERSION.to_le_bytes();
+    [0xa5, 1, a, b, c, d]
+}
+
 /// Moves an unreadable database file out of the way as `<name>.bad-<unix secs>`.
 fn set_aside(path: &Path) -> Result<PathBuf> {
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -642,11 +719,13 @@ fn analysis_rows(db: &Database) -> Result<Vec<(String, Vec<u8>)>> {
     Ok(out)
 }
 
-fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
-    for v in from..SCHEMA_VERSION {
+/// Schema upgrades from `from` to `to`, run inside the opening write
+/// transaction. Each step takes the db from `v` to `v + 1`. A step with no arm
+/// is an error, not a no-op: stamping old rows with the new version would
+/// leave them unreadable or wrong for good.
+fn migrate(wt: &WriteTransaction, from: u32, to: u32) -> Result<()> {
+    for v in from..to {
         match v {
-            // 0 => only possible for a db created before the meta table existed; nothing to do.
-            0 => {}
             // v2 adds labels/genres to albums and credits/composer/cover to tracks.
             // Index keys don't change, so rows are rewritten in place; the new
             // fields fill in the next time an album is synced.
@@ -666,7 +745,8 @@ fn migrate(wt: &WriteTransaction, from: u32) -> Result<()> {
             // Rows don't change, so stamps stay; every key made by `fold` is
             // rebuilt from them.
             3 => rebuild_folded_indexes(wt)?,
-            _ => {}
+            // Version 0 never existed: the first schema already stamped itself.
+            _ => return Err(Error::NoMigration { from: v }),
         }
     }
     Ok(())
@@ -731,6 +811,20 @@ fn get_row_or_skip<T: DeserializeOwned>(table: &impl ReadableTable<&'static str,
     }
 }
 
+/// Every row of `table` in one pass, skipping those that don't decode like
+/// [`get_row_or_skip`] does.
+fn all_rows<T: DeserializeOwned>(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<Vec<T>> {
+    let mut out = Vec::with_capacity(table.len()? as usize);
+    for entry in table.iter()? {
+        let (id, bytes) = entry?;
+        match decode(bytes.value()) {
+            Ok(row) => out.push(row),
+            Err(e) => tracing::warn!("library: skipping row {} that can't be read: {e}", id.value()),
+        }
+    }
+    Ok(out)
+}
+
 fn track_ids(rt: &ReadTransaction, album_id: &str) -> Result<Vec<String>> {
     collect_track_ids(&rt.open_table(TRACKS_BY_ALBUM)?, album_id)
 }
@@ -750,11 +844,46 @@ fn collect_track_ids(idx: &impl ReadableTable<(&'static str, u32, u32, &'static 
     Ok(ids)
 }
 
-fn put_album(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut Table<(&'static str, i32, &'static str, &'static str), ()>, a: &Album) -> Result<()> {
-    if let Some(old) = rows.insert(a.id.as_str(), encode(a)?.as_slice())? {
-        let old: Album = decode(old.value())?;
-        let (artist, year, title) = old.sort_parts();
-        idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
+/// An old row that a write replaces or removes.
+enum Old<T> {
+    Row(T),
+    /// The row didn't decode. Its index entries can't be worked out from it,
+    /// so they're found by id instead.
+    Unreadable,
+}
+
+/// Decodes the old row a write is about to drop. One that can't be read is
+/// logged and doesn't fail the write. The write replaces or removes it anyway,
+/// and failing would leave it in place to fail every later sync too.
+fn decode_old<T: DeserializeOwned>(id: &str, bytes: &[u8]) -> Old<T> {
+    match decode(bytes) {
+        Ok(row) => Old::Row(row),
+        Err(e) => {
+            tracing::warn!("library: dropping row {id} that can't be read: {e}");
+            Old::Unreadable
+        }
+    }
+}
+
+type AlbumIndex<'t> = Table<'t, (&'static str, i32, &'static str, &'static str), ()>;
+
+/// Removes album `id`'s sort index entry. The old row gives the key when it
+/// could be read; otherwise the index is scanned for the id.
+fn unindex_album(idx: &mut AlbumIndex, id: &str, old: &Old<Album>) -> Result<()> {
+    match old {
+        Old::Row(old) => {
+            let (artist, year, title) = old.sort_parts();
+            idx.remove((artist.as_str(), year, title.as_str(), id))?;
+        }
+        Old::Unreadable => idx.retain(|(_, _, _, i), ()| i != id)?,
+    }
+    Ok(())
+}
+
+fn put_album(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut AlbumIndex, a: &Album) -> Result<()> {
+    let old = rows.insert(a.id.as_str(), encode(a)?.as_slice())?.map(|g| decode_old(&a.id, g.value()));
+    if let Some(old) = &old {
+        unindex_album(idx, &a.id, old)?;
     }
     let (artist, year, title) = a.sort_parts();
     idx.insert((artist.as_str(), year, title.as_str(), a.id.as_str()), ())?;
@@ -764,7 +893,7 @@ fn put_album(rows: &mut Table<&'static str, &'static [u8]>, idx: &mut Table<(&'s
 /// The tables removing an album touches, opened once per transaction.
 struct AlbumTables<'t> {
     rows: Table<'t, &'static str, &'static [u8]>,
-    idx: Table<'t, (&'static str, i32, &'static str, &'static str), ()>,
+    idx: AlbumIndex<'t>,
     stamps: Table<'t, &'static str, u64>,
     tracks: TrackTables<'t>,
 }
@@ -779,10 +908,9 @@ impl<'t> AlbumTables<'t> {
     fn remove(&mut self, id: &str) -> Result<bool> {
         self.tracks.remove_album(id)?;
         self.stamps.remove(id)?;
-        let old = self.rows.remove(id)?.map(|g| decode::<Album>(g.value())).transpose()?;
+        let old = self.rows.remove(id)?.map(|g| decode_old::<Album>(id, g.value()));
         if let Some(old) = &old {
-            let (artist, year, title) = old.sort_parts();
-            self.idx.remove((artist.as_str(), year, title.as_str(), old.id.as_str()))?;
+            unindex_album(&mut self.idx, id, old)?;
         }
         Ok(old.is_some())
     }
@@ -803,9 +931,9 @@ impl<'t> TrackTables<'t> {
     fn put(&mut self, t: &Track) -> Result<()> {
         // A track the server moved to another album leaves its old index entries
         // behind unless we drop them here.
-        let old = self.rows.insert(t.id.as_str(), encode(t)?.as_slice())?.map(|g| decode::<Track>(g.value())).transpose()?;
+        let old = self.rows.insert(t.id.as_str(), encode(t)?.as_slice())?.map(|g| decode_old(&t.id, g.value()));
         if let Some(old) = old {
-            self.unindex(&old)?;
+            self.unindex(&t.id, &old)?;
         }
         let (disc, no) = t.order_parts();
         self.by_album.insert((t.album_id.as_str(), disc, no, t.id.as_str()), ())?;
@@ -815,20 +943,30 @@ impl<'t> TrackTables<'t> {
         Ok(())
     }
 
-    fn unindex(&mut self, old: &Track) -> Result<()> {
-        let (disc, no) = old.order_parts();
-        self.by_album.remove((old.album_id.as_str(), disc, no, old.id.as_str()))?;
-        for name in old.credited_names() {
-            self.credits.remove((name.as_str(), old.album_id.as_str(), old.id.as_str()))?;
+    /// Removes track `id`'s index entries: the ones its old row names, or
+    /// every entry for the id when the old row can't be read.
+    fn unindex(&mut self, id: &str, old: &Old<Track>) -> Result<()> {
+        match old {
+            Old::Row(old) => {
+                let (disc, no) = old.order_parts();
+                self.by_album.remove((old.album_id.as_str(), disc, no, id))?;
+                for name in old.credited_names() {
+                    self.credits.remove((name.as_str(), old.album_id.as_str(), id))?;
+                }
+            }
+            Old::Unreadable => {
+                self.by_album.retain(|(_, _, _, i), ()| i != id)?;
+                self.credits.retain(|(_, _, i), ()| i != id)?;
+            }
         }
         Ok(())
     }
 
     fn remove_album(&mut self, album_id: &str) -> Result<()> {
         for id in collect_track_ids(&self.by_album, album_id)? {
-            let old = self.rows.remove(id.as_str())?.map(|g| decode::<Track>(g.value())).transpose()?;
+            let old = self.rows.remove(id.as_str())?.map(|g| decode_old(&id, g.value()));
             if let Some(old) = old {
-                self.unindex(&old)?;
+                self.unindex(&id, &old)?;
             }
         }
         Ok(())

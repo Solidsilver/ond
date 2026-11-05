@@ -13,7 +13,8 @@
 //! steady on a big display or an integrated GPU.
 //!
 //! Everything lives in egui-wgpu's callback resources and is made the first
-//! time it's needed; the pictures follow the size drawn at.
+//! time it's needed; the pictures follow the size drawn at. Closing the
+//! visualizer paints [`release`], which takes it all out again.
 
 use super::visualizer::{Dot, Field, Look, Picture};
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
@@ -466,7 +467,11 @@ impl Gpu {
 
     /// Makes the two pictures at `size` (black) when the size changes, and
     /// hands back the old ones: this frame's feedback pass reads the last
-    /// picture from them, scaled, so a resize doesn't blank the view.
+    /// picture from them, scaled, so a resize doesn't blank the view. The
+    /// caller needn't keep the old pictures' views or bind group alive past
+    /// the encoder: `old` drops when the caller's frame ends, but wgpu's
+    /// refcounting keeps whatever a recorded pass references alive until the
+    /// submission finishes, so dropping them early is safe.
     fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) -> Option<Pictures> {
         if self.pictures.as_ref().is_none_or(|p| p.size != size) {
             let view = || {
@@ -591,9 +596,52 @@ pub fn shape(rect: egui::Rect, callback: VisualizerCallback) -> egui::Shape {
     egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(rect, callback))
 }
 
+/// Frees what the visualizer keeps on the GPU (the pipelines, and two
+/// pictures up to [`MAX_SIDE`] square) when it closes; it's made again the
+/// next time it opens. Painted as a callback because only callbacks reach
+/// egui-wgpu's resources.
+struct Release;
+
+impl CallbackTrait for Release {
+    fn prepare(
+        &self,
+        _: &wgpu::Device,
+        _: &wgpu::Queue,
+        _: &ScreenDescriptor,
+        _: &mut wgpu::CommandEncoder,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        resources.remove::<Gpu>();
+        Vec::new()
+    }
+
+    fn paint(&self, _: egui::PaintCallbackInfo, _: &mut wgpu::RenderPass<'static>, _: &CallbackResources) {}
+}
+
+/// The callback that frees the visualizer's GPU resources, painted once in
+/// the frame it closes. It draws nothing; `rect` only has to be on screen.
+pub fn release(rect: egui::Rect) -> egui::Shape {
+    egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(rect, Release))
+}
+
+/// The visualizer's resources are in `resources` (for the snapshot that
+/// checks closing it frees them).
+#[cfg(test)]
+pub fn held(resources: &CallbackResources) -> bool {
+    resources.get::<Gpu>().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shader_compiles() {
+        let module = naga::front::wgsl::parse_str(SHADER).unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
+    }
 
     #[test]
     fn big_views_are_drawn_smaller_and_scaled_up() {

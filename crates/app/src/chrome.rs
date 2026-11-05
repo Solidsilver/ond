@@ -178,7 +178,12 @@ mod mac {
             // NSView one is inherited), with the matching signature.
             unsafe {
                 let imp: objc2::runtime::Imp = std::mem::transmute(no as extern "C-unwind" fn(&AnyObject, objc2::runtime::Sel) -> objc2::runtime::Bool);
-                objc2::ffi::class_addMethod(std::ptr::from_ref(view.class()).cast_mut(), objc2::sel!(mouseDownCanMoveWindow), imp, types.as_ptr());
+                let added = objc2::ffi::class_addMethod(std::ptr::from_ref(view.class()).cast_mut(), objc2::sel!(mouseDownCanMoveWindow), imp, types.as_ptr());
+                // False means the class already defines it: a winit that adds
+                // its own would leave the volume-drag fix quietly undone.
+                if !added.as_bool() {
+                    tracing::warn!("winit's view already defines mouseDownCanMoveWindow; dragging a slider may move the window");
+                }
             }
         });
     }

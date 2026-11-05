@@ -5,12 +5,12 @@
 
 use super::WindowAction;
 use super::seek::SeekStyle;
-use super::widgets::elide;
 use super::{Action, OndApp};
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::visuals::backdrop::Blurred;
 use crate::visuals::over_art::{self, OnArt};
+use crate::widgets::elide;
 use crate::window::WindowMode;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, ViewportCommand, pos2, vec2};
 
@@ -148,9 +148,10 @@ impl OndApp {
         ] {
             // Until the cover's look is known: the dark disc that suits any cover.
             let on = under(blurred, r, rect).map_or(OnArt { fg: ON_ART, scrim: Some(scrim()) }, |u| OnArt::pick(u, ON_ART, over_art::ICON));
-            if let Some(scrim) = on.scrim {
-                ui.painter().circle_filled(r.center(), 13.0, scrim);
-            }
+            // A faint disc in the opposite tone even when the glyph reads on the
+            // art alone: the corners then look like buttons on any cover.
+            let disc = on.scrim.unwrap_or_else(|| if on.fg == ON_ART { scrim().gamma_multiply(0.35) } else { over_art::LIGHT.gamma_multiply(0.45) });
+            ui.painter().circle_filled(r.center(), 13.0, disc);
             let mut b = ui.new_child(UiBuilder::new().max_rect(r));
             on.apply(&mut b);
             if icons::sized_button(&mut b, icon, label, r.size(), 10.0, Some(on.fg)).clicked() {
@@ -168,30 +169,24 @@ impl OndApp {
             .frame(egui::Frame::new().fill(t.panel).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, Some(crate::output::SLIDER_W));
+                    let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.output_control(), Some(crate::output::SLIDER_W));
                     self.output_control_out(out);
                     // The same few characters of signal path as the full window's display.
                     let origin = self.player.playing_from.as_ref().map(|s| super::playing::origin(s, &self.cache));
-                    let readout = self
-                        .output
-                        .readout(&self.engine.status)
-                        .map(|r| crate::output::Readout { local: origin.as_ref().is_some_and(super::playing::Origin::is_local), ..r });
+                    let readout = super::signal_card::readout(&self.output, &self.engine.status, origin.as_ref());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let (Some(r), Some(item)) = (readout, self.player.queue.current.as_ref()) {
                             let size = crate::output::paint_readout(ui, egui::Pos2::ZERO, &r, 10.5, false).size();
                             let (rect, resp) = ui.allocate_exact_size(size + vec2(4.0, 6.0), Sense::click());
                             crate::output::paint_readout(ui, rect.right_center() - vec2(2.0, 0.0), &r, 10.5, true);
-                            resp.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default()))
-                            });
-                            let path = self.output.signal();
-                            super::signal_card::popover(&resp, origin.as_ref(), &item.track, path, self.engine.status.underruns());
-                            resp.on_hover_text(super::signal_card::hover(origin.as_ref(), path, &r.detail)).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            super::signal_card::pill(resp, &r, origin.as_ref(), &item.track, &self.output, self.engine.status.underruns());
                         }
                         if !self.session.online && self.session.settings.is_some() {
                             let (g, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                             icons::paint(ui.painter(), g, Icon::Offline, t.muted);
-                            resp.on_hover_text("Can't reach the server. Downloaded music still plays.");
+                            // Offline by choice isn't a failure to reach the server.
+                            let why = if self.session.work_offline { "Offline mode" } else { "Can't reach the server" };
+                            resp.on_hover_text(format!("{why}. Downloaded music still plays."));
                         }
                     });
                 });

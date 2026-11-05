@@ -1,5 +1,5 @@
 //! The native macOS menu bar (via `muda`). Every item routes to a
-//! [`Cmd`](crate::keys::Cmd), the same as the keyboard.
+//! [`Cmd`], the same as the keyboard.
 //!
 //! Keys that a text field also uses (Space, ⌘-arrows) get no menu
 //! accelerator: AppKit offers key equivalents to the menu before the view, so

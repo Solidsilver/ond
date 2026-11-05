@@ -51,8 +51,9 @@ pub(crate) enum DecoderMsg {
     },
     /// A new ring whose first track is `first_seq`: open (or reopen) the device for it.
     Ring { format: StreamFormat, input: RingInput, first_seq: u64 },
-    /// A seek in track `seq` landed (past the end: at the end, and the track is over).
-    Seeked { seq: u64, position_secs: f64 },
+    /// A seek in track `seq` landed (past the end: at the end, and the track is
+    /// over). `hold` is the output hold generation it released (0: none).
+    Seeked { seq: u64, position_secs: f64, hold: u64 },
     /// A seek for track `seq` arrived after the decoder had moved past it.
     SeekMiss { seq: u64, to: Duration },
     /// Track `seq` (`track_id`) failed; the session ends after what's already queued.
@@ -211,7 +212,7 @@ impl Session {
     }
 }
 
-struct Ctx {
+pub(crate) struct Ctx {
     config: EngineConfig,
     status: Arc<Status>,
     cache: Option<StreamCache>,
@@ -838,7 +839,7 @@ impl Ctx {
                 self.publish(|s| s.frames_played.store(played, Ordering::Relaxed));
             }
             let position_secs = if t.clock.rate == 0 { 0.0 } else { frames as f64 / t.clock.rate as f64 };
-            let _ = self.msgs.send(DecoderMsg::Seeked { seq, position_secs });
+            let _ = self.msgs.send(DecoderMsg::Seeked { seq, position_secs, hold: req.hold });
         }
         outcome
     }

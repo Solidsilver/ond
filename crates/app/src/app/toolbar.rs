@@ -2,17 +2,14 @@
 //! window, output / volume / queue on the right.
 
 use super::WindowAction;
-use super::playing::Origin;
 use super::seek::SeekStyle;
 use super::view_ctx::ViewCtx;
-use super::widgets::elide;
 use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
-use crate::output::Readout;
 use crate::theme::{Tokens, semibold};
-use audio::PlayState;
+use crate::widgets::elide;
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
 /// The toolbar's height; on macOS the traffic lights sit centred in it.
@@ -104,7 +101,7 @@ impl OndApp {
         // The output control, centred between the display and the buttons
         // (as the transport is on the left), never past the buttons.
         let slider = (!narrow).then_some(crate::output::SLIDER_W);
-        let control_w = self.output.control_width(slider);
+        let control_w = self.output.control_width(slider, self.ui.prefs.device_volume_db);
         // Centred on the whole window, not what's left of it: window buttons
         // on the right (most Linux desktops) would pull it off centre. The
         // two ends still keep it clear of them.
@@ -112,7 +109,7 @@ impl OndApp {
         let x = control_x(lcd.right(), buttons_start, control_w);
         let control = Rect::from_min_max(pos2(x, full.top()), pos2(x + control_w, full.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(control).layout(Layout::left_to_right(Align::Center)), |ui| {
-            let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.volume, slider);
+            let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.output_control(), slider);
             self.output_control_out(out);
         });
         let x = transport_x(free_left, lcd.left());
@@ -130,12 +127,7 @@ impl OndApp {
         if icons::sized_button(ui, Icon::Previous, "Previous", vec2(32.0, 32.0), 13.0, color).clicked() {
             self.actions.push(Action::Previous);
         }
-        let waiting = matches!(state, PlayState::Buffering | PlayState::Loading) || self.player.pending_seek.is_some() || self.player.held;
-        let (icon, label) = match state {
-            _ if waiting => (Icon::Spinner, "Buffering (click to pause)"),
-            PlayState::Playing => (Icon::Pause, "Pause"),
-            _ => (Icon::Play, "Play"),
-        };
+        let (icon, label) = super::playing::play_pause(state, &self.player);
         if icons::sized_button(ui, icon, label, vec2(36.0, 32.0), 17.0, Some(color.unwrap_or(t.text))).clicked() {
             self.actions.push(Action::PlayPause);
         }
@@ -197,7 +189,7 @@ impl ViewCtx<'_> {
         // it, both centred vertically.
         let heart = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(22.0, 22.0));
         let origin = self.origin();
-        let readout = self.output.readout(&self.engine.status).map(|r| Readout { local: origin.as_ref().is_some_and(Origin::is_local), ..r });
+        let readout = super::signal_card::readout(self.output, &self.engine.status, origin.as_ref());
         let readout_anchor = pos2(heart.left() - 2.0, rect.center().y);
         let readout_rect = readout.as_ref().map(|r| crate::output::paint_readout(ui, readout_anchor, r, 10.0, false));
         let col_right = readout_rect.map_or(heart.left(), |r| r.left()) - 10.0;
@@ -224,14 +216,13 @@ impl ViewCtx<'_> {
             if resp.hovered() {
                 painter.rect_stroke(area, area.height() / 2.0, egui::Stroke::new(1.0, t.muted.gamma_multiply(0.6)), egui::StrokeKind::Inside);
             }
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
             resp
         });
         let on_readout = readout_resp.as_ref().is_some_and(|r| r.hovered());
         // Always clickable: the heart sits over the display, so while the pointer
         // is on it the display itself doesn't count as hovered.
         let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
-        let heart_resp = super::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
+        let heart_resp = crate::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
         if heart_resp.clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }
@@ -250,9 +241,7 @@ impl ViewCtx<'_> {
         }
         heart_resp.on_hover_text(crate::keys::shown(love_label));
         if let (Some(resp), Some(r)) = (readout_resp, readout) {
-            let path = self.output.signal();
-            super::signal_card::popover(&resp, origin.as_ref(), &item.track, path, self.engine.status.underruns());
-            resp.on_hover_text(super::signal_card::hover(origin.as_ref(), path, &r.detail)).on_hover_cursor(egui::CursorIcon::PointingHand);
+            super::signal_card::pill(resp, &r, origin.as_ref(), &item.track, self.output, self.engine.status.underruns());
         }
     }
 

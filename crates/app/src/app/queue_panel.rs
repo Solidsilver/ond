@@ -7,11 +7,11 @@
 use super::QueueEdit;
 use super::track_row::{TrackRow, col, length};
 use super::view_ctx::ViewCtx;
-use super::widgets::{choice, elide};
 use super::{Action, Focus, QueueTab};
 use crate::icons::{self, Icon};
-use crate::queue::{EndAction, Item, Source, clock_label, end_offset, start_offsets};
+use crate::queue::{EndAction, Group, Item, Source, clock_label, end_offset, start_offsets};
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{choice, elide};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 /// Groups longer than this start folded (except the first).
@@ -28,6 +28,25 @@ const GROUP_NAME_X: f32 = 26.0;
 const GROUP_CHEVRON_FROM_RIGHT: f32 = 12.0;
 const GROUP_COUNT_FROM_RIGHT: f32 = 22.0;
 const GROUP_NAME_CLEAR: f32 = 80.0;
+/// The space after an open group's tracks.
+const GROUP_GAP: f32 = 4.0;
+/// "until 8:05 PM" in from the right, level with the chevrons and durations
+/// below it rather than against the column's edge.
+const UNTIL_INSET: f32 = 8.0;
+
+/// A line of Up Next, as laid out: a group's heading (and whether it's
+/// open), a track (its place in `upcoming`), the gap after a
+/// group, or how many tracks past `MAX_ROWS` aren't shown.
+enum Line<'q> {
+    Group(Group<'q>, bool),
+    Track(usize),
+    Gap,
+    More(usize),
+}
+
+fn more_text(n: usize) -> String {
+    format!("and {n} more")
+}
 
 fn group_icon(s: &Source) -> Icon {
     match s {
@@ -66,8 +85,9 @@ impl ViewCtx<'_> {
             if let Some(until) = &until {
                 // Beside the switch when there's room, else on its own line.
                 let w = ui.painter().layout_no_wrap(until.clone(), FontId::proportional(11.0), t.muted).size().x;
-                if ui.available_width() >= w + 8.0 {
+                if ui.available_width() >= w + 8.0 + UNTIL_INSET {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(UNTIL_INSET);
                         ui.label(egui::RichText::new(until).size(11.0).color(t.muted)).on_hover_text("When the queue runs out");
                     });
                 } else {
@@ -78,7 +98,7 @@ impl ViewCtx<'_> {
         if let Some(until) = until.filter(|_| until_below) {
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                ui.add_space(4.0);
+                ui.add_space(UNTIL_INSET);
                 ui.label(egui::RichText::new(until).size(11.0).color(t.muted)).on_hover_text("When the queue runs out");
             });
         }
@@ -93,12 +113,12 @@ impl ViewCtx<'_> {
 
         let footer_h = 40.0;
         let list_h = (ui.available_height() - footer_h).max(60.0);
-        egui::ScrollArea::vertical().id_salt("queue").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("queue").max_height(list_h).auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = 0.0;
             if history {
-                self.history(ui);
+                self.history(ui, viewport);
             } else {
-                self.up_next(ui, now, remaining);
+                self.up_next(ui, viewport, now, remaining);
             }
         });
         self.queue_keys(ui);
@@ -112,7 +132,7 @@ impl ViewCtx<'_> {
                     EndAction::RepeatQueue => "Repeat queue",
                 };
                 let mut end = self.player.queue.end;
-                let button = super::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text).on_hover_text("What happens when the queue runs out");
+                let button = crate::widgets::menu_label(ui, &format!("Then: {}", label(end)), t.text).on_hover_text("What happens when the queue runs out");
                 egui::Popup::menu(&button).show(|ui| {
                     ui.selectable_value(&mut end, EndAction::Stop, label(EndAction::Stop));
                     ui.selectable_value(&mut end, EndAction::RepeatQueue, label(EndAction::RepeatQueue));
@@ -127,7 +147,7 @@ impl ViewCtx<'_> {
                     };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        if super::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text(hint).clicked() {
+                        if crate::widgets::link(ui, "Clear", FontId::proportional(12.0), t.muted).on_hover_text(hint).clicked() {
                             self.actions.push(Action::Queue(QueueEdit::Clear));
                         }
                     });
@@ -138,100 +158,137 @@ impl ViewCtx<'_> {
         });
     }
 
-    pub(super) fn up_next(&mut self, ui: &mut Ui, now: chrono::NaiveTime, remaining: f64) {
+    /// Up Next, as the lines of `viewport` (the queue's scroll area shows
+    /// it): only the group headings and tracks on screen are laid out.
+    pub(super) fn up_next(&mut self, ui: &mut Ui, viewport: Rect, now: chrono::NaiveTime, remaining: f64) {
         let t = Tokens::of(ui);
         if self.player.queue.upcoming.is_empty() {
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Nothing up next").color(t.muted));
-                ui.label(egui::RichText::new(crate::keys::shown("⌥⏎ play next · ⇧⏎ add to queue")).size(11.0).color(t.muted));
-            });
+            crate::widgets::empty_state(ui, Icon::Queue, "Nothing up next", "⌥⏎ play next · ⇧⏎ add to queue");
             return;
         }
         // Borrowed from the player, not from `self`, so rows can take `&mut self`.
-        let queue = &self.player.queue;
+        let player = self.player;
+        let queue = &player.queue;
         let starts = start_offsets(remaining, &queue.upcoming);
         let split = queue.added_is_split();
+        let lines = self.up_next_lines(queue);
+        let more_h = |n: usize| ui.painter().layout_no_wrap(more_text(n), FontId::proportional(11.0), t.muted).size().y;
+        let heights: Vec<f32> = lines
+            .iter()
+            .map(|line| match line {
+                Line::Group(..) => GROUP_H,
+                Line::Track(_) => ROW_H,
+                Line::Gap => GROUP_GAP,
+                Line::More(n) => more_h(*n),
+            })
+            .collect();
+        super::virtual_list::visible_lines(ui, viewport, &heights, |ui, k| match &lines[k] {
+            // Each line in its own id scope: which lines are laid out changes
+            // as the list scrolls, and a drag or a menu must keep its row.
+            Line::Group(g, open) => {
+                ui.push_id(("queue-group", queue.upcoming[g.start].uid), |ui| self.queue_group(ui, &t, g, *open, split));
+            }
+            Line::Track(i) => {
+                let item = &queue.upcoming[*i];
+                ui.push_id(item.uid, |ui| self.queue_row(ui, &t, item, Some(*i), Some((now, starts[*i]))));
+            }
+            Line::Gap => ui.add_space(GROUP_GAP),
+            Line::More(n) => {
+                ui.label(egui::RichText::new(more_text(*n)).size(11.0).color(t.muted));
+            }
+        });
+    }
+
+    /// Up Next as lines: each group's heading, then its tracks when it's
+    /// open and a gap; after `MAX_ROWS` tracks, how many more there are.
+    fn up_next_lines<'q>(&self, queue: &'q crate::queue::Queue) -> Vec<Line<'q>> {
+        let mut lines = Vec::new();
         let mut drawn = 0;
         for (gi, g) in queue.groups().enumerate() {
-            let source = g.source;
-            let len = g.len;
-            let key = source.key();
-            let foldable = len > FOLD_OVER && gi > 0;
-            let open = *self.ui.queue_ui.open.get(&key).unwrap_or(&!foldable);
-            // Group header: icon + name, and a count with a chevron when it folds.
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), GROUP_H), Sense::click());
-            if ui.is_rect_visible(rect) {
-                if resp.hovered() {
-                    ui.painter().rect_filled(rect, 5.0, t.hover);
-                }
-                icons::paint(
-                    ui.painter(),
-                    Rect::from_center_size(pos2(rect.left() + GROUP_ICON_X, rect.center().y), vec2(10.0, 10.0)),
-                    group_icon(source),
-                    t.muted,
-                );
-                let name = elide(ui, source.label(), FontId::new(11.5, semibold()), t.muted, rect.width() - GROUP_NAME_CLEAR);
-                ui.painter().galley(pos2(rect.left() + GROUP_NAME_X, rect.center().y - name.size().y / 2.0), name, t.muted);
-                let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
-                icons::paint(
-                    ui.painter(),
-                    Rect::from_center_size(pos2(rect.right() - GROUP_CHEVRON_FROM_RIGHT, rect.center().y), vec2(8.0, 8.0)),
-                    chevron,
-                    t.muted,
-                );
-                ui.painter().text(
-                    pos2(rect.right() - GROUP_COUNT_FROM_RIGHT, rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    len.to_string(),
-                    FontId::proportional(11.0),
-                    t.muted,
-                );
-            }
-            resp.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::Role::DisclosureTriangle,
-                    true,
-                    format!("{}, {len} tracks, {}", source.label(), if open { "expanded" } else { "collapsed" }),
-                )
-            });
-            if resp.clicked() {
-                self.ui.queue_ui.open.insert(key, !open);
-            }
-            if split && *source == Source::Added {
-                resp.context_menu(|ui| {
-                    if ui.button("Bring together").on_hover_text("Everything you added, in one group").clicked() {
-                        self.actions.push(Action::Queue(QueueEdit::GatherAdded));
-                    }
-                });
-            }
+            let foldable = g.len > FOLD_OVER && gi > 0;
+            let open = *self.ui.queue_ui.open.get(&g.source.key()).unwrap_or(&!foldable);
+            let range = g.start..g.start + g.len;
+            lines.push(Line::Group(g, open));
             if !open {
                 continue;
             }
-            for (i, start) in starts.iter().enumerate().skip(g.start).take(len) {
+            for i in range {
                 if drawn == MAX_ROWS {
-                    let more = queue.upcoming.len() - i;
-                    ui.label(egui::RichText::new(format!("and {more} more")).size(11.0).color(t.muted));
-                    return;
+                    lines.push(Line::More(queue.upcoming.len() - i));
+                    return lines;
                 }
-                self.queue_row(ui, &t, &queue.upcoming[i], Some(i), Some((now, *start)));
+                lines.push(Line::Track(i));
                 drawn += 1;
             }
-            ui.add_space(4.0);
+            lines.push(Line::Gap);
+        }
+        lines
+    }
+
+    /// A group's heading: icon + name, and a count with a chevron when it
+    /// folds. Click opens or folds it.
+    fn queue_group(&mut self, ui: &mut Ui, t: &Tokens, g: &Group<'_>, open: bool, split: bool) {
+        let (source, len) = (g.source, g.len);
+        let key = source.key();
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), GROUP_H), Sense::click());
+        if ui.is_rect_visible(rect) {
+            if resp.hovered() {
+                ui.painter().rect_filled(rect, 5.0, t.hover);
+            }
+            icons::paint(
+                ui.painter(),
+                Rect::from_center_size(pos2(rect.left() + GROUP_ICON_X, rect.center().y), vec2(10.0, 10.0)),
+                group_icon(source),
+                t.muted,
+            );
+            let name = elide(ui, source.label(), FontId::new(11.5, semibold()), t.muted, rect.width() - GROUP_NAME_CLEAR);
+            ui.painter().galley(pos2(rect.left() + GROUP_NAME_X, rect.center().y - name.size().y / 2.0), name, t.muted);
+            let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
+            icons::paint(
+                ui.painter(),
+                Rect::from_center_size(pos2(rect.right() - GROUP_CHEVRON_FROM_RIGHT, rect.center().y), vec2(8.0, 8.0)),
+                chevron,
+                t.muted,
+            );
+            ui.painter().text(
+                pos2(rect.right() - GROUP_COUNT_FROM_RIGHT, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                len.to_string(),
+                FontId::proportional(11.0),
+                t.muted,
+            );
+        }
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::Role::DisclosureTriangle,
+                true,
+                format!("{}, {len} tracks, {}", source.label(), if open { "expanded" } else { "collapsed" }),
+            )
+        });
+        if resp.clicked() {
+            self.ui.queue_ui.open.insert(key, !open);
+        }
+        if split && *source == Source::Added {
+            resp.context_menu(|ui| {
+                if ui.button("Bring together").on_hover_text("Everything you added, in one group").clicked() {
+                    self.actions.push(Action::Queue(QueueEdit::GatherAdded));
+                }
+            });
         }
     }
 
-    pub(super) fn history(&mut self, ui: &mut Ui) {
+    /// History, newest first, as the lines of `viewport`.
+    pub(super) fn history(&mut self, ui: &mut Ui, viewport: Rect) {
         let t = Tokens::of(ui);
         if self.player.queue.history.is_empty() {
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| ui.label(egui::RichText::new("Nothing played yet").color(t.muted)));
+            crate::widgets::empty_state(ui, Icon::Clock, "Nothing played yet", "");
             return;
         }
-        let history = &self.player.queue.history;
-        for item in history.iter().rev().take(MAX_ROWS) {
-            self.queue_row(ui, &t, item, None, None);
-        }
+        let player = self.player;
+        let shown: Vec<&Item> = player.queue.history.iter().rev().take(MAX_ROWS).collect();
+        super::virtual_list::visible_lines(ui, viewport, &vec![ROW_H; shown.len()], |ui, k| {
+            ui.push_id(shown[k].uid, |ui| self.queue_row(ui, &t, shown[k], None, None));
+        });
     }
 
     /// One queue item, in the list's colors `t`. `index` is its place in
@@ -262,7 +319,7 @@ impl ViewCtx<'_> {
             let x = art.right() + col::INSET;
             let text_w = rect.right() - col::INSET - right_g.size().x - col::RIGHT_GAP - x;
             ui.painter().galley(pos2(rect.right() - col::INSET - right_g.size().x, row.cy() - right_g.size().y / 2.0), right_g, t.muted);
-            let color = super::widgets::track_color(t, false, available);
+            let color = crate::widgets::track_color(t, false, available);
             row.two_lines(
                 ui,
                 x,

@@ -4,9 +4,10 @@
 //! artist, the length, the download mark, what a screen reader hears) are
 //! drawn here, and where they sit is named in [`col`].
 
-use super::widgets::{Mark, elide, row_fill};
+use super::offline_page::Mark;
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{elide, row_fill};
 use egui::{Align2, Color32, FontId, Rect, Response, Sense, Ui, pos2, vec2};
 use library::Track;
 
@@ -85,9 +86,11 @@ impl TrackRow {
         self.rect.center().y
     }
 
-    /// The background: the selection, else the hover tint, else none.
+    /// The background: the selection, else the hover tint, else none; and
+    /// the focus ring when Tab is on the row.
     pub fn fill(&self, ui: &Ui, t: &Tokens, selected: bool, hovered: bool) {
         ui.painter().rect_filled(self.rect, col::RADIUS, row_fill(t, selected, hovered));
+        crate::widgets::focus_ring(ui, &self.resp, self.rect.shrink(2.0), col::RADIUS - 2.0);
     }
 
     /// The playing triangle at `x`; returns where the title starts after it.
@@ -122,7 +125,7 @@ impl TrackRow {
     /// The download mark centred at `x`, when the song has one.
     pub fn mark(&self, ui: &Ui, x: f32, state: Option<&offline::TrackState>) {
         if let Some(m) = Mark::of_track(state) {
-            super::widgets::mark(ui, pos2(x, self.cy()), col::MARK, m);
+            super::offline_page::mark(ui, pos2(x, self.cy()), col::MARK, m);
         }
     }
 

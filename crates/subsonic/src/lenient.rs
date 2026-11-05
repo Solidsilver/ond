@@ -78,6 +78,19 @@ where
     Ok(int(&Value::deserialize(d)?).unwrap_or_default())
 }
 
+/// Optional text from a string, or from a number or a boolean written out.
+/// Anything else is `None`.
+pub(crate) fn opt_text<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => Some(s),
+        v @ (Value::Number(_) | Value::Bool(_)) => Some(v.to_string()),
+        _ => None,
+    })
+}
+
 fn int<T: TryFrom<i128>>(v: &Value) -> Option<T> {
     let from_float = |f: f64| f.is_finite().then(|| f.round() as i128);
     let n = match v {

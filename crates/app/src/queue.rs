@@ -246,6 +246,10 @@ pub struct Group<'a> {
     pub len: usize,
 }
 
+/// Played items kept for the History tab and Previous. A day of listening
+/// stays well under it; looping a playlist for a week doesn't grow without end.
+pub const HISTORY_CAP: usize = 500;
+
 #[derive(Debug, Default)]
 pub struct Queue {
     pub history: Vec<Item>,
@@ -271,6 +275,19 @@ impl Queue {
     fn retire_current(&mut self) {
         if let Some(c) = self.current.take() {
             self.history.push(c);
+            self.trim_history();
+        }
+    }
+
+    /// Drops the oldest history beyond [`HISTORY_CAP`]. With "repeat queue"
+    /// the pass being repeated stays whole however long it is, since
+    /// it's what plays again; only what came before it goes.
+    fn trim_history(&mut self) {
+        let over = self.history.len().saturating_sub(HISTORY_CAP);
+        let drop = if self.end == EndAction::RepeatQueue { over.min(self.cycle_start) } else { over };
+        if drop > 0 {
+            self.history.drain(..drop);
+            self.cycle_start = self.cycle_start.saturating_sub(drop);
         }
     }
 
@@ -278,6 +295,13 @@ impl Queue {
     /// was upcoming is replaced, except items the user added by hand, which
     /// stay before or after the new tracks or go too, as [`OnPlay`] says.
     pub fn play_now(&mut self, tracks: Vec<Track>, start: usize, source: Source) {
+        self.play_now_with(tracks, start, source, self.prefs.on_play);
+    }
+
+    /// [`play_now`](Self::play_now) with the hand-added items kept or cleared
+    /// as `on_play` says, whatever the preference: the answer to
+    /// [`OnPlay::Ask`] is a choice for this once, not a new setting.
+    pub fn play_now_with(&mut self, tracks: Vec<Track>, start: usize, source: Source, on_play: OnPlay) {
         if start >= tracks.len() {
             return;
         }
@@ -287,7 +311,7 @@ impl Queue {
         let rest = items.split_off(start + 1);
         self.current = items.pop();
         self.upcoming.retain(|i| i.source == Source::Added);
-        match self.prefs.on_play {
+        match on_play {
             OnPlay::KeepAfter | OnPlay::Ask => drop(self.upcoming.splice(0..0, rest)),
             OnPlay::KeepBefore => self.upcoming.extend(rest),
             OnPlay::Clear => self.upcoming = rest,
@@ -400,15 +424,14 @@ impl Queue {
     /// Returns the new current item; `None` means playback should stop.
     pub fn advance(&mut self) -> Option<&Item> {
         if self.upcoming.is_empty() && self.end == EndAction::RepeatQueue {
-            let mut pass: Vec<Track> = self.history[self.cycle_start.min(self.history.len())..].iter().map(|i| i.track.clone()).collect();
-            if let Some(c) = &self.current {
-                pass.push(c.track.clone());
-            }
-            let sources: Vec<Source> =
-                self.history[self.cycle_start.min(self.history.len())..].iter().chain(self.current.as_ref()).map(|i| i.source.clone()).collect();
+            let pass: Vec<(Track, Source)> = self.history[self.cycle_start.min(self.history.len())..]
+                .iter()
+                .chain(self.current.as_ref())
+                .map(|i| (i.track.clone(), i.source.clone()))
+                .collect();
             self.retire_current();
             self.cycle_start = self.history.len();
-            let items: Vec<Item> = pass.into_iter().zip(sources).map(|(t, s)| self.item(t, s)).collect();
+            let items: Vec<Item> = pass.into_iter().map(|(t, s)| self.item(t, s)).collect();
             self.upcoming = items;
         } else {
             self.retire_current();
@@ -438,6 +461,7 @@ impl Queue {
         self.retire_current();
         let skipped: Vec<Item> = self.upcoming.drain(..at).collect();
         self.history.extend(skipped);
+        self.trim_history();
         self.current = Some(self.upcoming.remove(0));
         true
     }
@@ -495,31 +519,7 @@ mod tests {
     use super::*;
 
     fn t(id: &str, secs: u32) -> Track {
-        Track {
-            id: id.into(),
-            album_id: "al".into(),
-            title: id.into(),
-            artist: None,
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: Some(secs),
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        }
+        Track { duration_secs: Some(secs), ..crate::test_tracks::track(id, "al", id) }
     }
 
     fn album(ids: &[&str]) -> Vec<Track> {
@@ -658,6 +658,8 @@ mod tests {
         let uid = |q: &Queue, id: &str| q.upcoming.iter().find(|i| i.track.id == id).unwrap().uid;
         assert!(q.remove(uid(&q, "a3")));
         assert!(!q.remove(9999));
+        assert!(!q.move_to(9999, 0), "an unknown item moves nowhere");
+        assert!(!q.move_by(9999, 1));
         assert_eq!(ids(&q.upcoming), ["a2", "a4", "a5"]);
         assert!(q.move_to(uid(&q, "a5"), 0));
         assert_eq!(ids(&q.upcoming), ["a5", "a2", "a4"]);
@@ -704,6 +706,50 @@ mod tests {
     }
 
     #[test]
+    fn history_keeps_only_the_latest_plays() {
+        let names: Vec<String> = (0..HISTORY_CAP + 50).map(|i| format!("t{i}")).collect();
+        let mut q = Queue::default();
+        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        while q.advance().is_some() {}
+        assert_eq!(q.history.len(), HISTORY_CAP);
+        assert_eq!(q.history[0].track.id, format!("t{}", 50), "the oldest went");
+        assert_eq!(q.history.last().map(|i| i.track.id.as_str()), names.last().map(String::as_str));
+    }
+
+    #[test]
+    fn repeating_a_queue_for_days_keeps_history_capped() {
+        let mut q = Queue::default();
+        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.end = EndAction::RepeatQueue;
+        for _ in 0..HISTORY_CAP * 3 {
+            q.advance();
+        }
+        assert!(q.history.len() <= HISTORY_CAP, "{}", q.history.len());
+        // Still the same pass, in order.
+        assert_eq!(q.pass_len(), 3);
+        let at = cur(&q).unwrap().to_owned();
+        q.advance();
+        q.advance();
+        q.advance();
+        assert_eq!(cur(&q), Some(at.as_str()));
+    }
+
+    #[test]
+    fn a_repeated_pass_longer_than_the_cap_stays_whole() {
+        let names: Vec<String> = (0..HISTORY_CAP + 20).map(|i| format!("t{i}")).collect();
+        let mut q = Queue::default();
+        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        q.end = EndAction::RepeatQueue;
+        for _ in 0..names.len() - 1 {
+            q.advance();
+        }
+        assert_eq!(cur(&q), names.last().map(String::as_str));
+        assert_eq!(q.pass_len(), names.len(), "every track is still in the pass");
+        // Around again from the first.
+        assert_eq!(q.advance().map(|i| i.track.id.clone()), Some("t0".into()));
+    }
+
+    #[test]
     fn back_jump_and_replay() {
         let mut q = Queue::default();
         q.play_now(album(&["a1", "a2", "a3", "a4"]), 0, src("A"));
@@ -722,6 +768,55 @@ mod tests {
         assert_eq!(ids(&q.history), ["a1", "a2", "a3"]);
         // Nothing to go back to on a fresh queue.
         assert!(Queue::default().back().is_none());
+    }
+
+    #[test]
+    fn play_now_with_a_choice_overrides_the_preference_once() {
+        let mut q = Queue::default();
+        q.prefs.on_play = OnPlay::Ask;
+        q.play_now(album(&["a1", "a2"]), 0, src("A"));
+        q.add(album(&["z1"]));
+        q.play_now_with(album(&["b1", "b2"]), 0, src("B"), OnPlay::Clear);
+        assert_eq!(ids(&q.upcoming), ["b2"], "what was added went");
+        assert_eq!(q.prefs.on_play, OnPlay::Ask, "the preference is untouched");
+        q.add(album(&["z2"]));
+        q.play_now_with(album(&["c1", "c2"]), 0, src("C"), OnPlay::KeepBefore);
+        assert_eq!(ids(&q.upcoming), ["z2", "c2"]);
+    }
+
+    #[test]
+    fn going_back_past_a_play_now_brings_that_track_into_the_repeated_pass() {
+        let mut q = Queue::default();
+        q.play_now(album(&["old"]), 0, src("O"));
+        q.play_now(album(&["a1", "a2"]), 0, src("A"));
+        q.end = EndAction::RepeatQueue;
+        assert_eq!(q.back().map(|i| i.track.id.clone()), Some("old".into()));
+        assert_eq!(ids(&q.upcoming), ["a1", "a2"]);
+        assert_eq!(q.pass_len(), 3);
+        q.advance();
+        q.advance();
+        assert_eq!(cur(&q), Some("a2"));
+        assert_eq!(q.advance().map(|i| i.track.id.clone()), Some("old".into()), "the pass starts where it was gone back to");
+        assert_eq!(ids(&q.upcoming), ["a1", "a2"]);
+    }
+
+    #[test]
+    fn jumping_ahead_under_repeat_trims_only_what_came_before_the_pass() {
+        let olds: Vec<String> = (0..30).map(|i| format!("o{i}")).collect();
+        let names: Vec<String> = (0..HISTORY_CAP).map(|i| format!("t{i}")).collect();
+        let mut q = Queue::default();
+        q.play_now(album(&olds.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("O"));
+        while !q.upcoming.is_empty() {
+            q.advance();
+        }
+        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        q.end = EndAction::RepeatQueue;
+        let last = q.upcoming.last().unwrap().uid;
+        assert!(q.jump_to(last));
+        assert_eq!(q.history.len(), HISTORY_CAP);
+        assert_eq!(q.history[0].track.id, "o29", "the tracks from before went first");
+        assert_eq!(q.pass_len(), HISTORY_CAP, "the pass is whole");
+        assert_eq!(q.advance().map(|i| i.track.id.clone()), Some("t0".into()));
     }
 
     #[test]

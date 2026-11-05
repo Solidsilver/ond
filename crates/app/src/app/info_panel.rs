@@ -6,11 +6,11 @@
 use super::AnalysisAction;
 use super::album_page::{Credit, credits};
 use super::view_ctx::ViewCtx;
-use super::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use super::{Action, SongStats};
 use crate::icons::Icon;
 use crate::nav::{FilterKind, Route};
 use crate::theme::{Tokens, semibold};
+use crate::widgets::{KV_VALUE as VALUE, chip, elide, kv_row, kv_section, kv_text, link, link_line};
 use egui::{FontId, Sense, Ui, vec2};
 use library::Track;
 
@@ -52,19 +52,7 @@ impl ViewCtx<'_> {
         // take `&mut self`.
         let (player, data, analysis) = (self.player, self.data, self.analysis);
         let Some(track) = player.queue.current.as_ref().map(|c| &c.track) else {
-            // Wrapped to the column: a long line must not widen the sidebar.
-            let t = Tokens::of(ui);
-            let width = ui.available_width();
-            ui.add_space(40.0);
-            ui.vertical_centered(|ui| {
-                ui.set_max_width(width);
-                let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-                crate::icons::paint(ui.painter(), r, Icon::Note, t.muted);
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("Nothing playing").font(FontId::new(14.0, semibold())).color(t.text));
-                ui.add_space(4.0);
-                ui.add(egui::Label::new(egui::RichText::new("Play a song to see its credits, file details and analysis.").size(12.0).color(t.muted)).wrap());
-            });
+            crate::widgets::empty_state(ui, Icon::Note, "Nothing playing", "Play a song to see its credits, file details and analysis.");
             return;
         };
         if !self.song_stats.contains_key(&track.id) {
@@ -138,7 +126,7 @@ impl ViewCtx<'_> {
                     kv_text(ui, k, v);
                 }
                 if let Some(p) = &playback {
-                    kv_text(ui, "Playback", p);
+                    kv_text(ui, "Playback", &wrap_at_dots(p));
                 }
             }
 
@@ -313,36 +301,27 @@ fn play_rows(stats: Option<&SongStats>, rating: u8) -> Vec<(&'static str, String
     rows
 }
 
+/// `24/96 → 16/48 · resampled, dithered · device limit` with its spaces
+/// made non-breaking except the one after each dot, so a narrow column
+/// wraps between the parts and no line starts with "·" or splits "device limit".
+fn wrap_at_dots(summary: &str) -> String {
+    summary.split(" · ").map(|part| part.replace(' ', "\u{a0}")).collect::<Vec<_>>().join("\u{a0}· ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_playback_line_wraps_only_after_a_dot() {
+        let wrapped = wrap_at_dots("24/96 → 16/48 · resampled, dithered · device limit");
+        assert_eq!(wrapped, "24/96\u{a0}→\u{a0}16/48\u{a0}· resampled,\u{a0}dithered\u{a0}· device\u{a0}limit");
+        let lines: Vec<&str> = wrapped.split(' ').collect();
+        assert!(lines.iter().skip(1).all(|l| !l.starts_with('·')), "{lines:?}");
+    }
+
     fn track() -> Track {
-        Track {
-            id: "t".into(),
-            album_id: "a".into(),
-            title: "x".into(),
-            artist: None,
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: None,
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        }
+        crate::test_tracks::track("t", "a", "x")
     }
 
     #[test]

@@ -6,6 +6,7 @@
 use crate::managed::Managed;
 use crate::settings::Settings;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -35,6 +36,12 @@ struct Shared {
     wake: Condvar,
     path: PathBuf,
     overlay: Overlay,
+    /// Why the last write failed, until the app has said so (once a run).
+    write_error: Mutex<Option<String>>,
+    /// A failure has been handed to the app; later ones are only logged.
+    write_error_told: AtomicBool,
+    /// How long the writer waits for a burst of changes to end.
+    debounce: Duration,
 }
 
 /// The managed settings (see [`crate::managed`]) and what they lie over.
@@ -65,13 +72,21 @@ struct Handle {
 
 impl Prefs {
     /// Reads the settings file at `path`, with the managed settings beside it
-    /// (see [`crate::managed`]) over it. An unreadable file is moved aside
-    /// (never silently overwritten) and the defaults used instead.
+    /// (see [`crate::managed`]) over it. A value this build doesn't know costs
+    /// only that setting (see [`Settings::from_json`]). A file that isn't JSON
+    /// at all is moved aside, never silently overwritten, and the defaults
+    /// used instead.
     pub fn open(path: impl Into<PathBuf>) -> (Self, Loaded) {
+        Self::open_debounced(path, DEBOUNCE)
+    }
+
+    /// [`open`](Self::open) with the wait for a burst of changes to end set by
+    /// the caller, so a test needn't race the real one against the clock.
+    fn open_debounced(path: impl Into<PathBuf>, debounce: Duration) -> (Self, Loaded) {
         let path = path.into();
         let (settings, loaded) = match std::fs::read(&path) {
             Err(_) => (Settings::default(), Loaded::Missing),
-            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+            Ok(bytes) => match Settings::from_json(&bytes) {
                 Ok(mut s) => {
                     s.migrate();
                     (s, Loaded::Read)
@@ -94,7 +109,7 @@ impl Prefs {
         }
         managed.apply(&mut settings);
         let offline_was = adopted.iter().find(|(key, _)| key == "offline_dir").map(|(_, old)| serde_json::from_value(old.clone()).ok().flatten());
-        let prefs = Self::with(settings, path, Overlay { managed, users, offline_was });
+        let prefs = Self::with(settings, path, Overlay { managed, users, offline_was }, debounce);
         if !adopted.is_empty() {
             // Saved with what was adopted.
             prefs.lock().revision += 1;
@@ -103,8 +118,16 @@ impl Prefs {
         (prefs, loaded)
     }
 
-    fn with(settings: Settings, path: PathBuf, overlay: Overlay) -> Self {
-        let shared = Arc::new(Shared { state: Mutex::new(State { settings, revision: 0, written: 0, closing: false }), wake: Condvar::new(), path, overlay });
+    fn with(settings: Settings, path: PathBuf, overlay: Overlay, debounce: Duration) -> Self {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State { settings, revision: 0, written: 0, closing: false }),
+            wake: Condvar::new(),
+            path,
+            overlay,
+            write_error: Mutex::new(None),
+            write_error_told: AtomicBool::new(false),
+            debounce,
+        });
         let writer_shared = shared.clone();
         let writer = std::thread::Builder::new().name("settings-writer".into()).spawn(move || writer_loop(&writer_shared)).ok();
         Self { handle: Arc::new(Handle { shared, writer: Mutex::new(writer) }) }
@@ -167,6 +190,19 @@ impl Prefs {
         self.handle.shared.overlay.offline_was.clone()
     }
 
+    /// Why saving the settings failed, the first time it does in a run (the
+    /// app polls this each frame and says so once; later failures are only
+    /// logged). An uncontended lock per frame until then; a flag after.
+    pub fn take_write_error(&self) -> Option<String> {
+        let shared = &self.handle.shared;
+        if shared.write_error_told.load(Ordering::Acquire) {
+            return None;
+        }
+        let e = shared.write_error.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        shared.write_error_told.store(true, Ordering::Release);
+        Some(e)
+    }
+
     /// Writes now if anything changed (quitting, tests).
     pub fn flush(&self) {
         flush(&self.handle.shared);
@@ -198,7 +234,7 @@ fn writer_loop(shared: &Shared) {
         }
         // Let a burst of changes settle: each new change restarts the wait.
         let seen = state.revision;
-        let (next, timeout) = shared.wake.wait_timeout(state, DEBOUNCE).unwrap_or_else(|e| e.into_inner());
+        let (next, timeout) = shared.wake.wait_timeout(state, shared.debounce).unwrap_or_else(|e| e.into_inner());
         state = next;
         if state.closing || !timeout.timed_out() || state.revision != seen {
             continue;
@@ -223,23 +259,23 @@ fn flush(shared: &Shared) {
         state.written = state.revision;
         state.settings.clone()
     };
-    write(&shared.path, &snapshot, &shared.overlay);
+    if let Err(e) = write(&shared.path, &snapshot, &shared.overlay) {
+        tracing::warn!("saving settings: {e}");
+        if !shared.write_error_told.load(Ordering::Acquire) {
+            *shared.write_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+        }
+    }
 }
 
 /// Writes `settings`, with the user's own values where managed ones lie over them.
-fn write(path: &Path, settings: &Settings, overlay: &Overlay) {
-    let result = (|| -> anyhow::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let mut v = serde_json::to_value(settings)?;
-        overlay.managed.restore(&mut v, &overlay.users);
-        replace_file(path, &path.with_extension("json.tmp"), &serde_json::to_vec_pretty(&v)?)?;
-        Ok(())
-    })();
-    if let Err(e) = result {
-        tracing::warn!("saving settings: {e}");
+fn write(path: &Path, settings: &Settings, overlay: &Overlay) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
     }
+    let mut v = serde_json::to_value(settings)?;
+    overlay.managed.restore(&mut v, &overlay.users);
+    replace_file(path, &path.with_extension("json.tmp"), &serde_json::to_vec_pretty(&v)?)?;
+    Ok(())
 }
 
 /// Replaces `path` with `bytes` through `tmp`, renamed over it, so a reader
@@ -341,6 +377,60 @@ mod tests {
     }
 
     #[test]
+    fn a_value_this_build_does_not_know_costs_only_that_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A format and a theme from a newer build (as Opus was to 0.4.2).
+        std::fs::write(
+            &path,
+            r#"{
+  "server": "https://music.example.com",
+  "username": "me",
+  "theme": "sepia",
+  "show_queue": false,
+  "volume": 0.3,
+  "device_modes": { "uid-umc22": "bit-perfect" },
+  "playback": { "replay_gain": "album", "format": "flac-hd", "kbps": 192 }
+}"#,
+        )
+        .unwrap();
+        let (prefs, loaded) = Prefs::open(&path);
+        assert_eq!(loaded, Loaded::Read, "read, not set aside");
+        let s = prefs.snapshot();
+        assert_eq!((s.server.as_str(), s.username.as_str()), ("https://music.example.com", "me"), "still signed in");
+        assert_eq!(s.theme, ThemePref::default());
+        assert_eq!(s.playback.format, crate::playback::TranscodeFormat::default());
+        assert_eq!(s.playback.replay_gain, crate::playback::RgMode::Album);
+        assert_eq!(s.playback.kbps, 192);
+        assert!(!s.show_queue);
+        assert_eq!(s.volume, 0.3);
+        assert_eq!(s.device_modes.get("uid-umc22"), Some(&DeviceMode::BitPerfect));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing set aside");
+    }
+
+    #[test]
+    fn a_failed_save_is_told_once() {
+        let dir = tempfile::tempdir().unwrap();
+        // The settings folder can't be made: a file is in the way.
+        std::fs::write(dir.path().join("Ond"), b"").unwrap();
+        let (prefs, _) = Prefs::open(dir.path().join("Ond").join("settings.json"));
+        assert_eq!(prefs.take_write_error(), None);
+        prefs.edit(|s| s.volume = 0.5);
+        prefs.flush();
+        assert!(prefs.take_write_error().is_some());
+        assert_eq!(prefs.take_write_error(), None, "told already");
+        prefs.edit(|s| s.volume = 0.6);
+        prefs.flush();
+        assert_eq!(prefs.take_write_error(), None, "later failures are only logged");
+    }
+
+    #[test]
+    fn a_file_without_a_login_reads_as_signed_out() {
+        let s = Settings::from_json(br#"{ "theme": "dark" }"#).unwrap();
+        assert_eq!((s.server.as_str(), s.theme), ("", ThemePref::Dark));
+    }
+
+    #[test]
     fn replacing_a_file_leaves_the_new_contents_and_no_temporary() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -370,16 +460,31 @@ mod tests {
 
     #[test]
     fn a_burst_of_changes_is_one_write() {
+        // An hour's wait can't end mid-burst however the scheduler stalls; the
+        // last value reaches the file only when the handle goes away.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let (prefs, _) = Prefs::open(&path);
+        let (prefs, _) = Prefs::open_debounced(&path, Duration::from_secs(3600));
         for i in 0..50 {
             prefs.edit(|s| s.volume = i as f32 / 50.0);
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(!path.exists(), "nothing written while changes keep coming");
-        std::thread::sleep(DEBOUNCE * 3);
-        assert_eq!(read(&path).volume, 49.0 / 50.0, "the last value, once things settle");
+        drop(prefs);
+        assert_eq!(read(&path).volume, 49.0 / 50.0, "the last value, once the burst is over");
+    }
+
+    #[test]
+    fn a_change_is_written_once_the_wait_is_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let (prefs, _) = Prefs::open_debounced(&path, Duration::from_millis(10));
+        prefs.edit(|s| s.volume = 0.25);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(read(&path).volume, 0.25, "the writer thread saved it without a flush");
     }
 
     #[test]

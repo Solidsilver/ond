@@ -23,6 +23,8 @@ struct Opts {
     star_total: bool,
     /// No `Content-Length`: the body ends when the connection closes.
     no_length: bool,
+    /// Claimed in `Content-Length` beyond the bytes actually sent.
+    short_by: u64,
 }
 
 impl Server {
@@ -72,7 +74,7 @@ fn serve(conn: TcpStream, data: &[u8], opts: Opts, log: &Mutex<Vec<Option<u64>>>
         _ => ("200 OK".to_owned(), 0),
     };
     let body = &data[start as usize..];
-    let length = if opts.no_length { String::new() } else { format!("Content-Length: {}\r\n", body.len()) };
+    let length = if opts.no_length { String::new() } else { format!("Content-Length: {}\r\n", body.len() as u64 + opts.short_by) };
     let head = format!("HTTP/1.1 {status}\r\n{length}Accept-Ranges: bytes\r\nConnection: close\r\n\r\n");
     if out.write_all(head.as_bytes()).is_err() {
         return;
@@ -112,7 +114,7 @@ fn read_at(src: &mut CachedSource, pos: u64, n: usize) -> Vec<u8> {
     buf
 }
 
-const FAST: Opts = Opts { ranges: true, chunk: 16 * 1024, delay: Duration::ZERO, declared_extra: 0, star_total: false, no_length: false };
+const FAST: Opts = Opts { ranges: true, chunk: 16 * 1024, delay: Duration::ZERO, declared_extra: 0, star_total: false, no_length: false, short_by: 0 };
 
 /// Reads `src` from `from` to the end on another thread, failing the test
 /// instead of hanging if that takes longer than `timeout`. Hands the source back.
@@ -331,6 +333,32 @@ fn a_subsonic_error_reply_is_not_cached_as_audio() {
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     assert!(!dir.path().join("old.flac").exists());
 
+    let url = fixed_reply("application/json", br#"{"subsonic-response":{"status":"failed","error":{"code":40}}}"#);
+    let key = CacheKey::new("bad", Some("flac".into()));
+    // The open waits for the headers or a failure, so it ends in the error.
+    let err = cache.open(&key, &url, never()).err().expect("an error reply opened as audio");
+    assert!(!err.to_string().is_empty());
+    assert!(!dir.path().join("bad.flac").exists());
+    assert!(!cache.progress(&key).is_some_and(|p| p.complete));
+}
+
+/// A reverse proxy's login page, answered 200 on the stream URL, is no track.
+#[test]
+fn a_html_page_answering_200_is_not_cached_as_audio() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let url = fixed_reply("text/html; charset=utf-8", b"<!DOCTYPE html><html><head><title>Sign in</title></head><body>SSO</body></html>");
+    let key = CacheKey::new("sso", Some("flac".into()));
+    let err = cache.open(&key, &url, never()).err().expect("a page opened as audio");
+    assert!(err.to_string().contains("Sign in"), "{err}");
+    assert!(!dir.path().join("sso.flac").exists());
+    assert!(cache.complete_path(&key).is_none());
+    assert_eq!(cache.size(), 0);
+}
+
+/// A server that answers every request with one fixed 200 body.
+fn fixed_reply(content_type: &'static str, body: &'static [u8]) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rest/stream?id=x", listener.local_addr().unwrap());
     thread::spawn(move || {
@@ -341,21 +369,57 @@ fn a_subsonic_error_reply_is_not_cached_as_audio() {
             while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
                 line.clear();
             }
-            let body: &[u8] = br#"{"subsonic-response":{"status":"failed","error":{"code":40}}}"#;
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
             let _ = conn.write_all(head.as_bytes());
             let _ = conn.write_all(body);
         }
     });
-    let key = CacheKey::new("bad", Some("flac".into()));
-    // Either the open or the first read reports the failure; neither yields audio.
-    if let Ok(mut src) = cache.open(&key, &url, never()) {
-        let mut out = Vec::new();
-        assert!(src.read_to_end(&mut out).is_err(), "read {} bytes of an error reply as audio", out.len());
+    url
+}
+
+#[test]
+fn starting_over_the_cap_evicts_the_least_recently_used_files() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let base = SystemTime::now() - Duration::from_secs(1_000);
+    for (i, name) in ["old", "mid", "new"].into_iter().enumerate() {
+        let path = dir.path().join(name);
+        std::fs::write(&path, vec![7u8; 100]).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(base + Duration::from_secs(100 * i as u64)).unwrap();
     }
-    thread::sleep(Duration::from_millis(100));
-    assert!(!dir.path().join("bad.flac").exists());
-    assert!(!cache.progress(&key).is_some_and(|p| p.complete));
+    let cfg = CacheConfig { max_bytes: 250, ..CacheConfig::new(dir.path()) };
+    let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
+    assert_eq!(cache.size(), 200);
+    assert!(cache.complete_path(&CacheKey::new("old", None)).is_none());
+    assert!(cache.complete_path(&CacheKey::new("mid", None)).is_some());
+    assert!(cache.complete_path(&CacheKey::new("new", None)).is_some());
+    assert!(!dir.path().join("old").exists(), "the evicted file is deleted before new() returns");
+}
+
+#[test]
+fn a_cached_file_deleted_behind_our_back_is_downloaded_again() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let body = data(5_000);
+    let server = Server::start(body.clone(), FAST);
+    let key = CacheKey::new("gone", Some("flac".into()));
+    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    src.read_to_end(&mut Vec::new()).unwrap();
+    wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    drop(src);
+    assert_eq!(server.requests().len(), 1);
+
+    std::fs::remove_file(dir.path().join("gone.flac")).unwrap();
+    let mut again = cache.open(&key, &server.url, never()).unwrap();
+    let mut out = Vec::new();
+    again.read_to_end(&mut out).unwrap();
+    assert_eq!(out, body);
+    assert_eq!(server.requests().len(), 2, "it went back to the server");
+    wait_until("the second completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    assert_eq!(cache.size(), 5_000, "the stale entry's bytes aren't counted twice");
+    assert_eq!(std::fs::read(dir.path().join("gone.flac")).unwrap(), body);
 }
 
 /// A connection that goes quiet mid-body (half-open TCP, a stuck proxy) must
@@ -723,6 +787,58 @@ fn a_late_eviction_spares_a_file_downloaded_again() {
     cache.inner.remove(vec![key.file_name()]);
     assert!(!dir.path().join("again").exists());
     wait_until("background deletion", slack(Duration::from_secs(5)), || std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn a_200_with_a_content_length_longer_than_the_body_ends_in_an_error_not_a_loop() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let body = data(100_000);
+    let server = Server::start(body.clone(), Opts { ranges: false, short_by: 50_000, ..FAST });
+    let key = CacheKey::new("short", Some("mp3".into()));
+
+    let src = cache.open(&key, &server.url, never()).unwrap();
+    assert_eq!(src.byte_len(), Some(150_000));
+    // A reader at the missing tail gets an error once the tries run out
+    // (backoffs of 0.25 + 0.5 + 1 + 2 s), instead of waiting forever.
+    let (r, _src) = read_to_end_within(src, 120_000, slack(Duration::from_secs(10)));
+    assert!(r.is_err(), "read past the real end should fail");
+    assert_eq!(server.requests().len(), 5, "one request plus four retries: {:?}", server.requests());
+    wait_until("the download to end", slack(Duration::from_secs(2)), || active(&cache, &key).is_none());
+    assert!(!cache.is_complete(CacheKeyRef::Original { id: "short", suffix: Some("mp3") }));
+}
+
+#[test]
+fn a_borrowed_key_names_the_same_file_as_an_owned_one() {
+    let cases = [
+        (CacheKey::original("al-1_b", Some("FLAC".into())), CacheKeyRef::Original { id: "al-1_b", suffix: Some("FLAC") }),
+        (CacheKey::original("a/b c.d", None), CacheKeyRef::Original { id: "a/b c.d", suffix: None }),
+        (CacheKey::original("é", Some("m.p-3x".into())), CacheKeyRef::Original { id: "é", suffix: Some("m.p-3x") }),
+        (CacheKey::original("x", Some("..".into())), CacheKeyRef::Original { id: "x", suffix: Some("..") }),
+        (CacheKey::transcode("t1", "opus", 128), CacheKeyRef::Transcode { id: "t1", format: "opus", kbps: 128 }),
+        (CacheKey::transcode("t?", "mp3", 0), CacheKeyRef::Transcode { id: "t?", format: "mp3", kbps: 0 }),
+        (CacheKey::transcode("t", "aac", u32::MAX), CacheKeyRef::Transcode { id: "t", format: "aac", kbps: u32::MAX }),
+    ];
+    for (owned, borrowed) in cases {
+        assert_eq!(NameBuf::of(borrowed).as_str(), Some(owned.file_name().as_str()), "{borrowed:?}");
+    }
+    // Too long to be a file name, so it can't be cached.
+    let long = "x".repeat(300);
+    assert_eq!(NameBuf::of(CacheKeyRef::Original { id: &long, suffix: None }).as_str(), None);
+}
+
+#[test]
+fn is_complete_matches_the_index() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a%2Fb.flac"), data(1000)).unwrap();
+    std::fs::write(dir.path().join("t1%7Eopus128.opus"), data(1000)).unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    assert!(cache.is_complete(CacheKeyRef::Original { id: "a/b", suffix: Some("flac") }));
+    assert!(!cache.is_complete(CacheKeyRef::Original { id: "a/b", suffix: Some("mp3") }));
+    assert!(cache.is_complete(CacheKeyRef::Transcode { id: "t1", format: "opus", kbps: 128 }));
+    assert!(!cache.is_complete(CacheKeyRef::Transcode { id: "t1", format: "opus", kbps: 96 }));
 }
 
 /// Time budgets in these tests are tight on purpose (they guard real

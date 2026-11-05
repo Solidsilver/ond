@@ -165,7 +165,7 @@ type Scored = (Rank, u32, i64, usize);
 impl SearchIndex {
     /// `artists` are the server's artist entities; when there are none yet
     /// (older server, not synced), artists are derived from album artists.
-    pub fn new(albums: &[Album], artists: &[Artist], tracks: &[Track]) -> Self {
+    pub fn new<'a>(albums: &[Album], artists: &[Artist], tracks: impl IntoIterator<Item = &'a Track>) -> Self {
         // Each artist's span of years and their albums' genres, by id and by
         // name: the albums an artist's page shows (see `Album::has_artist`).
         let mut years: HashMap<&str, (i32, i32)> = HashMap::new();
@@ -225,7 +225,7 @@ impl SearchIndex {
         let albums: Vec<AlbumEntry> =
             albums.iter().map(|a| AlbumEntry { id: a.id.clone(), title: a.name.clone(), artist: a.artist.clone().unwrap_or_default(), year: a.year }).collect();
         let tracks: Vec<TrackEntry> = tracks
-            .iter()
+            .into_iter()
             .map(|t| TrackEntry {
                 id: t.id.clone(),
                 album_id: t.album_id.clone(),
@@ -331,31 +331,7 @@ mod tests {
     }
 
     fn track(id: &str, album_id: &str, title: &str, artist: &str) -> Track {
-        Track {
-            id: id.into(),
-            album_id: album_id.into(),
-            title: title.into(),
-            artist: Some(artist.into()),
-            artist_ref: None,
-            track: None,
-            disc: None,
-            duration_secs: None,
-            suffix: None,
-            content_type: None,
-            size: None,
-            bit_rate_kbps: None,
-            bit_depth: None,
-            sample_rate: None,
-            channels: None,
-            track_gain: None,
-            album_gain: None,
-            track_peak: None,
-            album_peak: None,
-            composer: None,
-            contributors: Vec::new(),
-            cover_art: None,
-            artists: Vec::new(),
-        }
+        Track { artist: Some(artist.into()), ..crate::test_tracks::track(id, album_id, title) }
     }
 
     fn index() -> SearchIndex {

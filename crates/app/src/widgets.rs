@@ -1,10 +1,11 @@
 //! Small shared pieces: elided text, quiet links, the accent button, a
-//! segmented control, a thin slider, a switch and a menu label.
+//! segmented control, a thin slider, a switch and a menu label, and the rows
+//! Settings is built from (a [`group`] of [`setting`]s).
 
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align2, Color32, FontId, Galley, Rect, Response, Sense, Ui, vec2};
+use egui::{Color32, FontId, Galley, Rect, Response, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
 
 /// One line of text cut to `width` with an ellipsis. The one way the app
@@ -12,6 +13,27 @@ use std::sync::Arc;
 /// caption (through [`elide_job`]) and [`link_line`].
 pub fn elide(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
     ui.painter().layout_job(elide_job(text, font, color, width))
+}
+
+/// `text` cut in the middle to fit `width`, keeping its start and (more of) its
+/// end. For paths, whose last components are the part that tells them apart.
+pub fn elide_middle(ui: &Ui, text: &str, font: &FontId, width: f32) -> String {
+    let fits = |s: &str| ui.painter().layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x <= width;
+    if fits(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let cut = |keep: usize| {
+        let head = keep / 3;
+        let tail = keep - head;
+        format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
+    };
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
 }
 
 /// The layout [`elide`] lays out, for a painter without a `Ui`.
@@ -33,18 +55,19 @@ pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
     // across the whole row) instead of widening its column.
     let cap = if ui.layout().main_wrap { ui.max_rect().width() } else { ui.available_width() };
     let wrap = TextWrapping { max_width: cap.max(24.0), ..Default::default() };
-    link_with(ui, text, font, color, wrap)
+    link_with(ui, text, font, color, wrap).0
 }
 
 /// A link kept to one line of at most `width`, cut with an ellipsis; the whole
 /// text shows on hover when it was cut.
 pub fn link_line(ui: &mut Ui, text: &str, font: FontId, color: Color32, width: f32) -> Response {
-    let resp = link_with(ui, text, font.clone(), color, elide_wrap(width));
-    let whole = ui.painter().layout_no_wrap(text.to_owned(), font, color).size().x;
-    if whole > resp.rect.width() + 0.5 { resp.on_hover_text(text) } else { resp }
+    let (resp, cut) = link_with(ui, text, font, color, elide_wrap(width));
+    if cut { resp.on_hover_text(text) } else { resp }
 }
 
-fn link_with(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: TextWrapping) -> Response {
+/// The link, and whether its text was cut to fit (the layout says so, so the
+/// whole text needn't be laid out again to find out).
+fn link_with(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: TextWrapping) -> (Response, bool) {
     let job = |underline: bool| {
         let mut job = LayoutJob::single_section(
             text.to_owned(),
@@ -59,6 +82,7 @@ fn link_with(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: TextWr
         job
     };
     let galley = ui.painter().layout_job(job(false));
+    let cut = galley.elided;
     let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
     if ui.is_rect_visible(rect) {
         let galley = if resp.hovered() { ui.painter().layout_job(job(true)) } else { galley };
@@ -66,7 +90,7 @@ fn link_with(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: TextWr
     }
     let label = text.to_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, &label));
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), cut)
 }
 
 /// How a filled button looks: text colour, fill at rest and on hover, and the
@@ -78,6 +102,16 @@ struct Fill {
     pad: f32,
 }
 
+/// An accent ring just outside `rect` while `resp` has keyboard focus, for
+/// the controls that paint themselves. A click never focuses them, so the
+/// ring shows only when Tab got there.
+pub fn focus_ring(ui: &Ui, resp: &Response, rect: Rect, radius: f32) {
+    if resp.has_focus() {
+        let ring = egui::Stroke::new(1.5, Tokens::of(ui).accent);
+        ui.painter().rect_stroke(rect.expand(2.0), radius + 2.0, ring, egui::StrokeKind::Inside);
+    }
+}
+
 /// The body every filled button shares: an optional icon, then the label.
 fn filled(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str, f: Fill) -> Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), f.text);
@@ -85,6 +119,7 @@ fn filled(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str, f: Fill) ->
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + icon_w + f.pad, 30.0), Sense::click());
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, 6.0, if resp.hovered() { f.hover } else { f.rest });
+        focus_ring(ui, &resp, rect, 6.0);
         let mut x = rect.left() + f.pad / 2.0;
         if let Some(icon) = icon {
             crate::icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(x + 5.0, rect.center().y), vec2(10.0, 10.0)), icon, f.text);
@@ -122,11 +157,14 @@ pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
 pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: bool, glyph: f32, label: &str) -> Response {
     let t = Tokens::of(ui);
     let resp = ui.interact(rect, id, Sense::click());
-    if loved || reveal || resp.hovered() {
-        let (icon, color) =
-            if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if resp.hovered() { t.text } else { t.muted }) };
+    // Focused, it shows (as when hovered), or Tab would land on nothing.
+    let hot = resp.hovered() || resp.has_focus();
+    if loved || reveal || hot {
+        let (icon, color) = if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if hot { t.text } else { t.muted }) };
         crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
     }
+    let side = glyph + 6.0;
+    focus_ring(ui, &resp, Rect::from_center_size(rect.center(), vec2(side, side)), side / 2.0);
     let label = crate::keys::shown(label).into_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
@@ -270,6 +308,7 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
         } else if resp.hovered() {
             ui.painter().rect_filled(r, 5.0, t.hover);
         }
+        focus_ring(ui, &resp, r.shrink(2.0), 3.0);
         let color = if i == selected { t.text } else { t.muted };
         let g = elide(ui, opt, font.clone(), color, w - 6.0);
         ui.painter().galley(r.center() - g.size() / 2.0, g, color);
@@ -281,60 +320,6 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
         x += w;
     }
     clicked
-}
-
-/// How far along something is on its way to this computer.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mark {
-    Done,
-    /// 0..=1; 0 while waiting its turn.
-    Progress(f32),
-    Failed,
-}
-
-impl Mark {
-    pub fn of_track(state: Option<&offline::TrackState>) -> Option<Mark> {
-        Some(match state? {
-            offline::TrackState::Done { .. } => Mark::Done,
-            offline::TrackState::Queued => Mark::Progress(0.0),
-            offline::TrackState::Downloading { done, total } => Mark::Progress(total.map_or(0.0, |t| *done as f32 / t.max(1) as f32)),
-            offline::TrackState::Failed { .. } => Mark::Failed,
-        })
-    }
-
-    pub fn of_pin(sum: Option<&offline::PinSummary>) -> Option<Mark> {
-        let sum = sum?;
-        Some(if sum.complete() {
-            Mark::Done
-        } else if sum.failed > 0 && !sum.downloading && sum.done + sum.failed == sum.total {
-            Mark::Failed
-        } else {
-            Mark::Progress(sum.fraction())
-        })
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Mark::Done => "Downloaded",
-            Mark::Progress(f) if f > 0.0 => "Downloading",
-            Mark::Progress(_) => "Waiting to download",
-            Mark::Failed => "Download failed",
-        }
-    }
-}
-
-/// The small glyph for a [`Mark`], centred at `center`, about `size` across.
-pub fn mark(ui: &Ui, center: egui::Pos2, size: f32, m: Mark) {
-    let t = Tokens::of(ui);
-    let r = size / 2.0;
-    match m {
-        Mark::Done => crate::icons::paint(ui.painter(), Rect::from_center_size(center, vec2(size, size)), crate::icons::Icon::Downloaded, t.muted),
-        Mark::Progress(f) => crate::icons::progress_ring(ui.painter(), center, r * 0.8, f, t.accent, t.hairline),
-        Mark::Failed => {
-            ui.painter().circle_stroke(center, r * 0.8, egui::Stroke::new(1.3, t.warn));
-            ui.painter().text(center, Align2::CENTER_CENTER, "!", FontId::new(size * 0.7, semibold()), t.warn);
-        }
-    }
 }
 
 /// A small pill of tinted text (a finding worth a glance, not an alarm).
@@ -410,6 +395,148 @@ pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
     kv_row(ui, label, |ui| {
         ui.add(egui::Label::new(egui::RichText::new(value).size(KV_VALUE).color(t.text)).wrap());
     });
+}
+
+/// A titled block of rows with hairlines between them: the title, 4, the
+/// rows, 20 to the next.
+pub fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+    section(ui, title);
+    ui.add_space(4.0);
+    ui.data_mut(|d| d.insert_temp(first_row(), true));
+    body(ui);
+    ui.add_space(20.0);
+}
+
+/// Set by a [`group`] and cleared by its first row, which has no hairline above.
+fn first_row() -> egui::Id {
+    egui::Id::unique("settings-first-row")
+}
+
+/// The hairline above a row, unless it's the first in its group.
+pub fn divider(ui: &mut Ui) {
+    let first = ui.data_mut(|d| std::mem::replace(d.get_temp_mut_or(first_row(), true), false));
+    if !first {
+        let t = Tokens::of(ui);
+        let (x, y) = (ui.cursor().left(), ui.cursor().top());
+        ui.painter().hline(x..=x + ui.available_width(), y, egui::Stroke::new(1.0, t.hairline));
+    }
+}
+
+/// Every control fits this height (a button is the tallest).
+const CONTROL_H: f32 = 30.0;
+/// Space above and below a row's content.
+pub const ROW_PAD: f32 = 6.0;
+/// The least room between a row's text and its control.
+const ROW_GAP: f32 = 24.0;
+/// The most of a name a row keeps beside its control before putting the
+/// control under it (longer names wrap).
+const NAME_W: f32 = 160.0;
+
+/// What a row says on its left.
+#[derive(Default, Clone, Copy)]
+pub struct Head<'a> {
+    pub label: &'a str,
+    /// A small accent note after the label ("in use").
+    pub tag: Option<&'a str>,
+    /// Muted text under the label, wrapped; empty for none.
+    pub hint: &'a str,
+    /// The hint is a path: one line, elided, never wrapped.
+    pub path: bool,
+}
+
+/// One setting: its name and a short hint on the left, its control on the
+/// right, level with the name. Every page is built from these, so controls
+/// share one right edge and hints never run under them. The control is added
+/// right to left (its last part first).
+pub fn setting<R>(ui: &mut Ui, label: &str, hint: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
+    row_with(ui, Head { label, hint, ..Default::default() }, control)
+}
+
+/// A row for a setting set in managed.json when `locked`: greyed, tagged
+/// as set there, and its control can't be used.
+pub fn managed<R>(ui: &mut Ui, locked: bool, row: impl FnOnce(&mut Ui) -> R) -> R {
+    if !locked {
+        return row(ui);
+    }
+    ui.scope(|ui| {
+        ui.disable();
+        row(ui)
+    })
+    .inner
+}
+
+/// [`setting`] with the whole [`Head`].
+pub fn row_with<R>(ui: &mut Ui, mut head: Head<'_>, control: impl FnOnce(&mut Ui) -> R) -> R {
+    // Rows are only ever disabled whole by `managed`.
+    if !ui.is_enabled() && head.tag.is_none() {
+        head.tag = Some(crate::managed::LOCKED);
+    }
+    let t = Tokens::of(ui);
+    divider(ui);
+    let (left, top, width) = (ui.cursor().left(), ui.cursor().top(), ui.available_width());
+    // The name's first line level with the control, and as much room below
+    // the text as above it.
+    let line = ui.ctx().fonts_mut(|f| f.row_height(&FontId::proportional(13.0)));
+    let inset = (CONTROL_H - line) / 2.0;
+    // The control goes beside the name when both fit (it did last frame), and
+    // under it in a narrow window.
+    let key = ui.scope_id().with(("setting", head.label));
+    let name_w = ui.painter().layout_no_wrap(head.label.to_owned(), FontId::proportional(13.0), t.text).size().x.min(NAME_W);
+    let fits = |w: f32| w + ROW_GAP + name_w <= width;
+    let beside = fits(ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(0.0));
+    let (out, used, bottom) = if beside {
+        let strip = Rect::from_min_size(pos2(left, top + ROW_PAD), vec2(width, CONTROL_H));
+        let (out, used) = row_control(ui, strip, control);
+        let room = (width - if used > 0.0 { used + ROW_GAP } else { 0.0 }).max(80.0);
+        let text = row_text(ui, head, pos2(left, strip.top() + inset), room);
+        (out, used, (text + inset).max(strip.bottom()) + ROW_PAD)
+    } else {
+        let text = row_text(ui, head, pos2(left, top + ROW_PAD + inset), width);
+        let strip = Rect::from_min_size(pos2(left, text + 8.0), vec2(width, CONTROL_H));
+        let (out, used) = row_control(ui, strip, control);
+        (out, used, strip.bottom() + ROW_PAD)
+    };
+    ui.data_mut(|d| d.insert_temp(key, used));
+    if fits(used) != beside {
+        ui.ctx().request_discard("a setting's control moved beside or under its name");
+    }
+    ui.advance_cursor_after_rect(Rect::from_min_max(pos2(left, top), pos2(left + width, bottom)));
+    out
+}
+
+/// A row's control, right-aligned in `strip`, and how wide it came out.
+fn row_control<R>(ui: &mut Ui, strip: Rect, control: impl FnOnce(&mut Ui) -> R) -> (R, f32) {
+    let mut right = ui.new_child(egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    right.spacing_mut().item_spacing.x = 6.0;
+    let out = control(&mut right);
+    (out, right.min_rect().width())
+}
+
+/// A row's name (and tag) and hint from `at`, `room` wide. Returns where they end.
+fn row_text(ui: &mut Ui, head: Head<'_>, at: egui::Pos2, room: f32) -> f32 {
+    let t = Tokens::of(ui);
+    let mut text =
+        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(at, vec2(room, f32::INFINITY))).layout(egui::Layout::top_down(egui::Align::Min)));
+    text.spacing_mut().item_spacing.y = 3.0;
+    let mut job = egui::text::LayoutJob::default();
+    job.append(head.label, 0.0, egui::TextFormat::simple(FontId::proportional(13.0), t.text));
+    if let Some(tag) = head.tag {
+        job.append(tag, 6.0, egui::TextFormat::simple(FontId::proportional(11.0), t.accent));
+    }
+    job.wrap.max_width = room;
+    let label = text.painter().layout_job(job);
+    text.add(egui::Label::new(label));
+    if !head.hint.is_empty() {
+        let hint = crate::keys::shown(head.hint);
+        if head.path {
+            let shown = elide_middle(&text, &hint, &FontId::proportional(12.0), room);
+            let resp = text.add(egui::Label::new(egui::RichText::new(shown).size(12.0).color(t.muted)).sense(Sense::hover()));
+            resp.on_hover_text(hint.as_ref());
+        } else {
+            text.add(egui::Label::new(egui::RichText::new(hint).size(12.0).color(t.muted)).wrap());
+        }
+    }
+    text.min_rect().bottom()
 }
 
 /// A thin horizontal slider for `value` in 0..=1 (volume): a 3 px track, the
@@ -504,9 +631,20 @@ pub fn switch_tinted(ui: &mut Ui, on: &mut bool, label: &str, on_color: Color32)
         ui.painter().rect_filled(sw, 9.0, track);
         let x = egui::lerp(sw.left() + 9.0..=sw.right() - 9.0, how_on);
         ui.painter().circle_filled(egui::pos2(x, sw.center().y), 7.0, Color32::WHITE);
+        focus_ring(ui, &resp, sw, 9.0);
     }
     let (on, label) = (*on, label.to_owned());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, true, on, &label));
+    resp
+}
+
+/// Bit-perfect's switch for the device `name`, green when on: the one the
+/// output panel and Settings › Output both show. `mode` comes back as chosen;
+/// each caller acts on the change its own way.
+pub fn bit_perfect_switch(ui: &mut Ui, name: &str, mode: &mut audio::PlaybackMode) -> Response {
+    let mut on = *mode == audio::PlaybackMode::BitPerfect;
+    let resp = switch_tinted(ui, &mut on, &format!("Bit-perfect on {name}"), Tokens::of(ui).ok);
+    *mode = if on { audio::PlaybackMode::BitPerfect } else { audio::PlaybackMode::Normal };
     resp
 }
 
@@ -529,8 +667,32 @@ pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
     resp
 }
 
+/// The round button on a tile's art (play on an album, shuffle on an
+/// artist), 32 points across at `at`. It's there while the tile or the
+/// button itself is hovered (on the button, the tile doesn't read as
+/// hovered), filled with the accent under the pointer. True when clicked.
+pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bool, icon: Icon, label: &str) -> bool {
+    let resp = ui.interact(at, id, Sense::click());
+    if !(tile_hovered || resp.hovered()) {
+        return false;
+    }
+    let fill = if resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
+    let fg = if resp.hovered() { t.on_accent } else { t.text };
+    ui.painter().circle_filled(at.center(), 16.0, fill);
+    // The play triangle sits a point right of centre so it looks centred.
+    let glyph = if matches!(icon, Icon::Play) {
+        Rect::from_center_size(at.center() + vec2(1.0, 0.0), vec2(12.0, 12.0))
+    } else {
+        Rect::from_center_size(at.center(), vec2(13.0, 13.0))
+    };
+    icons::paint(ui.painter(), glyph, icon, fg);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.clicked()
+}
+
 /// The one empty-state layout: a muted glyph, a short title, a line or two
-/// of how to fill it. Centred, with the same spacing everywhere.
+/// of how to fill it (none when `body` is empty, as while loading).
+/// Centred, with the same spacing everywhere.
 pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &str) {
     let t = Tokens::of(ui);
     ui.add_space(48.0);
@@ -539,9 +701,14 @@ pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &st
         crate::icons::paint(ui.painter(), r, icon, t.muted);
         ui.add_space(12.0);
         ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
+        if body.is_empty() {
+            return;
+        }
         ui.add_space(6.0);
         ui.scope(|ui| {
-            ui.set_max_width(440.0);
+            // Never wider than the column it sits in: a centred layout claims
+            // the whole frame, and a panel's scroll area would grow to fit it.
+            ui.set_max_width(440.0_f32.min(ui.available_width()));
             ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(body)).size(13.0).color(t.muted)).wrap());
         });
     });
@@ -552,9 +719,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tab_shows_which_painted_control_has_focus() {
+        // One of each control that paints itself, and whether its ring is drawn.
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
+            |ui, on: &mut bool| {
+                segmented_wide(ui, &["Off", "On"], 0, 120.0);
+                switch(ui, on, "Shuffle");
+                hover_heart(ui, Rect::from_min_size(ui.cursor().min, vec2(24.0, 24.0)), ui.scope_id().with("heart"), false, false, 14.0, "Love");
+            },
+            false,
+        );
+        let rings = |h: &egui_kittest::Harness<'_, bool>| {
+            let accent = Tokens::of_ctx(&h.ctx).accent;
+            h.output().shapes.iter().filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.stroke.color == accent && r.stroke.width == 1.5)).count()
+        };
+        h.run();
+        assert_eq!(rings(&h), 0, "nothing focused, no ring");
+        for _ in 0..4 {
+            h.key_press(egui::Key::Tab);
+            h.run();
+            assert_eq!(rings(&h), 1, "one control focused, one ring");
+        }
+    }
+
+    #[test]
     fn two_controls_with_the_same_label_click_separately() {
         use egui_kittest::kittest::Queryable;
-        let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).build_ui_state(
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
             |ui, picks: &mut (usize, usize)| {
                 choice(ui, &[0, 1, 2], &mut picks.0, Some(300.0), |i| ["Off", "Auto", "Album"][i].into());
                 choice(ui, &[0, 1, 2], &mut picks.1, Some(300.0), |i| ["Original", "Auto", "Transcoded"][i].into());
@@ -568,5 +759,32 @@ mod tests {
         h.get_all_by_label("Auto").nth(1).expect("the second control's Auto").click();
         h.run();
         assert_eq!(*h.state(), (1, 1));
+    }
+
+    #[test]
+    fn a_one_line_link_knows_when_its_text_was_cut() {
+        let mut cuts = Vec::new();
+        let mut h = egui_kittest::Harness::builder().build_ui(|ui| {
+            let font = FontId::proportional(13.0);
+            cuts.push(link_with(ui, "Short", font.clone(), Color32::WHITE, elide_wrap(400.0)).1);
+            cuts.push(link_with(ui, "A title far too long for forty points", font, Color32::WHITE, elide_wrap(40.0)).1);
+        });
+        h.run();
+        drop(h);
+        assert_eq!(cuts.last_chunk::<2>(), Some(&[false, true]));
+    }
+
+    #[test]
+    fn the_bit_perfect_switch_hands_back_the_mode_chosen() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder()
+            .build_ui_state(|ui, mode: &mut audio::PlaybackMode| _ = bit_perfect_switch(ui, "DAC", mode), audio::PlaybackMode::Normal);
+        h.run();
+        h.get_by_label("Bit-perfect on DAC").click();
+        h.run();
+        assert_eq!(*h.state(), audio::PlaybackMode::BitPerfect);
+        h.get_by_label("Bit-perfect on DAC").click();
+        h.run();
+        assert_eq!(*h.state(), audio::PlaybackMode::Normal);
     }
 }

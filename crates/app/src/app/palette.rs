@@ -3,12 +3,12 @@
 
 use super::OfflineAction;
 use super::view_ctx::ViewCtx;
-use super::widgets::elide;
 use super::{Action, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::search::{Hit, Results, SearchIndex};
 use crate::theme::{Tokens, semibold};
+use crate::widgets::elide;
 use egui::{FontId, Rect, Sense, pos2, vec2};
 
 #[derive(Default)]
