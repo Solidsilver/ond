@@ -87,11 +87,15 @@ impl Pins {
 
     /// Records `tracks` (keeping finished files' names) and returns their ids,
     /// duplicates dropped, in order.
+    ///
+    /// A track with an empty id is left out: there's nothing to ask the server
+    /// for, and its file name would start with '.', where the store keeps its
+    /// own hidden files.
     fn store(&mut self, tracks: Vec<TrackRef>) -> Vec<String> {
         let mut ids = Vec::with_capacity(tracks.len());
         let mut seen = HashSet::new();
         for t in tracks {
-            if !seen.insert(t.id.clone()) {
+            if t.id.is_empty() || !seen.insert(t.id.clone()) {
                 continue;
             }
             ids.push(t.id.clone());

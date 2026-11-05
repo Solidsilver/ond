@@ -1,4 +1,5 @@
 use super::*;
+use crate::moving::ADOPTING_FILE;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::AtomicUsize;
@@ -203,7 +204,7 @@ fn a_resume_whose_total_is_not_the_pinned_size_starts_over() {
     std::fs::write(dir.path().join("t.flac.part"), &body[..100_000]).unwrap();
     s.set_source(Some(server.url()));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", 200_000)]);
-    wait_for("a failed attempt", || server.requests().len() == 2 && s.snapshot().track("t") == Some(&TrackState::Queued));
+    wait_for("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
     assert_eq!(server.requests(), [Some(100_000 - RESUME_OVERLAP), None]);
     assert!(!dir.path().join("t.flac.part").exists());
 }
@@ -346,7 +347,7 @@ fn a_size_mismatch_fails_and_a_server_ignoring_ranges_starts_over() {
     let s = store(dir.path(), &rt);
     s.set_source(Some(server.url()));
     s.pin(Pin::Track("bad".into()), "Bad", vec![track("bad", body.len() + 1)]);
-    wait_for("a failed attempt", || !server.requests().is_empty() && s.snapshot().track("bad") == Some(&TrackState::Queued));
+    wait_for("the failure", || matches!(s.snapshot().track("bad"), Some(TrackState::Failed { .. })));
     assert!(s.local_path("bad").is_none());
     assert!(!dir.path().join("bad.flac.part").exists(), "a wrong-size file is discarded");
 
@@ -823,10 +824,11 @@ fn a_track_pinned_again_while_its_files_are_being_deleted_downloads_after() {
     // ...and the track pinned again while it removes them: a download now
     // would write a partial file the delete unlinks.
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    // Pinned after t, so a worker that gets to it has passed t over.
+    s.pin(Pin::Track("u".into()), "U", vec![track("u", body.len())]);
     s.set_source(Some(server.url()));
-    // Nothing to wait on for something that mustn't happen: give it a moment.
-    thread::sleep(Duration::from_millis(100));
-    assert!(server.requests().is_empty(), "no download while the delete runs");
+    wait_for("the other download", || s.snapshot().is_done("u"));
+    assert_eq!(server.requests().len(), 1, "no download of t while the delete runs");
     s.inner.deleted(&ids);
     wait_for("the download", || s.snapshot().is_done("t"));
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
@@ -983,9 +985,11 @@ fn a_track_pinned_while_unknown_files_are_removed_downloads_after() {
     s.inner.lock().sweeping.insert("t.flac".into());
     // ...and t pinned while it deletes them: a download now could lose its file.
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
+    // Pinned after t, so a worker that gets to it has passed t over.
+    s.pin(Pin::Track("u".into()), "U", vec![track("u", body.len())]);
     s.set_source(Some(server.url()));
-    thread::sleep(Duration::from_millis(100));
-    assert!(server.requests().is_empty(), "no download while the sweep runs");
+    wait_for("the other download", || s.snapshot().is_done("u"));
+    assert_eq!(server.requests().len(), 1, "no download of t while the sweep runs");
     let mut st = s.inner.lock();
     st.sweeping.clear();
     s.inner.changed(st);
@@ -1001,9 +1005,9 @@ fn a_pin_refreshed_with_a_new_size_downloads_with_it() {
     let s = store(dir.path(), &rt);
     s.set_source(Some(server.url()));
     let pin = Pin::Album("a".into());
-    // The server's file was replaced: the pinned size is stale, so every attempt fails.
+    // The server's file was replaced: the pinned size is stale, so every attempt would fail.
     s.pin(pin.clone(), "A", vec![track("t", body.len() + 1)]);
-    wait_for("a failed attempt", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
+    wait_for("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
     // The album, fetched again: same tracks, same name, the new size.
     s.update(&pin, "A", vec![track("t", body.len())]);
     assert_eq!(s.inner.lock().pins.tracks["t"].r.size, Some(body.len() as u64));
@@ -1032,4 +1036,88 @@ fn a_pin_refreshed_mid_download_leaves_the_download_running() {
     assert_eq!(server.requests().len(), 1, "one request, never cancelled");
     assert_eq!(s.local_path("t").unwrap(), dir.path().join("t.flac"));
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
+}
+
+#[test]
+fn a_stale_pinned_size_fails_at_once_after_one_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(30_000);
+    let server = Server::start(body.clone(), OPTS);
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(server.url()));
+    s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len() + 1)]);
+    // Content-Length already says it's the wrong file: no body, no retries.
+    wait_for("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
+    assert_eq!(server.requests(), [None]);
+    assert!(!dir.path().join("t.flac.part").exists(), "nothing of it is written");
+    assert_eq!(s.snapshot().failed, 1);
+}
+
+#[test]
+fn a_move_into_a_folder_inside_the_store_is_refused_and_changes_nothing() {
+    let base = tempfile::tempdir().unwrap();
+    let from = base.path().join("Offline");
+    std::fs::create_dir_all(from.join("0000abcd")).unwrap();
+    std::fs::write(from.join("0000abcd").join("t.flac"), b"music").unwrap();
+    std::fs::write(from.join("0000abcd").join(STATE_FILE), b"{}").unwrap();
+    let tree = |dir: &Path| {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                out.push(e.path().strip_prefix(root).unwrap().to_owned());
+                if e.file_type().unwrap().is_dir() {
+                    walk(&e.path(), root, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    };
+    let before = tree(base.path());
+    for to in [from.join("Sub"), from.join("0000abcd"), from.join("a").join("b"), base.path().join("x").join("..").join("Offline").join("Sub")] {
+        let err = move_store(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{}", to.display());
+        assert_eq!(tree(base.path()), before, "{} left the store as it was", to.display());
+    }
+    // A store moving up into the folder holding it is fine: only it is walked.
+    move_store(&from, base.path()).unwrap();
+    assert_eq!(std::fs::read(base.path().join("0000abcd").join("t.flac")).unwrap(), b"music");
+    assert!(!from.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_move_onto_the_same_folder_by_another_path_deletes_nothing() {
+    let base = tempfile::tempdir().unwrap();
+    let from = base.path().join("Offline");
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::write(from.join("t.flac"), b"music").unwrap();
+    let link = base.path().join("Link");
+    std::os::unix::fs::symlink(&from, &link).unwrap();
+    for to in [link.clone(), link.join("."), from.join(".")] {
+        assert!(move_store(&from, &to).unwrap().kept.is_empty());
+        assert_eq!(std::fs::read(from.join("t.flac")).unwrap(), b"music", "{}", to.display());
+    }
+}
+
+#[test]
+fn a_track_with_an_empty_id_is_never_pinned_and_hidden_files_survive_an_unpin() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let s = store(dir.path(), &rt);
+    for name in [".adopting", ".DS_Store", ".x.flac.moving", ".flac"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    let pin = Pin::Album("a".into());
+    s.pin(pin.clone(), "A", vec![track("", 1), track("x", 1)]);
+    assert_eq!(s.pin_tracks(&pin).unwrap().1, ["x"]);
+    assert!(s.snapshot().track("").is_none());
+    std::fs::write(dir.path().join("x.flac"), b"x").unwrap();
+    s.unpin(&pin);
+    wait_for("x.flac to go", || !dir.path().join("x.flac").exists());
+    for name in [".adopting", ".DS_Store", ".x.flac.moving", ".flac"] {
+        assert!(dir.path().join(name).exists(), "{name} stays");
+    }
 }
