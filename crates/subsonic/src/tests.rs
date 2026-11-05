@@ -264,6 +264,38 @@ fn error_replies_are_recognised_as_json_or_xml() {
 }
 
 #[test]
+fn a_page_is_not_a_file_whatever_it_says_it_is() {
+    let page = b"<!DOCTYPE html><html><head><title>Sign in</title></head></html>";
+    assert!(crate::is_error_reply(Some("text/html; charset=utf-8"), page));
+    assert!(crate::is_error_reply(Some("TEXT/PLAIN"), b"denied"));
+    assert!(crate::is_error_reply(Some("text/html"), b""));
+    // A page already on disk from before has no content type to go by.
+    assert!(crate::is_error_reply(None, page));
+    assert!(!crate::is_error_reply(Some("audio/mpeg"), b"ID3\x04"));
+    assert!(!crate::is_error_reply(Some("application/octet-stream"), b"OggS"));
+    assert_eq!(crate::error_text(page), "Sign in");
+}
+
+#[tokio::test]
+async fn cover_art_that_is_an_error_envelope_is_an_error() {
+    let envelope = r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":70,"message":"Cover art not found"}}}"#;
+    let base = serve_once(reply("200 OK", "application/json", envelope));
+    let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+    match c.cover_art("al-1", Some(300)).await {
+        Err(Error::Api { code: 70, message }) => assert_eq!(message, "Cover art not found"),
+        other => panic!("expected the server's error, got {other:?}"),
+    }
+    // Not an envelope the parser knows: still an error, with what was said.
+    let base = serve_once(reply("200 OK", "text/html", "<html><title>Sign in</title></html>"));
+    let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+    assert!(matches!(c.cover_art("al-1", None).await, Err(Error::Api { code: -1, message }) if message == "Sign in"));
+    // An image comes back as it is.
+    let base = serve_once(reply("200 OK", "image/jpeg", "\u{ff}JFIF"));
+    let c = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
+    assert_eq!(c.cover_art("al-1", None).await.unwrap(), "\u{ff}JFIF".as_bytes());
+}
+
+#[test]
 fn one_malformed_song_is_skipped_not_the_page() {
     // s-2 has no title; s-3's numbers come as strings and floats, as some
     // servers send them; s-4's are out of range or junk.

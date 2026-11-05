@@ -375,16 +375,23 @@ impl Client {
     }
 }
 
-/// Whether a response is a Subsonic error envelope (JSON or XML) rather than
-/// the file asked for. Subsonic sends those with status 200, so a download
-/// must check before keeping the bytes. `head` is the start of the body.
+/// Whether a response is something other than the file asked for: a Subsonic
+/// error envelope (JSON or XML), or a page (a reverse proxy's login, an SSO
+/// gate). Subsonic sends errors with status 200, so a download must check
+/// before keeping the bytes. Any `text/*` type counts, since no audio or
+/// image is ever served as text. `head` is the start of the body.
 pub fn is_error_reply(content_type: Option<&str>, head: &[u8]) -> bool {
-    if content_type.is_some_and(|ct| ct.contains("json") || ct.contains("xml")) {
+    if content_type.is_some_and(|ct| ct.trim_start().to_ascii_lowercase().starts_with("text/") || ct.contains("json") || ct.contains("xml")) {
         return true;
     }
     let text = String::from_utf8_lossy(&head[..head.len().min(512)]);
     let text = text.trim_start();
-    (text.starts_with('{') && text.contains("subsonic-response")) || text.starts_with("<?xml") || text.starts_with("<subsonic-response")
+    let lower = text.get(..15).unwrap_or(text).to_ascii_lowercase();
+    (text.starts_with('{') && text.contains("subsonic-response"))
+        || text.starts_with("<?xml")
+        || text.starts_with("<subsonic-response")
+        || lower.starts_with("<!doctype html")
+        || lower.starts_with("<html")
 }
 
 /// A short, readable form of an error envelope for messages: the server's
@@ -392,6 +399,10 @@ pub fn is_error_reply(content_type: Option<&str>, head: &[u8]) -> bool {
 pub fn error_text(body: &[u8]) -> String {
     if let Err(Error::Api { message, .. }) = parse_response::<serde_json::Value>(body) {
         return message;
+    }
+    // A page: its title says more than its markup.
+    if let Err(Error::NotApi(Some(title))) = parse_response::<serde_json::Value>(body) {
+        return title;
     }
     let text = String::from_utf8_lossy(&body[..body.len().min(200)]);
     match text.split_once("message=\"").and_then(|(_, rest)| rest.split_once('"')) {
