@@ -530,6 +530,40 @@ fn v2_rows_migrate_to_v3_with_credits_index() {
 }
 
 #[test]
+fn check_indexes_notices_a_missing_artist_entry() {
+    let lib = Library::in_memory().unwrap();
+    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    lib.upsert_artists([artist("1", "Eagles"), artist("2", "Zappa")]).unwrap();
+    assert!(lib.check_indexes().unwrap().is_empty());
+    let wt = lib.db.begin_write().unwrap();
+    wt.open_table(ARTISTS_BY_NAME).unwrap().remove(("eagles", "1")).unwrap();
+    wt.commit().unwrap();
+    let problems = lib.check_indexes().unwrap();
+    assert!(problems.iter().any(|p| p.contains("artist 1 missing")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("artist index has 1 entries for 2 rows")), "{problems:?}");
+}
+
+#[test]
+fn an_unreadable_analysis_database_is_set_aside_and_a_fresh_one_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("analysis.redb");
+    std::fs::write(&path, vec![0xAB; 8192]).unwrap();
+
+    let (store, aside) = AnalysisStore::open_or_recover(&path).unwrap();
+    let aside = aside.expect("the damaged file was moved aside");
+    assert!(aside.file_name().unwrap().to_string_lossy().starts_with("analysis.redb.bad-"));
+    assert_eq!(std::fs::read(&aside).unwrap(), vec![0xAB; 8192], "kept byte for byte");
+    assert!(store.records().unwrap().is_empty());
+    store.put("s-1", b"one").unwrap();
+    assert_eq!(store.records().unwrap(), [("s-1".to_owned(), b"one".to_vec())]);
+
+    drop(store);
+    let (again, aside) = AnalysisStore::open_or_recover(&path).unwrap();
+    assert!(aside.is_none(), "a healthy file stays where it is");
+    assert_eq!(again.records().unwrap().len(), 1);
+}
+
+#[test]
 fn analysis_records_persist_and_replace() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("analysis.redb");
@@ -819,8 +853,8 @@ fn full_album() -> Album {
         duration_secs: 2400,
         cover_art: Some("al-1_0".into()),
         created: Some("2024-01-02".into()),
-        labels: vec!["Riverside".into()],
-        genres: vec!["Jazz".into()],
+        labels: vec!["Riverside".into(), "Fantasy".into()],
+        genres: vec!["Bebop".into(), "Modal".into()],
         artists: vec![ArtistLink { id: Some("ar-2".into()), name: "Bill Evans Trio".into() }],
     }
 }
@@ -879,8 +913,8 @@ fn album_v3_keeps_its_wire_format() {
     const BYTES: &[u8] = &[
         4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
         32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
-        48, 49, 45, 48, 50, 1, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 1, 4, 74, 97, 122, 122, 1, 1, 4, 97, 114, 45, 50, 15, 66, 105, 108, 108, 32, 69,
-        118, 97, 110, 115, 32, 84, 114, 105, 111,
+        48, 49, 45, 48, 50, 2, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 7, 70, 97, 110, 116, 97, 115, 121, 2, 5, 66, 101, 98, 111, 112, 5, 77, 111, 100,
+        97, 108, 1, 1, 4, 97, 114, 45, 50, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115, 32, 84, 114, 105, 111,
     ];
     assert_eq!(encode(&full_album()).unwrap(), BYTES, "{SHAPE_CHANGED}");
     assert_eq!(decode::<Album>(BYTES).unwrap(), full_album());
@@ -920,7 +954,7 @@ fn full_album_v1() -> AlbumV1 {
 }
 
 fn full_album_v2() -> AlbumV2 {
-    AlbumV2 { labels: vec!["Riverside".into()], genres: vec!["Jazz".into()], ..AlbumV2::from(full_album_v1()) }
+    AlbumV2 { labels: vec!["Riverside".into(), "Fantasy".into()], genres: vec!["Bebop".into(), "Modal".into()], ..AlbumV2::from(full_album_v1()) }
 }
 
 fn full_track_v1() -> TrackV1 {
@@ -977,7 +1011,8 @@ fn frozen_album_v2_keeps_its_wire_format() {
     const BYTES: &[u8] = &[
         4, 97, 108, 45, 49, 6, 83, 117, 110, 100, 97, 121, 1, 9, 83, 117, 110, 100, 97, 121, 32, 97, 116, 1, 15, 66, 105, 108, 108, 32, 69, 118, 97, 110, 115,
         32, 84, 114, 105, 111, 1, 4, 97, 114, 45, 50, 1, 210, 30, 1, 4, 74, 97, 122, 122, 5, 224, 18, 1, 6, 97, 108, 45, 49, 95, 48, 1, 10, 50, 48, 50, 52, 45,
-        48, 49, 45, 48, 50, 1, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 1, 4, 74, 97, 122, 122,
+        48, 49, 45, 48, 50, 2, 9, 82, 105, 118, 101, 114, 115, 105, 100, 101, 7, 70, 97, 110, 116, 97, 115, 121, 2, 5, 66, 101, 98, 111, 112, 5, 77, 111, 100,
+        97, 108,
     ];
     assert_eq!(encode(&full_album_v2()).unwrap(), BYTES, "{FROZEN_CHANGED}");
     assert_eq!(decode::<AlbumV2>(BYTES).unwrap(), full_album_v2());

@@ -42,7 +42,10 @@ const CREDITS: TableDefinition<(&str, &str, &str), ()> = TableDefinition::new("c
 /// album id → [`Album::sync_stamp`] of the album when its tracks were last stored.
 const ALBUM_STAMPS: TableDefinition<&str, u64> = TableDefinition::new("album_stamps");
 /// Track id → an analysis record, opaque here (the `analysis` crate owns the format).
-/// A new table rather than a schema bump: older builds simply ignore it.
+/// Legacy in the library database: builds before [`AnalysisStore`] kept records
+/// here, and [`AnalysisStore::adopt`] moves them out. `init` still creates the
+/// table so `adopt` can open it; the live records are in the store's own database,
+/// which uses the same definition.
 const ANALYSIS: TableDefinition<&str, &[u8]> = TableDefinition::new("analysis");
 /// Name → a copy of something the server lists outside the library (the
 /// playlists, favorites, Recently added), kept for starting offline. Each
@@ -120,17 +123,26 @@ pub struct AnalysisStore {
 }
 
 impl AnalysisStore {
-    /// Opens (or creates) the store at `path`. An unreadable file is moved
-    /// aside (`<name>.bad-<unix secs>`) and a fresh store started.
+    /// [`open_or_recover`](Self::open_or_recover) for a caller that has
+    /// nothing to tell the user about the old file (it is logged).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::open_or_recover(path)?.0)
+    }
+
+    /// Opens (or creates) the store at `path`. An unreadable file is moved
+    /// aside (`<name>.bad-<unix secs>`) and a fresh store started; the second
+    /// value is where the old file went, so the caller can say so. Unlike the
+    /// library mirror, these records can't be rebuilt by a sync.
+    pub fn open_or_recover(path: impl AsRef<Path>) -> Result<(Self, Option<PathBuf>)> {
         let path = path.as_ref();
         let open = |p: &Path| Self::init(Database::create(p)?);
         match open(path) {
             Err(e) if e.is_damage() => {
-                set_aside(path)?;
-                open(path)
+                let aside = set_aside(path)?;
+                tracing::warn!("analysis database was unreadable; moved to {} and starting fresh", aside.display());
+                Ok((open(path)?, Some(aside)))
             }
-            other => other,
+            other => other.map(|store| (store, None)),
         }
     }
 
@@ -550,7 +562,8 @@ impl Library {
     }
 
     /// Deletes an album, its tracks and all their index entries. Returns whether
-    /// the album existed.
+    /// the album existed. Syncs go through `retain_albums`.
+    #[cfg(test)]
     pub fn remove_album(&self, id: &str) -> Result<bool> {
         let wt = self.db.begin_write()?;
         let existed = AlbumTables::open(&wt)?.remove(id)?;
@@ -643,6 +656,19 @@ impl Library {
         }
         if track_idx.len()? != tracks.len()? {
             problems.push(format!("track index has {} entries for {} rows", track_idx.len()?, tracks.len()?));
+        }
+
+        let artists = rt.open_table(ARTISTS)?;
+        let artist_idx = rt.open_table(ARTISTS_BY_NAME)?;
+        for entry in artists.iter()? {
+            let (id, bytes) = entry?;
+            let a: Artist = decode(bytes.value())?;
+            if artist_idx.get((a.sort_name().as_str(), id.value()))?.is_none() {
+                problems.push(format!("artist {} missing from index", id.value()));
+            }
+        }
+        if artist_idx.len()? != artists.len()? {
+            problems.push(format!("artist index has {} entries for {} rows", artist_idx.len()?, artists.len()?));
         }
 
         let credits = rt.open_table(CREDITS)?;
