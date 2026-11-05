@@ -565,3 +565,45 @@ fn opus_files_analyze() {
     assert!((a.duration_secs - 1.0).abs() < 0.05, "{a:?}");
     assert!(a.integrated_lufs.is_some(), "{a:?}");
 }
+
+/// A 16-bit mono PCM WAV of `samples` (in [-1, 1]).
+fn mono_wav_16(rate: u32, samples: &[f32]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|&x| ((x * 32767.0).round() as i16).to_le_bytes()).collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&data);
+    wav
+}
+
+#[test]
+fn peaks_of_a_decoded_wav_follow_its_loudness() {
+    let rate = 8000;
+    // One second quiet, one second loud: fifty windows each.
+    let samples: Vec<f32> = (0..2 * rate).map(|i| if i < rate { 0.25 } else { -0.5 }).collect();
+    let wav = mono_wav_16(rate, &samples);
+    let len = wav.len() as u64;
+
+    let p = peaks_reader(std::io::Cursor::new(wav.clone()), Some(len), Some("wav"), &|| false).unwrap();
+    assert_eq!(p.values.len(), 2 * crate::peaks::PEAKS_PER_SEC as usize);
+    assert!(p.values[..50].iter().all(|&v| v == 64), "{:?}", &p.values[..50]);
+    assert!(p.values[50..].iter().all(|&v| v == 128), "{:?}", &p.values[50..]);
+    let bars = p.bars(2);
+    assert_eq!(bars, [0.5, 1.0]);
+
+    // The boxed-source entry point agrees, and cancelling stops it.
+    let again = peaks(Box::new(std::io::Cursor::new(wav.clone())), Some("wav"), &|| false).unwrap();
+    assert_eq!(again, p);
+    assert!(peaks(Box::new(std::io::Cursor::new(wav)), Some("wav"), &|| true).is_err());
+    assert!(peaks_reader(std::io::Cursor::new(vec![0u8; 64]), Some(64), Some("wav"), &|| false).is_err());
+}
