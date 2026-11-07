@@ -19,7 +19,7 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 
 | Crate | Job |
 |---|---|
-| `crates/app` (package `ond-player`, binary `Ond`) | UI, queue, sync, settings, each platform's integration |
+| `apps/ond` (package `ond-player`, binary `Ond`) | UI, queue, sync, settings, each platform's integration |
 | `crates/subsonic` | OpenSubsonic API client |
 | `crates/library` | Local mirror in redb with hand-written indexes and migrations |
 | `crates/streamcache` | Download cache playback can read and seek while it fills |

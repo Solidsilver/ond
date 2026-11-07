@@ -2,12 +2,12 @@
 #
 #   pwsh scripts/bundle-windows.ps1
 #
-# The zip holds Ond.exe (icon and version info embedded by crates/app/build.rs)
+# The zip holds Ond.exe (icon and version info embedded by apps/ond/build.rs)
 # and the licences. No installer yet: unzip anywhere and run Ond.exe.
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
-# "path+file:///…/crates/app#ond-player@0.1.0" → "0.1.0"
+# "path+file:///…/apps/ond#ond-player@0.1.0" → "0.1.0"
 $version = (cargo pkgid -p ond-player).Split("@")[-1]
 if (-not $version -or $version.Contains("#")) { throw "could not read the ond-player package version from cargo pkgid" }
 

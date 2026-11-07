@@ -110,9 +110,11 @@ fn rust_files(dir: &Path, into: &mut Vec<std::path::PathBuf>) {
 
 #[test]
 fn no_emoji_or_symbol_glyphs_in_any_string() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("crates dir");
+    // The whole workspace: the apps and the shared crates they draw with.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
-    rust_files(crates, &mut files);
+    rust_files(&root.join("apps"), &mut files);
+    rust_files(&root.join("crates"), &mut files);
     assert!(files.len() > 20, "found the sources");
     let mut found = Vec::new();
     // This file names the banned symbols to test the scanner.
