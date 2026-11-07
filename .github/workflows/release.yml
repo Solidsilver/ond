@@ -1,9 +1,12 @@
 name: Release
 
+# Ond and Rede release from this repository, each from tags of its own:
+# `ond-v0.5.0`, `rede-v0.1.0`. Ond's tags before Rede were `v0.4.4`, and a
+# `v*` tag is still Ond's. Only the tagged app is built.
 on:
   push:
-    tags: ["v*"]
-  # Builds and uploads the bundles without publishing, to try the packaging.
+    tags: ["v*", "ond-v*", "rede-v*"]
+  # Builds and uploads Ond's bundles without publishing, to try the packaging.
   workflow_dispatch:
 
 permissions:
@@ -15,7 +18,47 @@ env:
   OND_DISTRIBUTION: github
 
 jobs:
+  # Which app the tag is for and the version it names. A tag must name the
+  # version the app's crate has: the bundles are named from the crate, and
+  # an app that thinks it's older than its own release keeps offering it.
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.tag.outputs.app }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: App and version
+        id: tag
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/ond-v*) app=ond; version="${GITHUB_REF_NAME#ond-v}" ;;
+            refs/tags/rede-v*) app=rede; version="${GITHUB_REF_NAME#rede-v}" ;;
+            refs/tags/v*) app=ond; version="${GITHUB_REF_NAME#v}" ;;
+            # Run by hand from a branch: Ond, built but not published.
+            *) app=ond; version="" ;;
+          esac
+          if [ "$app" = ond ] && [ -n "$version" ]; then
+            crate="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ond-player") | .version')"
+            if [ "$crate" != "$version" ]; then
+              echo "::error::$GITHUB_REF_NAME names $version, but ond-player is $crate"
+              exit 1
+            fi
+          fi
+          if [ "$app" = rede ]; then
+            echo "::notice::Rede has no bundles yet, so $GITHUB_REF_NAME builds nothing."
+          fi
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # Rede's bundle jobs go after Ond's, each gated on
+  # `needs.tag.outputs.app == 'rede'`, once Rede has bundle scripts beside
+  # Ond's in scripts/. Until then a `rede-v*` tag runs only the job above.
+
   macos:
+    needs: tag
+    if: needs.tag.outputs.app == 'ond'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -90,6 +133,8 @@ jobs:
             target/bundle/*.zip
 
   linux:
+    needs: tag
+    if: needs.tag.outputs.app == 'ond'
     strategy:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
@@ -123,6 +168,8 @@ jobs:
           path: target/bundle/*.tar.gz
 
   windows:
+    needs: tag
+    if: needs.tag.outputs.app == 'ond'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -146,29 +193,49 @@ jobs:
           path: target/bundle/*.zip
 
   publish:
-    needs: [macos, linux, windows]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [tag, macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/') && needs.tag.outputs.app == 'ond'
     runs-on: ubuntu-latest
+    env:
+      APP: ${{ needs.tag.outputs.app }}
+      VERSION: ${{ needs.tag.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
           sparse-checkout: .github/release-notes
+          # The tags, to find this app's previous release.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      # Hand-written notes for this tag, if there are any, above GitHub's changelog.
+      # Hand-written notes for this version, if there are any, above GitHub's
+      # changelog: .github/release-notes/ond/v0.5.0.md for ond-v0.5.0 (or v0.5.0).
       - name: Release notes
         run: |
-          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          notes=".github/release-notes/$APP/v$VERSION.md"
           [ -f "$notes" ] || : > "$notes"
           echo "notes=$notes" >> "$GITHUB_ENV"
+
+      # GitHub's changelog starts from the release before, which would be
+      # whichever app released last; this is Ond's own previous tag, either form.
+      - name: Previous release
+        run: |
+          previous="$(
+            git tag -l 'v*' 'ond-v*' | grep -E '^(ond-)?v[0-9]+\.[0-9]+\.[0-9]+$' |
+              while read -r t; do echo "${t#*v} $t"; done |
+              sort -V | awk -v v="$VERSION" '$1 == v { print prev; exit } { prev = $2 }'
+          )"
+          echo "Previous Ond release: ${previous:-none}"
+          echo "previous=$previous" >> "$GITHUB_ENV"
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          name: Ond ${{ needs.tag.outputs.version }}
           body_path: ${{ env.notes }}
           generate_release_notes: true
+          previous_tag: ${{ env.previous }}
           files: dist/*
