@@ -1,0 +1,25 @@
+[package]
+name = "rede"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "Rede"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "accesskit"] }
+egui = "0.37.0"
+shell = { version = "0.4.4", path = "../../crates/shell" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Offscreen rendering for the snapshot (`view.rs`).
+egui_kittest = { version = "0.37.0", features = ["wgpu"] }
+# The Linux window controls on any platform, and stand-in traffic lights.
+shell = { version = "0.4.4", path = "../../crates/shell", features = ["preview"] }
