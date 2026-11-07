@@ -391,7 +391,9 @@ impl OndApp {
         app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
         app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
         let bridge = app.bridge.clone();
-        crate::updates::start(app.bridge.runtime(), app.update_check.clone(), app.update_now.clone(), move |r| bridge.post(Msg::UpdateChecked(r)));
+        crate::updates::start(app.bridge.runtime(), &crate::updates::OND, app.update_check.clone(), app.update_now.clone(), move |r| {
+            bridge.post(Msg::UpdateChecked(r))
+        });
         // The window opened from this plan (see `main`); our title bar follows it.
         app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
         Ok(app)

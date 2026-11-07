@@ -56,7 +56,7 @@ impl OndApp {
                 if self.updates.notes.as_ref().is_none_or(|(n, _)| *n != v) {
                     self.updates.notes = Some((v, None));
                     let bridge = self.bridge.clone();
-                    crate::updates::fetch_notes(self.bridge.runtime(), v, move |notes| bridge.post(Msg::ReleaseNotes(v, notes)));
+                    crate::updates::fetch_notes(self.bridge.runtime(), &crate::updates::OND, v, move |notes| bridge.post(Msg::ReleaseNotes(v, notes)));
                 }
             }
         }
