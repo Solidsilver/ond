@@ -7,7 +7,7 @@
 //! (resizes, key-window changes), so [`sync`] re-applies the layout
 //! each frame; it's a handful of cheap property calls. It also ends the
 //! presentation mode egui-wgpu keeps on after a resize the user didn't drag
-//! (see [`mac::stop_transaction_presents`]).
+//! (see `mac::stop_transaction_presents`).
 
 /// How far the content must stay clear of the traffic lights, from the window's left edge.
 pub const LIGHTS_W: f32 = 84.0;
