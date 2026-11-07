@@ -6,6 +6,7 @@ use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Color32, FontId, Galley, Rect, Response, Sense, Ui, pos2, vec2};
+pub use shell::widgets::empty_state;
 use std::sync::Arc;
 
 /// One line of text cut to `width` with an ellipsis. The one way the app
@@ -688,30 +689,6 @@ pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bo
     icons::paint(ui.painter(), glyph, icon, fg);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     resp.clicked()
-}
-
-/// The one empty-state layout: a muted glyph, a short title, a line or two
-/// of how to fill it (none when `body` is empty, as while loading).
-/// Centred, with the same spacing everywhere.
-pub fn empty_state(ui: &mut Ui, icon: crate::icons::Icon, title: &str, body: &str) {
-    let t = Tokens::of(ui);
-    ui.add_space(48.0);
-    ui.vertical_centered(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-        crate::icons::paint(ui.painter(), r, icon, t.muted);
-        ui.add_space(12.0);
-        ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
-        if body.is_empty() {
-            return;
-        }
-        ui.add_space(6.0);
-        ui.scope(|ui| {
-            // Never wider than the column it sits in: a centred layout claims
-            // the whole frame, and a panel's scroll area would grow to fit it.
-            ui.set_max_width(440.0_f32.min(ui.available_width()));
-            ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(body)).size(13.0).color(t.muted)).wrap());
-        });
-    });
 }
 
 #[cfg(test)]

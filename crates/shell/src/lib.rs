@@ -12,4 +12,5 @@ pub mod icons;
 pub mod keys;
 pub mod over_art;
 pub mod theme;
+pub mod widgets;
 pub mod window;
