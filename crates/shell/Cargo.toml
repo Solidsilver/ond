@@ -1,0 +1,24 @@
+[package]
+name = "shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+egui = "0.37.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tracing = "0.1.44"
+
+[lints]
+workspace = true
+
+[features]
+# Lets UI snapshots and tests show the Linux window controls on any platform,
+# and paint stand-ins for the macOS traffic lights.
+preview = []
+
+[dev-dependencies]
+egui_kittest = "0.37.0"
