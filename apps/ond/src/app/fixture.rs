@@ -7,7 +7,7 @@
 use super::*;
 use crate::queue::Item;
 use audio::{DeviceCaps, DeviceInfo, DeviceKind, RateRange, SignalPath, StreamFormat};
-use egui::{Color32, ColorImage, Pos2, Vec2, pos2, vec2};
+use egui::{Color32, ColorImage, Pos2, Vec2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use library::Contributor;
@@ -681,18 +681,7 @@ pub(super) const VERSES: [&str; 26] = [
     "When it is done",
 ];
 
-/// Stand-ins for macOS's traffic lights, which the offscreen renderer can't
-/// draw: three circles where `chrome` puts the real ones, to judge spacing.
-pub(super) fn traffic_lights(ctx: &egui::Context, bar_h: Option<f32>) {
-    let Some(h) = bar_h else { return };
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("snapshot-traffic-lights")));
-    for (i, c) in [egui::Color32::from_rgb(0xFF, 0x5F, 0x57), egui::Color32::from_rgb(0xFE, 0xBC, 0x2E), egui::Color32::from_rgb(0x28, 0xC8, 0x40)]
-        .into_iter()
-        .enumerate()
-    {
-        painter.circle_filled(pos2(18.0 + 7.0 + 20.0 * i as f32, h / 2.0), 6.0, c);
-    }
-}
+pub(super) use shell::chrome::stand_in_lights as traffic_lights;
 
 /// The current track's lyrics, as the server would give them: one line every
 /// eight seconds from 0:20, so 2:21 into the fixture lands mid-song.
