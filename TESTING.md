@@ -79,6 +79,11 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 - [ ] Sign in as another user with many downloads: no hitch when it connects; switch back and that user's downloads are all still there.
 - [ ] Quit while a big download or a move runs: the app is gone within a couple of seconds.
 
+## Releases and updates
+- [ ] Push an `ond-v` tag whose version isn't the crate's: the release workflow stops at its first job. With the right version, it builds and publishes "Ond X.Y.Z" with the notes from `.github/release-notes/ond/`, and GitHub's changelog starts at Ond's previous tag.
+- [ ] Push a `rede-v` tag: only the first job runs, with a notice that Rede has no bundles yet; no release is published.
+- [ ] A GitHub build older than the newest Ond release: Settings › About says the new version is available, shows its notes, and Download opens its page. A Rede release newer than it doesn't change that.
+
 ## Analysis
 - [ ] Settings → Library → Analyze library: progress, pauses while playback buffers; album pages show `DR · LUFS` and, only when suspicious, a "likely upsampled / lossy source" chip.
 

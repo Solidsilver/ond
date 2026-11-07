@@ -134,7 +134,7 @@ The screenshot in this README comes from the `readme_snapshots` test, resized to
 
 Some things need real hardware or a real server. [TESTING.md](TESTING.md) lists them.
 
-`dev` is where work happens; `main` holds the latest release. Branch from `dev` and open pull requests against it. Pushing a `v*` tag builds the app and publishes a GitHub release. [CONTRIBUTING.md](CONTRIBUTING.md) has the process, and [AGENTS.md](AGENTS.md) is the short guide to how the code is organised, for coding agents and people alike.
+`dev` is where work happens; `main` holds the latest release. Branch from `dev` and open pull requests against it. Pushing an `ond-v*` tag builds the app and publishes a GitHub release. [CONTRIBUTING.md](CONTRIBUTING.md) has the process, and [AGENTS.md](AGENTS.md) is the short guide to how the code is organised, for coding agents and people alike.
 
 ## AI Disclosure
 

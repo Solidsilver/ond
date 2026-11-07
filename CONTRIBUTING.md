@@ -37,7 +37,14 @@ Fine, and most of Ond was written that way. The result is held to the same bar a
 
 ## Releases
 
-The maintainer merges `dev` into `main`, bumps the workspace version, writes `.github/release-notes/vX.Y.Z.md`, and pushes a `vX.Y.Z` tag. The release workflow builds and signs the bundles and publishes them.
+The maintainer merges `dev` into `main`, bumps the workspace version, writes `.github/release-notes/ond/vX.Y.Z.md`, and pushes an `ond-vX.Y.Z` tag. The release workflow builds and signs the bundles and publishes them as "Ond X.Y.Z".
+
+Each app in the repository has its own tags and notes, because Ond and Rede release separately from the same repository:
+
+- Ond: `ond-v0.5.0`, notes in `.github/release-notes/ond/`. Releases before 0.5 were tagged `v0.4.4`, and a `v*` tag still means Ond.
+- Rede: `rede-v0.1.0`, notes in `.github/release-notes/rede/`. Rede has no bundles yet, so its tags build nothing.
+
+The workflow builds only the app a tag names, and stops if the tag's version isn't that app's crate version. Each app's update check reads the repository's releases feed and looks only at its own tags, so a release of one never shows up as an update to the other. The feed lists the latest ten or so releases, so a long run of one app's releases can hide the other's newest until its next one.
 
 ## License
 
