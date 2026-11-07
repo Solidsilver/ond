@@ -1,6 +1,6 @@
 # Working on Ond
 
-Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of seven crates. This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
+Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of eight crates, one of them the start of Rede, an audiobook player for Audiobookshelf. This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
 
 ## Checks that must pass
 
@@ -11,7 +11,7 @@ cargo test --workspace                                     # hardware and PNG te
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, and `ond-player` for the app). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
+Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, and `ond-player` for the app). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
 
 Things that need real hardware or a real server are listed in [TESTING.md](TESTING.md). If you change something there, say so in the pull request so a human can run it.
 
@@ -26,6 +26,7 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 | `crates/offline` | Pinned downloads |
 | `crates/audio` | Decoding, the playback engine, resampling, dither, CoreAudio, ALSA and cpal output |
 | `crates/analysis` | Loudness, dynamic range and fake hi-res detection |
+| `crates/abs` | Rede: Audiobookshelf API client (tokens, single-flight refresh, play sessions, progress). Its live tests need a server; see its `tests/live.rs` |
 
 Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; shared widgets in `src/widgets.rs`; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
 
