@@ -1,6 +1,6 @@
 # Working on Ond
 
-Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of eight crates, one of them the start of Rede, an audiobook player for Audiobookshelf. This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
+Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of ten crates. Rede, an audiobook player that shares Ond's engine and look, is being built alongside it ([its design](docs/rede/design.md)). This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
 
 ## Checks that must pass
 
@@ -11,7 +11,7 @@ cargo test --workspace                                     # hardware and PNG te
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, and `ond-player` for the app). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
+Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, `shell`, `ond-player` for Ond and `rede` for Rede). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
 
 Things that need real hardware or a real server are listed in [TESTING.md](TESTING.md). If you change something there, say so in the pull request so a human can run it.
 
@@ -20,6 +20,8 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 | Crate | Job |
 |---|---|
 | `apps/ond` (package `ond-player`, binary `Ond`) | UI, queue, sync, settings, each platform's integration |
+| `apps/rede` (package `rede`, binary `Rede`) | Rede, the audiobook player; for now an empty window |
+| `crates/shell` | What the apps share on screen: theme, colors, icons, the window, its title bar (`chrome`, `csd`), shared widgets |
 | `crates/subsonic` | OpenSubsonic API client |
 | `crates/library` | Local mirror in redb with hand-written indexes and migrations |
 | `crates/streamcache` | Download cache playback can read and seek while it fills |
@@ -29,6 +31,8 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 | `crates/abs` | Rede: Audiobookshelf API client (tokens, single-flight refresh, play sessions, progress). Its live tests need a server; see its `tests/live.rs` |
 
 Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; shared widgets in `src/widgets.rs`; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
+
+`crates/shell` holds what Ond and Rede both draw. Code moves there from Ond when Rede needs it, not ahead of time, and nothing in it may know which app it serves. Ond imports `theme`, `chrome`, `csd` and `icons` at its crate root (and `visuals` re-exports `colors` and `over_art`), so `crate::theme::Tokens` and the like still work. A move is its own commit, and Ond's snapshots must come out the same before and after. Rede's window renders with `cargo test -p rede --release snapshots -- --ignored --nocapture`.
 
 ## How the app is wired
 
