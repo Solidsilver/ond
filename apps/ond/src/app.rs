@@ -443,6 +443,7 @@ impl OndApp {
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         let mut cache_cfg = streamcache::CacheConfig::new(&paths.stream_cache);
+        cache_cfg.reply_check = crate::bridge::reply_check();
         if let Some(mb) = saved.stream_cache_mb {
             cache_cfg.max_bytes = mb * 1024 * 1024;
         }
@@ -462,6 +463,7 @@ impl OndApp {
         // evict what was just played.
         let mut scratch_cfg = streamcache::CacheConfig::new(paths.stream_cache.with_file_name("analysis"));
         scratch_cfg.max_bytes = 64 * 1024 * 1024;
+        scratch_cfg.reply_check = crate::bridge::reply_check();
         let scratch_cache = streamcache::StreamCache::new(scratch_cfg, rt.handle().clone())?;
         let engine = audio::spawn(audio::EngineConfig::default(), backend, Some(cache));
         let output = Outputs::restore(&engine, prefs.clone());

@@ -134,7 +134,7 @@ async fn download(inner: &Inner, job: &Job, url: &str) -> Result<u64, JobError> 
 /// (start over from 0).
 async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> Result<Option<u64>, JobError> {
     let overlap = have.min(RESUME_OVERLAP);
-    let mut body = match fetch::get_from(&inner.http, url, (have > 0).then(|| have - overlap)).await {
+    let mut body = match fetch::get_from(&inner.http, &inner.reply_check, url, (have > 0).then(|| have - overlap)).await {
         Ok(b) => b,
         Err(FetchError::RangeNotSatisfiable) if have > 0 => {
             // Even the overlap lies past the end: the file shrank.

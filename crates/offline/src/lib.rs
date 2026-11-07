@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use streamcache::ReplyCheck;
 use streamcache::disk::InFlight;
 use streamcache::fetch;
 use tokio::sync::Notify;
@@ -82,6 +83,9 @@ pub struct OfflineConfig {
     pub dir: PathBuf,
     /// Cap on finished downloads; `None` is unlimited.
     pub limit: Option<u64>,
+    /// Tells the server's error replies from tracks, so one is never kept
+    /// as a download. The default keeps every body.
+    pub reply_check: ReplyCheck,
 }
 
 /// One track's download, as the UI shows it.
@@ -234,6 +238,7 @@ impl std::fmt::Debug for OfflineStore {
 struct Inner {
     dir: PathBuf,
     http: reqwest::Client,
+    reply_check: ReplyCheck,
     state: Mutex<State>,
     wake: Notify,
     on_change: OnChange,
@@ -364,6 +369,7 @@ impl OfflineStore {
             // Offline downloads aren't waited on by playback: a slow server gets longer.
             http: fetch::client(Duration::from_secs(60)).map_err(io::Error::other)?,
             dir: cfg.dir,
+            reply_check: cfg.reply_check,
             wake: Notify::new(),
             on_change,
             state: Mutex::new(State {

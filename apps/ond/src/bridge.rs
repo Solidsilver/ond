@@ -301,6 +301,12 @@ pub fn connect_error(e: &subsonic::Error) -> String {
     }
 }
 
+/// How the stream cache and offline downloads tell a Subsonic error reply
+/// (or a proxy's page) from a track: the server answers `200` either way.
+pub fn reply_check() -> streamcache::ReplyCheck {
+    streamcache::ReplyCheck::new(subsonic::is_error_reply, subsonic::error_text)
+}
+
 /// Hearts and ratings carried by a list of songs.
 fn song_meta(songs: &[subsonic::Song]) -> UserMeta {
     UserMeta {
@@ -1187,6 +1193,17 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::Receiver;
     use tokio::sync::Semaphore;
+
+    #[test]
+    fn the_reply_check_turns_away_subsonic_errors_and_sign_in_pages_but_not_audio() {
+        let check = reply_check();
+        let envelope = br#"{"subsonic-response":{"status":"failed","error":{"code":40,"message":"Wrong username or password"}}}"#;
+        assert!(check.is_error(Some("application/json"), envelope));
+        assert!(check.is_error(None, envelope), "sniffed from the body when the type says nothing");
+        assert_eq!(check.message(envelope), "Wrong username or password");
+        assert!(check.is_error(Some("text/html"), b"<!DOCTYPE html><html><head><title>Sign in</title></head></html>"));
+        assert!(!check.is_error(Some("audio/flac"), b"fLaC\0\0\0\x22"));
+    }
 
     /// A server whose requests can be held until the test lets them go.
     #[derive(Clone, Default)]

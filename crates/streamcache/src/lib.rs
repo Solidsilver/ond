@@ -40,7 +40,7 @@ mod download;
 pub mod fetch;
 mod ranges;
 
-pub use fetch::{CONNECT_TIMEOUT, READ_TIMEOUT};
+pub use fetch::{CONNECT_TIMEOUT, READ_TIMEOUT, ReplyCheck};
 
 use download::Download;
 use std::collections::HashMap;
@@ -64,11 +64,15 @@ pub struct CacheConfig {
     /// How long a download may go without receiving a byte before it counts
     /// as stalled and retries ([`READ_TIMEOUT`] by default).
     pub read_timeout: Duration,
+    /// Keeps the server's error replies out of the cache: a download whose
+    /// body it flags fails instead of completing, and a small file it flags
+    /// is deleted at startup. The default keeps every body.
+    pub reply_check: ReplyCheck,
 }
 
 impl CacheConfig {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES, read_timeout: READ_TIMEOUT }
+        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES, read_timeout: READ_TIMEOUT, reply_check: ReplyCheck::default() }
     }
 }
 
@@ -299,7 +303,7 @@ impl StreamCache {
             }
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
             // An error reply cached as audio by an earlier version: it would fail every play.
-            if meta.len() < 64 * 1024 && is_error_reply(&path) {
+            if meta.len() < 64 * 1024 && is_error_reply(&cfg.reply_check, &path) {
                 let _ = std::fs::remove_file(&path);
                 continue;
             }
@@ -498,7 +502,7 @@ impl Inner {
 
         let (inner, task_dl, url) = (self.clone(), dl.clone(), url.to_owned());
         self.rt.spawn(async move {
-            let result = download::run(&task_dl, &inner.client, &url).await;
+            let result = download::run(&task_dl, &inner.client, &inner.cfg.reply_check, &url).await;
             // Renaming and evicting touch the disk: keep them off the async workers.
             let _ = tokio::task::spawn_blocking(move || inner.finish(&task_dl, result)).await;
         });
@@ -711,9 +715,9 @@ impl Seek for StreamReader {
     }
 }
 
-/// A Subsonic error reply (JSON or XML) rather than audio.
-fn is_error_reply(path: &Path) -> bool {
-    std::fs::read(path).is_ok_and(|bytes| subsonic::is_error_reply(None, &bytes))
+/// A file on disk that `check` calls an error reply rather than audio.
+fn is_error_reply(check: &ReplyCheck, path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| check.is_error(None, &bytes))
 }
 
 #[cfg(test)]

@@ -117,8 +117,15 @@ fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()
 }
 
+/// A store's config, with a check that knows the test server's XML error
+/// reply, as the app's knows its server's.
+fn config(dir: &Path, limit: Option<u64>) -> OfflineConfig {
+    let reply_check = ReplyCheck::new(|_, head| head.starts_with(b"<?xml"), |body| String::from_utf8_lossy(body).into_owned());
+    OfflineConfig { dir: dir.to_owned(), limit, reply_check }
+}
+
 fn store(dir: &Path, rt: &tokio::runtime::Runtime) -> OfflineStore {
-    OfflineStore::open(OfflineConfig { dir: dir.to_owned(), limit: None }, rt.handle().clone(), Arc::new(|| {})).unwrap()
+    OfflineStore::open(config(dir, None), rt.handle().clone(), Arc::new(|| {})).unwrap()
 }
 
 fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
@@ -364,7 +371,7 @@ fn the_limit_holds_back_downloads() {
     let rt = rt();
     let body = data(10_000);
     let server = Server::start(body.clone(), OPTS);
-    let s = OfflineStore::open(OfflineConfig { dir: dir.path().to_owned(), limit: Some(15_000) }, rt.handle().clone(), Arc::new(|| {})).unwrap();
+    let s = OfflineStore::open(config(dir.path(), Some(15_000)), rt.handle().clone(), Arc::new(|| {})).unwrap();
     s.set_source(Some(server.url()));
     s.pin(Pin::Album("a".into()), "A", vec![track("1", body.len()), track("2", body.len())]);
     wait_for("the first download and the limit", || s.snapshot().is_done("1") && s.snapshot().limit_reached);
@@ -896,7 +903,7 @@ fn the_limit_lets_unknown_sizes_through_only_until_it_is_reached() {
     let rt = rt();
     let body = data(10_000);
     let server = Server::start(body.clone(), OPTS);
-    let s = OfflineStore::open(OfflineConfig { dir: dir.path().to_owned(), limit: Some(5_000) }, rt.handle().clone(), Arc::new(|| {})).unwrap();
+    let s = OfflineStore::open(config(dir.path(), Some(5_000)), rt.handle().clone(), Arc::new(|| {})).unwrap();
     s.set_source(Some(server.url()));
     let unknown = |id: &str| TrackRef::new(id, Some("flac".into()), None);
     // Nothing tells it this one won't fit.

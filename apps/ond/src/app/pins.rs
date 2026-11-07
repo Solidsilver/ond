@@ -132,7 +132,8 @@ impl Downloads {
     pub(super) fn opener(rt: tokio::runtime::Handle, ctx: egui::Context, cache: streamcache::StreamCache) -> OpenStore {
         Arc::new(move |dir, limit| {
             let repaint = ctx.clone();
-            let store = OfflineStore::open(offline::OfflineConfig { dir, limit }, rt.clone(), Arc::new(move || repaint.request_repaint()))?;
+            let cfg = offline::OfflineConfig { dir, limit, reply_check: crate::bridge::reply_check() };
+            let store = OfflineStore::open(cfg, rt.clone(), Arc::new(move || repaint.request_repaint()))?;
             // A track that finished streaming is linked in rather than downloaded again.
             let cached = cache.clone();
             store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&streamcache::CacheKey::original(r.id.clone(), r.suffix.clone()))));

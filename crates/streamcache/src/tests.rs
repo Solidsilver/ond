@@ -324,22 +324,46 @@ fn key_file_names_are_safe() {
     assert_eq!(CacheKey::new("x", Some("".into())).file_name(), "x");
 }
 
+/// A server's way of saying no, as an app might check for it: text where
+/// audio should be, or a body that starts `ERROR`.
+fn refusals() -> ReplyCheck {
+    ReplyCheck::new(|kind, head| kind.is_some_and(|k| k.starts_with("text/")) || head.starts_with(b"ERROR"), |body| String::from_utf8_lossy(body).into_owned())
+}
+
 #[test]
-fn a_subsonic_error_reply_is_not_cached_as_audio() {
+fn an_error_reply_the_check_flags_is_not_cached_as_audio() {
     let rt = runtime();
     let dir = tempfile::tempdir().unwrap();
     // A stale error reply from an older version is purged at startup.
-    std::fs::write(dir.path().join("old.flac"), br#"{"subsonic-response":{"status":"failed","error":{"code":70}}}"#).unwrap();
-    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    std::fs::write(dir.path().join("old.flac"), b"ERROR 70: not found").unwrap();
+    let cfg = CacheConfig { reply_check: refusals(), ..CacheConfig::new(dir.path()) };
+    let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
     assert!(!dir.path().join("old.flac").exists());
 
-    let url = fixed_reply("application/json", br#"{"subsonic-response":{"status":"failed","error":{"code":40}}}"#);
+    let url = fixed_reply("audio/flac", b"ERROR 40: wrong password");
     let key = CacheKey::new("bad", Some("flac".into()));
     // The open waits for the headers or a failure, so it ends in the error.
     let err = cache.open(&key, &url, never()).err().expect("an error reply opened as audio");
-    assert!(!err.to_string().is_empty());
+    assert!(err.to_string().contains("wrong password"), "{err}");
     assert!(!dir.path().join("bad.flac").exists());
     assert!(!cache.progress(&key).is_some_and(|p| p.complete));
+}
+
+#[test]
+fn a_cache_without_a_check_keeps_every_reply() {
+    let rt = runtime();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("old.flac"), b"ERROR 70: not found").unwrap();
+    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    assert!(dir.path().join("old.flac").exists());
+
+    let body = b"ERROR 40: wrong password";
+    let url = fixed_reply("text/plain", body);
+    let key = CacheKey::new("kept", Some("flac".into()));
+    let mut got = Vec::new();
+    cache.open(&key, &url, never()).unwrap().read_to_end(&mut got).unwrap();
+    assert_eq!(got, body);
+    wait_until("kept complete", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
 }
 
 /// A reverse proxy's login page, answered 200 on the stream URL, is no track.
@@ -347,7 +371,8 @@ fn a_subsonic_error_reply_is_not_cached_as_audio() {
 fn a_html_page_answering_200_is_not_cached_as_audio() {
     let rt = runtime();
     let dir = tempfile::tempdir().unwrap();
-    let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
+    let cfg = CacheConfig { reply_check: refusals(), ..CacheConfig::new(dir.path()) };
+    let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
     let url = fixed_reply("text/html; charset=utf-8", b"<!DOCTYPE html><html><head><title>Sign in</title></head><body>SSO</body></html>");
     let key = CacheKey::new("sso", Some("flac".into()));
     let err = cache.open(&key, &url, never()).err().expect("a page opened as audio");

@@ -4600,7 +4600,6 @@ version = "0.4.4"
 dependencies = [
  "bytes",
  "reqwest",
- "subsonic",
  "tempfile",
  "tokio",
  "tracing",
