@@ -173,7 +173,7 @@ ABS libraries are either book or podcast libraries. Every library in Rede carrie
 
 ### Audiobookshelf
 
-What the `abs` crate talks to. The official API docs are marked as no longer maintained, so everything here gets checked against the server source before it's relied on.
+What the `abs` crate talks to. The official API docs are marked as no longer maintained, so everything here gets checked against the server source before it's relied on. The checked request and response shapes are in [abs-api.md](abs-api.md).
 
 - **Login:** `POST /login` with `username` and `password` and the header `x-return-tokens: true`, which returns `user.accessToken` and `user.refreshToken` in the body (without the header the refresh token is only set as a cookie).
 - **Refresh:** `POST /auth/refresh` with `x-refresh-token`. The server rotates the refresh token on every refresh, so the stored copy is replaced each time, atomically. Two refreshes racing would spend the same token twice: one refresh in flight per account, others wait on it.
