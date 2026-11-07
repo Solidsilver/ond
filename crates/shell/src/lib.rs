@@ -4,3 +4,11 @@
 //! Code comes here from an app when a second app needs it, not before, so
 //! what's here has been used twice (or is about to be). Nothing in it knows
 //! which app it's drawing for.
+
+pub mod chrome;
+pub mod colors;
+pub mod csd;
+pub mod icons;
+pub mod keys;
+pub mod over_art;
+pub mod theme;

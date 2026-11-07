@@ -476,7 +476,7 @@ mod tests {
     use super::*;
 
     /// Renders the volume and offline icons at toolbar size and large, to
-    /// look at: `cargo test -p ond-player --release icons::tests::volume_icons -- --ignored`
+    /// look at: `cargo test -p shell --release icons::tests::volume_icons -- --ignored`
     /// writes target/snapshots/icons-volume.png.
     #[test]
     #[ignore = "writes a picture to look at"]

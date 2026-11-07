@@ -12,10 +12,8 @@
 //! when idle).
 
 pub mod backdrop;
-pub mod colors;
 pub mod flow;
 pub mod gpu;
-pub mod over_art;
 pub mod particles;
 pub mod pulse;
 pub mod ribbons;
@@ -23,6 +21,8 @@ pub mod spectrogram;
 pub mod spectrum;
 pub mod visualizer;
 pub mod waveform;
+
+pub use shell::{colors, over_art};
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

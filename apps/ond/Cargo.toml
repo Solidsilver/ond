@@ -27,6 +27,7 @@ realfft = "3.5.0"
 offline = { version = "0.4.4", path = "../../crates/offline" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+shell = { version = "0.4.4", path = "../../crates/shell" }
 streamcache = { version = "0.4.4", path = "../../crates/streamcache" }
 subsonic = { version = "0.4.4", path = "../../crates/subsonic" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
@@ -44,6 +45,8 @@ workspace = true
 # Offscreen rendering for the review snapshots (`app/snapshots.rs`).
 audio = { version = "0.4.4", path = "../../crates/audio", features = ["preview"] }
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
+# The Linux window controls on any platform, for the snapshots and UI tests.
+shell = { version = "0.4.4", path = "../../crates/shell", features = ["preview"] }
 # Validates the visualizer's WGSL in CI, where no GPU builds its pipelines.
 # Pinned to the version wgpu pulls in, so it's the same build.
 naga = { version = "=30.0.1", features = ["wgsl-in"] }

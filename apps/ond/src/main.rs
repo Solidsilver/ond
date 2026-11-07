@@ -10,13 +10,10 @@ mod analyze;
 mod app;
 mod art;
 mod bridge;
-mod chrome;
-mod csd;
 mod failure;
 mod favorites;
 mod fmt;
 mod folder;
-mod icons;
 mod keys;
 mod local;
 mod lyrics;
@@ -38,12 +35,13 @@ mod settings;
 mod sync;
 #[cfg(test)]
 mod test_tracks;
-mod theme;
 mod tracks;
 mod updates;
 mod visuals;
 mod widgets;
 mod window;
+
+use shell::{chrome, csd, icons, theme};
 
 fn main() -> eframe::Result {
     init_logging();

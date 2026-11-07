@@ -11,7 +11,7 @@
 //! system title bar for now. "Use the system title bar" in Settings turns all
 //! of this off.
 
-use crate::visuals::over_art::OnArt;
+use crate::over_art::OnArt;
 use egui::{Context, CursorIcon, Id, Order, Pos2, Rect, ResizeDirection, Sense, Stroke, Vec2, ViewportCommand, pos2, vec2};
 use std::sync::OnceLock;
 
@@ -37,14 +37,14 @@ struct State {
     /// The window has no system frame (so no resize borders either).
     frameless: bool,
     /// The UI snapshots show the Linux controls on any platform.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "preview"))]
     preview: bool,
 }
 
 impl State {
     /// Whether the controls can be drawn here at all.
     fn supported(&self) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "preview"))]
         if self.preview {
             return true;
         }
@@ -117,7 +117,7 @@ pub fn set_window(ctx: &Context, controls: bool, frameless: bool) {
 }
 
 /// Lets the UI snapshots and tests show the Linux controls on any platform.
-#[cfg(test)]
+#[cfg(any(test, feature = "preview"))]
 pub fn preview(ctx: &Context, on: bool) {
     store(ctx, State { preview: on, ..state(ctx) });
 }

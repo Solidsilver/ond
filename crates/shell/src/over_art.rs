@@ -5,7 +5,7 @@
 //! when neither reaches the contrast on the art alone, a scrim under it, just
 //! as strong as it needs to be.
 
-use super::colors::contrast;
+use crate::colors::contrast;
 use egui::{Color32, ColorImage, Rect, Ui, pos2};
 
 /// The light foreground over art (the dark theme's text, a touch softer).

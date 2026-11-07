@@ -80,12 +80,12 @@ impl Accent {
             Accent::Rose => pair(0x9C3A62, 0xE79AB9),
             Accent::Violet => pair(0x5E4A9E, 0xB3A2EC),
             Accent::Graphite => pair(0x4E4F55, 0xB9BAC2),
-            Accent::Custom([r, g, b]) => match crate::visuals::colors::held_accent(Color32::from_rgb(r, g, b), &[t.bg, t.sidebar, t.panel, t.field], dark) {
+            Accent::Custom([r, g, b]) => match crate::colors::held_accent(Color32::from_rgb(r, g, b), &[t.bg, t.sidebar, t.panel, t.field], dark) {
                 Some(c) => c,
                 None => return (t.accent, t.on_accent),
             },
         };
-        (accent, crate::visuals::colors::on_accent(accent, &t).unwrap_or(t.on_accent))
+        (accent, crate::colors::on_accent(accent, &t).unwrap_or(t.on_accent))
     }
 }
 
@@ -171,7 +171,7 @@ impl Tokens {
     }
 
     /// The theme's tokens, with the accent in use: the user's, or the album
-    /// art's when colors adapt to it (see [`crate::visuals::colors`]).
+    /// art's when colors adapt to it (see [`crate::colors`]).
     fn themed(ctx: &Context, dark: bool) -> Tokens {
         let base = if dark { Self::DARK } else { Self::LIGHT };
         match tint(ctx, dark) {
@@ -183,31 +183,31 @@ impl Tokens {
 
 /// The tint in use (the chosen accent, or the album art's colors); `None`
 /// before the app's first frame, which means the theme's own.
-pub fn tint(ctx: &Context, dark: bool) -> Option<crate::visuals::colors::Tint> {
-    ctx.data(|d| d.get_temp::<crate::visuals::colors::Tints>(crate::visuals::colors::id())).map(|t| t.of(dark))
+pub fn tint(ctx: &Context, dark: bool) -> Option<crate::colors::Tint> {
+    ctx.data(|d| d.get_temp::<crate::colors::Tints>(crate::colors::id())).map(|t| t.of(dark))
 }
 
 /// [`tint`] for the theme `ui` is drawn in.
-pub fn tint_of(ui: &egui::Ui) -> Option<crate::visuals::colors::Tint> {
+pub fn tint_of(ui: &egui::Ui) -> Option<crate::colors::Tint> {
     tint(ui.ctx(), ui.visuals().dark_mode)
 }
 
 /// Sets the tint [`Tokens::of`] finds from here on.
-pub fn set_tints(ctx: &Context, tints: crate::visuals::colors::Tints) {
-    ctx.data_mut(|d| d.insert_temp(crate::visuals::colors::id(), tints));
+pub fn set_tints(ctx: &Context, tints: crate::colors::Tints) {
+    ctx.data_mut(|d| d.insert_temp(crate::colors::id(), tints));
 }
 
 /// Runs `draw` with `tints` in use, then puts back what was there: an album
 /// page in its own album's colors, inside a window in the playing one's.
-pub fn with_tints<R>(ctx: &Context, tints: Option<crate::visuals::colors::Tints>, draw: impl FnOnce() -> R) -> R {
+pub fn with_tints<R>(ctx: &Context, tints: Option<crate::colors::Tints>, draw: impl FnOnce() -> R) -> R {
     let Some(tints) = tints else { return draw() };
-    let id = crate::visuals::colors::id();
-    let outer = ctx.data(|d| d.get_temp::<crate::visuals::colors::Tints>(id));
+    let id = crate::colors::id();
+    let outer = ctx.data(|d| d.get_temp::<crate::colors::Tints>(id));
     set_tints(ctx, tints);
     let r = draw();
     match outer {
         Some(t) => set_tints(ctx, t),
-        None => ctx.data_mut(|d| d.remove::<crate::visuals::colors::Tints>(id)),
+        None => ctx.data_mut(|d| d.remove::<crate::colors::Tints>(id)),
     }
     r
 }
