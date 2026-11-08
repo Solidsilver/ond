@@ -2,10 +2,9 @@
 //! signing out. The sign-in form pushes [`Action::SignIn`]; everything that
 //! talks to the server is the bridge's.
 //!
-//! Signing out is the one thing here that touches only this app's own files:
-//! it forgets the tokens in the keyring and nothing else. The shelf and its
-//! books stay where they are, and so does the downloaded art, so signing back
-//! in finds the library at once.
+//! Signing out forgets local tokens and asks the server to end its login as
+//! a best effort. The shelf and downloaded art stay where they are, so signing
+//! back in finds the library at once.
 
 use super::{Action, RedeApp};
 use crate::failure::SIGNED_OUT;
@@ -147,7 +146,7 @@ impl RedeApp {
     /// back with the account filled in, and anything in flight is dropped.
     pub(super) fn sign_out(&mut self) {
         let Some(account) = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned())) else { return };
-        self.bridge.sign_out(account.clone());
+        self.bridge.sign_out(account.clone(), self.session.source.clone());
         self.session = Session::default();
         self.books.clear();
         self.art.set_source(None);

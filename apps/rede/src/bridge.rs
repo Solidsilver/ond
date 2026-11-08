@@ -208,6 +208,7 @@ impl Bridge {
             if !this.live(session) {
                 // Signed out while the password was on its way. The tokens the
                 // sign-in just got are for an account nobody wants.
+                let _ = client.logout().await;
                 return;
             }
             this.ready(session, account, client, warning).await;
@@ -217,11 +218,18 @@ impl Bridge {
     /// Signs out: the tokens go (and only the tokens: the shelf and its books
     /// stay), and anything in flight stops. The answer to a sign-in that was
     /// still running is dropped with the session.
-    pub fn sign_out(&self, account: Account) {
+    pub fn sign_out(&self, account: Account, source: Option<Arc<dyn Source>>) {
         self.end_session();
         // A refresh from the old client may still be in flight; its new pair
         // mustn't be written back over the sign-out.
         self.keeper.forget(account);
+        if let Some(source) = source {
+            self.rt.spawn(async move {
+                if let Err(e) = source.logout().await {
+                    tracing::info!("ending the server login: {e}");
+                }
+            });
+        }
     }
 
     /// Opens the shelf and tells the app the account is ready. The shelf is
@@ -230,6 +238,7 @@ impl Bridge {
     async fn ready(&self, session: u64, account: Account, client: abs::Client, warning: Option<String>) {
         let this = self.scoped_to(session);
         if !this.current() {
+            let _ = client.logout().await;
             return;
         }
         let path = this.paths.shelf(&account);
@@ -239,6 +248,10 @@ impl Bridge {
             Ok(Err(e)) => return this.send(AccountMsg::SignInFailed { session, error: format!("Couldn't open this account's library: {e}") }),
             Err(e) => return this.send(AccountMsg::SignInFailed { session, error: format!("Couldn't open this account's library: {e}") }),
         };
+        if !this.current() {
+            let _ = client.logout().await;
+            return;
+        }
         let source: Arc<dyn Source> = Arc::new(AbsSource::new(account.id, client, MIME_TYPES.iter().map(|m| (*m).to_owned()).collect()));
         this.send(AccountMsg::SignedIn { session, account, source, shelf, warning });
     }
@@ -382,6 +395,107 @@ mod tests {
 
     fn account() -> Account {
         Account::new("https://books.example.com", "sam")
+    }
+
+    struct TokenStore {
+        forgotten: Sender<()>,
+    }
+
+    impl crate::tokens::TokenStore for TokenStore {
+        fn store(&self, _: &Account, _: &abs::Tokens) {}
+        fn forget(&self, _: &Account) {
+            let _ = self.forgotten.send(());
+        }
+    }
+
+    #[test]
+    fn sign_out_ends_the_server_login_even_when_logout_is_refused() {
+        use std::io::{BufRead, Write};
+        for status in ["200 OK", "500 Internal Server Error"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (requested, request) = channel();
+            let (release, released) = channel();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    headers.push_str(&line);
+                }
+                requested.send(headers).unwrap();
+                released.recv_timeout(Duration::from_secs(3)).unwrap();
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let (tx, rx) = channel();
+            let (forgotten, forgot) = channel();
+            let keeper = Keeper::with_store(TokenStore { forgotten });
+            let dir = tempfile::tempdir().unwrap();
+            let bridge = Bridge::new(
+                rt.handle().clone(),
+                tx,
+                Arc::new(|| {}),
+                keeper.clone(),
+                Arc::new(Paths { config_file: dir.path().join("settings.json"), shelves: dir.path().join("accounts"), art_cache: dir.path().join("art") }),
+            );
+            let account = Account::new(format!("http://{address}"), "sam");
+            keeper.use_account(account.clone());
+            let client = abs::Client::new(&account.server, account.device()).unwrap().with_tokens(abs::Tokens::new("access", "refresh"));
+            client.set_auth_hook(keeper.hook());
+            let source = Arc::new(AbsSource::new(account.id, client, Vec::new()));
+            bridge.sign_out(account, Some(source.clone()));
+            // The server hasn't even received logout yet: local deletion must
+            // not depend on its response or on the async runtime being driven.
+            forgot.recv_timeout(Duration::from_secs(3)).unwrap();
+            let headers = rt.block_on(async { tokio::task::spawn_blocking(move || request.recv_timeout(Duration::from_secs(3)).unwrap()).await.unwrap() });
+            assert!(headers.starts_with("POST /logout HTTP/1.1\r\n"));
+            assert!(headers.to_ascii_lowercase().contains("x-refresh-token: refresh\r\n"));
+            assert!(source.client().tokens().is_none());
+            release.send(()).unwrap();
+            rt.block_on(async { tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap() });
+            assert!(rx.try_iter().next().is_none(), "logout does not deliver errors to the signed-out screen");
+        }
+    }
+
+    #[test]
+    fn an_unreachable_server_does_not_prevent_local_sign_out() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let account = Account::new(format!("http://{}", listener.local_addr().unwrap()), "sam");
+        drop(listener);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (tx, rx) = channel();
+        let (forgotten, forgot) = channel();
+        let keeper = Keeper::with_store(TokenStore { forgotten });
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = Bridge::new(
+            rt.handle().clone(),
+            tx,
+            Arc::new(|| {}),
+            keeper.clone(),
+            Arc::new(Paths { config_file: dir.path().join("settings.json"), shelves: dir.path().join("accounts"), art_cache: dir.path().join("art") }),
+        );
+        let client = abs::Client::new(&account.server, account.device()).unwrap().with_tokens(abs::Tokens::new("access", "refresh"));
+        let source = Arc::new(AbsSource::new(account.id, client, Vec::new()));
+        bridge.sign_out(account, Some(source.clone()));
+        forgot.recv_timeout(Duration::from_secs(3)).unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while source.client().tokens().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        assert_eq!(bridge.session(), 1);
+        assert!(rx.try_iter().next().is_none());
     }
 
     #[test]
