@@ -11,15 +11,31 @@ name = "Rede"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "accesskit"] }
+abs = { version = "0.4.4", path = "../../crates/abs" }
+anyhow = "1.0.104"
+directories = "6.0.0"
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "accesskit", "clipboard", "links"] }
 egui = "0.37.0"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+keyring = "4.2.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+shelf = { version = "0.4.4", path = "../../crates/shelf" }
 shell = { version = "0.4.4", path = "../../crates/shell" }
+sources = { version = "0.4.4", path = "../../crates/sources" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.29.0", features = ["v4"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-# Offscreen rendering for the snapshot (`view.rs`).
+async-trait = "0.1.92"
+bytes = "1.12.1"
+# Offscreen rendering for the snapshot (`app/snapshots.rs`).
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
 # The Linux window controls on any platform, and stand-in traffic lights.
 shell = { version = "0.4.4", path = "../../crates/shell", features = ["preview"] }
+tempfile = "3"

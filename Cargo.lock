@@ -3924,10 +3924,26 @@ dependencies = [
 name = "rede"
 version = "0.1.0"
 dependencies = [
+ "abs",
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "directories",
  "eframe",
  "egui",
  "egui_kittest",
+ "image",
+ "keyring",
+ "serde",
+ "serde_json",
+ "shelf",
  "shell",
+ "sources",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

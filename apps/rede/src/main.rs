@@ -1,20 +1,31 @@
 //! Rede: a native audiobook player for Audiobookshelf and audiobook folders.
 //!
-//! For now an empty window in the family's look, built from `shell`; the
-//! design and the plan to fill it are in `docs/rede/design.md`.
+//! The window, its title bar and the app's frame; the plan and the design are
+//! in `docs/rede/design.md`.
 
 // A release build on Windows is a GUI app: no console window behind it.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod view;
+mod app;
+mod art;
+mod bridge;
+mod failure;
+mod fmt;
+mod memo;
+mod prefs;
+mod settings;
+mod sync;
+mod tokens;
+mod widgets;
 
 use shell::window::Plan;
 
-/// The window's size and smallest size, in points.
+/// The library's books need room; the book page has one column of its own.
 const SIZE: [f32; 2] = [1100.0, 720.0];
 const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 
 fn main() -> eframe::Result {
+    init_logging();
     let plan = window();
     let options = eframe::NativeOptions {
         // The app id names the window for Wayland and X11 desktops.
@@ -22,33 +33,51 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    eframe::run_native(
-        "Rede",
-        options,
-        Box::new(move |cc| {
-            shell::theme::install(&cc.egui_ctx, shell::theme::ThemePref::System);
-            // The window opened from this plan; our title bar follows it.
-            plan.apply_frame(&cc.egui_ctx);
-            Ok(Box::new(Rede))
-        }),
-    )
+    eframe::run_native("Rede", options, Box::new(|cc| Ok(Box::new(app::RedeApp::new(cc)?))))
 }
 
-/// One window, one mode, until there's a player to make smaller.
+/// Logs to stderr from a terminal; launched as an app there is no terminal, so
+/// logs go to `rede.log` in the user's log folder, rotated once it passes 5 MB.
+fn init_logging() {
+    use std::io::IsTerminal;
+    let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,wgpu=warn,naga=warn".into());
+    if !std::io::stderr().is_terminal()
+        && let Some(file) = log_file()
+    {
+        tracing_subscriber::fmt().with_env_filter(filter()).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
+        return;
+    }
+    tracing_subscriber::fmt().with_env_filter(filter()).init();
+}
+
+fn log_file() -> Option<std::fs::File> {
+    const MAX: u64 = 5 * 1024 * 1024;
+    let dir = log_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("rede.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX) {
+        let _ = std::fs::rename(&path, dir.join("rede.log.1"));
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
+/// `~/Library/Logs/Rede` on macOS, `~/.local/state/rede/logs` on Linux,
+/// `%LOCALAPPDATA%\solidsilver\rede\data\logs` on Windows.
+fn log_dir() -> Option<std::path::PathBuf> {
+    if cfg!(target_os = "macos") {
+        return Some(directories::BaseDirs::new()?.home_dir().join("Library/Logs/Rede"));
+    }
+    let dirs = directories::ProjectDirs::from("dev", "solidsilver", "rede")?;
+    Some(dirs.state_dir().unwrap_or(dirs.data_local_dir()).join("logs"))
+}
+
+/// One window, one mode, and what a framed window draws its title bar with.
 fn window() -> Plan<()> {
     Plan::framed((), SIZE, MIN_SIZE)
 }
 
-struct Rede;
-
-impl eframe::App for Rede {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        view::root(ui);
-    }
-}
-
-/// A placeholder until Rede has its own artwork: a ring in the dark theme's
-/// accent on its sidebar color, drawn here so no image ships with it.
+/// A placeholder until Rede has artwork: a ring in the dark theme's accent on
+/// its sidebar color, drawn here so no image ships with it.
 fn icon() -> egui::IconData {
     use shell::theme::Tokens;
     const SIDE: usize = 256;
