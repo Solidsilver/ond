@@ -381,6 +381,18 @@ fn file_urls_are_absolute_with_the_token_and_the_path_prefix() {
     assert_eq!(client.cover_url("li1", None).as_str(), "https://example.com/abs/api/items/li1/cover");
 }
 
+#[tokio::test]
+async fn a_cover_is_fetched_without_a_token() {
+    let fake = Fake::start(|s| match s.path() {
+        "/api/items/li1/cover" if s.header("authorization").is_none() => ok("PNGDATA"),
+        _ => answer("404 Not Found", ""),
+    });
+    // Not signed in: a cover needs no token.
+    let client = fake.client();
+    assert_eq!(client.cover("li1", Some(200)).await.unwrap(), b"PNGDATA");
+    assert_eq!(fake.seen()[0].target, "/api/items/li1/cover?width=200");
+}
+
 #[test]
 fn server_addresses() {
     let c = Client::new(" https://example.com/abs/?x=1#y ", device()).unwrap();

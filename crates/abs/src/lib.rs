@@ -357,6 +357,12 @@ impl Client {
         url
     }
 
+    /// `GET /api/items/:id/cover`: the cover image itself. Covers need no
+    /// token, so this works on a client that isn't signed in.
+    pub async fn cover(&self, item_id: &str, width: Option<u32>) -> Result<Vec<u8>> {
+        self.send(Method::GET, self.cover_url(item_id, width), None, Auth::Open).await
+    }
+
     /// An absolute URL for a track's relative `contentUrl`, with the current
     /// access token in `?token=`, for the stream cache and the offline store.
     ///
