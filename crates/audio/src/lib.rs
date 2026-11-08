@@ -352,6 +352,11 @@ pub struct Status {
     /// it where a seek landed: after the callback has flushed the ring and
     /// before any new audio is queued, so the callback isn't counting then).
     pub(crate) frames_played: AtomicU64,
+    /// Current source time as f64 seconds, stored in one atomic so rate and
+    /// position cannot be read from different tracks. Callback (from timeline
+    /// segments); decoder (after an acknowledged seek, before queuing audio);
+    /// engine (zeroes it on stop and when reopening for a new track).
+    pub(crate) source_position_bits: AtomicU64,
     /// 0 when unknown (e.g. unseekable stream without a duration header). Engine.
     pub(crate) total_frames: AtomicU64,
     /// The output rate of the current track. Engine.
@@ -420,6 +425,13 @@ impl Status {
         secs(self.frames_played.load(Ordering::Relaxed), self.sample_rate.load(Ordering::Relaxed))
     }
 
+    /// Position in the current file's source time, independent of processing
+    /// speed and the device rate. Like `position_secs`, this is the end of the
+    /// last buffer handed to the device, and freezes while paused or buffering.
+    pub fn source_position_secs(&self) -> f64 {
+        f64::from_bits(self.source_position_bits.load(Ordering::Relaxed))
+    }
+
     /// Playback is using the network: loading, buffering, or still downloading
     /// the current track or the next one's prefetch. Background work that wants
     /// bandwidth should wait.
@@ -469,6 +481,7 @@ impl Status {
         self.buffering.store(buffering, Ordering::Relaxed);
         self.sample_rate.store(RATE, Ordering::Relaxed);
         self.frames_played.store((position * RATE as f64) as u64, Ordering::Relaxed);
+        self.source_position_bits.store(position.to_bits(), Ordering::Relaxed);
         self.total_frames.store((duration * RATE as f64) as u64, Ordering::Relaxed);
         self.total_bytes.store(1_000_000, Ordering::Relaxed);
         self.fetched_bytes.store((fetched.clamp(0.0, 1.0) * 1_000_000.0) as u64, Ordering::Relaxed);
@@ -855,6 +868,7 @@ impl Engine {
         self.status.set_state(PlayState::Stopped);
         self.status.track_seq.store(0, Ordering::Relaxed);
         self.status.frames_played.store(0, Ordering::Relaxed);
+        self.status.source_position_bits.store(0, Ordering::Relaxed);
         self.status.total_frames.store(0, Ordering::Relaxed);
         self.status.fetched_bytes.store(0, Ordering::Relaxed);
         self.status.total_bytes.store(0, Ordering::Relaxed);
@@ -957,7 +971,7 @@ impl Engine {
         }
         let paused = state == PlayState::Paused;
         if let Some(t) = self.current() {
-            let at = Duration::from_secs_f64(self.status.position_secs());
+            let at = Duration::from_secs_f64(self.status.source_position_secs());
             return Some(Resume { src: t.src.clone(), at, paused, announced: true });
         }
         // The UI hasn't heard this track start, unless this session is itself
@@ -1266,6 +1280,7 @@ impl Engine {
             // The new ring starts on a new track. (A first ring keeps the
             // position a session started at, set by the decoder's seek.)
             self.status.frames_played.store(0, Ordering::Relaxed);
+            self.status.source_position_bits.store(0, Ordering::Relaxed);
             // As at a gapless boundary: the track that was next is playing
             // now, and the UI names the new next once it hears about it.
             self.forget_next();

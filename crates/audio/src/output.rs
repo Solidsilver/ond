@@ -105,6 +105,16 @@ pub(crate) struct Marker {
     pub(crate) source_bits: Option<u32>,
 }
 
+/// A linear piece of source time beside the sample ring. Positions are samples
+/// in the ring and frames in the file, so channel mapping never changes time.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Segment {
+    pub(crate) at: u64,
+    pub(crate) source_frame: f64,
+    pub(crate) source_rate: u32,
+    pub(crate) ratio: f64,
+}
+
 /// Track boundaries a ring can hold at once. The decoder waits for room once
 /// it is this many tracks ahead of the output. (Must stay below
 /// [`crate::replaygain::GAIN_SLOTS`]: the gain table is indexed by track number
@@ -118,6 +128,8 @@ pub struct RingInput {
     pub(crate) samples: Consumer<f32>,
     /// Where the next tracks begin. Pushed by the decoder when it continues gaplessly.
     pub(crate) markers: Consumer<Marker>,
+    segments: Option<Consumer<Segment>>,
+    segment: Option<Segment>,
     /// Set by the decoder after its last push; starvation after this is the end, not an underrun.
     pub(crate) input_done: Arc<AtomicBool>,
     pub(crate) ctl: Arc<RingCtl>,
@@ -148,7 +160,26 @@ impl std::fmt::Debug for RingInput {
 
 impl RingInput {
     pub(crate) fn new(samples: Consumer<f32>, markers: Consumer<Marker>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
-        Self { samples, markers, input_done, ctl, pos: 0, gain: 1.0, rg: 1.0, buffering: true, faded: 0, source_bits: None, processed: false }
+        Self {
+            samples,
+            markers,
+            segments: None,
+            segment: None,
+            input_done,
+            ctl,
+            pos: 0,
+            gain: 1.0,
+            rg: 1.0,
+            buffering: true,
+            faded: 0,
+            source_bits: None,
+            processed: false,
+        }
+    }
+
+    pub(crate) fn with_timeline(mut self, segments: Consumer<Segment>) -> Self {
+        self.segments = Some(segments);
+        self
     }
 
     /// Describes what's in the ring, for the dither decision: the first
@@ -200,6 +231,10 @@ impl RingInput {
         if requested != self.ctl.flush_acked.load(Ordering::Relaxed) {
             self.discard();
             while self.markers.pop().is_ok() {}
+            if let Some(segments) = self.segments.as_mut() {
+                while segments.pop().is_ok() {}
+            }
+            self.segment = None;
             self.pos = 0;
             self.buffering = true;
             self.ctl.released_gen.fetch_max(self.ctl.pending_release.load(Ordering::Acquire), Ordering::AcqRel);
@@ -307,6 +342,15 @@ impl RingInput {
                 Ok(m) => (m.at - self.pos) as usize,
                 Err(_) => usize::MAX,
             };
+            let source_until = match self.segments.as_mut().and_then(|segments| segments.peek().ok()) {
+                Some(segment) if segment.at <= self.pos => {
+                    self.segment = self.segments.as_mut().and_then(|segments| segments.pop().ok());
+                    continue;
+                }
+                Some(segment) => (segment.at - self.pos) as usize,
+                None => usize::MAX,
+            };
+            let until = until.min(source_until);
             let rg_target = if bit_perfect { 1.0 } else { status.gains.get(status.track_seq.load(Ordering::Acquire)) };
             let n = (avail - written).min(until);
             let Ok(chunk) = self.samples.read_chunk(n) else { break };
@@ -325,6 +369,11 @@ impl RingInput {
             written += n;
             self.pos += n as u64;
             status.frames_played.fetch_add((n / channels) as u64, Ordering::Relaxed);
+            if let Some(segment) = self.segment {
+                let frames = (self.pos - segment.at) / channels as u64;
+                let source = (segment.source_frame + frames as f64 * segment.ratio) / segment.source_rate.max(1) as f64;
+                status.source_position_bits.store(source.to_bits(), Ordering::Relaxed);
+            }
         }
         out[written..].fill(silence);
 

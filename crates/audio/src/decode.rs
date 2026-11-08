@@ -8,9 +8,17 @@
 //! [`choose_rate`]: the file's own rate when the device can do it, else a
 //! resampler converts on this thread. Gapless needs the same source rate *and*
 //! the same device format, so one resampler carries across the boundary.
+//!
+//! Source time travels in a separate bounded SPSC segment queue beside the
+//! samples. Unlike track markers, segments can change time without advancing
+//! the track or its gain (seeks now, silence cuts later). Each is published
+//! before its samples; the callback splits at both queues and uses arithmetic
+//! alone to publish source time. A flush clears both queues before the decoder
+//! publishes a replacement origin. Resampler delay is trimmed, so segments use
+//! its input-to-output position rather than the amount already pushed.
 
 use crate::channels::{ChannelChange, ChannelMap, output_channels};
-use crate::output::{MARKER_CAP, Marker, RingCtl, RingInput, StreamFormat};
+use crate::output::{MARKER_CAP, Marker, RingCtl, RingInput, Segment, StreamFormat};
 use crate::replaygain::{GainConfig, ReplayGain, applied_gain, parse_tag_value};
 use crate::resample::StreamResampler;
 use crate::signal::{DeviceCaps, choose_rate};
@@ -266,6 +274,7 @@ struct Track {
     out_rate: u32,
     /// ReplayGain from the file's tags.
     tag_gain: ReplayGain,
+    source_start: u64,
 }
 
 impl Track {
@@ -288,6 +297,7 @@ struct Out {
     src_rate: u32,
     samples: Producer<f32>,
     markers: Producer<Marker>,
+    segments: Producer<Segment>,
     done: Arc<AtomicBool>,
     ctl: Arc<RingCtl>,
     pushed: u64,
@@ -490,6 +500,7 @@ impl Ctx {
             // first packet's own format confirms or corrects it.
             out_rate: self.device_rate(params.sample_rate.unwrap_or(0), params.channels.as_ref().map_or(2, |c| c.count() as u16)),
             tag_gain,
+            source_start: 0,
         })
     }
 
@@ -636,7 +647,7 @@ impl Ctx {
         let linear = applied_gain(&cfg, &replay_gain, src.album_context).map_or(1.0, |g| g.linear);
         self.publish(|s| s.gains.set(seq, linear));
         let feed = Feed { rate: spec.rate, channels: spec.channels, downmixed: matches!(change, ChannelChange::Downmix { .. }) };
-        let attached = self.attach(output, feed, out)?;
+        let attached = self.attach(output, feed, t.source_start, out)?;
         if !matches!(attached, Attached::Cancelled) {
             let total_frames = t.total_frames.map(|f| t.to_output(f));
             let _ = self.msgs.send(DecoderMsg::Track { seq, src: src.clone(), format, output, total_frames, replay_gain, channels: change });
@@ -718,7 +729,7 @@ impl Ctx {
     /// bit depth: each track's depth travels with its [`Marker`], so a 16-bit
     /// track followed by a 24-bit one (or a lossy one by a lossless one) at
     /// the same rate stays gapless.
-    fn attach(&mut self, output: StreamFormat, feed: Feed, out: &mut Option<Out>) -> Result<Attached, String> {
+    fn attach(&mut self, output: StreamFormat, feed: Feed, source_frame: u64, out: &mut Option<Out>) -> Result<Attached, String> {
         let format = StreamFormat { bits_per_sample: None, ..output };
         if let Some(o) = out.as_mut() {
             if o.format == format && o.src_rate == feed.rate && o.src_channels == feed.channels {
@@ -735,6 +746,9 @@ impl Ctx {
                         return Ok(Attached::Cancelled);
                     }
                     thread::sleep(Duration::from_millis(2));
+                }
+                if !self.segment(o, at, source_frame) {
+                    return Ok(Attached::Cancelled);
                 }
                 return Ok(Attached::Continued);
             }
@@ -757,19 +771,36 @@ impl Ctx {
         let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
         let (samples, consumer) = RingBuffer::new(cap.max(8192));
         let (markers, marker_consumer) = RingBuffer::new(MARKER_CAP);
+        // The first track has a segment too, but no boundary marker.
+        let (segments, segment_consumer) = RingBuffer::new(MARKER_CAP + 1);
         let done = Arc::new(AtomicBool::new(false));
         let ctl = Arc::new(RingCtl::default());
-        let input =
-            RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone()).with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
+        let input = RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone())
+            .with_timeline(segment_consumer)
+            .with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
         let (src_rate, src_channels) = (feed.rate, feed.channels);
-        *out = Some(Out { format, src_rate, samples, markers, done, ctl, pushed: 0, src_channels, resampler, rs_base: 0 });
+        *out = Some(Out { format, src_rate, samples, markers, segments, done, ctl, pushed: 0, src_channels, resampler, rs_base: 0 });
+        if !self.segment(out.as_mut().expect("new ring"), 0, source_frame) {
+            return Ok(Attached::Cancelled);
+        }
         Ok(Attached::NewRing(input))
+    }
+
+    fn segment(&self, o: &mut Out, at: u64, source_frame: u64) -> bool {
+        let segment = Segment { at, source_frame: source_frame as f64, source_rate: o.src_rate, ratio: o.src_rate as f64 / o.format.sample_rate as f64 };
+        while o.segments.push(segment).is_err() {
+            if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        true
     }
 
     /// Applies the newest pending seek: reposition the reader, reset the decoder,
     /// flush stale audio out of the ring (releasing the output's hold), then
     /// publish the new position.
-    fn seek(&mut self, seq: u64, t: &mut Track, out: Option<&mut Out>) -> Seeked {
+    fn seek(&mut self, seq: u64, t: &mut Track, mut out: Option<&mut Out>) -> Seeked {
         // Clear before draining: a request racing in after this is seen on the next pass.
         self.seek_pending.store(false, Ordering::Release);
         let Some(req) = self.seek_rx.try_iter().last() else { return Seeked::Nothing };
@@ -799,7 +830,7 @@ impl Ctx {
         };
         // Whatever happened, the output must stop holding: flush, then let it buffer.
         let started = out.is_some();
-        if let Some(o) = out {
+        if let Some(o) = out.as_deref_mut() {
             let generation = o.ctl.request_flush(req.hold);
             // The callback empties the ring. It runs whenever the device is open
             // (paused too), and the engine opens the device as soon as it hears
@@ -832,11 +863,19 @@ impl Ctx {
             Seeked::Nothing => None,
         };
         if let Some(frames) = frames {
+            t.source_start = frames;
+            if let Some(o) = out {
+                self.segment(o, 0, frames);
+            }
             // The callback counts frames at the output rate. (Past the end of a
             // track that hasn't started, the next one starts its own count.)
             if started || matches!(outcome, Seeked::To(_)) {
                 let played = t.to_output(frames);
-                self.publish(|s| s.frames_played.store(played, Ordering::Relaxed));
+                let source_secs = frames as f64 / t.clock.rate.max(1) as f64;
+                self.publish(|s| {
+                    s.frames_played.store(played, Ordering::Relaxed);
+                    s.source_position_bits.store(source_secs.to_bits(), Ordering::Relaxed);
+                });
             }
             let position_secs = if t.clock.rate == 0 { 0.0 } else { frames as f64 / t.clock.rate as f64 };
             let _ = self.msgs.send(DecoderMsg::Seeked { seq, position_secs, hold: req.hold });

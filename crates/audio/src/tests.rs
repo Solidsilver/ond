@@ -10,6 +10,8 @@ use std::time::Instant;
 struct FakeBackend {
     caps: DeviceCaps,
     played: Arc<Mutex<Vec<f32>>>,
+    /// Positions after each callback, including boundaries inside a buffer.
+    positions: Arc<Mutex<Vec<(u64, f64, f64)>>>,
     stop: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
     drained: Arc<AtomicBool>,
     opens: Arc<AtomicU64>,
@@ -52,6 +54,7 @@ impl FakeBackend {
         Self {
             caps,
             played: Arc::default(),
+            positions: Arc::default(),
             stop: None,
             drained: Arc::default(),
             opens: Arc::default(),
@@ -159,6 +162,7 @@ impl OutputBackend for FakeBackend {
         let drained = Arc::new(AtomicBool::new(false));
         self.drained = drained.clone();
         let (played, stop2) = (self.played.clone(), stop.clone());
+        let positions = self.positions.clone();
         let channels = format.channels as usize;
         let (period, frames) = self.period;
         // An integer device gets dither where needed, as through CoreAudio.
@@ -184,6 +188,7 @@ impl OutputBackend for FakeBackend {
                 if input.fill_for_device(&mut buf, channels, format.sample_rate, &status, device_bits, &mut dither) {
                     drained.store(true, Ordering::Release);
                 }
+                positions.lock().unwrap().push((status.track_seq.load(Ordering::Acquire), status.position_secs(), status.source_position_secs()));
                 rendered = true;
             }
         });
@@ -1535,5 +1540,47 @@ fn playing_from_a_position_never_outputs_the_beginning() {
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
     assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{seen:?}");
     assert_eq!(played_i16(&played), samples[2 * 44_100 * 2..]);
+    engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn source_time_matches_output_time_at_unity_through_resampling_and_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.own_rate = Some(48_000);
+    let positions = backend.positions.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+    let source = |id, frames: usize| source_at(&dir, id, 96_000, &loud(frames * 2, 101));
+    engine.send(Command::Play(source("a", 96_001)));
+    engine.send(Command::SetNext(Some(source("b", 96_007))));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("a".into(), false, false), ("b".into(), true, false)]);
+    let positions = positions.lock().unwrap();
+    assert!(positions.iter().any(|(seq, _, source)| *seq == 1 && *source > 0.1));
+    for (_, output, source) in positions.iter() {
+        assert!((output - source).abs() < 1.0 / 48_000.0, "output {output}, source {source}");
+    }
+    engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn source_time_starts_at_the_requested_position_and_follows_a_seek() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.period = UI_PACE;
+    let positions = backend.positions.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::PlayFrom(file_source(&dir, "book", &loud(2 * 44_100 * 8, 102)), Duration::from_secs(2)));
+    engine.send(Command::Pause);
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert_eq!(engine.status.source_position_secs(), 2.0);
+    engine.send(Command::Seek(Duration::from_secs_f64(4.25)));
+    events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+    assert!((engine.status.source_position_secs() - 4.25).abs() <= 1.0 / 44_100.0);
+    engine.send(Command::Resume);
+    events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    for (_, output, source) in positions.lock().unwrap().iter() {
+        assert!((output - source).abs() <= 1.0 / 44_100.0, "output {output}, source {source}");
+    }
     engine.shutdown(Duration::from_secs(2));
 }
