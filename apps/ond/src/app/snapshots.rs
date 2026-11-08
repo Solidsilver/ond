@@ -81,6 +81,12 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, s
             .build_ui_state(
                 |ui, app: &mut Option<OndApp>| {
                     if let Some(app) = app {
+                        // Storage labels describe the fixture, not the machine
+                        // rendering it or the random folder holding its files.
+                        app.downloads.base = PathBuf::from("/Users/demo/Music/Ond/Downloads");
+                        if app.downloads.snap.free_bytes != Some(180_000_000_000) {
+                            std::sync::Arc::make_mut(&mut app.downloads.snap).free_bytes = Some(180_000_000_000);
+                        }
                         if app.login.is_some() {
                             app.login_ui(ui);
                         } else {
