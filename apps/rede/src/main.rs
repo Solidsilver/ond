@@ -76,33 +76,14 @@ fn window() -> Plan<()> {
     Plan::framed((), SIZE, MIN_SIZE)
 }
 
-/// A placeholder until Rede has artwork: a ring in the dark theme's accent on
-/// its sidebar color, drawn here so no image ships with it.
+/// The window icon uses the platform's padding, as Ond's does.
 fn icon() -> egui::IconData {
-    use shell::theme::Tokens;
-    const SIDE: usize = 256;
-    let t = Tokens::DARK;
-    let (bg, ring) = (t.sidebar, t.accent);
-    let c = SIDE as f32 / 2.0;
-    let mut rgba = Vec::with_capacity(SIDE * SIDE * 4);
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
-            // A rounded square: inside when the corner distance is within the radius.
-            let (qx, qy) = ((dx.abs() - (c - 56.0)).max(0.0), (dy.abs() - (c - 56.0)).max(0.0));
-            let inside = (qx * qx + qy * qy).sqrt() <= 48.0;
-            let r = (dx * dx + dy * dy).sqrt();
-            let color = if !inside {
-                egui::Color32::TRANSPARENT
-            } else if (r - 56.0).abs() <= 12.0 {
-                ring
-            } else {
-                bg
-            };
-            rgba.extend_from_slice(&color.to_array());
-        }
-    }
-    egui::IconData { rgba, width: SIDE as u32, height: SIDE as u32 }
+    let png: &[u8] = if cfg!(target_os = "macos") {
+        include_bytes!("../../../packaging/rede/macos/icon-256.png")
+    } else {
+        include_bytes!("../../../packaging/rede/linux/hicolor/256x256/apps/dev.solidsilver.rede.png")
+    };
+    eframe::icon_data::from_png_bytes(png).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -110,10 +91,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_placeholder_icon_is_a_square_with_clear_corners() {
+    fn the_packaged_window_icon_decodes_at_256_pixels() {
         let icon = icon();
         assert_eq!((icon.width, icon.height, icon.rgba.len()), (256, 256, 256 * 256 * 4));
-        assert_eq!(icon.rgba[3], 0, "the corner is transparent");
+        let packaged = if cfg!(target_os = "macos") {
+            include_bytes!("../../../packaging/rede/macos/icon-256.png").as_slice()
+        } else {
+            include_bytes!("../../../packaging/rede/linux/hicolor/256x256/apps/dev.solidsilver.rede.png").as_slice()
+        };
+        assert_eq!(icon.rgba, image::load_from_memory(packaged).unwrap().to_rgba8().into_raw());
         let mid = (128 * 256 + 128) * 4;
         assert_eq!(icon.rgba[mid + 3], 255, "the middle is opaque");
     }

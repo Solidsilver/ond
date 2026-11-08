@@ -3944,6 +3944,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "winresource",
 ]
 
 [[package]]
