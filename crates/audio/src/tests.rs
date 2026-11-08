@@ -1523,3 +1523,17 @@ fn a_short_tracks_next_is_prefetched_while_it_is_still_downloading() {
     assert!(engine.status.needs_network());
     engine.send(Command::Shutdown);
 }
+
+#[test]
+fn playing_from_a_position_never_outputs_the_beginning() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = loud(2 * 44_100 * 3, 91);
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::PlayFrom(file_source(&dir, "book", &samples), Duration::from_secs(2)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{seen:?}");
+    assert_eq!(played_i16(&played), samples[2 * 44_100 * 2..]);
+    engine.shutdown(Duration::from_secs(2));
+}

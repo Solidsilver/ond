@@ -225,6 +225,8 @@ impl TrackSource {
 #[derive(Debug)]
 pub enum Command {
     Play(TrackSource),
+    /// Start at a source position, before any audio reaches the device.
+    PlayFrom(TrackSource, Duration),
     Pause,
     Resume,
     Stop,
@@ -690,6 +692,10 @@ impl Engine {
                 // A new queue: whatever the old one had lined up doesn't follow this track.
                 self.forget_next();
                 self.start(src, None);
+            }
+            Command::PlayFrom(src, at) => {
+                self.forget_next();
+                self.start(src, Some(at));
             }
             Command::Pause => {
                 // Loading too: a pause pressed while a slow server answers must
