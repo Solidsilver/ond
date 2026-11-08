@@ -155,6 +155,8 @@ impl Bridge {
     pub fn start(&self, account: Account) {
         let session = self.session();
         let this = self.scoped_to(session);
+        self.keeper.use_account(account.clone());
+        let hook = self.keeper.hook();
         self.rt.spawn(async move {
             let wanted = account.clone();
             let settings = Settings::default();
@@ -167,8 +169,7 @@ impl Bridge {
                 Ok(c) => c.with_tokens(tokens),
                 Err(e) => return this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
             };
-            this.keeper.use_account(Some(account.clone()));
-            client.set_auth_hook(this.keeper.hook());
+            client.set_auth_hook(hook);
             this.ready(session, account, client, None).await;
         });
     }
@@ -179,14 +180,15 @@ impl Bridge {
     pub fn sign_in(&self, account: Account, password: String) {
         let session = self.session();
         let this = self.scoped_to(session);
+        self.keeper.use_account(account.clone());
+        let hook = self.keeper.hook();
         self.rt.spawn(async move {
             let failed = |error: String| Msg::Account(AccountMsg::SignInFailed { session, error });
             let client = match abs::Client::new(&account.server, account.device()) {
                 Ok(c) => c,
                 Err(e) => return this.send(failed(sign_in_error(&e))),
             };
-            this.keeper.use_account(Some(account.clone()));
-            client.set_auth_hook(this.keeper.hook());
+            client.set_auth_hook(hook);
             let status = match client.status().await {
                 Ok(s) => s,
                 Err(e) => return this.send(failed(sign_in_error(&e))),
@@ -206,9 +208,6 @@ impl Bridge {
             if !this.live(session) {
                 // Signed out while the password was on its way. The tokens the
                 // sign-in just got are for an account nobody wants.
-                this.keeper.use_account(None);
-                let forgotten = account.clone();
-                let _ = tokio::task::spawn_blocking(move || Settings::default().forget_tokens(&forgotten)).await;
                 return;
             }
             this.ready(session, account, client, warning).await;
@@ -222,12 +221,7 @@ impl Bridge {
         self.end_session();
         // A refresh from the old client may still be in flight; its new pair
         // mustn't be written back over the sign-out.
-        self.keeper.use_account(None);
-        let this = self.clone();
-        self.rt.spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || Settings::default().forget_tokens(&account)).await;
-            this.keeper.use_account(None);
-        });
+        self.keeper.forget(account);
     }
 
     /// Opens the shelf and tells the app the account is ready. The shelf is
@@ -490,7 +484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_rt, bridge, rx, keeper) = rig(dir.path());
         send_sync(&keeper.hook());
-        keeper.use_account(Some(account()));
+        keeper.use_account(account());
         (keeper.hook())(abs::AuthEvent::SignedOut);
         // The keeper's thread takes it from there; nothing was sent to the UI.
         assert!(rx.try_iter().next().is_none());
