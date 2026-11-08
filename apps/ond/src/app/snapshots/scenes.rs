@@ -566,6 +566,13 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         let jobs: Vec<_> =
             (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
         app.analysis.runner.enqueue(jobs);
+        // The worker acknowledges playback asynchronously. Capture the intended
+        // waiting state rather than racing its first progress update.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !app.analysis.runner.progress().waiting {
+            assert!(std::time::Instant::now() < deadline, "the analysis worker never yielded to playback");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
     s.shoot(h, "settings-analysing");
