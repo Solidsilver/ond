@@ -2,6 +2,7 @@
 //! it.
 //!
 //! [`Network`](Error::Network) means check on the server and try again later,
+//! [`Busy`](Error::Busy) means wait before trying again,
 //! [`SignedOut`](Error::SignedOut) means the account needs the user,
 //! [`Server`](Error::Server) and [`Decode`](Error::Decode) are shown as they
 //! are, and [`NotSupported`](Error::NotSupported) is a request this source has
@@ -31,6 +32,10 @@ pub enum Error {
     /// it.
     #[error("signed out; sign in again")]
     SignedOut,
+    /// The server's rate limit refused the request. The session is fine;
+    /// try again after `retry_after`, if the server said.
+    #[error("the server is busy; try again later")]
+    Busy { retry_after: Option<std::time::Duration> },
     /// This source has no answer for the request, and no amount of retrying
     /// will change that (an item a build doesn't handle yet, an operation the
     /// server doesn't offer).
@@ -56,6 +61,7 @@ impl Error {
     pub fn status(&self) -> Option<u16> {
         match self {
             Error::Server { status, .. } => Some(*status),
+            Error::Busy { .. } => Some(429),
             _ => None,
         }
     }
@@ -66,9 +72,13 @@ impl From<abs::Error> for Error {
         match e {
             abs::Error::Network(e) => Error::Network(e.to_string()),
             abs::Error::Server { status, message } => Error::Server { status, message },
-            // The client is already signed in, so a refused token is the only
-            // auth failure its calls can meet; wrong credentials and the rate
-            // limiter belong to signing in, which the app does itself.
+            // A signed-in client's call can still meet the rate limiter: a
+            // token refresh counts against the same budget as signing in. That
+            // leaves the session intact, so it must not read as signed out.
+            abs::Error::Auth(abs::AuthError::RateLimited { retry_after }) => Error::Busy { retry_after },
+            // Otherwise a refused token is the only auth failure its calls
+            // can meet; wrong credentials belong to signing in, which the app
+            // does itself.
             abs::Error::Auth(_) => Error::SignedOut,
             abs::Error::Decode(said) => Error::Decode(said),
             // A reply that was a web page or something else entirely: the app
@@ -82,5 +92,23 @@ impl From<abs::Error> for Error {
             // like an unreachable server, which is what it is to a sync.
             abs::Error::Url(e) => Error::Network(format!("invalid server address: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rate_limited_refresh_is_busy_not_signed_out() {
+        let e = Error::from(abs::Error::Auth(abs::AuthError::RateLimited { retry_after: Some(std::time::Duration::from_secs(30)) }));
+        assert!(!e.is_signed_out());
+        assert!(matches!(e, Error::Busy { retry_after: Some(d) } if d.as_secs() == 30));
+        assert_eq!(e.status(), Some(429));
+    }
+
+    #[test]
+    fn a_refused_token_is_signed_out() {
+        assert!(Error::from(abs::Error::Auth(abs::AuthError::SignedOut)).is_signed_out());
     }
 }
