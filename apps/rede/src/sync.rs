@@ -83,6 +83,10 @@ pub async fn run(source: &dyn Source, shelf: &Shelf, now: sources::Stamp, progre
             // never listed before has nothing to compare with.
             match shelf.items(&library.id) {
                 Ok(stored) => {
+                    if changes.items.is_empty() && !stored.is_empty() {
+                        tracing::warn!(library = %library.id, "empty full listing for a populated library; keeping its books and retrying next sync");
+                        continue;
+                    }
                     let listed: std::collections::HashSet<&str> = changes.items.iter().map(|i| i.id.as_str()).collect();
                     changes.removed = stored.iter().filter(|s| !listed.contains(s.id.as_str())).map(|s| s.id.clone()).collect();
                 }
@@ -293,6 +297,30 @@ mod tests {
         assert_eq!(outcome, Outcome::Done(report(1, 2)));
         assert_eq!(fake.asked(), [("books".to_string(), None)], "from the start, so it can see what's missing");
         assert_eq!(titles(&shelf), ["Kept, revised"]);
+    }
+
+    #[test]
+    fn an_empty_full_listing_keeps_the_books_and_retries_from_the_same_cursor() {
+        let (_dir, shelf) = shelf(&[("kept", "Kept")]);
+        let state = SyncState { cursor: Some("5".into()), newest: Some(Stamp::from_millis(1_500)) };
+        shelf.set_sync_state("books", &state).unwrap();
+        let fake = Fake::new(&[]);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for _ in 0..2 {
+            assert_eq!(rt.block_on(run(&fake, &shelf, now(), |_| {})), Outcome::Done(report(0, 0)));
+            assert_eq!(titles(&shelf), ["Kept"]);
+            assert_eq!(shelf.sync_state("books").unwrap(), Some(state.clone()));
+        }
+        assert_eq!(fake.asked(), [("books".to_string(), None), ("books".to_string(), None)]);
+    }
+
+    #[test]
+    fn an_empty_full_listing_for_a_new_library_records_its_cursor() {
+        let (_dir, shelf) = shelf(&[]);
+        let fake = Fake::new(&[]);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert_eq!(rt.block_on(run(&fake, &shelf, now(), |_| {})), Outcome::Done(report(0, 0)));
+        assert_eq!(shelf.sync_state("books").unwrap().unwrap().cursor, Some(now().millis().to_string()));
     }
 
     #[test]
