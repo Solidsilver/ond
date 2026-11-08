@@ -226,22 +226,40 @@ impl Art {
         }
     }
 
-    /// Paints `cover` into `rect` (or the placeholder tile). A rect that isn't
-    /// the cover's shape is filled edge to edge, cropping its middle.
-    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>) {
+    /// Fits the whole cover on a quiet backdrop, or shows its title while art
+    /// is missing or still loading. Both views use the same square bounds.
+    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, title: &str, radius: impl Into<CornerRadius>) {
         let radius = radius.into();
+        let t = shell::theme::Tokens::of(ui);
         let painter = ui.painter();
-        let tex = cover.and_then(|c| self.texture(c, rect.width().max(rect.height())));
-        match tex {
-            Some(t) => {
-                let uv = shell::art::crop_uv(rect.width() / rect.height().max(1.0));
-                painter.add(egui::epaint::RectShape::filled(rect, radius, Color32::WHITE).with_texture(t.id(), uv));
+        painter.rect_filled(rect, radius, t.placeholder);
+        match cover.and_then(|c| self.texture(c, rect.width().max(rect.height()))) {
+            Some(texture) => {
+                let size = texture.size_vec2();
+                let scale = (rect.width() / size.x).min(rect.height() / size.y);
+                let fitted = Rect::from_center_size(rect.center(), size * scale);
+                let uv = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+                painter.add(egui::epaint::RectShape::filled(fitted, radius, Color32::WHITE).with_texture(texture.id(), uv));
             }
             None => {
-                let t = shell::theme::Tokens::of(ui);
-                painter.rect_filled(rect, radius, t.placeholder);
+                let content = rect.shrink(16.0);
+                let painter = painter.with_clip_rect(painter.clip_rect().intersect(content));
+                let title = painter.layout(title.to_owned(), egui::FontId::proportional(14.0), t.muted, content.width());
+                let top = (rect.center().y - title.size().y / 2.0).max(content.top());
+                painter.galley(egui::pos2(content.left(), top), title, t.muted);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn preload(&mut self, cover: &str, image: ColorImage) {
+        let key = self.key(cover, 512);
+        let weight = image.width() * image.height() * 4;
+        let texture = self.ctx.load_texture(cover, image, TextureOptions::LINEAR);
+        for gone in self.lru.insert(key, weight) {
+            self.textures.remove(&gone);
+        }
+        self.textures.insert(key, texture);
     }
 }
 
@@ -290,6 +308,57 @@ async fn fetch_cached(source: &dyn Source, dir: &Path, cover: &str, size: u32) -
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn non_square_covers_are_centred_and_fitted_without_cropping() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut art = Art::new(rt.handle().clone(), ctx.clone(), dir.path().to_owned());
+        let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 200.0));
+        for (size, expected) in [([100, 200], egui::vec2(100.0, 200.0)), ([200, 100], egui::vec2(200.0, 100.0)), ([200, 200], rect.size())] {
+            art.preload("book", ColorImage::filled(size, Color32::WHITE));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, Some("book"), "A book", 5));
+            out.textures_delta.clear();
+            let painted = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Rect(r) if r.fill_texture_id() != egui::TextureId::default() => Some(r),
+                    _ => None,
+                })
+                .expect("the cover is painted");
+            assert_eq!(painted.rect.size(), expected);
+            assert_eq!(painted.rect.center(), rect.center());
+            assert_eq!(painted.brush.as_ref().unwrap().uv, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)));
+        }
+    }
+
+    #[test]
+    fn a_missing_or_loading_cover_shows_a_wrapped_and_clipped_title() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut art = Art::new(rt.handle().clone(), ctx.clone(), dir.path().to_owned());
+        let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(176.0, 176.0));
+        let title = "The Long Title of a Book Without Artwork ".repeat(20);
+        for cover in [None, Some("not-loaded")] {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, cover, &title, 5));
+            out.textures_delta.clear();
+            let (clip, text) = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some((s.clip_rect, t)),
+                    _ => None,
+                })
+                .expect("the placeholder names the book");
+            assert_eq!(text.galley.text(), title);
+            assert!(text.galley.rows.len() > 1);
+            assert!(text.galley.size().x <= rect.width() - 32.0);
+            assert_eq!(clip, rect.shrink(16.0));
+        }
+    }
 
     #[test]
     fn cached_covers_load_without_an_account() {

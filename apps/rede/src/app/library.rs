@@ -28,8 +28,6 @@ const GAP_X: f32 = 20.0;
 const GAP_Y: f32 = 24.0;
 /// Title and author under the art.
 const LABEL_H: f32 = 42.0;
-/// A cover's height for its width: book covers are taller than they're wide.
-const COVER_RATIO: f32 = 1.5;
 /// The rows just past either end whose covers load ahead.
 const PREFETCH_ROWS: usize = 1;
 
@@ -176,7 +174,7 @@ impl ViewCtx<'_> {
             } else {
                 ("No books yet", "Books show up here as they're added to the server's library.")
             };
-            shell::widgets::empty_state(ui, Icon::List, title, body);
+            shell::widgets::empty_state(ui, Icon::Headphones, title, body);
             return;
         }
         let ids = self.books.order(sort);
@@ -187,7 +185,7 @@ impl ViewCtx<'_> {
     /// asked for.
     fn book_grid(&mut self, ui: &mut Ui, ids: &[usize], sort: LibrarySort) {
         let (cols, tile) = grid_metrics(ui.available_width());
-        let cover_h = tile * COVER_RATIO;
+        let cover_h = tile;
         let row_h = cover_h + LABEL_H + GAP_Y;
         let rows = ids.len().div_ceil(cols);
         let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
@@ -224,7 +222,7 @@ impl ViewCtx<'_> {
         let book = &self.books.all()[idx];
         if ui.is_rect_visible(rect) {
             let art = Rect::from_min_size(rect.min, vec2(tile, cover_h));
-            self.art.paint(ui, art, book.cover.as_deref(), 5.0);
+            self.art.paint(ui, art, book.cover.as_deref(), &book.title, 5.0);
             let title = elide(ui, &book.title, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
             let author = author_of(book);

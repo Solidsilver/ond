@@ -168,6 +168,23 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     for (n, book) in all.iter().enumerate().take(books) {
         app.handle(crate::bridge::LibraryMsg::Book { key: ItemKey::new(account().id, book.id.clone()), item: Box::new(details(n)) });
     }
+    // Square, portrait and landscape art exercise the fit; the remaining
+    // books keep their title placeholders, including a cover still loading.
+    for (n, size, color) in [
+        (0, [128, 192], egui::Color32::from_rgb(123, 146, 155)),
+        (1, [192, 192], egui::Color32::from_rgb(190, 157, 101)),
+        (2, [192, 128], egui::Color32::from_rgb(126, 149, 123)),
+    ] {
+        let mut image = egui::ColorImage::filled(size, color);
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                if x < 4 || y < 4 || x >= size[0] - 4 || y >= size[1] - 4 {
+                    image.pixels[y * size[0] + x] = egui::Color32::from_rgb(225, 218, 198);
+                }
+            }
+        }
+        app.art.preload(&format!("book-{n}"), image);
+    }
     app
 }
 

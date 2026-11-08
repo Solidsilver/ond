@@ -88,6 +88,13 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.go(book_route(0));
         app
     });
+    for (n, name) in [(1, "book-square"), (2, "book-landscape"), (3, "book-missing-art")] {
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            app.go(book_route(n));
+            app
+        });
+    }
     // Dropping the app (and its runtime) before the next theme.
     *h.state_mut() = None;
 }

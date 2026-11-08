@@ -15,10 +15,8 @@ use shell::icons::Icon;
 use shell::theme::{Tokens, semibold};
 use sources::ItemSummary;
 
-/// The width a cover is drawn at on the page; its height follows the cover
-/// ratio.
+/// A square cover, matching the library tiles.
 const COVER_W: f32 = 176.0;
-const COVER_RATIO: f32 = 1.5;
 /// What a disabled Play button says when hovered.
 const PLAY_LATER: &str = "Playback comes next";
 
@@ -31,13 +29,13 @@ impl ViewCtx<'_> {
         }
         ui.add_space(8.0);
         let Some(book) = self.books.by_id(id).cloned() else {
-            shell::widgets::empty_state(ui, Icon::List, "This book isn't here", "It may have been removed from the server. Sync again to see.");
+            shell::widgets::empty_state(ui, Icon::Headphones, "This book isn't here", "It may have been removed from the server. Sync again to see.");
             return;
         };
         egui::ScrollArea::vertical().id_salt(("book", id)).auto_shrink(false).show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let (rect, _) = ui.allocate_exact_size(vec2(COVER_W, COVER_W * COVER_RATIO), Sense::hover());
-                self.art.paint(ui, rect, book.cover.as_deref(), 6.0);
+                let (rect, _) = ui.allocate_exact_size(vec2(COVER_W, COVER_W), Sense::hover());
+                self.art.paint(ui, rect, book.cover.as_deref(), &book.title, 6.0);
                 ui.add_space(22.0);
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&book.title).font(FontId::new(24.0, semibold())).color(t.text));
