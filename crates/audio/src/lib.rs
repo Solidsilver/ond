@@ -446,6 +446,8 @@ impl Status {
     /// Position in the current file's source time, independent of processing
     /// speed and the device rate. Like `position_secs`, this is the end of the
     /// last buffer handed to the device, and freezes while paused or buffering.
+    /// At non-unity speed this is nominal source time: pitch-synchronous
+    /// overlap can align the waveform within a two-pitch-period (31 ms) window.
     pub fn source_position_secs(&self) -> f64 {
         f64::from_bits(self.source_position_bits.load(Ordering::Relaxed))
     }

@@ -288,8 +288,11 @@ struct Track {
 impl Track {
     /// Source frames → output frames.
     fn to_output(&self, frames: u64, speed: f32) -> u64 {
-        let frames = if speed == 1.0 { frames } else { (frames as f64 / speed as f64).round() as u64 };
         let (from, to) = (self.clock.rate as u128, self.out_rate as u128);
+        if speed != 1.0 {
+            let rate_ratio = if from == 0 || to == 0 { 1.0 } else { to as f64 / from as f64 };
+            return (frames as f64 * rate_ratio / speed as f64).round() as u64;
+        }
         if from == 0 || to == 0 || from == to {
             return frames;
         }

@@ -12,6 +12,7 @@ struct FakeBackend {
     played: Arc<Mutex<Vec<f32>>>,
     /// Positions after each callback, including boundaries inside a buffer.
     positions: Arc<Mutex<Vec<(u64, f64, f64)>>>,
+    landmarks: Arc<Mutex<Vec<(f64, f32)>>>,
     stop: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
     drained: Arc<AtomicBool>,
     opens: Arc<AtomicU64>,
@@ -55,6 +56,7 @@ impl FakeBackend {
             caps,
             played: Arc::default(),
             positions: Arc::default(),
+            landmarks: Arc::default(),
             stop: None,
             drained: Arc::default(),
             opens: Arc::default(),
@@ -163,6 +165,7 @@ impl OutputBackend for FakeBackend {
         self.drained = drained.clone();
         let (played, stop2) = (self.played.clone(), stop.clone());
         let positions = self.positions.clone();
+        let landmarks = self.landmarks.clone();
         let channels = format.channels as usize;
         let (period, frames) = self.period;
         // An integer device gets dither where needed, as through CoreAudio.
@@ -189,6 +192,7 @@ impl OutputBackend for FakeBackend {
                     drained.store(true, Ordering::Release);
                 }
                 positions.lock().unwrap().push((status.track_seq.load(Ordering::Acquire), status.position_secs(), status.source_position_secs()));
+                landmarks.lock().unwrap().push((status.source_position_secs(), buf[buf.len() - channels]));
                 rendered = true;
             }
         });
@@ -1644,4 +1648,227 @@ fn double_speed_outputs_about_half_the_source_duration() {
     // EOF overlap/rounding is bounded by Sonic's two 65 Hz pitch periods.
     assert!((output_seconds - 5.0).abs() < 2.0 / 65.0, "{output_seconds} seconds");
     engine.shutdown(Duration::from_secs(2));
+}
+
+fn wait_source_position(engine: &EngineHandle, at: f64) {
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while engine.status.source_position_secs() < at {
+        assert!(Instant::now() < deadline, "never played to {at}: {:?}", engine.status);
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn changing_speed_while_playing_refills_the_same_ring_from_source_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.period = UI_PACE;
+    let opens = backend.opens.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 2.0 }, Box::new(backend), None);
+    engine.send(Command::PlayFrom(file_source(&dir, "book", &voice(44_100, 12)), Duration::from_secs_f64(1.25)));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    wait_source_position(&engine, 1.5);
+    for speed in [1.5, 2.0, 3.0, 1.0] {
+        let before = engine.status.source_position_secs();
+        engine.send(Command::SetSpeed(speed));
+        let seen = events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+        let Some(Event::Seeked { position_secs: at, .. }) = seen.last() else { unreachable!() };
+        assert!((*at - before).abs() < 0.1, "{speed}×: {before} → {at}");
+        assert_eq!(engine.status.speed(), speed);
+        assert!((engine.status.source_position_secs() - engine.status.position_secs() * speed as f64).abs() < speed as f64 / 44_100.0);
+        wait_source_position(&engine, at + 0.25);
+        assert_eq!(opens.load(Ordering::Relaxed), 1, "the existing ring's hold/flush handles each change");
+    }
+    engine.send(Command::Pause);
+    engine.send(Command::RefreshDevices);
+    events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    let paused_at = engine.status.source_position_secs();
+    engine.send(Command::SetSpeed(2.0));
+    events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    assert!((engine.status.source_position_secs() - paused_at).abs() <= 1.0 / 44_100.0);
+    engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn stretching_and_resampling_keep_tracks_gapless_with_their_own_source_clocks() {
+    for speed in [1.5, 2.0, 3.0] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = FakeBackend::new(caps(None, 192_000));
+        backend.own_rate = Some(48_000);
+        backend.period = UI_PACE;
+        let (positions, opens, played) = (backend.positions.clone(), backend.opens.clone(), backend.played.clone());
+        let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 2.0 }, Box::new(backend), None);
+        engine.send(Command::SetSpeed(speed));
+        engine.send(Command::Play(source_at(&dir, "a", 96_000, &voice(96_000, 2))));
+        engine.send(Command::SetNext(Some(source_at(&dir, "b", 96_000, &voice(96_000, 3)))));
+        let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+        assert_eq!(starts(&seen), [("a".into(), false, false), ("b".into(), true, false)], "{speed}×: {seen:?}");
+        assert_eq!(opens.load(Ordering::Relaxed), 1);
+        assert_eq!(engine.status.underruns(), 0);
+        assert_eq!(engine.status.speed(), speed);
+        let positions = positions.lock().unwrap();
+        let second: Vec<_> = positions.iter().filter(|(seq, _, _)| *seq == 1).collect();
+        assert!(!second.is_empty());
+        assert!(second.first().unwrap().2 < 0.05, "new track begins from zero");
+        let end = second.last().unwrap().2;
+        assert!((end - 3.0).abs() < 2.0 / 65.0, "{speed}×: ended at source {end}");
+        for (_, output, source) in positions.iter() {
+            assert!((source - output * speed as f64).abs() < 1e-9, "{speed}×: source {source}, output {output}");
+        }
+        let seconds = played.lock().unwrap().len() as f64 / (2.0 * 48_000.0);
+        assert!((seconds - 5.0 / speed as f64).abs() < 4.0 / 65.0, "{seconds} seconds");
+        engine.shutdown(Duration::from_secs(2));
+    }
+}
+
+#[test]
+fn returning_to_unity_outputs_the_original_float_samples_bit_for_bit() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples: Vec<f32> = (0..44_100 * 8).map(|i| 0.1 + i as f32 / 1_000_000.0).collect();
+    let source = source_of(&dir, "float", crate::decode::tests::wav_float(44_100, 2, &samples));
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.period = UI_PACE;
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::SetSpeed(2.0));
+    engine.send(Command::Play(source));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    wait_source_position(&engine, 0.3);
+    engine.send(Command::SetSpeed(1.0));
+    let seen = events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+    let Some(Event::Seeked { position_secs: at, .. }) = seen.last() else { unreachable!() };
+    let frame = (at * 44_100.0).round() as usize;
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{seen:?}");
+    let played = played.lock().unwrap();
+    let expected = &samples[frame * 2..];
+    assert!(played.len() >= expected.len());
+    let actual = &played[played.len() - expected.len()..];
+    assert!(actual.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits()), "unity bypasses all stretching and quantization");
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+    engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn the_source_clock_follows_an_audible_landmark_without_a_stretch_latency_offset() {
+    for speed in [0.5, 1.0, 1.5, 2.0, 3.0] {
+        let dir = tempfile::tempdir().unwrap();
+        let samples: Vec<i16> = (0..44_100 * 4).flat_map(|i| if i < 44_100 * 2 { [-12_000, -12_000] } else { [12_000, 12_000] }).collect();
+        let mut backend = FakeBackend::new(caps(None, 192_000));
+        backend.period = UI_PACE;
+        let landmarks = backend.landmarks.clone();
+        let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+        engine.send(Command::SetSpeed(speed));
+        engine.send(Command::PlayFrom(file_source(&dir, "landmark", &samples), Duration::from_secs_f64(0.25)));
+        events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+        let landmarks = landmarks.lock().unwrap();
+        let positive_at = landmarks.iter().find(|(_, sample)| *sample > 0.1).expect("the positive half played").0;
+        // Two pitch periods bound Sonic's local overlap; observing one whole
+        // callback adds at most 10 ms of output time to the landmark's timestamp.
+        let tolerance = 2.0 / 65.0 + 0.01 * speed as f64;
+        assert!((positive_at - 2.0).abs() < tolerance, "{speed}×: landmark at {positive_at}, tolerance {tolerance}");
+        engine.shutdown(Duration::from_secs(2));
+    }
+}
+
+#[test]
+fn speed_requests_are_bounded_and_invalid_values_leave_playback_alone() {
+    let engine = spawn(EngineConfig::default(), Box::new(FakeBackend::new(caps(None, 192_000))), None);
+    for (requested, expected) in [(0.0, 0.5), (9.0, 3.0), (1.53, 1.55), (f32::NAN, 1.55), (f32::INFINITY, 1.55), (1.0, 1.0)] {
+        engine.send(Command::SetSpeed(requested));
+        engine.send(Command::RefreshDevices);
+        events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+        assert_eq!(engine.status.speed(), expected);
+    }
+    engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn a_speed_change_after_the_decoder_moves_on_restarts_at_source_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.period = UI_PACE;
+    let positions = backend.positions.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 30.0 }, Box::new(backend), None);
+    engine.send(Command::SetSpeed(1.5));
+    engine.send(Command::PlayFrom(file_source(&dir, "a", &voice(44_100, 5)), Duration::from_secs_f64(2.25)));
+    engine.send(Command::Pause);
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &voice(44_100, 2)))));
+    events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    wait_decoding(&engine, 1);
+    engine.send(Command::SetSpeed(2.0));
+    let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+    assert_eq!(starts(&seen), [("a".into(), false, true)], "{seen:?}");
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    assert_eq!(engine.status.source_position_secs(), 2.25, "restart used source time, not output time");
+    assert_eq!(engine.status.speed(), 2.0);
+    positions.lock().unwrap().clear();
+    engine.send(Command::Resume);
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("b".into(), true, false)], "the next track follows at the new speed: {seen:?}");
+    assert!(positions.lock().unwrap().iter().filter(|(seq, _, _)| *seq == 1).all(|(_, output, source)| (source - output * 2.0).abs() < 1e-9));
+    engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn speed_changes_during_a_seek_keep_the_pending_source_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.period = UI_PACE;
+    let (stalled, ring_ctl) = (backend.stalled.clone(), backend.ring_ctl.clone());
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+    play_paused(&engine, file_source(&dir, "a", &voice(44_100, 8)));
+    stalled.store(true, Ordering::Relaxed);
+    engine.send(Command::Seek(Duration::from_secs_f64(4.25)));
+    let ctl = ring_ctl.lock().unwrap().clone().expect("open ring");
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while !ctl.flush_pending() {
+        assert!(Instant::now() < deadline, "the decoder never took the seek");
+        thread::sleep(Duration::from_millis(1));
+    }
+    engine.send(Command::SetSpeed(3.0));
+    engine.send(Command::RefreshDevices);
+    events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    stalled.store(false, Ordering::Relaxed);
+    // Both seeks report the same target. Wait for the output-equivalent
+    // position to show that the request carrying the new speed also landed.
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while (engine.status.position_secs() - 4.25 / 3.0).abs() > 1.0 / 44_100.0 {
+        assert!(Instant::now() < deadline, "the speed change never landed: {:?}", engine.status);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(engine.status.source_position_secs(), 4.25);
+    assert_eq!(engine.status.state(), PlayState::Paused);
+    engine.send(Command::Resume);
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{seen:?}");
+    engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn seeks_under_stretch_and_resampling_start_from_source_frames() {
+    for (source_rate, output_rate) in [(96_000, 48_000), (44_100, 192_000)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = FakeBackend::new(caps(None, 192_000));
+        backend.own_rate = Some(output_rate);
+        backend.period = UI_PACE;
+        let positions = backend.positions.clone();
+        let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+        engine.send(Command::SetSpeed(3.0));
+        engine.send(Command::PlayFrom(source_at(&dir, "a", source_rate, &voice(source_rate, 6)), Duration::from_secs_f64(1.25)));
+        engine.send(Command::Pause);
+        events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+        engine.send(Command::Seek(Duration::from_secs_f64(4.125013)));
+        events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+        assert!((engine.status.source_position_secs() - 4.125013).abs() <= 1.0 / source_rate as f64);
+        engine.send(Command::Resume);
+        events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+        let positions = positions.lock().unwrap();
+        assert!(positions.iter().any(|(_, _, source)| *source > 5.5));
+        for (_, output, source) in positions.iter() {
+            assert!((source - output * 3.0).abs() <= 3.0 / output_rate as f64, "source {source}, output {output}");
+        }
+        engine.shutdown(Duration::from_secs(2));
+    }
 }
