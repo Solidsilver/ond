@@ -1,0 +1,25 @@
+[package]
+name = "sources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+abs = { version = "0.4.4", path = "../abs" }
+async-trait = "0.1.92"
+bytes = "1.12.1"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+tracing = "0.1.44"
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Only to prove that an item key survives `file_name`, which both the stream
+# cache and the offline store use to name files.
+streamcache = { version = "0.4.4", path = "../streamcache" }
+serde_json = "1.0.154"

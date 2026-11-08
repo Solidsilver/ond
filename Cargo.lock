@@ -4427,6 +4427,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "shelf"
+version = "0.4.4"
+dependencies = [
+ "postcard",
+ "redb",
+ "serde",
+ "sources",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "shell"
 version = "0.4.4"
 dependencies = [
@@ -4603,6 +4616,21 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sources"
+version = "0.4.4"
+dependencies = [
+ "abs",
+ "async-trait",
+ "bytes",
+ "serde",
+ "serde_json",
+ "streamcache",
+ "thiserror 2.0.21",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5399,6 +5427,7 @@ version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "serde_core",
  "wasm-bindgen",

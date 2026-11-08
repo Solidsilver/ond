@@ -11,7 +11,7 @@ cargo test --workspace                                     # hardware and PNG te
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, `shell`, `ond-player` for Ond and `rede` for Rede). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
+Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, `sources`, `shelf`, `shell`, `ond-player` for Ond and `rede` for Rede). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
 
 Things that need real hardware or a real server are listed in [TESTING.md](TESTING.md). If you change something there, say so in the pull request so a human can run it.
 
@@ -29,6 +29,7 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 | `crates/audio` | Decoding, the playback engine, resampling, dither, CoreAudio, ALSA and cpal output |
 | `crates/analysis` | Loudness, dynamic range and fake hi-res detection |
 | `crates/abs` | Rede: Audiobookshelf API client (tokens, single-flight refresh, play sessions, progress). Its live tests need a server; see its `tests/live.rs` |
+| `crates/sources` | Rede: the `Source` trait and the server-independent models (accounts, libraries, items, tracks, chapters, positions), plus `AbsSource` on the Audiobookshelf client |
 
 Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; shared widgets in `src/widgets.rs`; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
 
