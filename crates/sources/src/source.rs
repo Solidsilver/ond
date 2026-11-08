@@ -35,6 +35,12 @@ use crate::model::{Capabilities, Changes, DeviceInfo, Item, ItemSummary, Library
 pub trait Source: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 
+    /// Ends the account's server login, if it has one. The app must forget
+    /// its local credentials even when this fails.
+    async fn logout(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Every library this account may read.
     async fn libraries(&self) -> Result<Vec<Library>>;
 

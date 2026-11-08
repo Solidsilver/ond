@@ -88,6 +88,10 @@ impl Source for AbsSource {
         }
     }
 
+    async fn logout(&self) -> Result<()> {
+        Ok(self.client.logout().await?)
+    }
+
     async fn libraries(&self) -> Result<Vec<Library>> {
         Ok(self.client.libraries().await?.into_iter().filter_map(library).collect())
     }
