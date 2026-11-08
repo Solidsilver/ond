@@ -10,6 +10,8 @@
 //! with several sources and a track part-way through. No server, no audio
 //! device, no keychain; settings and caches live in a temp dir.
 //!
+//! Set `OND_SNAPSHOT_DIR` to keep independent render runs in separate folders.
+//!
 //! The scenes are in `scenes`, the README's screenshots in `sleeves` and
 //! the frame-time budget in `perf`; the fixture they share is
 //! `app::fixture`.
@@ -57,7 +59,8 @@ impl Shooter {
 /// Renders `scenes` in each of `themes`, offscreen through wgpu, into
 /// `target/snapshots`, with `managed` as managed.json when given.
 fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, scenes: fn(&mut Harness<'_, Option<OndApp>>, &Shooter)) {
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
+    let out =
+        std::env::var_os("OND_SNAPSHOT_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots"));
     std::fs::create_dir_all(&out).unwrap();
     let out = out.canonicalize().unwrap();
     for &(theme, name) in themes {

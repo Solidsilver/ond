@@ -33,6 +33,11 @@ impl audio::OutputBackend for NullOutput {
 
 pub(super) const FULL: Vec2 = vec2(1440.0, 900.0);
 
+/// Queue end and start labels must not change with the time of a render.
+pub(super) fn queue_time() -> chrono::NaiveTime {
+    chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap()
+}
+
 /// (title, album artist, year, genre, label)
 pub(super) const ALBUMS: &[(&str, &str, i32, &str, &str)] = &[
     ("Sunday at the Village Vanguard", "Bill Evans Trio", 1961, "Jazz", "Riverside"),

@@ -6,8 +6,8 @@
 //! cargo test -p rede --release snapshots -- --ignored --nocapture
 //! ```
 //!
-//! The data is the fixture shelf (`app::fixture`): twelve books, their covers
-//! missing (no server), titles, authors and chapters. No server, no keychain;
+//! The data is the fixture shelf (`app::fixture`): twelve books, generated
+//! covers in three shapes, missing art, titles, authors and chapters. No server, no keychain;
 //! the settings and caches live in a temp dir.
 
 use super::fixture::*;

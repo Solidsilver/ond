@@ -65,7 +65,10 @@ impl ViewCtx<'_> {
         if !lyrics_tab && self.ui.queue_ui.tab == QueueTab::Lyrics {
             self.ui.queue_ui.tab = QueueTab::UpNext;
         }
+        #[cfg(not(test))]
         let now = chrono::Local::now().time();
+        #[cfg(test)]
+        let now = super::fixture::queue_time();
         let remaining = match (self.player.queue.current.as_ref(), self.duration_secs()) {
             (Some(_), Some(d)) => d - self.position_secs(),
             _ => 0.0,
