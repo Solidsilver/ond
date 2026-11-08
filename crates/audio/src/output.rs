@@ -113,6 +113,7 @@ pub(crate) struct Segment {
     pub(crate) source_frame: f64,
     pub(crate) source_rate: u32,
     pub(crate) ratio: f64,
+    pub(crate) stretched: bool,
 }
 
 /// Track boundaries a ring can hold at once. The decoder waits for room once
@@ -199,7 +200,7 @@ impl RingInput {
     }
 
     fn treatment(&self, gained: bool) -> Treatment {
-        Treatment { processed: self.processed, gained, source_bits: self.source_bits }
+        Treatment { processed: self.processed || self.segment.is_some_and(|s| s.stretched), gained, source_bits: self.source_bits }
     }
 
     /// The realtime path for an integer device seen through a float stream:

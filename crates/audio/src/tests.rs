@@ -1584,3 +1584,64 @@ fn source_time_starts_at_the_requested_position_and_follows_a_seek() {
     }
     engine.shutdown(Duration::from_secs(2));
 }
+
+/// Voiced harmonics with different stereo levels, rather than noise that gives
+/// a pitch-synchronous stretcher no useful periods to match.
+fn voice(rate: u32, seconds: usize) -> Vec<i16> {
+    (0..rate as usize * seconds)
+        .flat_map(|i| {
+            let phase = std::f64::consts::TAU * 220.0 * i as f64 / rate as f64;
+            let sample = ((phase.sin() * 0.4 + (phase * 2.0).sin() * 0.15) * 32_000.0) as i16;
+            [if sample == 0 { 1 } else { sample }, if sample / 2 == 0 { 1 } else { sample / 2 }]
+        })
+        .collect()
+}
+
+#[test]
+fn source_time_after_starting_and_seeking_is_independent_of_speed() {
+    for speed in [0.5, 1.0, 1.5, 2.0, 3.0] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = FakeBackend::new(caps(None, 192_000));
+        backend.period = UI_PACE;
+        let positions = backend.positions.clone();
+        let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+        engine.send(Command::SetSpeed(speed));
+        engine.send(Command::PlayFrom(file_source(&dir, "book", &voice(44_100, 6)), Duration::from_secs_f64(1.25)));
+        engine.send(Command::Pause);
+        events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
+        assert_eq!(engine.status.speed(), speed);
+        assert_eq!(engine.status.source_position_secs(), 1.25);
+        assert_eq!(engine.status.source_duration_secs(), Some(6.0));
+        assert_eq!(engine.status.duration_secs(), Some(6.0 / speed as f64));
+        engine.send(Command::Seek(Duration::from_secs_f64(4.25)));
+        events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
+        assert!((engine.status.source_position_secs() - 4.25).abs() <= 1.0 / 44_100.0);
+        engine.send(Command::Resume);
+        let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+        assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{speed}×: {seen:?}");
+        let positions = positions.lock().unwrap();
+        assert!(positions.iter().any(|(_, _, source)| *source > 5.5), "{speed}× played on");
+        // The clock is affine to within one output-frame rounding at the seek.
+        // Sonic's local pitch overlap is bounded separately by two pitch periods.
+        for (_, output, source) in positions.iter() {
+            assert!((source - output * speed as f64).abs() <= speed as f64 / 44_100.0, "{speed}×: source {source}, output {output}");
+        }
+        engine.shutdown(Duration::from_secs(2));
+    }
+}
+
+#[test]
+fn double_speed_outputs_about_half_the_source_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FakeBackend::new(caps(None, 192_000));
+    let played = backend.played.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::SetSpeed(2.0));
+    engine.send(Command::Play(file_source(&dir, "book", &voice(44_100, 10))));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{seen:?}");
+    let output_seconds = played.lock().unwrap().len() as f64 / (44_100.0 * 2.0);
+    // EOF overlap/rounding is bounded by Sonic's two 65 Hz pitch periods.
+    assert!((output_seconds - 5.0).abs() < 2.0 / 65.0, "{output_seconds} seconds");
+    engine.shutdown(Duration::from_secs(2));
+}

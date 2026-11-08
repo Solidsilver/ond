@@ -504,6 +504,7 @@ dependencies = [
  "crossbeam-channel",
  "enumflags2",
  "libc",
+ "libsonic",
  "objc2-core-audio",
  "objc2-core-audio-types",
  "objc2-core-foundation",
@@ -2499,6 +2500,12 @@ dependencies = [
  "plain",
  "redox_syscall 0.9.5",
 ]
+
+[[package]]
+name = "libsonic"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58ee4569e4db9d40a94b560b985f1141d67e1d6a9d64ea248b7505f4176aee10"
 
 [[package]]
 name = "libspa"

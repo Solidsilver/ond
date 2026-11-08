@@ -123,6 +123,7 @@ mod output;
 pub mod replaygain;
 mod resample;
 mod signal;
+mod stretch;
 pub mod tap;
 
 pub use channels::ChannelChange;
@@ -159,7 +160,8 @@ pub enum PlaybackMode {
     /// Software volume, ReplayGain and resampling are allowed.
     #[default]
     Normal,
-    /// Samples reach the device untouched; the device follows the source rate.
+    /// At unity speed samples reach the device untouched; the device follows
+    /// the source rate. Stretching is reported as unavailable for bit-perfect.
     BitPerfect,
 }
 
@@ -231,6 +233,11 @@ pub enum Command {
     Resume,
     Stop,
     SetVolume(f32),
+    /// Speech speed with pitch kept. Finite values are clamped to 0.5–3.0 in
+    /// 0.05 steps; non-finite values are ignored. Flushes and refills from the
+    /// current source position through the seek handshake, preserving pause.
+    /// Persists across tracks, seeks and new plays until changed again.
+    SetSpeed(f32),
     /// ReplayGain settings. Applies to the current track at once (with a short
     /// glide) and to every track after it.
     SetGain(GainConfig),
@@ -357,7 +364,8 @@ pub struct Status {
     /// segments); decoder (after an acknowledged seek, before queuing audio);
     /// engine (zeroes it on stop and when reopening for a new track).
     pub(crate) source_position_bits: AtomicU64,
-    /// 0 when unknown (e.g. unseekable stream without a duration header). Engine.
+    /// File duration expressed at the output rate before stretching, or 0
+    /// when unknown. Engine. Accessors scale this for source or output time.
     pub(crate) total_frames: AtomicU64,
     /// The output rate of the current track. Engine.
     pub(crate) sample_rate: AtomicU32,
@@ -378,6 +386,9 @@ pub struct Status {
     pub(crate) track_seq: AtomicU64,
     /// Engine.
     volume_bits: AtomicU32,
+    /// Requested speed as f32 bits (0 in a default snapshot means unity).
+    /// Engine; the decoder captures it with each seek request.
+    speed_bits: AtomicU32,
     /// Engine.
     pub(crate) paused: AtomicBool,
     /// The callback is holding or prebuffering. Callback; engine (sets it the
@@ -421,8 +432,15 @@ impl Status {
         if self.bit_perfect.load(Ordering::Relaxed) { PlaybackMode::BitPerfect } else { PlaybackMode::Normal }
     }
 
+    /// Output time in the current track. A seek sets the equivalent output
+    /// position at the current speed; callbacks then count device frames.
     pub fn position_secs(&self) -> f64 {
         secs(self.frames_played.load(Ordering::Relaxed), self.sample_rate.load(Ordering::Relaxed))
+    }
+
+    pub fn speed(&self) -> f32 {
+        let bits = self.speed_bits.load(Ordering::Relaxed);
+        if bits == 0 { 1.0 } else { f32::from_bits(bits) }
     }
 
     /// Position in the current file's source time, independent of processing
@@ -465,7 +483,13 @@ impl Status {
         (self.fetched_bytes.load(Ordering::Relaxed), self.total_bytes.load(Ordering::Relaxed))
     }
 
+    /// Nominal output duration at the requested speed.
     pub fn duration_secs(&self) -> Option<f64> {
+        self.source_duration_secs().map(|duration| duration / self.speed() as f64)
+    }
+
+    /// Full file duration in source seconds, or `None` when unknown.
+    pub fn source_duration_secs(&self) -> Option<f64> {
         let total = self.total_frames.load(Ordering::Relaxed);
         (total > 0).then(|| secs(total, self.sample_rate.load(Ordering::Relaxed)))
     }
@@ -753,6 +777,7 @@ impl Engine {
                 self.apply_mode(m);
             }
             Command::Seek(to) => self.seek(to),
+            Command::SetSpeed(speed) => self.set_speed(speed),
             Command::SetNext(next) => self.set_next(next),
             Command::SelectDevice(uid) => match self.backend.select_device(uid.as_deref()) {
                 Ok(()) => {
@@ -886,6 +911,24 @@ impl Engine {
 
     fn current(&self) -> Option<&SessionTrack> {
         self.tracks.get(self.out_seq as usize)
+    }
+
+    fn set_speed(&mut self, speed: f32) {
+        if !speed.is_finite() {
+            return;
+        }
+        let speed = (speed.clamp(0.5, 3.0) * 20.0).round() / 20.0;
+        if speed == self.status.speed() {
+            return;
+        }
+        // Bring the engine's track up to date before choosing the source time.
+        self.poll_session();
+        let at = self.held_seek.map(|(_, to)| to).or_else(|| self.take_position().map(|r| r.at));
+        self.status.speed_bits.store(speed.to_bits(), Ordering::Relaxed);
+        if let Some(at) = at {
+            self.seek(at);
+        }
+        self.report_signal_path();
     }
 
     fn seek(&mut self, to: Duration) {
@@ -1101,7 +1144,12 @@ impl Engine {
         let caps = self.backend.device_caps();
         // Judged on what reaches the device channel-wise; the mapping itself is folded in below.
         let sent = StreamFormat { channels: ring.format.channels, ..source };
-        let bit_perfect = adjust(assess(self.config.mode, &sent, device_rate, caps.as_ref()), channels, transcoded.as_deref());
+        let stretched = self.status.speed() != 1.0;
+        let bit_perfect = if stretched && self.config.mode == PlaybackMode::BitPerfect {
+            BitPerfectStatus::Unavailable { reason: format!("speed {}×", self.status.speed()), device_limit: false }
+        } else {
+            adjust(assess(self.config.mode, &sent, device_rate, caps.as_ref()), channels, transcoded.as_deref())
+        };
         // The integer format actually in use: what the callback dithers to.
         let device_bits = caps.as_ref().and_then(|c| c.active_bits);
         let resampled = device_rate != source.sample_rate;
@@ -1109,7 +1157,7 @@ impl Engine {
         let volume = self.config.mode == PlaybackMode::Normal && self.status.volume() < 1.0;
         // The same rule the callback applies to what it plays.
         let treatment = dither::Treatment {
-            processed: resampled || matches!(channels, ChannelChange::Downmix { .. }),
+            processed: stretched || resampled || matches!(channels, ChannelChange::Downmix { .. }),
             gained: matches!(gain, GainState::Applied(g) if g.linear != 1.0) || volume,
             source_bits: source.bits_per_sample,
         };
@@ -1153,7 +1201,8 @@ impl Engine {
         if next.is_local() || self.prefetched.as_ref() == Some(&next.id) {
             return;
         }
-        let near_end = self.status.duration_secs().is_some_and(|d| d - self.status.position_secs() <= PREFETCH_LEAD_SECS);
+        let near_end =
+            self.status.source_duration_secs().is_some_and(|d| (d - self.status.source_position_secs()) / self.status.speed() as f64 <= PREFETCH_LEAD_SECS);
         if progress.is_some_and(|p| p.complete) || near_end {
             cache.prefetch(&next.cache_key(), &next.url);
             self.prefetched = Some(next.id.clone());
