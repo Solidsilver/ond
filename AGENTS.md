@@ -20,7 +20,7 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 | Crate | Job |
 |---|---|
 | `apps/ond` (package `ond-player`, binary `Ond`) | UI, queue, sync, settings, each platform's integration |
-| `apps/rede` (package `rede`, binary `Rede`) | Rede, the audiobook player; for now an empty window |
+| `apps/rede` (package `rede`, binary `Rede`) | Audiobook player: Audiobookshelf sign-in, library sync, cover grid and book pages |
 | `crates/shell` | What the apps share on screen: theme, colors, icons, the window, its title bar (`chrome`, `csd`), shared widgets, and the machinery under the cover-art cache (`art`: the size buckets, the load queue, the LRU set, the disk cache, the decode) |
 | `crates/subsonic` | OpenSubsonic API client |
 | `crates/library` | Local mirror in redb with hand-written indexes and migrations |
