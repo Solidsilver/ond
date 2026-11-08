@@ -48,6 +48,15 @@ mod ui_state;
 mod view_ctx;
 mod virtual_list;
 
+#[cfg(test)]
+mod fixture;
+#[cfg(test)]
+mod snapshots;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod ui_tests;
+
 use crate::art::Art;
 use crate::bridge::{AccountMsg, Bridge, LibraryMsg, Msg};
 use crate::failure::Failure;
