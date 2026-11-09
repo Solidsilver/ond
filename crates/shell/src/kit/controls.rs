@@ -1,5 +1,5 @@
 //! Controls that set a value: the segmented pill ([`segmented`],
-//! [`segmented_wide`], [`choice`]), the [`thin_slider`], the [`switch`], the
+//! [`segmented_wide`], [`choice`], and [`icon_choice`] for icons), the [`thin_slider`], the [`switch`], the
 //! [`stepper`] and its [`step_button`], and the [`choice_chip`].
 
 use super::focus_ring;
@@ -87,6 +87,33 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
         x += w;
     }
     clicked
+}
+
+/// Mutually exclusive choices drawn as icons in the segmented pill (grid or
+/// list), each named by its label for a tooltip and a screen reader.
+/// Returns the index clicked, unless it was the one already chosen.
+pub fn icon_choice(ui: &mut Ui, options: &[(Icon, &str)], selected: usize) -> Option<usize> {
+    let t = Tokens::of(ui);
+    let seg = vec2(30.0, 22.0);
+    let (rect, pill) = ui.allocate_exact_size(vec2(seg.x * options.len() as f32 + 4.0, 26.0), Sense::hover());
+    ui.painter().rect_filled(rect, 7.0, t.field);
+    let mut picked = None;
+    for (i, (icon, label)) in options.iter().enumerate() {
+        let r = Rect::from_min_size(egui::pos2(rect.left() + 2.0 + seg.x * i as f32, rect.top() + 2.0), seg);
+        let resp = ui.interact(r, pill.id.with(("seg", i)), Sense::click());
+        let on = i == selected;
+        if on {
+            ui.painter().rect_filled(r, 5.0, t.bg);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r, 5.0, t.hover);
+        }
+        crate::icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(13.0, 13.0)), *icon, if on { t.text } else { t.muted });
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, *label));
+        if resp.on_hover_text(*label).clicked() && !on {
+            picked = Some(i);
+        }
+    }
+    picked
 }
 
 /// A thin horizontal slider for `value` in 0..=1 (volume): a 3 px track, the

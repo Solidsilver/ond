@@ -1,12 +1,13 @@
 //! Popovers and what goes in them: [`popover`] (or [`popover_at`]) opens one
 //! in the theme's frame; [`padded`] lines a block up with its rows;
 //! [`popover_title`], [`popover_rule`], [`menu_row`] (a command),
-//! [`info_row`] (a fact) and [`switch_row`] (a setting that's on or off).
+//! [`info_row`] (a fact) and [`switch_row`] (a setting that's on or off);
+//! and the [`menu_label`] that opens a menu.
 
 use super::controls::switch;
 use super::focus_ring;
 use crate::theme::{Tokens, semibold};
-use egui::{FontId, Response, Sense, Ui, vec2};
+use egui::{Color32, FontId, Rect, Response, Sense, Ui, vec2};
 
 /// A row in a popover menu, hovered as a sidebar row is. True when chosen,
 /// and the menu closes.
@@ -124,6 +125,25 @@ pub fn switch_row(ui: &mut Ui, label: &str, on: &mut bool) -> bool {
         return true;
     }
     flipped
+}
+
+/// A quiet button that opens a menu: its text and a small chevron, hugging
+/// its content.
+pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    let t = Tokens::of(ui);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(12.0), color);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 6.0, t.hover);
+        }
+        ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, color);
+        let chev = Rect::from_center_size(egui::pos2(rect.right() - 10.0, rect.center().y + 1.0), vec2(8.0, 8.0));
+        crate::icons::paint(ui.painter(), chev, crate::icons::Icon::ChevronDown, t.muted);
+    }
+    let label = text.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    resp
 }
 
 #[cfg(test)]

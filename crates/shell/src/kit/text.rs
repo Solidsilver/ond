@@ -1,6 +1,6 @@
 //! Text: one line cut to fit ([`elide`] and its kin), the quiet [`link`]s
 //! that underline on hover, the muted [`section`] label, a key combo drawn
-//! as a [`key_cap`], and the one [`empty_state`].
+//! as a [`key_cap`], a [`chip`] of tinted text, and the one [`empty_state`].
 
 use crate::icons::Icon;
 use crate::theme::{Tokens, semibold};
@@ -133,6 +133,17 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, body: &str) {
             ui.add(egui::Label::new(egui::RichText::new(crate::keys::shown(body)).size(13.0).color(t.muted)).wrap());
         });
     });
+}
+
+/// A small pill of tinted text (a finding worth a glance, not an alarm).
+pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.0), color);
+    let size = galley.size() + vec2(14.0, 4.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.13));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
+    resp
 }
 
 #[cfg(test)]

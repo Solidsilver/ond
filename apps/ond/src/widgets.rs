@@ -6,7 +6,8 @@ use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use egui::{Color32, FontId, Rect, Response, Sense, Ui, vec2};
 pub use shell::kit::{
-    Head, ROW_PAD, choice, divider, elide, elide_job, group, link, link_line, managed, section, switch, switch_tinted, thin_slider, thin_slider_marked,
+    Head, ROW_PAD, chip, choice, divider, elide, elide_job, group, icon_choice, link, link_line, managed, menu_label, section, switch, switch_tinted,
+    thin_slider, thin_slider_marked,
 };
 pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
 
@@ -66,43 +67,19 @@ pub fn rating_choice(ui: &mut Ui, rating: u8, current: bool) -> Response {
     resp
 }
 
-/// Grid or list: an icon for each in a segmented pill. Writes the pick into
-/// `current` and says whether it changed.
+/// Grid or list: an icon for each in the kit's [`icon_choice`]. Writes the
+/// pick into `current` and says whether it changed.
 pub fn view_picker(ui: &mut Ui, current: &mut crate::settings::ViewMode) -> bool {
     use crate::settings::ViewMode;
-    let t = Tokens::of(ui);
-    let seg = vec2(30.0, 22.0);
-    let (rect, pill) = ui.allocate_exact_size(vec2(seg.x * 2.0 + 4.0, 26.0), Sense::hover());
-    ui.painter().rect_filled(rect, 7.0, t.field);
-    let mut changed = false;
-    for (i, (mode, icon, label)) in [(ViewMode::Grid, Icon::Grid, "Grid"), (ViewMode::List, Icon::List, "List")].into_iter().enumerate() {
-        let r = Rect::from_min_size(egui::pos2(rect.left() + 2.0 + seg.x * i as f32, rect.top() + 2.0), seg);
-        let resp = ui.interact(r, pill.id.with(("view", i)), Sense::click());
-        let on = *current == mode;
-        if on {
-            ui.painter().rect_filled(r, 5.0, t.bg);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(r, 5.0, t.hover);
+    let all = [ViewMode::Grid, ViewMode::List];
+    let at = all.iter().position(|m| m == current).unwrap_or(0);
+    match icon_choice(ui, &[(Icon::Grid, "Grid"), (Icon::List, "List")], at) {
+        Some(i) => {
+            *current = all[i];
+            true
         }
-        icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(13.0, 13.0)), icon, if on { t.text } else { t.muted });
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, label));
-        if resp.on_hover_text(label).clicked() && !on {
-            *current = mode;
-            changed = true;
-        }
+        None => false,
     }
-    changed
-}
-
-/// A small pill of tinted text (a finding worth a glance, not an alarm).
-pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.0), color);
-    let size = galley.size() + vec2(14.0, 4.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.13));
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
-    resp
 }
 
 /// A list row's background: the selection, else the hover tint, else none.
@@ -186,25 +163,6 @@ pub fn bit_perfect_switch(ui: &mut Ui, name: &str, mode: &mut audio::PlaybackMod
     let mut on = *mode == audio::PlaybackMode::BitPerfect;
     let resp = switch_tinted(ui, &mut on, &format!("Bit-perfect on {name}"), Tokens::of(ui).ok);
     *mode = if on { audio::PlaybackMode::BitPerfect } else { audio::PlaybackMode::Normal };
-    resp
-}
-
-/// A quiet button that opens a menu: its text and a small chevron, hugging
-/// its content.
-pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    let t = Tokens::of(ui);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(12.0), color);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 24.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, t.hover);
-        }
-        ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, color);
-        let chev = Rect::from_center_size(egui::pos2(rect.right() - 10.0, rect.center().y + 1.0), vec2(8.0, 8.0));
-        crate::icons::paint(ui.painter(), chev, crate::icons::Icon::ChevronDown, t.muted);
-    }
-    let label = text.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
 }
 

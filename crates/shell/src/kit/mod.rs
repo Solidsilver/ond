@@ -6,13 +6,13 @@
 //!
 //! - [`text`]: [`elide`], [`elide_middle`], [`elide_job`], the quiet
 //!   [`link`] and [`link_line`] that underline on hover, the muted
-//!   [`section`] label, [`key_cap`] (a combo drawn as a key), and the one
-//!   [`empty_state`].
+//!   [`section`] label, [`key_cap`] (a combo drawn as a key), [`chip`] (a
+//!   finding in tinted text), and the one [`empty_state`].
 //! - [`buttons`]: the filled [`primary`], [`secondary`], [`danger`] (and
 //!   [`primary_unavailable`], [`secondary_danger`]), the [`quiet_button`],
 //!   and the [`focus_ring`] every self-painted control shows under Tab.
 //! - [`controls`]: the segmented pill ([`segmented`], [`segmented_wide`],
-//!   [`choice`]), [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]
+//!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]
 //!   (and [`switch_tinted`]), [`stepper`] and its [`step_button`], and
 //!   [`choice_chip`] (one of a grid of choices, lit when on).
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
@@ -20,8 +20,9 @@
 //!   one; and [`sidebar_row`].
 //! - [`menus`]: [`popover`] (or [`popover_at`]) in the theme's frame,
 //!   [`padded`] to line a block up with its rows, [`popover_title`],
-//!   [`popover_rule`], [`menu_row`] (a command), [`info_row`] (a fact) and
-//!   [`switch_row`].
+//!   [`popover_rule`], [`menu_row`] (a command), [`info_row`] (a fact),
+//!   [`switch_row`], and [`menu_label`] (a quiet button with a chevron that
+//!   opens one).
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
 //!   in) and [`sheet_header`] (its title, and a × that closes it).
 
