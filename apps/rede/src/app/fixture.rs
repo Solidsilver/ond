@@ -19,7 +19,10 @@ pub const LIBRARY: &str = "lib-books";
 const ADDED: i64 = 1_767_225_600_000;
 
 pub fn account() -> Account {
-    Account::new(SERVER, "sam")
+    let mut account = Account::new(SERVER, "sam");
+    account.id = sources::AccountId::from_uuid(uuid::Uuid::from_u128(42));
+    account.device_id = "fixture".into();
+    account
 }
 
 /// One of the fixture's books, as a listing would describe it.
@@ -185,6 +188,9 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
         }
         app.art.preload(&format!("book-{n}"), image);
     }
+    for book in &all {
+        app.art.preload_missing(&book.id);
+    }
     app
 }
 
@@ -218,3 +224,35 @@ pub fn frame(ctx: &egui::Context, app: &mut RedeApp) {
 
 /// The window the snapshots and the frames are drawn at.
 pub const FULL: [f32; 2] = [1100.0, 720.0];
+
+/// Places the real player policy in a stable mid-book scene without opening
+/// an audio device. The same scene is used by accessibility and PNG tests.
+pub fn playing(app: &mut RedeApp, paused: bool) {
+    struct Preview;
+    impl crate::player::Transport for Preview {
+        fn send(&self, _: audio::Command) {}
+        fn state(&self) -> audio::PlayState {
+            audio::PlayState::Paused
+        }
+        fn position(&self) -> f64 {
+            0.0
+        }
+    }
+    let item = details(0);
+    let session = sources::PlaySession {
+        id: "fixture".into(),
+        item: "book-0".into(),
+        start: sources::Position::from_secs(14_200.0),
+        duration: Some(40_920.0),
+        tracks: item
+            .tracks
+            .iter()
+            .map(|t| sources::SessionTrack { index: t.index, start_offset: t.start_offset, duration: t.duration, ..Default::default() })
+            .collect(),
+    };
+    app.player
+        .load(crate::player::Opened { key: ItemKey::new(account().id, "book-0"), item, session, position: 14_200.0 }, 1.5, &Preview, std::time::Instant::now())
+        .unwrap();
+    app.player.paused = paused;
+    app.prefs.edit(|p| p.playback.speed = 1.5);
+}

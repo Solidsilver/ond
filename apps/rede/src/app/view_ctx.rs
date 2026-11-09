@@ -16,6 +16,10 @@ pub struct ViewCtx<'a> {
     pub nav: &'a Nav,
     /// The library's order, as this frame's copy of the preferences has it.
     pub sort: LibrarySort,
+    pub playback: crate::settings::PlaybackSettings,
+    pub opening: bool,
+    pub player: &'a crate::player::Player,
+    pub positions: &'a std::collections::HashMap<String, sources::Progress>,
     /// Covers load as they're first drawn.
     pub art: &'a mut Art,
     pub actions: &'a mut Vec<Action>,
@@ -30,6 +34,10 @@ impl RedeApp {
             sync: &self.sync,
             nav: &self.ui.nav,
             sort: self.shown.sort,
+            playback: self.shown.playback,
+            opening: self.opening,
+            player: &self.player,
+            positions: &self.positions,
             art: &mut self.art,
             actions: &mut self.actions,
         }

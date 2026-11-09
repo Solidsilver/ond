@@ -4,8 +4,6 @@
 //! by side in reading-width columns when the window is wide, one above the
 //! other when it isn't. The details are fetched when the page opens.
 //!
-//! Playback isn't here yet (the engine work is on another branch), so the Play
-//! button is drawn faded and says so.
 
 use super::library::{COVER_RADIUS, authors_line};
 use super::view_ctx::ViewCtx;
@@ -36,8 +34,6 @@ const CHAPTER_ROW_H: f32 = 32.0;
 /// its title starts at `CHAPTER_TITLE_X`.
 const CHAPTER_NUMBER_RIGHT: f32 = 18.0;
 const CHAPTER_TITLE_X: f32 = 34.0;
-/// What a disabled Play button says when hovered.
-const PLAY_LATER: &str = "Playback comes next";
 
 impl ViewCtx<'_> {
     pub(super) fn book_page(&mut self, ui: &mut Ui, id: &str) {
@@ -56,7 +52,12 @@ impl ViewCtx<'_> {
             ui.add_space(32.0);
             self.details(ui, id, &t);
             if let Some(Details::Loaded(item)) = self.books.details.get(id).cloned() {
-                book_body(ui, &t, &item);
+                let at = if self.player.book.as_ref().is_some_and(|b| b.key.item == id) {
+                    Some(self.player.position)
+                } else {
+                    self.positions.get(id).map(|p| p.position.secs())
+                };
+                book_body(ui, &t, &item, at);
             }
             ui.add_space(24.0);
         });
@@ -84,6 +85,27 @@ impl ViewCtx<'_> {
                 }
                 let top = ui.cursor().top();
                 header_text(ui, t, book);
+                let position = if self.player.book.as_ref().is_some_and(|b| b.key.item == book.id) {
+                    self.player.position
+                } else {
+                    self.positions.get(&book.id).filter(|p| !p.finished).map_or(0.0, |p| p.position.secs())
+                };
+                let label = if position > 0.0 {
+                    format!(
+                        "Resume · {}",
+                        crate::timeline::left(
+                            (book.duration.unwrap_or(0.0) - position).max(0.0) / f64::from(crate::timeline::normalize_speed(self.playback.speed)),
+                            self.playback.speed
+                        )
+                    )
+                } else {
+                    "Play".into()
+                };
+                if self.opening {
+                    shell::widgets::primary_unavailable(ui, None, "Opening…");
+                } else if shell::widgets::primary(ui, Some(Icon::Play), &label).clicked() {
+                    self.actions.push(Action::PlayBook(book.id.clone()));
+                }
                 ui.min_rect().bottom() - top
             });
             let h = block.inner.round();
@@ -128,14 +150,11 @@ fn header_text(ui: &mut Ui, t: &Tokens, book: &ItemSummary) {
         ui.add(egui::Label::new(RichText::new(facts).size(12.0).color(t.muted)).wrap());
     }
     ui.add_space(12.0);
-    // Playback is the engine branch's work: the button shows where it will
-    // be, and says when it comes.
-    shell::widgets::primary_unavailable(ui, Some(Icon::Play), "Play").on_disabled_hover_text(PLAY_LATER);
 }
 
 /// The description and the chapters: two columns from [`SPLIT_FROM`], else
 /// one above the other, each no wider than [`READING_W`].
-fn book_body(ui: &mut Ui, t: &Tokens, item: &sources::Item) {
+fn book_body(ui: &mut Ui, t: &Tokens, item: &sources::Item, at: Option<f64>) {
     let description = item.description.as_deref().map(str::trim).filter(|d| !d.is_empty());
     let chapters = item.chapters.as_slice();
     let avail = ui.available_width();
@@ -151,7 +170,7 @@ fn book_body(ui: &mut Ui, t: &Tokens, item: &sources::Item) {
             ui.spacing_mut().item_spacing.x = 0.0;
             column(ui, w, &|ui| about(ui, t, description));
             ui.add_space(COLUMN_GAP);
-            column(ui, w, &|ui| chapter_list(ui, t, chapters));
+            column(ui, w, &|ui| chapter_list(ui, t, chapters, at));
         });
     } else {
         let w = avail.min(READING_W);
@@ -159,7 +178,7 @@ fn book_body(ui: &mut Ui, t: &Tokens, item: &sources::Item) {
             column(ui, w, &|ui| about(ui, t, description));
             ui.add_space(24.0);
         }
-        column(ui, w, &|ui| chapter_list(ui, t, chapters));
+        column(ui, w, &|ui| chapter_list(ui, t, chapters, at));
     }
 }
 
@@ -203,7 +222,7 @@ pub fn facts_line(book: &ItemSummary) -> String {
 }
 
 /// The chapter list: each chapter's number, title and how long it runs.
-fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter]) {
+fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter], at: Option<f64>) {
     if chapters.is_empty() {
         return;
     }
@@ -219,14 +238,36 @@ fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter]) {
         if !ui.is_rect_visible(row) {
             continue;
         }
+        let current = at.is_some_and(|at| at >= chapter.start && at < chapter.end);
+        let finished = at.is_some_and(|at| at >= chapter.end);
+        let ink = if current {
+            t.accent
+        } else if finished {
+            t.muted
+        } else {
+            t.text
+        };
+        if current {
+            ui.painter().rect_filled(row, 4.0, t.accent.gamma_multiply(0.1));
+        }
         let cy = row.center().y;
-        let number = format!("{}", n + 1);
-        ui.painter().text(pos2(row.left() + CHAPTER_NUMBER_RIGHT, cy), egui::Align2::RIGHT_CENTER, number, FontId::proportional(12.0), t.muted);
+        if current {
+            let icon = egui::Rect::from_center_size(pos2(row.left() + CHAPTER_NUMBER_RIGHT - 5.0, cy), vec2(10.0, 10.0));
+            shell::icons::paint(ui.painter(), icon, Icon::Play, t.accent);
+        } else {
+            ui.painter().text(
+                pos2(row.left() + CHAPTER_NUMBER_RIGHT, cy),
+                egui::Align2::RIGHT_CENTER,
+                format!("{}", n + 1),
+                FontId::proportional(12.0),
+                t.muted,
+            );
+        }
         let time = elide(ui, &length, FontId::proportional(12.0), t.muted, 72.0);
         let time_w = time.size().x;
         ui.painter().galley(pos2(row.right() - time_w, cy - time.size().y / 2.0), time, t.muted);
-        let title = elide(ui, &chapter.title, FontId::proportional(13.0), t.text, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
-        ui.painter().galley(pos2(row.left() + CHAPTER_TITLE_X, cy - title.size().y / 2.0), title, t.text);
+        let title = elide(ui, &chapter.title, FontId::proportional(13.0), ink, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
+        ui.painter().galley(pos2(row.left() + CHAPTER_TITLE_X, cy - title.size().y / 2.0), title, ink);
     }
 }
 

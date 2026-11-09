@@ -257,6 +257,16 @@ impl Art {
         }
     }
 
+    /// Fixtures know their missing covers already; disk work would race the
+    /// idle assertion and make snapshots depend on task scheduling.
+    #[cfg(test)]
+    pub fn preload_missing(&mut self, cover: &str) {
+        for size in SIZES {
+            let key = self.key(cover, size);
+            self.missing.insert(key);
+        }
+    }
+
     #[cfg(test)]
     pub fn preload(&mut self, cover: &str, image: ColorImage) {
         let key = self.key(cover, 512);

@@ -10,6 +10,8 @@
 //! - `session`: signing in, resuming, and signing out
 //! - `library`: the books the shelf has, in the order drawn
 //! - `nav`: where the window is, and how it got there
+//! - `playing`: playback actions, engine events and the listening worker
+//! - `player_bar`: chapter seeking and the listening controls
 //! - `ui_state`: the notice line, the trail, and what a frame reads
 //! - `prefs_view`: the preferences a frame reads, and the actions that change
 //!   them
@@ -42,6 +44,8 @@
 mod book;
 mod library;
 mod nav;
+mod player_bar;
+mod playing;
 mod prefs_view;
 mod session;
 mod ui_state;
@@ -108,6 +112,8 @@ pub enum Action {
     SyncNow,
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
+    PlayBook(String),
+    Playback(crate::player::Control),
 }
 
 pub struct RedeApp {
@@ -137,6 +143,13 @@ pub struct RedeApp {
     /// The window: where it is, the notice line, the toasts' state.
     ui: UiState,
     actions: Vec<Action>,
+    player: crate::player::Player,
+    engine: Option<audio::EngineHandle>,
+    listening: Option<crate::listening::Listening>,
+    playback_generation: u64,
+    opening: bool,
+    positions: std::collections::HashMap<String, sources::Progress>,
+    stream_dir: std::path::PathBuf,
 }
 
 impl RedeApp {
@@ -184,6 +197,13 @@ impl RedeApp {
             sync: SyncState::default(),
             ui,
             actions: Vec::new(),
+            player: crate::player::Player::default(),
+            engine: None,
+            listening: None,
+            playback_generation: 0,
+            opening: false,
+            positions: std::collections::HashMap::new(),
+            stream_dir: paths.art_cache.with_file_name("streams"),
         })
     }
 
@@ -207,12 +227,23 @@ impl RedeApp {
                 AccountMsg::NoTokens => self.needs_sign_in(None),
             },
             Msg::Library(m) => match m {
-                LibraryMsg::Books(books) => self.books.set(books),
+                LibraryMsg::Books(books) => {
+                    if self.session.source.is_some()
+                        && let (Some(account), Some(shelf)) = (&self.session.account, &self.session.shelf)
+                    {
+                        self.bridge.positions(shelf.clone(), books.iter().map(|book| sources::ItemKey::new(account.id, &book.id)).collect());
+                    }
+                    self.books.set(books);
+                }
                 LibraryMsg::SyncProgress(items) => self.sync.applied = items,
                 LibraryMsg::SyncDone(outcome) => self.sync_done(outcome),
                 LibraryMsg::Book { key, item } => self.books.loaded(&key.item, *item),
                 LibraryMsg::BookFailed { key, error } => self.books.failed(&key.item, error),
             },
+            Msg::Playback { session, event } if session == self.bridge.session() => self.playback_event(event),
+            Msg::Playback { .. } => {}
+            Msg::Engine { session, event } if session == self.bridge.session() => self.engine_event(event),
+            Msg::Engine { .. } => {}
             Msg::Error(e) => self.show_failure(e),
         }
     }
@@ -241,12 +272,22 @@ impl RedeApp {
             Action::SignOut => self.sign_out(),
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
+            Action::PlayBook(id) => self.play_book(id, None),
+            Action::Playback(control) => self.playback_control(control),
         }
     }
 
     /// A change to a preference, saved once the burst of changes ends.
     fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
+            PrefsAction::Playback(mut playback) => {
+                playback.speed = crate::timeline::normalize_speed(playback.speed);
+                playback.skip_back = playback.skip_back.clamp(1, 300);
+                playback.skip_forward = playback.skip_forward.clamp(1, 300);
+                playback.rewind = playback.rewind.min(60);
+                self.prefs.edit(|s| s.playback = playback);
+                self.shown.playback = playback;
+            }
             PrefsAction::Sort(sort) => {
                 if self.prefs.get(|s| s.sort) == sort {
                     return;
@@ -358,6 +399,8 @@ impl RedeApp {
         let t = Tokens::of(ui);
         self.art.poll();
         egui::Panel::top("title-bar").exact_size(crate::app::BAR_H).resizable(false).frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| self.title_bar(ui));
+        self.playback_keys(ui.ctx());
+        self.player_panel(ui);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 })).show(
             ui,
             |ui| {
@@ -383,6 +426,7 @@ impl RedeApp {
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg);
         }
+        self.playback_tick(ctx);
         // The window came to the front: catch up with the server, at most every
         // few minutes. Idle windows never ask.
         if self.session.signed_in()
@@ -425,6 +469,7 @@ impl eframe::App for RedeApp {
     }
 
     fn on_exit(&mut self) {
+        self.finish_playback();
         self.prefs.flush();
     }
 }
@@ -436,6 +481,7 @@ pub const BAR_H: f32 = 52.0;
 impl Drop for RedeApp {
     fn drop(&mut self) {
         // Work in flight belongs to a session nobody is using any more.
+        self.finish_playback();
         self.bridge.end_session();
         self.prefs.flush();
     }

@@ -77,7 +77,17 @@ impl RedeApp {
         let changed = self.session.account.as_ref().map(|a| a.id) != Some(account.id);
         self.session = Session { account: Some(account.clone()), source: Some(source.clone()), shelf: Some(shelf.clone()), connecting: false };
         self.login = None;
-        self.art.set_source(Some(source));
+        self.art.set_source(Some(source.clone()));
+        self.listening = Some(self.bridge.listening(
+            source,
+            shelf.clone(),
+            sources::DeviceInfo {
+                device_id: account.device_id.clone(),
+                client_name: "Rede".into(),
+                client_version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            },
+        ));
         self.prefs.edit(|s| s.put_account(account.clone()));
         if changed {
             self.books.clear();
@@ -146,7 +156,16 @@ impl RedeApp {
     /// back with the account filled in, and anything in flight is dropped.
     pub(super) fn sign_out(&mut self) {
         let Some(account) = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned())) else { return };
-        self.bridge.sign_out(account.clone(), self.session.source.clone());
+        self.playback_control(crate::player::Control::Stop);
+        self.playback_generation += 1;
+        self.opening = false;
+        let finished = self.listening.take().map(crate::listening::Listening::finish);
+        self.bridge.sign_out_after(account.clone(), self.session.source.clone(), finished);
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown(Duration::from_secs(2));
+        }
+        self.player = crate::player::Player::default();
+        self.positions.clear();
         self.session = Session::default();
         self.books.clear();
         self.art.set_source(None);
@@ -170,6 +189,9 @@ impl RedeApp {
         let (Some(source), Some(shelf)) = (self.session.source.clone(), self.session.shelf.clone()) else { return };
         if self.sync.running {
             return;
+        }
+        if let Some(listening) = &self.listening {
+            listening.send(crate::listening::Request::Reconcile);
         }
         self.sync.running = true;
         self.sync.applied = 0;

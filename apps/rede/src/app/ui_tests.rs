@@ -42,6 +42,12 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    for paused in [false, true] {
+        playing(app_mut(&mut h), paused);
+        app_mut(&mut h).go(book_route(0));
+        h.run_steps(3);
+        h.check_accessibility();
+    }
     // The sign-in screen, and the same with an error under the button.
     *h.state_mut() = Some(signed_out(&h.ctx.clone(), dir.path()));
     h.run_steps(3);
@@ -75,12 +81,12 @@ fn the_sort_pill_reorders_the_shelf_and_is_saved() {
 }
 
 #[test]
-fn the_play_button_waits_for_the_engine() {
+fn the_book_page_offers_play_and_lists_its_chapters() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     app_mut(&mut h).go(book_route(0));
     h.run_steps(3);
-    // Drawn where it will work, and disabled until the engine is there.
+    // The page has a usable control before any device has been opened.
     let play = h.get_by_label("Play").rect();
     assert!(play.width() > 0.0, "the Play button is drawn on the page");
     assert_eq!(h.query_all_by_label_contains("A Wizard").count(), 0, "the library is not on screen");
@@ -122,13 +128,68 @@ fn signing_out_is_in_the_account_menu() {
 }
 
 #[test]
-fn the_play_button_says_playback_comes_later() {
+fn play_without_a_connection_explains_how_to_continue() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     app_mut(&mut h).go(book_route(0));
     h.run_steps(2);
-    h.get_by_label("Play").hover();
-    // egui holds a tooltip back a moment before showing it.
-    h.run_steps(40);
-    h.get_by_label("Playback comes next");
+    h.get_by_label("Play").click();
+    h.run_steps(2);
+    h.get_by_label("Not connected. Sign in to play this book.");
+}
+
+#[test]
+fn the_player_exposes_speed_and_listening_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    app_mut(&mut h).go(book_route(0));
+    h.run_steps(3);
+    h.get_by_label_contains("Resume ·");
+    h.get_by_label("1.5×").click();
+    h.run_steps(2);
+    assert_eq!(h.query_all_by_label("Speed").count(), 2);
+    h.get_by_label("Previous chapter");
+    h.get_by_label("Next chapter");
+    h.get_by_label("Stop playback");
+    h.check_accessibility();
+}
+
+#[test]
+fn the_player_controls_fit_inside_the_bottom_panel() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    for size in [FULL, [crate::MIN_SIZE[0], 560.0]] {
+        h.set_size(egui::vec2(size[0], size[1]));
+        h.run_steps(3);
+        for label in ["Skip back 15 seconds", "Play", "Skip forward 30 seconds", "Chapter position", "1.5×"] {
+            let rect = h.get_by_label(label).rect();
+            assert!(rect.min.y >= size[1] - 160.0 && rect.max.y <= size[1], "{label}: {rect:?}");
+            assert!(rect.min.x >= 0.0 && rect.max.x <= size[0], "{label}: {rect:?}");
+        }
+    }
+}
+
+#[test]
+fn playback_shortcuts_enqueue_the_same_controls_as_the_buttons() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    playing(&mut app, true);
+    for (key, modifiers, expected) in [
+        (egui::Key::Space, egui::Modifiers::NONE, crate::player::Control::Toggle),
+        (egui::Key::ArrowLeft, egui::Modifiers::NONE, crate::player::Control::Skip(-15.0)),
+        (egui::Key::ArrowRight, egui::Modifiers::NONE, crate::player::Control::Skip(30.0)),
+        (egui::Key::ArrowLeft, egui::Modifiers::SHIFT, crate::player::Control::PreviousChapter),
+        (egui::Key::ArrowRight, egui::Modifiers::SHIFT, crate::player::Control::NextChapter),
+        (egui::Key::OpenBracket, egui::Modifiers::NONE, crate::player::Control::Speed(1.45)),
+        (egui::Key::CloseBracket, egui::Modifiers::NONE, crate::player::Control::Speed(1.55)),
+    ] {
+        let input =
+            egui::RawInput { events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }], ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.playback_keys(ui.ctx()));
+        out.textures_delta.clear();
+        assert!(matches!(app.actions.pop(), Some(Action::Playback(control)) if control == expected));
+    }
 }

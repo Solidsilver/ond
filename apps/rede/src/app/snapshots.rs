@@ -95,12 +95,27 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    for (name, paused, book) in [("player-playing", false, false), ("player-paused", true, false), ("book-midway", false, true)] {
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, paused);
+            if book {
+                app.go(book_route(0));
+            }
+            app
+        });
+    }
     // The same page at the smallest window Rede opens: the cover goes
     // above the text and the columns stack.
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
     scene(h, s, "book-narrow", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         app.go(book_route(0));
+        app
+    });
+    scene(h, s, "player-narrow", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
         app
     });
     h.set_size(egui::vec2(FULL[0], FULL[1]));

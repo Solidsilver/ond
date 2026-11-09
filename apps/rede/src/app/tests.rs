@@ -25,6 +25,10 @@ fn every_view_draws() {
             frame(&ctx, &mut app);
         }
     }
+    playing(&mut app, false);
+    frame(&ctx, &mut app);
+    app.player.paused = true;
+    frame(&ctx, &mut app);
     // The trail went Library → book → book → gone; back walks it.
     assert!(app.ui.nav.can_back());
     app.back();
@@ -162,6 +166,8 @@ fn an_idle_window_asks_for_no_frames() {
     // A book page too, once its details are there.
     app_mut(&mut h).go(book_route(0));
     idle(&mut h, "an idle book page");
+    playing(app_mut(&mut h), true);
+    idle(&mut h, "a paused player");
 }
 
 /// Runs frames until nothing asks for another, then a few more, and says the
@@ -185,4 +191,25 @@ fn idle(h: &mut egui_kittest::Harness<'static, Option<RedeApp>>, what: &str) {
 
 fn app_mut<'a>(h: &'a mut egui_kittest::Harness<'static, Option<RedeApp>>) -> &'a mut RedeApp {
     h.state_mut().as_mut().expect("the fixture app")
+}
+
+#[test]
+fn queued_playback_results_from_a_signed_out_account_are_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    let session = app.bridge.session();
+    app.sign_out();
+    app.handle(Msg::Playback {
+        session,
+        event: crate::listening::Event::Positions(vec![sources::Progress {
+            item: sources::ItemKey::new(account().id, "book-0"),
+            position: sources::Position::from_secs(500.0),
+            finished: false,
+            at: None,
+        }]),
+    });
+    assert!(app.positions.is_empty());
+    app.handle(Msg::Engine { session, event: audio::Event::Error { track_id: None, message: "old device".into() } });
+    assert!(app.ui.notice.is_none());
 }

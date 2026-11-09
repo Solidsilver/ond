@@ -86,6 +86,24 @@ pub struct Settings {
     pub theme: shell::theme::ThemePref,
     #[serde(default)]
     pub sort: LibrarySort,
+    #[serde(default)]
+    pub playback: PlaybackSettings,
+}
+
+/// Listening preferences are separate from engine time: skip and rewind are
+/// book seconds, while the speed changes how long those seconds take to hear.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaybackSettings {
+    pub skip_back: u32,
+    pub skip_forward: u32,
+    pub speed: f32,
+    pub rewind: u32,
+}
+impl Default for PlaybackSettings {
+    fn default() -> Self {
+        Self { skip_back: 15, skip_forward: 30, speed: 1.0, rewind: 5 }
+    }
 }
 
 /// Every value in `obj` that isn't itself an object, with its path.

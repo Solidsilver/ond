@@ -25,6 +25,14 @@ use std::sync::mpsc::Sender;
 pub enum Msg {
     Account(AccountMsg),
     Library(LibraryMsg),
+    Playback {
+        session: u64,
+        event: crate::listening::Event,
+    },
+    Engine {
+        session: u64,
+        event: audio::Event,
+    },
     /// Something the user asked for failed.
     Error(Failure),
 }
@@ -79,8 +87,7 @@ impl From<LibraryMsg> for Msg {
 
 /// What the player decodes, sent with every play session: without it, or
 /// without `forceDirectPlay`, Audiobookshelf transcodes to HLS instead of
-/// handing over the files. Playback isn't wired yet; this is the list the
-/// engine will decode.
+/// handing over the files. The engine decodes these formats directly.
 const MIME_TYPES: [&str; 7] = ["audio/mpeg", "audio/mp4", "audio/aac", "audio/flac", "audio/ogg", "audio/webm", "audio/x-matroska"];
 
 /// Wakes the UI so it reads what was sent (a repaint, in the app).
@@ -109,6 +116,37 @@ pub struct Bridge {
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, keeper: Keeper, paths: Arc<Paths>) -> Self {
         Self { rt, tx, notify, keeper, paths, session: Arc::default(), pass: Arc::default(), scope: None }
+    }
+
+    fn playback(&self, event: crate::listening::Event) {
+        self.send(Msg::Playback { session: self.scope.unwrap_or_else(|| self.session()), event });
+    }
+
+    pub fn listening(&self, source: Arc<dyn Source>, shelf: Arc<Shelf>, device: sources::DeviceInfo) -> crate::listening::Listening {
+        let this = self.scoped();
+        let live = this.clone();
+        crate::listening::spawn(&self.rt, source, shelf, device, move || live.current(), move |event| this.playback(event))
+    }
+
+    pub fn engine_events(&self, engine: &audio::EngineHandle) {
+        let this = self.scoped();
+        let events = engine.events.clone();
+        let status = engine.status.clone();
+        self.rt.spawn_blocking(move || {
+            let mut previous = status.state();
+            while this.current() {
+                let state = status.state();
+                if state != previous {
+                    (this.notify)();
+                    previous = state;
+                }
+                match events.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(event) => this.send(Msg::Engine { session: this.scope.unwrap_or_else(|| this.session()), event }),
+                    Err(error) if error.is_disconnected() => break,
+                    Err(_) => {}
+                }
+            }
+        });
     }
 
     /// The current login session (see [`end_session`](Self::end_session)).
@@ -218,13 +256,21 @@ impl Bridge {
     /// Signs out: the tokens go (and only the tokens: the shelf and its books
     /// stay), and anything in flight stops. The answer to a sign-in that was
     /// still running is dropped with the session.
+    #[cfg(test)]
     pub fn sign_out(&self, account: Account, source: Option<Arc<dyn Source>>) {
+        self.sign_out_after(account, source, None);
+    }
+
+    pub fn sign_out_after(&self, account: Account, source: Option<Arc<dyn Source>>, finished: Option<tokio::sync::oneshot::Receiver<()>>) {
         self.end_session();
         // A refresh from the old client may still be in flight; its new pair
         // mustn't be written back over the sign-out.
         self.keeper.forget(account);
         if let Some(source) = source {
             self.rt.spawn(async move {
+                if let Some(finished) = finished {
+                    let _ = finished.await;
+                }
                 if let Err(e) = source.logout().await {
                     tracing::info!("ending the server login: {e}");
                 }
@@ -254,6 +300,24 @@ impl Bridge {
         }
         let source: Arc<dyn Source> = Arc::new(AbsSource::new(account.id, client, MIME_TYPES.iter().map(|m| (*m).to_owned()).collect()));
         this.send(AccountMsg::SignedIn { session, account, source, shelf, warning });
+    }
+
+    pub fn positions(&self, shelf: Arc<Shelf>, keys: Vec<ItemKey>) {
+        let this = self.scoped();
+        self.rt.spawn_blocking(move || {
+            let mut positions = Vec::new();
+            for key in keys {
+                match shelf.position(&key) {
+                    Ok(Some(position)) => positions.push(position),
+                    Ok(None) => {}
+                    Err(e) => {
+                        this.send(Msg::Error(Failure::Local(format!("Couldn't read listening progress: {e}"))));
+                        return;
+                    }
+                }
+            }
+            this.playback(crate::listening::Event::Positions(positions));
+        });
     }
 
     /// Reads the shelf's books without the network, for the first frame after a

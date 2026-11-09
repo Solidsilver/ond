@@ -1,0 +1,203 @@
+//! The app supplies the real engine and the scoped session worker. Views only
+//! enqueue controls; notes return to the worker in exactly the order produced.
+
+use super::{Action, RedeApp};
+use crate::failure::Failure;
+use crate::listening::{Event, Request};
+use crate::player::{Control, Live, Note};
+use std::time::{Duration, Instant};
+
+impl RedeApp {
+    fn ensure_engine(&mut self) -> Result<(), Failure> {
+        if self.engine.is_none() {
+            let rt = self._rt.0.as_ref().expect("the app runtime is alive");
+            let mut config = streamcache::CacheConfig::new(&self.stream_dir);
+            // ABS uses HTTP error statuses. The default accepts successful
+            // bodies; streamcache itself rejects 401 before caching bytes.
+            config.reply_check = streamcache::ReplyCheck::default();
+            let cache =
+                streamcache::StreamCache::new(config, rt.handle().clone()).map_err(|e| Failure::Local(format!("Couldn't open the stream cache: {e}")))?;
+            let engine = audio::spawn(audio::EngineConfig::default(), audio::default_backend(), Some(cache));
+            self.bridge.engine_events(&engine);
+            self.engine = Some(engine);
+        }
+        Ok(())
+    }
+
+    pub(super) fn play_book(&mut self, id: String, at: Option<f64>) {
+        if self.player.book.as_ref().is_some_and(|b| b.key.item == id) && self.player.active && at.is_none() {
+            if self.player.paused {
+                self.playback_control(Control::Toggle);
+            }
+            return;
+        }
+        let (Some(account), Some(source), Some(shelf)) = (&self.session.account, &self.session.source, &self.session.shelf) else {
+            self.show_failure(Failure::Local("Not connected. Sign in to play this book.".into()));
+            return;
+        };
+        let key = sources::ItemKey::new(account.id, id);
+        if self.listening.is_none() {
+            self.listening = Some(self.bridge.listening(
+                source.clone(),
+                shelf.clone(),
+                sources::DeviceInfo {
+                    device_id: account.device_id.clone(),
+                    client_name: "Rede".into(),
+                    client_version: env!("CARGO_PKG_VERSION").into(),
+                    ..Default::default()
+                },
+            ));
+        }
+        self.playback_control(Control::Stop);
+        self.player.book = None;
+        self.playback_generation += 1;
+        self.opening = true;
+        self.listening.as_ref().unwrap().send(Request::Open { generation: self.playback_generation, key, at });
+    }
+
+    pub(super) fn playback_control(&mut self, control: Control) {
+        if !self.player.active
+            && let Some(book) = &self.player.book
+            && control == Control::Toggle
+        {
+            let id = book.key.item.clone();
+            self.play_book(id, None);
+            return;
+        }
+        let mut notes = Vec::new();
+        if let Some(engine) = &self.engine {
+            self.player.control(control, f64::from(self.shown.playback.rewind), engine, Instant::now(), &mut notes);
+        }
+        if let Control::Speed(speed) = control {
+            let speed = crate::timeline::normalize_speed(speed);
+            self.prefs.edit(|s| s.playback.speed = speed);
+            self.shown.playback.speed = speed;
+        }
+        self.playback_notes(notes);
+    }
+
+    fn playback_notes(&mut self, notes: Vec<Note>) {
+        for note in notes {
+            match note {
+                Note::Report { update, close } => {
+                    if let Some(listening) = &self.listening {
+                        self.positions.insert(
+                            update.item.item.clone(),
+                            sources::Progress { item: update.item.clone(), position: update.position, finished: update.finished, at: Some(update.at) },
+                        );
+                        listening.send(Request::Report { generation: self.playback_generation, update, close });
+                    }
+                }
+                Note::Refresh => {
+                    if let Some(listening) = &self.listening {
+                        listening.send(Request::Refresh { generation: self.playback_generation });
+                    }
+                }
+                Note::Error(message) => self.show_error(message),
+            }
+        }
+    }
+
+    pub(super) fn playback_event(&mut self, event: Event) {
+        match event {
+            Event::Opened { generation, result } if generation == self.playback_generation => {
+                self.opening = false;
+                match result {
+                    Ok(opened) => {
+                        if let Err(error) = self.ensure_engine() {
+                            self.show_failure(error);
+                            return;
+                        }
+                        let result = self.player.load(*opened, self.shown.playback.speed, self.engine.as_ref().unwrap(), Instant::now());
+                        if let Err(error) = result {
+                            self.show_error(error);
+                        }
+                    }
+                    Err(error) => self.show_failure(error),
+                }
+            }
+            Event::Refreshed { generation, result } if generation == self.playback_generation => match result {
+                Ok(tracks) => {
+                    if self.player.active
+                        && let Some(engine) = &self.engine
+                    {
+                        self.player.refreshed(tracks, engine);
+                    }
+                }
+                Err(error) => {
+                    self.playback_control(Control::Stop);
+                    self.show_failure(error);
+                }
+            },
+            Event::Positions(positions) => {
+                for position in positions {
+                    let old = self.positions.remove(&position.item.item);
+                    let latest = crate::listening::newer(old, Some(position)).unwrap();
+                    self.positions.insert(latest.item.item.clone(), latest);
+                }
+            }
+            Event::Error(error) => self.show_failure(error),
+            _ => {}
+        }
+    }
+
+    pub(super) fn engine_event(&mut self, event: audio::Event) {
+        let mut notes = Vec::new();
+        if let Some(engine) = &self.engine {
+            self.player.event(&event, engine, Instant::now(), &mut notes);
+        }
+        self.playback_notes(notes);
+    }
+
+    pub(super) fn playback_tick(&mut self, ctx: &egui::Context) {
+        let mut notes = Vec::new();
+        if let Some(engine) = &self.engine {
+            self.player.tick(engine, Instant::now(), &mut notes);
+            Live(self.player.active && !self.player.paused && engine.status.state() == audio::PlayState::Playing).request(ctx);
+        }
+        self.playback_notes(notes);
+    }
+
+    pub(super) fn playback_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() || self.player.book.is_none() {
+            return;
+        }
+        let prefs = self.shown.playback;
+        let control = ctx.input_mut(|i| {
+            use egui::{Key, Modifiers};
+            if i.consume_key(Modifiers::NONE, Key::Space) {
+                Some(Control::Toggle)
+            } else if i.consume_key(Modifiers::SHIFT, Key::ArrowLeft) {
+                Some(Control::PreviousChapter)
+            } else if i.consume_key(Modifiers::SHIFT, Key::ArrowRight) {
+                Some(Control::NextChapter)
+            } else if i.consume_key(Modifiers::NONE, Key::ArrowLeft) {
+                Some(Control::Skip(-f64::from(prefs.skip_back)))
+            } else if i.consume_key(Modifiers::NONE, Key::ArrowRight) {
+                Some(Control::Skip(f64::from(prefs.skip_forward)))
+            } else if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
+                Some(Control::Speed(self.player.speed - 0.05))
+            } else if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
+                Some(Control::Speed(self.player.speed + 0.05))
+            } else {
+                None
+            }
+        });
+        if let Some(control) = control {
+            self.actions.push(Action::Playback(control));
+        }
+    }
+
+    pub(super) fn finish_playback(&mut self) {
+        self.playback_control(Control::Stop);
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown(Duration::from_secs(2));
+        }
+        if let Some(listening) = self.listening.take()
+            && let Some(rt) = &self._rt.0
+        {
+            let done = listening.finish();
+            let _ = rt.block_on(async { tokio::time::timeout(Duration::from_secs(2), done).await });
+        }
+    }
+}
