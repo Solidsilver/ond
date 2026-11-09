@@ -9,7 +9,7 @@ use crate::theme::{Tokens, semibold};
 use crate::widgets::{danger, primary, secondary};
 use egui::{FontId, Key, Modifiers, vec2};
 use library::Track;
-use shell::kit::key_cap;
+use shell::kit::{ShortcutGroup, shortcuts_sheet};
 
 pub enum Overlay {
     Shortcuts,
@@ -223,86 +223,17 @@ fn name_dialog(ui: &mut egui::Ui, title: &str, sub: &str, name: &mut String, ver
     out
 }
 
-/// The key map, grouped into two or three balanced columns (three when the
-/// window is wide). Rows with the same label merge their keys. It's sized to
-/// fit; only a really short window scrolls, with a soft fade at the bottom.
+/// The key map in the kit's shortcuts sheet, in two or three columns (three
+/// when the window is wide). Rows with the same label merge their keys.
 fn shortcuts_ui(ui: &mut egui::Ui, visualizer: bool) {
-    let t = Tokens::of(ui);
-    const COL_W: f32 = 260.0;
-    const GAP: f32 = 32.0;
-    let screen = ui.ctx().content_rect();
-    let cols = if screen.width() >= COL_W * 3.0 + GAP * 2.0 + 120.0 { 3 } else { 2 };
-    let width = COL_W * cols as f32 + GAP * (cols - 1) as f32;
-    ui.set_width(width);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Keyboard shortcuts").font(FontId::new(15.0, semibold())).color(t.text));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new("esc").size(11.0).color(t.muted));
-        });
-    });
-    ui.add_space(16.0);
-    let columns = columns_of(cols);
-    let column = |ui: &mut egui::Ui, groups: &[&str]| {
-        ui.vertical(|ui| {
-            ui.set_width(COL_W);
-            for (gi, group) in groups.iter().enumerate() {
-                if gi > 0 {
-                    ui.add_space(16.0);
-                }
-                ui.label(egui::RichText::new(*group).font(FontId::new(11.0, semibold())).color(t.muted));
-                ui.add_space(6.0);
-                for (label, keys) in group_rows(group).iter().filter(|(l, _)| visualizer || *l != "Visualizer") {
-                    ui.horizontal(|ui| {
-                        ui.set_height(ROW_H);
-                        ui.label(egui::RichText::new(*label).size(13.0).color(t.text));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            for k in keys.iter().rev() {
-                                key_cap(ui, &crate::keys::shown(k));
-                            }
-                        });
-                    });
-                }
-            }
-        });
-    };
-    // Up to ~85% of the window (less the title and the frame's padding).
-    let max_h = (screen.height() * 0.85 - 80.0).max(200.0);
-    // The modal's area only offers the height it had last frame, so ask for
-    // the columns' full height outright (capped), or it never grows to fit.
-    let tallest = columns.iter().map(|c| c.iter().map(|g| group_height(g)).sum::<f32>()).fold(0.0, f32::max);
-    let out = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(tallest.min(max_h)).show(ui, |ui| {
-        ui.horizontal_top(|ui| {
-            for (k, groups) in columns.iter().enumerate() {
-                if k > 0 {
-                    ui.add_space(GAP);
-                }
-                column(ui, groups);
-            }
-        });
-    });
-    // When it does scroll, fade the last rows into the background.
-    let inner = out.inner_rect;
-    let hidden_below = out.content_size.y - (out.state.clamped_offset().y + inner.height());
-    if hidden_below > 1.0 {
-        let fade = egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 28.0), inner.max);
-        let bg = ui.visuals().window_fill;
-        let mut mesh = egui::Mesh::default();
-        mesh.colored_vertex(fade.left_top(), bg.gamma_multiply(0.0));
-        mesh.colored_vertex(fade.right_top(), bg.gamma_multiply(0.0));
-        mesh.colored_vertex(fade.left_bottom(), bg);
-        mesh.colored_vertex(fade.right_bottom(), bg);
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(1, 2, 3);
-        ui.painter().add(mesh);
-    }
-}
-
-const ROW_H: f32 = 22.0;
-
-/// A group's height in the list: its rows plus header and gap.
-fn group_height(group: &str) -> f32 {
-    group_rows(group).len() as f32 * (ROW_H + 8.0) + 44.0
+    let groups: Vec<ShortcutGroup<'_>> = GROUPS
+        .iter()
+        .map(|g| ShortcutGroup {
+            name: g,
+            rows: group_rows(g).iter().filter(|(l, _)| visualizer || *l != "Visualizer").map(|(l, keys)| (*l, keys.as_slice())).collect(),
+        })
+        .collect();
+    shortcuts_sheet(ui, &groups, 2..=3, false);
 }
 
 /// A group's rows, worked out once (the key map is fixed).
@@ -310,36 +241,6 @@ fn group_rows(group: &str) -> &'static [(&'static str, Vec<&'static str>)] {
     type Rows = Vec<(&'static str, Vec<&'static str>)>;
     static ALL: std::sync::OnceLock<Vec<(&'static str, Rows)>> = std::sync::OnceLock::new();
     ALL.get_or_init(|| GROUPS.iter().map(|g| (*g, rows(g))).collect()).iter().find(|(g, _)| *g == group).map_or(&[], |(_, r)| r.as_slice())
-}
-
-/// The groups split into two or three columns, worked out once each.
-fn columns_of(cols: usize) -> &'static [Vec<&'static str>] {
-    static SPLITS: std::sync::OnceLock<[Vec<Vec<&'static str>>; 2]> = std::sync::OnceLock::new();
-    let [two, three] = SPLITS.get_or_init(|| [balance(&GROUPS, 2), balance(&GROUPS, 3)]);
-    if cols >= 3 { three } else { two }
-}
-
-/// Splits `groups` (in order) into `cols` columns of roughly equal height.
-fn balance<'a>(groups: &[&'a str], cols: usize) -> Vec<Vec<&'a str>> {
-    let height = group_height;
-    let total: f32 = groups.iter().map(|g| height(g)).sum();
-    let target = total / cols as f32;
-    let mut out: Vec<Vec<&str>> = vec![Vec::new()];
-    let mut acc = 0.0;
-    for (i, g) in groups.iter().enumerate() {
-        let h = height(g);
-        let left = groups.len() - i;
-        let open = cols - out.len();
-        // Start a new column when this one is full, or when every remaining
-        // group needs a column of its own.
-        if !out.last().unwrap().is_empty() && open > 0 && (acc + h / 2.0 > target || left <= open) {
-            out.push(Vec::new());
-            acc = 0.0;
-        }
-        out.last_mut().unwrap().push(g);
-        acc += h;
-    }
-    out
 }
 
 /// One group's rows: (label, keys), keys merged for repeated labels.
@@ -354,7 +255,6 @@ fn rows(group: &str) -> Vec<(&'static str, Vec<&'static str>)> {
     out
 }
 
-/// A key combination in a quiet rounded box.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,15 +266,5 @@ mod tests {
         assert_eq!(search.1, ["⌘K", "⌘F", "/"]);
         // Every group has something to show.
         assert!(GROUPS.iter().all(|g| !rows(g).is_empty()));
-    }
-
-    #[test]
-    fn columns_keep_every_group_in_order() {
-        for cols in [2, 3] {
-            let split = balance(&GROUPS, cols);
-            assert!(split.len() <= cols && split.iter().all(|c| !c.is_empty()));
-            let flat: Vec<&str> = split.into_iter().flatten().collect();
-            assert_eq!(flat, GROUPS);
-        }
     }
 }

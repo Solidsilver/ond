@@ -14,6 +14,7 @@ use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
 use crate::widgets::{Head, ROW_PAD, choice, divider, group, managed, menu_label, row_with, secondary, secondary_danger, setting, switch, thin_slider};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use shell::kit::{readout, step_slider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Section {
@@ -938,14 +939,6 @@ fn db_row(ui: &mut Ui, label: &str, hint: &str, db: &mut f32, range: std::ops::R
     });
 }
 
-/// A slider's value, right-aligned in a fixed width so the slider beside it
-/// doesn't shift as the value changes.
-fn readout(ui: &mut Ui, text: &str) {
-    let t = Tokens::of(ui);
-    let (r, _) = ui.allocate_exact_size(vec2(52.0, 18.0), Sense::hover());
-    ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, text, FontId::proportional(12.0), t.muted);
-}
-
 /// The waveform's bars (their ends, thickness and spacing) under a preview
 /// of them across the pane.
 /// `locks`: whether the ends, thickness and spacing are set in managed.json.
@@ -977,23 +970,9 @@ fn waveform_preview(ui: &mut Ui, look: Bars, width: f32) {
     }
 }
 
-/// A whole-number setting in `range` on a thin slider, with its value read
-/// out. The slider's own position is kept between frames, so the wheel and
-/// the arrow keys, which move it a little at a time, add up to a step.
+/// A whole-number setting in `range` on the kit's [`step_slider`].
 fn step_row(ui: &mut Ui, label: &str, value: &mut u8, range: std::ops::RangeInclusive<u8>, text: fn(u8) -> String) {
-    let (lo, hi) = (*range.start(), *range.end());
-    let span = f32::from(hi - lo);
-    let at = (*value).clamp(lo, hi);
-    let snapped = |v: f32| lo + (v * span).round() as u8;
-    setting(ui, label, "", |ui| {
-        readout(ui, &text(at));
-        let id = ui.scope_id().with(("step", label));
-        let mut v = ui.data(|d| d.get_temp::<f32>(id)).filter(|&v| snapped(v) == at).unwrap_or(f32::from(at - lo) / span);
-        if thin_slider(ui, &mut v, SLIDER_W, label).changed() {
-            ui.data_mut(|d| d.insert_temp(id, v));
-            *value = snapped(v);
-        }
-    });
+    setting(ui, label, "", |ui| step_slider(ui, label, value, range, SLIDER_W, text));
 }
 
 /// Half points as points: "1 pt", "1.5 pt".

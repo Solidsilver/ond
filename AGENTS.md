@@ -21,7 +21,7 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 |---|---|
 | `apps/ond` (package `ond-player`, binary `Ond`) | UI, queue, sync, settings, each platform's integration |
 | `apps/rede` (package `rede`, binary `Rede`) | Audiobook player: Audiobookshelf sign-in, library sync, cover grid and book pages |
-| `crates/shell` | What the apps share on screen: theme, colors, icons, the window, its title bar (`chrome`, `csd`), shared widgets, and the machinery under the cover-art cache (`art`: the size buckets, the load queue, the LRU set, the disk cache, the decode) |
+| `crates/shell` | What the apps share on screen: theme, colors, icons, the window, its title bar (`chrome`, `csd`), the widget kit (`kit`: text, buttons, controls, rows, menus, sheets, toasts), and the machinery under the cover-art cache (`art`: the size buckets, the load queue, the LRU set, the disk cache, the decode) |
 | `crates/subsonic` | OpenSubsonic API client |
 | `crates/library` | Local mirror in redb with hand-written indexes and migrations |
 | `crates/streamcache` | Download cache playback can read and seek while it fills |
@@ -32,9 +32,9 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 | `crates/sources` | Rede: the `Source` trait and the server-independent models (accounts, libraries, items, tracks, chapters, positions), plus `AbsSource` on the Audiobookshelf client |
 | `crates/shelf` | Rede: one redb database per account (items, tracks, chapters, the progress log, positions, bookmarks, sync state) with frozen versioned rows and migrations |
 
-Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; shared widgets in `src/widgets.rs`; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
+Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; `src/widgets.rs` re-exports the kit's widgets and holds the few that are Ond's own; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
 
-`crates/shell` holds what Ond and Rede both draw. Code moves there from Ond when Rede needs it, not ahead of time, and nothing in it may know which app it serves. Ond imports `theme`, `chrome`, `csd` and `icons` at its crate root (and `visuals` re-exports `colors` and `over_art`), so `crate::theme::Tokens` and the like still work. A move is its own commit, and Ond's snapshots must come out the same before and after. Rede's window renders with `cargo test -p rede --release snapshots -- --ignored --nocapture`.
+`crates/shell` holds what Ond and Rede both draw, and nothing in it may know which app it serves. Shared look and feel lives in `shell::kit`: a widget either app could use goes there first, even while only one app uses it, so the two keep drawing alike. Behaviour that belongs to one app stays in that app as a thin wrapper over the kit's widget (Ond's settings rows add the managed.json tag; its view picker maps its view modes onto `kit::icon_choice`). The kit's module header says what's where. Ond imports `theme`, `chrome`, `csd` and `icons` at its crate root (and `visuals` re-exports `colors` and `over_art`), so `crate::theme::Tokens` and the like still work. A move is its own commit, and Ond's snapshots must come out the same before and after. Rede's window renders with `cargo test -p rede --release snapshots -- --ignored --nocapture`.
 
 ## How the app is wired
 
@@ -49,7 +49,7 @@ Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for 
 
 - **A server call:** a method on `Bridge` (scoped), a `Msg` variant in the right group, a handler in the matching `src/app/*.rs`. Errors cross the bridge typed as network, server or local; only network failures trigger a reachability probe.
 - **A preference:** a field on `Settings` (with `#[serde(default)]` and a lenient fallback if it's an enum), a `PrefsView` field, a `PrefsAction` variant and its `apply_prefs` arm, a `locked()` arm in `prefs_view.rs` if Home Manager may manage it, a row in `settings_page.rs`, and a line in `docs/home-manager.md`.
-- **A view:** `src/app/<view>.rs` taking `ViewCtx`, a `Route`, an entry in `every_view_draws` in `src/app/tests.rs`, a route in `every_view_names_its_controls` in `src/app/ui_tests.rs` (every painted control needs a `widget_info`), and a scene in `snapshots/scenes.rs`. Reuse what's there: `virtual_list` for long lists, `track_list` for tracks, `browse::heading_bar` for a page heading with its picker and sort, `widgets::empty_state` for an empty list.
+- **A view:** `src/app/<view>.rs` taking `ViewCtx`, a `Route`, an entry in `every_view_draws` in `src/app/tests.rs`, a route in `every_view_names_its_controls` in `src/app/ui_tests.rs` (every painted control needs a `widget_info`), and a scene in `snapshots/scenes.rs`. Reuse what's there (the kit first): `virtual_list` for long lists, `track_list` for tracks, `browse::heading_bar` for a page heading with its picker and sort, `kit::empty_state` for an empty list.
 - **Test data:** `test_tracks::track(id, album, title)` builds a `Track` for any test; `app/fixture.rs` has the UI's fixture library and harness helpers.
 - **A queue or playback behaviour:** `queue.rs` is pure data with its own tests; `player.rs` drives the engine and is tested with fakes. Keep them that way.
 

@@ -1,40 +1,17 @@
-//! Small shared pieces: elided text, quiet links, the accent button, a
-//! segmented control, a thin slider, a switch and a menu label, and the rows
-//! Settings is built from (a [`group`] of [`setting`]s).
+//! The kit's widgets ([`shell::kit`]) under the names Ond's views use, and
+//! the few that are Ond's own: a rating menu's choice, a track title's
+//! colour, the grid/list picker over Ond's view modes, settings rows that say
+//! when managed.json locks them (a [`group`] of [`setting`]s), and
+//! bit-perfect's switch.
 
-use crate::icons::{self, Icon};
+use crate::icons::Icon;
 use crate::theme::Tokens;
-use egui::{Color32, FontId, Rect, Response, Sense, Ui, vec2};
+use egui::{Color32, Rect, Response, Sense, Ui, vec2};
 pub use shell::kit::{
-    Head, ROW_PAD, choice, divider, elide, elide_job, group, link, link_line, managed, section, switch, switch_tinted, thin_slider, thin_slider_marked,
+    Head, KV_VALUE, ROW_PAD, chip, choice, danger, divider, elide, elide_job, empty_state, focus_ring, group, heart_button, hover_heart, icon_choice, kv_row,
+    kv_section, kv_text, link, link_line, managed, menu_label, menu_row, primary, row_fill, secondary, secondary_danger, section, sidebar_row, switch,
+    switch_tinted, thin_slider, thin_slider_marked, tile_button,
 };
-pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
-
-/// A heart that loves / unloves: filled accent when on, a quiet outline when off.
-pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
-    let t = Tokens::of(ui);
-    let (icon, color, label) = if on { (crate::icons::Icon::HeartFilled, t.accent, "Unlove") } else { (crate::icons::Icon::Heart, t.muted, "Love") };
-    crate::icons::sized_button(ui, icon, label, vec2(size, size), glyph, Some(color))
-}
-
-/// The heart over a row or display: drawn filled when loved, as an outline when
-/// `reveal` (its row is hovered) or when it's hovered itself, and always
-/// clickable. `label` names it for accessibility ("Love", "Unlove (⇧⌘L)").
-pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: bool, glyph: f32, label: &str) -> Response {
-    let t = Tokens::of(ui);
-    let resp = ui.interact(rect, id, Sense::click());
-    // Focused, it shows (as when hovered), or Tab would land on nothing.
-    let hot = resp.hovered() || resp.has_focus();
-    if loved || reveal || hot {
-        let (icon, color) = if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if hot { t.text } else { t.muted }) };
-        crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
-    }
-    let side = glyph + 6.0;
-    focus_ring(ui, &resp, Rect::from_center_size(rect.center(), vec2(side, side)), side / 2.0);
-    let label = crate::keys::shown(label).into_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    resp
-}
 
 /// One choice in a rating menu: `rating` stars drawn as icons, filled up to
 /// it, with a check when it's the current rating.
@@ -66,53 +43,18 @@ pub fn rating_choice(ui: &mut Ui, rating: u8, current: bool) -> Response {
     resp
 }
 
-/// Grid or list: an icon for each in a segmented pill. Writes the pick into
-/// `current` and says whether it changed.
+/// Grid or list: an icon for each in the kit's [`icon_choice`]. Writes the
+/// pick into `current` and says whether it changed.
 pub fn view_picker(ui: &mut Ui, current: &mut crate::settings::ViewMode) -> bool {
     use crate::settings::ViewMode;
-    let t = Tokens::of(ui);
-    let seg = vec2(30.0, 22.0);
-    let (rect, pill) = ui.allocate_exact_size(vec2(seg.x * 2.0 + 4.0, 26.0), Sense::hover());
-    ui.painter().rect_filled(rect, 7.0, t.field);
-    let mut changed = false;
-    for (i, (mode, icon, label)) in [(ViewMode::Grid, Icon::Grid, "Grid"), (ViewMode::List, Icon::List, "List")].into_iter().enumerate() {
-        let r = Rect::from_min_size(egui::pos2(rect.left() + 2.0 + seg.x * i as f32, rect.top() + 2.0), seg);
-        let resp = ui.interact(r, pill.id.with(("view", i)), Sense::click());
-        let on = *current == mode;
-        if on {
-            ui.painter().rect_filled(r, 5.0, t.bg);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(r, 5.0, t.hover);
+    let all = [ViewMode::Grid, ViewMode::List];
+    let at = all.iter().position(|m| m == current).unwrap_or(0);
+    match icon_choice(ui, &[(Icon::Grid, "Grid"), (Icon::List, "List")], at) {
+        Some(i) => {
+            *current = all[i];
+            true
         }
-        icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(13.0, 13.0)), icon, if on { t.text } else { t.muted });
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, label));
-        if resp.on_hover_text(label).clicked() && !on {
-            *current = mode;
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// A small pill of tinted text (a finding worth a glance, not an alarm).
-pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.0), color);
-    let size = galley.size() + vec2(14.0, 4.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.13));
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
-    resp
-}
-
-/// A list row's background: the selection, else the hover tint, else none.
-pub fn row_fill(t: &Tokens, selected: bool, hovered: bool) -> Color32 {
-    if selected {
-        t.selected
-    } else if hovered {
-        t.hover
-    } else {
-        Color32::TRANSPARENT
+        None => false,
     }
 }
 
@@ -126,41 +68,6 @@ pub fn track_color(t: &Tokens, playing: bool, playable: bool) -> Color32 {
     } else {
         t.muted.gamma_multiply(0.75)
     }
-}
-
-/// The label column of [`kv_row`]s, so values line up down a section.
-const KV_LABEL_W: f32 = 96.0;
-/// Value text size in [`kv_row`]s.
-pub const KV_VALUE: f32 = 12.5;
-
-/// A [`section`] label with room above it, heading a run of [`kv_row`]s.
-pub fn kv_section(ui: &mut Ui, title: &str) {
-    ui.add_space(18.0);
-    section(ui, title);
-    ui.add_space(6.0);
-}
-
-/// A muted label in a fixed column, then the value laid out by `value`
-/// (Info tab, album details, the Player's details).
-pub fn kv_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
-    let t = Tokens::of(ui);
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (r, _) = ui.allocate_exact_size(vec2(KV_LABEL_W, KV_VALUE + 4.0), Sense::hover());
-        let g = elide(ui, label, FontId::proportional(12.0), t.muted, KV_LABEL_W - 4.0);
-        ui.painter().galley(r.min + vec2(0.0, 1.0), g, t.muted);
-        let rest = ui.available_width();
-        ui.allocate_ui_with_layout(vec2(rest, 0.0), egui::Layout::top_down(egui::Align::Min), value);
-    });
-    ui.add_space(6.0);
-}
-
-/// A [`kv_row`] whose value is plain, wrapping text.
-pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
-    let t = Tokens::of(ui);
-    kv_row(ui, label, |ui| {
-        ui.add(egui::Label::new(egui::RichText::new(value).size(KV_VALUE).color(t.text)).wrap());
-    });
 }
 
 /// One setting: its name and a short hint on the left, its control on the
@@ -187,48 +94,6 @@ pub fn bit_perfect_switch(ui: &mut Ui, name: &str, mode: &mut audio::PlaybackMod
     let resp = switch_tinted(ui, &mut on, &format!("Bit-perfect on {name}"), Tokens::of(ui).ok);
     *mode = if on { audio::PlaybackMode::BitPerfect } else { audio::PlaybackMode::Normal };
     resp
-}
-
-/// A quiet button that opens a menu: its text and a small chevron, hugging
-/// its content.
-pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    let t = Tokens::of(ui);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(12.0), color);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 24.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, t.hover);
-        }
-        ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, color);
-        let chev = Rect::from_center_size(egui::pos2(rect.right() - 10.0, rect.center().y + 1.0), vec2(8.0, 8.0));
-        crate::icons::paint(ui.painter(), chev, crate::icons::Icon::ChevronDown, t.muted);
-    }
-    let label = text.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    resp
-}
-
-/// The round button on a tile's art (play on an album, shuffle on an
-/// artist), 32 points across at `at`. It's there while the tile or the
-/// button itself is hovered (on the button, the tile doesn't read as
-/// hovered), filled with the accent under the pointer. True when clicked.
-pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bool, icon: Icon, label: &str) -> bool {
-    let resp = ui.interact(at, id, Sense::click());
-    if !(tile_hovered || resp.hovered()) {
-        return false;
-    }
-    let fill = if resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
-    let fg = if resp.hovered() { t.on_accent } else { t.text };
-    ui.painter().circle_filled(at.center(), 16.0, fill);
-    // The play triangle sits a point right of centre so it looks centred.
-    let glyph = if matches!(icon, Icon::Play) {
-        Rect::from_center_size(at.center() + vec2(1.0, 0.0), vec2(12.0, 12.0))
-    } else {
-        Rect::from_center_size(at.center(), vec2(13.0, 13.0))
-    };
-    icons::paint(ui.painter(), glyph, icon, fg);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-    resp.clicked()
 }
 
 #[cfg(test)]

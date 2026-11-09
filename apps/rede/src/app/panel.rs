@@ -16,6 +16,7 @@ use crate::player::Control;
 use crate::widgets::elide;
 use egui::{FontId, Rect, RichText, Sense, Ui, vec2};
 use shell::icons::Icon;
+use shell::kit::{KV_VALUE, kv_section, kv_text};
 use shell::theme::{Tokens, semibold};
 
 /// The column's width: Ond's queue column at its default.
@@ -23,9 +24,6 @@ pub const PANEL_W: f32 = 320.0;
 /// The page keeps at least this much beside a docked column, as Ond's
 /// content does beside its queue.
 const CONTENT_MIN: f32 = 564.0;
-/// The Info tab's labels, in a column of their own, and its value size.
-const KV_LABEL_W: f32 = 96.0;
-const KV_VALUE: f32 = 12.5;
 /// The Info tab's cover beside the title.
 const INFO_COVER: f32 = 56.0;
 
@@ -206,7 +204,7 @@ impl ViewCtx<'_> {
         ui.add_space(8.0);
         match tab {
             Tab::Chapters => self.chapters_tab(ui, &t),
-            Tab::Bookmarks => shell::widgets::empty_state(ui, Icon::Bookmark, "No bookmarks yet", "Bookmarks come with the next update."),
+            Tab::Bookmarks => shell::kit::empty_state(ui, Icon::Bookmark, "No bookmarks yet", "Bookmarks come with the next update."),
             Tab::Info => self.info_tab(ui, &t),
         }
     }
@@ -216,12 +214,12 @@ impl ViewCtx<'_> {
     /// rows on screen are laid out: a book can have a few hundred.
     fn chapters_tab(&mut self, ui: &mut Ui, t: &Tokens) {
         let Some(book) = &self.player.book else {
-            shell::widgets::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its chapters here.");
+            shell::kit::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its chapters here.");
             return;
         };
         let chapters = &book.timeline.chapters;
         if chapters.is_empty() {
-            shell::widgets::empty_state(ui, Icon::Headphones, "No chapters", "This book plays as one long track.");
+            shell::kit::empty_state(ui, Icon::Headphones, "No chapters", "This book plays as one long track.");
             return;
         }
         let at = self.player.position;
@@ -248,7 +246,7 @@ impl ViewCtx<'_> {
                 if resp.hovered() && !current {
                     ui.painter().rect_filled(row, 4.0, t.hover);
                 }
-                shell::widgets::focus_ring(ui, &resp, row, 4.0);
+                shell::kit::focus_ring(ui, &resp, row, 4.0);
                 chapter_row(ui, t, row, n, chapter, Some(at));
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     self.actions.push(Action::Playback(Control::Seek(chapter.start)));
@@ -264,7 +262,7 @@ impl ViewCtx<'_> {
         // mutably while the book is read.
         let player = self.player;
         let Some(book) = &player.book else {
-            shell::widgets::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its details here.");
+            shell::kit::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its details here.");
             return;
         };
         let item = &book.item;
@@ -290,32 +288,32 @@ impl ViewCtx<'_> {
                     ui.painter().galley(r.min, authors, t.muted);
                 });
             });
-            kv_section(ui, t, "Book");
+            kv_section(ui, "Book");
             if !summary.narrators.is_empty() {
-                kv_text(ui, t, "Read by", &summary.narrators.join(", "));
+                kv_text(ui, "Read by", &summary.narrators.join(", "));
             }
             for series in &summary.series {
                 let value = match &series.sequence {
                     Some(n) => format!("{} #{n}", series.name),
                     None => series.name.clone(),
                 };
-                kv_text(ui, t, "Series", &value);
+                kv_text(ui, "Series", &value);
             }
-            kv_text(ui, t, "Length", &crate::fmt::span(book.timeline.duration));
+            kv_text(ui, "Length", &crate::fmt::span(book.timeline.duration));
             if !book.timeline.chapters.is_empty() {
-                kv_text(ui, t, "Chapters", &book.timeline.chapters.len().to_string());
+                kv_text(ui, "Chapters", &book.timeline.chapters.len().to_string());
             }
             if let Some(year) = item.published_year.as_deref().filter(|y| !y.is_empty()) {
-                kv_text(ui, t, "Published", year);
+                kv_text(ui, "Published", year);
             }
             if let Some(publisher) = item.publisher.as_deref().filter(|p| !p.is_empty()) {
-                kv_text(ui, t, "Publisher", publisher);
+                kv_text(ui, "Publisher", publisher);
             }
             if !item.genres.is_empty() {
-                kv_text(ui, t, if item.genres.len() == 1 { "Genre" } else { "Genres" }, &item.genres.join(", "));
+                kv_text(ui, if item.genres.len() == 1 { "Genre" } else { "Genres" }, &item.genres.join(", "));
             }
             if let Some(description) = item.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-                kv_section(ui, t, "About");
+                kv_section(ui, "About");
                 // Audiobookshelf keeps descriptions as HTML; the book page's
                 // parse is memoised by book, so this reuses it.
                 let blocks = self.books.description(&summary.id, description);
@@ -325,28 +323,6 @@ impl ViewCtx<'_> {
             ui.add_space(12.0);
         });
     }
-}
-
-/// A section's name, small and muted, with room above it: Ond's Info tab's.
-fn kv_section(ui: &mut Ui, t: &Tokens, title: &str) {
-    ui.add_space(18.0);
-    ui.label(RichText::new(title).font(FontId::new(11.0, semibold())).color(t.muted));
-    ui.add_space(6.0);
-}
-
-/// A muted label in a fixed column, then its value, wrapping.
-fn kv_text(ui: &mut Ui, t: &Tokens, label: &str, value: &str) {
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (r, _) = ui.allocate_exact_size(vec2(KV_LABEL_W, KV_VALUE + 4.0), Sense::hover());
-        let g = elide(ui, label, FontId::proportional(12.0), t.muted, KV_LABEL_W - 4.0);
-        ui.painter().galley(r.min + vec2(0.0, 1.0), g, t.muted);
-        let rest = ui.available_width();
-        ui.allocate_ui_with_layout(vec2(rest, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.add(egui::Label::new(RichText::new(value).size(KV_VALUE).color(t.text)).wrap());
-        });
-    });
-    ui.add_space(6.0);
 }
 
 #[cfg(test)]

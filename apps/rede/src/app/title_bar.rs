@@ -38,6 +38,7 @@ use super::{Action, RedeApp, Route};
 use crate::player::Control;
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use shell::icons::{self, Icon};
+use shell::kit::{self, ChipButton};
 use shell::theme::{Tokens, semibold};
 
 /// Without the traffic lights (full screen, other platforms), the
@@ -97,6 +98,11 @@ const CHIP_INSET_X: f32 = 3.0;
 const CHIP_INSET_Y: f32 = 2.0;
 const CHIP_GAP: f32 = 2.0;
 const CHIP_FONT: f32 = 10.5;
+
+/// A capsule chip in `ink` as the kit draws it: small type, a tight corner.
+fn chip_look(ink: egui::Color32) -> ChipButton<'static> {
+    ChipButton { icon: None, text: None, size: CHIP_FONT, radius: 5.0, lit: false, ink }
+}
 
 /// The chapters column's toggle at the bar's right end.
 const BUTTON: f32 = 28.0;
@@ -385,7 +391,7 @@ impl ViewCtx<'_> {
             ui.painter().rect_filled(art, 6.0, egui::Color32::from_black_alpha(110));
             icons::paint(ui.painter(), Rect::from_center_size(art.center(), vec2(16.0, 16.0)), Icon::Player, shell::over_art::LIGHT);
         }
-        shell::widgets::focus_ring(ui, &resp, art, 6.0);
+        shell::kit::focus_ring(ui, &resp, art, 6.0);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Open the Player"));
         let label = shell::keys::shown("Open the Player (⇧⌘N)");
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&*label).clicked() {
@@ -405,7 +411,8 @@ impl ViewCtx<'_> {
 
         let speed = crate::timeline::speed_label(self.player.speed);
         let normal = crate::timeline::normalize_speed(self.player.speed) == 1.0;
-        let resp = chip(ui, speed_rect, id.with("speed"), None, Some(&speed), false, if normal { t.muted } else { t.text }, t);
+        let ink = if normal { t.muted } else { t.text };
+        let resp = kit::chip_button(ui, speed_rect, id.with("speed"), ChipButton { text: Some(&speed), ..chip_look(ink) });
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Playback speed, {speed}")));
         let resp = resp.on_hover_text("Playback ([ and ] step the speed)");
         self.playback_menu(&resp);
@@ -413,7 +420,8 @@ impl ViewCtx<'_> {
         let text = self.sleep_text();
         let short = self.sleep_chip_text();
         let lit = short.is_some();
-        let resp = chip(ui, sleep_rect, id.with("sleep"), Some(Icon::Moon), short.as_deref(), lit, if lit { t.accent } else { t.muted }, t);
+        let ink = if lit { t.accent } else { t.muted };
+        let resp = kit::chip_button(ui, sleep_rect, id.with("sleep"), ChipButton { icon: Some(Icon::Moon), text: short.as_deref(), lit, ..chip_look(ink) });
         resp.widget_info(|| {
             let name = text.as_ref().map_or_else(|| "Sleep timer".to_owned(), |text| format!("Sleep timer, {text}"));
             egui::WidgetInfo::labeled(egui::Role::Button, true, name)
@@ -426,40 +434,6 @@ impl ViewCtx<'_> {
         let resp = resp.on_hover_text(tip);
         self.sleep_menu(&resp);
     }
-}
-
-/// One of the capsule's chips in `rect`: an icon, some text, or both, in
-/// `ink`, centred. Quiet at rest on the field's fill, deeper while hovered
-/// or its menu is open; `lit` tints it with the accent, for a timer that's
-/// running.
-#[allow(clippy::too_many_arguments)]
-fn chip(ui: &mut Ui, rect: Rect, id: egui::Id, icon: Option<Icon>, text: Option<&str>, lit: bool, ink: egui::Color32, t: &Tokens) -> egui::Response {
-    let resp = ui.interact(rect, id, Sense::click());
-    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
-    let hot = resp.hovered() || open;
-    let fill = if lit {
-        t.accent.gamma_multiply(if hot { 0.24 } else { 0.14 })
-    } else if hot {
-        t.selected
-    } else {
-        t.field
-    };
-    ui.painter().rect_filled(rect, 5.0, fill);
-    shell::widgets::focus_ring(ui, &resp, rect, 5.0);
-    let galley = text.map(|text| ui.painter().layout_no_wrap(text.to_owned(), FontId::new(CHIP_FONT, semibold()), ink));
-    let glyph = if icon.is_some() { CHIP_FONT } else { 0.0 };
-    let gap = if icon.is_some() && galley.is_some() { 3.0 } else { 0.0 };
-    let w = glyph + gap + galley.as_ref().map_or(0.0, |g| g.size().x);
-    let mut x = rect.center().x - w / 2.0;
-    if let Some(icon) = icon {
-        icons::paint(ui.painter(), Rect::from_min_size(pos2(x, rect.center().y - glyph / 2.0), vec2(glyph, glyph)), icon, ink);
-        x += glyph + gap;
-    }
-    if let Some(galley) = galley {
-        let y = rect.center().y - galley.size().y / 2.0;
-        ui.painter().galley(pos2(x, y), galley, ink);
-    }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Where the capsule's two lines start, `title_h` and `sub_h` tall, from

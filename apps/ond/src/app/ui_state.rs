@@ -2,7 +2,7 @@
 //! place and its selections, sheets and panels, toasts, the colors as they
 //! ease, and the window's own bookkeeping.
 
-use super::{Overlay, Palette, PrefsView, WindowState, favorites_page, settings_page, songs, toasts, view_ctx, visualizer_view};
+use super::{Overlay, Palette, PrefsView, WindowState, favorites_page, settings_page, songs, view_ctx, visualizer_view};
 use crate::nav::{Nav, Route};
 use crate::theme;
 use library::Track;
@@ -131,7 +131,7 @@ pub struct UiState {
     pub seek_preview: Option<f64>,
     pub songs: songs::SongsView,
     /// Errors and notices, shown as toasts.
-    pub toasts: toasts::Toasts,
+    pub toasts: shell::kit::Toasts<super::Action>,
     pub palette: Option<Palette>,
     /// A sheet over the window, if one is open.
     pub overlay: Option<Overlay>,
@@ -216,7 +216,7 @@ impl UiState {
             songs: songs::SongsView::default(),
             memos: Default::default(),
             // Something worth knowing at start-up (e.g. the library was rebuilt).
-            toasts: toasts::Toasts::with_notices(notices),
+            toasts: shell::kit::Toasts::with_notices(notices),
             palette: None,
             overlay: None,
             reveal: None,

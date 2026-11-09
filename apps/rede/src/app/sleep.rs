@@ -113,7 +113,7 @@ impl ViewCtx<'_> {
                     ui.label(RichText::new("Custom").size(13.0).color(t.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        if shell::widgets::secondary(ui, "Start").clicked() {
+                        if shell::kit::secondary(ui, "Start").clicked() {
                             self.actions.push(Action::Playback(Control::Sleep(Some(Choice::Minutes(prefs.sleep_minutes)))));
                             ui.close();
                         }
@@ -141,7 +141,7 @@ impl ViewCtx<'_> {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if shell::widgets::secondary(ui, EXTEND_SHORT).clicked() {
+            if shell::kit::secondary(ui, EXTEND_SHORT).clicked() {
                 self.actions.push(Action::Playback(Control::ExtendSleep));
             }
             if kit::quiet_button(ui, None, "Cancel timer").clicked() {
@@ -190,7 +190,7 @@ impl ViewCtx<'_> {
             if extend.hovered() {
                 ui.painter().rect_filled(button, 6.0, t.hover);
             }
-            shell::widgets::focus_ring(ui, &extend, button, 6.0);
+            shell::kit::focus_ring(ui, &extend, button, 6.0);
             ui.painter().galley(button.center() - notice.button.size() / 2.0, notice.button.clone(), t.accent);
             if extend.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.actions.push(Action::Playback(Control::ExtendSleep));

@@ -135,7 +135,7 @@ pub(super) fn round_play(ui: &mut Ui, d: f32, fill: Color32, knock: Color32, pau
     let (slot, resp) = ui.allocate_exact_size(vec2(d, d), Sense::click());
     let fill = if resp.hovered() { fill.gamma_multiply(0.85) } else { fill };
     ui.painter().circle_filled(slot.center(), d / 2.0, fill);
-    shell::widgets::focus_ring(ui, &resp, slot, d / 2.0);
+    shell::kit::focus_ring(ui, &resp, slot, d / 2.0);
     // A triangle's weight sits left of its box's centre; nudged, it looks centred.
     let nudge = if paused { vec2(d * 0.0375, 0.0) } else { vec2(0.0, 0.0) };
     icons::paint(ui.painter(), Rect::from_center_size(slot.center() + nudge, vec2(d * 0.4, d * 0.4)), icon, knock);
@@ -182,7 +182,7 @@ pub(super) fn pill(ui: &mut Ui, t: &Tokens, size: Pill, icon: Option<Icon>, text
     let (rect, resp) = ui.allocate_exact_size(vec2(w, size.height), Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     ui.painter().rect_filled(rect, rect.height() / 2.0, if resp.hovered() || open { t.selected } else { t.field });
-    shell::widgets::focus_ring(ui, &resp, rect, rect.height() / 2.0);
+    shell::kit::focus_ring(ui, &resp, rect, rect.height() / 2.0);
     if let Some(icon) = icon {
         let glyph = Rect::from_min_size(pos2(rect.left() + icon_x, rect.center().y - size.font / 2.0), vec2(size.font, size.font));
         icons::paint(ui.painter(), glyph, icon, if lit { t.text } else { t.muted });
@@ -276,7 +276,7 @@ impl Scrub {
     /// pointer is on it.
     pub(super) fn run(&self, ui: &Ui, response: &Response, at: f64, start: f64, end: f64, t: &Tokens) -> (f64, Option<f64>, bool) {
         let line = self.line;
-        shell::widgets::focus_ring(ui, response, self.ring, line.height());
+        shell::kit::focus_ring(ui, response, self.ring, line.height());
         let pointer = response.interact_pointer_pos().map(|p| start + f64::from(((p.x - line.left()) / line.width()).clamp(0.0, 1.0)) * (end - start));
         let shown = if response.dragged() { pointer.unwrap_or(at) } else { at };
         let fraction = ((shown - start) / (end - start).max(1.0)).clamp(0.0, 1.0);

@@ -16,7 +16,7 @@ use crate::settings::LibrarySort;
 use crate::widgets::elide;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use shell::icons::Icon;
-use shell::theme::{Tokens, semibold};
+use shell::theme::Tokens;
 use sources::{Item, ItemSummary};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -160,16 +160,16 @@ pub fn grid_metrics(width: f32) -> (usize, f32) {
 
 impl ViewCtx<'_> {
     pub(super) fn library_page(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
         let count = self.books.len();
         let mut sort = self.sort;
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Books").font(FontId::new(24.0, semibold())).color(t.text));
-            if count > 0 {
-                let sub = if count == 1 { "1 book".to_owned() } else { format!("{count} books") };
-                ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
-            }
+            let sub = match count {
+                0 => None,
+                1 => Some("1 book".to_owned()),
+                n => Some(format!("{n} books")),
+            };
+            shell::kit::page_heading(ui, "Books", sub);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     changed = crate::widgets::choice(ui, &LibrarySort::ALL, &mut sort, |s| s.label().into());
@@ -186,7 +186,7 @@ impl ViewCtx<'_> {
             } else {
                 ("No books yet", "Books show up here as they're added to the server's library.")
             };
-            shell::widgets::empty_state(ui, Icon::Headphones, title, body);
+            shell::kit::empty_state(ui, Icon::Headphones, title, body);
             return;
         }
         let ids = self.books.order(sort);

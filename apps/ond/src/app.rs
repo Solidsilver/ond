@@ -96,7 +96,6 @@ mod settings_page;
 mod sidebar;
 mod songs;
 mod table;
-mod toasts;
 mod toolbar;
 mod track_list;
 mod track_row;
