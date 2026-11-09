@@ -31,7 +31,8 @@ struct Fake {
     bookmark_calls: Mutex<Vec<String>>,
     bookmark_offline: AtomicBool,
     lose_bookmark_response: AtomicBool,
-    refuse_bookmark: Mutex<Option<String>>,
+    /// A bookmark title the server refuses, and the status it answers with.
+    refuse_bookmark: Mutex<Option<(String, u16)>>,
     bookmarks_blocked: AtomicBool,
     progress_fails: AtomicBool,
     progress_calls: AtomicUsize,
@@ -111,8 +112,10 @@ impl Source for Fake {
     }
     async fn create_bookmark(&self, item: &str, time: Position, title: &str) -> Result<sources::Bookmark> {
         self.bookmark_calls.lock().unwrap().push(format!("create:{title}"));
-        if self.refuse_bookmark.lock().unwrap().as_deref() == Some(title) {
-            return Err(sources::Error::Server { status: 403, message: Some("no room for bookmarks".into()) });
+        if let Some((refused, status)) = self.refuse_bookmark.lock().unwrap().clone()
+            && refused == title
+        {
+            return Err(sources::Error::Server { status, message: Some("no room for bookmarks".into()) });
         }
         let mut bookmarks = self.bookmarks.lock().unwrap();
         let account = bookmarks.first().map_or_else(test_account, |b| b.item.account);
@@ -646,13 +649,13 @@ async fn a_pull_that_cannot_reach_the_server_skips_bookmark_sync() {
 #[tokio::test]
 async fn a_refused_bookmark_edit_is_dropped_reported_once_and_does_not_block_the_next() {
     let mut rig = Rig::new(None, None).await;
-    *rig.fake.refuse_bookmark.lock().unwrap() = Some("Refused".into());
+    *rig.fake.refuse_bookmark.lock().unwrap() = Some(("Refused".into(), 400));
     rig.shelf.queue_bookmark(&bookmark("Refused"), shelf::BookmarkChange::Create).unwrap();
     let next = sources::Bookmark { position: Position::from_secs(2_000.0), ..bookmark("Next") };
     rig.shelf.queue_bookmark(&next, shelf::BookmarkChange::Create).unwrap();
     rig.listening.send(Request::Reconcile);
     let Event::Error(error) = rig.event(|e| matches!(e, Event::Error(_))).await else { unreachable!() };
-    assert!(error.message().contains("403"), "the refusal is shown: {}", error.message());
+    assert!(error.message().contains("400"), "the refusal is shown: {}", error.message());
     assert!(rig.shelf.pending_bookmarks().unwrap().is_empty(), "a permanent refusal is not retried forever");
     assert_eq!(*rig.fake.bookmark_calls.lock().unwrap(), ["create:Refused", "create:Next"], "the rest of the queue still runs");
     assert!(rig.shelf.bookmark_snapshot().unwrap().bookmarks.iter().any(|b| b.title == "Next"));
@@ -661,6 +664,18 @@ async fn a_refused_bookmark_edit_is_dropped_reported_once_and_does_not_block_the
     rig.listening.send(Request::Reconcile);
     rig.event(|e| matches!(e, Event::Bookmarks(Ok(snapshot)) if snapshot.bookmarks.iter().any(|b| b.title == "Next"))).await;
     assert_eq!(*rig.fake.bookmark_calls.lock().unwrap(), ["create:Refused", "create:Next"], "a dropped edit is not attempted again");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_bookmark_edit_refused_for_want_of_sign_in_stays_queued() {
+    let mut rig = Rig::new(None, None).await;
+    *rig.fake.refuse_bookmark.lock().unwrap() = Some(("Gated".into(), 401));
+    rig.shelf.queue_bookmark(&bookmark("Gated"), shelf::BookmarkChange::Create).unwrap();
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Bookmarks(Err(_)))).await;
+    assert_eq!(rig.shelf.pending_bookmarks().unwrap().len(), 1, "a 401 from a lapsed gate keeps the edit for the next try");
+    *rig.fake.refuse_bookmark.lock().unwrap() = None;
     rig.finish().await;
 }
 

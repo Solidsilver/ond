@@ -208,9 +208,11 @@ pub async fn bookmarks(source: &dyn Source, shelf: &Shelf) -> Result<BookmarkSyn
 }
 
 /// Whether retrying the same edit cannot help. 408 (timeout) and 429 (rate
-/// limit) are the 4xx answers that do change.
+/// limit) are 4xx answers that change; so are 401 and 403, which a proxy or
+/// SSO gate whose session lapsed sends too, and dropping the edit then would
+/// lose offline bookmarks to a sign-in problem.
 fn is_final(e: &sources::Error) -> bool {
-    e.status().is_some_and(|status| (400..500).contains(&status) && status != 408 && status != 429)
+    e.status().is_some_and(|status| (400..500).contains(&status) && !matches!(status, 401 | 403 | 408 | 429))
 }
 
 #[cfg(test)]
