@@ -701,3 +701,52 @@ async fn a_mobile_callback_error_redirect_is_reported_without_following_it() {
     assert!(!format!("{error:?} / {error}").contains("SECRET"));
     assert_eq!(fake.count("/login"), 0);
 }
+
+#[tokio::test]
+async fn bookmark_listing_falls_back_only_when_the_route_is_missing() {
+    for status in ["404 Not Found", "403 Forbidden", "500 Internal Server Error"] {
+        let fake = Fake::start(move |s| match s.path() {
+            "/api/me/bookmarks" => answer(status, r#"{"error":"no route"}"#),
+            "/api/me" => ok(r#"{"id":"u","bookmarks":[{"libraryItemId":"book","time":0.84551240822557006,"title":"Phone","createdAt":10}]}"#),
+            _ => panic!("unexpected request"),
+        });
+        let result = fake.client().with_tokens(Tokens::new("a", "r")).bookmarks().await;
+        if status.starts_with("404") {
+            let bookmarks = result.unwrap();
+            assert_eq!(bookmarks[0].time.to_bits(), 0.845_512_408_225_570_1_f64.to_bits());
+            assert_eq!(fake.count("/api/me"), 1);
+        } else {
+            assert_eq!(result.unwrap_err().status(), Some(if status.starts_with("403") { 403 } else { 500 }));
+            assert_eq!(fake.count("/api/me"), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_listed_bookmark_preserves_every_bit_of_its_time() {
+    let fake = Fake::start(|s| match s.method.as_str() {
+        "GET" => ok(r#"{"bookmarks":[{"libraryItemId":"book","time":1234.0000000000002,"title":"Phone","createdAt":10}]}"#),
+        "DELETE" => {
+            let time: f64 = s.path().rsplit('/').next().unwrap().parse().unwrap();
+            assert_eq!(time.to_bits(), 1_234.000_000_000_000_2_f64.to_bits());
+            ok("")
+        }
+        _ => answer("404 Not Found", r#"{"error":"No bookmark"}"#),
+    });
+    let client = fake.client().with_tokens(Tokens::new("a", "r"));
+    let listed = client.bookmarks().await.unwrap().remove(0);
+    assert_eq!(fake.count("/api/me/bookmarks"), 1, "the 2.36 route answers, so `/api/me` isn't read");
+    client.delete_bookmark(&listed.library_item_id, listed.time).await.unwrap();
+    assert!(client.rename_bookmark("book", listed.time, "Renamed").await.unwrap_err().is_not_found());
+}
+
+#[tokio::test]
+async fn bookmark_writes_keep_server_errors_typed() {
+    for (status, code) in [("400 Bad Request", 400), ("403 Forbidden", 403), ("404 Not Found", 404)] {
+        let fake = Fake::start(move |_| answer(status, r#"{"error":"Invalid bookmark"}"#));
+        let client = fake.client().with_tokens(Tokens::new("a", "r"));
+        assert_eq!(client.create_bookmark("book", 12.5, "Title").await.unwrap_err().status(), Some(code));
+        assert_eq!(client.rename_bookmark("book", 12.5, "Title").await.unwrap_err().status(), Some(code));
+        assert_eq!(client.delete_bookmark("book", 12.5).await.unwrap_err().status(), Some(code));
+    }
+}

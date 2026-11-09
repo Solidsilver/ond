@@ -525,10 +525,18 @@ impl Client {
         self.send(Method::DELETE, self.url("api/me/progress", &[progress_id]), None, Auth::Bearer).await.map(drop)
     }
 
-    /// Every bookmark the user has. Read from `/api/me`, which every server
-    /// version has.
+    /// Every bookmark, using the 2.36 endpoint and falling back only when the
+    /// route is absent. A refusal or a broken reply must not look like no bookmarks.
     pub async fn bookmarks(&self) -> Result<Vec<Bookmark>> {
-        Ok(self.me().await?.bookmarks)
+        #[derive(Deserialize)]
+        struct Reply {
+            bookmarks: Vec<Bookmark>,
+        }
+        match self.get::<Reply>(self.url("api/me/bookmarks", &[])).await {
+            Ok(reply) => Ok(reply.bookmarks),
+            Err(e) if e.is_not_found() => Ok(self.me().await?.bookmarks),
+            Err(e) => Err(e),
+        }
     }
 
     /// Adds a bookmark at `time` seconds, or retitles the one already there.

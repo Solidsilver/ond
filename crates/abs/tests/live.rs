@@ -50,7 +50,7 @@ async fn a_real_server_round_trip() {
     let me = client.me().await.unwrap();
     let progress_before: BTreeSet<_> = me.media_progress.iter().map(|p| (p.id.clone(), p.last_update)).collect();
     let bookmarks_before: BTreeSet<_> = me.bookmarks.iter().map(|b| (b.library_item_id.clone(), b.time.to_bits())).collect();
-    println!("account: {} progress rows, {} bookmarks", progress_before.len(), bookmarks_before.len());
+    assert!(progress_before.is_empty() && bookmarks_before.is_empty(), "the dedicated test account must start empty");
 
     let books = survey(&client).await.unwrap();
 
@@ -58,7 +58,15 @@ async fn a_real_server_round_trip() {
     let started: BTreeSet<_> = me.media_progress.iter().filter_map(|p| p.library_item_id.clone()).collect();
     let target = books.iter().find(|b| b.user_media_progress.is_none() && !started.contains(&b.id));
     let outcome = match target {
-        Some(book) => exercise(&client, book).await,
+        Some(book) => {
+            // Join even an assertion panic before cleaning up the account.
+            let client = client.clone();
+            let book = book.clone();
+            match tokio::spawn(async move { exercise(&client, &book).await }).await {
+                Ok(outcome) => outcome,
+                Err(_) => Err("a live assertion failed; cleanup still runs".into()),
+            }
+        }
         None => {
             println!("no book without progress; skipping the writes");
             Ok(())
@@ -171,9 +179,12 @@ async fn exercise(client: &Client, book: &LibraryItem) -> Outcome {
     client.delete_progress(&synced.id).await?;
     assert_eq!(client.item_progress(&book.id, None).await?, None);
 
-    let time = 12.345_678;
+    let time = 12.345_678_901_234_567;
     let made = client.create_bookmark(&book.id, time, "abs test").await?;
     assert_eq!(made.time, time);
+    let updated = client.create_bookmark(&book.id, made.time, "abs test, same time").await?;
+    assert_eq!(updated.title.as_deref(), Some("abs test, same time"));
+    assert_eq!(client.bookmarks().await?.iter().filter(|b| b.library_item_id == book.id && b.time == made.time).count(), 1);
     let renamed = client.rename_bookmark(&book.id, made.time, "abs test, renamed").await?;
     assert_eq!(renamed.title.as_deref(), Some("abs test, renamed"));
     assert!(client.bookmarks().await?.iter().any(|b| b.library_item_id == book.id && b.time == time));
