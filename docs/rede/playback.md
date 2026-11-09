@@ -96,18 +96,29 @@ Ond sends neither switch and keeps its existing audio path.
 Silence removal measures RMS across all channels in 10 ms windows. The
 threshold is absolute −45 dBFS: no cheap book loudness measurement is currently
 available. Runs of at most 400 ms are kept unchanged. A longer run keeps its
-first 200 ms, fades the last 5 ms to zero, discards the remaining quiet frames,
-and fades the first 5 ms of returning speech in. Detection is quantized to
-windows; a window containing speech is preserved. Lookahead is bounded at
-410 ms of source audio and is allocated once. Short pauses can therefore add
-up to 400 ms of decoder lookahead, independently of speed.
+first 200 ms, fades the last 5 ms to zero, and discards the remaining quiet
+frames. The last two or three quiet windows (20–30 ms) are held back and played
+into the returning speech, ramped up from silence, so a soft onset is kept and
+the cut doesn't land on a consonant; the speech itself is not faded. Detection
+is quantized to windows; a window containing speech is preserved.
+
+Lookahead is bounded at 410 ms of source audio. Its samples and origins are
+stored together in one buffer whose capacity is reserved for the format when
+the detector is built; a seek or a restart clears it in place, so a book's
+seeks don't allocate. Origins are kept per run of frames rather than per frame:
+a 410 ms window is a few files, not tens of thousands of records. Short pauses
+can therefore add up to 400 ms of decoder lookahead, independently of speed.
 
 Buffered frames retain their file sequence and source frame. A quiet run can
 span gapless files, including a boundary inside the first 400 ms, without
-retaining another pause for each file. A first file entirely inside lookahead
-allows up to 100 ms for the engine to name its next file. File format changes
-flush lookahead and restart the detector. Seeks discard pending windows and
-start detection at the new source position.
+retaining another pause for each file. A file whose own output is shorter than
+the 100 ms the decoder waits out at its end — a first file entirely inside
+lookahead, or one silence removal shrank below the floor — gets that same
+100 ms for the engine to name its next file. File format changes flush lookahead
+and restart the detector. Seeks discard pending windows and start detection at
+the new source position. An interrupted push (a seek arriving mid-piece) marks
+a cut even when the seek then resolves to nothing, so the next kept frames
+publish their own source origin rather than leaving the clock behind.
 
 At a cut, the stretch tail is drained and its storage reused. The resampler
 is drained/reset there too, so a wholly quiet tail cannot strand source-time
@@ -132,11 +143,14 @@ silence alone are this value divided by speed; the remaining-book display stays
 an estimate because future silences have not been decoded.
 
 Voice boost uses a stereo-linked 2:1 peak compressor with a −18 dBFS threshold,
-20 ms attack and 150 ms release. A peaking EQ adds 3 dB at 3 kHz (Q 0.8), with
-3 dB makeup gain. A linked limiter has instantaneous attack and 50 ms release;
-a final full-scale guard also catches resampler overshoot. A 5 ms wet ramp
-starts the stage. The slow compressor attack preserves consonants; the limiter
-catches exceptional peaks. Per-book loudness levelling is deferred.
+20 ms attack and 150 ms release. A peaking EQ adds 3 dB at 3 kHz (Q 0.8),
+moving to 0.2 × the sample rate below 15 kHz, with 3 dB makeup gain. A linked
+limiter has instantaneous attack and 50 ms release; a final full-scale guard
+also catches resampler overshoot. A 5 ms wet ramp starts the stage. Non-finite
+input is replaced with silence before the filters, and their state is flushed
+where it would go subnormal, so one bad sample can't poison the rest of the
+session. The slow compressor attack preserves consonants; the limiter catches
+exceptional peaks. Per-book loudness levelling is deferred.
 
 `Command::SetVoiceBoost(bool)` and `Command::SetSkipSilence(bool)` use the
 existing hold/fade/flush seek handshake at the current source position. They
@@ -146,8 +160,9 @@ and survive file and speed changes. `Status::voice_boost()` and
 reported as unavailable for bit-perfect output when explicitly enabled.
 
 The new silence and voice processors do not allocate while processing blocks;
-window/origin and filter storage is allocated at construction, and voice
-processing uses a fixed stack buffer. Existing Sonic and resampler buffering
+window, run and filter storage is allocated when one is built (or when a new
+format needs another), reused across seeks, and voice processing uses a fixed
+stack buffer. Existing Sonic and resampler buffering
 remain on the decoder thread. The callback only consumes bounded sample,
 marker and segment queues and publishes atomics; it adds no locks, allocation,
 channels or logging.

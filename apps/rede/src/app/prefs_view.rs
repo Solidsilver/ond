@@ -27,7 +27,8 @@ pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
     Playback(crate::settings::PlaybackSettings),
-    // The popover supplies these independently of the full playback form.
+    // The popover sets these independently of the full playback form; a UI
+    // agent wires the switches next.
     #[allow(dead_code)]
     VoiceBoost(bool),
     #[allow(dead_code)]

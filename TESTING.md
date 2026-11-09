@@ -196,9 +196,10 @@ pending transaction before it opens a browser.
 ## Rede speech processing (M3)
 
 These checks need real output and a person listening. Use a release build.
-The engine/settings wiring provides `playback.voice_boost` and
-`playback.skip_silence` in Rede's settings; the playback popover supplies the
-switches when integrated.
+The switches arrive with the Playback popover. Until then, set
+`playback.voice_boost` or `playback.skip_silence` to `true` in Rede's
+`settings.json` (under `~/.config/rede/`, or `~/Library/Application Support/rede/`
+on macOS) and relaunch.
 
 - [ ] Listen to speech with both switches on at 1×, 1.5× and 2×. Consonants stay
   clear, quiet passages are audible, stereo placement stays steady and loud
