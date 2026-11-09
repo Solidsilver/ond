@@ -394,10 +394,9 @@ impl ViewCtx<'_> {
     }
 
     /// The speed and the sleep timer, stacked in `column` at the capsule's
-    /// right end. The speed chip opens the playback menu (the speed, and the
-    /// listening preferences with it), so voice boost and skip silence can
-    /// join it there; the sleep chip opens the timer's menu, and is lit with
-    /// what's left while a timer runs.
+    /// right end. The speed chip opens the Playback popover (the speed, and
+    /// with M3 voice boost and skip silence); the sleep chip opens the Sleep
+    /// timer popover, and is lit with what's left while a timer runs.
     fn chips(&mut self, ui: &mut Ui, column: Rect, id: egui::Id, t: &Tokens) {
         let inner = column.shrink2(vec2(CHIP_INSET_X, CHIP_INSET_Y));
         let h = (inner.height() - CHIP_GAP) / 2.0;
@@ -408,7 +407,7 @@ impl ViewCtx<'_> {
         let normal = crate::timeline::normalize_speed(self.player.speed) == 1.0;
         let resp = chip(ui, speed_rect, id.with("speed"), None, Some(&speed), false, if normal { t.muted } else { t.text }, t);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Playback speed, {speed}")));
-        let resp = resp.on_hover_text("Playback speed ([ and ])");
+        let resp = resp.on_hover_text("Playback ([ and ] step the speed)");
         self.playback_menu(&resp);
 
         let text = self.sleep_text();
@@ -426,12 +425,6 @@ impl ViewCtx<'_> {
         };
         let resp = resp.on_hover_text(tip);
         self.sleep_menu(&resp);
-    }
-
-    /// The menu the speed chip opens. For now it's the speed menu; it's the
-    /// place the rest of playback's settings will go.
-    fn playback_menu(&mut self, chip: &egui::Response) {
-        self.speed_menu(chip);
     }
 }
 

@@ -225,12 +225,19 @@ fn the_player_exposes_speed_and_listening_preferences() {
     h.get_by_label("Next chapter (⇧→)");
     h.get_by_label("Playback speed, 1.5×").click();
     h.run_steps(2);
-    assert_eq!(h.query_all_by_label("Speed").count(), 2);
-    for speed in ["1×", "1.25×", "1.5×", "2×"] {
+    for label in ["Speed", "Slower", "Faster", "Stop playback", "Settings…"] {
+        h.get_by_label(label);
+    }
+    // The speed playing shows large over its lit preset.
+    for speed in ["0.8×", "1×", "1.25×", "1.75×", "2×"] {
         h.get_by_label(speed);
     }
-    h.get_by_label("Stop playback");
+    assert_eq!(h.query_all_by_label("1.5×").count(), 2);
     h.check_accessibility();
+    // The skips and rewinds are settings, a click away in their own sheet.
+    h.get_by_label("Settings…").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::PlaybackSettings));
 }
 
 /// The controls the title bar holds while a book plays.

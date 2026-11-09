@@ -7,13 +7,14 @@
 //! title bar's capsule can draw them at its own small size and the Player at
 //! its large one.
 
+use super::Action;
 use super::view_ctx::ViewCtx;
-use super::{Action, PrefsAction};
 use crate::player::Control;
 use crate::timeline::Timeline;
 use egui::{Color32, FontId, Rect, Response, RichText, Sense, Ui, pos2, vec2};
 use shell::{
     icons::{self, Icon},
+    kit,
     theme::{Tokens, semibold},
 };
 
@@ -25,59 +26,106 @@ const SCRUB_KNOB: f32 = 6.0;
 const BOOK_H: f32 = 8.0;
 const BOOK_LINE: f32 = 2.0;
 
-/// The speeds the speed menu offers at a click; the slider has the rest.
+/// The speeds the Playback popover offers at a click; the slider and its
+/// steppers have the rest, in [`SPEED_STEP`]s across [`SPEED_RANGE`].
 const SPEEDS: [f32; 6] = [0.8, 1.0, 1.25, 1.5, 1.75, 2.0];
+const SPEED_RANGE: (f32, f32) = (0.5, 3.0);
+const SPEED_STEP: f32 = 0.05;
+/// The Playback popover's width: room for the six presets.
+const PLAYBACK_W: f32 = 296.0;
 
 impl ViewCtx<'_> {
-    /// The speed pill's menu: common speeds at a click, the slider between
-    /// them, then the playback preferences and Stop.
-    pub(super) fn speed_menu(&mut self, pill: &Response) {
-        egui::Popup::menu(pill).show(|ui| {
-            let t = Tokens::of(ui);
-            ui.set_min_width(250.0);
-            ui.label(RichText::new("Playback speed").font(FontId::new(13.0, semibold())));
-            ui.add_space(4.0);
-            let current = crate::timeline::normalize_speed(self.player.speed);
+    /// The Playback popover the speed chip and pill open: the speed, large,
+    /// with its presets, a slider and its steppers; then Stop, and the way
+    /// to the playback settings. The skip lengths and rewinds are settings,
+    /// not controls, so they live in the Playback settings sheet.
+    pub(super) fn playback_menu(&mut self, anchor: &Response) {
+        kit::popover(anchor, PLAYBACK_W, |ui| {
+            kit::popover_title(ui, "Playback", None);
+            ui.add_space(10.0);
+            kit::padded(ui, |ui| self.speed_controls(ui));
+            // M3: voice boost and skip silence go here, under a
+            // `kit::popover_rule(ui, 8.0)`, as two `kit::switch_row`s
+            // ("Voice boost", "Skip silence") that push their PrefsAction.
+            // The rows inset themselves, so they sit straight in the popover.
+            kit::popover_rule(ui, 8.0);
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for speed in SPEEDS {
-                    if ui.selectable_label(speed == current, crate::timeline::speed_label(speed)).clicked() {
-                        self.actions.push(Action::Playback(Control::Speed(speed)));
+                ui.add_space(kit::POPOVER_PAD - 8.0);
+                let playing = self.player.book.is_some();
+                if ui.add_enabled_ui(playing, |ui| kit::quiet_button(ui, None, "Stop playback")).inner.clicked() {
+                    self.actions.push(Action::Playback(Control::Stop));
+                    ui.close();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(kit::POPOVER_PAD - 8.0);
+                    if kit::quiet_button(ui, Some(Icon::Gear), "Settings…").clicked() {
+                        self.actions.push(Action::PlaybackSettings);
+                        ui.close();
                     }
-                }
+                });
             });
-            let mut value = self.player.speed;
-            if ui.add(egui::Slider::new(&mut value, 0.5..=3.0).step_by(0.05).suffix("×").text("Speed")).changed() {
-                self.actions.push(Action::Playback(Control::Speed(value)));
+        });
+    }
+
+    /// The speed: its value large, the `[` and `]` that step it, the presets
+    /// in a segmented pill (the one playing lit), and the slider between −
+    /// and +.
+    fn speed_controls(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let speed = crate::timeline::normalize_speed(self.player.speed);
+        let width = ui.available_width();
+        ui.horizontal(|ui| {
+            ui.set_height(30.0);
+            let value = crate::timeline::speed_label(speed);
+            ui.label(RichText::new(&value).font(FontId::new(24.0, semibold())).color(t.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                kit::key_cap(ui, "]");
+                kit::key_cap(ui, "[");
+                ui.add_space(2.0);
+                ui.label(RichText::new("Step").size(11.0).color(t.muted));
+            })
+            .response
+            .on_hover_text("[ and ] step the speed by 0.05");
+        });
+        ui.add_space(8.0);
+        let labels: Vec<String> = SPEEDS.iter().map(|s| crate::timeline::speed_label(*s)).collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        // None lit when the speed is between presets.
+        let lit = SPEEDS.iter().position(|s| (*s - speed).abs() < 0.001).unwrap_or(usize::MAX);
+        if let Some(i) = kit::segmented_wide(ui, &labels, lit, width) {
+            self.actions.push(Action::Playback(Control::Speed(SPEEDS[i])));
+        }
+        ui.add_space(10.0);
+        let (lo, hi) = SPEED_RANGE;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if kit::step_button(ui, Icon::Minus, "Slower", speed > lo).clicked() {
+                self.actions.push(Action::Playback(Control::Speed(snap(speed - SPEED_STEP))));
             }
-            ui.label(RichText::new("[ and ] step it by 0.05.").size(11.0).color(t.muted));
-            ui.separator();
-            let mut prefs = self.playback;
-            // Each value is named by the label beside it, for a screen reader too.
-            egui::Grid::new("playback-prefs").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                for (label, value, range, unit) in [
-                    ("Skip back", &mut prefs.skip_back, 1..=300, " s"),
-                    ("Skip forward", &mut prefs.skip_forward, 1..=300, " s"),
-                    ("Rewind after a long pause", &mut prefs.rewind, 0..=60, " s"),
-                    ("Sleep timer duration", &mut prefs.sleep_minutes, 5..=120, " min"),
-                    ("Rewind after sleep", &mut prefs.sleep_rewind, 0..=60, " s"),
-                ] {
-                    let name = ui.label(label).id;
-                    ui.add(egui::DragValue::new(value).range(range).suffix(unit)).labelled_by(name);
-                    ui.end_row();
-                }
-            });
-            ui.label(RichText::new("A pause longer than 5 minutes resumes a little earlier; 0 turns it off.").size(11.0).color(t.muted));
-            if prefs != self.playback {
-                self.actions.push(Action::Prefs(PrefsAction::Playback(prefs)));
+            let slider_w = ui.available_width() - 26.0 - 4.0;
+            let mut v = (speed - lo) / (hi - lo);
+            if kit::thin_slider(ui, &mut v, slider_w, "Speed").changed() {
+                self.actions.push(Action::Playback(Control::Speed(snap(lo + v * (hi - lo)))));
             }
-            ui.separator();
-            if ui.button("Stop playback").clicked() {
-                self.actions.push(Action::Playback(Control::Stop));
-                ui.close();
+            if kit::step_button(ui, Icon::Plus, "Faster", speed < hi).clicked() {
+                self.actions.push(Action::Playback(Control::Speed(snap(speed + SPEED_STEP))));
+            }
+        });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(width, 14.0), Sense::hover());
+            let ends = [(rect.left() + 30.0, egui::Align2::LEFT_CENTER, "0.5×"), (rect.right() - 30.0, egui::Align2::RIGHT_CENTER, "3×")];
+            for (x, align, text) in ends {
+                ui.painter().text(pos2(x, rect.center().y), align, text, FontId::proportional(10.5), t.muted);
             }
         });
     }
+}
+
+/// A speed on the slider's 0.05 grid, within its range.
+fn snap(speed: f32) -> f32 {
+    ((speed / SPEED_STEP).round() * SPEED_STEP).clamp(SPEED_RANGE.0, SPEED_RANGE.1)
 }
 
 /// The round play/pause at any diameter `d`: filled with `fill`, the glyph

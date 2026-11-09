@@ -190,7 +190,7 @@ impl ViewCtx<'_> {
         line.add_space(group_gap - gap);
         line.label(egui::RichText::new(text).font(font).color(t.muted));
         let pill = controls::speed_pill(&mut line, t, speed, size);
-        self.speed_menu(&pill);
+        self.playback_menu(&pill);
     }
 
     fn large_transport(&mut self, ui: &mut Ui, t: &Tokens) {
