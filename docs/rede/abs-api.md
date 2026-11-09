@@ -41,7 +41,7 @@ Response 200 (`Auth.js:96-104`, `User.toOldJSONForBrowser` at `server/models/Use
     "itemTagsSelected": ["tag", ...],
     "hasOpenIDLink": bool,
     "accessToken": "jwt",           // added by handleLoginSuccess
-    "refreshToken": "jwt|null"      // non-null only with x-return-tokens: true
+    "refreshToken": "jwt|null"      // password: non-null with x-return-tokens: true; mobile OpenID: always returned
   },
   "userDefaultLibraryId": "uuid|null",
   "serverSettings": { /* ServerSettings.toJSONForBrowser, see below */ },
@@ -415,3 +415,78 @@ Events relevant to a player:
 11. Play sessions are in memory. Expect 404 on sync after a server restart, and recover by starting a new session or posting a local session.
 12. The legacy non-expiring `user.token` is still returned and still accepted. Don't use it, and don't log it.
 13. Delete bookmarks with a numeric `time` that exactly matches the stored value.
+
+## 18. Native OpenID sign-in (verified mobile flow)
+
+Verified against the read-only 2.37.2/master source: `server/Auth.js`
+(`paramsToCookies`, `handleLoginSuccessBasedOnCookie`, the three OpenID routes),
+`server/auth/OidcAuthStrategy.js` (`getAuthorizationUrl`, `generatePkce`,
+`isValidRedirectUri`, `handleMobileRedirect`), and
+`server/objects/settings/ServerSettings.js` (`authFormData`). This is a code
+exchange through ABS, not a provider token request made directly by Rede.
+
+1. `GET /status` exposes `authMethods` (`local`, `openid`) and `authFormData`:
+   `authLoginCustomMessage` (sanitized HTML), `authOpenIDButtonText` (default
+   `Login with OpenId`) and `authOpenIDAutoLaunch` (default false). The OpenID
+   fields appear only when that method is enabled. ABS's web form places the
+   local form before the OpenID button; auto-launch goes directly to OpenID.
+   Empty/missing methods retain the legacy local form. Rede checks the minimum
+   version and warning version before offering either method, uses the server's
+   button text verbatim, and honors auto-launch once after discovery.
+2. Rede generates independent 32-byte CSPRNG values for the PKCE verifier and
+   state, encoded base64url without padding. It makes **a native HTTP request**
+   to `GET /auth/openid?response_type=code&redirect_uri=rede%3A%2F%2Foauth&code_challenge=<base64url(SHA256(verifier))>&code_challenge_method=S256&state=<state>`.
+   `response_type=code`, a `redirect_uri`, **or** a `code_challenge` selects the
+   mobile flow. The verifier is not sent yet. S256 is the only accepted method.
+3. The native request disables HTTP redirects and retains the response's ABS
+   session cookies, including `connect.sid` and `auth_method=openid-mobile`.
+   A success is **302** with the provider authorization URL in `Location`.
+   Rede opens that URL in the system browser. Opening the original ABS URL in
+   the browser instead would give the browser the session that the native
+   exchange needs. ABS puts the supplied state, mobile URI and provider callback
+   URI in its session; a separate ten-minute LRU maps state to the mobile URI.
+4. The redirect whitelist is exact membership in
+   `authOpenIDMobileRedirectURIs`, default `['audiobookshelf://oauth']`. A
+   single-element `['*']` accepts any URI (a `*` alongside other entries does
+   not). A disallowed or missing URI returns **400**, plain text
+   **`Invalid redirect_uri`**, before redirecting to the provider. Only this
+   exact response triggers Rede's retry with `audiobookshelf://oauth`; it tells
+   the user their admin can add `rede://oauth` to the allowed URIs. Other errors
+   do not trigger fallback. Both schemes are registered by Rede on macOS.
+5. ABS sends the provider an HTTP(S) redirect URI ending in
+   `/auth/openid/mobile-redirect` (including its configured
+   `authOpenIDSubfolderForRedirectURLs`). After the person signs in, the
+   provider lands there with `code` and `state`. ABS checks its state LRU,
+   consumes that entry, and returns **302** to
+   `<chosen-scheme>://oauth?code=<encoded-code>&state=<encoded-state>`.
+   This route forwards code and state, **not tokens**. Missing/unknown state
+   returns 400 `State parameter mismatch`. The route does not forward provider
+   `error` parameters; denial may arrive with `code=undefined`, which Rede
+   treats as cancellation. A provider may instead leave an error in the browser;
+   Cancel and the five-minute deadline cover a redirect that never arrives.
+6. Rede checks both the exact redirect target and the single, matching state
+   before accepting the code. Mismatches are ignored with a value-free log.
+   It then requests **`GET /auth/openid/callback?code=<code>&state=<state>&code_verifier=<verifier>`**
+   using its **original native ABS session cookies**, not browser cookies.
+   ABS inserts the verifier into that session, and passport/openid-client
+   exchanges the code at the provider, resending the saved provider redirect
+   URI. No separate native token endpoint or `redirect_uri` parameter is needed
+   on this request. Without the original session, the route returns 400
+   `No session` when `code_verifier` is present.
+7. On success `handleLoginSuccessBasedOnCookie` recognizes the
+   `auth_method=openid-mobile` cookie as API-based and returns **200 JSON** in
+   the same shape as password login: `user`, `user.accessToken`,
+   `user.refreshToken`, `userDefaultLibraryId`, `serverSettings`. This code
+   path ignores `x-return-tokens`; that header controls **only POST /login**.
+   Rede installs the same token hook and uses the existing keyring, refresh and
+   source machinery. The legacy `user.token` is ignored.
+
+The callback's error branch has a server quirk: it checks
+`req.session[sessionKey]?.mobile === true`, but authorization stores the URI
+string there. Some callback failures therefore redirect to `/login?...` rather
+than returning an API error status. Rede never follows those redirects or
+quotes their bodies; it reports a typed OpenID server error. It also redacts
+pending transactions and never logs state, verifier, code, cookies or provider
+URLs. A pending transaction is kept only in the keyring so a macOS launch URL
+can finish the same exchange after quitting; cancellation, expiry and successful
+exchange clear it. Pending credentials are never written to preferences.

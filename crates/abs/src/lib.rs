@@ -32,6 +32,8 @@ mod auth;
 mod error;
 mod lenient;
 mod model;
+mod openid;
+pub use openid::{OpenId, OpenIdError};
 
 pub use auth::{AuthEvent, AuthHook, Tokens};
 pub use error::{AuthError, Error, Result};

@@ -80,6 +80,7 @@ impl From<abs::Error> for Error {
             // can meet; wrong credentials belong to signing in, which the app
             // does itself.
             abs::Error::Auth(_) => Error::SignedOut,
+            abs::Error::OpenId(e) => Error::Decode(e.to_string()),
             abs::Error::Decode(said) => Error::Decode(said),
             // A reply that was a web page or something else entirely: the app
             // shows it, so the words are kept.

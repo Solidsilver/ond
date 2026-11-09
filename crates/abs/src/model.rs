@@ -26,6 +26,20 @@ pub struct ServerStatus {
     /// `"local"`, `"openid"`.
     #[serde(default, deserialize_with = "lenient::list")]
     pub auth_methods: Vec<String>,
+    #[serde(default)]
+    pub auth_form_data: AuthFormData,
+}
+
+/// The public sign-in settings, with no provider credentials.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthFormData {
+    #[serde(rename = "authOpenIDButtonText")]
+    pub auth_open_id_button_text: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "authOpenIDAutoLaunch")]
+    pub auth_open_id_auto_launch: bool,
+    pub auth_login_custom_message: Option<String>,
 }
 
 impl ServerStatus {

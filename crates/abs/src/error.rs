@@ -33,6 +33,8 @@ pub enum Error {
     })]
     Server { status: u16, message: Option<String> },
     #[error(transparent)]
+    OpenId(#[from] crate::OpenIdError),
+    #[error(transparent)]
     Auth(#[from] AuthError),
     /// A reply that should have been JSON of a known shape and wasn't.
     #[error("malformed response: {0}")]
@@ -86,7 +88,7 @@ impl Error {
     /// one.
     pub fn status(&self) -> Option<u16> {
         match self {
-            Error::Server { status, .. } => Some(*status),
+            Error::Server { status, .. } | Error::OpenId(crate::OpenIdError::Server { status }) => Some(*status),
             Error::Auth(AuthError::RateLimited { .. }) => Some(429),
             _ => None,
         }

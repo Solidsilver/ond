@@ -413,7 +413,10 @@ async fn credentials_never_show_in_debug_or_errors() {
         _ => answer("401 Unauthorized", "Unauthorized"),
     });
     let client = fake.client().with_tokens(tokens.clone());
-    let mut shown = vec![format!("{tokens:?}"), format!("{client:?}")];
+    let flow = Fake::start(openid_authorized).client().begin_openid().await.unwrap();
+    let mut shown = vec![format!("{tokens:?}"), format!("{client:?}"), format!("{flow:?}")];
+    let mismatch = flow.validate_callback("rede://oauth?state=SECRET-STATE&code=SECRET-CODE&error=SECRET").unwrap_err();
+    shown.push(format!("{mismatch} / {mismatch:?}"));
     let e = client.login("joe", "SECRET-PASSWORD").await.unwrap_err();
     assert!(matches!(e, Error::Decode(_)), "{e:?}");
     shown.push(format!("{e} / {e:?}"));
@@ -567,4 +570,134 @@ fn versions_parse_and_order() {
     assert_eq!(Version::parse("nightly"), None);
     assert!(Version(2, 30, 9) < Version::REFRESH_FIX && Version(2, 30, 9) > Version::TOKENS);
     assert_eq!(Version(2, 37, 2).to_string(), "2.37.2");
+}
+
+fn openid_authorized(s: &Seen) -> Answer {
+    let params: HashMap<_, _> =
+        Url::parse(&format!("http://localhost{}", s.target)).unwrap().query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    assert_eq!(params["response_type"], "code");
+    assert_eq!(params["code_challenge_method"], "S256");
+    assert_eq!(params["code_challenge"].len(), 43);
+    assert_eq!(params["state"].len(), 43);
+    Answer {
+        status: "302 Found",
+        headers: vec![
+            ("Location", format!("https://id.example/authorize?state={}", params["state"])),
+            ("Set-Cookie", "connect.sid=SECRET-SESSION; Path=/; HttpOnly".into()),
+            ("Set-Cookie", "auth_method=openid-mobile; Path=/; HttpOnly".into()),
+        ],
+        body: String::new(),
+    }
+}
+
+fn openid_callback(pending: &OpenId, scheme: &str) -> String {
+    let state = Url::parse(pending.browser_url()).unwrap().query_pairs().find(|(k, _)| k == "state").unwrap().1.into_owned();
+    format!("{scheme}://oauth?code=SECRET-CODE&state={state}")
+}
+
+#[tokio::test]
+async fn openid_falls_back_only_for_the_exact_invalid_redirect_response() {
+    let fake = Fake::start(|s| if s.target.contains("rede%3A%2F%2Foauth") { answer("400 Bad Request", "Invalid redirect_uri") } else { openid_authorized(s) });
+    let pending = fake.client().begin_openid().await.unwrap();
+    assert!(pending.used_fallback());
+    assert_eq!(fake.count("/auth/openid"), 2);
+    let other = Fake::start(|_| answer("400 Bad Request", "code_challenge required for mobile flow (PKCE)"));
+    assert!(matches!(other.client().begin_openid().await, Err(Error::OpenId(OpenIdError::Server { status: 400 }))));
+    assert_eq!(other.count("/auth/openid"), 1);
+}
+
+#[tokio::test]
+async fn openid_exchanges_the_code_with_its_original_session_and_stores_tokens() {
+    let fake = Fake::start(|s| match s.path() {
+        "/auth/openid" => openid_authorized(s),
+        "/auth/openid/callback" => {
+            assert_eq!(s.method, "GET");
+            assert_eq!(s.header("cookie"), Some("connect.sid=SECRET-SESSION; auth_method=openid-mobile"));
+            assert_eq!(s.header("x-return-tokens"), None);
+            let url = Url::parse(&format!("http://localhost{}", s.target)).unwrap();
+            let params: HashMap<_, _> = url.query_pairs().collect();
+            assert_eq!(params["code"], "SECRET-CODE");
+            assert_eq!(params["code_verifier"].len(), 43);
+            ok(login_reply("SECRET-ACCESS", "SECRET-REFRESH"))
+        }
+        _ => panic!("unexpected request"),
+    });
+    let client = fake.client();
+    let saved = Arc::new(Mutex::new(None));
+    let stored = saved.clone();
+    client.set_auth_hook(move |e| {
+        if let AuthEvent::Tokens(t) = e {
+            *stored.lock().unwrap() = Some(t);
+        }
+    });
+    let pending = client.begin_openid().await.unwrap();
+    assert!(!pending.used_fallback());
+    let callback = openid_callback(&pending, "rede");
+    let secrets = serde_json::to_value(&pending).unwrap();
+    let request = fake.seen().into_iter().find(|r| r.path() == "/auth/openid").unwrap();
+    let url = Url::parse(&format!("http://localhost{}", request.target)).unwrap();
+    let params: HashMap<_, _> = url.query_pairs().collect();
+    use base64::Engine;
+    use sha2::Digest;
+    let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(secrets["verifier"].as_str().unwrap().as_bytes()));
+    assert_eq!(params["code_challenge"], expected);
+    assert_eq!(params["redirect_uri"], "rede://oauth");
+    assert_ne!(secrets["state"], secrets["verifier"]);
+    // A round-trip through secure storage preserves what a cold launch needs.
+    let pending: OpenId = serde_json::from_str(&serde_json::to_string(&pending).unwrap()).unwrap();
+    let login = client.complete_openid(pending, &callback).await.unwrap();
+    assert_eq!(login.user.username.as_deref(), Some("joe"));
+    assert_eq!(saved.lock().unwrap().as_ref().unwrap().refresh(), "SECRET-REFRESH");
+    assert_eq!(client.tokens().unwrap().access(), "SECRET-ACCESS");
+}
+
+#[tokio::test]
+async fn an_unrelated_redirect_is_ignored_before_an_exchange_or_cancellation() {
+    let fake = Fake::start(openid_authorized);
+    let client = fake.client();
+    let pending = client.begin_openid().await.unwrap();
+    for callback in ["rede://oauth?state=wrong&code=SECRET", "rede://oauth?state=wrong&error=access_denied", "https://example.org/?state=wrong"] {
+        assert!(matches!(pending.validate_callback(callback), Err(Error::OpenId(OpenIdError::StateMismatch))));
+    }
+    let callback = openid_callback(&pending, "rede").replace("code=SECRET-CODE", "error=access_denied");
+    assert!(matches!(pending.validate_callback(&callback), Err(Error::OpenId(OpenIdError::Cancelled))));
+    let undefined = openid_callback(&pending, "rede").replace("SECRET-CODE", "undefined");
+    assert!(matches!(pending.validate_callback(&undefined), Err(Error::OpenId(OpenIdError::Cancelled))));
+    let duplicate = format!("{}&state=other", openid_callback(&pending, "rede"));
+    assert!(matches!(pending.validate_callback(&duplicate), Err(Error::OpenId(OpenIdError::StateMismatch))));
+    assert_eq!(fake.count("/auth/openid/callback"), 0);
+}
+
+#[tokio::test]
+async fn openid_secrets_never_appear_in_debug_or_errors() {
+    let fake = Fake::start(|s| {
+        if s.path() == "/auth/openid" { openid_authorized(s) } else { answer("500 Internal Server Error", "SECRET-CODE SECRET-VERIFIER SECRET-STATE") }
+    });
+    let client = fake.client();
+    let pending = client.begin_openid().await.unwrap();
+    let serialized = serde_json::to_value(&pending).unwrap();
+    let callback = openid_callback(&pending, "rede");
+    let shown = format!("{pending:?} {:?} {}", client.complete_openid(pending.clone(), &callback).await.unwrap_err(), OpenIdError::Cancelled);
+    for key in ["verifier", "state", "cookies", "browser"] {
+        assert!(!shown.contains(serialized[key].as_str().unwrap()));
+    }
+    assert!(!shown.contains("SECRET"));
+}
+
+#[tokio::test]
+async fn a_mobile_callback_error_redirect_is_reported_without_following_it() {
+    let fake = Fake::start(|s| match s.path() {
+        "/auth/openid" => openid_authorized(s),
+        "/auth/openid/callback" => {
+            Answer { status: "302 Found", headers: vec![("Location", "/login?error=SECRET-PROVIDER-ERROR".into())], body: String::new() }
+        }
+        _ => panic!("the callback's failure redirect must not be followed"),
+    });
+    let client = fake.client();
+    let pending = client.begin_openid().await.unwrap();
+    let callback = openid_callback(&pending, "rede");
+    let error = client.complete_openid(pending, &callback).await.unwrap_err();
+    assert!(matches!(error, Error::OpenId(OpenIdError::Server { status: 302 })));
+    assert!(!format!("{error:?} / {error}").contains("SECRET"));
+    assert_eq!(fake.count("/login"), 0);
 }

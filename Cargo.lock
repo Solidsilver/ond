@@ -6,9 +6,12 @@ version = 4
 name = "abs"
 version = "0.4.4"
 dependencies = [
+ "base64",
+ "getrandom 0.4.3",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
