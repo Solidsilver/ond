@@ -79,10 +79,6 @@ impl Silence {
         self.saved = saved;
     }
 
-    pub fn has_pending(&self) -> bool {
-        !self.runs.is_empty() || !self.lead_runs.is_empty()
-    }
-
     pub fn process(&mut self, samples: &[f32], mut origin: Origin, mut emit: impl FnMut(&[f32], Origin, f64)) {
         for frame in samples.chunks_exact(self.channels) {
             self.samples.extend_from_slice(frame);
@@ -449,7 +445,7 @@ mod tests {
         assert_eq!(silence.runs.len(), 4, "one origin record per file, not one per frame");
         silence.boundary(|_, _, _| {});
         silence.reset(48_000, 2, 1.5);
-        assert!(!silence.has_pending());
+        assert!(silence.runs.is_empty() && silence.lead_runs.is_empty());
         assert_eq!((silence.samples.capacity(), silence.lead.capacity(), silence.runs.capacity()), capacities);
     }
 

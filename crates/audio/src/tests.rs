@@ -2053,3 +2053,39 @@ fn a_rate_change_between_files_keeps_the_savings_already_heard() {
     assert!((engine.status.silence_saved_secs() - 0.8).abs() < 1e-9);
     engine.shutdown(Duration::from_secs(2));
 }
+
+#[test]
+fn a_file_shrunk_below_the_linger_floor_still_hands_over_to_the_next() {
+    // Rede names the file after B once B starts. Silence removal shrinks B's
+    // 2 s of quiet to 200 ms — 67 ms at 3×, under the 100 ms the decoder waits
+    // out at a file's end — so the hand-over used to be given up on.
+    let dir = tempfile::tempdir().unwrap();
+    let (a, quiet, c) = (voice(44_100, 1), vec![32; 44_100 * 2 * 2], voice(44_100, 1));
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.own_rate = Some(48_000);
+    backend.period = UI_PACE;
+    let (played, opens) = (backend.played.clone(), backend.opens.clone());
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::SetSpeed(3.0));
+    engine.send(Command::SetSkipSilence(true));
+    engine.send(Command::Play(file_source(&dir, "a", &a)));
+    engine.send(Command::SetNext(Some(file_source(&dir, "b", &quiet))));
+    let third = file_source(&dir, "c", &c);
+    let seen = events_until(&engine, |e| {
+        if let Event::TrackStarted { track_id, .. } = e
+            && track_id == "b"
+        {
+            engine.send(Command::SetNext(Some(third.clone())));
+        }
+        matches!(e, Event::Ended { .. })
+    });
+    assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{seen:?}");
+    let started: Vec<_> = starts(&seen).into_iter().map(|(id, gapless, _)| (id, gapless)).collect();
+    assert_eq!(started, [("a".into(), false), ("b".into(), true), ("c".into(), true)], "{seen:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 1, "one stream for three files");
+    // 1 s of speech, 200 ms of quiet and its 30 ms lead-in, 1 s of speech.
+    let seconds = played.lock().unwrap().len() as f64 / (48_000.0 * 2.0);
+    assert!((seconds - 2.23 / 3.0).abs() < 4.0 / 65.0, "{seconds} seconds");
+    assert!((engine.status.silence_saved_secs() - 1.77).abs() < 1e-9);
+    engine.shutdown(Duration::from_secs(2));
+}

@@ -338,6 +338,9 @@ struct Out {
     output_seq: u64,
     cut: bool,
     saved: f64,
+    /// `pushed` when the current file started: the output this file has made
+    /// so far is `pushed - file_start`.
+    file_start: u64,
     /// `pushed` when the resampler last started from zero: its output frame `n`
     /// is ring sample `rs_base + n * channels`.
     rs_base: u64,
@@ -890,11 +893,14 @@ impl Ctx {
     fn linger(&self, seq: u64, out: Option<&Out>) -> bool {
         let Some(o) = out else { return false };
         let floor = (o.format.sample_rate as f32 * o.format.channels as f32 * LINGER_FLOOR_SECS) as usize;
-        // A first file can fit entirely in the silence lookahead. Give the
-        // engine a bounded chance to receive its Track/Ring and name the next
-        // file, just as queued audio normally gives it time to do.
-        let lookahead = o.pushed == 0 && o.silence.as_ref().is_some_and(Silence::has_pending);
-        let deadline = Instant::now() + Duration::from_millis(100);
+        // A file that made less output than the floor never leaves the queued
+        // window the engine names its next file in: silence removal can shrink
+        // a file that far, and a first file can fit entirely in the lookahead.
+        // Give both the same bounded chance to be followed.
+        let lookahead = o.pushed.saturating_sub(o.file_start) < floor as u64;
+        // Counted from the moment the queue is down to the floor, which is the
+        // decision this grace postpones.
+        let mut deadline = None;
         loop {
             if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) {
                 return true;
@@ -904,9 +910,12 @@ impl Ctx {
             }
             let queued = o.samples.buffer().capacity() - o.samples.slots();
             if queued <= floor || o.samples.is_abandoned() {
-                if lookahead && !o.samples.is_abandoned() && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(2));
-                    continue;
+                if lookahead && !o.samples.is_abandoned() {
+                    let deadline = *deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
+                    if Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
                 }
                 return false;
             }
@@ -931,6 +940,7 @@ impl Ctx {
         if let Some(o) = out.as_mut() {
             if o.format == format && o.src_rate == feed.rate && o.src_channels == feed.channels {
                 o.input_origin = origin;
+                o.file_start = o.pushed;
                 if o.silence.is_some() {
                     return Ok(Attached::Continued);
                 }
@@ -1012,6 +1022,7 @@ impl Ctx {
             output_seq: origin.seq,
             cut: false,
             saved,
+            file_start: 0,
             rs_base: 0,
         });
         if !self.segment(out.as_mut().expect("new ring"), 0, origin.frame) {
@@ -1116,6 +1127,7 @@ impl Ctx {
                 o.voice = None;
             }
             o.cut = false;
+            o.file_start = 0;
             o.output_seq = seq;
             if let Some(r) = o.resampler.as_mut() {
                 r.reset();
