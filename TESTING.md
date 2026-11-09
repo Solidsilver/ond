@@ -117,7 +117,7 @@ and snapshots do not sign in to a server.
 
 - [ ] Start a sleep timer, hide or minimize Rede through the final minute, and listen for a smooth ten-second fade followed by pause. Show it again: resume is audible at the original volume and starts ten book seconds before the fade ended; restart Rede and confirm that saved position.
 - [ ] Choose End of chapter on a chapter spanning two audio files, change speed to 1.5× and then 0.75×, and confirm it still pauses at that chapter's end. Test the final chapter too: sleep must leave the book unfinished with the rewound position.
-- [ ] During the final-minute notice, click Extend 10 minutes once. The fade stops, volume returns, and the countdown gains ten minutes. Cancel a fading timer and confirm volume returns. Step the Sleep timer popover's Custom length and start it; in Playback settings (the account menu, or Settings… in the Playback popover) change Rewind after sleep. Both survive relaunch.
+- [ ] During the final-minute notice, click Extend 10 minutes once. The fade stops, volume returns, and the countdown gains ten minutes. Cancel a fading timer and confirm volume returns. Step the Sleep timer popover's Custom length and start it; on Settings › Playback (⌘,, the account menu, or Settings… in the Playback popover) change Rewind after sleep. Both survive relaunch.
 - [ ] Switch Full / Player / Mini using buttons, ⇧⌘N, ⇧⌘M and ⌥⌘1/2/3 (Ctrl/Alt equivalents elsewhere). Mini stays above other windows, drags by the cover, stays square while resizing, and double-click returns to its originating mode. Each mode restores its geometry, including after relaunch; test a maximized Full window on Linux.
 - [ ] In Player, check the large cover, book/chapter titles, both progress bars, chapter/skip/play controls, speed and sleep menus in light and dark. In Mini check chapter text, skip/play controls and the extension notice at the smallest size. Check keyboard and screen reader focus, including ⌘/ and Escape for the shortcuts list.
 - [ ] macOS Control Center shows Rede's book title, chapter subtitle, chapter number/count where supported, cover and whole-book duration/elapsed time. At 1.5× its progress advances at the real speed; pause and buffering stop the clock. Scrubbing seeks to the same whole-book position across chapters/files. Switching books must not show stale artwork.
@@ -196,10 +196,8 @@ pending transaction before it opens a browser.
 ## Rede speech processing (M3)
 
 These checks need real output and a person listening. Use a release build.
-The switches arrive with the Playback popover. Until then, set
-`playback.voice_boost` or `playback.skip_silence` to `true` in Rede's
-`settings.json` (under `~/.config/rede/`, or `~/Library/Application Support/rede/`
-on macOS) and relaunch.
+The switches are on Settings › Playback (⌘,); the Playback popover gets
+them too in M3.
 
 - [ ] Listen to speech with both switches on at 1×, 1.5× and 2×. Consonants stay
   clear, quiet passages are audible, stereo placement stays steady and loud

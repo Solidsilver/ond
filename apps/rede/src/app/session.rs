@@ -8,7 +8,7 @@
 
 use super::{Action, RedeApp};
 use crate::failure::SIGNED_OUT;
-use crate::settings::Account;
+use crate::settings::{Account, SignInMethod};
 use crate::sync::Outcome;
 use shelf::Shelf;
 use shell::icons::Icon;
@@ -197,6 +197,7 @@ impl RedeApp {
                 } else {
                     Account::new(account.server, username)
                 };
+                let account = Account { sign_in: Some(SignInMethod::OpenId), ..account };
                 self.bridge.accept_openid(account, client, login.tokens, warning);
             }
             _ => {}
@@ -289,6 +290,7 @@ impl RedeApp {
             Some(a) if a.username == username => Account { server, username, ..a },
             _ => Account::new(server, username),
         };
+        let account = Account { sign_in: Some(SignInMethod::Password), ..account };
         form.account = Some(account.clone());
         self.session.connecting = true;
         self.bridge.sign_in(account, form.password.clone());
@@ -353,6 +355,7 @@ impl RedeApp {
         match outcome {
             Outcome::Done(report) => {
                 self.sync.offline = false;
+                self.sync.synced = Some(std::time::SystemTime::now());
                 // The libraries are the account's own: the shelf is read back
                 // by them at the next start, before the server answers.
                 if let Some(account) = self.session.account.as_mut() {

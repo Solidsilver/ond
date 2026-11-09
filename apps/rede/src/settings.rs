@@ -57,12 +57,41 @@ pub struct Account {
     /// The book libraries seen at the last sync.
     #[serde(default)]
     pub libraries: Vec<KnownLibrary>,
+    /// How the account last signed in, for Settings to say. Unknown for an
+    /// account saved before Rede kept it, until it signs in again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignInMethod>,
+}
+
+/// How an account proves who it is: a password typed into Rede, or the
+/// server's single sign-on in the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignInMethod {
+    Password,
+    OpenId,
+}
+
+impl SignInMethod {
+    pub fn label(self) -> &'static str {
+        match self {
+            SignInMethod::Password => "Password",
+            SignInMethod::OpenId => "Single sign-on (OpenID)",
+        }
+    }
 }
 
 impl Account {
     /// A new account for `server` and `username`, with the ids it keeps.
     pub fn new(server: impl Into<String>, username: impl Into<String>) -> Self {
-        Self { id: AccountId::new(), server: server.into(), username: username.into(), device_id: uuid::Uuid::new_v4().to_string(), libraries: Vec::new() }
+        Self {
+            id: AccountId::new(),
+            server: server.into(),
+            username: username.into(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            libraries: Vec::new(),
+            sign_in: None,
+        }
     }
 
     /// What the client tells the server about this device.
@@ -290,6 +319,18 @@ mod tests {
         assert!(!read.device_id.is_empty());
         assert_eq!(read.device().client_name, "Rede");
         assert_eq!(read.device().device_id, read.device_id);
+    }
+
+    #[test]
+    fn an_account_remembers_how_it_signed_in_and_an_older_file_reads_as_unknown() {
+        let mut s = login();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("sign_in"), "an unknown method isn't written");
+        assert_eq!(Settings::from_json(json.as_bytes()).unwrap().account().unwrap().sign_in, None);
+        s.accounts[0].sign_in = Some(SignInMethod::OpenId);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""sign_in":"open-id""#));
+        assert_eq!(Settings::from_json(json.as_bytes()).unwrap(), s);
     }
 
     #[test]

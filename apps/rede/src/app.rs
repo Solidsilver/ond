@@ -17,8 +17,8 @@
 //! - `controls`: chapter seeking and the listening controls
 //! - `title_bar`: the player in the title bar, and the window's controls
 //! - `sidebar`: the places and the account, in the column at the left
-//! - `sheets`: the keyboard shortcuts and the playback settings, over the
-//!   window
+//! - `sheets`: the keyboard shortcuts, over the window
+//! - `settings_page`: Settings, a page with its tabs (⌘,)
 //! - `panel`: the chapters column at the right
 //! - `ui_state`: the notice line, the trail, and what a frame reads
 //! - `prefs_view`: the preferences a frame reads, and the actions that change
@@ -59,6 +59,7 @@ mod player_view;
 mod playing;
 mod prefs_view;
 mod session;
+mod settings_page;
 mod sheets;
 mod shortcuts;
 mod sidebar;
@@ -165,8 +166,9 @@ pub enum Action {
     Mode(crate::window::Mode),
     /// The keyboard shortcuts' sheet: open it, or close it if it's open.
     Shortcuts,
-    /// The playback settings' sheet (skips, rewinds, the timer's length).
-    PlaybackSettings,
+    /// Settings, on this tab. From Player or Mini, the full window comes back
+    /// first, as Ond's Settings does.
+    OpenSettings(settings_page::Tab),
     /// Whichever sheet is open goes.
     CloseSheet,
     ToggleMini,
@@ -412,7 +414,12 @@ impl RedeApp {
             Action::Shortcuts => {
                 self.sheet = (self.sheet != Some(sheets::Sheet::Shortcuts)).then_some(sheets::Sheet::Shortcuts);
             }
-            Action::PlaybackSettings => self.sheet = Some(sheets::Sheet::PlaybackSettings),
+            Action::OpenSettings(tab) => {
+                self.ui.settings = tab;
+                self.sheet = None;
+                self.set_mode(crate::window::Mode::Full);
+                self.go(Route::Settings);
+            }
             Action::CloseSheet => self.sheet = None,
             Action::ToggleMini => self.set_mode(self.prefs.get(|s| s.window.mini())),
             Action::Panel(a) => self.apply_panel(a),
@@ -548,6 +555,7 @@ impl RedeApp {
                                 let id = id.clone();
                                 self.view().book_page(ui, &id);
                             }
+                            Route::Settings => self.view().settings_page(ui),
                         }
                         // Floats over the foot of the page.
                         self.view().sleep_notice(ui, within);

@@ -237,15 +237,28 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.event(egui::Event::PointerGone);
     s.shoot(h, "account-menu");
     egui::Popup::close_all(&ctx);
-    // The sheets: the keyboard shortcuts and the playback settings.
-    for (sheet, name) in [(super::sheets::Sheet::Shortcuts, "sheet-shortcuts"), (super::sheets::Sheet::PlaybackSettings, "sheet-playback-settings")] {
-        scene(h, s, name, || {
-            let mut app = app(&ctx, dir.path(), BOOKS.len());
-            playing(&mut app, false);
-            app.sheet = Some(sheet);
-            app
-        });
+    // The keyboard shortcuts' sheet.
+    scene(h, s, "sheet-shortcuts", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app.sheet = Some(super::sheets::Sheet::Shortcuts);
+        app
+    });
+    // Settings on each tab, then in the narrowest window (the sidebar a
+    // rail, the tabs narrowed).
+    for (size, suffix) in [(FULL, ""), (crate::MIN_SIZE, "-narrow")] {
+        h.set_size(egui::vec2(size[0], size[1]));
+        for tab in super::settings_page::Tab::ALL {
+            scene(h, s, &format!("settings-{}{suffix}", tab.label().to_lowercase()), || {
+                let mut app = app(&ctx, dir.path(), BOOKS.len());
+                playing(&mut app, false);
+                app.sync.synced = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(12 * 60));
+                app.apply(Action::OpenSettings(tab));
+                app
+            });
+        }
     }
+    h.set_size(egui::vec2(FULL[0], FULL[1]));
     // The capsule's cover under the pointer: the way to the Player.
     *h.state_mut() = None;
     *h.state_mut() = Some({

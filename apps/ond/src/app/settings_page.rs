@@ -14,7 +14,7 @@ use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
 use crate::widgets::{Head, ROW_PAD, choice, divider, group, managed, menu_label, row_with, secondary, secondary_danger, setting, switch, thin_slider};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use shell::kit::{readout, step_slider};
+use shell::kit::{self, readout, step_slider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Section {
@@ -61,9 +61,7 @@ impl Section {
     }
 }
 
-const NAV_W: f32 = 176.0;
-/// The right pane's content width (it scrolls when taller than the window).
-const PANE_PAD: f32 = 28.0;
+const NAV_W: f32 = kit::SETTINGS_NAV_W;
 
 impl OndApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -87,47 +85,26 @@ impl OndApp {
                 ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
 
                 // Section list.
-                let mut nav = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(vec2(10.0, 16.0))).layout(egui::Layout::top_down(egui::Align::Min)));
-                nav.spacing_mut().item_spacing.y = 2.0;
-                nav.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Settings").font(FontId::new(15.0, semibold())).color(t.text));
-                });
-                nav.add_space(12.0);
-                for s in Section::ALL {
-                    if self.place(&mut nav, s.label(), self.ui.settings_section == s).clicked() {
-                        self.ui.settings_section = s;
-                    }
+                let labels = Section::ALL.map(Section::label);
+                let at = Section::ALL.iter().position(|s| *s == self.ui.settings_section).unwrap_or(0);
+                if let Some(i) = kit::settings_nav(ui, side, &labels, at) {
+                    self.ui.settings_section = Section::ALL[i];
                 }
 
                 // The pane.
                 let pane = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
-                let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(pane).layout(egui::Layout::top_down(egui::Align::Min)));
-                egui::ScrollArea::vertical().id_salt(("settings-pane", self.ui.settings_section)).auto_shrink(false).show(&mut ui, |ui| {
-                    ui.add_space(20.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(PANE_PAD);
-                        ui.vertical(|ui| {
-                            let width = pane.width() - PANE_PAD * 2.0;
-                            ui.set_width(width);
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.label(egui::RichText::new(self.ui.settings_section.label()).font(FontId::new(20.0, semibold())).color(t.text));
-                            ui.add_space(16.0);
-                            match self.ui.settings_section {
-                                Section::General => self.general_settings(ui),
-                                Section::Appearance => self.appearance_settings(ui),
-                                Section::Playback => self.playback_settings(ui),
-                                Section::Queue => self.queue_settings(ui),
-                                Section::Output => self.output_settings(ui),
-                                Section::Offline => self.offline_settings(ui),
-                                Section::Library => self.library_settings(ui),
-                                Section::Account => self.account_settings(ui),
-                                Section::Experimental => self.experimental_settings(ui),
-                                Section::About => self.about(ui),
-                            }
-                            ui.add_space(24.0);
-                        });
-                    });
+                let section = self.ui.settings_section;
+                kit::settings_pane(ui, pane, ("settings-pane", section), section.label(), |ui| match section {
+                    Section::General => self.general_settings(ui),
+                    Section::Appearance => self.appearance_settings(ui),
+                    Section::Playback => self.playback_settings(ui),
+                    Section::Queue => self.queue_settings(ui),
+                    Section::Output => self.output_settings(ui),
+                    Section::Offline => self.offline_settings(ui),
+                    Section::Library => self.library_settings(ui),
+                    Section::Account => self.account_settings(ui),
+                    Section::Experimental => self.experimental_settings(ui),
+                    Section::About => self.about(ui),
                 });
             });
         if modal.should_close() {
@@ -157,16 +134,8 @@ impl OndApp {
     fn about(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let current = crate::updates::Version::current();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            ui.add(egui::Image::new((app_icon(ui.ctx()).id(), vec2(56.0, 56.0))));
-            ui.vertical(|ui| {
-                ui.add_space(8.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                ui.label(egui::RichText::new("Ond").font(FontId::new(17.0, semibold())).color(t.text));
-                ui.label(egui::RichText::new(format!("Version {current}")).size(12.5).color(t.muted));
-            });
-        });
+        let icon = kit::app_icon(ui.ctx(), "ond", include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png"));
+        kit::about_header(ui, &icon, "Ond", &format!("Version {current}"));
         ui.add_space(20.0);
         let newer = self.updates.latest.filter(|v| *v > current);
         group(ui, "Updates", |ui| match crate::updates::channel() {
@@ -820,20 +789,6 @@ fn ago(at: std::time::SystemTime) -> String {
         _ => (s / 86400, "day"),
     };
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
-}
-
-/// Ond's icon, for the About page.
-fn app_icon(ctx: &egui::Context) -> egui::TextureHandle {
-    let id = egui::Id::unique("about-app-icon");
-    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
-        return tex;
-    }
-    let icon =
-        eframe::icon_data::from_png_bytes(include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png")).unwrap_or_default();
-    let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-    let tex = ctx.load_texture("about-app-icon", image, egui::TextureOptions::LINEAR);
-    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
-    tex
 }
 
 /// Muted text under a group's rows, about all of them.

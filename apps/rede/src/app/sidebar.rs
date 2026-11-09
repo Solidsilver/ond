@@ -337,9 +337,9 @@ impl ViewCtx<'_> {
         self.account_menu(&resp, &state);
     }
 
-    /// Who's signed in and where, the server's state, then Sync now, the
-    /// playback settings, the shortcuts, and Sign out, under `resp`: Ond's
-    /// server popover, from the kit.
+    /// Who's signed in and where, the server's state, then Sync now,
+    /// Settings (on the tab it was last on), the shortcuts, and Sign out, under
+    /// `resp`: Ond's server popover, from the kit.
     fn account_menu(&mut self, resp: &egui::Response, state: &AccountState) {
         let Some(account) = self.session.account.clone() else { return };
         // Up from the foot of the window, where there's room for it.
@@ -377,8 +377,8 @@ impl ViewCtx<'_> {
             if can_sync && kit::menu_row(ui, "Sync now") {
                 self.actions.push(Action::SyncNow);
             }
-            if kit::menu_row(ui, "Playback settings…") {
-                self.actions.push(Action::PlaybackSettings);
+            if kit::menu_row(ui, "Settings…") {
+                self.actions.push(Action::OpenSettings(self.settings));
             }
             if kit::menu_row(ui, "Keyboard shortcuts") {
                 self.actions.push(Action::Shortcuts);

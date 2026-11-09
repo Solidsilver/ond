@@ -23,6 +23,7 @@ pub fn account() -> Account {
     account.id = sources::AccountId::from_uuid(uuid::Uuid::from_u128(42));
     account.device_id = "fixture".into();
     account.libraries = vec![crate::settings::KnownLibrary { id: LIBRARY.into(), name: "Books".into() }];
+    account.sign_in = Some(crate::settings::SignInMethod::Password);
     account
 }
 

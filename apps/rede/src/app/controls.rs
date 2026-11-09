@@ -37,8 +37,8 @@ const PLAYBACK_W: f32 = 296.0;
 impl ViewCtx<'_> {
     /// The Playback popover the speed chip and pill open: the speed, large,
     /// with its presets, a slider and its steppers; then Stop, and the way
-    /// to the playback settings. The skip lengths and rewinds are settings,
-    /// not controls, so they live in the Playback settings sheet.
+    /// to Settings' Playback tab. The skip lengths and rewinds are settings,
+    /// not controls, so they live there.
     pub(super) fn playback_menu(&mut self, anchor: &Response) {
         kit::popover(anchor, PLAYBACK_W, |ui| {
             kit::popover_title(ui, "Playback", None);
@@ -59,7 +59,7 @@ impl ViewCtx<'_> {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(kit::POPOVER_PAD - 8.0);
                     if kit::quiet_button(ui, Some(Icon::Gear), "Settings…").clicked() {
-                        self.actions.push(Action::PlaybackSettings);
+                        self.actions.push(Action::OpenSettings(super::settings_page::Tab::Playback));
                         ui.close();
                     }
                 });

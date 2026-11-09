@@ -23,6 +23,8 @@ pub struct ViewCtx<'a> {
     /// The chapters column's tab, and whether to bring the chapter playing
     /// into view.
     pub panel: super::panel::PanelState,
+    /// Settings' tab.
+    pub settings: super::settings_page::Tab,
     pub positions: &'a std::collections::HashMap<String, sources::Progress>,
     /// Covers load as they're first drawn.
     pub art: &'a mut Art,
@@ -43,6 +45,7 @@ impl RedeApp {
             mode: self.mode,
             player: &self.player,
             panel: self.ui.panel,
+            settings: self.ui.settings,
             positions: &self.positions,
             art: &mut self.art,
             actions: &mut self.actions,

@@ -33,6 +33,9 @@
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
 //!   in), [`sheet_header`] (its title, and a × that closes it), and the
 //!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
+//! - [`settings`]: a Settings page's tab list ([`settings_nav`], its width
+//!   [`SETTINGS_NAV_W`]), the pane beside it ([`settings_pane`]), and
+//!   About's [`about_header`] with the [`app_icon`].
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
 //!   fade, or stay with a button until clicked away.
 
@@ -40,6 +43,7 @@ pub mod buttons;
 pub mod controls;
 pub mod menus;
 pub mod rows;
+pub mod settings;
 pub mod sheets;
 pub mod text;
 pub mod toasts;
@@ -48,6 +52,7 @@ pub use buttons::*;
 pub use controls::*;
 pub use menus::*;
 pub use rows::*;
+pub use settings::*;
 pub use sheets::*;
 pub use text::*;
 pub use toasts::Toasts;
