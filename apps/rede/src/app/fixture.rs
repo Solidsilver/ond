@@ -105,11 +105,17 @@ pub fn details(n: usize) -> Item {
     let fixture = &BOOKS[n];
     let (title, author) = (fixture.title, fixture.author);
     let mut item = Item { summary: ItemSummary { title: title.into(), authors: vec![author.into()], ..summary(n) }, ..Item::default() };
-    item.description = Some(format!(
-        "{title} is one of the fixture's books, here to show what a book's page looks like. \
-         The description runs to a few lines of prose, which is all the page needs to lay out: \
-         a paragraph that wraps in its column, a little longer than the metadata above it."
-    ));
+    item.description = Some(if n == 1 {
+        // Audiobookshelf keeps a description as HTML. One of the fixture's
+        // books has the markup a real one does, so the page shows how it reads.
+        html_description(title)
+    } else {
+        format!(
+            "{title} is one of the fixture's books, here to show what a book's page looks like. \
+             The description runs to a few lines of prose, which is all the page needs to lay out: \
+             a paragraph that wraps in its column, a little longer than the metadata above it."
+        )
+    });
     item.genres = vec!["Science Fiction".into()];
     item.published_year = Some("1969".into());
     item.publisher = Some("Ace Books".into());
@@ -134,6 +140,22 @@ pub fn details(n: usize) -> Item {
         })
         .collect();
     item
+}
+
+/// A book's description as the server stores it: paragraphs with bold and
+/// italic runs, entities, a list, a quote and a link.
+fn html_description(title: &str) -> String {
+    format!(
+        "<p><b>“{title} is a landmark.”</b> — <i>The Saturday Review</i><br />\
+         <b>Winner</b> of the Hugo Award &amp; the Nebula Award, and the first of a series that \
+         changed what science fiction could do.</p>\
+         <p>On the desert planet Arrakis, young Paul Atreides&nbsp;&mdash; heir to a noble house \
+         &mdash; is caught between two empires and a spice only his world makes.</p>\
+         <h3>What the critics said</h3>\
+         <ul><li>“A wonderful, lifelike tapestry.”</li><li>“Its power and vision are extraordinary.”</li></ul>\
+         <blockquote>A beginning is the most important part of the work.</blockquote>\
+         <p>The reading group guide is on <a href=\"https://example.com/guide\">the publisher's site</a>.</p>"
+    )
 }
 
 /// A shelf holding the fixture's books, with the first book's details stored.

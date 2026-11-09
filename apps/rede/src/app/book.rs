@@ -57,7 +57,8 @@ impl ViewCtx<'_> {
                 } else {
                     self.positions.get(id).map(|p| p.position.secs())
                 };
-                book_body(ui, &t, &item, at);
+                let description = item.description.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(|text| self.books.description(id, text));
+                book_body(ui, &t, description.as_ref().map(|blocks| blocks.as_slice()), &item.chapters, at);
             }
             ui.add_space(24.0);
         });
@@ -154,9 +155,7 @@ fn header_text(ui: &mut Ui, t: &Tokens, book: &ItemSummary) {
 
 /// The description and the chapters: two columns from [`SPLIT_FROM`], else
 /// one above the other, each no wider than [`READING_W`].
-fn book_body(ui: &mut Ui, t: &Tokens, item: &sources::Item, at: Option<f64>) {
-    let description = item.description.as_deref().map(str::trim).filter(|d| !d.is_empty());
-    let chapters = item.chapters.as_slice();
+fn book_body(ui: &mut Ui, t: &Tokens, description: Option<&[shell::rich::Block]>, chapters: &[sources::Chapter], at: Option<f64>) {
     let avail = ui.available_width();
     let column = |ui: &mut Ui, w: f32, draw: &dyn Fn(&mut Ui)| {
         ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -196,10 +195,10 @@ fn section_heading(ui: &mut Ui, t: &Tokens, title: &str, note: Option<String>) {
 }
 
 /// "About this book" and the description, set for reading.
-fn about(ui: &mut Ui, t: &Tokens, description: Option<&str>) {
+fn about(ui: &mut Ui, t: &Tokens, description: Option<&[shell::rich::Block]>) {
     let Some(description) = description else { return };
     section_heading(ui, t, "About this book", None);
-    ui.add(egui::Label::new(RichText::new(description).size(13.0).line_height(Some(20.0)).color(t.text)).wrap());
+    shell::rich::draw(ui, description, &shell::rich::Style::reading(ui));
 }
 
 /// The line under the authors: narrators, series and number, and how long the

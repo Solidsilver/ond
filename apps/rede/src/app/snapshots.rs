@@ -141,6 +141,27 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.run_steps(30);
     h.event(egui::Event::PointerGone);
     s.shoot(h, "book-midway");
+    // A description that arrived as HTML, scrolled until the prose fills the
+    // page: bold and italic runs, decoded entities, a list, a quote and a
+    // link.
+    *h.state_mut() = None;
+    *h.state_mut() = Some({
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        app.go(book_route(1));
+        app
+    });
+    h.run_steps(2);
+    h.hover_at(egui::pos2(FULL[0] / 2.0, FULL[1] / 2.0));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -290.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(30);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "book-html");
     // The same page at the smallest window Rede opens: the cover goes
     // above the text and the columns stack.
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));

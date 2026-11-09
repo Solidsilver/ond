@@ -45,6 +45,9 @@ pub struct Books {
     /// A book's details once its page asked for them. By the book's own id:
     /// one account is shown for now.
     pub details: HashMap<String, Details>,
+    /// Descriptions read as prose, by the book and the text it was given: a
+    /// page drawn every frame parses its markup once.
+    descriptions: Memo<(String, String), Vec<shell::rich::Block>>,
 }
 
 /// What a book page knows about a book beyond its listing.
@@ -99,6 +102,13 @@ impl Books {
 
     pub fn failed(&mut self, id: &str, error: crate::failure::Failure) {
         self.details.insert(id.to_owned(), Details::Failed(error.into_message()));
+    }
+
+    /// A book's description as blocks, parsed once for each text it has: a
+    /// frame that only redraws (a hover, a repaint while playing) reads the
+    /// markup no further.
+    pub fn description(&mut self, id: &str, text: &str) -> Arc<Vec<shell::rich::Block>> {
+        self.descriptions.get((id.to_owned(), text.to_owned()), || shell::rich::parse(text))
     }
 }
 
@@ -294,6 +304,21 @@ mod tests {
         // Another account: nothing of this one stays.
         books.clear();
         assert_eq!(books.len(), 0);
+    }
+
+    #[test]
+    fn a_description_is_read_once_for_each_book_and_text() {
+        let mut books = Books::default();
+        let text = "<b>Praise</b> for the book &amp; its author.";
+        let first = books.description("a", text);
+        let again = books.description("a", text);
+        assert!(Arc::ptr_eq(&first, &again), "the same description is not read twice");
+        assert_eq!(first[0].runs[0].text, "Praise", "and it reads as prose");
+        let other_text = "<i>Another</i> description.";
+        let other = books.description("a", other_text);
+        assert!(!Arc::ptr_eq(&first, &other), "a new text is read anew");
+        assert_eq!(other[0].runs[0].text, "Another");
+        assert!(!Arc::ptr_eq(&other, &books.description("b", other_text)), "and another book's text is its own");
     }
 
     #[test]

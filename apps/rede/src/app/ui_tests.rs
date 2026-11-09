@@ -127,6 +127,21 @@ fn a_book_page_lists_its_chapters_with_their_lengths() {
 }
 
 #[test]
+fn an_html_description_reads_as_prose_with_its_markup_folded_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    // The fixture's second book gives its description as Audiobookshelf does.
+    app_mut(&mut h).go(book_route(1));
+    h.run_steps(3);
+    h.get_by_label_contains("is a landmark");
+    h.get_by_label_contains("What the critics said");
+    h.get_by_label_contains("A wonderful, lifelike tapestry.");
+    for markup in ["<b>", "</p>", "&amp;", "&mdash;", "<li>", "<a href", "<blockquote>"] {
+        assert_eq!(h.query_all_by_label_contains(markup).count(), 0, "{markup} shows through");
+    }
+}
+
+#[test]
 fn an_empty_library_says_so_instead_of_showing_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), 0);
