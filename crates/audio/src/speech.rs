@@ -297,6 +297,15 @@ pub(crate) struct Voice {
     step: f32,
 }
 
+/// Denormal filter and envelope state is flushed to zero: it's inaudible, and
+/// on some CPUs subnormal arithmetic is hundreds of times slower.
+const DENORMAL: f32 = 1e-25;
+
+/// A finite filter value, with denormals and any non-finite result cleared.
+fn clean(value: f32) -> f32 {
+    if value.is_finite() && value.abs() > DENORMAL { value } else { 0.0 }
+}
+
 impl Voice {
     pub fn new(rate: u32, channels: u16) -> Self {
         let frequency = 3000.0f32.min(rate as f32 * 0.2);
@@ -335,23 +344,25 @@ impl Voice {
 
     pub fn process(&mut self, samples: &mut [f32]) {
         for frame in samples.chunks_exact_mut(self.filters.len()) {
-            let peak = frame.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+            let peak = frame.iter().fold(0.0f32, |peak, sample| if sample.is_finite() { peak.max(sample.abs()) } else { peak });
             let coefficient = if peak > self.envelope { self.attack } else { self.release };
-            self.envelope = coefficient * self.envelope + (1.0 - coefficient) * peak;
+            self.envelope = clean(coefficient * self.envelope + (1.0 - coefficient) * peak);
             // -18 dBFS threshold, 2:1 ratio, +3 dB makeup.
             let gain = if self.envelope > 0.125_892_54 { (0.125_892_54 / self.envelope).sqrt() } else { 1.0 } * 1.412_537_6;
             self.wet = (self.wet + self.step).min(1.0);
             let mut output_peak = 0.0f32;
             for (sample, state) in frame.iter_mut().zip(&mut self.filters) {
-                let dry = *sample;
-                let filtered = self.b[0] * dry + state[0];
-                state[0] = self.b[1] * dry - self.a[0] * filtered + state[1];
-                state[1] = self.b[2] * dry - self.a[1] * filtered;
-                *sample = dry + (filtered * gain - dry) * self.wet;
+                // A bad decode must not leave a NaN in the filter state: one
+                // such sample would otherwise silence the rest of the session.
+                let dry = if sample.is_finite() { *sample } else { 0.0 };
+                let filtered = clean(self.b[0] * dry + state[0]);
+                state[0] = clean(self.b[1] * dry - self.a[0] * filtered + state[1]);
+                state[1] = clean(self.b[2] * dry - self.a[1] * filtered);
+                *sample = clean(dry + (filtered * gain - dry) * self.wet);
                 output_peak = output_peak.max(sample.abs());
             }
             let ceiling = if output_peak > 1.0 { output_peak.recip() } else { 1.0 };
-            self.limiter = ceiling.min(self.limiter_release * self.limiter + (1.0 - self.limiter_release));
+            self.limiter = clean(ceiling.min(self.limiter_release * self.limiter + (1.0 - self.limiter_release)));
             for sample in frame {
                 *sample = (*sample * self.limiter).clamp(-1.0, 1.0);
             }
@@ -472,6 +483,33 @@ mod tests {
         assert!((presence_db - 3.0).abs() < 0.1, "presence {presence_db} dB");
         let ratio = boosted_rms(200.0, 0.4) / boosted_rms(200.0, 0.2);
         assert!((ratio - 2.0f32.sqrt()).abs() < 0.02, "2:1 compression: {ratio}");
+    }
+
+    #[test]
+    fn a_nan_or_an_infinity_cannot_poison_the_voice_filters() {
+        let mut boost = Voice::new(48_000, 2);
+        let mut signal: Vec<f32> = (0..48_000 * 2).map(|i| (std::f32::consts::TAU * 3000.0 * (i / 2) as f32 / 48_000.0).sin() * 0.1).collect();
+        signal[100] = f32::NAN;
+        signal[101] = f32::INFINITY;
+        for piece in signal.chunks_mut(512) {
+            boost.process(piece);
+        }
+        assert!(signal.iter().all(|s| s.is_finite()));
+        // A poisoned filter would have gone silent: the presence boost is still there.
+        let rms = (signal[24_000..].iter().map(|s| s * s).sum::<f32>() / 24_000.0).sqrt();
+        assert!(rms > 0.05, "presence after the NaN: {rms}");
+    }
+
+    #[test]
+    fn denormal_filter_and_envelope_state_is_flushed_to_zero() {
+        let mut boost = Voice::new(48_000, 1);
+        let mut signal = vec![1e-30f32; 48_000];
+        for piece in signal.chunks_mut(512) {
+            boost.process(piece);
+        }
+        assert_eq!(boost.envelope, 0.0);
+        assert_eq!(boost.limiter, 1.0);
+        assert!(boost.filters.iter().flatten().all(|state| *state == 0.0), "{:?}", boost.filters);
     }
 
     #[test]
