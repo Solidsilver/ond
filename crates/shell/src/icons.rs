@@ -80,6 +80,8 @@ pub enum Icon {
     SkipBack(u32),
     /// The same arrow turning forward: skip ahead by that many seconds.
     SkipForward(u32),
+    /// A crescent moon: the sleep timer.
+    Moon,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -306,6 +308,23 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             painter.circle_stroke(c, r * 0.55, line);
             painter.circle_stroke(c, r * 0.2, line);
+        }
+        Icon::Moon => {
+            // A disc with a slightly smaller one taken out towards its upper
+            // right, traced as one outline: the lit arc of the first circle,
+            // then back along the second where it bites in. The bite meets the
+            // rim at ±`alpha` from its direction, seen from either centre as
+            // ±`beta`.
+            let tau = std::f32::consts::TAU;
+            let (r1, r2, d, toward) = (0.8f32, 0.68f32, 0.38f32, -std::f32::consts::FRAC_PI_4);
+            let along = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+            let alpha = (along / r1).acos();
+            let beta = (r1 * alpha.sin()).atan2(along - d);
+            let bite = p(d * toward.cos(), d * toward.sin());
+            let on = |centre: Pos2, rad: f32, a: f32| centre + vec2(a.cos(), a.sin()) * rad * r;
+            let lit = (0..=32).map(|k| on(c, r1, toward + alpha + (tau - 2.0 * alpha) * k as f32 / 32.0));
+            let shadow = (1..32).map(|k| on(bite, r2, toward - beta - (tau - 2.0 * beta) * k as f32 / 32.0));
+            painter.add(Shape::closed_line(lit.chain(shadow).collect(), Stroke::new((r * 0.16).max(1.1), color)));
         }
         Icon::Clock => {
             painter.circle_stroke(c, r * 0.8, line);
