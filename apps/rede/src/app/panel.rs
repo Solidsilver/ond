@@ -260,7 +260,10 @@ impl ViewCtx<'_> {
     /// The playing book's facts as quiet label and value rows, as Ond's Info
     /// tab sets a song's, then its description.
     fn info_tab(&mut self, ui: &mut Ui, t: &Tokens) {
-        let Some(book) = &self.player.book else {
+        // A copy of the reference, so the description memo can be borrowed
+        // mutably while the book is read.
+        let player = self.player;
+        let Some(book) = &player.book else {
             shell::widgets::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its details here.");
             return;
         };
@@ -313,7 +316,11 @@ impl ViewCtx<'_> {
             }
             if let Some(description) = item.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
                 kv_section(ui, t, "About");
-                ui.add(egui::Label::new(RichText::new(description).size(KV_VALUE).line_height(Some(19.0)).color(t.text)).wrap());
+                // Audiobookshelf keeps descriptions as HTML; the book page's
+                // parse is memoised by book, so this reuses it.
+                let blocks = self.books.description(&summary.id, description);
+                let style = shell::rich::Style { font: FontId::proportional(KV_VALUE), line_height: 19.0, ..shell::rich::Style::reading(ui) };
+                shell::rich::draw(ui, &blocks, &style);
             }
             ui.add_space(12.0);
         });
