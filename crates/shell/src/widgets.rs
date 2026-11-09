@@ -108,6 +108,58 @@ pub fn secondary_danger(ui: &mut Ui, text: &str) -> Response {
     filled(ui, None, text, Fill { text: t.danger, rest: t.field, hover: t.selected, pad: 28.0 })
 }
 
+/// A place in a sidebar: its name, highlighted when `on`, `trailing` points
+/// kept clear at the right end for a mark the caller paints there. `name` is
+/// what the accessibility tree calls it (the label, and whatever the mark
+/// says).
+pub fn sidebar_row(ui: &mut Ui, label: &str, on: bool, trailing: f32, name: &str) -> Response {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if on {
+            t.selected
+        } else if resp.hovered() {
+            t.hover
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, 6.0, fill);
+        focus_ring(ui, &resp, rect.shrink(2.0), 4.0);
+        let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
+        let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font, t.text);
+        job.wrap =
+            egui::text::TextWrapping {
+                max_width: (rect.width() - 16.0 - trailing).max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…')
+            };
+        let g = ui.painter().layout_job(job);
+        ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, t.text);
+    }
+    let name = name.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, &name));
+    resp
+}
+
+/// A row in a popover menu, hovered as a sidebar row is. True when chosen,
+/// and the menu closes.
+pub fn menu_row(ui: &mut Ui, label: &str) -> bool {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 5.0, t.hover);
+        }
+        focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
+        ui.painter().text(egui::pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
+    }
+    let label = label.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
+    if resp.clicked() {
+        ui.close();
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

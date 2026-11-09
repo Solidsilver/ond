@@ -6,7 +6,7 @@ use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Color32, FontId, Galley, Rect, Response, Sense, Ui, pos2, vec2};
-pub use shell::widgets::{danger, empty_state, focus_ring, primary, secondary, secondary_danger};
+pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
 use std::sync::Arc;
 
 /// One line of text cut to `width` with an ellipsis. The one way the app

@@ -465,52 +465,23 @@ const MARK_ROOM: f32 = 16.0;
 /// A place in the sidebar: its name, highlighted when `on`, and a download
 /// mark at the right end when it has one.
 fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::offline_page::Mark>) -> egui::Response {
-    let t = Tokens::of(ui);
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let fill = if on {
-            t.selected
-        } else if resp.hovered() {
-            t.hover
-        } else {
-            egui::Color32::TRANSPARENT
-        };
-        ui.painter().rect_filled(rect, 6.0, fill);
-        crate::widgets::focus_ring(ui, &resp, rect.shrink(2.0), 4.0);
-        let font = if on { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-        let room = if mark.is_some() { MARK_ROOM } else { 0.0 };
-        let g = crate::widgets::elide(ui, label, font, t.text, rect.width() - 16.0 - room);
-        ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, t.text);
-        if let Some(m) = mark {
-            super::offline_page::mark(ui, pos2(rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, rect.center().y), 11.0, m);
-        }
-    }
-    let label = match mark {
+    let room = if mark.is_some() { MARK_ROOM } else { 0.0 };
+    let name = match mark {
         Some(m) => format!("{label}, {}", m.hint().to_lowercase()),
         None => label.to_owned(),
     };
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, &label));
+    let resp = crate::widgets::sidebar_row(ui, label, on, room, &name);
+    if let Some(m) = mark
+        && ui.is_rect_visible(resp.rect)
+    {
+        super::offline_page::mark(ui, pos2(resp.rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, resp.rect.center().y), 11.0, m);
+    }
     resp
 }
 
 /// A row in the server menu. True when chosen.
 fn menu_item(ui: &mut Ui, label: &str) -> bool {
-    let t = Tokens::of(ui);
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 5.0, t.hover);
-        }
-        crate::widgets::focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
-        ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
-    }
-    let label = label.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
-    if resp.clicked() {
-        ui.close();
-        return true;
-    }
-    false
+    crate::widgets::menu_row(ui, label)
 }
 
 /// A label and value in the server popover.
