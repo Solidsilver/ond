@@ -115,7 +115,10 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.run_steps(2);
     h.event(egui::Event::PointerGone);
     s.shoot(h, "player-speed");
-    // The playing book's page, scrolled down to the chapter playing.
+    // The playing book's page, scrolled down to the chapter playing. The
+    // speed menu's open state lives in the shared context, not the app, so
+    // it would follow into this scene unless closed.
+    egui::Popup::close_all(&ctx);
     *h.state_mut() = None;
     *h.state_mut() = Some({
         let mut app = app(&ctx, dir.path(), BOOKS.len());
