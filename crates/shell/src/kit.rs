@@ -5,6 +5,8 @@
 //!   [`link`] and [`link_line`] that underline on hover.
 //! - Choices: the segmented pill, [`segmented`] (each segment fits its
 //!   label), [`segmented_wide`] (equal segments) and [`choice`] (over values).
+//! - Controls: [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]
+//!   (and [`switch_tinted`]).
 
 use crate::theme::Tokens;
 use crate::widgets::focus_ring;
@@ -176,6 +178,105 @@ fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> O
         x += w;
     }
     clicked
+}
+
+/// A thin horizontal slider for `value` in 0..=1 (volume): a 3 px track, the
+/// filled part in the accent, a small round knob that grows on hover.
+/// Dragging, clicking, the scroll wheel and ←/→ (when focused) all adjust it.
+pub fn thin_slider(ui: &mut Ui, value: &mut f32, width: f32, label: &str) -> Response {
+    thin_slider_marked(ui, value, width, label, None)
+}
+
+/// [`thin_slider`] with a small dot of `mark` in its knob (it says what the
+/// slider sets, e.g. a device's own volume).
+pub fn thin_slider_marked(ui: &mut Ui, value: &mut f32, width: f32, label: &str, mark: Option<Color32>) -> Response {
+    let t = Tokens::of(ui);
+    let fill = t.accent;
+    let enabled = ui.is_enabled();
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
+    let knob_r = 6.0;
+    let track = Rect::from_min_max(egui::pos2(rect.left() + knob_r, rect.center().y - 1.5), egui::pos2(rect.right() - knob_r, rect.center().y + 1.5));
+    let before = *value;
+    if enabled {
+        if let Some(p) = resp.interact_pointer_pos()
+            && (resp.dragged() || resp.clicked() || resp.drag_started())
+        {
+            *value = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta);
+            let d = if scroll.x.abs() > scroll.y.abs() { scroll.x } else { scroll.y };
+            if d != 0.0 {
+                *value = (*value + d / 400.0).clamp(0.0, 1.0);
+            }
+        }
+        if resp.has_focus() {
+            let step = ui.input(|i| {
+                let mut s = 0.0;
+                if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowUp) {
+                    s += 0.05;
+                }
+                if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowDown) {
+                    s -= 0.05;
+                }
+                s
+            });
+            *value = (*value + step).clamp(0.0, 1.0);
+        }
+    }
+    if *value != before {
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let fill = if enabled { fill } else { t.muted.gamma_multiply(0.5) };
+        ui.painter().rect_filled(track, 1.5, t.hairline);
+        let x = track.left() + track.width() * value.clamp(0.0, 1.0);
+        ui.painter().rect_filled(Rect::from_min_max(track.min, egui::pos2(x, track.bottom())), 1.5, fill);
+        if enabled {
+            let hot = resp.hovered() || resp.dragged() || resp.has_focus();
+            let r = if hot { knob_r + 1.0 } else { knob_r };
+            let c = egui::pos2(x, track.center().y);
+            let knob = if ui.visuals().dark_mode { t.text } else { Color32::WHITE };
+            ui.painter().circle_filled(c + vec2(0.0, 0.5), r + 0.5, Color32::from_black_alpha(40));
+            ui.painter().circle(c, r, knob, egui::Stroke::new(1.0, t.hairline));
+            if let Some(mark) = mark {
+                ui.painter().circle_filled(c, r * 0.45, mark);
+            }
+        }
+    }
+    let v = f64::from(*value);
+    let label = label.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::slider(enabled, v, &label));
+    resp
+}
+
+/// An on/off switch on its own; `label` names it for accessibility (the
+/// row it sits in shows the name).
+pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let accent = Tokens::of(ui).accent;
+    switch_tinted(ui, on, label, accent)
+}
+
+/// [`switch`] whose track is `on_color` when on (bit-perfect's green).
+pub fn switch_tinted(ui: &mut Ui, on: &mut bool, label: &str, on_color: Color32) -> Response {
+    let t = Tokens::of(ui);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let sw = Rect::from_center_size(rect.center(), vec2(30.0, 18.0));
+        let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
+        let track = if *on { on_color } else { t.selected };
+        ui.painter().rect_filled(sw, 9.0, track);
+        let x = egui::lerp(sw.left() + 9.0..=sw.right() - 9.0, how_on);
+        ui.painter().circle_filled(egui::pos2(x, sw.center().y), 7.0, Color32::WHITE);
+        focus_ring(ui, &resp, sw, 9.0);
+    }
+    let (on, label) = (*on, label.to_owned());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, true, on, &label));
+    resp
 }
 
 #[cfg(test)]
