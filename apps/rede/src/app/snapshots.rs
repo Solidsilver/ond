@@ -151,19 +151,87 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         playing(&mut app, true);
         app
     });
-    for (mode, name) in [(crate::window::Mode::Player, "mode-player"), (crate::window::Mode::Mini, "mode-mini")] {
-        let size = mode.size();
+    // The Player and Mini at their usual sizes and their smallest, with no
+    // timer, with one running, and in its last minute with the notice up.
+    use crate::window::Mode;
+    for (mode, size, name) in [
+        (Mode::Player, Mode::Player.size(), "mode-player"),
+        (Mode::Player, Mode::Player.min_size(), "mode-player-narrow"),
+        (Mode::Mini, Mode::Mini.size(), "mode-mini"),
+        (Mode::Mini, Mode::Mini.min_size(), "mode-mini-narrow"),
+    ] {
         h.set_size(egui::vec2(size[0], size[1]));
+        for (timer, suffix) in [(None, ""), (Some(Sleep::Running), "-sleep"), (Some(Sleep::Chapter), "-sleep-chapter"), (Some(Sleep::Ending), "-notice")] {
+            // Mini shows no timer but its notice.
+            if mode == Mode::Mini && matches!(timer, Some(Sleep::Running | Sleep::Chapter)) {
+                continue;
+            }
+            scene(h, s, &format!("{name}{suffix}"), || {
+                let mut app = app(&ctx, dir.path(), BOOKS.len());
+                playing(&mut app, true);
+                if let Some(timer) = timer {
+                    sleep(&mut app, timer);
+                }
+                app.mode = mode;
+                app
+            });
+        }
+    }
+    // The sleep menu, open over the Player with a timer waiting for the
+    // chapter's end.
+    let size = Mode::Player.size();
+    h.set_size(egui::vec2(size[0], size[1]));
+    *h.state_mut() = None;
+    *h.state_mut() = Some({
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        sleep(&mut app, Sleep::Chapter);
+        app.mode = Mode::Player;
+        app
+    });
+    h.run_steps(2);
+    h.get_by_label("Sleep timer, End of chapter").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "mode-player-sleep-menu");
+    egui::Popup::close_all(&ctx);
+    h.set_size(egui::vec2(FULL[0], FULL[1]));
+    // The bar with a timer running, and with its notice over the page.
+    for (timer, name) in [(Sleep::Running, "player-sleep"), (Sleep::Ending, "player-notice")] {
         scene(h, s, name, || {
             let mut app = app(&ctx, dir.path(), BOOKS.len());
-            playing(&mut app, true);
-            app.mode = mode;
+            playing(&mut app, false);
+            sleep(&mut app, timer);
             app
         });
     }
-    h.set_size(egui::vec2(FULL[0], FULL[1]));
     // Dropping the app (and its runtime) before the next theme.
     *h.state_mut() = None;
+}
+
+/// The sleep timers the scenes show.
+#[derive(Clone, Copy)]
+enum Sleep {
+    /// 23:41 to go.
+    Running,
+    /// Waiting for the chapter to end.
+    Chapter,
+    /// In its last minute, with the notice up.
+    Ending,
+}
+
+fn sleep(app: &mut RedeApp, timer: Sleep) {
+    use crate::sleep::{Choice, Timer};
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    // A timer started earlier, so it has the time left the scene wants.
+    let started = |ago: u64| now.checked_sub(Duration::from_secs(ago)).unwrap_or(now);
+    let chapter_end = app.player.book.as_ref().map_or(0.0, |b| b.timeline.chapter_range(app.player.position).1);
+    app.player.sleep = Some(match timer {
+        Sleep::Running => Timer::new(Choice::Minutes(30), chapter_end, started(30 * 60 - (23 * 60 + 41))),
+        Sleep::Chapter => Timer::new(Choice::Chapter, chapter_end, now),
+        Sleep::Ending => Timer::new(Choice::Minutes(5), chapter_end, started(5 * 60 - 48)),
+    });
 }
 
 #[test]

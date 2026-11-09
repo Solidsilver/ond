@@ -288,6 +288,27 @@ fn sleep_options_and_custom_defaults_are_accessible_from_the_bar() {
 }
 
 #[test]
+fn the_sleep_notice_names_its_extension_in_every_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), false);
+    // The fixture has no engine, so this checks the button is there and named;
+    // what Extend does is the player's, tested there.
+    for mode in [crate::window::Mode::Full, crate::window::Mode::Player, crate::window::Mode::Mini] {
+        let app = app_mut(&mut h);
+        let now = std::time::Instant::now();
+        let started = now.checked_sub(std::time::Duration::from_secs(5 * 60 - 40)).unwrap_or(now);
+        app.player.sleep = Some(crate::sleep::Timer::new(crate::sleep::Choice::Minutes(5), 0.0, started));
+        app.mode = mode;
+        let size = mode.size();
+        h.set_size(egui::vec2(size[0], size[1]));
+        h.run_steps(3);
+        h.check_accessibility();
+        h.get_by_label("Extend 10 minutes");
+    }
+}
+
+#[test]
 fn the_window_shortcuts_match_onds_bindings_without_a_loaded_book() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
