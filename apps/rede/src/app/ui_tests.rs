@@ -465,9 +465,31 @@ fn sleep_options_and_custom_defaults_are_accessible_from_the_title_bar() {
     h.get_by_label("Sleep timer").click();
     h.run_steps(3);
     h.check_accessibility();
-    for label in ["5 minutes", "120 minutes", "End of chapter", "Custom minutes", "Start 30 minute timer"] {
+    for label in ["5 min", "15 min", "30 min", "45 min", "60 min", "90 min", "End of chapter", "timer length, 30 min", "Start"] {
         h.get_by_label(label);
     }
+    // The custom length steps, and is saved for next time.
+    h.get_by_label("More timer length").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.playback.sleep_minutes), 45);
+    h.get_by_label("timer length, 45 min");
+}
+
+#[test]
+fn a_running_timer_shows_what_is_left_and_how_to_change_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), false);
+    let now = std::time::Instant::now();
+    app_mut(&mut h).player.sleep = Some(crate::sleep::Timer::new(crate::sleep::Choice::Minutes(30), 0.0, now));
+    h.run_steps(3);
+    h.get_by_label_contains("Sleep timer, ").click();
+    h.run_steps(3);
+    h.check_accessibility();
+    for label in ["Add 10 min", "Cancel timer", "Start again with"] {
+        h.get_by_label(label);
+    }
+    h.get_by_label_contains("left until playback pauses");
 }
 
 #[test]
