@@ -11,9 +11,8 @@
 
 use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction, RedeApp};
-use egui::{FontId, Ui};
+use egui::Ui;
 use shell::kit;
-use shell::theme::{Tokens, semibold};
 
 /// Which sheet is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,17 +24,15 @@ pub enum Sheet {
 /// A group of shortcuts: its name, and each row's description and keys.
 type Group = (&'static str, &'static [(&'static str, &'static [&'static str])]);
 
-/// The keyboard shortcuts, grouped, each with the keys that do it. Laid out
-/// in two columns: Playback and Chapters, then Window and Navigation.
+/// The keyboard shortcuts, grouped, each with the keys that do it. The sheet
+/// balances them into two columns: Playback and Chapters, then Window and
+/// Navigation.
 const SHORTCUTS: [Group; 4] = [
     ("Playback", &[("Play / pause", &["Space"]), ("Skip back", &["←"]), ("Skip forward", &["→"]), ("Slower", &["["]), ("Faster", &["]"])]),
     ("Chapters", &[("Previous chapter", &["⇧←"]), ("Next chapter", &["⇧→"]), ("Show / hide chapters", &["⌥⌘U"])]),
     ("Window", &[("Player, and back", &["⇧⌘N"]), ("Mini, and back", &["⇧⌘M"]), ("Full, Player, Mini", &["⌥⌘1", "⌥⌘2", "⌥⌘3"])]),
     ("Navigation", &[("Collapse / expand sidebar", &["⌥⌘S"]), ("Keyboard shortcuts", &["⌘/"]), ("Close a sheet or menu", &["esc"])]),
 ];
-const COL_W: f32 = 250.0;
-const COL_GAP: f32 = 32.0;
-const ROW_H: f32 = 26.0;
 
 /// The playback settings sheet's width.
 const SETTINGS_W: f32 = 380.0;
@@ -66,70 +63,11 @@ impl RedeApp {
 }
 
 impl ViewCtx<'_> {
-    /// The keyboard shortcuts in two columns, or one in a narrow window (the
-    /// Player). True when its × was clicked.
+    /// The keyboard shortcuts in the kit's sheet, Ond's: two columns, or one
+    /// in a narrow window (the Player). True when its × was clicked.
     fn shortcuts_sheet(&mut self, ui: &mut Ui) -> bool {
-        let t = Tokens::of(ui);
-        let two = ui.ctx().content_rect().width() >= 2.0 * COL_W + COL_GAP + 80.0;
-        let width = if two { 2.0 * COL_W + COL_GAP } else { COL_W };
-        ui.set_width(width);
-        let close = kit::sheet_header(ui, "Keyboard shortcuts");
-        ui.add_space(14.0);
-        let group = |ui: &mut Ui, (name, rows): Group| {
-            ui.label(egui::RichText::new(name).font(FontId::new(11.0, semibold())).color(t.muted));
-            ui.add_space(4.0);
-            for (label, keys) in rows {
-                ui.horizontal(|ui| {
-                    ui.set_height(ROW_H);
-                    ui.label(egui::RichText::new(*label).size(13.0).color(t.text));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        for k in keys.iter().rev() {
-                            kit::key_cap(ui, &shell::keys::shown(k));
-                        }
-                    });
-                });
-            }
-        };
-        let column = |ui: &mut Ui, groups: &[Group]| {
-            ui.vertical(|ui| {
-                ui.set_width(COL_W);
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for (i, g) in groups.iter().enumerate() {
-                    if i > 0 {
-                        ui.add_space(16.0);
-                    }
-                    group(ui, *g);
-                }
-            });
-        };
-        let max_h = (ui.ctx().content_rect().height() * 0.85 - 90.0).max(160.0);
-        let out = egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-            if two {
-                ui.horizontal_top(|ui| {
-                    column(ui, &SHORTCUTS[..2]);
-                    ui.add_space(COL_GAP);
-                    column(ui, &SHORTCUTS[2..]);
-                });
-            } else {
-                column(ui, &SHORTCUTS);
-            }
-        });
-        // When it scrolls (one column, in the Player), the last rows fade
-        // into the sheet, as Ond's do, so it's plain there's more.
-        let inner = out.inner_rect;
-        if out.content_size.y - (out.state.clamped_offset().y + inner.height()) > 1.0 {
-            let fade = egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 28.0), inner.max);
-            let bg = ui.visuals().window_fill;
-            let mut mesh = egui::Mesh::default();
-            for (at, alpha) in [(fade.left_top(), 0.0), (fade.right_top(), 0.0), (fade.left_bottom(), 1.0), (fade.right_bottom(), 1.0)] {
-                mesh.colored_vertex(at, bg.gamma_multiply(alpha));
-            }
-            mesh.add_triangle(0, 1, 2);
-            mesh.add_triangle(1, 2, 3);
-            ui.painter().add(mesh);
-        }
-        close
+        let groups: Vec<kit::ShortcutGroup<'_>> = SHORTCUTS.iter().map(|(name, rows)| kit::ShortcutGroup { name, rows: rows.to_vec() }).collect();
+        kit::shortcuts_sheet(ui, &groups, 1..=2, true)
     }
 
     /// The playback settings, in Ond's settings rows: each a name and a hint
