@@ -108,13 +108,17 @@ pub struct PlaybackSettings {
     pub skip_back: u32,
     pub skip_forward: u32,
     pub speed: f32,
+    #[serde(default)]
+    pub voice_boost: bool,
+    #[serde(default)]
+    pub skip_silence: bool,
     pub rewind: u32,
     pub sleep_minutes: u32,
     pub sleep_rewind: u32,
 }
 impl Default for PlaybackSettings {
     fn default() -> Self {
-        Self { skip_back: 15, skip_forward: 30, speed: 1.0, rewind: 5, sleep_minutes: 30, sleep_rewind: 10 }
+        Self { skip_back: 15, skip_forward: 30, speed: 1.0, voice_boost: false, skip_silence: false, rewind: 5, sleep_minutes: 30, sleep_rewind: 10 }
     }
 }
 
@@ -261,6 +265,17 @@ mod tests {
 
     fn login() -> Settings {
         Settings { accounts: vec![Account::new("https://books.example.com", "sam")], ..Default::default() }
+    }
+
+    #[test]
+    fn speech_preferences_default_off_and_survive_a_save() {
+        let old = Settings::from_json(br#"{ "playback": { "speed": 1.5 } }"#).unwrap();
+        assert!(!old.playback.voice_boost && !old.playback.skip_silence);
+        let mut settings = old;
+        settings.playback.voice_boost = true;
+        settings.playback.skip_silence = true;
+        let read = Settings::from_json(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(read, settings);
     }
 
     #[test]

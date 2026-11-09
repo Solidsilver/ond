@@ -24,6 +24,13 @@ impl Transport for EngineHandle {
     }
 }
 
+/// Apply the same persisted switches at engine creation and after a preference
+/// change; playback policy and the views never need their own settings copy.
+pub fn apply_speech(settings: crate::settings::PlaybackSettings, engine: &dyn Transport) {
+    engine.send(Command::SetVoiceBoost(settings.voice_boost));
+    engine.send(Command::SetSkipSilence(settings.skip_silence));
+}
+
 pub trait Sources {
     fn track(&self, key: &ItemKey, item: &Item, track: &SessionTrack, token: u64) -> TrackSource;
 }

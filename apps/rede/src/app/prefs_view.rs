@@ -27,8 +27,33 @@ pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
     Playback(crate::settings::PlaybackSettings),
+    // The popover supplies these independently of the full playback form.
+    #[allow(dead_code)]
+    VoiceBoost(bool),
+    #[allow(dead_code)]
+    SkipSilence(bool),
     /// The chapters column shown or hidden.
     ShowPanel(bool),
     /// The sidebar folded to its rail, or opened out again.
     CollapseSidebar(bool),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_speech_action_updates_the_saved_and_frame_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = crate::app::fixture::app(&ctx, dir.path(), 0);
+        app.apply_prefs(PrefsAction::VoiceBoost(true));
+        app.apply_prefs(PrefsAction::SkipSilence(true));
+        assert!(app.prefs.get(|s| s.playback.voice_boost && s.playback.skip_silence));
+        assert!(app.shown.playback.voice_boost && app.shown.playback.skip_silence);
+        app.apply_prefs(PrefsAction::VoiceBoost(false));
+        assert!(!app.shown.playback.voice_boost && app.shown.playback.skip_silence);
+        app.apply_prefs(PrefsAction::SkipSilence(false));
+        assert!(!app.prefs.get(|s| s.playback.voice_boost || s.playback.skip_silence));
+    }
 }

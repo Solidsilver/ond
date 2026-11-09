@@ -577,3 +577,15 @@ fn sleeping_at_the_books_end_reopens_the_rewound_file_paused() {
     assert!(sent.iter().any(|c| matches!(c, Command::PlayFrom(_, offset) if offset.as_secs_f64() == 30.0)));
     assert!(sent.iter().rposition(|c| matches!(c, Command::Pause)).unwrap() > sent.iter().rposition(|c| matches!(c, Command::PlayFrom(..))).unwrap());
 }
+
+#[test]
+fn persisted_speech_switches_are_sent_through_the_transport() {
+    let engine = Fake::default();
+    apply_speech(crate::settings::PlaybackSettings { voice_boost: true, skip_silence: true, ..Default::default() }, &engine);
+    apply_speech(crate::settings::PlaybackSettings::default(), &engine);
+    let commands = engine.sent.borrow();
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::SetVoiceBoost(true), Command::SetSkipSilence(true), Command::SetVoiceBoost(false), Command::SetSkipSilence(false)]
+    ));
+}
