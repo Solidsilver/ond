@@ -394,18 +394,30 @@ impl RedeApp {
         self.session.connecting.then(|| "Connecting…".to_owned())
     }
 
-    /// The server chooses which credential controls the form offers.
+    /// The sign-in screen. The server chooses which ways in the form offers;
+    /// when it offers its provider, that leads (most accounts use it) and the
+    /// password form follows under a divider, so one button is plainly the
+    /// main one.
     pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
         let Some(form) = self.login.as_mut() else { return };
         let t = Tokens::of(ui);
         let waiting = self.openid.pending.as_ref();
+        let exchanging = self.openid.exchanging;
+        let password_busy = self.session.connecting;
         let mut action = None;
         let status = form.status.as_ref().filter(|_| form.checked_server == form.server.trim());
         let local = status.is_some_and(|s| s.auth_methods.is_empty() || s.auth_methods.iter().any(|m| m == "local"));
         let oidc = status.is_some_and(|s| s.auth_methods.iter().any(|m| m == "openid"));
-        let oidc_first = status.is_some_and(|s| s.auth_form_data.auth_open_id_auto_launch);
         let oidc_label = status.and_then(|s| s.auth_form_data.auth_open_id_button_text.as_deref()).unwrap_or("Sign in with OpenID");
-        let custom_message = status.and_then(|s| s.auth_form_data.auth_login_custom_message.as_deref());
+        let custom_message = status.and_then(|s| s.auth_form_data.auth_login_custom_message.as_deref()).filter(|m| !m.is_empty());
+        // Which spinner turns, if any: each phase gets its own few seconds.
+        let phase = match waiting {
+            Some(_) if exchanging => Some(Phase::Finishing),
+            Some(_) => Some(Phase::Browser),
+            None if form.busy => Some(Phase::Server),
+            None => None,
+        };
+        let spin = spin(ui, phase);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
             let strip = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), super::BAR_H));
             let bar = ui.interact(strip, ui.scope_id().with("login-titlebar"), egui::Sense::click_and_drag());
@@ -415,94 +427,132 @@ impl RedeApp {
             if bar.double_clicked() {
                 shell::chrome::title_double_click(ui.ctx());
             }
-            const W: f32 = 340.0;
-            ui.add_space(((ui.available_height() - 420.0) * 0.42).max(24.0));
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Rede").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Sign in to Audiobookshelf").size(13.0).color(t.muted));
-                ui.add_space(24.0);
-            });
-            ui.horizontal(|ui| {
-                ui.add_space(((ui.available_width() - W) / 2.0).max(0.0));
-                ui.vertical(|ui| {
-                    ui.set_width(W);
-                    ui.spacing_mut().item_spacing.y = 8.0;
-                    if let Some(pending) = waiting {
-                        ui.label(egui::RichText::new("Finish signing in in your browser").color(t.text));
-                        if !pending.remaining(std::time::SystemTime::now()).is_zero() {
-                            ui.horizontal(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                                shell::icons::paint(ui.painter(), rect, Icon::Spinner, t.muted);
-                                ui.label(egui::RichText::new("Waiting for your browser…").size(12.0).color(t.muted));
-                            });
-                            ui.ctx().request_repaint_after(SPIN_FRAME);
-                        }
-                        if pending.flow.used_fallback() {
-                            ui.add(egui::Label::new(egui::RichText::new(crate::openid::FALLBACK).size(12.0).color(t.muted)).wrap());
-                        }
-                        if ui.button("Cancel").clicked() {
-                            action = Some(Action::CancelSignIn);
-                        }
-                        return;
+            // Roughly how tall the column is, so it sits a little above the
+            // middle whatever the server offers.
+            let form_h = if let Some(pending) = waiting {
+                if pending.flow.used_fallback() { 360.0 } else { 260.0 }
+            } else if oidc && local {
+                400.0
+            } else if local {
+                320.0
+            } else {
+                250.0
+            };
+            let room = ui.available_height();
+            // A short window keeps the buttons in view: a smaller heading, and
+            // no help for an address the server has already answered at.
+            let compact = room < form_h + 160.0;
+            // Shorter still, it scrolls rather than cutting the error off.
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.add_space(((room - form_h) * 0.42).max(if compact { 12.0 } else { 24.0 }));
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("Rede").font(egui::FontId::new(if compact { 22.0 } else { 28.0 }, theme::semibold())).color(t.text));
+                    if !compact {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Sign in to Audiobookshelf").size(13.0).color(t.muted));
                     }
-                    if let Some(message) = custom_message.filter(|m| !m.is_empty()) {
-                        ui.add(egui::Label::new(message).wrap());
-                    }
-                    let mut enter = false;
-                    ui.add_enabled_ui(!form.busy, |ui| {
-                        enter |= login_field(ui, &t, "Server", &mut form.server, false, !form.focused);
-                        form.focused = true;
-                        ui.label(egui::RichText::new("Your Audiobookshelf server's address").size(11.0).color(t.muted));
-                        let openid_button = |ui: &mut egui::Ui| {
-                            if ui.add_sized([W, 34.0], egui::Button::new(egui::RichText::new(oidc_label).color(t.on_accent)).fill(t.accent)).clicked() {
-                                Some(Action::OpenId)
+                    ui.add_space(if compact { 14.0 } else { 24.0 });
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(((ui.available_width() - FORM_W) / 2.0).max(0.0));
+                    ui.vertical(|ui| {
+                        ui.set_width(FORM_W);
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        if let Some(pending) = waiting {
+                            action = waiting_ui(ui, &t, pending, exchanging, spin);
+                            return;
+                        }
+                        if let Some(message) = custom_message {
+                            ui.add(egui::Label::new(egui::RichText::new(message).size(12.0).color(t.muted)).wrap());
+                            ui.add_space(14.0);
+                        }
+                        let mut enter = false;
+                        ui.add_enabled_ui(!form.busy, |ui| {
+                            enter |= login_field(ui, &t, "Server", &mut form.server, "https://books.example.com", false, !form.focused);
+                            form.focused = true;
+                            if !(compact && status.is_some()) {
+                                ui.label(egui::RichText::new("Your Audiobookshelf server's address").size(11.0).color(t.muted));
+                            }
+                        });
+                        // The button that's waiting on the server says so; the
+                        // rest are greyed out until it answers.
+                        let form_busy = form.busy;
+                        let button = |ui: &mut egui::Ui, label: &str, primary: bool, busy: bool| {
+                            if form_busy && busy {
+                                form_button(ui, label, primary, Some(spin));
+                                false
                             } else {
-                                None
+                                ui.add_enabled_ui(!form_busy, |ui| form_button(ui, label, primary, None)).inner.clicked()
                             }
                         };
-                        if oidc && (oidc_first || !local) {
-                            action = openid_button(ui);
+                        // The space above a button, less when room is short.
+                        let gap = if compact { 12.0 } else { 18.0 };
+                        if status.is_none() {
+                            ui.add_space(gap);
+                            if button(ui, "Sign in", true, true) || enter {
+                                action = Some(Action::CheckServer);
+                            }
+                        }
+                        if oidc {
+                            ui.add_space(gap);
+                            if button(ui, oidc_label, true, !password_busy) {
+                                action = Some(Action::OpenId);
+                            }
+                            if !local {
+                                ui.add_space(6.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(egui::RichText::new("You'll finish signing in in your browser.").size(11.0).color(t.muted));
+                                });
+                            }
                         }
                         if local {
-                            enter |= login_field(ui, &t, "Username", &mut form.username, false, false);
-                            enter |= login_field(ui, &t, "Password", &mut form.password, true, false);
-                            if ui.add_sized([W, 34.0], egui::Button::new(egui::RichText::new("Sign in").color(t.on_accent)).fill(t.accent)).clicked() || enter {
+                            if oidc {
+                                ui.add_space(if compact { 8.0 } else { 14.0 });
+                                or_divider(ui, &t);
+                                ui.add_space(if compact { 2.0 } else { 6.0 });
+                            } else {
+                                ui.add_space(10.0);
+                            }
+                            ui.add_enabled_ui(!form.busy, |ui| {
+                                enter |= login_field(ui, &t, "Username", &mut form.username, "", false, false);
+                                ui.add_space(10.0);
+                                enter |= login_field(ui, &t, "Password", &mut form.password, "", true, false);
+                            });
+                            ui.add_space(gap);
+                            if button(ui, "Sign in", !oidc, password_busy || !oidc) || enter {
                                 action = Some(Action::SignIn);
                             }
                         }
-                        if oidc && local && !oidc_first {
-                            action = openid_button(ui).or(action.take());
-                        }
-                        if status.is_none()
-                            && (ui.add_sized([W, 34.0], egui::Button::new(egui::RichText::new("Sign in").color(t.on_accent)).fill(t.accent)).clicked() || enter)
-                        {
-                            action = Some(Action::CheckServer);
-                        }
                         if status.is_some() && !local && !oidc {
-                            ui.label("This server offers no supported sign-in method.");
+                            ui.add_space(14.0);
+                            notice(
+                                ui,
+                                &t,
+                                "No way to sign in",
+                                "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID.",
+                            );
+                        }
+                        if let Some(error) = &form.error {
+                            ui.add_space(12.0);
+                            ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(ui.visuals().error_fg_color)).wrap());
+                        }
+                        if let Some(warning) = &form.warning {
+                            ui.add_space(14.0);
+                            notice(ui, &t, "Update recommended", warning);
+                        }
+                        // A server that takes the connection and then says
+                        // nothing would hold the form until the request times out.
+                        if form.busy {
+                            ui.add_space(16.0);
+                            ui.vertical_centered(|ui| {
+                                if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
+                                    action = Some(Action::CancelSignIn);
+                                }
+                            });
                         }
                     });
-                    if form.busy {
-                        ui.label("Connecting…");
-                        let now = ui.input(|i| i.time);
-                        let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(signing_in_since(), || now));
-                        if now - since < CONNECT_SPIN_SECS {
-                            ui.ctx().request_repaint_after(SPIN_FRAME);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            action = Some(Action::CancelSignIn);
-                        }
-                    } else {
-                        ui.data_mut(|d| d.remove::<f64>(signing_in_since()));
-                    }
-                    if let Some(warning) = &form.warning {
-                        ui.add(egui::Label::new(egui::RichText::new(warning).size(12.0).color(t.muted)).wrap());
-                    }
-                    if let Some(error) = &form.error {
-                        ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(ui.visuals().error_fg_color)).wrap());
-                    }
                 });
+                ui.add_space(24.0);
             });
         });
         if let Some(action) = action {
@@ -514,9 +564,142 @@ impl RedeApp {
     }
 }
 
-fn login_field(ui: &mut egui::Ui, t: &Tokens, label: &str, text: &mut String, password: bool, focus: bool) -> bool {
+/// The sign-in column's width, Ond's.
+const FORM_W: f32 = 320.0;
+
+/// Waiting for the browser: what's happening, and a way out. Centred, since
+/// there's nothing to fill in.
+fn waiting_ui(ui: &mut egui::Ui, t: &Tokens, pending: &crate::openid::Pending, exchanging: bool, spin: bool) -> Option<Action> {
+    let mut action = None;
+    ui.vertical_centered(|ui| {
+        ui.add_space(4.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+        // Still after a while: the browser may take minutes, and the window
+        // shouldn't draw all that time to say so.
+        shell::icons::paint(ui.painter(), rect, if spin { Icon::Spinner } else { Icon::Clock }, t.muted);
+        ui.add_space(14.0);
+        let title = if exchanging { "Signing in…" } else { "Finish signing in in your browser" };
+        ui.label(egui::RichText::new(title).font(egui::FontId::new(15.0, theme::semibold())).color(t.text));
+        ui.add_space(4.0);
+        let host = pending.account.server.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
+        let body = format!("Signing in to {host}. When you're done, your browser brings you back here.");
+        ui.add(egui::Label::new(egui::RichText::new(body).size(12.0).color(t.muted)).wrap());
+        ui.add_space(20.0);
+        if shell::widgets::secondary(ui, "Cancel").clicked() {
+            action = Some(Action::CancelSignIn);
+        }
+    });
+    if pending.flow.used_fallback() {
+        ui.add_space(22.0);
+        notice(ui, t, "Rede's link isn't allowed on this server", crate::openid::FALLBACK);
+    }
+    action
+}
+
+/// What the sign-in is waiting on.
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    /// The server, about its methods or a password.
+    Server,
+    /// The user, in the browser.
+    Browser,
+    /// The server, turning the browser's code into a login.
+    Finishing,
+}
+
+/// Whether the sign-in spinner turns this frame. Each `phase` (checking the
+/// server, waiting for the browser, finishing) turns it for a few seconds and
+/// then lets it go still, so a request that never answers doesn't keep the
+/// window drawing. `None` is nothing to wait for.
+fn spin(ui: &egui::Ui, phase: Option<Phase>) -> bool {
+    let key = signing_in_since();
+    let Some(phase) = phase else {
+        ui.data_mut(|d| d.remove::<(Phase, f64)>(key));
+        return false;
+    };
+    let now = ui.input(|i| i.time);
+    let (_, since) = ui.data_mut(|d| {
+        let entry = d.get_temp_mut_or_insert_with(key, || (phase, now));
+        if entry.0 != phase {
+            *entry = (phase, now);
+        }
+        *entry
+    });
+    let turning = now - since < CONNECT_SPIN_SECS;
+    if turning {
+        ui.ctx().request_repaint_after(SPIN_FRAME);
+    }
+    turning
+}
+
+/// One of the form's full-width buttons: the accent fill for the main way in,
+/// the quiet field fill for the other. `busy` is `Some` on the one waiting
+/// for the server, which says so (with a spinner while `Some(true)`) and takes
+/// no clicks.
+fn form_button(ui: &mut egui::Ui, label: &str, primary: bool, busy: Option<bool>) -> egui::Response {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), if busy.is_some() { egui::Sense::hover() } else { egui::Sense::click() });
+    let hovered = resp.hovered() && busy.is_none();
+    let (fill, ink) = match (primary, busy.is_some(), hovered) {
+        (true, true, _) => (t.accent.gamma_multiply(0.6), t.on_accent),
+        (true, false, true) => (t.accent.gamma_multiply(0.88), t.on_accent),
+        (true, false, false) => (t.accent, t.on_accent),
+        (false, _, true) => (t.selected, t.accent),
+        (false, _, false) => (t.field, t.accent),
+    };
+    let text = if busy.is_some() { "Connecting…" } else { label };
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        p.rect_filled(rect, 7.0, fill);
+        // A long provider name is cut rather than spilling out of the button.
+        let galley = crate::widgets::elide(ui, text, egui::FontId::new(13.0, theme::semibold()), ink, rect.width() - 56.0);
+        p.galley(rect.center() - galley.size() / 2.0, galley, ink);
+        if busy == Some(true) {
+            let r = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(14.0, 14.0));
+            shell::icons::paint(p, r, Icon::Spinner, ink);
+        }
+        shell::widgets::focus_ring(ui, &resp, rect, 7.0);
+    }
+    let (text, enabled) = (text.to_owned(), ui.is_enabled() && busy.is_none());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &text));
+    if busy.is_none() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+}
+
+/// A hairline either side of a small "or", between the provider and the
+/// password.
+fn or_divider(ui: &mut egui::Ui, t: &Tokens) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+    let p = ui.painter();
+    let galley = p.layout_no_wrap("or".to_owned(), egui::FontId::proportional(11.0), t.muted);
+    let gap = galley.size().x / 2.0 + 10.0;
+    let (y, mid) = (rect.center().y, rect.center().x);
+    let stroke = egui::Stroke::new(1.0, t.hairline);
+    p.hline(rect.left()..=mid - gap, y, stroke);
+    p.hline(mid + gap..=rect.right(), y, stroke);
+    p.galley(rect.center() - galley.size() / 2.0, galley, t.muted);
+}
+
+/// Something the form wants read but can't act on, outlined as Ond outlines
+/// its notices: a short title, then the detail in muted text.
+fn notice(ui: &mut egui::Ui, t: &Tokens, title: &str, body: &str) {
+    egui::Frame::new().stroke(egui::Stroke::new(1.0, t.hairline)).corner_radius(8).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(egui::RichText::new(title).font(egui::FontId::new(12.5, theme::semibold())).color(t.text));
+        ui.add(egui::Label::new(egui::RichText::new(body).size(12.0).color(t.muted)).wrap());
+    });
+}
+
+fn login_field(ui: &mut egui::Ui, t: &Tokens, label: &str, text: &mut String, hint: &str, password: bool, focus: bool) -> bool {
     ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
-    let r = ui.add(egui::TextEdit::singleline(text).password(password).desired_width(f32::INFINITY).margin(egui::vec2(10.0, 7.0)).background_color(t.field));
+    let r = ui.add(
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .password(password)
+            .desired_width(f32::INFINITY)
+            .margin(egui::vec2(10.0, 7.0))
+            .background_color(t.field),
+    );
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
     if focus {
         r.request_focus();

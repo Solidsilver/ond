@@ -113,6 +113,7 @@ pub enum Action {
     /// Connect with what's typed in the sign-in form.
     SignIn,
     CheckServer,
+    /// Start a browser sign-in with the server's provider.
     OpenId,
     CancelSignIn,
     /// Back to the sign-in screen; the saved tokens are forgotten. The shelf

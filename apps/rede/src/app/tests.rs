@@ -55,6 +55,16 @@ fn every_view_draws() {
         let mut login = signin(&ctx, dir.path(), both, waiting);
         frame(&ctx, &mut login);
     }
+    // Passwords only, a password on its way, and a browser sign-in through
+    // Audiobookshelf's link.
+    let mut login = signin_with(&ctx, dir.path(), &["local"], None);
+    frame(&ctx, &mut login);
+    login.login.as_mut().unwrap().busy = true;
+    login.session.connecting = true;
+    frame(&ctx, &mut login);
+    drop(login);
+    let mut login = signin_with(&ctx, dir.path(), &["openid"], Some(pending_openid_fallback()));
+    frame(&ctx, &mut login);
 }
 
 #[test]
@@ -213,6 +223,33 @@ fn the_column_toggle_is_remembered_and_opening_it_finds_the_chapter_playing() {
     app.apply_panel(PanelAction::Show(Tab::Chapters));
     assert!(app.ui.panel.sheet && !app.prefs.get(|s| s.show_panel));
     assert_eq!(app.ui.panel.tab, Tab::Chapters);
+}
+
+/// The sign-in screen is still too (once nothing's being typed), and so is one waiting on the browser once
+/// its spinner has had its few seconds: the browser may take minutes.
+#[test]
+fn a_sign_in_screen_asks_for_no_frames_even_while_the_browser_takes_its_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).with_pixels_per_point(2.0).build_ui_state(
+        |ui, app: &mut Option<RedeApp>| {
+            if let Some(app) = app {
+                app.login_ui(ui);
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(signin(&ctx, dir.path(), true, false));
+    // A caret blinking in the server's field is a reason to draw; with
+    // nothing focused, there's none.
+    h.step();
+    h.ctx.memory_mut(|m| m.stop_text_input());
+    idle(&mut h, "the sign-in form");
+    *h.state_mut() = Some(signin(&ctx, dir.path(), false, true));
+    h.step();
+    assert!(h.ctx.has_requested_repaint(), "the spinner turns at first");
+    idle(&mut h, "a sign-in waiting on the browser");
+    assert!(app_mut(&mut h).openid.pending.is_some(), "still waiting, only still");
 }
 
 /// Runs frames until nothing asks for another, then a few more, and says the
