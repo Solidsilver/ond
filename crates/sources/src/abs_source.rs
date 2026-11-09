@@ -74,9 +74,7 @@ impl Source for AbsSource {
             // The app's search runs over the local shelf; the client has no
             // call for the server's.
             server_search: false,
-            // ABS keeps bookmarks, but the trait has no calls for them yet, so
-            // claiming them would offer the user something with no wiring.
-            bookmarks: false,
+            bookmarks: true,
             // socket.io isn't spoken yet; progress is pulled on start, on
             // focus and before playing.
             live_updates: false,
@@ -185,8 +183,37 @@ impl Source for AbsSource {
     }
 
     async fn set_progress(&self, batch: &[ProgressUpdate]) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        // A reset is needed only when restoring an unfinished position over a
+        // finished server row. ABS ignores currentTime in the reset request.
+        if batch.iter().any(|update| !update.finished) {
+            let remote = self.client.progress().await?;
+            for update in batch.iter().filter(|update| !update.finished) {
+                if remote
+                    .iter()
+                    .any(|p| p.library_item_id.as_deref() == Some(update.item.item.as_str()) && p.episode_id.is_none() && p.is_finished == Some(true))
+                {
+                    self.client.update_progress(&update.item.item, None, &abs::ProgressUpdate { is_finished: Some(false), ..Default::default() }).await?;
+                }
+            }
+        }
         let updates: Vec<abs::ItemProgressUpdate> = batch.iter().map(progress_update).collect();
         Ok(self.client.update_progress_batch(&updates).await?)
+    }
+
+    async fn bookmarks(&self) -> Result<Vec<crate::Bookmark>> {
+        Ok(self.client.bookmarks().await?.into_iter().map(|b| bookmark(self.account, b)).collect())
+    }
+    async fn create_bookmark(&self, item: &str, time: Position, title: &str) -> Result<crate::Bookmark> {
+        Ok(bookmark(self.account, self.client.create_bookmark(item, time.secs(), title).await?))
+    }
+    async fn rename_bookmark(&self, item: &str, time: Position, title: &str) -> Result<crate::Bookmark> {
+        Ok(bookmark(self.account, self.client.rename_bookmark(item, time.secs(), title).await?))
+    }
+    async fn delete_bookmark(&self, item: &str, time: Position) -> Result<()> {
+        Ok(self.client.delete_bookmark(item, time.secs()).await?)
     }
 }
 
@@ -357,17 +384,15 @@ fn progress_update(update: &ProgressUpdate) -> abs::ItemProgressUpdate {
         episode_id: None,
         library_item_id: update.item.item.clone(),
         update: abs::ProgressUpdate {
-            // Without a duration the server can't apply its "within 10
-            // seconds of the end" rule; the log's own `finished` is the one
-            // that decides.
+            // Omit unknown duration rather than replace the server's. ABS
+            // may still auto-finish using the duration it already remembers.
             duration: None,
             progress: None,
             current_time: Some(update.position.secs()),
             // Only a finish is ever said. `isFinished: false` on a finished
             // item resets its position to 0 and drops the `currentTime` sent
             // with it, so sending it would undo the position being reported;
-            // clearing a finish takes two requests, which the app makes when
-            // the user asks for it.
+            // set_progress clears a finish in a separate request first.
             is_finished: update.finished.then_some(true),
             hide_from_continue_listening: None,
             finished_at: None,
@@ -411,3 +436,12 @@ fn extension(ext: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+fn bookmark(account: AccountId, b: abs::Bookmark) -> crate::Bookmark {
+    crate::Bookmark {
+        item: ItemKey::new(account, b.library_item_id),
+        position: Position::from_secs(b.time),
+        title: b.title.unwrap_or_default(),
+        created: Stamp::from_millis(b.created_at.unwrap_or_default()).system_time(),
+    }
+}
