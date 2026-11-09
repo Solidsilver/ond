@@ -1,6 +1,7 @@
-//! A Settings page's parts: the tab list down its side ([`settings_nav`])
-//! and the pane beside it that scrolls under the tab's title
-//! ([`settings_pane`]). Ond draws them in a window over the library, Rede
+//! A Settings page's parts: the tab list down its side ([`settings_nav`]),
+//! the pane beside it that scrolls under the tab's title
+//! ([`settings_pane`]), and About's header ([`about_header`], with the
+//! [`app_icon`] it shows). Ond draws them in a window over the library, Rede
 //! in the page's place; what frames them (a fill, a hairline, the "esc"
 //! hint) is the app's.
 
@@ -49,6 +50,43 @@ pub fn settings_pane(ui: &mut Ui, pane: Rect, id: impl std::hash::Hash + std::fm
                 body(ui);
                 ui.add_space(24.0);
             });
+        });
+    });
+}
+
+/// The app's icon from its packaged PNG, decoded once and kept for the
+/// context's life under `name`.
+pub fn app_icon(ctx: &egui::Context, name: &str, png: &[u8]) -> egui::TextureHandle {
+    let id = egui::Id::unique("about-app-icon").with(name);
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return tex;
+    }
+    let image = match image::load_from_memory_with_format(png, image::ImageFormat::Png) {
+        Ok(decoded) => {
+            let rgba = decoded.to_rgba8();
+            egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw())
+        }
+        Err(e) => {
+            tracing::warn!("app icon: {e}");
+            egui::ColorImage::example()
+        }
+    };
+    let tex = ctx.load_texture("about-app-icon", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    tex
+}
+
+/// About's header: the icon, and beside it the app's name over its version.
+pub fn about_header(ui: &mut Ui, icon: &egui::TextureHandle, name: &str, version: &str) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
+        ui.add(egui::Image::new((icon.id(), vec2(56.0, 56.0))));
+        ui.vertical(|ui| {
+            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.label(egui::RichText::new(name).font(FontId::new(17.0, semibold())).color(t.text));
+            ui.label(egui::RichText::new(version).size(12.5).color(t.muted));
         });
     });
 }

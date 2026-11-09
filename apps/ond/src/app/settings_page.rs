@@ -134,16 +134,8 @@ impl OndApp {
     fn about(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let current = crate::updates::Version::current();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            ui.add(egui::Image::new((app_icon(ui.ctx()).id(), vec2(56.0, 56.0))));
-            ui.vertical(|ui| {
-                ui.add_space(8.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                ui.label(egui::RichText::new("Ond").font(FontId::new(17.0, semibold())).color(t.text));
-                ui.label(egui::RichText::new(format!("Version {current}")).size(12.5).color(t.muted));
-            });
-        });
+        let icon = kit::app_icon(ui.ctx(), "ond", include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png"));
+        kit::about_header(ui, &icon, "Ond", &format!("Version {current}"));
         ui.add_space(20.0);
         let newer = self.updates.latest.filter(|v| *v > current);
         group(ui, "Updates", |ui| match crate::updates::channel() {
@@ -797,20 +789,6 @@ fn ago(at: std::time::SystemTime) -> String {
         _ => (s / 86400, "day"),
     };
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
-}
-
-/// Ond's icon, for the About page.
-fn app_icon(ctx: &egui::Context) -> egui::TextureHandle {
-    let id = egui::Id::unique("about-app-icon");
-    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
-        return tex;
-    }
-    let icon =
-        eframe::icon_data::from_png_bytes(include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png")).unwrap_or_default();
-    let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-    let tex = ctx.load_texture("about-app-icon", image, egui::TextureOptions::LINEAR);
-    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
-    tex
 }
 
 /// Muted text under a group's rows, about all of them.
