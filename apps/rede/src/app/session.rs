@@ -258,8 +258,8 @@ impl RedeApp {
             if bar.double_clicked() {
                 shell::chrome::title_double_click(ui.ctx());
             }
-            const W: f32 = 340.0;
-            const FORM_H: f32 = 340.0;
+            const W: f32 = 320.0;
+            const FORM_H: f32 = 330.0;
             ui.add_space(((ui.available_height() - FORM_H) * 0.42).max(24.0));
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("Rede").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
@@ -319,11 +319,21 @@ impl RedeApp {
                     });
                     ui.add_space(18.0);
                     let label = if form.busy { "Connecting…" } else { "Sign in" };
-                    let button = egui::Button::new(egui::RichText::new(label).font(egui::FontId::new(13.0, theme::semibold())).color(t.on_accent))
-                        .fill(t.accent)
-                        .corner_radius(7)
-                        .min_size(egui::vec2(W, 34.0));
-                    let resp = ui.add_enabled(!form.busy, button);
+                    // Painted as Ond paints Connect: the label centred, a
+                    // lighter fill on hover, a faded one while connecting.
+                    let sense = if form.busy { egui::Sense::hover() } else { egui::Sense::click() };
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, 34.0), sense);
+                    let fill = if form.busy {
+                        t.accent.gamma_multiply(0.6)
+                    } else if resp.hovered() {
+                        t.accent.gamma_multiply(0.88)
+                    } else {
+                        t.accent
+                    };
+                    ui.painter().rect_filled(rect, 7.0, fill);
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::new(13.0, theme::semibold()), t.on_accent);
+                    let ready = !form.busy;
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ready, label));
                     if form.busy {
                         let r = egui::Rect::from_center_size(egui::pos2(resp.rect.left() + 18.0, resp.rect.center().y), egui::vec2(14.0, 14.0));
                         shell::icons::paint(ui.painter(), r, Icon::Spinner, t.on_accent);
