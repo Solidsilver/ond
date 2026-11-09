@@ -28,8 +28,7 @@ use super::{Action, RedeApp, Route};
 use crate::player::Control;
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use shell::icons::{self, Icon};
-use shell::theme::{self, Tokens, semibold};
-use std::time::Duration;
+use shell::theme::{Tokens, semibold};
 
 /// Without the traffic lights (full screen, other platforms), the
 /// transport's smallest inset from the window's edge.
@@ -196,8 +195,8 @@ impl RedeApp {
         view.capsule(ui, at.capsule);
     }
 
-    /// The chapters column's toggle, the account, the syncing indicator and
-    /// the mode buttons, laid out right to left from the bar's end.
+    /// The chapters column's toggle and the mode buttons, laid out right to
+    /// left from the bar's end.
     fn window_controls(&mut self, ui: &mut Ui, compact: bool) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.x = if compact { NARROW_WINDOW_SPACING } else { WINDOW_SPACING };
@@ -212,39 +211,7 @@ impl RedeApp {
         if toggle.clicked() {
             self.actions.push(Action::Panel(PanelAction::Toggle));
         }
-        self.account_and_sync(ui, &t, compact);
         self.view().mode_buttons(ui);
-    }
-
-    /// The account menu, then (to its left) the syncing indicator.
-    fn account_and_sync(&mut self, ui: &mut Ui, t: &Tokens, compact: bool) {
-        match self.session.account.clone() {
-            Some(account) => {
-                let button = account_button(ui, t, &account.username, compact);
-                egui::Popup::menu(&button).show(|ui| {
-                    ui.set_min_width(200.0);
-                    ui.label(egui::RichText::new(&account.username).font(FontId::new(13.0, theme::semibold())).color(t.text));
-                    ui.label(egui::RichText::new(&account.server).size(11.0).color(t.muted));
-                    ui.separator();
-                    if ui.button("Sign out").clicked() {
-                        ui.close();
-                        self.actions.push(Action::SignOut);
-                    }
-                });
-            }
-            None => {
-                ui.label(egui::RichText::new("Not signed in").size(12.0).color(t.muted));
-            }
-        }
-        if let Some(label) = self.sync_label() {
-            // Beside the spinner when there's room; in its tooltip when not.
-            if !compact {
-                ui.label(egui::RichText::new(&label).size(12.0).color(t.muted));
-            }
-            syncing_glyph(ui, t, &label);
-        } else {
-            ui.data_mut(|d| d.remove::<f64>(syncing_since_id()));
-        }
     }
 }
 
@@ -448,69 +415,6 @@ fn title_rows(top: f32, floor: f32, title_h: f32, sub_h: f32) -> (f32, f32) {
     let tuck = (over - lift).clamp(0.0, 2.0);
     let y0 = top + 4.0 - lift;
     (y0, y0 + title_h - tuck)
-}
-
-/// The sync spinner: it turns while a sync runs, then stops after
-/// [`SYNC_SPIN`], so a listing that stalls can't hold the window at 20 frames a
-/// second for ever. The start is kept in egui's own memory, per window.
-fn syncing_glyph(ui: &mut Ui, t: &Tokens, label: &str) {
-    let (rect, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-    icons::paint(ui.painter(), rect, Icon::Spinner, t.muted);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ProgressIndicator, true, label));
-    resp.on_hover_text(label);
-    let now = ui.input(|i| i.time);
-    let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(syncing_since_id(), || now));
-    if now - since < SYNC_SPIN {
-        ui.ctx().request_repaint_after(SPIN_FRAME);
-    }
-}
-
-/// The account's control: a person and the name, quiet at rest like Ond's
-/// toolbar buttons, with a fill on hover and a deeper one while pressed or
-/// while its menu is open. It's named by the account, so it reads (and is
-/// found) as who is signed in. `compact` leaves the name to the tooltip.
-fn account_button(ui: &mut Ui, t: &Tokens, name: &str, compact: bool) -> egui::Response {
-    let font = FontId::proportional(12.5);
-    // Laid out without a colour, so it's painted in whichever ink the state
-    // calls for.
-    let galley = (!compact).then(|| ui.painter().layout_no_wrap(name.to_owned(), font, egui::Color32::PLACEHOLDER));
-    let (icon, chevron, pad, gap) = (13.0, 8.0, 8.0, 6.0);
-    let text_w = galley.as_ref().map_or(0.0, |g| g.size().x + gap);
-    let width = pad + icon + gap + text_w + chevron + pad;
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, BUTTON), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
-        let fill = if resp.is_pointer_button_down_on() || open {
-            t.selected
-        } else if resp.hovered() {
-            t.hover
-        } else {
-            egui::Color32::TRANSPARENT
-        };
-        ui.painter().rect_filled(rect, 6.0, fill);
-        shell::widgets::focus_ring(ui, &resp, rect, 6.0);
-        let ink = if resp.hovered() || open { t.text } else { t.muted };
-        let mut x = rect.left() + pad;
-        let y = rect.center().y;
-        icons::paint(ui.painter(), Rect::from_center_size(pos2(x + icon / 2.0, y), vec2(icon, icon)), Icon::Person, ink);
-        x += icon + gap;
-        if let Some(galley) = galley {
-            ui.painter().galley(pos2(x, y - galley.size().y / 2.0), galley, ink);
-            x += text_w;
-        }
-        icons::paint(ui.painter(), Rect::from_center_size(pos2(x + chevron / 2.0, y + 0.5), vec2(chevron, chevron)), Icon::ChevronDown, t.muted);
-    }
-    let label = name.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    if compact { resp.on_hover_text(name) } else { resp }
-}
-
-/// How long the spinner turns before it goes still.
-const SYNC_SPIN: f64 = 30.0;
-const SPIN_FRAME: Duration = Duration::from_millis(50);
-
-fn syncing_since_id() -> egui::Id {
-    egui::Id::unique("sync-since")
 }
 
 #[cfg(test)]

@@ -10,11 +10,13 @@ pub struct PrefsView {
     pub playback: crate::settings::PlaybackSettings,
     /// The chapters column is docked at the right (when the window has room).
     pub show_panel: bool,
+    /// The sidebar is folded to its rail.
+    pub sidebar_collapsed: bool,
 }
 
 impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
-        prefs.get(|s| Self { sort: s.sort, playback: s.playback, show_panel: s.show_panel })
+        prefs.get(|s| Self { sort: s.sort, playback: s.playback, show_panel: s.show_panel, sidebar_collapsed: s.sidebar_collapsed })
     }
 }
 
@@ -27,4 +29,6 @@ pub enum PrefsAction {
     Playback(crate::settings::PlaybackSettings),
     /// The chapters column shown or hidden.
     ShowPanel(bool),
+    /// The sidebar folded to its rail, or opened out again.
+    CollapseSidebar(bool),
 }

@@ -171,8 +171,9 @@ fn signing_out_is_in_the_account_menu() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     h.run_steps(2);
-    h.get_by_label("sam").click();
-    h.run_steps(2);
+    h.get_by_label("sam, books.example.com").click();
+    // The menu opens up from the foot, placed once its size is known.
+    h.run_steps(4);
     h.get_by_label("Sign out").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).login.is_some(), "the sign-in screen comes back");
@@ -212,7 +213,7 @@ fn the_player_exposes_speed_and_listening_preferences() {
 }
 
 /// The controls the title bar holds while a book plays.
-const BAR_CONTROLS: [&str; 7] = ["Back 15 seconds", "Play (Space)", "Forward 30 seconds", "Chapter position", "Playback speed, 1.5×", "Sleep timer", "sam"];
+const BAR_CONTROLS: [&str; 6] = ["Back 15 seconds", "Play (Space)", "Forward 30 seconds", "Chapter position", "Playback speed, 1.5×", "Sleep timer"];
 
 #[test]
 fn the_title_bar_holds_the_player_at_every_width_without_overlaps() {

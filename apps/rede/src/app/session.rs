@@ -350,6 +350,7 @@ impl RedeApp {
         self.sync.last = Some(Instant::now());
         match outcome {
             Outcome::Done(report) => {
+                self.sync.offline = false;
                 // The libraries are the account's own: the shelf is read back
                 // by them at the next start, before the server answers.
                 if let Some(account) = self.session.account.as_mut() {
@@ -371,6 +372,7 @@ impl RedeApp {
             Outcome::SignedOut => self.signed_out_and_say(SIGNED_OUT),
             Outcome::Failed(f) => {
                 let network = f.is_network();
+                self.sync.offline = network;
                 self.show_failure(f);
                 if network {
                     self.retry_in(Duration::from_secs(60));
@@ -384,14 +386,6 @@ impl RedeApp {
     fn retry_in(&mut self, wait: Duration) {
         self.sync.retry_at = Some(Instant::now() + wait);
         self.ctx.request_repaint_after(wait);
-    }
-
-    /// What the sync says while it runs, for the title bar and the empty state.
-    pub(super) fn sync_label(&self) -> Option<String> {
-        if self.sync.running {
-            return Some(if self.sync.applied > 0 { format!("Syncing… {} books", self.sync.applied) } else { "Syncing…".to_owned() });
-        }
-        self.session.connecting.then(|| "Connecting…".to_owned())
     }
 
     /// The sign-in screen. The server chooses which ways in the form offers;

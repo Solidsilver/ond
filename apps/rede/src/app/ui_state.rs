@@ -37,6 +37,9 @@ pub struct SyncState {
     /// A sync the server asked us to hold off on, or one to retry after the
     /// network failed.
     pub retry_at: Option<Instant>,
+    /// The last sync couldn't reach the server. Cleared when one gets
+    /// through.
+    pub offline: bool,
 }
 
 impl SyncState {

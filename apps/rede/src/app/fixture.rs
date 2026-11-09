@@ -22,6 +22,7 @@ pub fn account() -> Account {
     let mut account = Account::new(SERVER, "sam");
     account.id = sources::AccountId::from_uuid(uuid::Uuid::from_u128(42));
     account.device_id = "fixture".into();
+    account.libraries = vec![crate::settings::KnownLibrary { id: LIBRARY.into(), name: "Books".into() }];
     account
 }
 

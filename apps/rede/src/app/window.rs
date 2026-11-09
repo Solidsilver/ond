@@ -62,8 +62,9 @@ impl ViewCtx<'_> {
         self.mode_buttons_sized(ui, 28.0, 14.0, None);
     }
 
-    /// The other modes and the shortcuts, right to left, as `side` square
-    /// buttons with `glyph` icons in `color` (the theme's when `None`).
+    /// The other modes, and the shortcuts where there's no sidebar to hold
+    /// them (the Player and Mini), right to left, as `side` square buttons
+    /// with `glyph` icons in `color` (the theme's when `None`).
     pub(super) fn mode_buttons_sized(&mut self, ui: &mut egui::Ui, side: f32, glyph: f32, color: Option<egui::Color32>) {
         use shell::icons::{self, Icon};
         let size = egui::vec2(side, side);
@@ -76,7 +77,7 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::Mode(mode));
             }
         }
-        if icons::sized_button(ui, Icon::More, "Keyboard shortcuts (⌘/)", size, glyph, color).clicked() {
+        if self.mode != Mode::Full && icons::sized_button(ui, Icon::More, "Keyboard shortcuts (⌘/)", size, glyph, color).clicked() {
             self.actions.push(Action::Shortcuts);
         }
     }

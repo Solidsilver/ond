@@ -1,5 +1,6 @@
-//! The main window: a title bar with the account, the message bar, and the
-//! page the trail leads to (the library, a book). Views are in submodules; they
+//! The main window: the title bar that is also the player, the sidebar with
+//! the places and the account, the message bar, and the page the trail leads
+//! to (the library, a book). Views are in submodules; they
 //! don't change state directly but push [`Action`]s, which are applied once the
 //! frame is drawn.
 //!
@@ -13,6 +14,7 @@
 //! - `playing`: playback actions, engine events and the listening worker
 //! - `controls`: chapter seeking and the listening controls
 //! - `title_bar`: the player in the title bar, and the window's controls
+//! - `sidebar`: the places and the account, in the column at the left
 //! - `panel`: the chapters column at the right
 //! - `ui_state`: the notice line, the trail, and what a frame reads
 //! - `prefs_view`: the preferences a frame reads, and the actions that change
@@ -53,6 +55,7 @@ mod playing;
 mod prefs_view;
 mod session;
 mod shortcuts;
+mod sidebar;
 mod sleep;
 mod title_bar;
 mod ui_state;
@@ -377,6 +380,11 @@ impl RedeApp {
                 self.shown.show_panel = show;
                 self.ctx.request_repaint();
             }
+            PrefsAction::CollapseSidebar(collapsed) => {
+                self.prefs.edit(|s| s.sidebar_collapsed = collapsed);
+                self.shown.sidebar_collapsed = collapsed;
+                self.ctx.request_repaint();
+            }
         }
     }
 
@@ -424,9 +432,14 @@ impl RedeApp {
         self.shown = PrefsView::read(&self.prefs);
         let t = Tokens::of(ui);
         self.art.poll();
-        // Narrow windows give the page the room: the chapters column becomes a
-        // sheet over it. Known before the title bar, whose toggle says which.
-        self.ui.panel.narrow = !panel::docks(ui.available_width());
+        // Narrow windows give the page the room: the sidebar folds to its
+        // rail, and the chapters column becomes a sheet over the page. Known
+        // before the title bar, whose toggle says which.
+        // The window's own width: what decides the columns, wherever the
+        // root ui starts (the test harness draws inside a margin).
+        let width = ui.ctx().content_rect().width();
+        let sidebar = sidebar::plan(width, self.shown.sidebar_collapsed);
+        self.ui.panel.narrow = !panel::docks(width - sidebar.unwrap_or(sidebar::RAIL_W));
         if !self.ui.panel.narrow {
             self.ui.panel.sheet = false;
         }
@@ -443,6 +456,7 @@ impl RedeApp {
             crate::window::Mode::Player => self.player_window(ui),
             crate::window::Mode::Mini => self.mini_window(ui),
             crate::window::Mode::Full => {
+                self.sidebar_panel(ui, sidebar, width);
                 self.side_panel(ui);
                 let content = egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 }))

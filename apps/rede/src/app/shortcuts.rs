@@ -27,6 +27,11 @@ impl RedeApp {
                 Some(Mode::Player)
             } else if i.consume_key(alt, Key::Num3) {
                 Some(Mode::Mini)
+            } else if self.mode == Mode::Full && i.consume_key(alt, Key::S) {
+                // The left column's partner to ⌥⌘U for the right one.
+                let collapsed = self.prefs.get(|s| s.sidebar_collapsed);
+                self.actions.push(Action::Prefs(super::PrefsAction::CollapseSidebar(!collapsed)));
+                None
             } else if self.mode == Mode::Full && i.consume_key(alt, Key::U) {
                 // Ond's binding for its queue column, which this one replaces.
                 self.actions.push(Action::Panel(super::panel::PanelAction::Toggle));
@@ -54,6 +59,7 @@ impl RedeApp {
                     ("⇧⌘N", "Switch to Player and back"),
                     ("⇧⌘M", "Switch to Mini and back"),
                     ("⌥⌘1 / 2 / 3", "Full / Player / Mini"),
+                    ("⌥⌘S", "Collapse / expand sidebar"),
                     ("⌥⌘U", "Show / hide chapters"),
                     ("⌘/", "Keyboard shortcuts"),
                 ] {

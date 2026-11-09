@@ -94,6 +94,10 @@ pub struct Settings {
     /// for: a first start has nothing playing to put in it.
     #[serde(default)]
     pub show_panel: bool,
+    /// The sidebar is folded to its rail of icons. Off, so a first start
+    /// shows the places and the account by name.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
 }
 
 /// Listening preferences are separate from engine time: skip and rewind are
