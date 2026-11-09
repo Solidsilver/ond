@@ -50,11 +50,7 @@ fn window(theme: egui::Theme) -> Harness<'static, Option<RedeApp>> {
         .build_ui_state(
             |ui, app: &mut Option<RedeApp>| {
                 let Some(app) = app else { return };
-                if app.login.is_some() {
-                    app.login_ui(ui);
-                } else {
-                    app.main_ui(ui);
-                }
+                whole_window(ui, |ui| if app.login.is_some() { app.login_ui(ui) } else { app.main_ui(ui) });
                 shell::chrome::stand_in_lights(ui.ctx(), (app.mode != crate::window::Mode::Mini).then_some(super::BAR_H));
             },
             None,

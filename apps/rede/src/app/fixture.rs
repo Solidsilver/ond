@@ -333,3 +333,14 @@ pub fn pending_openid_fallback() -> crate::openid::Pending {
 pub fn pending_openid() -> crate::openid::Pending {
     crate::openid::test_pending()
 }
+
+/// Draws `body` over the whole window, edge to edge as the app does, rather
+/// than inside the margin the test harness leaves around its ui: what sits at
+/// the window's edges (the sidebar's foot) is then where it would be.
+pub fn whole_window(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    let rect = ui.ctx().content_rect();
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.set_clip_rect(rect);
+        body(ui);
+    });
+}

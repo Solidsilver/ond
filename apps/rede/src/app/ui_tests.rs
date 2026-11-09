@@ -13,11 +13,7 @@ fn window(dir: &Path, books: usize) -> Harness<'static, Option<RedeApp>> {
     let mut h = Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).with_pixels_per_point(2.0).with_os(egui::os::OperatingSystem::Mac).build_ui_state(
         |ui, app: &mut Option<RedeApp>| {
             if let Some(app) = app {
-                if app.login.is_some() {
-                    app.login_ui(ui);
-                } else {
-                    app.main_ui(ui);
-                }
+                whole_window(ui, |ui| if app.login.is_some() { app.login_ui(ui) } else { app.main_ui(ui) });
             }
         },
         None,
@@ -253,20 +249,13 @@ fn the_title_bar_holds_the_player_at_every_width_without_overlaps() {
         for label in BAR_CONTROLS {
             rects.push((label, h.get_by_label(label).rect()));
         }
-        // The cover, the way to the Player, stays at every width. So do the
-        // chapter buttons in a real window (the placement's own tests); the
-        // harness's margin takes 16 pt from the smallest, enough to let them
-        // go there.
+        // The cover, the way to the Player, and the chapter buttons stay at
+        // every width.
         rects.push(("cover", h.get_by_label("Open the Player").rect()));
-        let chapters = h.query_all_by_label("Previous chapter (⇧←)").count() == 1;
-        assert!(chapters || width <= crate::MIN_SIZE[0], "the chapter buttons stay at {width}");
-        if chapters {
-            rects.push(("previous", h.get_by_label("Previous chapter (⇧←)").rect()));
-            rects.push(("next", h.get_by_label("Next chapter (⇧→)").rect()));
-        }
-        // The harness draws the window inside an 8 pt margin.
+        rects.push(("previous", h.get_by_label("Previous chapter (⇧←)").rect()));
+        rects.push(("next", h.get_by_label("Next chapter (⇧→)").rect()));
         for (label, rect) in &rects {
-            assert!(rect.min.y >= 8.0 && rect.max.y <= 8.0 + super::BAR_H, "{label} at {width}: {rect:?}");
+            assert!(rect.min.y >= 0.0 && rect.max.y <= super::BAR_H, "{label} at {width}: {rect:?}");
             assert!(rect.min.x >= 0.0 && rect.max.x <= width, "{label} at {width}: {rect:?}");
         }
         for (i, (a, ra)) in rects.iter().enumerate() {
@@ -624,4 +613,23 @@ fn the_shortcuts_are_in_the_account_menu_too() {
     h.get_by_label("Keyboard shortcuts").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).shortcuts, "the sheet opens");
+}
+
+/// The account at the foot of the column, and the rail's, sit inside the
+/// window with room under them: a row that grew past its layout once hung
+/// its second line under the window's bottom edge.
+#[test]
+fn the_sidebar_foot_sits_inside_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    for collapsed in [false, true] {
+        app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
+        h.run_steps(3);
+        let window = h.ctx.content_rect();
+        for label in ["sam, books.example.com", "Keyboard shortcuts (⌘/)"] {
+            let rect = h.get_by_label(label).rect();
+            let room = window.bottom() - rect.bottom();
+            assert!(room >= f32::from(super::sidebar::FOOT_MARGIN) - 0.5, "{label} (collapsed: {collapsed}) has {room} under it: {rect:?}");
+        }
+    }
 }

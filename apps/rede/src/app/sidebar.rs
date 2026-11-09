@@ -29,6 +29,10 @@ pub const RAIL_W: f32 = 52.0;
 const CONTENT_MIN: f32 = 604.0;
 /// The account's row at the foot, and the buttons beside it.
 const ACCOUNT_H: f32 = 40.0;
+/// Room under the foot, in both the column and the rail: a little more than
+/// Ond's 10, so the avatar stays clear of the window's rounded corner on
+/// macOS.
+pub(super) const FOOT_MARGIN: i8 = 12;
 const FOOTER_BUTTON: f32 = 28.0;
 const RAIL_BUTTON: f32 = 32.0;
 const TOGGLE: f32 = 22.0;
@@ -61,7 +65,7 @@ impl RedeApp {
                 egui::Panel::left("sidebar")
                     .exact_size(w)
                     .resizable(false)
-                    .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }))
+                    .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: FOOT_MARGIN }))
                     .show(ui, |ui| {
                         ui.set_max_width(ui.available_width());
                         self.view().sidebar(ui);
@@ -71,7 +75,7 @@ impl RedeApp {
                 egui::Panel::left("sidebar-rail")
                     .exact_size(RAIL_W)
                     .resizable(false)
-                    .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 4, right: 4, top: 12, bottom: 10 }))
+                    .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin { left: 4, right: 4, top: 12, bottom: FOOT_MARGIN }))
                     .show(ui, |ui| self.view().sidebar_rail(ui, window));
             }
         }
@@ -194,9 +198,13 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::Go(route));
             }
         }
-        // The foot: the account, and the shortcuts beside it.
+        // The foot: the account, and the shortcuts beside it. Its row is
+        // given its height up front: a `horizontal` in a bottom-up layout
+        // starts a control's height tall and grows downwards, which put the
+        // account's second line under the window's edge.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.horizontal(|ui| {
+            let size = vec2(ui.available_width(), ACCOUNT_H);
+            ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let w = (ui.available_width() - FOOTER_BUTTON - 2.0).max(40.0);
                 self.account_row(ui, w);
