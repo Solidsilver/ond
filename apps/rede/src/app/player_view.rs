@@ -112,7 +112,9 @@ impl ViewCtx<'_> {
         let cover = egui::Rect::from_center_size(egui::pos2(full.center().x, full.top() + side / 2.0), vec2(side, side));
         let book = self.player.book.as_ref();
         self.art.paint(ui, cover, book.and_then(|b| b.item.summary.cover.as_deref()), 0);
-        ui.scope_builder(UiBuilder::new().max_rect(full.shrink(6.0)).layout(Layout::right_to_left(Align::Min)), |ui| self.mode_buttons(ui));
+        let buttons = egui::Rect::from_min_max(egui::pos2(full.right() - 112.0, full.top() + 4.0), egui::pos2(full.right() - 4.0, full.top() + 36.0));
+        ui.painter().rect_filled(buttons, 5.0, Tokens::of(ui).panel);
+        ui.scope_builder(UiBuilder::new().max_rect(buttons.shrink(2.0)).layout(Layout::right_to_left(Align::Min)), |ui| self.mode_buttons(ui));
         let bottom = egui::Rect::from_min_max(egui::pos2(full.left() + 8.0, cover.bottom() + 4.0), full.max - vec2(8.0, 0.0));
         ui.scope_builder(UiBuilder::new().max_rect(bottom).layout(Layout::top_down(Align::Center)), |ui| {
             let chapter = book.and_then(|b| b.timeline.chapter(self.player.position).map(|i| b.timeline.chapters[i].title.as_str())).unwrap_or("Choose a book");

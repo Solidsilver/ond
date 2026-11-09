@@ -286,3 +286,32 @@ fn sleep_options_and_custom_defaults_are_accessible_from_the_bar() {
         h.get_by_label(label);
     }
 }
+
+#[test]
+fn the_window_shortcuts_match_onds_bindings_without_a_loaded_book() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    let alt = egui::Modifiers::COMMAND | egui::Modifiers::ALT;
+    let shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+    for (key, modifiers, expected) in [
+        (egui::Key::Num1, alt, crate::window::Mode::Full),
+        (egui::Key::Num2, alt, crate::window::Mode::Player),
+        (egui::Key::Num3, alt, crate::window::Mode::Mini),
+        (egui::Key::N, shift, crate::window::Mode::Player),
+        (egui::Key::M, shift, crate::window::Mode::Mini),
+    ] {
+        let input =
+            egui::RawInput { events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }], ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.window_keys(ui.ctx()));
+        out.textures_delta.clear();
+        assert!(matches!(app.actions.pop(), Some(Action::Mode(mode)) if mode == expected));
+    }
+    let input = egui::RawInput {
+        events: vec![egui::Event::Key { key: egui::Key::Slash, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }],
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| app.window_keys(ui.ctx()));
+    out.textures_delta.clear();
+    assert!(matches!(app.actions.pop(), Some(Action::Shortcuts)));
+}
