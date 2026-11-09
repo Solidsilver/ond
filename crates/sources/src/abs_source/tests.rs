@@ -337,13 +337,13 @@ fn bookmarks_map_exact_book_time_and_account_identity() {
 }
 
 #[tokio::test]
-async fn undoing_finished_progress_resets_first_then_restores_the_position() {
+async fn undoing_finished_progress_resets_with_an_earlier_stamp_then_restores_the_position() {
     use std::io::{BufRead, Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let mut seen = Vec::new();
-        for response in [r#"{"id":"u","mediaProgress":[{"id":"p","libraryItemId":"book","isFinished":true,"currentTime":5000}]}"#, "", ""] {
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut reader = std::io::BufReader::new(&stream);
@@ -363,27 +363,35 @@ async fn undoing_finished_progress_resets_first_then_restores_the_position() {
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             seen.push((first, body));
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
         }
         seen
     });
     let source = AbsSource::new(account(), abs::Client::new(&base, abs::DeviceInfo::new("d", "1")).unwrap().with_tokens(Tokens::new("a", "r")), vec![]);
+    let item = ItemKey::new(account(), "book");
+    let remote = [Progress { item: item.clone(), position: Position::from_secs(5_000.0), finished: true, at: Some(Stamp::from_millis(400).system_time()) }];
     source
-        .set_progress(&[ProgressUpdate {
-            item: ItemKey::new(account(), "book"),
-            position: Position::from_secs(1_234.5),
-            finished: false,
-            at: Stamp::from_millis(500).system_time(),
-            listened: Duration::ZERO,
-        }])
+        .set_progress(
+            &[ProgressUpdate {
+                item,
+                position: Position::from_secs(1_234.5),
+                finished: false,
+                at: Stamp::from_millis(500).system_time(),
+                listened: Duration::ZERO,
+            }],
+            &remote,
+        )
         .await
         .unwrap();
     let seen = server.join().unwrap();
-    assert!(seen[0].0.starts_with("GET /api/me "));
-    assert!(seen[1].0.starts_with("PATCH /api/me/progress/book "));
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&seen[1].1).unwrap(), serde_json::json!({"isFinished":false}));
-    assert!(seen[2].0.starts_with("PATCH /api/me/progress/batch/update "));
-    let body: serde_json::Value = serde_json::from_slice(&seen[2].1).unwrap();
+    assert!(seen[0].0.starts_with("PATCH /api/me/progress/book "), "the remote list was passed in, so no GET comes first");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&seen[0].1).unwrap(),
+        serde_json::json!({"isFinished": false, "lastUpdate": 499}),
+        "a reset stamped before the position leaves a failed follow-up replayable"
+    );
+    assert!(seen[1].0.starts_with("PATCH /api/me/progress/batch/update "));
+    let body: serde_json::Value = serde_json::from_slice(&seen[1].1).unwrap();
     assert_eq!(body[0]["currentTime"], 1_234.5);
     assert_eq!(body[0]["lastUpdate"], 500);
     assert!(body[0].get("isFinished").is_none());

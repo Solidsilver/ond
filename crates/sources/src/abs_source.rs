@@ -182,21 +182,21 @@ impl Source for AbsSource {
         Ok(self.client.progress().await?.iter().filter_map(|p| progress(&self.account, p)).collect())
     }
 
-    async fn set_progress(&self, batch: &[ProgressUpdate]) -> Result<()> {
+    async fn set_progress(&self, batch: &[ProgressUpdate], remote: &[Progress]) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
         // A reset is needed only when restoring an unfinished position over a
-        // finished server row. ABS ignores currentTime in the reset request.
-        if batch.iter().any(|update| !update.finished) {
-            let remote = self.client.progress().await?;
-            for update in batch.iter().filter(|update| !update.finished) {
-                if remote
-                    .iter()
-                    .any(|p| p.library_item_id.as_deref() == Some(update.item.item.as_str()) && p.episode_id.is_none() && p.is_finished == Some(true))
-                {
-                    self.client.update_progress(&update.item.item, None, &abs::ProgressUpdate { is_finished: Some(false), ..Default::default() }).await?;
-                }
+        // finished server row. ABS ignores currentTime in the reset request and
+        // stamps the row with server-now unless given lastUpdate, so the reset
+        // carries a millisecond before the position that follows it. If the
+        // batch PATCH then fails, the next replay sees the server older than
+        // the local position and sends it again instead of syncing it away.
+        for update in batch.iter().filter(|update| !update.finished) {
+            if remote.iter().any(|p| p.item == update.item && p.finished) {
+                let last_update = Stamp::from(update.at).millis().saturating_sub(1);
+                let reset = abs::ProgressUpdate { is_finished: Some(false), last_update: Some(last_update), ..Default::default() };
+                self.client.update_progress(&update.item.item, None, &reset).await?;
             }
         }
         let updates: Vec<abs::ItemProgressUpdate> = batch.iter().map(progress_update).collect();

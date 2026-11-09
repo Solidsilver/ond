@@ -93,5 +93,10 @@ pub trait Source: Send + Sync {
     }
 
     /// Writes log entries back to the source, oldest first.
-    async fn set_progress(&self, batch: &[ProgressUpdate]) -> Result<()>;
+    ///
+    /// `remote` is what [`progress`](Source::progress) just answered with, so a
+    /// source can tell that an unfinished position is replacing a finished row
+    /// without asking for the list a second time. Callers that don't have the
+    /// list fetch it first.
+    async fn set_progress(&self, batch: &[ProgressUpdate], remote: &[Progress]) -> Result<()>;
 }
