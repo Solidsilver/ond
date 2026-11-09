@@ -38,6 +38,8 @@ Status: design, being built. Written November 2026. Claims about Ond's code, the
 | Platform | macOS first. |
 | Network speakers | AirPlay through the system, as Ond does now. Chromecast and older Sonos later. |
 | Early audio features | Speed with pitch kept, voice boost, silence removal. |
+| Where playback controls live | In the title bar, as Ond's: transport, a capsule with the chapter scrubber that widens with the window (0.44 of it, 180 to 960 pt), speed and sleep. Chapters, bookmarks and info sit in Ond's right-hand panel slot. A bottom bar cost too much height on every screen. |
+| Sign-in | Password and OpenID. OpenID uses ABS's app flow with PKCE, redirecting to `rede://oauth`, falling back to `audiobookshelf://oauth` (the only URI a server allows by default). Done before M3, since most accounts use it. |
 
 ## The family and the repository
 
@@ -393,6 +395,8 @@ MPRIS (Linux) and SMTC (Windows) get the same changes when those platforms come.
 - Library sync, Home, Library, Book page, search.
 - Play with resume, chapters, skip, speed, sleep timer, session sync to ABS.
 - Player and Mini modes, now playing and media keys.
+
+**M2.5: done after M2.** OpenID sign-in; the player moved to the title bar with a chapters panel; book descriptions rendered from their HTML.
 
 **M3: listening.**
 - Voice boost and silence removal.
