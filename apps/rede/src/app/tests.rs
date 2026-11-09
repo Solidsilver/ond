@@ -29,6 +29,12 @@ fn every_view_draws() {
     frame(&ctx, &mut app);
     app.player.paused = true;
     frame(&ctx, &mut app);
+    // The chapters column on each tab.
+    app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Chapters));
+    for tab in [super::panel::Tab::Chapters, super::panel::Tab::Bookmarks, super::panel::Tab::Info] {
+        app.apply_panel(super::panel::PanelAction::Tab(tab));
+        frame(&ctx, &mut app);
+    }
     for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
         app.mode = mode;
         frame(&ctx, &mut app);
@@ -181,6 +187,32 @@ fn an_idle_window_asks_for_no_frames() {
     idle(&mut h, "an idle book page");
     playing(app_mut(&mut h), true);
     idle(&mut h, "a paused player");
+    app_mut(&mut h).apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Chapters));
+    idle(&mut h, "the chapters column, paused");
+}
+
+#[test]
+fn the_column_toggle_is_remembered_and_opening_it_finds_the_chapter_playing() {
+    use super::panel::{PanelAction, Tab};
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    frame(&ctx, &mut app);
+    assert!(!app.prefs.get(|s| s.show_panel), "hidden until it's asked for");
+    app.apply_panel(PanelAction::Toggle);
+    assert!(app.prefs.get(|s| s.show_panel), "saved with the preferences");
+    assert!(app.ui.panel.reveal, "the chapter playing is brought into view");
+    frame(&ctx, &mut app);
+    assert!(!app.ui.panel.reveal, "once");
+    app.apply_panel(PanelAction::Tab(Tab::Info));
+    assert!(!app.ui.panel.reveal, "another tab is just another tab");
+    app.apply_panel(PanelAction::Toggle);
+    assert!(!app.prefs.get(|s| s.show_panel));
+    // A narrow window opens the sheet instead, and leaves the preference be.
+    app.ui.panel.narrow = true;
+    app.apply_panel(PanelAction::Show(Tab::Chapters));
+    assert!(app.ui.panel.sheet && !app.prefs.get(|s| s.show_panel));
+    assert_eq!(app.ui.panel.tab, Tab::Chapters);
 }
 
 /// Runs frames until nothing asks for another, then a few more, and says the

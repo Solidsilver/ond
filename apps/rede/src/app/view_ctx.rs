@@ -20,6 +20,9 @@ pub struct ViewCtx<'a> {
     pub opening: bool,
     pub mode: crate::window::Mode,
     pub player: &'a crate::player::Player,
+    /// The chapters column's tab, and whether to bring the chapter playing
+    /// into view.
+    pub panel: super::panel::PanelState,
     pub positions: &'a std::collections::HashMap<String, sources::Progress>,
     /// Covers load as they're first drawn.
     pub art: &'a mut Art,
@@ -39,6 +42,7 @@ impl RedeApp {
             opening: self.opening,
             mode: self.mode,
             player: &self.player,
+            panel: self.ui.panel,
             positions: &self.positions,
             art: &mut self.art,
             actions: &mut self.actions,

@@ -12,7 +12,9 @@ impl RedeApp {
             if i.consume_key(Modifiers::COMMAND, Key::Slash) {
                 self.actions.push(Action::Shortcuts);
             }
-            if i.consume_key(Modifiers::NONE, Key::Escape) && self.shortcuts {
+            // Esc is the shortcuts window's only while it's open; otherwise it
+            // closes whatever else is open (the chapters sheet, a menu).
+            if self.shortcuts && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.actions.push(Action::Shortcuts);
             }
             if i.consume_key(shift, Key::N) {
@@ -25,6 +27,10 @@ impl RedeApp {
                 Some(Mode::Player)
             } else if i.consume_key(alt, Key::Num3) {
                 Some(Mode::Mini)
+            } else if self.mode == Mode::Full && i.consume_key(alt, Key::U) {
+                // Ond's binding for its queue column, which this one replaces.
+                self.actions.push(Action::Panel(super::panel::PanelAction::Toggle));
+                None
             } else {
                 None
             }
@@ -48,6 +54,7 @@ impl RedeApp {
                     ("⇧⌘N", "Switch to Player and back"),
                     ("⇧⌘M", "Switch to Mini and back"),
                     ("⌥⌘1 / 2 / 3", "Full / Player / Mini"),
+                    ("⌥⌘U", "Show / hide chapters"),
                     ("⌘/", "Keyboard shortcuts"),
                 ] {
                     ui.label(shell::keys::shown(keys));

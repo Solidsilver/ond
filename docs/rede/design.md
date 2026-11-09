@@ -361,7 +361,7 @@ Podcasts, when they come, get their own Home (new episodes as an inbox), Shows a
 
 ### Keyboard
 
-Space play/pause; ← and → skip back and forward; ⇧← and ⇧→ previous and next chapter; `[` and `]` speed down and up; ⌘B add a bookmark; ⌘K search; ⌘/ the shortcuts list, as in Ond.
+Space play/pause; ← and → skip back and forward; ⇧← and ⇧→ previous and next chapter; `[` and `]` speed down and up; ⌥⌘U the chapters column (Ond's queue toggle); ⌘B add a bookmark; ⌘K search; ⌘/ the shortcuts list, as in Ond.
 
 ### System integration (macOS first)
 

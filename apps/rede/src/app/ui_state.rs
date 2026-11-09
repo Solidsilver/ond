@@ -52,6 +52,8 @@ pub struct UiState {
     pub nav: Nav,
     /// The line above the page, until it's dismissed or replaced.
     pub notice: Option<Notice>,
+    /// The chapters column's tab, and whether it's a sheet.
+    pub panel: super::panel::PanelState,
 }
 
 impl UiState {

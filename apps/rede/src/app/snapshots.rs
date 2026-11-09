@@ -99,29 +99,63 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
-    for (name, paused) in [("player-playing", false), ("player-paused", true)] {
+    // Nothing playing: the capsule's quiet line, and the column saying so.
+    scene(h, s, "nothing-playing", || {
+        let app = app(&ctx, dir.path(), BOOKS.len());
+        app.prefs.edit(|p| p.show_panel = true);
+        app
+    });
+    // The library and a book's page while a book plays (the page's button
+    // pauses it), and paused.
+    for (name, route, paused) in [("library-playing", None, false), ("library-paused", None, true), ("book-playing", Some(0), false)] {
         scene(h, s, name, || {
             let mut app = app(&ctx, dir.path(), BOOKS.len());
             playing(&mut app, paused);
+            if let Some(n) = route {
+                app.go(book_route(n));
+            }
             app
         });
     }
-    // The speed menu, open over the bar.
-    *h.state_mut() = None;
-    *h.state_mut() = Some({
-        let mut app = app(&ctx, dir.path(), BOOKS.len());
-        playing(&mut app, false);
-        app
-    });
-    h.run_steps(2);
-    h.get_by_label("Playback speed, 1.5×").click();
-    h.run_steps(2);
-    h.event(egui::Event::PointerGone);
-    s.shoot(h, "player-speed");
-    // The playing book's page, scrolled down to the chapter playing. The
-    // speed menu's open state lives in the shared context, not the app, so
-    // it would follow into this scene unless closed.
-    egui::Popup::close_all(&ctx);
+    // The chapters column on each tab, beside the library.
+    for (tab, name) in
+        [(super::panel::Tab::Chapters, "panel-chapters"), (super::panel::Tab::Bookmarks, "panel-bookmarks"), (super::panel::Tab::Info, "panel-info")]
+    {
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, false);
+            app.apply_panel(super::panel::PanelAction::Show(tab));
+            app
+        });
+    }
+    // The speed and sleep menus, open from the title bar, a timer running.
+    for (label, name) in [("Playback speed, 1.5×", "title-speed-menu"), ("Sleep timer, ", "title-sleep-menu")] {
+        *h.state_mut() = None;
+        *h.state_mut() = Some({
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, false);
+            sleep(&mut app, Sleep::Running);
+            app
+        });
+        h.run_steps(2);
+        h.get_by_label_contains(label).click();
+        h.run_steps(2);
+        h.event(egui::Event::PointerGone);
+        s.shoot(h, name);
+        egui::Popup::close_all(&ctx);
+    }
+    // The capsule at the window's smallest width, then as it grows with the
+    // window: Ond's 1440, a 1920 display, a 2560 one full screen.
+    for width in [crate::MIN_SIZE[0], 1440.0, 1920.0, 2560.0] {
+        h.set_size(egui::vec2(width, 420.0));
+        scene(h, s, &format!("bar-{width}"), || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, false);
+            app
+        });
+    }
+    h.set_size(egui::vec2(FULL[0], FULL[1]));
+    // The playing book's page, scrolled down to the chapter playing.
     *h.state_mut() = None;
     *h.state_mut() = Some({
         let mut app = app(&ctx, dir.path(), BOOKS.len());
@@ -170,9 +204,17 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.go(book_route(0));
         app
     });
-    scene(h, s, "player-narrow", || {
+    scene(h, s, "library-playing-narrow", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         playing(&mut app, true);
+        app
+    });
+    // There the column is a sheet over the page.
+    scene(h, s, "panel-sheet-narrow", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        app.ui.panel.narrow = true;
+        app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Chapters));
         app
     });
     // The Player and Mini at their usual sizes and their smallest, with no
@@ -220,8 +262,8 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     s.shoot(h, "mode-player-sleep-menu");
     egui::Popup::close_all(&ctx);
     h.set_size(egui::vec2(FULL[0], FULL[1]));
-    // The bar with a timer running, and with its notice over the page.
-    for (timer, name) in [(Sleep::Running, "player-sleep"), (Sleep::Ending, "player-notice")] {
+    // The title bar with a timer running, and its notice over the page.
+    for (timer, name) in [(Sleep::Running, "playing-sleep"), (Sleep::Ending, "playing-notice")] {
         scene(h, s, name, || {
             let mut app = app(&ctx, dir.path(), BOOKS.len());
             playing(&mut app, false);

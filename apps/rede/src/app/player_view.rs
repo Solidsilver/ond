@@ -1,5 +1,5 @@
-//! The Player and Mini window modes, in the player bar's language at other
-//! sizes.
+//! The Player and Mini window modes, in the title bar player's language at
+//! other sizes.
 //!
 //! The Player is for reading across the room: the cover as large as the
 //! window allows, the book and chapter under it, the chapter scrubber over
@@ -40,7 +40,7 @@ const TRANSPORT_GAP: f32 = 16.0;
 const TRANSPORT_H: f32 = 64.0;
 const CONTROLS_GAP: f32 = 18.0;
 const NOTICE_GAP: f32 = 14.0;
-/// The scrubber's and the book line's strips, as the player bar draws them.
+/// The scrubber's and the book line's strips, as `controls` draws them.
 const SCRUB_H: f32 = 16.0 + 8.0;
 const COVER_MIN: f32 = 120.0;
 
@@ -144,7 +144,7 @@ impl ViewCtx<'_> {
         controls::book_line(ui, &book.timeline, shown, &t);
         ui.add_space(TIMES_GAP);
 
-        // The chapter's times at the scrubber's ends, in the bar's words; the
+        // The chapter's times at the scrubber's ends, in the capsule's words; the
         // book's time left goes by the speed it depends on, below.
         let (chapter_left, book_left) = book.timeline.remaining(shown, self.player.speed);
         let elapsed = crate::fmt::clock((shown - start).max(0.0));

@@ -4,9 +4,14 @@ The book page's Play button opens an Audiobookshelf session. Resume uses the
 session's position unless the shelf has a newer local position. Finishing a
 book starts its next play at the beginning. Equal timestamps favour the server.
 
-The bottom bar shows the current chapter. Its large scrubber seeks within that
-chapter; the thin line underneath shows progress through the whole book. The
-speed menu also holds skip intervals, rewind on resume, chapter navigation and
+The title bar is the player, as Ond's toolbar is: the transport at the left,
+then a capsule with the cover, the book and the current chapter. Its scrubber
+seeks within that chapter; the thin line underneath shows progress through the
+whole book. The capsule grows with the window (0.44 of its width, from 180 to
+960 points), so a wide window gets a finer scrubber. Clicking the chapter's
+name opens the chapters column at the right (⌥⌘U shows and hides it), which
+lists the chapters, the bookmarks to come, and the book's details. The speed
+menu also holds skip intervals, rewind on resume, the sleep settings and
 Stop. Space toggles playback, Left and Right skip, Shift+Left and Shift+Right
 change chapters, and `[` and `]` change speed by 0.05. Text fields keep their
 normal keyboard behaviour.
@@ -31,10 +36,10 @@ keep it testable without devices or a server. It issues `PlayFrom`, `Seek` and
 `SetNext`, follows the engine's output-side track events, and derives book time
 from `Status::source_position_secs()`. Listening time uses monotonic wall time
 while the output is playing, excluding pauses and buffering. The `Live` gate
-requests frames only for a visible, moving player bar. Paused and stopped views
+requests frames only for a visible, moving player. Paused and stopped views
 stay idle. The existing engine-event forwarder owns a monotonic report clock:
 while playing or buffering it posts a scoped `PlaybackTick` every 15 seconds;
-state changes also wake accounting. Clock wakeups coalesce with the bar's
+state changes also wake accounting. Clock wakeups coalesce with the player's
 100 ms repaint deadline. Reporting runs only on clock messages, so delayed UI
 processing cannot accidentally skip a report by just missing a second timer's
 15-second threshold. Player state remains owned by the UI thread.
@@ -63,8 +68,9 @@ carry the current token, then rebuilds all URLs through `Client::file_url`.
 Playback retries at its saved book position; a second rejection before a
 successful start stops it. No audio-engine changes were needed.
 
-The bar uses the existing shell buttons, icons, theme and focus ring. It needs
-no extraction from Ond, so Ond's rendering code is unchanged. The cache retains
+The player uses the existing shell buttons, icons, theme and focus ring. It
+follows Ond's toolbar without sharing its code, so Ond's rendering code is
+unchanged. The cache retains
 streamcache's existing file-based eviction; whole-book eviction and pinned
 downloads remain later work.
 

@@ -8,11 +8,13 @@ use crate::settings::LibrarySort;
 pub struct PrefsView {
     pub sort: LibrarySort,
     pub playback: crate::settings::PlaybackSettings,
+    /// The chapters column is docked at the right (when the window has room).
+    pub show_panel: bool,
 }
 
 impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
-        prefs.get(|s| Self { sort: s.sort, playback: s.playback })
+        prefs.get(|s| Self { sort: s.sort, playback: s.playback, show_panel: s.show_panel })
     }
 }
 
@@ -23,4 +25,6 @@ pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
     Playback(crate::settings::PlaybackSettings),
+    /// The chapters column shown or hidden.
+    ShowPanel(bool),
 }

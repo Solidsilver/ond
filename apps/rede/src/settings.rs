@@ -90,6 +90,10 @@ pub struct Settings {
     pub playback: PlaybackSettings,
     #[serde(default)]
     pub window: crate::window::Windows,
+    /// The chapters column is shown beside the page. Off until it's asked
+    /// for: a first start has nothing playing to put in it.
+    #[serde(default)]
+    pub show_panel: bool,
 }
 
 /// Listening preferences are separate from engine time: skip and rewind are

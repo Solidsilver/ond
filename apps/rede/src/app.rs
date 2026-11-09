@@ -12,7 +12,8 @@
 //! - `nav`: where the window is, and how it got there
 //! - `playing`: playback actions, engine events and the listening worker
 //! - `controls`: chapter seeking and the listening controls
-//! - `title_bar`: the window's drag area, the mode buttons and the account
+//! - `title_bar`: the player in the title bar, and the window's controls
+//! - `panel`: the chapters column at the right
 //! - `ui_state`: the notice line, the trail, and what a frame reads
 //! - `prefs_view`: the preferences a frame reads, and the actions that change
 //!   them
@@ -46,6 +47,7 @@ mod book;
 mod controls;
 mod library;
 mod nav;
+mod panel;
 mod player_view;
 mod playing;
 mod prefs_view;
@@ -126,6 +128,8 @@ pub enum Action {
     Mode(crate::window::Mode),
     Shortcuts,
     ToggleMini,
+    /// The chapters column: shown, hidden, or on another tab.
+    Panel(panel::PanelAction),
 }
 
 pub struct RedeApp {
@@ -334,6 +338,7 @@ impl RedeApp {
             Action::Mode(mode) => self.set_mode(mode),
             Action::Shortcuts => self.shortcuts = !self.shortcuts,
             Action::ToggleMini => self.set_mode(self.prefs.get(|s| s.window.mini())),
+            Action::Panel(a) => self.apply_panel(a),
         }
     }
 
@@ -360,6 +365,11 @@ impl RedeApp {
                 // This frame's copy too, so the grid draws in the new order
                 // without waiting for the next frame's read.
                 self.shown.sort = sort;
+                self.ctx.request_repaint();
+            }
+            PrefsAction::ShowPanel(show) => {
+                self.prefs.edit(|s| s.show_panel = show);
+                self.shown.show_panel = show;
                 self.ctx.request_repaint();
             }
         }
@@ -409,8 +419,18 @@ impl RedeApp {
         self.shown = PrefsView::read(&self.prefs);
         let t = Tokens::of(ui);
         self.art.poll();
+        // Narrow windows give the page the room: the chapters column becomes a
+        // sheet over it. Known before the title bar, whose toggle says which.
+        self.ui.panel.narrow = !panel::docks(ui.available_width());
+        if !self.ui.panel.narrow {
+            self.ui.panel.sheet = false;
+        }
         if self.mode != crate::window::Mode::Mini {
-            egui::Panel::top("title-bar").exact_size(crate::app::BAR_H).resizable(false).frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| self.title_bar(ui));
+            egui::Panel::top("title-bar")
+                .exact_size(crate::app::BAR_H)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
+                .show(ui, |ui| self.title_bar(ui));
         }
         self.window_keys(ui.ctx());
         self.playback_keys(ui.ctx());
@@ -418,10 +438,10 @@ impl RedeApp {
             crate::window::Mode::Player => self.player_window(ui),
             crate::window::Mode::Mini => self.mini_window(ui),
             crate::window::Mode::Full => {
-                self.player_panel(ui);
-                egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 })).show(
-                    ui,
-                    |ui| {
+                self.side_panel(ui);
+                let content = egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 }))
+                    .show(ui, |ui| {
                         let within = ui.max_rect();
                         self.notice_bar(ui);
                         let route = self.ui.nav.current().clone();
@@ -432,10 +452,10 @@ impl RedeApp {
                                 self.view().book_page(ui, &id);
                             }
                         }
-                        // Floats over the foot of the page, just above the bar.
+                        // Floats over the foot of the page.
                         self.view().sleep_notice(ui, within);
-                    },
-                );
+                    });
+                self.panel_sheet(ui.ctx(), content.response.rect);
             }
         }
         self.shortcuts_ui(ui.ctx());

@@ -102,9 +102,9 @@ fn summary(n: usize) -> ItemSummary {
 /// A book's details: a description and a chapter list, as `Source::item` would
 /// bring them.
 pub fn details(n: usize) -> Item {
-    let fixture = &BOOKS[n];
-    let (title, author) = (fixture.title, fixture.author);
-    let mut item = Item { summary: ItemSummary { title: title.into(), authors: vec![author.into()], ..summary(n) }, ..Item::default() };
+    let title = BOOKS[n].title;
+    // The details carry what the listing does (narrators, series, length).
+    let mut item = Item { summary: summaries().swap_remove(n), ..Item::default() };
     item.description = Some(if n == 1 {
         // Audiobookshelf keeps a description as HTML. One of the fixture's
         // books has the markup a real one does, so the page shows how it reads.
@@ -188,7 +188,12 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     let all = summaries();
     let listed: Vec<ItemSummary> = all.iter().take(books).cloned().collect();
     let signed_in = account();
-    app.prefs.edit(|s| s.put_account(signed_in.clone()));
+    // The settings file is shared by every app a test builds in `dir`; the
+    // column starts hidden whatever the last one left.
+    app.prefs.edit(|s| {
+        s.put_account(signed_in.clone());
+        s.show_panel = false;
+    });
     app.session = Session { account: Some(signed_in), source: None, shelf: Some(shelf.clone()), connecting: false };
     app.handle(crate::bridge::LibraryMsg::Books(listed));
     for (n, book) in all.iter().enumerate().take(books) {

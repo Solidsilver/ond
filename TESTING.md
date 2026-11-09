@@ -107,7 +107,7 @@ its progress cleanup are described in [Rede playback](docs/rede/playback.md).
 - [ ] Space, Left/Right, Shift+Left/Right and the bracket keys work; changing the skip intervals and speed survives a relaunch. Typing in an editable field does not control playback.
 - [ ] Restart ABS during listening: the next report reopens a session without interrupting the audio. Interrupt the network, keep listening from buffered audio, reconnect and confirm the final position reaches ABS.
 - [ ] Switch books, stop, sign out and quit: the old session closes when reachable, and resuming keeps the final position. At the end the book is finished on ABS.
-- [ ] Leave the library and book page paused: CPU settles and the UI does not keep repainting. Resize to the minimum window and inspect the bottom bar and speed menu.
+- [ ] Leave the library and book page paused: CPU settles and the UI does not keep repainting. Resize to the minimum window and inspect the title bar and speed menu.
 
 
 ## Rede M2: sleep, window modes and macOS controls
@@ -123,6 +123,15 @@ and snapshots do not sign in to a server.
 - [ ] macOS Control Center shows Rede's book title, chapter subtitle, chapter number/count where supported, cover and whole-book duration/elapsed time. At 1.5× its progress advances at the real speed; pause and buffering stop the clock. Scrubbing seeks to the same whole-book position across chapters/files. Switching books must not show stale artwork.
 - [ ] Change Rede's skip intervals; Control Center's skip commands use the new preferred intervals. F7/F8/F9 and headphone play/pause/skip work with Rede hidden and minimized. Repeat after a sleep stop, and confirm pause/play commands are idempotent.
 - [ ] Ond retains its existing macOS controls: next/previous tracks, skip commands disabled, unity playback rate, artwork and seeking, including while hidden.
+
+## Rede: the player in the title bar
+
+- [ ] Drag the window by the title bar's empty parts and by the capsule (not its scrubber); double-click them to zoom. In full screen the transport moves to the window's edge.
+- [ ] Drag the capsule's scrubber through an hour-long chapter at 1440, 1920 and full-screen widths: the times follow the drag and the release lands where they said. Arrow keys, Home and End move it when it has focus.
+- [ ] Resize from the widest to the smallest window: the capsule grows to 960 points and no more, and shrinks without anything overlapping; the time left, the account's name and the chapter buttons go, in that order, then the title and the cover.
+- [ ] Click the chapter's name: the chapters column opens on Chapters with the playing one in view. Click a chapter: playback goes to its start. Toggle with the button and ⌥⌘U; the choice survives a relaunch. In a narrow window the column is a sheet that Esc or a click outside closes.
+- [ ] Play a book with a hundred or more chapters (the test server has one with 178): the column scrolls smoothly and the title bar's book line drops its chapter breaks rather than turning into dashes.
+- [ ] On Linux, with the window buttons on the right and on the left, nothing in the title bar runs under them.
 
 Rede's output device picker is deferred: Ond's current panel combines device
 preferences and bit-perfect controls. Rede continues following system output;

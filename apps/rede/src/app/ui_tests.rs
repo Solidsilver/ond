@@ -51,8 +51,25 @@ fn every_view_names_its_controls() {
         {
             h.get_by_label(label);
         }
-        h.get_by_label(if paused { "Play" } else { "Pause" });
+        h.get_by_label(if paused { "Play (Space)" } else { "Pause (Space)" });
+        h.get_by_label("Chapter 5, show chapters");
+        h.get_by_label_contains("Now playing: ");
     }
+    // The chapters column on each of its tabs, playing and not.
+    app_mut(&mut h).apply_prefs(PrefsAction::ShowPanel(true));
+    for tab in [super::panel::Tab::Chapters, super::panel::Tab::Bookmarks, super::panel::Tab::Info] {
+        app_mut(&mut h).ui.panel.tab = tab;
+        h.run_steps(3);
+        h.check_accessibility();
+        h.get_by_label("Hide chapters (⌥⌘U)");
+    }
+    h.get_by_label("George Guidall");
+    app_mut(&mut h).playback_control(crate::player::Control::Stop);
+    app_mut(&mut h).player.book = None;
+    h.run_steps(3);
+    h.check_accessibility();
+    app_mut(&mut h).apply_prefs(PrefsAction::ShowPanel(false));
+    playing(app_mut(&mut h), true);
     for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
         app_mut(&mut h).mode = mode;
         let size = mode.size();
@@ -194,25 +211,43 @@ fn the_player_exposes_speed_and_listening_preferences() {
     h.check_accessibility();
 }
 
+/// The controls the title bar holds while a book plays.
+const BAR_CONTROLS: [&str; 7] = ["Back 15 seconds", "Play (Space)", "Forward 30 seconds", "Chapter position", "Playback speed, 1.5×", "Sleep timer", "sam"];
+
 #[test]
-fn the_player_controls_fit_inside_the_bottom_panel() {
+fn the_title_bar_holds_the_player_at_every_width_without_overlaps() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     playing(app_mut(&mut h), true);
-    for size in [FULL, [crate::MIN_SIZE[0], 560.0]] {
-        h.set_size(egui::vec2(size[0], size[1]));
+    for width in [crate::MIN_SIZE[0], FULL[0], 1440.0, 1920.0, 2560.0] {
+        h.set_size(egui::vec2(width, FULL[1]));
         h.run_steps(3);
-        for label in ["Previous chapter (⇧←)", "Back 15 seconds", "Play", "Forward 30 seconds", "Next chapter (⇧→)", "Chapter position", "Playback speed, 1.5×"]
-        {
-            let rect = h.get_by_label(label).rect();
-            assert!(rect.min.y >= size[1] - 160.0 && rect.max.y <= size[1], "{label}: {rect:?}");
-            assert!(rect.min.x >= 0.0 && rect.max.x <= size[0], "{label}: {rect:?}");
+        let toggle = h.get_by_label_contains("chapters (⌥⌘U)").rect();
+        let mut rects = vec![("toggle", toggle)];
+        for label in BAR_CONTROLS {
+            rects.push((label, h.get_by_label(label).rect()));
         }
+        let chapters = h.query_all_by_label("Previous chapter (⇧←)").count() == 1;
+        assert_eq!(chapters, width > crate::MIN_SIZE[0], "the chapter buttons go only in the smallest window ({width})");
+        if chapters {
+            rects.push(("previous", h.get_by_label("Previous chapter (⇧←)").rect()));
+            rects.push(("next", h.get_by_label("Next chapter (⇧→)").rect()));
+        }
+        for (label, rect) in &rects {
+            assert!(rect.min.y >= 0.0 && rect.max.y <= super::BAR_H, "{label} at {width}: {rect:?}");
+            assert!(rect.min.x >= 0.0 && rect.max.x <= width, "{label} at {width}: {rect:?}");
+        }
+        for (i, (a, ra)) in rects.iter().enumerate() {
+            for (b, rb) in &rects[i + 1..] {
+                assert!(!ra.shrink(0.5).intersects(rb.shrink(0.5)), "{a} and {b} overlap at {width}: {ra:?} {rb:?}");
+            }
+        }
+        assert!(h.get_by_label("Chapter position").rect().width() >= 100.0, "the scrubber stays usable at {width}");
     }
 }
 
 #[test]
-fn the_player_bar_buttons_enqueue_their_controls() {
+fn the_title_bar_buttons_enqueue_their_controls() {
     use crate::player::Control;
     // Only the bar, with nothing applying what it asks for, so the test
     // sees the actions themselves.
@@ -220,7 +255,7 @@ fn the_player_bar_buttons_enqueue_their_controls() {
     let mut h = Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).build_ui_state(
         |ui, app: &mut Option<RedeApp>| {
             if let Some(app) = app {
-                app.player_panel(ui);
+                egui::Panel::top("bar").exact_size(super::BAR_H).show(ui, |ui| app.title_bar(ui));
             }
         },
         None,
@@ -233,7 +268,7 @@ fn the_player_bar_buttons_enqueue_their_controls() {
     for (label, expected) in [
         ("Previous chapter (⇧←)", Control::PreviousChapter),
         ("Back 15 seconds", Control::Skip(-15.0)),
-        ("Play", Control::Toggle),
+        ("Play (Space)", Control::Toggle),
         ("Forward 30 seconds", Control::Skip(30.0)),
         ("Next chapter (⇧→)", Control::NextChapter),
     ] {
@@ -242,6 +277,93 @@ fn the_player_bar_buttons_enqueue_their_controls() {
         let actions = std::mem::take(&mut app_mut(&mut h).actions);
         assert!(matches!(actions.as_slice(), [Action::Playback(control)] if *control == expected), "{label}: {} actions", actions.len());
     }
+    // The cover, which is the capsule's own (the middle has the chapter's link).
+    let capsule = h.get_by_label_contains("Now playing: The Left Hand of Darkness").rect();
+    let cover = capsule.left_center() + egui::vec2(capsule.height() / 2.0, 0.0);
+    h.event(egui::Event::PointerMoved(cover));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: cover, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions.as_slice(), [Action::Go(Route::Book(id))] if id == "book-0"), "the capsule opens the playing book's page");
+}
+
+#[test]
+fn nothing_playing_leaves_a_quiet_capsule_and_an_unavailable_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(3);
+    h.get_by_label("Not playing");
+    assert_eq!(h.query_all_by_label("Playback speed, 1.5×").count(), 0, "no pills without a book");
+    h.get_by_label("Play (Space)").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).player.book.is_none());
+    assert!(app_mut(&mut h).ui.notice.is_none(), "an unavailable button does nothing, not even complain");
+}
+
+#[test]
+fn the_chapter_in_the_title_bar_opens_the_column_at_the_chapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    app_mut(&mut h).ui.panel.tab = super::panel::Tab::Info;
+    h.run_steps(3);
+    h.get_by_label("Chapter 5, show chapters").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.prefs.get(|s| s.show_panel), "the column is shown, and that's remembered");
+    assert_eq!(app.ui.panel.tab, super::panel::Tab::Chapters);
+    // The chapter playing is in view, marked as playing.
+    let row = h.get_by_label("Chapter 5, 56:40, playing").rect();
+    assert!(row.min.y >= super::BAR_H && row.max.y <= FULL[1], "{row:?}");
+}
+
+#[test]
+fn a_chapter_in_the_column_seeks_to_its_start() {
+    use crate::player::Control;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(super::panel::PANEL_W, FULL[1])).build_ui_state(
+        |ui, app: &mut Option<RedeApp>| {
+            if let Some(app) = app {
+                app.view().panel(ui);
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    playing(&mut app, true);
+    *h.state_mut() = Some(app);
+    h.run_steps(2);
+    h.get_by_label("Chapter 2, 56:40").click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions.as_slice(), [Action::Playback(Control::Seek(at))] if *at == 3_400.0), "{} actions", actions.len());
+    h.get_by_label("Info").click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions.as_slice(), [Action::Panel(super::panel::PanelAction::Tab(super::panel::Tab::Info))]));
+}
+
+#[test]
+fn the_column_is_a_sheet_in_a_narrow_window_and_the_preference_stays_put() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
+    h.run_steps(3);
+    h.get_by_label("Show chapters (⌥⌘U)").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.ui.panel.sheet, "the sheet opens");
+    assert!(!app.prefs.get(|s| s.show_panel), "the docked column's preference isn't touched");
+    h.get_by_label("Chapter 5, 56:40, playing");
+    h.check_accessibility();
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!app_mut(&mut h).ui.panel.sheet, "Esc closes it");
 }
 
 #[test]
@@ -289,7 +411,7 @@ fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
 }
 
 #[test]
-fn sleep_options_and_custom_defaults_are_accessible_from_the_bar() {
+fn sleep_options_and_custom_defaults_are_accessible_from_the_title_bar() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     playing(app_mut(&mut h), true);
@@ -343,6 +465,13 @@ fn the_window_shortcuts_match_onds_bindings_without_a_loaded_book() {
         out.textures_delta.clear();
         assert!(matches!(app.actions.pop(), Some(Action::Mode(mode)) if mode == expected));
     }
+    let input = egui::RawInput {
+        events: vec![egui::Event::Key { key: egui::Key::U, physical_key: None, pressed: true, repeat: false, modifiers: alt }],
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| app.window_keys(ui.ctx()));
+    out.textures_delta.clear();
+    assert!(matches!(app.actions.pop(), Some(Action::Panel(super::panel::PanelAction::Toggle))), "⌥⌘U toggles the column, as it does Ond's queue");
     let input = egui::RawInput {
         events: vec![egui::Event::Key { key: egui::Key::Slash, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }],
         ..Default::default()
