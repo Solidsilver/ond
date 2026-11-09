@@ -123,9 +123,13 @@ output reaches each cut, including gapless files. It excludes savings still
 queued ahead, retains heard savings through seeks, speed changes and internal
 restarts, and counts another pass through a pause again. Stop retains the last
 total; a new `Play`/`PlayFrom` resets it. It is a play-session counter, not a
-persistent lifetime counter for the book. Wall-clock savings from silence
-alone are this value divided by speed; the remaining-book display stays an
-estimate because future silences have not been decoded.
+persistent counter for the book.
+
+Rede keeps the book's total: `Player::silence_saved` adds the sessions that
+`PlayFrom` ended (chapter jumps, a file's end, a token refresh) to the current
+one, and starts over only when a different book loads. Wall-clock savings from
+silence alone are this value divided by speed; the remaining-book display stays
+an estimate because future silences have not been decoded.
 
 Voice boost uses a stereo-linked 2:1 peak compressor with a −18 dBFS threshold,
 20 ms attack and 150 ms release. A peaking EQ adds 3 dB at 3 kHz (Q 0.8), with

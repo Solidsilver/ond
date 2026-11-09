@@ -11,6 +11,9 @@ pub trait Transport {
     fn send(&self, cmd: Command);
     fn state(&self) -> PlayState;
     fn position(&self) -> f64;
+    /// Seconds of silence the engine has removed in its current play session
+    /// (see [`audio::Status::silence_saved_secs`]).
+    fn silence_saved(&self) -> f64;
 }
 impl Transport for EngineHandle {
     fn send(&self, cmd: Command) {
@@ -21,6 +24,9 @@ impl Transport for EngineHandle {
     }
     fn position(&self) -> f64 {
         self.status.source_position_secs()
+    }
+    fn silence_saved(&self) -> f64 {
+        self.status.silence_saved_secs()
     }
 }
 
@@ -88,6 +94,8 @@ pub struct Book {
 pub struct Player {
     pub book: Option<Book>,
     pub position: f64,
+    /// Removed source seconds over this book, across engine sessions.
+    pub silence_saved: f64,
     pub speed: f32,
     pub paused: bool,
     pub active: bool,
@@ -101,12 +109,18 @@ pub struct Player {
     last_tick: Instant,
     listened: Duration,
     audible: bool,
+    /// Saved seconds from engine sessions of this book that have ended, the
+    /// engine's own counter at that fold, and the book they belong to.
+    folded: f64,
+    fold_at: f64,
+    fold_key: Option<ItemKey>,
 }
 impl Default for Player {
     fn default() -> Self {
         Self {
             book: None,
             position: 0.0,
+            silence_saved: 0.0,
             speed: 1.0,
             paused: false,
             active: false,
@@ -120,6 +134,9 @@ impl Default for Player {
             last_tick: Instant::now(),
             listened: Duration::ZERO,
             audible: false,
+            folded: 0.0,
+            fold_at: 0.0,
+            fold_key: None,
         }
     }
 }
@@ -166,6 +183,19 @@ impl Player {
     fn play_from(&mut self, at: f64, engine: &dyn Transport) {
         let Some(book) = &mut self.book else { return };
         let Some((file, offset)) = book.timeline.locate(at) else { return };
+        // `PlayFrom` starts a new engine session, and the engine counts removed
+        // silence per session: hold on to what this book has saved so far. The
+        // engine's counter still reads the old total until its new session
+        // starts, so discount that much until it has restarted.
+        let live = engine.silence_saved();
+        if self.fold_key.as_ref() == Some(&book.key) {
+            self.folded += live - self.fold_at;
+        } else {
+            self.folded = 0.0;
+            self.fold_key = Some(book.key.clone());
+        }
+        self.fold_at = live;
+        self.silence_saved = self.folded;
         book.file = file;
         self.position = book.timeline.clamp(at);
         self.pending = true;
@@ -195,6 +225,14 @@ impl Player {
         }
         self.audible = self.active && !self.paused && state == PlayState::Playing;
         self.last_tick = now;
+        let live = engine.silence_saved();
+        if live < self.fold_at {
+            // The engine's new session has begun: nothing left to discount.
+            self.fold_at = 0.0;
+        }
+        if self.book.as_ref().is_some_and(|book| self.fold_key.as_ref() == Some(&book.key)) {
+            self.silence_saved = self.folded + live - self.fold_at;
+        }
         if self.active
             && state != PlayState::Stopped
             && !self.pending

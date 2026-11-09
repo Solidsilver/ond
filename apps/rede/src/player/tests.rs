@@ -7,10 +7,11 @@ struct Fake {
     sent: RefCell<Vec<Command>>,
     state: Cell<PlayState>,
     position: Cell<f64>,
+    saved: Cell<f64>,
 }
 impl Default for Fake {
     fn default() -> Self {
-        Self { sent: RefCell::default(), state: Cell::new(PlayState::Loading), position: Cell::new(0.0) }
+        Self { sent: RefCell::default(), state: Cell::new(PlayState::Loading), position: Cell::new(0.0), saved: Cell::new(0.0) }
     }
 }
 impl Transport for Fake {
@@ -22,6 +23,9 @@ impl Transport for Fake {
     }
     fn position(&self) -> f64 {
         self.position.get()
+    }
+    fn silence_saved(&self) -> f64 {
+        self.saved.get()
     }
 }
 
@@ -588,4 +592,43 @@ fn persisted_speech_switches_are_sent_through_the_transport() {
         commands.as_slice(),
         [Command::SetVoiceBoost(true), Command::SetSkipSilence(true), Command::SetVoiceBoost(false), Command::SetSkipSilence(false)]
     ));
+}
+
+#[test]
+fn the_books_saved_time_survives_play_from_and_starts_over_for_another_book() {
+    let engine = Fake::default();
+    let mut player = Player::default();
+    let now = Instant::now();
+    let mut notes = Vec::new();
+    player.load(opened(false), 1.0, &engine, now).unwrap();
+    engine.saved.set(4.5);
+    player.tick(&engine, now, false, &mut notes);
+    assert_eq!(player.silence_saved, 4.5);
+    // A skip within the file keeps the engine's session, and its counter.
+    player.control(Control::Skip(5.0), 0.0, &engine, now, &mut notes);
+    engine.saved.set(6.0);
+    player.tick(&engine, now, false, &mut notes);
+    assert_eq!(player.silence_saved, 6.0);
+    // Crossing into the other file issues PlayFrom, which starts the engine's
+    // counter over: the book keeps what it had saved.
+    player.control(Control::Seek(10.0), 0.0, &engine, now, &mut notes);
+    engine.saved.set(0.0);
+    player.tick(&engine, now, false, &mut notes);
+    assert_eq!(player.silence_saved, 6.0);
+    engine.saved.set(1.5);
+    player.tick(&engine, now, false, &mut notes);
+    assert_eq!(player.silence_saved, 7.5);
+
+    // Another book starts its own total, and the engine's old counter isn't it.
+    let mut other = opened(true);
+    other.key = ItemKey::new(AccountId::new(), "another-book");
+    engine.saved.set(2.0);
+    player.load(other, 1.0, &engine, now).unwrap();
+    player.tick(&engine, now, false, &mut notes);
+    assert_eq!(player.silence_saved, 0.0);
+    engine.saved.set(0.0);
+    player.tick(&engine, now, false, &mut notes);
+    engine.saved.set(0.5);
+    player.tick(&engine, now, false, &mut notes);
+    assert_eq!(player.silence_saved, 0.5);
 }
