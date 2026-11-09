@@ -11,7 +11,8 @@
 //! - [`buttons`]: the filled [`primary`], [`secondary`], [`danger`] (and
 //!   [`primary_unavailable`], [`secondary_danger`]), the [`quiet_button`],
 //!   [`heart_button`] and [`hover_heart`], [`tile_button`] (round, on a
-//!   tile's art),
+//!   tile's art), [`chip_button`] (a small tinted chip, Rede's speed and
+//!   sleep timer),
 //!   and the [`focus_ring`] every self-painted control shows under Tab.
 //! - [`controls`]: the segmented pill ([`segmented`], [`segmented_wide`],
 //!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]; [`step_slider`] steps a

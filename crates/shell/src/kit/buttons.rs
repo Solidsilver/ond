@@ -1,7 +1,7 @@
 //! Buttons that paint themselves: the filled ones ([`primary`],
 //! [`secondary`], [`danger`] and their kin), the [`quiet_button`], the
 //! hearts that love something ([`heart_button`], and [`hover_heart`] over a
-//! row), the round [`tile_button`] on a tile's art, and the [`focus_ring`] every self-painted control shows when Tab
+//! row), the round [`tile_button`] on a tile's art, the [`chip_button`], and the [`focus_ring`] every self-painted control shows when Tab
 //! lands on it.
 
 use crate::icons::Icon;
@@ -160,4 +160,50 @@ pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bo
     crate::icons::paint(ui.painter(), glyph, icon, fg);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     resp.clicked()
+}
+
+/// What a [`chip_button`] shows and how: an icon, some text, or both, at
+/// `size` (the type's, and the glyph's), in `ink`, with corners of `radius`.
+#[derive(Clone, Copy)]
+pub struct ChipButton<'a> {
+    pub icon: Option<Icon>,
+    pub text: Option<&'a str>,
+    pub size: f32,
+    pub radius: f32,
+    /// Tinted with the accent, for something that's on (a timer running).
+    pub lit: bool,
+    pub ink: Color32,
+}
+
+/// A chip that's a button, in `rect`: its content centred, quiet at rest on
+/// the field's fill, deeper while hovered or its menu is open, tinted with
+/// the accent when lit (Rede's speed and sleep timer chips).
+pub fn chip_button(ui: &mut Ui, rect: Rect, id: egui::Id, chip: ChipButton<'_>) -> Response {
+    let t = Tokens::of(ui);
+    let resp = ui.interact(rect, id, Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    let hot = resp.hovered() || open;
+    let fill = if chip.lit {
+        t.accent.gamma_multiply(if hot { 0.24 } else { 0.14 })
+    } else if hot {
+        t.selected
+    } else {
+        t.field
+    };
+    ui.painter().rect_filled(rect, chip.radius, fill);
+    focus_ring(ui, &resp, rect, chip.radius);
+    let galley = chip.text.map(|text| ui.painter().layout_no_wrap(text.to_owned(), FontId::new(chip.size, semibold()), chip.ink));
+    let glyph = if chip.icon.is_some() { chip.size } else { 0.0 };
+    let gap = if chip.icon.is_some() && galley.is_some() { 3.0 } else { 0.0 };
+    let w = glyph + gap + galley.as_ref().map_or(0.0, |g| g.size().x);
+    let mut x = rect.center().x - w / 2.0;
+    if let Some(icon) = chip.icon {
+        crate::icons::paint(ui.painter(), Rect::from_min_size(egui::pos2(x, rect.center().y - glyph / 2.0), vec2(glyph, glyph)), icon, chip.ink);
+        x += glyph + gap;
+    }
+    if let Some(galley) = galley {
+        let y = rect.center().y - galley.size().y / 2.0;
+        ui.painter().galley(egui::pos2(x, y), galley, chip.ink);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
