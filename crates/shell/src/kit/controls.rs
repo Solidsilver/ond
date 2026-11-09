@@ -1,5 +1,6 @@
 //! Controls that set a value: the segmented pill ([`segmented`],
-//! [`segmented_wide`], [`choice`], and [`icon_choice`] for icons), the [`thin_slider`], the [`switch`], the
+//! [`segmented_wide`], [`choice`], and [`icon_choice`] for icons), the [`thin_slider`]
+//! (and [`step_slider`], a whole number on one beside its [`readout`]), the [`switch`], the
 //! [`stepper`] and its [`step_button`], and the [`choice_chip`].
 
 use super::focus_ring;
@@ -184,6 +185,33 @@ pub fn thin_slider_marked(ui: &mut Ui, value: &mut f32, width: f32, label: &str,
     let label = label.to_owned();
     resp.widget_info(|| egui::WidgetInfo::slider(enabled, v, &label));
     resp
+}
+
+/// A slider's value, right-aligned in a fixed width so the slider beside it
+/// doesn't shift as the value changes.
+pub fn readout(ui: &mut Ui, text: &str) {
+    let t = Tokens::of(ui);
+    let (r, _) = ui.allocate_exact_size(vec2(52.0, 18.0), Sense::hover());
+    ui.painter().text(r.right_center(), egui::Align2::RIGHT_CENTER, text, FontId::proportional(12.0), t.muted);
+}
+
+/// A whole number in `range` on a [`thin_slider`] `width` wide, with its
+/// value read out as `text` writes it, for a settings row's control (laid
+/// out right to left). The slider's own position is kept between frames, so
+/// the wheel and the arrow keys, which move it a little at a time, add up to
+/// a step.
+pub fn step_slider(ui: &mut Ui, label: &str, value: &mut u8, range: std::ops::RangeInclusive<u8>, width: f32, text: impl Fn(u8) -> String) {
+    let (lo, hi) = (*range.start(), *range.end());
+    let span = f32::from(hi - lo);
+    let at = (*value).clamp(lo, hi);
+    let snapped = |v: f32| lo + (v * span).round() as u8;
+    readout(ui, &text(at));
+    let id = ui.scope_id().with(("step", label));
+    let mut v = ui.data(|d| d.get_temp::<f32>(id)).filter(|&v| snapped(v) == at).unwrap_or(f32::from(at - lo) / span);
+    if thin_slider(ui, &mut v, width, label).changed() {
+        ui.data_mut(|d| d.insert_temp(id, v));
+        *value = snapped(v);
+    }
 }
 
 /// An on/off switch on its own; `label` names it for accessibility (the

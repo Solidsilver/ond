@@ -14,7 +14,8 @@
 //!   tile's art),
 //!   and the [`focus_ring`] every self-painted control shows under Tab.
 //! - [`controls`]: the segmented pill ([`segmented`], [`segmented_wide`],
-//!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]
+//!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]; [`step_slider`] steps a
+//!   whole number on one, beside its [`readout`]), [`switch`]
 //!   (and [`switch_tinted`]), [`stepper`] and its [`step_button`], and
 //!   [`choice_chip`] (one of a grid of choices, lit when on).
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
