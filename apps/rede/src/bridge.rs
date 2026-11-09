@@ -133,7 +133,7 @@ impl Bridge {
         crate::listening::spawn(&self.rt, source, shelf, device, move || live.current(), move |event| this.playback(event))
     }
 
-    pub fn engine_events(&self, engine: &audio::EngineHandle, ctx: egui::Context) {
+    pub fn engine_events(&self, engine: &audio::EngineHandle, ctx: egui::Context, timer: Arc<std::sync::atomic::AtomicBool>) {
         let this = self.scoped();
         let events = engine.events.clone();
         let status = engine.status.clone();
@@ -141,7 +141,7 @@ impl Bridge {
             let mut clock = crate::player::ReportClock::new(std::time::Instant::now());
             while this.current() {
                 let state = status.state();
-                if let Some(report) = clock.poll(state, std::time::Instant::now())
+                if let Some(report) = clock.poll_for(state, std::time::Instant::now(), timer.load(Ordering::Relaxed))
                     && this.current()
                 {
                     let _ = this.tx.send(Msg::PlaybackTick { session: this.scope.expect("engine events are scoped"), report });

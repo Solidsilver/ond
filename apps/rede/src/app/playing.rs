@@ -18,7 +18,7 @@ impl RedeApp {
             let cache =
                 streamcache::StreamCache::new(config, rt.handle().clone()).map_err(|e| Failure::Local(format!("Couldn't open the stream cache: {e}")))?;
             let engine = audio::spawn(audio::EngineConfig::default(), audio::default_backend(), Some(cache));
-            self.bridge.engine_events(&engine, self.ctx.clone());
+            self.bridge.engine_events(&engine, self.ctx.clone(), self.sleep_wake.clone());
             self.engine = Some(engine);
         }
         Ok(())
@@ -65,9 +65,14 @@ impl RedeApp {
             return;
         }
         let mut notes = Vec::new();
+        self.player.sleep_rewind = f64::from(self.shown.playback.sleep_rewind);
         if let Some(engine) = &self.engine {
             self.player.control(control, f64::from(self.shown.playback.rewind), engine, Instant::now(), &mut notes);
         }
+        if let Control::Sleep(Some(crate::sleep::Choice::Minutes(minutes))) = control {
+            self.prefs.edit(|s| s.playback.sleep_minutes = minutes.clamp(5, 120));
+        }
+        self.sleep_wake.store(self.player.sleep.is_some(), std::sync::atomic::Ordering::Relaxed);
         if let Control::Speed(speed) = control {
             let speed = crate::timeline::normalize_speed(speed);
             self.prefs.edit(|s| s.playback.speed = speed);
@@ -77,6 +82,7 @@ impl RedeApp {
     }
 
     fn playback_notes(&mut self, notes: Vec<Note>) {
+        self.sleep_wake.store(self.player.sleep.is_some(), std::sync::atomic::Ordering::Relaxed);
         for note in notes {
             match note {
                 Note::Report { update, close } => {

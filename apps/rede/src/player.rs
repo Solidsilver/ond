@@ -58,6 +58,8 @@ pub enum Control {
     NextChapter,
     Speed(f32),
     Stop,
+    Sleep(Option<crate::sleep::Choice>),
+    ExtendSleep,
 }
 
 pub struct Opened {
@@ -82,6 +84,9 @@ pub struct Player {
     pub speed: f32,
     pub paused: bool,
     pub active: bool,
+    pub sleep: Option<crate::sleep::Timer>,
+    pub sleep_rewind: f64,
+    gain: f32,
     pending: bool,
     refreshed: bool,
     serial: u64,
@@ -98,6 +103,9 @@ impl Default for Player {
             speed: 1.0,
             paused: false,
             active: false,
+            sleep: None,
+            sleep_rewind: 10.0,
+            gain: 1.0,
             pending: false,
             refreshed: false,
             serial: 0,
@@ -111,6 +119,7 @@ impl Default for Player {
 
 impl Player {
     pub fn load(&mut self, opened: Opened, speed: f32, engine: &dyn Transport, now: Instant) -> Result<(), &'static str> {
+        self.cancel_sleep(engine);
         let Opened { key, item, session, position: at } = opened;
         let timeline = Timeline::new(
             &session.tracks.iter().map(|t| (t.start_offset, t.duration)).collect::<Vec<_>>(),
@@ -163,7 +172,7 @@ impl Player {
     fn seek(&mut self, at: f64, engine: &dyn Transport) {
         let Some(book) = &self.book else { return };
         let Some((file, offset)) = book.timeline.locate(at) else { return };
-        if file == book.file && self.active {
+        if file == book.file && self.active && engine.state() != PlayState::Stopped {
             self.position = book.timeline.clamp(at);
             self.pending = true;
             engine.send(Command::Seek(Duration::from_secs_f64(offset)));
@@ -204,6 +213,7 @@ impl Player {
 
     pub fn tick(&mut self, engine: &dyn Transport, now: Instant, report: bool, notes: &mut Vec<Note>) {
         self.account_time(engine, now);
+        self.sleep_tick(engine, now, notes);
         if report && self.active && !self.paused {
             self.report(false, false, notes);
         }
@@ -235,7 +245,18 @@ impl Player {
                 engine.send(Command::Pause);
                 self.report(false, false, notes);
             }
+            Control::Sleep(choice) => {
+                self.cancel_sleep(engine);
+                self.sleep = choice.map(|choice| crate::sleep::Timer::new(choice, self.book.as_ref().unwrap().timeline.chapter_range(self.position).1, now));
+            }
+            Control::ExtendSleep => {
+                if let Some(timer) = &mut self.sleep {
+                    timer.extend(self.position, self.speed, now);
+                }
+                self.set_gain(1.0, engine);
+            }
             Control::Stop => {
+                self.cancel_sleep(engine);
                 if self.active {
                     self.report(true, false, notes);
                 }
@@ -260,6 +281,38 @@ impl Player {
                 self.report(false, false, notes);
             }
         }
+    }
+
+    pub fn sleep_remaining(&self, now: Instant) -> Option<f64> {
+        self.sleep.as_ref().map(|timer| timer.remaining(self.position, self.speed, now))
+    }
+
+    fn set_gain(&mut self, gain: f32, engine: &dyn Transport) {
+        if (self.gain - gain).abs() > 0.0001 {
+            self.gain = gain;
+            engine.send(Command::SetVolume(gain));
+        }
+    }
+
+    fn cancel_sleep(&mut self, engine: &dyn Transport) {
+        self.sleep = None;
+        self.set_gain(1.0, engine);
+    }
+
+    fn sleep_tick(&mut self, engine: &dyn Transport, now: Instant, notes: &mut Vec<Note>) {
+        let Some(left) = self.sleep_remaining(now) else { return };
+        if left > 0.0 {
+            self.set_gain((left / 10.0).min(1.0) as f32, engine);
+            return;
+        }
+        // Pause before restoring gain, and seek before reporting so the journal
+        // and the next resume agree about the half-heard tail.
+        engine.send(Command::Pause);
+        self.paused = true;
+        self.paused_at = Some(now);
+        self.seek(self.position - self.sleep_rewind, engine);
+        self.report(false, false, notes);
+        self.cancel_sleep(engine);
     }
 
     pub fn event(&mut self, event: &Event, engine: &dyn Transport, now: Instant, notes: &mut Vec<Note>) {
@@ -293,6 +346,11 @@ impl Player {
                 } else {
                     self.account_time(engine, now);
                     self.position = self.book.as_ref().unwrap().timeline.duration;
+                    if self.sleep_remaining(now).is_some_and(|left| left <= 0.0) {
+                        self.sleep_tick(engine, now, notes);
+                        return;
+                    }
+                    self.cancel_sleep(engine);
                     self.report(true, true, notes);
                     self.active = false;
                     self.paused = true;
@@ -333,10 +391,22 @@ impl Player {
 pub struct ReportClock {
     state: PlayState,
     last: Instant,
+    pulse: Instant,
 }
 impl ReportClock {
     pub fn new(now: Instant) -> Self {
-        Self { state: PlayState::Stopped, last: now }
+        Self { state: PlayState::Stopped, last: now, pulse: now }
+    }
+
+    pub fn poll_for(&mut self, state: PlayState, now: Instant, timer: bool) -> Option<bool> {
+        let report = self.poll(state, now);
+        let running = matches!(state, PlayState::Playing | PlayState::Buffering);
+        if report.is_some() || ((running || timer) && now.saturating_duration_since(self.pulse) >= Duration::from_millis(100)) {
+            self.pulse = now;
+            Some(report.unwrap_or(false))
+        } else {
+            None
+        }
     }
 
     pub fn poll(&mut self, state: PlayState, now: Instant) -> Option<bool> {

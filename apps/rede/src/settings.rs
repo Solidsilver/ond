@@ -99,10 +99,12 @@ pub struct PlaybackSettings {
     pub skip_forward: u32,
     pub speed: f32,
     pub rewind: u32,
+    pub sleep_minutes: u32,
+    pub sleep_rewind: u32,
 }
 impl Default for PlaybackSettings {
     fn default() -> Self {
-        Self { skip_back: 15, skip_forward: 30, speed: 1.0, rewind: 5 }
+        Self { skip_back: 15, skip_forward: 30, speed: 1.0, rewind: 5, sleep_minutes: 30, sleep_rewind: 10 }
     }
 }
 

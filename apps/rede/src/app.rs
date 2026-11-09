@@ -48,6 +48,7 @@ mod player_bar;
 mod playing;
 mod prefs_view;
 mod session;
+mod sleep;
 mod ui_state;
 mod view_ctx;
 mod virtual_list;
@@ -148,6 +149,7 @@ pub struct RedeApp {
     listening: Option<crate::listening::Listening>,
     playback_generation: u64,
     opening: bool,
+    sleep_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
     positions: std::collections::HashMap<String, sources::Progress>,
     stream_dir: std::path::PathBuf,
 }
@@ -202,6 +204,7 @@ impl RedeApp {
             listening: None,
             playback_generation: 0,
             opening: false,
+            sleep_wake: Default::default(),
             positions: std::collections::HashMap::new(),
             stream_dir: paths.art_cache.with_file_name("streams"),
         })
@@ -287,6 +290,8 @@ impl RedeApp {
                 playback.skip_back = playback.skip_back.clamp(1, 300);
                 playback.skip_forward = playback.skip_forward.clamp(1, 300);
                 playback.rewind = playback.rewind.min(60);
+                playback.sleep_minutes = playback.sleep_minutes.clamp(5, 120);
+                playback.sleep_rewind = playback.sleep_rewind.min(60);
                 self.prefs.edit(|s| s.playback = playback);
                 self.shown.playback = playback;
             }
@@ -407,6 +412,7 @@ impl RedeApp {
             ui,
             |ui| {
                 self.notice_bar(ui);
+                self.view().sleep_notice(ui);
                 let route = self.ui.nav.current().clone();
                 match &route {
                     Route::Library => self.view().library_page(ui),

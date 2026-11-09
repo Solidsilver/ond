@@ -16,6 +16,7 @@ mod memo;
 mod player;
 mod prefs;
 mod settings;
+mod sleep;
 mod sync;
 mod timeline;
 mod tokens;

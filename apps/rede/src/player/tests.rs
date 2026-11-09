@@ -474,3 +474,102 @@ fn repeated_buffer_holds_do_not_postpone_the_reporting_deadline() {
     }
     assert_eq!(reports, vec![15, 30, 45]);
 }
+
+fn sleeping(single: bool, speed: f32, at: f64) -> (Player, Fake, Instant, Vec<Note>) {
+    let engine = Fake::default();
+    let mut player = Player::default();
+    let now = Instant::now();
+    let mut open = opened(single);
+    open.position = at;
+    player.load(open, speed, &engine, now).unwrap();
+    let mut notes = Vec::new();
+    let file = player.book.as_ref().unwrap().file;
+    engine.position.set(at - if file == 1 { 60.0 } else { 0.0 });
+    engine.state.set(PlayState::Playing);
+    player.event(&started(&player, file, false), &engine, now, &mut notes);
+    (player, engine, now, notes)
+}
+
+#[test]
+fn a_hidden_timer_fades_for_ten_seconds_and_saves_before_the_half_heard_tail() {
+    let (mut player, engine, now, mut notes) = sleeping(true, 1.0, 20.0);
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Minutes(5))), 0.0, &engine, now, &mut notes);
+    let mut clock = ReportClock::new(now);
+    for tenth in 0..=3000 {
+        let at = now + Duration::from_millis(tenth * 100);
+        engine.position.set(20.0 + tenth as f64 / 100.0);
+        if let Some(report) = clock.poll_for(engine.state(), at, player.sleep.is_some()) {
+            player.tick(&engine, at, report, &mut notes);
+        }
+        if tenth == 2950 {
+            assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(gain)) if (*gain - 0.5).abs() < 0.001));
+        }
+    }
+    assert!(player.paused);
+    assert!(player.sleep.is_none());
+    assert_eq!(player.position, 40.0);
+    assert!(matches!(notes.last(), Some(Note::Report { update, close: false }) if update.position.secs() == 40.0 && !update.finished));
+    let sent = engine.sent.borrow();
+    let pause = sent.iter().rposition(|c| matches!(c, Command::Pause)).unwrap();
+    assert!(matches!(sent[pause + 1], Command::Seek(at) if at.as_secs_f64() == 40.0));
+    assert!(matches!(sent.last(), Some(Command::SetVolume(1.0))));
+}
+
+#[test]
+fn a_chapter_timer_follows_speed_across_file_boundaries() {
+    let (mut player, engine, now, mut notes) = sleeping(false, 1.5, 50.0);
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Chapter)), 0.0, &engine, now, &mut notes);
+    assert!((player.sleep_remaining(now).unwrap() - 50.0 / 1.5).abs() < 0.001);
+    engine.position.set(0.0);
+    player.event(&started(&player, 1, true), &engine, now + Duration::from_secs(7), &mut notes);
+    engine.position.set(32.5);
+    player.tick(&engine, now + Duration::from_secs(28), false, &mut notes);
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(gain)) if (*gain - 0.5).abs() < 0.001));
+    player.control(Control::Speed(0.75), 0.0, &engine, now + Duration::from_secs(28), &mut notes);
+    assert_eq!(player.sleep_remaining(now).unwrap(), 10.0);
+    engine.position.set(40.0);
+    player.tick(&engine, now + Duration::from_secs(38), false, &mut notes);
+    assert!(player.paused);
+    assert_eq!(player.position, 90.0);
+    assert!(matches!(notes.last(), Some(Note::Report { update, .. }) if update.position.secs() == 90.0));
+}
+
+#[test]
+fn extending_a_fading_chapter_restores_volume_and_adds_ten_minutes() {
+    let (mut player, engine, now, mut notes) = sleeping(true, 1.5, 32.5);
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Chapter)), 0.0, &engine, now, &mut notes);
+    player.tick(&engine, now, false, &mut notes);
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(0.5))));
+    player.control(Control::ExtendSleep, 0.0, &engine, now, &mut notes);
+    assert_eq!(player.sleep_remaining(now), Some(605.0));
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(1.0))));
+    player.tick(&engine, now + Duration::from_secs(5), false, &mut notes);
+    assert!(!player.paused);
+    player.control(Control::Sleep(None), 0.0, &engine, now, &mut notes);
+    assert!(player.sleep.is_none());
+}
+
+#[test]
+fn a_paused_timer_wakes_without_frames_and_goes_idle_after_cancelling() {
+    let now = Instant::now();
+    let mut clock = ReportClock::new(now);
+    clock.poll_for(PlayState::Paused, now, true);
+    assert_eq!(clock.poll_for(PlayState::Paused, now + Duration::from_millis(100), true), Some(false));
+    assert_eq!(clock.poll_for(PlayState::Paused, now + Duration::from_secs(60), false), None);
+}
+
+#[test]
+fn sleeping_at_the_books_end_reopens_the_rewound_file_paused() {
+    let (mut player, engine, now, mut notes) = sleeping(false, 1.5, 95.0);
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Chapter)), 0.0, &engine, now, &mut notes);
+    engine.state.set(PlayState::Stopped);
+    let file = &player.book.as_ref().unwrap().files[1];
+    let ended = Event::Ended { track_id: file.id.clone(), token: file.token };
+    player.event(&ended, &engine, now + Duration::from_secs(4), &mut notes);
+    assert!(player.active && player.paused);
+    assert_eq!(player.position, 90.0);
+    assert!(matches!(notes.last(), Some(Note::Report { update, close: false }) if !update.finished && update.position.secs() == 90.0));
+    let sent = engine.sent.borrow();
+    assert!(sent.iter().any(|c| matches!(c, Command::PlayFrom(_, offset) if offset.as_secs_f64() == 30.0)));
+    assert!(sent.iter().rposition(|c| matches!(c, Command::Pause)).unwrap() > sent.iter().rposition(|c| matches!(c, Command::PlayFrom(..))).unwrap());
+}

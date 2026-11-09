@@ -138,6 +138,7 @@ impl ViewCtx<'_> {
         let pill = speed_pill(&mut readout, &t, speed);
         self.speed_menu(&pill);
         readout.label(RichText::new(format!("{} at", crate::timeline::span_left(book_left))).size(12.0).color(t.muted));
+        self.sleep_menu(&mut readout);
         let room = readout.available_width() - 24.0;
         let times = format!("  {elapsed} · {left} left");
         let times_w = ui.painter().layout_no_wrap(times.clone(), FontId::proportional(12.0), t.muted).size().x;
@@ -180,6 +181,8 @@ impl ViewCtx<'_> {
                     ("Skip back", &mut prefs.skip_back, 1..=300),
                     ("Skip forward", &mut prefs.skip_forward, 1..=300),
                     ("Rewind after a long pause", &mut prefs.rewind, 0..=60),
+                    ("Sleep timer duration", &mut prefs.sleep_minutes, 5..=120),
+                    ("Rewind after sleep", &mut prefs.sleep_rewind, 0..=60),
                 ] {
                     let name = ui.label(label).id;
                     ui.add(egui::DragValue::new(value).range(range).suffix(" s")).labelled_by(name);
