@@ -255,11 +255,13 @@ race another worker's blind progress PATCH.
 - If the server is newer and differs by more than a minute in either direction,
   Rede saves both positions in `Reconciled` state. Its message is: "Picked up where
   you left off on another device, 1h 12m in." The toast's Undo action restores the
-  saved local position. With no prior local position, Undo restores the start.
+  saved local position. This only happens for the book loaded in the player and
+  only when a local position exists to restore; books started elsewhere are
+  accepted silently.
 - Exactly a minute or less updates the position without the toast. A paused
   player's engine moves with the accepted snapshot and remains paused. Resuming
-  waits for that pull before restarting audio; an unreachable server still lets
-  it resume the saved local position.
+  waits at most 2.5 seconds for that pull before restarting from the saved local
+  position, so an unreachable or lossy server cannot hold the play press.
 - While the same book is actively playing on this device, local wins regardless
   of the phone's timestamp, and is reported back. Moving running audio beneath
   its listener would interrupt this device's session. The app also refuses to
@@ -268,7 +270,9 @@ race another worker's blind progress PATCH.
   both the accepted phone stamp and now. This prevents the old phone position
   returning on the next pull, even if the phone clock was ahead. Restoring an
   unfinished position over a finished ABS row clears `isFinished` first, then
-  writes the position separately: ABS drops a position sent with the reset.
+  writes the position separately: ABS drops a position sent with the reset. The
+  reset carries a `lastUpdate` one millisecond before the position, so a failed
+  position write is replayed rather than mistaken for already-synced.
   The server can still auto-finish a restored position within its end threshold.
 - Pending entries replay before comparison, oldest log first, coalesced to the
   newest position per item. ABS PATCH is a blind overwrite, so each replay checks
@@ -286,7 +290,8 @@ only the title; moving a bookmark is delete followed by create.
 Local create, rename and delete commit the optimistic row and an ordered journal
 entry in one transaction. They survive offline use and restart. The listening
 worker replays them on startup, focus, full library sync, book open/resume and a
-30-second retry that runs only while an edit is still queued. A pull installs the
+retry that runs only while an edit is still queued, backing off from 30 seconds
+when the server is unreachable. A pull installs the
 authoritative server list and overlays edits queued during the request; it asks
 the server again after a write, and once when there was nothing to write. Snapshot
 revisions prevent a delayed UI message from erasing a newer optimistic edit. The
@@ -298,11 +303,14 @@ server title (or absence) with the title seen when an edit was queued. If they
 differ, the server wins and the queued edit is acknowledged without overwriting
 it. A missing renamed bookmark stays deleted. A row already at the desired title,
 or an already absent deletion, also acknowledges the edit: this makes retrying a
-lost HTTP response idempotent. Creation time is not compared, because the server
-assigns it when an offline create is uploaded. Edits that delete and recreate the
-same title cannot be distinguished; ABS supplies no compare-and-swap, so phone
-writes between the comparison and mutation can still race. A final pull keeps
-whatever the server ended with.
+lost HTTP response idempotent. A 4xx refusal other than 408 or 429 is final:
+the edit is acknowledged, shown once, and the remaining edits continue; only a
+timeout, rate limit, 5xx or network failure stays queued for retry, with a
+backoff. Creation time is not compared, because the server assigns it when an
+offline create is uploaded. Edits that delete and recreate the same title cannot
+be distinguished; ABS supplies no compare-and-swap, so phone writes between the
+comparison and mutation can still race. A final pull keeps whatever the server
+ended with.
 
 Schema v2 adds a frozen bookmark-edit journal without changing any v1 row bytes.
 Existing v1 bookmarks become pending creates during migration, so upgrading does
