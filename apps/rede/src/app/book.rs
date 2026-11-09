@@ -247,8 +247,13 @@ fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter], at: Opti
         } else {
             t.text
         };
-        if current {
+        if current && let Some(at) = at {
+            // The chapter playing: tinted, with how far into it along the
+            // foot of the row, as the player bar's scrubber shows it.
             ui.painter().rect_filled(row, 4.0, t.accent.gamma_multiply(0.1));
+            let fraction = ((at - chapter.start) / (chapter.end - chapter.start).max(1.0)).clamp(0.0, 1.0) as f32;
+            let foot = egui::Rect::from_min_max(pos2(row.left() + 4.0, row.bottom() - 2.0), pos2(row.right() - 4.0, row.bottom()));
+            ui.painter().rect_filled(egui::Rect::from_min_max(foot.min, pos2(foot.left() + foot.width() * fraction, foot.bottom())), 1.0, t.accent);
         }
         let cy = row.center().y;
         if current {
@@ -266,7 +271,8 @@ fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter], at: Opti
         let time = elide(ui, &length, FontId::proportional(12.0), t.muted, 72.0);
         let time_w = time.size().x;
         ui.painter().galley(pos2(row.right() - time_w, cy - time.size().y / 2.0), time, t.muted);
-        let title = elide(ui, &chapter.title, FontId::proportional(13.0), ink, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
+        let font = if current { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
+        let title = elide(ui, &chapter.title, font, ink, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
         ui.painter().galley(pos2(row.left() + CHAPTER_TITLE_X, cy - title.size().y / 2.0), title, ink);
     }
 }

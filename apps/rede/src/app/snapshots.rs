@@ -96,13 +96,10 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
-    for (name, paused, book) in [("player-playing", false, false), ("player-paused", true, false), ("book-midway", false, true)] {
+    for (name, paused) in [("player-playing", false), ("player-paused", true)] {
         scene(h, s, name, || {
             let mut app = app(&ctx, dir.path(), BOOKS.len());
             playing(&mut app, paused);
-            if book {
-                app.go(book_route(0));
-            }
             app
         });
     }
@@ -118,6 +115,26 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.run_steps(2);
     h.event(egui::Event::PointerGone);
     s.shoot(h, "player-speed");
+    // The playing book's page, scrolled down to the chapter playing.
+    *h.state_mut() = None;
+    *h.state_mut() = Some({
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app.go(book_route(0));
+        app
+    });
+    h.run_steps(2);
+    h.hover_at(egui::pos2(FULL[0] / 2.0, FULL[1] / 2.0));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -240.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(30);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "book-midway");
     // The same page at the smallest window Rede opens: the cover goes
     // above the text and the columns stack.
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
