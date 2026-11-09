@@ -17,6 +17,11 @@
 //!   table holding the ids that haven't been sent yet. The log is the truth
 //!   about how a book was listened to; the position per item is derived from
 //!   it and stored apart, so reading a position is one lookup.
+//! - **Bookmarks** are rows keyed by an internal id, found by the pair a source
+//!   treats as their identity: the item and the exact book time (never a rounded
+//!   one). Each local edit writes its journal entry in the same transaction, so
+//!   it is visible at once, survives a restart, and is replayed to the source in
+//!   the order it was made.
 //! - **Deleting an item** (gone from the server) drops its row, its index
 //!   entry, its tracks and its chapters. Its progress, bookmarks and position
 //!   stay: a book that's missing from one listing may come back, and losing a
@@ -32,7 +37,9 @@
 //! its bytes happen to mean, and an upgrade with no step is
 //! [`Error::NoMigration`]. The stored rows themselves are frozen (`model`).
 
+mod bookmarks;
 mod model;
+pub use bookmarks::{BookmarkChange, BookmarkSnapshot, PendingBookmark};
 
 use model::{BookmarkV1, ChaptersV1, DetailsV1, ItemV1, LibrarySyncV1, PositionV1, ProgressEntryV1, SummaryV1, TracksV1};
 
@@ -44,7 +51,7 @@ use std::time::SystemTime;
 
 /// Bump when a stored row or an index layout changes, and handle the step in
 /// `migrate`.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
 /// Ids that only go up: log entries and bookmarks are ordered by them, so the
@@ -66,6 +73,9 @@ const UNSYNCED: TableDefinition<u64, ()> = TableDefinition::new("progress_unsync
 const POSITIONS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("positions");
 /// (account, item, bookmark id) → [`BookmarkV1`].
 const BOOKMARKS: TableDefinition<(&str, &str, u64), &[u8]> = TableDefinition::new("bookmarks");
+/// Edit id → [`BookmarkEditV1`](model::BookmarkEditV1): bookmark changes the
+/// server hasn't taken yet, in the order they were made.
+const BOOKMARK_EDITS: TableDefinition<u64, &[u8]> = TableDefinition::new("bookmark_edits");
 /// Library id → [`LibrarySyncV1`].
 const SYNC: TableDefinition<&str, &[u8]> = TableDefinition::new("sync");
 
@@ -170,6 +180,7 @@ impl Shelf {
             wt.open_table(UNSYNCED)?;
             wt.open_table(POSITIONS)?;
             wt.open_table(BOOKMARKS)?;
+            wt.open_table(BOOKMARK_EDITS)?;
             wt.open_table(SYNC)?;
         }
         wt.commit()?;
@@ -399,8 +410,8 @@ impl Shelf {
         Ok(get_row::<PositionV1>(&rt.open_table(POSITIONS)?, &account, &key.item)?.map(|row| row.progress(key)))
     }
 
-    /// Saves a place in a book. Bookmarks are the shelf's own: a source's are
-    /// separate and synced by the app.
+    /// Saves a local-only place without a server journal. Server-backed edits
+    /// use [`Self::queue_bookmark`] so the row and intent commit together.
     pub fn add_bookmark(&self, key: &ItemKey, at: Position, note: Option<String>, created: SystemTime) -> Result<BookmarkId> {
         let account = key.account.to_string();
         let row = BookmarkV1 { position: at.secs(), note, created_ms: Stamp::from(created).millis() };
@@ -535,10 +546,17 @@ fn get_row_or_skip<T: DeserializeOwned>(
 /// step per version bump. A version with no step is an error rather than a
 /// no-op, because stamping old rows with the new version would leave them
 /// unreadable or wrong for good.
-fn migrate(_wt: &WriteTransaction, from: u32, _to: u32) -> Result<()> {
-    // v1 is the only schema there has been: no older file exists, so any
-    // earlier number is a build bug.
-    Err(Error::NoMigration { from })
+fn migrate(wt: &WriteTransaction, from: u32, to: u32) -> Result<()> {
+    for version in from..to {
+        match version {
+            // Existing bookmark bytes stay frozen. Only the journal is new.
+            1 => {
+                bookmarks::migrate_v1(wt)?;
+            }
+            _ => return Err(Error::NoMigration { from: version }),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

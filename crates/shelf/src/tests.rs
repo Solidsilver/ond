@@ -356,3 +356,98 @@ fn library_sync_v1_keeps_its_wire_format() {
     assert_eq!(encode(&full_sync_v1()).unwrap(), BYTES, "{SHAPE_CHANGED}");
     assert_eq!(decode::<LibrarySyncV1>(BYTES).unwrap(), full_sync_v1());
 }
+
+fn source_bookmark(id: &str, position: f64, title: &str) -> sources::Bookmark {
+    sources::Bookmark { item: key(id), position: Position::from_secs(position), title: title.into(), created: Stamp::from_millis(1).system_time() }
+}
+
+#[test]
+fn bookmark_edits_and_their_exact_positions_survive_a_restart_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shelf.redb");
+    let original = source_bookmark("book", 1_234.000_000_000_000_2, "Here");
+    let renamed = sources::Bookmark { title: "There".into(), ..original.clone() };
+    let ids = {
+        let shelf = Shelf::open(&path).unwrap();
+        let create = shelf.queue_bookmark(&original, BookmarkChange::Create).unwrap();
+        let rename = shelf.queue_bookmark(&renamed, BookmarkChange::Rename).unwrap();
+        assert_eq!(shelf.all_bookmarks().unwrap().as_slice(), std::slice::from_ref(&renamed));
+        let delete = shelf.queue_bookmark(&renamed, BookmarkChange::Delete).unwrap();
+        assert!(shelf.bookmarks(&original.item).unwrap().is_empty());
+        [create, rename, delete]
+    };
+    let shelf = Shelf::open(&path).unwrap();
+    let pending = shelf.pending_bookmarks().unwrap();
+    assert_eq!(pending.iter().map(|p| p.id).collect::<Vec<_>>(), ids);
+    assert_eq!(pending[1].base.as_ref(), Some(&original));
+    assert_eq!(pending[2].base.as_ref(), Some(&renamed));
+    assert_eq!(pending[2].bookmark.position.secs().to_bits(), original.position.secs().to_bits());
+    shelf.acknowledge_bookmark(ids[0]).unwrap();
+    assert_eq!(shelf.pending_bookmarks().unwrap().len(), 2);
+}
+
+#[test]
+fn an_inflight_snapshot_cannot_erase_a_newer_local_bookmark_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let shelf = Shelf::open(dir.path().join("shelf.redb")).unwrap();
+    let phone = source_bookmark("book", 200.5, "Phone");
+    shelf.replace_bookmarks(std::slice::from_ref(&phone)).unwrap();
+    let before = shelf.bookmark_snapshot().unwrap();
+    let local = source_bookmark("book", 100.25, "Local");
+    shelf.queue_bookmark(&local, BookmarkChange::Create).unwrap();
+    shelf.queue_bookmark(&phone, BookmarkChange::Delete).unwrap();
+    shelf.replace_bookmarks(&[phone]).unwrap();
+    let after = shelf.bookmark_snapshot().unwrap();
+    assert!(after.revision > before.revision);
+    assert_eq!(after.bookmarks, [local]);
+}
+
+#[test]
+fn upgrading_v1_preserves_frozen_bookmarks_and_queues_them_for_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shelf.redb");
+    let original = full_bookmark_v1();
+    {
+        let db = Database::create(&path).unwrap();
+        let wt = db.begin_write().unwrap();
+        wt.open_table(META).unwrap().insert(SCHEMA_KEY, 1).unwrap();
+        wt.open_table(COUNTERS).unwrap();
+        wt.open_table(BOOKMARKS).unwrap().insert((account().to_string().as_str(), "book", 1), encode(&original).unwrap().as_slice()).unwrap();
+        wt.commit().unwrap();
+    }
+    let shelf = Shelf::open(&path).unwrap();
+    assert_eq!(shelf.schema_version().unwrap(), 2);
+    let saved = shelf.bookmarks(&key("book")).unwrap();
+    assert_eq!(saved[0].note, original.note);
+    assert_eq!(shelf.pending_bookmarks().unwrap()[0].change, BookmarkChange::Create);
+}
+
+#[test]
+fn bookmark_edit_v1_keeps_its_wire_format() {
+    use crate::model::BookmarkEditV1;
+    let value = BookmarkV1 { position: 1.5, note: Some("n".into()), created_ms: 1 };
+    let edit = BookmarkEditV1 { account: "a".into(), item: "b".into(), kind: 1, value: value.clone(), base: Some(value) };
+    const BYTES: &[u8] = &[1, 97, 1, 98, 1, 0, 0, 0, 0, 0, 0, 248, 63, 1, 1, 110, 2, 1, 0, 0, 0, 0, 0, 0, 248, 63, 1, 1, 110, 2];
+    assert_eq!(encode(&edit).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<BookmarkEditV1>(BYTES).unwrap(), edit);
+}
+
+#[test]
+fn accepting_a_phone_position_does_not_create_listening_or_overwrite_a_newer_local_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let shelf = Shelf::open(dir.path().join("shelf.redb")).unwrap();
+    let mut remote = Progress { item: key("book"), position: Position::from_secs(500.0), finished: false, at: Some(Stamp::from_millis(10).system_time()) };
+    assert!(shelf.accept_position(&remote).unwrap());
+    assert!(shelf.pending_progress().unwrap().is_empty());
+    let local = ProgressUpdate {
+        item: remote.item.clone(),
+        position: Position::from_secs(600.0),
+        finished: false,
+        at: Stamp::from_millis(20).system_time(),
+        listened: Duration::ZERO,
+    };
+    shelf.append_progress(&local).unwrap();
+    remote.position = Position::from_secs(700.0);
+    assert!(!shelf.accept_position(&remote).unwrap());
+    assert_eq!(shelf.position(&remote.item).unwrap().unwrap().position.secs(), 600.0);
+}
