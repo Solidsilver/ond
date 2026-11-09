@@ -1,0 +1,57 @@
+//! The look both apps are drawn with: every widget whose shape, colours and
+//! spacing should match wherever it appears. A widget belongs here when
+//! either app could use it as it is; what only makes sense in one app (Ond's
+//! managed-settings tag, a track's colour) stays there as a thin wrapper.
+//! Everything is re-exported here, so callers write `kit::switch`.
+//!
+//! - [`text`]: [`elide`], [`elide_middle`], [`elide_job`], the quiet
+//!   [`link`] and [`link_line`] that underline on hover, the muted
+//!   [`section`] label, [`key_cap`] (a combo drawn as a key), and the one
+//!   [`empty_state`].
+//! - [`buttons`]: the filled [`primary`], [`secondary`], [`danger`] (and
+//!   [`primary_unavailable`], [`secondary_danger`]), the [`quiet_button`],
+//!   and the [`focus_ring`] every self-painted control shows under Tab.
+//! - [`controls`]: the segmented pill ([`segmented`], [`segmented_wide`],
+//!   [`choice`]), [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]
+//!   (and [`switch_tinted`]), [`stepper`] and its [`step_button`], and
+//!   [`choice_chip`] (one of a grid of choices, lit when on).
+//! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
+//!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
+//!   one; and [`sidebar_row`].
+//! - [`menus`]: [`popover`] (or [`popover_at`]) in the theme's frame,
+//!   [`padded`] to line a block up with its rows, [`popover_title`],
+//!   [`popover_rule`], [`menu_row`] (a command), [`info_row`] (a fact) and
+//!   [`switch_row`].
+//! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
+//!   in) and [`sheet_header`] (its title, and a × that closes it).
+
+pub mod buttons;
+pub mod controls;
+pub mod menus;
+pub mod rows;
+pub mod sheets;
+pub mod text;
+
+pub use buttons::*;
+pub use controls::*;
+pub use menus::*;
+pub use rows::*;
+pub use sheets::*;
+pub use text::*;
+
+/// A harness whose first frame installs the theme (its fonts arrive a
+/// frame later) and whose later frames draw `body`.
+#[cfg(test)]
+fn themed<S: 'static>(state: S, mut body: impl FnMut(&mut egui::Ui, &mut S) + 'static) -> egui_kittest::Harness<'static, (bool, S)> {
+    egui_kittest::Harness::builder().build_ui_state(
+        move |ui, (installed, state): &mut (bool, S)| {
+            if !std::mem::replace(installed, true) {
+                crate::theme::install(ui.ctx(), crate::theme::ThemePref::Light);
+                ui.ctx().request_repaint();
+                return;
+            }
+            body(ui, state);
+        },
+        (false, state),
+    )
+}
