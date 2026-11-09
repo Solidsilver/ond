@@ -188,6 +188,11 @@ impl Player {
         // engine's counter still reads the old total until its new session
         // starts, so discount that much until it has restarted.
         let live = engine.silence_saved();
+        // A PlayFrom that follows another with no tick between (an `Ended`
+        // recovery, a token refresh) may find the engine already restarted.
+        if live < self.fold_at {
+            self.fold_at = 0.0;
+        }
         if self.fold_key.as_ref() == Some(&book.key) {
             self.folded += live - self.fold_at;
         } else {
