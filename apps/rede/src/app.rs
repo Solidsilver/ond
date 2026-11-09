@@ -323,9 +323,10 @@ impl RedeApp {
             ui.label(egui::RichText::new("Not signed in").size(12.0).color(t.muted));
             return;
         };
-        let label = egui::RichText::new(&account.username).size(12.0).color(t.muted);
-        ui.menu_button(label, |ui| {
-            ui.set_min_width(180.0);
+        let button = account_button(ui, &t, &account.username);
+        egui::Popup::menu(&button).show(|ui| {
+            ui.set_min_width(200.0);
+            ui.label(egui::RichText::new(&account.username).font(egui::FontId::new(13.0, theme::semibold())).color(t.text));
             ui.label(egui::RichText::new(&account.server).size(11.0).color(t.muted));
             ui.separator();
             if ui.button("Sign out").clicked() {
@@ -451,6 +452,49 @@ fn syncing_glyph(ui: &mut egui::Ui, t: &Tokens) {
     if now - since < SYNC_SPIN {
         ui.ctx().request_repaint_after(SPIN_FRAME);
     }
+}
+
+/// The account's control: a person and the name, quiet at rest like Ond's
+/// toolbar buttons, with a fill on hover and a deeper one while pressed or
+/// while its menu is open. It's named by the account, so it reads (and is
+/// found) as who is signed in.
+fn account_button(ui: &mut egui::Ui, t: &Tokens, name: &str) -> egui::Response {
+    let font = egui::FontId::proportional(12.5);
+    // Laid out without a colour, so it's painted in whichever ink the state
+    // calls for.
+    let galley = ui.painter().layout_no_wrap(name.to_owned(), font, egui::Color32::PLACEHOLDER);
+    let (icon, chevron, pad, gap) = (13.0, 8.0, 8.0, 6.0);
+    let width = pad + icon + gap + galley.size().x + gap + chevron + pad;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+        let fill = if resp.is_pointer_button_down_on() || open {
+            t.selected
+        } else if resp.hovered() {
+            t.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, 6.0, fill);
+        shell::widgets::focus_ring(ui, &resp, rect, 6.0);
+        let ink = if resp.hovered() || open { t.text } else { t.muted };
+        let mut x = rect.left() + pad;
+        let y = rect.center().y;
+        shell::icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(x + icon / 2.0, y), egui::vec2(icon, icon)), shell::icons::Icon::Person, ink);
+        x += icon + gap;
+        let text_w = galley.size().x;
+        ui.painter().galley(egui::pos2(x, y - galley.size().y / 2.0), galley, ink);
+        x += text_w + gap;
+        shell::icons::paint(
+            ui.painter(),
+            egui::Rect::from_center_size(egui::pos2(x + chevron / 2.0, y + 0.5), egui::vec2(chevron, chevron)),
+            shell::icons::Icon::ChevronDown,
+            t.muted,
+        );
+    }
+    let label = name.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    resp
 }
 
 /// How long the spinner turns before it goes still.
