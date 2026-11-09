@@ -1899,11 +1899,12 @@ fn silence_cuts_keep_source_landmarks_and_saved_time_at_every_speech_speed() {
         let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
         assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{speed}×: {seen:?}");
         let seconds = played.lock().unwrap().len() as f64 / (48_000.0 * 2.0);
-        assert!((seconds - 2.2 / speed as f64).abs() < 4.0 / 65.0, "{speed}×: {seconds} seconds");
+        // The pause keeps 200 ms and its last 30 ms lead into the speech.
+        assert!((seconds - 2.23 / speed as f64).abs() < 4.0 / 65.0, "{speed}×: {seconds} seconds");
         let landmarks = landmarks.lock().unwrap();
         let positive_at = landmarks.iter().find(|(_, sample)| *sample > 0.1).expect("the speech after the cut played").0;
         assert!((positive_at - 2.0).abs() < 2.0 / 65.0 + 0.02 * speed as f64, "{speed}×: landmark at {positive_at}");
-        assert!((engine.status.silence_saved_secs() - 0.8).abs() < 1e-9);
+        assert!((engine.status.silence_saved_secs() - 0.77).abs() < 1e-9);
         engine.shutdown(Duration::from_secs(2));
     }
 }
@@ -1929,9 +1930,9 @@ fn a_pause_crossing_gapless_files_is_cut_once_and_retains_both_source_clocks() {
         assert_eq!(opens.load(Ordering::Relaxed), 1);
         let played = played.lock().unwrap();
         let seconds = played.len() as f64 / (48_000.0 * 2.0);
-        assert!((seconds - 1.2 / speed as f64).abs() < 4.0 / 65.0, "{speed}×: {seconds} seconds");
+        assert!((seconds - 1.23 / speed as f64).abs() < 40.0 / 65.0, "{speed}×: {seconds} seconds");
         assert!(played.iter().all(|sample| sample.abs() <= 1.0));
-        assert!((engine.status.silence_saved_secs() - 0.8).abs() < 1e-9);
+        assert!((engine.status.silence_saved_secs() - 0.77).abs() < 1e-9);
         assert!(positions.lock().unwrap().iter().any(|(seq, _, source)| *seq == 1 && *source > 1.70));
         engine.shutdown(Duration::from_secs(2));
     }
@@ -2016,7 +2017,8 @@ fn seeking_after_a_cut_keeps_heard_savings_and_restarts_the_source_clock() {
     engine.send(Command::RefreshDevices);
     events_until(&engine, |e| matches!(e, Event::Devices { .. }));
     let saved = engine.status.silence_saved_secs();
-    assert!((saved - 0.8).abs() < 1e-9);
+    // 200 ms kept, plus the 30 ms lead-in to the speech that follows.
+    assert!((saved - 0.77).abs() < 1e-9);
     engine.send(Command::Seek(Duration::from_secs(4)));
     events_until(&engine, |e| matches!(e, Event::Seeked { .. }));
     engine.send(Command::SetSpeed(1.5));
@@ -2047,6 +2049,7 @@ fn a_rate_change_between_files_keeps_the_savings_already_heard() {
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
     assert_eq!(starts(&seen), [("before-format".into(), false, false), ("after-format".into(), false, false)], "{seen:?}");
     assert_eq!(opens.load(Ordering::Relaxed), 2);
+    // The format change closes the ring, so the held lead-in never plays.
     assert!((engine.status.silence_saved_secs() - 0.8).abs() < 1e-9);
     engine.shutdown(Duration::from_secs(2));
 }

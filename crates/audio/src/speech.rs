@@ -4,6 +4,12 @@
 //! tail to the following file. Both processors allocate their channel/window
 //! storage at construction, and a seek resets those buffers in place.
 
+/// Quiet windows held back at a cut, as the lead-in to returning speech.
+const LEAD_WINDOWS: usize = 3;
+
+/// Below -45 dBFS RMS, across every channel, is quiet.
+const QUIET_POWER: f64 = 0.000_031_622_776_601_683_79;
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Origin {
     pub seq: u64,
@@ -26,26 +32,32 @@ pub(crate) struct Silence {
     window: usize,
     samples: Vec<f32>,
     runs: Vec<Run>,
+    /// The quiet windows just before returning speech, kept out of the cut.
+    lead: Vec<f32>,
+    lead_runs: Vec<Run>,
     partial: usize,
     quiet: usize,
     cutting: bool,
-    fade_in: usize,
     saved: f64,
 }
 
 impl Silence {
     pub fn new(rate: u32, channels: u16, saved: f64) -> Self {
         let window = (rate as usize / 100).max(1);
+        let channels = channels as usize;
         Self {
-            channels: channels as usize,
+            channels,
             rate,
             window,
-            samples: Vec::with_capacity(window * 41 * channels as usize),
+            samples: Vec::with_capacity(window * 41 * channels),
             runs: Vec::with_capacity(48),
+            // One more window than it holds: a window is appended before the
+            // oldest ages out, and that must not grow the buffer mid-playback.
+            lead: Vec::with_capacity(window * (LEAD_WINDOWS + 1) * channels),
+            lead_runs: Vec::with_capacity(LEAD_WINDOWS + 1),
             partial: 0,
             quiet: 0,
             cutting: false,
-            fade_in: 0,
             saved,
         }
     }
@@ -59,15 +71,16 @@ impl Silence {
         }
         self.samples.clear();
         self.runs.clear();
+        self.lead.clear();
+        self.lead_runs.clear();
         self.partial = 0;
         self.quiet = 0;
         self.cutting = false;
-        self.fade_in = 0;
         self.saved = saved;
     }
 
     pub fn has_pending(&self) -> bool {
-        !self.runs.is_empty()
+        !self.runs.is_empty() || !self.lead_runs.is_empty()
     }
 
     pub fn process(&mut self, samples: &[f32], mut origin: Origin, mut emit: impl FnMut(&[f32], Origin, f64)) {
@@ -92,6 +105,13 @@ impl Silence {
 
     pub fn finish(&mut self, mut emit: impl FnMut(&[f32], Origin, f64)) {
         self.boundary(&mut emit);
+        // Quiet windows that never led to speech are removed time.
+        let held = self.lead.len() / self.channels;
+        if held != 0 {
+            self.emit_lead(0, held, true, &mut emit);
+            self.lead.clear();
+            self.lead_runs.clear();
+        }
         let total = self.samples.len() / self.channels;
         self.emit(0, total, false, &mut emit);
         self.samples.clear();
@@ -103,41 +123,34 @@ impl Silence {
         self.partial = 0;
         let start = self.samples.len() - count * self.channels;
         let power = self.samples[start..].iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / (count * self.channels) as f64;
-        // -45 dBFS RMS, with every channel contributing to the decision.
-        if power < 0.000_031_622_776_601_683_79 {
+        if power < QUIET_POWER {
             self.quiet += count;
-            if self.cutting || self.quiet > self.window * 40 {
-                if !self.cutting {
-                    let keep = self.window * 20;
-                    let fade = (self.rate as usize / 200).max(1).min(keep);
-                    for (i, frame) in self.samples[(keep - fade) * self.channels..keep * self.channels].chunks_exact_mut(self.channels).enumerate() {
-                        let gain = (fade - 1 - i) as f32 / fade as f32;
-                        for sample in frame {
-                            *sample *= gain;
-                        }
-                    }
-                    self.emit(0, keep, false, emit);
-                    self.emit(keep, total_frames(&self.samples, self.channels), true, emit);
-                } else {
-                    self.emit(0, total_frames(&self.samples, self.channels), true, emit);
-                }
-                self.samples.clear();
-                self.runs.clear();
-                self.cutting = true;
-                self.fade_in = (self.rate as usize / 200).max(1);
+            if self.cutting {
+                self.hold_lead(start, emit);
+                return;
             }
+            if self.quiet <= self.window * 40 {
+                return;
+            }
+            let keep = self.window * 20;
+            let fade = (self.rate as usize / 200).max(1).min(keep);
+            for (i, frame) in self.samples[(keep - fade) * self.channels..keep * self.channels].chunks_exact_mut(self.channels).enumerate() {
+                let gain = (fade - 1 - i) as f32 / fade as f32;
+                for sample in frame {
+                    *sample *= gain;
+                }
+            }
+            let total = self.samples.len() / self.channels;
+            self.emit(0, keep, false, emit);
+            self.emit(keep, total, true, emit);
+            self.samples.clear();
+            self.runs.clear();
+            self.cutting = true;
         } else {
-            let fade = (self.rate as usize / 200).max(1);
-            for frame in self.samples.chunks_exact_mut(self.channels) {
-                if self.fade_in != 0 {
-                    let gain = (fade - self.fade_in) as f32 / fade as f32;
-                    for sample in frame {
-                        *sample *= gain;
-                    }
-                    self.fade_in -= 1;
-                }
-            }
-            self.emit(0, total_frames(&self.samples, self.channels), false, emit);
+            // The lead-in carries the fade; the words themselves play as they are.
+            self.release_lead(emit);
+            let total = self.samples.len() / self.channels;
+            self.emit(0, total, false, emit);
             self.samples.clear();
             self.runs.clear();
             self.quiet = 0;
@@ -145,13 +158,48 @@ impl Silence {
         }
     }
 
+    /// Holds this window of quiet as the lead-in to returning speech, letting
+    /// the oldest held window go (as removed time) once the ring is full.
+    fn hold_lead(&mut self, start: usize, emit: &mut impl FnMut(&[f32], Origin, f64)) {
+        let total = self.samples.len() / self.channels;
+        self.lead.extend_from_slice(&self.samples[start * self.channels..]);
+        append_runs(&mut self.lead_runs, &self.runs, start, total);
+        self.samples.clear();
+        self.runs.clear();
+        let held = self.lead.len() / self.channels;
+        if held > self.window * LEAD_WINDOWS {
+            let drop = held - self.window * LEAD_WINDOWS;
+            self.emit_lead(0, drop, true, emit);
+            self.lead.drain(..drop * self.channels);
+            drop_runs(&mut self.lead_runs, drop);
+        }
+    }
+
+    /// Plays the held quiet windows into the returning speech, ramped up from
+    /// silence over their own length so the cut doesn't land on a consonant.
+    fn release_lead(&mut self, emit: &mut impl FnMut(&[f32], Origin, f64)) {
+        let frames = self.lead.len() / self.channels;
+        if frames == 0 {
+            return;
+        }
+        for (i, frame) in self.lead.chunks_exact_mut(self.channels).enumerate() {
+            let gain = i as f32 / frames as f32;
+            for sample in frame {
+                *sample *= gain;
+            }
+        }
+        self.emit_lead(0, frames, false, emit);
+        self.lead.clear();
+        self.lead_runs.clear();
+    }
+
     fn emit(&mut self, start: usize, end: usize, removed: bool, emit: &mut impl FnMut(&[f32], Origin, f64)) {
         emit_span(&self.samples, &self.runs, self.channels, self.rate, start, end, removed, &mut self.saved, emit);
     }
-}
 
-fn total_frames(samples: &[f32], channels: usize) -> usize {
-    samples.len() / channels
+    fn emit_lead(&mut self, start: usize, end: usize, removed: bool, emit: &mut impl FnMut(&[f32], Origin, f64)) {
+        emit_span(&self.lead, &self.lead_runs, self.channels, self.rate, start, end, removed, &mut self.saved, emit);
+    }
 }
 
 /// Publishes frames `[start, end)` of `samples`/`runs` as kept audio, or as a
@@ -189,6 +237,21 @@ fn emit_span(
     }
 }
 
+/// Appends the runs covering frames `[from, to)` of `source` to `dest`.
+fn append_runs(dest: &mut Vec<Run>, source: &[Run], from: usize, to: usize) {
+    let mut at = 0;
+    for run in source {
+        let end = at + run.frames;
+        let (lo, hi) = (from.max(at), to.min(end));
+        if lo < hi {
+            let mut origin = run.origin;
+            origin.frame += (lo - at) as u64;
+            push_run(dest, Run { origin, frames: hi - lo });
+        }
+        at = end;
+    }
+}
+
 /// Appends one run, folding it into the last when they're contiguous.
 fn push_run(runs: &mut Vec<Run>, run: Run) {
     if let Some(last) = runs.last_mut()
@@ -200,6 +263,21 @@ fn push_run(runs: &mut Vec<Run>, run: Run) {
         return;
     }
     runs.push(run);
+}
+
+/// Drops `frames` frames from the front of `runs`, splitting the run they fall inside.
+fn drop_runs(runs: &mut Vec<Run>, mut frames: usize) {
+    while frames != 0 {
+        let Some(first) = runs.first_mut() else { return };
+        if first.frames <= frames {
+            frames -= first.frames;
+            runs.remove(0);
+        } else {
+            first.origin.frame += frames as u64;
+            first.frames -= frames;
+            frames = 0;
+        }
+    }
 }
 
 /// A linked peak compressor keeps the stereo image steady. Its 20 ms attack
@@ -286,7 +364,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_long_pause_keeps_two_hundred_ms_with_fades_and_exact_origins() {
+    fn a_long_pause_keeps_two_hundred_ms_a_lead_in_and_exact_origins() {
         let mut silence = Silence::new(1000, 1, 0.0);
         let mut output = Vec::new();
         let mut origins = Vec::new();
@@ -296,31 +374,63 @@ mod tests {
             output.extend_from_slice(samples);
         });
         silence.finish(|samples, _, _| output.extend_from_slice(samples));
-        assert_eq!(output.len(), 400);
-        assert_eq!(output[299], 0.0);
-        assert_eq!(output[300], 0.0);
-        assert_eq!(output[305], 0.2);
-        assert!(origins.iter().any(|(out, source, saved)| *out == 300 && *source == 1100 && (*saved - 0.8).abs() < 1e-12));
+        // 100 ms of speech, 200 ms of quiet, 30 ms of lead-in, 100 ms of speech.
+        assert_eq!(output.len(), 430);
+        assert_eq!(output[299], 0.0, "the kept run fades out over its last 5 ms");
+        assert_eq!(output[300], 0.0, "the lead-in ramps up from silence");
+        assert!((output[329] - 0.001 * 29.0 / 30.0).abs() < 1e-9);
+        assert_eq!(output[330], 0.2, "the words themselves are not faded");
+        // The last 30 ms of quiet now play, so 770 ms of the pause was removed.
+        assert!(origins.iter().any(|(out, source, saved)| *out == 330 && *source == 1100 && (*saved - 0.77).abs() < 1e-12));
+        assert!(origins.iter().any(|(out, source, _)| *out == 300 && *source == 1070), "the lead-in keeps its own source frames: {origins:?}");
     }
 
     #[test]
     fn a_short_pause_is_preserved_bit_for_bit_and_storage_never_grows() {
         let mut silence = Silence::new(48_000, 2, 0.0);
         let input = vec![0.001; 48_000 * 2 / 5];
-        let capacities = (silence.samples.capacity(), silence.runs.capacity());
+        let capacities = (silence.samples.capacity(), silence.lead.capacity());
         let mut output = Vec::new();
         for piece in input.chunks(714) {
             silence.process(piece, Origin::default(), |samples, _, _| output.extend_from_slice(samples));
         }
         silence.finish(|samples, _, _| output.extend_from_slice(samples));
         assert_eq!(output, input);
-        assert_eq!((silence.samples.capacity(), silence.runs.capacity()), capacities);
+        assert_eq!((silence.samples.capacity(), silence.lead.capacity()), capacities);
+    }
+
+    #[test]
+    fn returning_speech_keeps_the_quiet_windows_before_it_and_cuts_without_a_click() {
+        let rate = 48_000u32;
+        let window = (rate / 100) as usize;
+        let pause = rate as usize;
+        let speech_at = window * 5 + pause;
+        // Speech, a full second of room tone below the threshold, then a soft
+        // onset: a sine from phase zero, so the first samples rise gently.
+        let mut signal = vec![0.3f32; window * 5];
+        signal.extend(std::iter::repeat_n(0.002f32, pause));
+        signal.extend((0..rate as usize / 5).map(|i| (std::f32::consts::TAU * 220.0 * i as f32 / rate as f32).sin() * 0.06));
+        let mut silence = Silence::new(rate, 1, 0.0);
+        let mut output = Vec::new();
+        let mut origins = Vec::new();
+        silence.process(&signal, Origin::default(), |samples, origin, _| {
+            origins.push((output.len(), origin.frame));
+            output.extend_from_slice(samples);
+        });
+        silence.finish(|samples, _, _| output.extend_from_slice(samples));
+
+        let at = origins.iter().find(|(_, frame)| *frame == speech_at as u64).map(|(out, _)| *out).expect("the speech played");
+        let last_lead = output[at - 1];
+        assert!((0.0019..=0.002).contains(&last_lead), "the quiet window before the speech survived: {last_lead}");
+        let step = output[at - 3 * window..at + window].windows(2).map(|pair| (pair[1] - pair[0]).abs()).fold(0.0f32, f32::max);
+        assert!(step < 0.01, "a click of {step} at the cut");
+        assert_eq!(output[at..at + rate as usize / 5], signal[speech_at..], "the returning speech is not faded");
     }
 
     #[test]
     fn lookahead_origins_are_stored_per_run_and_a_seek_resets_in_place() {
         let mut silence = Silence::new(48_000, 2, 0.0);
-        let capacities = (silence.samples.capacity(), silence.runs.capacity());
+        let capacities = (silence.samples.capacity(), silence.lead.capacity(), silence.runs.capacity());
         let window = vec![0.001; 48_000 / 10 * 2];
         for seq in 0..4 {
             silence.process(&window, Origin { seq, ..Default::default() }, |_, _, _| {});
@@ -329,7 +439,7 @@ mod tests {
         silence.boundary(|_, _, _| {});
         silence.reset(48_000, 2, 1.5);
         assert!(!silence.has_pending());
-        assert_eq!((silence.samples.capacity(), silence.runs.capacity()), capacities);
+        assert_eq!((silence.samples.capacity(), silence.lead.capacity(), silence.runs.capacity()), capacities);
     }
 
     #[test]
