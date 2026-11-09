@@ -82,6 +82,8 @@ pub enum Icon {
     SkipForward(u32),
     /// A crescent moon: the sleep timer.
     Moon,
+    /// A ribbon with a notch cut in its foot: a bookmark.
+    Bookmark,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -325,6 +327,10 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             let lit = (0..=32).map(|k| on(c, r1, toward + alpha + (tau - 2.0 * alpha) * k as f32 / 32.0));
             let shadow = (1..32).map(|k| on(bite, r2, toward - beta - (tau - 2.0 * beta) * k as f32 / 32.0));
             painter.add(Shape::closed_line(lit.chain(shadow).collect(), Stroke::new((r * 0.16).max(1.1), color)));
+        }
+        Icon::Bookmark => {
+            let ribbon = vec![p(-0.55, -0.85), p(0.55, -0.85), p(0.55, 0.88), p(0.0, 0.45), p(-0.55, 0.88)];
+            painter.add(Shape::closed_line(ribbon, line));
         }
         Icon::Clock => {
             painter.circle_stroke(c, r * 0.8, line);
