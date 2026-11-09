@@ -13,6 +13,7 @@
 use super::fixture::*;
 use super::*;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use std::path::PathBuf;
 
 struct Shooter {
@@ -105,6 +106,18 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // The speed menu, open over the bar.
+    *h.state_mut() = None;
+    *h.state_mut() = Some({
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app
+    });
+    h.run_steps(2);
+    h.get_by_label("Playback speed, 1.5×").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "player-speed");
     // The same page at the smallest window Rede opens: the cover goes
     // above the text and the columns stack.
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));

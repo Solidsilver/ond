@@ -47,6 +47,11 @@ fn every_view_names_its_controls() {
         app_mut(&mut h).go(book_route(0));
         h.run_steps(3);
         h.check_accessibility();
+        for label in ["Previous chapter (⇧←)", "Back 15 seconds", "Forward 30 seconds", "Next chapter (⇧→)", "Chapter position", "Playback speed, 1.5×"]
+        {
+            h.get_by_label(label);
+        }
+        h.get_by_label(if paused { "Play" } else { "Pause" });
     }
     // The sign-in screen, and the same with an error under the button.
     *h.state_mut() = Some(signed_out(&h.ctx.clone(), dir.path()));
@@ -146,11 +151,14 @@ fn the_player_exposes_speed_and_listening_preferences() {
     app_mut(&mut h).go(book_route(0));
     h.run_steps(3);
     h.get_by_label_contains("Resume ·");
-    h.get_by_label("1.5×").click();
+    h.get_by_label("Previous chapter (⇧←)");
+    h.get_by_label("Next chapter (⇧→)");
+    h.get_by_label("Playback speed, 1.5×").click();
     h.run_steps(2);
     assert_eq!(h.query_all_by_label("Speed").count(), 2);
-    h.get_by_label("Previous chapter");
-    h.get_by_label("Next chapter");
+    for speed in ["1×", "1.25×", "1.5×", "2×"] {
+        h.get_by_label(speed);
+    }
     h.get_by_label("Stop playback");
     h.check_accessibility();
 }
@@ -163,11 +171,45 @@ fn the_player_controls_fit_inside_the_bottom_panel() {
     for size in [FULL, [crate::MIN_SIZE[0], 560.0]] {
         h.set_size(egui::vec2(size[0], size[1]));
         h.run_steps(3);
-        for label in ["Skip back 15 seconds", "Play", "Skip forward 30 seconds", "Chapter position", "1.5×"] {
+        for label in ["Previous chapter (⇧←)", "Back 15 seconds", "Play", "Forward 30 seconds", "Next chapter (⇧→)", "Chapter position", "Playback speed, 1.5×"]
+        {
             let rect = h.get_by_label(label).rect();
             assert!(rect.min.y >= size[1] - 160.0 && rect.max.y <= size[1], "{label}: {rect:?}");
             assert!(rect.min.x >= 0.0 && rect.max.x <= size[0], "{label}: {rect:?}");
         }
+    }
+}
+
+#[test]
+fn the_player_bar_buttons_enqueue_their_controls() {
+    use crate::player::Control;
+    // Only the bar, with nothing applying what it asks for, so the test
+    // sees the actions themselves.
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).build_ui_state(
+        |ui, app: &mut Option<RedeApp>| {
+            if let Some(app) = app {
+                app.player_panel(ui);
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    playing(&mut app, true);
+    *h.state_mut() = Some(app);
+    h.run_steps(2);
+    for (label, expected) in [
+        ("Previous chapter (⇧←)", Control::PreviousChapter),
+        ("Back 15 seconds", Control::Skip(-15.0)),
+        ("Play", Control::Toggle),
+        ("Forward 30 seconds", Control::Skip(30.0)),
+        ("Next chapter (⇧→)", Control::NextChapter),
+    ] {
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        let actions = std::mem::take(&mut app_mut(&mut h).actions);
+        assert!(matches!(actions.as_slice(), [Action::Playback(control)] if *control == expected), "{label}: {} actions", actions.len());
     }
 }
 

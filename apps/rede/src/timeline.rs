@@ -82,9 +82,19 @@ pub fn normalize_speed(speed: f32) -> f32 {
 }
 
 pub fn left(seconds: f64, speed: f32) -> String {
+    format!("{} at {}", span_left(seconds), speed_label(speed))
+}
+
+/// "4h 10m left", in whole minutes rounded up, for a span already at speed.
+pub fn span_left(seconds: f64) -> String {
     let minutes = (seconds.max(0.0) / 60.0).ceil() as u64;
     let span = if minutes >= 60 { format!("{}h {}m", minutes / 60, minutes % 60) } else { format!("{minutes}m") };
-    format!("{span} left at {}×", normalize_speed(speed))
+    format!("{span} left")
+}
+
+/// "1.5×", as the speed is actually played.
+pub fn speed_label(speed: f32) -> String {
+    format!("{}×", normalize_speed(speed))
 }
 
 #[cfg(test)]
@@ -139,6 +149,8 @@ mod tests {
         assert_eq!(t.remaining(25.0, 1.5), (10.0, 50.0));
         assert_eq!(t.remaining(500.0, 3.0), (0.0, 0.0));
         assert_eq!(left(15_000.0, 1.5), "4h 10m left at 1.5×");
+        assert_eq!(span_left(59.0), "1m left");
+        assert_eq!(speed_label(1.0), "1×");
         assert_eq!(normalize_speed(1.526), 1.55);
         assert_eq!(normalize_speed(0.0), 0.5);
         assert_eq!(normalize_speed(9.0), 3.0);
