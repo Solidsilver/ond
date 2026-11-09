@@ -7,6 +7,7 @@ use crate::icons::{self, Icon};
 use crate::nav::{Nav, Route};
 use crate::theme::{Tokens, semibold};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use shell::kit::info_row;
 
 /// Width of the icon rail (the full sidebar's is the user's, see `layout`).
 pub const RAIL_W: f32 = 52.0;
@@ -482,17 +483,6 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::offline_page::M
 /// A row in the server menu. True when chosen.
 fn menu_item(ui: &mut Ui, label: &str) -> bool {
     crate::widgets::menu_row(ui, label)
-}
-
-/// A label and value in the server popover.
-fn info_row(ui: &mut Ui, label: &str, value: &str, color: egui::Color32) {
-    let t = Tokens::of(ui);
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        let (r, _) = ui.allocate_exact_size(vec2(64.0, 20.0), Sense::hover());
-        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), t.muted);
-        ui.add(egui::Label::new(egui::RichText::new(value).size(12.0).color(color)).truncate());
-    });
 }
 
 /// The server's state as the footer shows it.

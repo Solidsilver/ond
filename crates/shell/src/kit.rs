@@ -7,8 +7,10 @@
 //!   label), [`segmented_wide`] (equal segments) and [`choice`] (over values).
 //! - Controls: [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]
 //!   (and [`switch_tinted`]).
+//! - Labels: [`section`] (a muted group label), [`info_row`] (a label and
+//!   its value in a popover), [`key_cap`] (a combo drawn as a key).
 
-use crate::theme::Tokens;
+use crate::theme::{Tokens, semibold};
 use crate::widgets::focus_ring;
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Color32, FontId, Galley, Rect, Response, Sense, Ui, vec2};
@@ -277,6 +279,34 @@ pub fn switch_tinted(ui: &mut Ui, on: &mut bool, label: &str, on_color: Color32)
     let (on, label) = (*on, label.to_owned());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, true, on, &label));
     resp
+}
+
+/// Muted small-caps-ish section label.
+pub fn section(ui: &mut Ui, text: &str) {
+    let t = Tokens::of(ui);
+    ui.label(egui::RichText::new(text).font(FontId::new(11.0, semibold())).color(t.muted));
+}
+
+/// A key combo drawn as a small rounded key: `keys` as the platform writes
+/// them, on the field's fill with a hairline edge.
+pub fn key_cap(ui: &mut egui::Ui, keys: &str) {
+    let t = Tokens::of(ui);
+    let g = ui.painter().layout_no_wrap(keys.to_owned(), FontId::proportional(12.0), t.text);
+    let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 12.0, 20.0), egui::Sense::hover());
+    ui.painter().rect(r, 5.0, t.field, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+    ui.painter().galley(r.center() - g.size() / 2.0, g, t.text);
+}
+
+/// A label and value in a popover (the server's): the label muted in a
+/// fixed column, so values line up.
+pub fn info_row(ui: &mut Ui, label: &str, value: &str, color: egui::Color32) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let (r, _) = ui.allocate_exact_size(vec2(64.0, 20.0), Sense::hover());
+        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), t.muted);
+        ui.add(egui::Label::new(egui::RichText::new(value).size(12.0).color(color)).truncate());
+    });
 }
 
 #[cfg(test)]

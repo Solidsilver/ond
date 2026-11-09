@@ -9,6 +9,7 @@ use crate::theme::{Tokens, semibold};
 use crate::widgets::{danger, primary, secondary};
 use egui::{FontId, Key, Modifiers, vec2};
 use library::Track;
+use shell::kit::key_cap;
 
 pub enum Overlay {
     Shortcuts,
@@ -354,14 +355,6 @@ fn rows(group: &str) -> Vec<(&'static str, Vec<&'static str>)> {
 }
 
 /// A key combination in a quiet rounded box.
-fn key_cap(ui: &mut egui::Ui, keys: &str) {
-    let t = Tokens::of(ui);
-    let g = ui.painter().layout_no_wrap(keys.to_owned(), FontId::proportional(12.0), t.text);
-    let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 12.0, 20.0), egui::Sense::hover());
-    ui.painter().rect(r, 5.0, t.field, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
-    ui.painter().galley(r.center() - g.size() / 2.0, g, t.text);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

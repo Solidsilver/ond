@@ -3,9 +3,9 @@
 //! Settings is built from (a [`group`] of [`setting`]s).
 
 use crate::icons::{self, Icon};
-use crate::theme::{Tokens, semibold};
+use crate::theme::Tokens;
 use egui::{Color32, FontId, Rect, Response, Sense, Ui, pos2, vec2};
-pub use shell::kit::{choice, elide, elide_job, elide_middle, link, link_line, switch, switch_tinted, thin_slider, thin_slider_marked};
+pub use shell::kit::{choice, elide, elide_job, elide_middle, link, link_line, section, switch, switch_tinted, thin_slider, thin_slider_marked};
 pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
 
 /// A heart that loves / unloves: filled accent when on, a quiet outline when off.
@@ -101,12 +101,6 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
     resp
-}
-
-/// Muted small-caps-ish section label.
-pub fn section(ui: &mut Ui, text: &str) {
-    let t = Tokens::of(ui);
-    ui.label(egui::RichText::new(text).font(FontId::new(11.0, semibold())).color(t.muted));
 }
 
 /// A list row's background: the selection, else the hover tint, else none.
