@@ -113,11 +113,17 @@ pub fn quiet_button(ui: &mut Ui, icon: Option<Icon>, text: &str) -> Response {
     resp
 }
 
-/// A heart that loves / unloves: filled accent when on, a quiet outline when off.
+/// A heart that loves / unloves, drawn as a [`chip_button`] (as Rede's speed
+/// and sleep timer are): a muted outline on the field's fill, and once loved
+/// a filled heart in the accent on the accent's tint. `size` is the chip's
+/// side, `glyph` the heart's.
 pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
     let t = Tokens::of(ui);
-    let (icon, color, label) = if on { (crate::icons::Icon::HeartFilled, t.accent, "Unlove") } else { (crate::icons::Icon::Heart, t.muted, "Love") };
-    crate::icons::sized_button(ui, icon, label, vec2(size, size), glyph, Some(color))
+    let (icon, ink, label) = if on { (Icon::HeartFilled, t.accent, "Unlove") } else { (Icon::Heart, t.muted, "Love") };
+    let (id, rect) = ui.allocate_space(vec2(size, size));
+    let resp = chip_button(ui, rect, id, ChipButton { icon: Some(icon), text: None, size: glyph, radius: 6.0, lit: on, ink });
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+    resp.on_hover_text(label)
 }
 
 /// The heart over a row or display: drawn filled when loved, as an outline when
