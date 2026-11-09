@@ -19,6 +19,19 @@ pub fn span(secs: f64) -> String {
     }
 }
 
+/// How long ago, in Ond's words: "just now", "5 minutes ago", "3 hours ago",
+/// "2 days ago".
+pub fn ago(at: std::time::SystemTime) -> String {
+    let s = at.elapsed().map_or(0, |d| d.as_secs());
+    let (n, unit) = match s {
+        0..60 => return "just now".into(),
+        60..3600 => (s / 60, "minute"),
+        3600..86400 => (s / 3600, "hour"),
+        _ => (s / 86400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +50,15 @@ mod tests {
         assert_eq!(span(2460.0), "41 min");
         assert_eq!(span(41_040.0), "11 hr 24 min");
         assert_eq!(span(36_000.0), "10 hr");
+    }
+
+    #[test]
+    fn a_time_past_reads_in_the_largest_whole_unit() {
+        let back = |s: u64| std::time::SystemTime::now() - std::time::Duration::from_secs(s);
+        assert_eq!(ago(back(5)), "just now");
+        assert_eq!(ago(back(60)), "1 minute ago");
+        assert_eq!(ago(back(2 * 3600 + 59)), "2 hours ago");
+        assert_eq!(ago(back(3 * 86400)), "3 days ago");
+        assert_eq!(ago(std::time::SystemTime::now() + std::time::Duration::from_secs(30)), "just now", "a clock that moved back");
     }
 }

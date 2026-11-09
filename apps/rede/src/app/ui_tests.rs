@@ -38,6 +38,11 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    for tab in super::settings_page::Tab::ALL {
+        app_mut(&mut h).apply(Action::OpenSettings(tab));
+        h.run_steps(3);
+        h.check_accessibility();
+    }
     for paused in [false, true] {
         playing(app_mut(&mut h), paused);
         app_mut(&mut h).go(book_route(0));
@@ -234,10 +239,13 @@ fn the_player_exposes_speed_and_listening_preferences() {
     }
     assert_eq!(h.query_all_by_label("1.5×").count(), 2);
     h.check_accessibility();
-    // The skips and rewinds are settings, a click away in their own sheet.
+    // The skips and rewinds are settings, a click away on Settings' Playback
+    // tab, whichever tab it was last on.
+    app_mut(&mut h).ui.settings = super::settings_page::Tab::About;
     h.get_by_label("Settings…").click();
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::PlaybackSettings));
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Playback);
 }
 
 /// The controls the title bar holds while a book plays.
@@ -493,15 +501,17 @@ fn a_running_timer_shows_what_is_left_and_how_to_change_it() {
 }
 
 #[test]
-fn the_playback_settings_sheet_steps_each_setting_and_closes() {
+fn the_settings_page_steps_each_playback_setting_and_goes_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).go(book_route(0));
     h.run_steps(2);
     h.get_by_label("sam, books.example.com").click();
     h.run_steps(2);
-    h.get_by_label("Playback settings…").click();
+    h.get_by_label("Settings…").click();
     h.run_steps(3);
-    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::PlaybackSettings));
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Playback);
     h.check_accessibility();
     for (label, more) in [
         ("skip back, 15 s", "More skip back"),
@@ -519,15 +529,66 @@ fn the_playback_settings_sheet_steps_each_setting_and_closes() {
     h.get_by_label("Less rewind after a pause").click();
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).prefs.get(|s| s.playback.rewind), 5);
-    h.get_by_label("Close (esc)").click();
+    // The speech switches, each on its own.
+    h.get_by_role_and_label(egui::accesskit::Role::Switch, "Voice boost").click();
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).sheet, None);
-    // Esc closes it too.
-    app_mut(&mut h).sheet = Some(super::sheets::Sheet::PlaybackSettings);
+    assert!(app_mut(&mut h).prefs.get(|s| s.playback.voice_boost && !s.playback.skip_silence));
+    h.get_by_role_and_label(egui::accesskit::Role::Switch, "Skip silence").click();
     h.run_steps(2);
+    assert!(app_mut(&mut h).prefs.get(|s| s.playback.voice_boost && s.playback.skip_silence));
+    // Back returns to the book it was opened over; Esc does too.
+    h.get_by_label("← Back").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(0));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).sheet, None);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(0));
+}
+
+#[test]
+fn settings_lists_its_tabs_and_each_names_its_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::Playback));
+    h.run_steps(3);
+    h.get_by_label("Account").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account);
+    h.check_accessibility();
+    for label in ["https://books.example.com", "sam", "Password", "Sync now", "Sign out"] {
+        h.get_by_label(label);
+    }
+    h.get_by_label("Sign out").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).login.is_some(), "signed out, to the sign-in screen");
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::About));
+    h.run_steps(3);
+    h.check_accessibility();
+    for label in ["Rede", "Source code", "Report a problem"] {
+        h.get_by_label(label);
+    }
+    h.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn opening_settings_from_the_player_returns_to_the_full_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
+        app_mut(&mut h).set_mode(mode);
+        assert_eq!(app_mut(&mut h).mode, mode);
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+        h.run_steps(2);
+        assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Full);
+        assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
+        app_mut(&mut h).back();
+    }
 }
 
 #[test]

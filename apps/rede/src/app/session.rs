@@ -355,6 +355,7 @@ impl RedeApp {
         match outcome {
             Outcome::Done(report) => {
                 self.sync.offline = false;
+                self.sync.synced = Some(std::time::SystemTime::now());
                 // The libraries are the account's own: the shelf is read back
                 // by them at the next start, before the server answers.
                 if let Some(account) = self.session.account.as_mut() {

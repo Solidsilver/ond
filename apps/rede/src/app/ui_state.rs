@@ -37,6 +37,9 @@ pub struct SyncState {
     /// A sync the server asked us to hold off on, or one to retry after the
     /// network failed.
     pub retry_at: Option<Instant>,
+    /// When a sync last finished and wrote what changed: the wall clock, so
+    /// Settings can say how long ago.
+    pub synced: Option<std::time::SystemTime>,
     /// The last sync couldn't reach the server. Cleared when one gets
     /// through.
     pub offline: bool,
@@ -57,6 +60,8 @@ pub struct UiState {
     pub notice: Option<Notice>,
     /// The chapters column's tab, and whether it's a sheet.
     pub panel: super::panel::PanelState,
+    /// Settings' tab, kept while the page is away.
+    pub settings: super::settings_page::Tab,
 }
 
 impl UiState {

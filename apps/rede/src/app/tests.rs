@@ -25,6 +25,12 @@ fn every_view_draws() {
             frame(&ctx, &mut app);
         }
     }
+    // Settings on each tab.
+    for tab in super::settings_page::Tab::ALL {
+        app.apply(Action::OpenSettings(tab));
+        frame(&ctx, &mut app);
+    }
+    app.back();
     playing(&mut app, false);
     frame(&ctx, &mut app);
     app.player.paused = true;

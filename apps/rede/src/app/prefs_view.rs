@@ -27,11 +27,10 @@ pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
     Playback(crate::settings::PlaybackSettings),
-    // The popover sets these independently of the full playback form; a UI
-    // agent wires the switches next.
-    #[allow(dead_code)]
+    /// Voice boost or skip silence on its own, from a switch, so a switch
+    /// never writes back the rest of the playback settings as it last saw
+    /// them.
     VoiceBoost(bool),
-    #[allow(dead_code)]
     SkipSilence(bool),
     /// The chapters column shown or hidden.
     ShowPanel(bool),
