@@ -76,6 +76,10 @@ pub enum Icon {
     Bluetooth,
     /// A triangle under rings: AirPlay.
     AirPlay,
+    /// An arrow turning back round a circle, with the seconds it skips inside.
+    SkipBack(u32),
+    /// The same arrow turning forward: skip ahead by that many seconds.
+    SkipForward(u32),
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -379,6 +383,30 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.0, -0.75), p(0.0, 0.75)], line);
             painter.line_segment([p(-0.75, 0.0), p(0.75, 0.0)], line);
         }
+        Icon::SkipBack(seconds) | Icon::SkipForward(seconds) => {
+            // Drawn as back and mirrored for forward: the arrowhead at the top
+            // points the way it turns, and the circle runs from it round the
+            // far side, stopping short so the head stands clear. A plain
+            // chevron would read as previous and next.
+            let side = if matches!(icon, Icon::SkipForward(_)) { -1.0 } else { 1.0 };
+            let q = |x: f32, y: f32| p(side * x, y);
+            let ring = 0.8;
+            let stroke = Stroke::new((r * 0.13).max(1.1), color);
+            let arc = (0..=36).map(|k| {
+                let a = -std::f32::consts::FRAC_PI_2 + (std::f32::consts::TAU - 1.05) * k as f32 / 36.0;
+                q(ring * a.cos(), ring * a.sin())
+            });
+            painter.add(Shape::line(arc.collect(), stroke));
+            let mut head = vec![q(0.08, -ring - 0.22), q(0.08, -ring + 0.22), q(-0.3, -ring)];
+            if side < 0.0 {
+                // Mirrored, the corners would wind the other way round.
+                head.reverse();
+            }
+            painter.add(tri(head));
+            // Up to two digits fill the circle; three (up to 300) set smaller.
+            let size = r * if seconds >= 100 { 0.6 } else { 0.78 };
+            painter.text(c + vec2(0.0, r * 0.06), egui::Align2::CENTER_CENTER, seconds.to_string(), egui::FontId::new(size, crate::theme::semibold()), color);
+        }
         Icon::Spinner => {
             let t = painter.ctx().input(|i| i.time) as f32;
             let start = t * std::f32::consts::TAU * 1.2;
@@ -493,5 +521,36 @@ mod tests {
         let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
         std::fs::create_dir_all(&out).unwrap();
         h.render().unwrap().save(out.join("icons-volume.png")).unwrap();
+    }
+
+    /// The skip icons at the player bar's size and large, with two and three
+    /// digit intervals: `cargo test -p shell --release icons::tests::skip_icons -- --ignored`
+    /// writes target/snapshots/icons-skip.png.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    fn skip_icons() {
+        // The numbers are set in the theme's semibold, which arrives a frame
+        // after it's installed.
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(500.0, 80.0)).with_pixels_per_point(2.0).with_theme(egui::Theme::Dark).build_ui_state(
+            |ui, installed: &mut bool| {
+                if !std::mem::replace(installed, true) {
+                    crate::theme::install(ui.ctx(), crate::theme::ThemePref::Dark);
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                let painter = ui.painter();
+                painter.rect_filled(ui.max_rect(), 0.0, Color32::from_gray(30));
+                for (k, icon) in [Icon::SkipBack(15), Icon::SkipForward(30), Icon::SkipBack(120)].into_iter().enumerate() {
+                    let x = 20.0 + k as f32 * 160.0;
+                    paint(painter, Rect::from_center_size(egui::pos2(x, 40.0), vec2(24.0, 24.0)), icon, Color32::WHITE);
+                    paint(painter, Rect::from_center_size(egui::pos2(x + 80.0, 40.0), vec2(64.0, 64.0)), icon, Color32::WHITE);
+                }
+            },
+            false,
+        );
+        h.run();
+        let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
+        std::fs::create_dir_all(&out).unwrap();
+        h.render().unwrap().save(out.join("icons-skip.png")).unwrap();
     }
 }
