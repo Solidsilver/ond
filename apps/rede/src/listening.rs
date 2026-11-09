@@ -5,6 +5,7 @@
 use crate::failure::Failure;
 use shelf::Shelf;
 use sources::{DeviceInfo, ItemKey, PlaySession, Position, Progress, ProgressUpdate, Source};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -177,9 +178,8 @@ impl Worker {
         Ok(Opened { key, item, session, position })
     }
 
-    /// Old entries must not follow a newer live report onto the server. The
-    /// source's PATCH endpoint blindly overwrites, so check timestamps before
-    /// replaying and send each retained entry separately, in log order.
+    /// ABS blindly overwrites progress, so only the newest local position for
+    /// each item may follow the timestamp comparison onto the server.
     async fn replay(&self, before: Option<shelf::ProgressId>) -> Result<(), Failure> {
         let pending = self.shelf.pending_progress().map_err(local_error)?;
         let pending: Vec<_> = pending.into_iter().take_while(|p| before.is_none_or(|id| p.id < id)).collect();
@@ -187,13 +187,24 @@ impl Worker {
             return Ok(());
         }
         let remote = self.source.progress().await.map_err(Failure::from)?;
-        for entry in pending {
-            if !remote.iter().any(|p| p.item == entry.update.item && p.at.is_some_and(|at| at > entry.update.at)) {
-                self.source.set_progress(std::slice::from_ref(&entry.update)).await.map_err(Failure::from)?;
+        let mut newest = HashMap::new();
+        for entry in &pending {
+            let retained = newest.entry(&entry.update.item).or_insert(entry);
+            if (entry.update.at, entry.id) > (retained.update.at, retained.id) {
+                *retained = entry;
             }
-            self.shelf.mark_synced(&[entry.id]).map_err(local_error)?;
         }
-        Ok(())
+        let updates: Vec<_> = newest
+            .values()
+            .filter(|entry| !remote.iter().any(|p| p.item == entry.update.item && p.at.is_some_and(|at| at > entry.update.at)))
+            .map(|entry| entry.update.clone())
+            .collect();
+        // M4 will send offline listening as ABS local sessions for statistics;
+        // progress PATCH carries only the latest position, not listening time.
+        if !updates.is_empty() {
+            self.source.set_progress(&updates).await.map_err(Failure::from)?;
+        }
+        self.shelf.mark_synced(&pending.iter().map(|entry| entry.id).collect::<Vec<_>>()).map_err(local_error)
     }
 
     async fn report(&mut self, id: shelf::ProgressId, generation: u64, update: ProgressUpdate, close: bool) -> Result<(), Failure> {

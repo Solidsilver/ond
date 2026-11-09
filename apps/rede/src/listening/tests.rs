@@ -23,6 +23,7 @@ struct Fake {
     calls: Mutex<Vec<Call>>,
     report_errors: Mutex<VecDeque<sources::Error>>,
     patch_fails: AtomicBool,
+    batches: Mutex<Vec<Vec<f64>>>,
     remote: Mutex<Vec<Progress>>,
     blocked: AtomicBool,
     release: tokio::sync::Notify,
@@ -85,6 +86,7 @@ impl Source for Fake {
         if self.patch_fails.load(Ordering::Relaxed) {
             return Err(sources::Error::Network("offline".into()));
         }
+        self.batches.lock().unwrap().push(updates.iter().map(|u| u.position.secs()).collect());
         for update in updates {
             self.calls.lock().unwrap().push(Call::Patch(update.position.secs(), update.finished));
         }
@@ -102,16 +104,16 @@ struct Rig {
 }
 impl Rig {
     async fn new(local: Option<ProgressUpdate>, remote: Option<Progress>) -> Self {
+        Self::pending(local.into_iter().collect(), remote).await
+    }
+    async fn pending(local: Vec<ProgressUpdate>, remote: Option<Progress>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let shelf = Arc::new(Shelf::open(dir.path().join("shelf.redb")).unwrap());
-        if let Some(update) = &local {
+        for update in &local {
             shelf.append_progress(update).unwrap();
         }
-        let key = local
-            .as_ref()
-            .map(|p| p.item.clone())
-            .or_else(|| remote.as_ref().map(|p| p.item.clone()))
-            .unwrap_or_else(|| ItemKey::new(AccountId::new(), "book"));
+        let key =
+            local.first().map(|p| p.item.clone()).or_else(|| remote.as_ref().map(|p| p.item.clone())).unwrap_or_else(|| ItemKey::new(AccountId::new(), "book"));
         let fake = Arc::new(Fake::default());
         if let Some(remote) = remote {
             fake.remote.lock().unwrap().push(remote);
@@ -177,7 +179,7 @@ async fn a_failed_report_is_logged_and_replayed_before_the_next_live_report() {
 }
 
 #[tokio::test]
-async fn an_outage_keeps_every_report_in_order_until_recovery() {
+async fn an_outage_keeps_every_report_and_replays_only_the_latest_position() {
     let mut rig = Rig::new(None, None).await;
     rig.open(1, rig.key.clone()).await;
     rig.fake.report_errors.lock().unwrap().push_back(sources::Error::Network("offline".into()));
@@ -187,7 +189,7 @@ async fn an_outage_keeps_every_report_in_order_until_recovery() {
     assert_eq!(rig.shelf.pending_progress().unwrap().len(), 2);
     rig.fake.patch_fails.store(false, Ordering::Relaxed);
     rig.report(45.0, false, false).await;
-    assert!(rig.fake.calls().ends_with(&[Call::Patch(15.0, false), Call::Patch(30.0, false), Call::Report(45.0, Duration::from_secs(15))]));
+    assert!(rig.fake.calls().ends_with(&[Call::Patch(30.0, false), Call::Report(45.0, Duration::from_secs(15))]));
     assert!(rig.shelf.pending_progress().unwrap().is_empty());
     rig.finish().await;
 }
@@ -261,6 +263,38 @@ async fn new_positions_are_durable_while_an_earlier_network_report_is_stalled() 
     rig.fake.blocked.store(false, Ordering::Release);
     rig.fake.release.notify_waiters();
     rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.position.secs() == 45.0))).await;
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn an_hour_of_pending_progress_is_one_request_and_every_entry_is_synced() {
+    let key = ItemKey::new(AccountId::new(), "book");
+    let pending = (1..=240).map(|n| update(&key, f64::from(n * 15), false)).collect();
+    let rig = Rig::pending(pending, None).await;
+    assert_eq!(*rig.fake.batches.lock().unwrap(), vec![vec![3600.0]]);
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn several_items_replay_together_and_a_failed_batch_keeps_every_entry_pending() {
+    let mut rig = Rig::new(None, None).await;
+    rig.fake.patch_fails.store(true, Ordering::Relaxed);
+    for item in ["first", "second"] {
+        for at in [15.0, 30.0] {
+            rig.shelf.append_progress(&update(&ItemKey::new(rig.key.account, item), at, false)).unwrap();
+        }
+    }
+    // A live report first replays the pending batch; failure must retain it.
+    rig.report(45.0, false, false).await;
+    assert_eq!(rig.shelf.pending_progress().unwrap().len(), 5);
+    rig.fake.patch_fails.store(false, Ordering::Relaxed);
+    rig.report(60.0, false, false).await;
+    let batches = rig.fake.batches.lock().unwrap().clone();
+    let mut replay = batches[0].clone();
+    replay.sort_by(f64::total_cmp);
+    assert_eq!(replay, vec![30.0, 30.0, 45.0]);
     assert!(rig.shelf.pending_progress().unwrap().is_empty());
     rig.finish().await;
 }
