@@ -239,11 +239,14 @@ state; the bookmarks panel, shortcut and toast are wired by the UI change.
 - [ ] Pause Rede, listen on the phone for more than a minute, and focus Rede.
   It stays paused at the newer position and offers "Picked up where you left off
   on another device, … in." Repeat by quitting/reopening Rede and by resuming a
-  paused book; resume must pull before audio starts.
+  paused book; resume asks the server first but plays within about 2.5 s even
+  when the server is slow or unreachable.
 - [ ] Undo that reconciliation. The old local position returns in Rede and on
   the server; focusing again and restarting Rede must not bring the old phone
   position back. Repeat after the phone finished the book: Undo restores the
   unfinished local position, except inside ABS's automatic finish threshold.
+  This also confirms ABS honours the `lastUpdate` Rede sends with the
+  un-finish reset; if it doesn't, the book can jump to the start.
 - [ ] Change the phone position while Rede is actively playing the same book:
   Rede keeps playing from its local position and reports it. Pause Rede and
   listen later on the phone: the next pull can adopt that newer position.
@@ -253,6 +256,11 @@ state; the bookmarks panel, shortcut and toast are wired by the UI change.
 - [ ] Sign out or switch accounts while pulls are pending: no old bookmark or
   reconciliation result appears in the new session. Offline network errors are
   quiet after the first; a server refusal or local storage error is shown.
+- [ ] Make the server refuse a bookmark edit outright (e.g. remove the
+  account's access to the library): the error shows once, the edit is dropped
+  and later edits still sync. A 401 or 403 from a lapsed proxy or SSO session
+  keeps the edits queued instead. A server answering 5xx is retried less and
+  less often, up to every 10 minutes.
 
 The opt-in `abs::a_real_server_round_trip` test uses one login and one explicit
 refresh, creates/renames/lists/deletes a fractional bookmark, exercises progress,
