@@ -73,9 +73,62 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     // The sign-in screen, as a first start shows it.
     let dir = tempfile::tempdir().unwrap();
     scene(h, s, "signin", || signed_out(&ctx, dir.path()));
-    for (name, both, waiting) in [("signin-openid", false, false), ("signin-both", true, false), ("signin-waiting", false, true)] {
-        scene(h, s, name, || signin(&ctx, dir.path(), both, waiting));
+    // Once the server has said how it signs people in: passwords, its
+    // provider, both, and waiting on the browser (through Rede's own link, and
+    // through Audiobookshelf's when the server hasn't allowed Rede's).
+    for (name, methods, waiting) in [
+        ("signin-password", &["local"][..], None),
+        ("signin-openid", &["openid"], None),
+        ("signin-both", &["local", "openid"], None),
+        ("signin-waiting", &["openid"], Some(pending_openid())),
+        ("signin-fallback", &["openid"], Some(pending_openid_fallback())),
+    ] {
+        scene(h, s, name, || signin_with(&ctx, dir.path(), methods, waiting));
     }
+    // Waiting on the server for a password, and the ways it can go wrong: a
+    // wrong password with a warning about the server's version, an address
+    // that isn't one, and a server too old to use.
+    scene(h, s, "signin-busy", || {
+        let mut app = signin_with(&ctx, dir.path(), &["local", "openid"], None);
+        let form = app.login.as_mut().unwrap();
+        (form.username, form.busy) = ("sam".into(), true);
+        app.session.connecting = true;
+        app
+    });
+    let wrong_password = |app: &mut RedeApp| {
+        let form = app.login.as_mut().unwrap();
+        form.username = "sam".into();
+        form.error = Some(crate::bridge::sign_in_error(&abs::Error::Auth(abs::AuthError::BadCredentials)));
+        form.warning = Some("This server version has a known security issue; update it.".into());
+    };
+    scene(h, s, "signin-error", || {
+        let mut app = signin_with(&ctx, dir.path(), &["local"], None);
+        wrong_password(&mut app);
+        app
+    });
+    scene(h, s, "signin-bad-address", || {
+        let mut app = signed_out(&ctx, dir.path());
+        let form = app.login.as_mut().unwrap();
+        form.server = "books example".into();
+        form.error = Some(crate::bridge::sign_in_error(&abs::Client::new("books example", account().device()).err().unwrap()));
+        app
+    });
+    scene(h, s, "signin-too-old", || {
+        let mut app = signed_out(&ctx, dir.path());
+        let form = app.login.as_mut().unwrap();
+        form.server = "https://books.example.com".into();
+        form.error = Some("This server is version 2.19.0. Rede needs Audiobookshelf 2.26 or newer.".into());
+        app
+    });
+    // Both ways in, gone wrong, in the smallest window Rede opens.
+    h.set_size(egui::vec2(crate::MIN_SIZE[0], crate::MIN_SIZE[1]));
+    scene(h, s, "signin-narrow", || {
+        let mut app = signin_with(&ctx, dir.path(), &["local", "openid"], None);
+        wrong_password(&mut app);
+        app
+    });
+    scene(h, s, "signin-waiting-narrow", || signin_with(&ctx, dir.path(), &["openid"], Some(pending_openid_fallback())));
+    h.set_size(egui::vec2(FULL[0], FULL[1]));
     // A library with nothing in it yet.
     scene(h, s, "library-empty", || app(&ctx, dir.path(), 0));
     // Twelve books, in each of the orders the pill offers.

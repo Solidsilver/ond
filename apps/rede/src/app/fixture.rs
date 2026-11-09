@@ -290,28 +290,42 @@ pub fn playing(app: &mut RedeApp, paused: bool) {
 /// Server discovery and pending-keyring replies for sign-in screenshots and
 /// UI tests. These are wire fixtures, never real browser credentials.
 pub fn signin(ctx: &egui::Context, dir: &Path, both: bool, waiting: bool) -> RedeApp {
+    let methods: &[&str] = if both { &["local", "openid"] } else { &["openid"] };
+    signin_with(ctx, dir, methods, waiting.then(pending_openid))
+}
+
+/// The sign-in screen after the server said which `methods` it offers, and
+/// waiting for the browser when there's a `waiting` sign-in.
+pub fn signin_with(ctx: &egui::Context, dir: &Path, methods: &[&str], waiting: Option<crate::openid::Pending>) -> RedeApp {
     let mut app = signed_out(ctx, dir);
     {
         let form = app.login.as_mut().unwrap();
         form.server = "https://books.example.com".into();
         form.checked_server = form.server.clone();
     }
-    let methods = if both { vec!["local".into(), "openid".into()] } else { vec!["openid".into()] };
     app.handle(crate::bridge::AccountMsg::Status {
         session: app.bridge.session(),
         status: abs::ServerStatus {
-            auth_methods: methods,
+            auth_methods: methods.iter().map(|m| (*m).to_owned()).collect(),
             auth_form_data: abs::AuthFormData { auth_open_id_button_text: Some("Sign in with Book Club".into()), ..Default::default() },
             ..Default::default()
         },
         warning: None,
     });
-    if waiting {
-        app.handle(crate::bridge::AccountMsg::OpenIdRestored { session: 0, pending: Some(Box::new(pending_openid())) });
+    if let Some(pending) = waiting {
+        app.handle(crate::bridge::AccountMsg::OpenIdRestored { session: 0, pending: Some(Box::new(pending)) });
     } else {
         app.openid.restored = true;
     }
     app
+}
+
+/// A browser sign-in on a server that hasn't allowed Rede's own redirect, so
+/// it went through Audiobookshelf's.
+pub fn pending_openid_fallback() -> crate::openid::Pending {
+    let mut value = serde_json::to_value(pending_openid()).unwrap();
+    value["flow"]["redirect"] = "audiobookshelf://oauth".into();
+    serde_json::from_value(value).unwrap()
 }
 
 pub fn pending_openid() -> crate::openid::Pending {
