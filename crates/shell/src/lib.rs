@@ -12,6 +12,7 @@ pub mod colors;
 pub mod csd;
 pub mod icons;
 pub mod keys;
+pub mod now_playing;
 pub mod over_art;
 pub mod theme;
 pub mod widgets;
