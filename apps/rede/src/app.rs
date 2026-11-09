@@ -205,6 +205,9 @@ pub struct RedeApp {
     playback_generation: u64,
     opening: bool,
     resume_pending: bool,
+    /// When a resume pull has waited long enough to play from the local
+    /// position instead.
+    resume_deadline: Option<Instant>,
     sleep_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
     positions: std::collections::HashMap<String, sources::Progress>,
     stream_dir: std::path::PathBuf,
@@ -278,6 +281,7 @@ impl RedeApp {
             playback_generation: 0,
             opening: false,
             resume_pending: false,
+            resume_deadline: None,
             sleep_wake: Default::default(),
             positions: std::collections::HashMap::new(),
             bookmarks: bookmarks::State::default(),

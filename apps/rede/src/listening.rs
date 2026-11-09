@@ -141,9 +141,8 @@ pub fn spawn(
         notify(Event::Bookmarks(worker.shelf.bookmark_snapshot().map_err(local_error)));
         let mut received = worker.shelf.pending_progress().ok().and_then(|p| p.last().map(|p| p.id)).unwrap_or(0);
         if current() { worker.pull(None, &*notify).await; }
-        let period = std::time::Duration::from_secs(30);
-        let mut retry = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut retry_delay = RETRY_DELAY;
+        let mut retry_at = tokio::time::Instant::now() + retry_delay;
         loop {
             tokio::select! {
                 biased;
@@ -151,9 +150,14 @@ pub fn spawn(
                     let Some(Envelope { request, id }) = request else { break };
                     match request {
                         Request::Open { generation, key, at } if current() => {
-                            worker.pull(Some(received.saturating_add(1)), &*notify).await;
+                            // Opening must not wait for bookmark sync: the book
+                            // starts playing as soon as its position is known.
+                            let failed = worker.pull_positions(Some(received.saturating_add(1)), &*notify).await;
                             let result = worker.open(generation, key, at).await.map(Box::new);
                             notify(Event::Opened { generation, result });
+                            if !failed {
+                                let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
+                            }
                         }
                         Request::Refresh { generation } if current() => {
                             if let Some(session) = &mut worker.session && session.generation == generation {
@@ -172,12 +176,18 @@ pub fn spawn(
                         }
                         Request::Activity { item } if current() => { worker.active = item; }
                         Request::Bookmark { .. } if current() => {
-                            notify(Event::Bookmarks(crate::sync::bookmarks(&*worker.source, &worker.shelf).await));
+                            let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
                         }
                         Request::Undo(update) if current() => {
                             let id = id.expect("Undo is durable");
                             received = id;
-                            let result = worker.source.set_progress(std::slice::from_ref(&update)).await.map_err(Failure::from);
+                            // Undo may restore an unfinished position over a
+                            // finished row, so it needs the server's current
+                            // list to decide whether a reset PATCH comes first.
+                            let result = match worker.source.progress().await.map_err(Failure::from) {
+                                Ok(remote) => worker.source.set_progress(std::slice::from_ref(&update), &remote).await.map_err(Failure::from),
+                                Err(e) => Err(e),
+                            };
                             match result {
                                 Ok(()) => { if let Err(e) = worker.shelf.mark_synced(&[id]) { notify(Event::Error(local_error(e))); } }
                                 Err(e) => notify(Event::Error(e)),
@@ -186,8 +196,14 @@ pub fn spawn(
                             notify(Event::Positions(vec![Progress { item: update.item, position: update.position, finished: update.finished, at: Some(update.at) }]));
                         }
                         Request::Resume { generation } if current() => {
-                            worker.pull(Some(received.saturating_add(1)), &*notify).await;
+                            // ResumeReady comes straight after the positions:
+                            // the app waits on it, and bookmark sync must not
+                            // hold playback up.
+                            let failed = worker.pull_positions(Some(received.saturating_add(1)), &*notify).await;
                             notify(Event::ResumeReady { generation });
+                            if !failed {
+                                let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
+                            }
                         }
                         Request::Reconcile if current() => {
                             worker.pull(Some(received.saturating_add(1)), &*notify).await;
@@ -200,18 +216,25 @@ pub fn spawn(
                         _ => {}
                     }
                 }
-                _ = retry.tick() => {
-                    if !current() { continue; }
-                    if let Err(e) = worker.replay(Some(received.saturating_add(1))).await { notify(Event::Error(e)); }
-                    // Only queued bookmark edits are retried here: a pull already
-                    // asks when the window is focused, so an idle app asks nothing.
-                    match worker.shelf.pending_bookmarks() {
-                        Ok(pending) if !pending.is_empty() => {
-                            notify(Event::Bookmarks(crate::sync::bookmarks(&*worker.source, &worker.shelf).await));
+                _ = tokio::time::sleep_until(retry_at) => {
+                    let mut failed = false;
+                    if current() {
+                        if let Err(e) = worker.replay(Some(received.saturating_add(1))).await {
+                            failed = true;
+                            notify(Event::Error(e));
                         }
-                        Ok(_) => {}
-                        Err(e) => notify(Event::Error(local_error(e))),
+                        // Only queued bookmark edits are retried here: a pull already
+                        // asks when the window is focused, so an idle app asks nothing.
+                        match worker.shelf.pending_bookmarks() {
+                            Ok(pending) if !pending.is_empty() => {
+                                failed |= sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
+                            }
+                            Ok(_) => {}
+                            Err(e) => notify(Event::Error(local_error(e))),
+                        }
                     }
+                    retry_delay = next_retry_delay(retry_delay, failed);
+                    retry_at = tokio::time::Instant::now() + retry_delay;
                 }
             }
         }
@@ -219,22 +242,70 @@ pub fn spawn(
     Listening(tx)
 }
 
+/// The first pause after a failed retry, and the longest it grows to. A
+/// permanent refusal is dropped by `sync::bookmarks`, so only a network or 5xx
+/// failure keeps backing off.
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+fn next_retry_delay(current: std::time::Duration, failed: bool) -> std::time::Duration {
+    if failed { (current * 2).min(MAX_RETRY_DELAY) } else { RETRY_DELAY }
+}
+
+/// Reports a bookmark sync's snapshot and, when an edit was permanently
+/// refused and dropped, that refusal exactly once. Returns whether the failure
+/// is worth retrying, so only a network or 5xx answer backs the retry off.
+async fn sync_bookmarks(source: &dyn Source, shelf: &Shelf, notify: &(dyn Fn(Event) + Sync)) -> bool {
+    match crate::sync::bookmarks(source, shelf).await {
+        Ok(sync) => {
+            notify(Event::Bookmarks(Ok(sync.snapshot)));
+            if let Some(error) = sync.refused {
+                notify(Event::Error(error));
+            }
+            false
+        }
+        Err(error) => {
+            notify(Event::Bookmarks(Err(error)));
+            true
+        }
+    }
+}
+
 impl Worker {
     async fn pull(&mut self, before: Option<shelf::ProgressId>, notify: &(dyn Fn(Event) + Sync)) {
+        let network_failed = self.pull_positions(before, notify).await;
+        // A pull that couldn't reach the server skips the bookmark step: the
+        // next answer is likely the same, and resume must not wait for it.
+        if !network_failed {
+            sync_bookmarks(&*self.source, &self.shelf, notify).await;
+        }
+    }
+
+    /// Replays the log and takes the server's positions. Returns whether a
+    /// network failure happened on the way, which makes the bookmark step
+    /// pointless for this pull.
+    async fn pull_positions(&mut self, before: Option<shelf::ProgressId>, notify: &(dyn Fn(Event) + Sync)) -> bool {
+        let mut network_failed = false;
         match self.replay(before).await {
             Ok(()) => match self.positions(notify).await {
                 Ok(positions) => notify(Event::Positions(positions)),
-                Err(e) => notify(Event::Error(e)),
+                Err(e) => {
+                    network_failed = e.is_network();
+                    notify(Event::Error(e));
+                }
             },
-            Err(e) => notify(Event::Error(e)),
+            Err(e) => {
+                network_failed = e.is_network();
+                notify(Event::Error(e));
+            }
         }
-        notify(Event::Bookmarks(crate::sync::bookmarks(&*self.source, &self.shelf).await));
+        network_failed
     }
 
     async fn positions(&mut self, notify: &(dyn Fn(Event) + Sync)) -> Result<Vec<Progress>, Failure> {
-        let remote = self.source.progress().await.map_err(Failure::from)?;
+        let remote_list = self.source.progress().await.map_err(Failure::from)?;
         let mut positions = Vec::new();
-        for remote in remote {
+        for remote in remote_list.clone() {
             let local = self.shelf.position(&remote.item).map_err(local_error)?;
             // Moving audio under an active listener would interrupt this device.
             // It reports its own position; paused books may pick up the phone.
@@ -242,23 +313,37 @@ impl Worker {
             let local_wins = local.as_ref().is_some_and(|p| active || p.at > remote.at);
             if local_wins {
                 let local = local.unwrap();
-                if local.at > remote.at || local.position != remote.position || local.finished != remote.finished {
+                // Only the device actually playing may overwrite the server.
+                // A paused local position with a fast clock would otherwise win
+                // every pull and erase what the phone listened to; replay has
+                // already sent anything genuinely unsent.
+                if active && (local.at > remote.at || local.position != remote.position || local.finished != remote.finished) {
                     self.source
-                        .set_progress(&[ProgressUpdate {
-                            item: local.item.clone(),
-                            position: local.position,
-                            finished: local.finished,
-                            at: local.at.unwrap_or(std::time::SystemTime::now()),
-                            listened: std::time::Duration::ZERO,
-                        }])
+                        .set_progress(
+                            &[ProgressUpdate {
+                                item: local.item.clone(),
+                                position: local.position,
+                                finished: local.finished,
+                                at: local.at.unwrap_or(std::time::SystemTime::now()),
+                                listened: std::time::Duration::ZERO,
+                            }],
+                            &remote_list,
+                        )
                         .await
                         .map_err(Failure::from)?;
                 }
                 positions.push(local);
             } else if !active && self.shelf.accept_position(&remote).map_err(local_error)? {
-                let previous = local.unwrap_or_else(|| Progress { item: remote.item.clone(), position: Position::default(), finished: false, at: None });
-                if remote.at > previous.at && (remote.position.secs() - previous.position.secs()).abs() > 60.0 {
-                    notify(Event::Reconciled(Reconciled { previous, current: remote.clone() }));
+                // A toast and Undo only make sense for the book the player has
+                // loaded. A book started on the phone but never opened here is
+                // accepted silently: there is no local position to offer back.
+                let loaded = self.session.as_ref().is_some_and(|session| session.key == remote.item);
+                if loaded
+                    && let Some(previous) = &local
+                    && remote.at > previous.at
+                    && (remote.position.secs() - previous.position.secs()).abs() > 60.0
+                {
+                    notify(Event::Reconciled(Reconciled { previous: previous.clone(), current: remote.clone() }));
                 }
                 if let Some(session) = &mut self.session
                     && session.key == remote.item
@@ -310,7 +395,7 @@ impl Worker {
         // M4 will send offline listening as ABS local sessions for statistics;
         // progress PATCH carries only the latest position, not listening time.
         if !updates.is_empty() {
-            self.source.set_progress(&updates).await.map_err(Failure::from)?;
+            self.source.set_progress(&updates, &remote).await.map_err(Failure::from)?;
         }
         self.shelf.mark_synced(&pending.iter().map(|entry| entry.id).collect::<Vec<_>>()).map_err(local_error)
     }
@@ -331,10 +416,18 @@ impl Worker {
                     result.map_err(Failure::from)?;
                 }
                 if update.finished {
-                    self.source.set_progress(std::slice::from_ref(&update)).await.map_err(Failure::from)?;
+                    // A finished update never needs a reset, so it has no use
+                    // for the server's progress list.
+                    self.source.set_progress(std::slice::from_ref(&update), &[]).await.map_err(Failure::from)?;
                 }
+            } else if update.finished {
+                self.source.set_progress(std::slice::from_ref(&update), &[]).await.map_err(Failure::from)?;
             } else {
-                self.source.set_progress(std::slice::from_ref(&update)).await.map_err(Failure::from)?;
+                // No session to report through: the update goes straight to the
+                // progress endpoint, which may need the server's list to clear
+                // a finish first.
+                let remote = self.source.progress().await.map_err(Failure::from)?;
+                self.source.set_progress(std::slice::from_ref(&update), &remote).await.map_err(Failure::from)?;
             }
             self.shelf.mark_synced(&[id]).map_err(local_error)
         }

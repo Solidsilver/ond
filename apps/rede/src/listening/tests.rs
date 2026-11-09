@@ -31,6 +31,10 @@ struct Fake {
     bookmark_calls: Mutex<Vec<String>>,
     bookmark_offline: AtomicBool,
     lose_bookmark_response: AtomicBool,
+    refuse_bookmark: Mutex<Option<String>>,
+    bookmarks_blocked: AtomicBool,
+    progress_fails: AtomicBool,
+    progress_calls: AtomicUsize,
     release: tokio::sync::Notify,
 }
 impl Fake {
@@ -85,22 +89,36 @@ impl Source for Fake {
         Ok(())
     }
     async fn progress(&self) -> Result<Vec<Progress>> {
+        self.progress_calls.fetch_add(1, Ordering::Relaxed);
+        if self.progress_fails.load(Ordering::Relaxed) {
+            return Err(sources::Error::Network("offline".into()));
+        }
         Ok(self.remote.lock().unwrap().clone())
     }
     async fn bookmarks(&self) -> Result<Vec<sources::Bookmark>> {
         self.bookmark_lists.fetch_add(1, Ordering::Relaxed);
+        loop {
+            let released = self.release.notified();
+            if !self.bookmarks_blocked.load(Ordering::Acquire) {
+                break;
+            }
+            released.await;
+        }
         if self.bookmark_offline.load(Ordering::Relaxed) {
             return Err(sources::Error::Network("offline".into()));
         }
         Ok(self.bookmarks.lock().unwrap().clone())
     }
     async fn create_bookmark(&self, item: &str, time: Position, title: &str) -> Result<sources::Bookmark> {
+        self.bookmark_calls.lock().unwrap().push(format!("create:{title}"));
+        if self.refuse_bookmark.lock().unwrap().as_deref() == Some(title) {
+            return Err(sources::Error::Server { status: 403, message: Some("no room for bookmarks".into()) });
+        }
         let mut bookmarks = self.bookmarks.lock().unwrap();
         let account = bookmarks.first().map_or_else(test_account, |b| b.item.account);
         let value = sources::Bookmark { item: ItemKey::new(account, item), position: time, title: title.into(), created: SystemTime::now() };
         bookmarks.retain(|b| b.item.item != item || b.position != time);
         bookmarks.push(value.clone());
-        self.bookmark_calls.lock().unwrap().push(format!("create:{title}"));
         if self.lose_bookmark_response.swap(false, Ordering::Relaxed) {
             return Err(sources::Error::Network("response lost".into()));
         }
@@ -119,7 +137,7 @@ impl Source for Fake {
         Ok(())
     }
 
-    async fn set_progress(&self, updates: &[ProgressUpdate]) -> Result<()> {
+    async fn set_progress(&self, updates: &[ProgressUpdate], _remote: &[Progress]) -> Result<()> {
         if self.patch_fails.load(Ordering::Relaxed) {
             return Err(sources::Error::Network("offline".into()));
         }
@@ -366,12 +384,12 @@ async fn offline_bookmarks_replay_in_order_after_reopening_the_shelf() {
     }
     let shelf = Shelf::open(&path).unwrap();
     source.bookmark_offline.store(false, Ordering::Relaxed);
-    assert_eq!(crate::sync::bookmarks(&source, &shelf).await.unwrap().bookmarks[0].title, "Renamed");
+    assert_eq!(crate::sync::bookmarks(&source, &shelf).await.unwrap().snapshot.bookmarks[0].title, "Renamed");
     assert_eq!(*source.bookmark_calls.lock().unwrap(), ["create:First", "rename:Renamed"]);
     assert!(shelf.pending_bookmarks().unwrap().is_empty());
     shelf.queue_bookmark(&bookmark("Renamed"), shelf::BookmarkChange::Delete).unwrap();
     assert!(shelf.all_bookmarks().unwrap().is_empty());
-    assert!(crate::sync::bookmarks(&source, &shelf).await.unwrap().bookmarks.is_empty());
+    assert!(crate::sync::bookmarks(&source, &shelf).await.unwrap().snapshot.bookmarks.is_empty());
     assert!(source.bookmarks.lock().unwrap().is_empty());
 }
 
@@ -386,7 +404,7 @@ async fn a_phone_rename_or_deletion_wins_over_a_queued_bookmark_edit() {
         }
         shelf.queue_bookmark(&bookmark("Local"), change).unwrap();
         *source.bookmarks.lock().unwrap() = vec![bookmark("Phone")];
-        assert_eq!(crate::sync::bookmarks(&source, &shelf).await.unwrap().bookmarks, [bookmark("Phone")]);
+        assert_eq!(crate::sync::bookmarks(&source, &shelf).await.unwrap().snapshot.bookmarks, [bookmark("Phone")]);
         assert!(source.bookmark_calls.lock().unwrap().is_empty());
         assert!(shelf.pending_bookmarks().unwrap().is_empty());
     }
@@ -395,7 +413,7 @@ async fn a_phone_rename_or_deletion_wins_over_a_queued_bookmark_edit() {
     shelf.replace_bookmarks(&[bookmark("Original")]).unwrap();
     shelf.queue_bookmark(&bookmark("Rename"), shelf::BookmarkChange::Rename).unwrap();
     let source = Fake::default();
-    assert!(crate::sync::bookmarks(&source, &shelf).await.unwrap().bookmarks.is_empty());
+    assert!(crate::sync::bookmarks(&source, &shelf).await.unwrap().snapshot.bookmarks.is_empty());
     assert!(source.bookmark_calls.lock().unwrap().is_empty(), "rename must not recreate a deleted phone bookmark");
 }
 
@@ -408,7 +426,7 @@ async fn a_lost_bookmark_response_can_be_retried_without_duplicate_writes() {
     shelf.queue_bookmark(&bookmark("Local"), shelf::BookmarkChange::Create).unwrap();
     assert!(crate::sync::bookmarks(&source, &shelf).await.unwrap_err().is_network());
     assert_eq!(shelf.pending_bookmarks().unwrap().len(), 1);
-    assert_eq!(crate::sync::bookmarks(&source, &shelf).await.unwrap().bookmarks.len(), 1);
+    assert_eq!(crate::sync::bookmarks(&source, &shelf).await.unwrap().snapshot.bookmarks.len(), 1);
     assert_eq!(*source.bookmark_calls.lock().unwrap(), ["create:Local"]);
     assert!(shelf.pending_bookmarks().unwrap().is_empty());
 }
@@ -492,6 +510,7 @@ async fn a_bookmark_is_visible_and_durable_while_an_earlier_report_is_stalled() 
 #[tokio::test]
 async fn a_paused_resume_pulls_the_phone_position_before_signalling_playback() {
     let mut rig = Rig::new(None, None).await;
+    rig.open(1, rig.key.clone()).await;
     rig.report(50.0, false, false).await;
     *rig.fake.remote.lock().unwrap() =
         vec![Progress { item: rig.key.clone(), position: Position::from_secs(500.0), finished: false, at: Some(SystemTime::now() + Duration::from_secs(10)) }];
@@ -512,4 +531,144 @@ async fn a_pull_with_nothing_queued_asks_the_server_for_bookmarks_once() {
     rig.event(|e| matches!(e, Event::Bookmarks(_))).await;
     assert_eq!(rig.fake.bookmark_lists.load(Ordering::Relaxed), 2, "and a focus pull is one request");
     rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_book_first_started_on_the_phone_is_accepted_without_an_undo_toast() {
+    let mut rig = Rig::new(None, None).await;
+    *rig.fake.remote.lock().unwrap() = vec![Progress {
+        item: rig.key.clone(),
+        position: Position::from_secs(5_000.0),
+        finished: false,
+        at: Some(SystemTime::now() + Duration::from_secs(10)),
+    }];
+    rig.listening.send(Request::Reconcile);
+    let mut reconciled = false;
+    loop {
+        match rig.events.recv().await.unwrap() {
+            Event::Reconciled(_) => reconciled = true,
+            Event::Positions(positions) if positions.iter().any(|p| p.position.secs() == 5_000.0) => break,
+            _ => {}
+        }
+    }
+    assert!(!reconciled, "there is no local place to undo to");
+    assert_eq!(rig.shelf.position(&rig.key).unwrap().unwrap().position.secs(), 5_000.0);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_phone_position_does_not_offer_undo_for_a_book_the_player_has_not_loaded() {
+    let mut rig = Rig::new(None, None).await;
+    let id = rig.shelf.append_progress(&update(&rig.key, 50.0, false)).unwrap();
+    rig.shelf.mark_synced(&[id]).unwrap();
+    *rig.fake.remote.lock().unwrap() = vec![Progress {
+        item: rig.key.clone(),
+        position: Position::from_secs(5_000.0),
+        finished: false,
+        at: Some(SystemTime::now() + Duration::from_secs(10)),
+    }];
+    rig.listening.send(Request::Reconcile);
+    let mut reconciled = false;
+    loop {
+        match rig.events.recv().await.unwrap() {
+            Event::Reconciled(_) => reconciled = true,
+            Event::Positions(positions) if positions.iter().any(|p| p.position.secs() == 5_000.0) => break,
+            _ => {}
+        }
+    }
+    assert!(!reconciled, "a book that isn't open has nothing to move or undo");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_paused_local_position_ahead_of_the_clock_does_not_overwrite_the_phone() {
+    let key = ItemKey::new(test_account(), "book");
+    let remote =
+        Progress { item: key.clone(), position: Position::from_secs(4_000.0), finished: false, at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)) };
+    let mut rig = Rig::new(None, Some(remote)).await;
+    let local = ProgressUpdate {
+        item: key.clone(),
+        position: Position::from_secs(50.0),
+        finished: false,
+        at: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
+        listened: Duration::ZERO,
+    };
+    let id = rig.shelf.append_progress(&local).unwrap();
+    rig.shelf.mark_synced(&[id]).unwrap();
+    rig.listening.send(Request::Reconcile);
+    let Event::Positions(positions) = rig.event(|e| matches!(e, Event::Positions(_))).await else { unreachable!() };
+    assert_eq!(positions[0].position.secs(), 50.0, "the newest local position still wins here");
+    assert_eq!(rig.fake.remote.lock().unwrap()[0].position.secs(), 4_000.0, "but a paused device does not overwrite the phone");
+    assert!(!rig.fake.calls().iter().any(|c| matches!(c, Call::Patch(..))));
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn resume_does_not_wait_for_bookmark_sync() {
+    let mut rig = Rig::new(None, None).await;
+    rig.fake.bookmarks_blocked.store(true, Ordering::Release);
+    rig.listening.send(Request::Resume { generation: 7 });
+    rig.event(|e| matches!(e, Event::ResumeReady { generation: 7 })).await;
+    rig.fake.bookmarks_blocked.store(false, Ordering::Release);
+    rig.fake.release.notify_waiters();
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn opening_a_book_does_not_wait_for_bookmark_sync() {
+    let mut rig = Rig::new(None, None).await;
+    rig.fake.bookmarks_blocked.store(true, Ordering::Release);
+    rig.open(1, rig.key.clone()).await;
+    rig.fake.bookmarks_blocked.store(false, Ordering::Release);
+    rig.fake.release.notify_waiters();
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_pull_that_cannot_reach_the_server_skips_bookmark_sync() {
+    let mut rig = Rig::new(None, None).await;
+    let before = rig.fake.bookmark_lists.load(Ordering::Relaxed);
+    rig.fake.progress_fails.store(true, Ordering::Relaxed);
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Error(e) if e.is_network())).await;
+    // Give a regression time to make the bookmark request it should skip.
+    let _ = tokio::time::timeout(Duration::from_millis(100), async {
+        while rig.fake.bookmark_lists.load(Ordering::Relaxed) == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(rig.fake.bookmark_lists.load(Ordering::Relaxed), before, "the same unreachable server isn't asked again for bookmarks");
+    rig.fake.progress_fails.store(false, Ordering::Relaxed);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_refused_bookmark_edit_is_dropped_reported_once_and_does_not_block_the_next() {
+    let mut rig = Rig::new(None, None).await;
+    *rig.fake.refuse_bookmark.lock().unwrap() = Some("Refused".into());
+    rig.shelf.queue_bookmark(&bookmark("Refused"), shelf::BookmarkChange::Create).unwrap();
+    let next = sources::Bookmark { position: Position::from_secs(2_000.0), ..bookmark("Next") };
+    rig.shelf.queue_bookmark(&next, shelf::BookmarkChange::Create).unwrap();
+    rig.listening.send(Request::Reconcile);
+    let Event::Error(error) = rig.event(|e| matches!(e, Event::Error(_))).await else { unreachable!() };
+    assert!(error.message().contains("403"), "the refusal is shown: {}", error.message());
+    assert!(rig.shelf.pending_bookmarks().unwrap().is_empty(), "a permanent refusal is not retried forever");
+    assert_eq!(*rig.fake.bookmark_calls.lock().unwrap(), ["create:Refused", "create:Next"], "the rest of the queue still runs");
+    assert!(rig.shelf.bookmark_snapshot().unwrap().bookmarks.iter().any(|b| b.title == "Next"));
+
+    // A later pull finds nothing queued and does not create the refused edit again.
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Bookmarks(Ok(snapshot)) if snapshot.bookmarks.iter().any(|b| b.title == "Next"))).await;
+    assert_eq!(*rig.fake.bookmark_calls.lock().unwrap(), ["create:Refused", "create:Next"], "a dropped edit is not attempted again");
+    rig.finish().await;
+}
+
+#[test]
+fn a_failed_retry_backs_off_and_a_success_resets_it() {
+    let doubled = next_retry_delay(RETRY_DELAY, true);
+    assert_eq!(doubled, RETRY_DELAY * 2);
+    assert_eq!(next_retry_delay(doubled, true), RETRY_DELAY * 4);
+    assert_eq!(next_retry_delay(MAX_RETRY_DELAY, true), MAX_RETRY_DELAY);
+    assert_eq!(next_retry_delay(doubled, false), RETRY_DELAY);
 }
