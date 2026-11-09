@@ -6,7 +6,7 @@
 //! timer stops playback, is a card in the manner of Ond's toasts, floating
 //! over the bottom of whatever it's given, with the one button that matters.
 
-use super::player_bar::{Pill, pill};
+use super::controls::{Pill, pill};
 use super::{Action, PrefsAction, view_ctx::ViewCtx};
 use crate::{player::Control, sleep::Choice};
 use egui::{FontId, Rect, Response, RichText, Sense, Ui, pos2, vec2};

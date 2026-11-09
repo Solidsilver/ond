@@ -11,7 +11,7 @@
 //! - `library`: the books the shelf has, in the order drawn
 //! - `nav`: where the window is, and how it got there
 //! - `playing`: playback actions, engine events and the listening worker
-//! - `player_bar`: chapter seeking and the listening controls
+//! - `controls`: chapter seeking and the listening controls
 //! - `ui_state`: the notice line, the trail, and what a frame reads
 //! - `prefs_view`: the preferences a frame reads, and the actions that change
 //!   them
@@ -42,9 +42,9 @@
 //!    control needs a `widget_info`), and a scene in `snapshots.rs`.
 
 mod book;
+mod controls;
 mod library;
 mod nav;
-mod player_bar;
 mod player_view;
 mod playing;
 mod prefs_view;

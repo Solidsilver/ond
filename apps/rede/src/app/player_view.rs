@@ -13,7 +13,7 @@
 //! scrim along its foot, in light colours that read on any cover. Unlike
 //! Ond's they don't wait for the pointer: they are all of Mini's controls.
 
-use super::player_bar::{self, Pill};
+use super::controls::{self, Pill};
 use super::{Action, RedeApp, view_ctx::ViewCtx};
 use crate::player::Control;
 use egui::{Align, Color32, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -137,11 +137,11 @@ impl ViewCtx<'_> {
 
         let at = self.player.position;
         let (start, end) = book.timeline.chapter_range(at);
-        let (shown, seek) = player_bar::scrubber(ui, at, start, end, &t);
+        let (shown, seek) = controls::scrubber(ui, at, start, end, &t);
         if let Some(at) = seek {
             self.actions.push(Action::Playback(Control::Seek(at)));
         }
-        player_bar::book_line(ui, &book.timeline, shown, &t);
+        controls::book_line(ui, &book.timeline, shown, &t);
         ui.add_space(TIMES_GAP);
 
         // The chapter's times at the scrubber's ends, in the bar's words; the
@@ -173,8 +173,8 @@ impl ViewCtx<'_> {
         let text = format!("{} at", crate::timeline::span_left(book_left));
         let font = FontId::proportional(size.font);
         let text_w = ui.painter().layout_no_wrap(text.clone(), font.clone(), t.muted).size().x;
-        let sleep_w = player_bar::pill_width(ui, size, Some(Icon::Moon), self.sleep_text().as_deref());
-        let speed_w = player_bar::pill_width(ui, size, None, Some(&crate::timeline::speed_label(speed)));
+        let sleep_w = controls::pill_width(ui, size, Some(Icon::Moon), self.sleep_text().as_deref());
+        let speed_w = controls::pill_width(ui, size, None, Some(&crate::timeline::speed_label(speed)));
         let (group_gap, gap) = (14.0, 6.0);
         let total = sleep_w + group_gap + text_w + gap + speed_w;
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), size.height), Sense::hover());
@@ -189,7 +189,7 @@ impl ViewCtx<'_> {
         self.sleep_control(&mut line, size);
         line.add_space(group_gap - gap);
         line.label(egui::RichText::new(text).font(font).color(t.muted));
-        let pill = player_bar::speed_pill(&mut line, t, speed, size);
+        let pill = controls::speed_pill(&mut line, t, speed, size);
         self.speed_menu(&pill);
     }
 
@@ -216,7 +216,7 @@ impl ViewCtx<'_> {
         if icons::sized_button(ui, Icon::SkipBack(back), &format!("Back {back} seconds"), vec2(skip, skip), glyph, Some(fg)).clicked() {
             self.actions.push(Action::Playback(Control::Skip(-f64::from(back))));
         }
-        if player_bar::round_play(ui, play, fg, knock, self.player.paused || !self.player.active).clicked() {
+        if controls::round_play(ui, play, fg, knock, self.player.paused || !self.player.active).clicked() {
             self.actions.push(Action::Playback(Control::Toggle));
         }
         let forward = self.playback.skip_forward;
