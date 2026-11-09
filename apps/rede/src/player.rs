@@ -341,14 +341,19 @@ impl ReportClock {
 
     pub fn poll(&mut self, state: PlayState, now: Instant) -> Option<bool> {
         let changed = state != self.state;
-        let due = matches!(state, PlayState::Playing | PlayState::Buffering) && now.saturating_duration_since(self.last) >= Duration::from_secs(15);
-        self.state = state;
-        if changed || due {
+        let running = matches!(state, PlayState::Playing | PlayState::Buffering);
+        let was_running = matches!(self.state, PlayState::Playing | PlayState::Buffering);
+        if running && !was_running {
             self.last = now;
-            Some(due)
-        } else {
-            None
         }
+        // An intermittent stream still needs reports while it alternates
+        // between audible output and buffer holds.
+        let due = running && now.saturating_duration_since(self.last) >= Duration::from_secs(15);
+        self.state = state;
+        if due {
+            self.last = now;
+        }
+        (changed || due).then_some(due)
     }
 }
 

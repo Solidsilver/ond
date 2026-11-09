@@ -459,3 +459,18 @@ fn a_hidden_file_end_starts_the_next_file_when_gapless_playback_was_unavailable(
     assert!(notes.is_empty());
     assert_eq!(ctx.cumulative_pass_nr(), 0);
 }
+
+#[test]
+fn repeated_buffer_holds_do_not_postpone_the_reporting_deadline() {
+    let now = Instant::now();
+    let mut clock = ReportClock::new(now);
+    assert_eq!(clock.poll(PlayState::Playing, now), Some(false));
+    let mut reports = Vec::new();
+    for second in 1..=45 {
+        let state = if second % 2 == 0 { PlayState::Playing } else { PlayState::Buffering };
+        if clock.poll(state, now + Duration::from_secs(second)) == Some(true) {
+            reports.push(second);
+        }
+    }
+    assert_eq!(reports, vec![15, 30, 45]);
+}
