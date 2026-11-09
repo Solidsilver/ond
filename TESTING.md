@@ -192,3 +192,29 @@ pending transaction before it opens a browser.
 `scripts/bundle-rede-macos.sh` without `--dev` also builds Rede's zip and dmg;
 `--universal` builds both architectures. Ond continues to use its unchanged
 `scripts/bundle-macos.sh` and `packaging/macos/Info.plist.in`.
+
+## Rede speech processing (M3)
+
+These checks need real output and a person listening. Use a release build.
+The switches arrive with the Playback popover. Until then, set
+`playback.voice_boost` or `playback.skip_silence` to `true` in Rede's
+`settings.json` (under `~/.config/rede/`, or `~/Library/Application Support/rede/`
+on macOS) and relaunch.
+
+- [ ] Listen to speech with both switches on at 1×, 1.5× and 2×. Consonants stay
+  clear, quiet passages are audible, stereo placement stays steady and loud
+  peaks do not crackle. Compare with each switch off.
+- [ ] Use long pauses, room tone, very quiet narration and a music-heavy intro.
+  Long quiet runs shrink to about 200 ms of source time; short pauses and
+  music retain their rhythm. Listen for clicks or pumping at the cuts.
+- [ ] Include a pause crossing a gapless file boundary and an entirely quiet
+  file/tail. Playback advances without stalling; chapters, scrubber, source
+  position and progress jump by the removed time. The saved-time readout moves
+  only when that cut reaches output, and stays correct after changing speed.
+- [ ] Toggle each switch while playing and paused; seek into and out of a long
+  pause, change speed, and cross a file boundary. No old buffered speech leaks
+  through a seek, pause remains paused, and settings survive a relaunch.
+- [ ] Check the chapter sleep timer near a removed pause; it follows book time.
+  Check a minutes timer separately; it follows elapsed listening time.
+- [ ] Play music in Ond with its default settings and compare its usual output
+  and signal path; neither speech stage is enabled there.

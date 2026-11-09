@@ -304,9 +304,9 @@ This is the most important engine change: everything else builds on it. Ond keep
 
 A speed change has to be heard at once, but the ring holds about 2 seconds already stretched at the old speed. So a speed change works like a seek: flush the ring and refill from the current source position at the new speed, as a seek does. A short fade at the switch may be needed to avoid a click.
 
-**4. Silence removal.** Before the stretch: measure level in 10 ms windows; a run below a threshold (about −45 dBFS, relative to the book's loudness) for longer than about 400 ms is shortened to about 200 ms, with short fades at the cut. Removed time is a new segment, so positions stay correct. The total time saved is shown, as podcast apps do. Off by default; one switch, with a strength setting perhaps later.
+**4. Silence removal.** Implemented in M3; tuned parameters and source-time accounting are in [Playing books](playback.md#speech-processing). Before the stretch: measure level in 10 ms windows; a run below a threshold (about −45 dBFS, absolute until a cheap book loudness measurement is available) for longer than about 400 ms is shortened to about 200 ms, with short fades at the cut. Removed time is a new segment, so positions stay correct. The total time saved is shown, as podcast apps do. Off by default; one switch, with a strength setting perhaps later.
 
-**5. Voice boost.** After the stretch: a gentle compressor (slow attack, so consonants stay crisp), a few dB of presence boost around 2–4 kHz, makeup gain and a limiter. One switch. Loudness from the `ebur128` measurement Ond's `analysis` crate does could set a per-book target level, so quiet and loud recordings come out alike.
+**5. Voice boost.** Implemented in M3, with per-book loudness levelling deferred. After the stretch: a gentle compressor (slow attack, so consonants stay crisp), a few dB of presence boost around 2–4 kHz, makeup gain and a limiter. One switch. Loudness from the `ebur128` measurement Ond's `analysis` crate does could set a per-book target level, so quiet and loud recordings come out alike.
 
 **6. Mono** (small): a downmix option, for one earbud or one speaker.
 

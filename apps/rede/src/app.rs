@@ -375,8 +375,17 @@ impl RedeApp {
                 playback.sleep_rewind = playback.sleep_rewind.min(60);
                 self.prefs.edit(|s| s.playback = playback);
                 self.shown.playback = playback;
+                if let Some(engine) = &self.engine {
+                    crate::player::apply_speech(playback, engine);
+                }
                 #[cfg(target_os = "macos")]
                 shell::now_playing::intervals(f64::from(playback.skip_back), f64::from(playback.skip_forward));
+            }
+            PrefsAction::VoiceBoost(enabled) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { voice_boost: enabled, ..self.shown.playback }));
+            }
+            PrefsAction::SkipSilence(enabled) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { skip_silence: enabled, ..self.shown.playback }));
             }
             PrefsAction::Sort(sort) => {
                 if self.prefs.get(|s| s.sort) == sort {

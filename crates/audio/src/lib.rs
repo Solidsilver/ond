@@ -123,6 +123,7 @@ mod output;
 pub mod replaygain;
 mod resample;
 mod signal;
+mod speech;
 mod stretch;
 pub mod tap;
 
@@ -238,6 +239,12 @@ pub enum Command {
     /// current source position through the seek handshake, preserving pause.
     /// Persists across tracks, seeks and new plays until changed again.
     SetSpeed(f32),
+    /// Gentle speech compressor, presence EQ and limiter. Off by default.
+    /// Uses the seek hold/flush and a 5 ms wet ramp, preserving source time.
+    SetVoiceBoost(bool),
+    /// Shorten quiet runs before stretching. Off by default. Uses the seek
+    /// hold/flush so already queued audio cannot use the previous setting.
+    SetSkipSilence(bool),
     /// ReplayGain settings. Applies to the current track at once (with a short
     /// glide) and to every track after it.
     SetGain(GainConfig),
@@ -389,6 +396,13 @@ pub struct Status {
     /// Requested speed as f32 bits (0 in a default snapshot means unity).
     /// Engine; the decoder captures it with each seek request.
     speed_bits: AtomicU32,
+    /// Requested speech processing. Engine; captured with each seek.
+    voice_boost: AtomicBool,
+    skip_silence: AtomicBool,
+    /// Cumulative removed source seconds heard in this play session. Callback
+    /// (timeline segments); engine (new Play). Seeks and internal restarts
+    /// retain heard savings, discarding savings in flushed lookahead.
+    pub(crate) silence_saved_bits: AtomicU64,
     /// Engine.
     pub(crate) paused: AtomicBool,
     /// The callback is holding or prebuffering. Callback; engine (sets it the
@@ -441,6 +455,21 @@ impl Status {
     pub fn speed(&self) -> f32 {
         let bits = self.speed_bits.load(Ordering::Relaxed);
         if bits == 0 { 1.0 } else { f32::from_bits(bits) }
+    }
+
+    pub fn voice_boost(&self) -> bool {
+        self.voice_boost.load(Ordering::Relaxed)
+    }
+
+    pub fn skip_silence(&self) -> bool {
+        self.skip_silence.load(Ordering::Relaxed)
+    }
+
+    /// Removed source seconds, independent of speed, accumulated over this
+    /// play session (including gapless files and repeated listening after seeks).
+    /// New Play/PlayFrom resets this counter; Stop retains the last total.
+    pub fn silence_saved_secs(&self) -> f64 {
+        f64::from_bits(self.silence_saved_bits.load(Ordering::Relaxed))
     }
 
     /// Position in the current file's source time, independent of processing
@@ -780,6 +809,8 @@ impl Engine {
             }
             Command::Seek(to) => self.seek(to),
             Command::SetSpeed(speed) => self.set_speed(speed),
+            Command::SetVoiceBoost(enabled) => self.set_speech(enabled, false),
+            Command::SetSkipSilence(enabled) => self.set_speech(enabled, true),
             Command::SetNext(next) => self.set_next(next),
             Command::SelectDevice(uid) => match self.backend.select_device(uid.as_deref()) {
                 Ok(()) => {
@@ -850,6 +881,7 @@ impl Engine {
     /// Starts a new session at `src`, optionally from `start_at`.
     fn start(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.stop();
+        self.status.silence_saved_bits.store(0, Ordering::Relaxed);
         self.begin(src, start_at);
     }
 
@@ -913,6 +945,19 @@ impl Engine {
 
     fn current(&self) -> Option<&SessionTrack> {
         self.tracks.get(self.out_seq as usize)
+    }
+
+    fn set_speech(&mut self, enabled: bool, silence: bool) {
+        self.poll_session();
+        let setting = if silence { &self.status.skip_silence } else { &self.status.voice_boost };
+        if setting.swap(enabled, Ordering::Relaxed) == enabled {
+            return;
+        }
+        let at = self.held_seek.map(|(_, to)| to).or_else(|| self.take_position().map(|r| r.at));
+        if let Some(at) = at {
+            self.seek(at);
+        }
+        self.report_signal_path();
     }
 
     fn set_speed(&mut self, speed: f32) {
@@ -1147,7 +1192,10 @@ impl Engine {
         // Judged on what reaches the device channel-wise; the mapping itself is folded in below.
         let sent = StreamFormat { channels: ring.format.channels, ..source };
         let stretched = self.status.speed() != 1.0;
-        let bit_perfect = if stretched && self.config.mode == PlaybackMode::BitPerfect {
+        let speech = self.status.voice_boost() || self.status.skip_silence();
+        let bit_perfect = if speech && self.config.mode == PlaybackMode::BitPerfect {
+            BitPerfectStatus::Unavailable { reason: "speech processing".into(), device_limit: false }
+        } else if stretched && self.config.mode == PlaybackMode::BitPerfect {
             BitPerfectStatus::Unavailable { reason: format!("speed {}×", self.status.speed()), device_limit: false }
         } else {
             adjust(assess(self.config.mode, &sent, device_rate, caps.as_ref()), channels, transcoded.as_deref())
@@ -1159,7 +1207,7 @@ impl Engine {
         let volume = self.config.mode == PlaybackMode::Normal && self.status.volume() < 1.0;
         // The same rule the callback applies to what it plays.
         let treatment = dither::Treatment {
-            processed: stretched || resampled || matches!(channels, ChannelChange::Downmix { .. }),
+            processed: speech || stretched || resampled || matches!(channels, ChannelChange::Downmix { .. }),
             gained: matches!(gain, GainState::Applied(g) if g.linear != 1.0) || volume,
             source_bits: source.bits_per_sample,
         };

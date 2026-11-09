@@ -269,6 +269,9 @@ pub fn playing(app: &mut RedeApp, paused: bool) {
         fn position(&self) -> f64 {
             0.0
         }
+        fn silence_saved(&self) -> f64 {
+            0.0
+        }
     }
     let item = details(0);
     let session = sources::PlaySession {
