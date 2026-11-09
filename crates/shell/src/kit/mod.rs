@@ -5,7 +5,8 @@
 //! Everything is re-exported here, so callers write `kit::switch`.
 //!
 //! - [`text`]: [`elide`], [`elide_middle`], [`elide_job`], the quiet
-//!   [`link`] and [`link_line`] that underline on hover, the muted
+//!   [`link`] and [`link_line`] that underline on hover, a page's title
+//!   ([`page_heading`]), the muted
 //!   [`section`] label, [`key_cap`] (a combo drawn as a key), [`chip`] (a
 //!   finding in tinted text), and the one [`empty_state`].
 //! - [`buttons`]: the filled [`primary`], [`secondary`], [`danger`] (and

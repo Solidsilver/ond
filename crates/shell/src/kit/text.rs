@@ -1,5 +1,5 @@
 //! Text: one line cut to fit ([`elide`] and its kin), the quiet [`link`]s
-//! that underline on hover, the muted [`section`] label, a key combo drawn
+//! that underline on hover, a [`page_heading`], the muted [`section`] label, a key combo drawn
 //! as a [`key_cap`], a [`chip`] of tinted text, and the one [`empty_state`].
 
 use crate::icons::Icon;
@@ -144,6 +144,18 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
     resp
+}
+
+/// A page's title, large, with a muted note beside it (a count, a kind).
+pub fn page_heading(ui: &mut Ui, title: &str, sub: Option<String>) {
+    let t = Tokens::of(ui);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
+        if let Some(sub) = sub {
+            ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
+        }
+    });
+    ui.add_space(10.0);
 }
 
 #[cfg(test)]

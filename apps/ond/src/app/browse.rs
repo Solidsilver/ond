@@ -12,6 +12,7 @@ use crate::settings::ViewMode;
 use crate::theme::{Tokens, semibold};
 use crate::widgets::{choice, elide, view_picker};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use shell::kit::page_heading;
 use std::sync::Arc;
 
 const TILE_MIN: f32 = 160.0;
@@ -268,18 +269,6 @@ impl OndApp {
             });
         }
     }
-}
-
-/// A page's title, large, with a muted note beside it (a count, a kind).
-pub(super) fn page_heading(ui: &mut Ui, title: &str, sub: Option<String>) {
-    let t = Tokens::of(ui);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).font(FontId::new(24.0, semibold())).color(t.text));
-        if let Some(sub) = sub {
-            ui.label(egui::RichText::new(sub).size(13.0).color(t.muted));
-        }
-    });
-    ui.add_space(10.0);
 }
 
 /// A page's heading with its controls at the right: the grid/list picker
