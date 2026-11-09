@@ -299,13 +299,15 @@ pub fn section(ui: &mut Ui, text: &str) {
 }
 
 /// A key combo drawn as a small rounded key: `keys` as the platform writes
-/// them, on the field's fill with a hairline edge.
+/// them, on the field's fill with a hairline edge. Named as its keys, so a
+/// screen reader reads the combo beside its description.
 pub fn key_cap(ui: &mut egui::Ui, keys: &str) {
     let t = Tokens::of(ui);
     let g = ui.painter().layout_no_wrap(keys.to_owned(), FontId::proportional(12.0), t.text);
-    let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 12.0, 20.0), egui::Sense::hover());
+    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 12.0, 20.0), egui::Sense::hover());
     ui.painter().rect(r, 5.0, t.field, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
     ui.painter().galley(r.center() - g.size() / 2.0, g, t.text);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, keys));
 }
 
 /// A label and value in a popover (the server's): the label muted in a
