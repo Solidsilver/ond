@@ -218,3 +218,16 @@ fn queued_playback_results_from_a_signed_out_account_are_dropped() {
     app.handle(Msg::Engine { session, event: audio::Event::Error { track_id: None, message: "old device".into() } });
     assert!(app.ui.notice.is_none());
 }
+
+#[test]
+fn needing_credentials_returns_a_small_window_to_full_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    app.set_mode(crate::window::Mode::Mini);
+    app.needs_sign_in(None);
+    assert_eq!(app.mode, crate::window::Mode::Full);
+    assert_eq!(app.prefs.get(|s| s.window.mode), crate::window::Mode::Full);
+    assert!(app.login.is_some());
+    frame(&ctx, &mut app);
+}

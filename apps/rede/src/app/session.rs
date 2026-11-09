@@ -117,6 +117,7 @@ impl RedeApp {
     /// The sign-in form, filled in from the account on file (if any) and saying
     /// `error` when there is one.
     pub(super) fn needs_sign_in(&mut self, error: Option<String>) {
+        self.set_mode(crate::window::Mode::Full);
         let account = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned()));
         self.login = Some(LoginForm { error, ..LoginForm::for_account(account.as_ref()) });
         self.session.connecting = false;
@@ -156,6 +157,7 @@ impl RedeApp {
     /// back with the account filled in, and anything in flight is dropped.
     pub(super) fn sign_out(&mut self) {
         let Some(account) = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned())) else { return };
+        self.set_mode(crate::window::Mode::Full);
         self.playback_control(crate::player::Control::Stop);
         self.playback_generation += 1;
         self.opening = false;
