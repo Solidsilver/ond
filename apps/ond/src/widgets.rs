@@ -5,7 +5,7 @@
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::{Color32, FontId, Rect, Response, Sense, Ui, pos2, vec2};
-pub use shell::kit::{elide, elide_job, elide_middle, link, link_line};
+pub use shell::kit::{choice, elide, elide_job, elide_middle, link, link_line};
 pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
 
 /// A heart that loves / unloves: filled accent when on, a quiet outline when off.
@@ -64,34 +64,6 @@ pub fn rating_choice(ui: &mut Ui, rating: u8, current: bool) -> Response {
     resp
 }
 
-/// Mutually exclusive choices in a pill (Up Next / History, sort order).
-/// Returns the index clicked, if any.
-pub fn segmented(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize> {
-    let font = FontId::proportional(12.0);
-    let natural: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), font.clone(), Color32::WHITE).size().x).collect();
-    segments(ui, options, &fit_segments(&natural, ui.available_width()), selected)
-}
-
-/// One of `all` in a segmented control, each labelled by `label`. With a
-/// `width`, equal segments fill it; otherwise each fits its label. Writes the
-/// pick into `current` and says whether it changed.
-pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, all: &[T], current: &mut T, width: Option<f32>, label: impl Fn(T) -> String) -> bool {
-    let labels: Vec<String> = all.iter().map(|v| label(*v)).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let at = all.iter().position(|v| v == current).unwrap_or(0);
-    let picked = match width {
-        Some(w) => segmented_wide(ui, &labels, at, w),
-        None => segmented(ui, &labels, at),
-    };
-    match picked.map(|i| all[i]) {
-        Some(v) if v != *current => {
-            *current = v;
-            true
-        }
-        _ => false,
-    }
-}
-
 /// Grid or list: an icon for each in a segmented pill. Writes the pick into
 /// `current` and says whether it changed.
 pub fn view_picker(ui: &mut Ui, current: &mut crate::settings::ViewMode) -> bool {
@@ -118,59 +90,6 @@ pub fn view_picker(ui: &mut Ui, current: &mut crate::settings::ViewMode) -> bool
         }
     }
     changed
-}
-
-/// Segment widths for labels of `natural` width: comfortable padding when it
-/// fits in `room`, tighter padding next, and finally the room shared out (the
-/// labels then elide) — the control never grows past its column.
-pub fn fit_segments(natural: &[f32], room: f32) -> Vec<f32> {
-    let room = (room - 4.0).max(0.0);
-    for pad in [22.0, 14.0, 8.0] {
-        let w: Vec<f32> = natural.iter().map(|n| n + pad).collect();
-        if w.iter().sum::<f32>() <= room {
-            return w;
-        }
-    }
-    vec![room / natural.len().max(1) as f32; natural.len()]
-}
-
-/// [`segmented`] with equal segments filling `width`.
-pub fn segmented_wide(ui: &mut Ui, options: &[&str], selected: usize, width: f32) -> Option<usize> {
-    let each = (width - 4.0) / options.len().max(1) as f32;
-    segments(ui, options, &vec![each; options.len()], selected)
-}
-
-fn segments(ui: &mut Ui, options: &[&str], widths: &[f32], selected: usize) -> Option<usize> {
-    let t = Tokens::of(ui);
-    let font = FontId::proportional(12.0);
-    let widths = widths.to_vec();
-    let size = vec2(widths.iter().sum::<f32>() + 4.0, 26.0);
-    // Segments take their ids from the pill's own: two controls in one scope
-    // can share a label (ReplayGain and Streaming both have "Auto").
-    let (rect, pill) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(rect, 7.0, t.field);
-    let mut x = rect.left() + 2.0;
-    let mut clicked = None;
-    for (i, (opt, w)) in options.iter().zip(widths).enumerate() {
-        let r = Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(w, rect.height() - 4.0));
-        let resp = ui.interact(r, pill.id.with(("seg", i)), Sense::click());
-        if i == selected {
-            ui.painter().rect_filled(r, 5.0, t.bg);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(r, 5.0, t.hover);
-        }
-        focus_ring(ui, &resp, r.shrink(2.0), 3.0);
-        let color = if i == selected { t.text } else { t.muted };
-        let g = elide(ui, opt, font.clone(), color, w - 6.0);
-        ui.painter().galley(r.center() - g.size() / 2.0, g, color);
-        let label = (*opt).to_owned();
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, i == selected, &label));
-        if resp.clicked() {
-            clicked = Some(i);
-        }
-        x += w;
-    }
-    clicked
 }
 
 /// A small pill of tinted text (a finding worth a glance, not an alarm).
@@ -544,6 +463,7 @@ pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shell::kit::segmented_wide;
 
     #[test]
     fn tab_shows_which_painted_control_has_focus() {
@@ -567,25 +487,6 @@ mod tests {
             h.run();
             assert_eq!(rings(&h), 1, "one control focused, one ring");
         }
-    }
-
-    #[test]
-    fn two_controls_with_the_same_label_click_separately() {
-        use egui_kittest::kittest::Queryable;
-        let mut h = egui_kittest::Harness::builder().build_ui_state(
-            |ui, picks: &mut (usize, usize)| {
-                choice(ui, &[0, 1, 2], &mut picks.0, Some(300.0), |i| ["Off", "Auto", "Album"][i].into());
-                choice(ui, &[0, 1, 2], &mut picks.1, Some(300.0), |i| ["Original", "Auto", "Transcoded"][i].into());
-            },
-            (0, 0),
-        );
-        h.run();
-        h.get_all_by_label("Auto").next().expect("the first control's Auto").click();
-        h.run();
-        assert_eq!(*h.state(), (1, 0));
-        h.get_all_by_label("Auto").nth(1).expect("the second control's Auto").click();
-        h.run();
-        assert_eq!(*h.state(), (1, 1));
     }
 
     #[test]
