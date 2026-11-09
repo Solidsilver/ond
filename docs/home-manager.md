@@ -131,3 +131,10 @@ Like a folder picked in Settings, `offline_dir` gets a folder of Ond's own insid
 Experimental settings may change or go away between versions.
 
 The rest of `settings.json` is state the app keeps for itself (window positions, volume, column widths, whether the queue is open, grid or list views), and Ond ignores it in `managed.json`.
+
+## Rede
+
+Rede does not yet read managed settings. Its own `settings.json` has
+`playback.skip_back` (15 seconds), `playback.skip_forward` (30 seconds),
+`playback.speed` (1.0), and `playback.rewind` (5 seconds after more than five
+minutes paused; 0 disables it). These are editable in the player's speed menu.

@@ -95,3 +95,16 @@ Just the visualizers as PNGs: `cargo test -p ond-player --release visualizer_sna
 - [ ] A quiet recording (classical, solo piano) still moves; a track with a kick drum makes Flow and Particles jump on the beat.
 - [ ] The cover, title, artist and album show bottom-left for a few seconds when a track starts, then fade.
 - [ ] Paused: the picture holds still and the app goes back to its idle frame rate.
+
+## Rede playback
+
+Use a release build with an Audiobookshelf account. The opt-in live test and
+its progress cleanup are described in [Rede playback](docs/rede/playback.md).
+
+- [ ] Listen at 0.5×, 1×, 1.5×, 2× and 3×: pitch stays natural, speech stays intelligible, and skips and seeks land where the scrubber says.
+- [ ] Play a single-file m4b and a book split across files. Listen through a file boundary for a gap, repeated speech or missing speech; chapters need not line up with files.
+- [ ] Pause for more than five minutes, then resume: it rewinds five seconds by default. Set rewind to 0 and try again. A short pause does not rewind.
+- [ ] Space, Left/Right, Shift+Left/Right and the bracket keys work; changing the skip intervals and speed survives a relaunch. Typing in an editable field does not control playback.
+- [ ] Restart ABS during listening: the next report reopens a session without interrupting the audio. Interrupt the network, keep listening from buffered audio, reconnect and confirm the final position reaches ABS.
+- [ ] Switch books, stop, sign out and quit: the old session closes when reachable, and resuming keeps the final position. At the end the book is finished on ABS.
+- [ ] Leave the library and book page paused: CPU settles and the UI does not keep repainting. Resize to the minimum window and inspect the bottom bar and speed menu.
