@@ -56,8 +56,10 @@ pub enum Icon {
     Star,
     /// A rating star, given.
     StarFilled,
-    /// New playlist.
+    /// New playlist; more, in a stepper.
     Plus,
+    /// Less, in a stepper.
+    Minus,
     /// A question mark in a circle: help, the keyboard shortcuts.
     Help,
     /// The speaker with a slash: muted.
@@ -412,6 +414,9 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Plus => {
             painter.line_segment([p(0.0, -0.75), p(0.0, 0.75)], line);
+            painter.line_segment([p(-0.75, 0.0), p(0.75, 0.0)], line);
+        }
+        Icon::Minus => {
             painter.line_segment([p(-0.75, 0.0), p(0.75, 0.0)], line);
         }
         Icon::SkipBack(seconds) | Icon::SkipForward(seconds) => {
