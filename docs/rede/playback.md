@@ -31,19 +31,25 @@ keep it testable without devices or a server. It issues `PlayFrom`, `Seek` and
 `SetNext`, follows the engine's output-side track events, and derives book time
 from `Status::source_position_secs()`. Listening time uses monotonic wall time
 while the output is playing, excluding pauses and buffering. The `Live` gate
-requests frames while source time moves; paused and stopped views stay idle.
-Engine events and status changes wake the UI through the scoped bridge.
+requests frames only for a visible, moving player bar. Paused and stopped views
+stay idle. The existing engine-event forwarder owns a monotonic report clock:
+while playing or buffering it posts a scoped `PlaybackTick` every 15 seconds;
+state changes also wake accounting. Clock wakeups coalesce with the bar's
+100 ms repaint deadline. Reporting runs only on clock messages, so delayed UI
+processing cannot accidentally skip a report by just missing a second timer's
+15-second threshold. Player state remains owned by the UI thread.
 
 `listening.rs` has a journal stage and one serialized server worker. The journal
 appends every report before forwarding it, even if a server call is stalled.
-The server worker reports every 15 seconds and on pause, seek and stop. Stop,
+The player sends reports every 15 seconds and on pause, seek and stop. Stop,
 book switches and exit close the session. A 404 on report opens another session
 and reports the existing position and listening delta without restarting audio.
 
 Failed reports remain pending. Replay runs at startup, before a newer live
-report, and every 30 seconds while the account remains connected. It sends
-entries individually through `set_progress`, in log order, marking each synced
-only after success. Server progress timestamps protect newer listening on
+report, and every 30 seconds while the account remains connected. It collapses
+pending entries to the newest timestamp per item and sends one `set_progress`
+batch, marking all covered entries synced only after success. Server progress
+timestamps protect newer listening on
 another device from old replay entries. Replayed entries retain listening time
 locally; counting those intervals in ABS's listening statistics through local
 sessions belongs to M4. Only completion sends `isFinished: true`; no path sends
@@ -62,6 +68,31 @@ no extraction from Ond, so Ond's rendering code is unchanged. The cache retains
 streamcache's existing file-based eviction; whole-book eviction and pinned
 downloads remain later work.
 
+## Hidden windows
+
+The pinned eframe 0.37 separates `App::logic` from `App::ui`. Its
+[`App` contract](https://github.com/emilk/egui/blob/0.37.0/crates/eframe/src/epi.rs)
+explicitly runs logic on repaint requests while hidden. The
+[wgpu integration](https://github.com/emilk/egui/blob/0.37.0/crates/eframe/src/native/wgpu_integration.rs)
+uses `update_logic_only` for minimized or occluded root windows. The
+[event loop](https://github.com/emilk/egui/blob/0.37.0/crates/eframe/src/native/run.rs)
+schedules both immediate and delayed repaint requests, directly services
+invisible/minimized windows (throttled to 100 ms), and falls back to logic-only
+after 250 ms if a requested redraw never arrives. In
+[winit 0.30.13 on macOS](https://github.com/rust-windowing/winit/blob/v0.30.13/src/platform_impl/macos/window_delegate.rs),
+AppKit occlusion notifications become `WindowEvent::Occluded` and redraw
+requests are queued through the application delegate.
+
+Rede already drained its inbox and ticked playback in `App::logic`, just as
+Ond drains forwarded engine events there. Thus hiding the window did not, by
+itself, stop playback logic in this pinned version. The independent clock makes
+the reporting dependency explicit and lets hidden playback stop requesting
+animation frames. End-of-file and gapless track events still go through the
+same scoped inbox: they start/prefetch the next file, or journal a finished
+report and close the final session, without a painted frame. Fake-clock tests
+exercise reporting, both file-transition paths and completion through
+`Context::run_logic` with zero UI passes.
+
 ## Live check
 
 With `ABS_TEST_URL`, `ABS_TEST_USER` and `ABS_TEST_PASSWORD` supplied privately:
@@ -74,3 +105,9 @@ This is one opt-in test, run at most twice for a verification pass. It requires
 an account with no progress, signs in once, uses the real engine and system
 output for 20 seconds, syncs and closes, then deletes the progress and verifies
 that the account is empty again. It never prints the address or credentials.
+
+Manually play a book for several minutes with the window minimized, then fully
+covered, and confirm server progress continues moving. Include a file boundary
+and the end of a book; check that playback advances and completion is recorded.
+Pause while hidden and confirm the process settles without periodic repaints.
+Repeat with a slow stream and confirm buffering is excluded from listening time.

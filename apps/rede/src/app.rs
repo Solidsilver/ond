@@ -244,6 +244,8 @@ impl RedeApp {
             Msg::Playback { .. } => {}
             Msg::Engine { session, event } if session == self.bridge.session() => self.engine_event(event),
             Msg::Engine { .. } => {}
+            Msg::PlaybackTick { session, report } if session == self.bridge.session() => self.report_playback(report),
+            Msg::PlaybackTick { .. } => {}
             Msg::Error(e) => self.show_failure(e),
         }
     }

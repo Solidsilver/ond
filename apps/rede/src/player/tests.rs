@@ -170,17 +170,17 @@ fn reports_count_wall_time_and_exclude_pause_and_buffering() {
     player.load(opened(true), 3.0, &engine, now).unwrap();
     let mut notes = Vec::new();
     engine.state.set(PlayState::Playing);
-    player.tick(&engine, now, &mut notes);
-    player.tick(&engine, now + Duration::from_secs(15), &mut notes);
+    player.tick(&engine, now, false, &mut notes);
+    player.tick(&engine, now + Duration::from_secs(15), true, &mut notes);
     assert!(matches!(&notes[0], Note::Report { update, close: false } if update.listened == Duration::from_secs(15)));
     player.control(Control::Toggle, 0.0, &engine, now + Duration::from_secs(16), &mut notes);
     assert!(matches!(notes.last(), Some(Note::Report { update, .. }) if update.listened == Duration::from_secs(1)));
     engine.state.set(PlayState::Paused);
-    player.tick(&engine, now + Duration::from_secs(600), &mut notes);
+    player.tick(&engine, now + Duration::from_secs(600), true, &mut notes);
     let n = notes.len();
     player.control(Control::Toggle, 0.0, &engine, now + Duration::from_secs(600), &mut notes);
     engine.state.set(PlayState::Buffering);
-    player.tick(&engine, now + Duration::from_secs(610), &mut notes);
+    player.tick(&engine, now + Duration::from_secs(610), true, &mut notes);
     assert_eq!(notes.len(), n + 1);
     assert!(matches!(notes.last(), Some(Note::Report { update, .. }) if update.listened.is_zero()));
 }
@@ -230,11 +230,11 @@ fn stale_track_events_do_not_clear_a_new_seek_or_finish_a_new_book() {
     let mut notes = Vec::new();
     player.event(&old, &engine, now, &mut notes);
     engine.position.set(0.0);
-    player.tick(&engine, now, &mut notes);
+    player.tick(&engine, now, false, &mut notes);
     assert_eq!(player.position, 75.0);
     player.control(Control::Seek(85.0), 0.0, &engine, now, &mut notes);
     player.event(&landed(&player, 1.0), &engine, now, &mut notes);
-    player.tick(&engine, now, &mut notes);
+    player.tick(&engine, now, false, &mut notes);
     assert_eq!(player.position, 85.0);
 }
 
@@ -298,7 +298,115 @@ async fn a_real_fetch_rejection_reaches_the_player_as_a_redacted_401() {
     assert!(!message.contains("PRIVATE"));
     let mut notes = Vec::new();
     player.event(&event, &engine, Instant::now(), &mut notes);
-    player.tick(&engine, Instant::now(), &mut notes);
+    player.tick(&engine, Instant::now(), false, &mut notes);
     assert!(matches!(notes.first(), Some(Note::Refresh)));
     assert_eq!(player.position, 75.0, "the stopped engine cannot erase the retry position");
+}
+
+#[test]
+fn a_hidden_book_reports_and_advances_without_any_ui_passes() {
+    let engine = Fake::default();
+    let mut player = Player::default();
+    let now = Instant::now();
+    let mut open = opened(false);
+    open.position = 0.0;
+    player.load(open, 1.0, &engine, now).unwrap();
+    let ctx = egui::Context::default();
+    let mut input = egui::RawInput::default();
+    input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().minimized = Some(true);
+    let mut clock = ReportClock::new(now);
+    let mut notes = Vec::new();
+    engine.state.set(PlayState::Playing);
+    let _ = ctx.run_logic(&input, |_| player.event(&started(&player, 0, false), &engine, now, &mut notes));
+    for second in 0..=60 {
+        let at = now + Duration::from_secs(second);
+        engine.position.set(second as f64);
+        if let Some(report) = clock.poll(engine.state(), at) {
+            let _ = ctx.run_logic(&input, |_| player.tick(&engine, at, report, &mut notes));
+        }
+    }
+    let reports: Vec<_> = notes
+        .iter()
+        .filter_map(|n| match n {
+            Note::Report { update, .. } => Some((update.position.secs(), update.listened)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports, [15.0, 30.0, 45.0, 60.0].map(|at| (at, Duration::from_secs(15))));
+    // The event forwarder wakes this same logic path at file boundaries.
+    engine.position.set(0.0);
+    let _ = ctx.run_logic(&input, |_| player.event(&started(&player, 1, true), &engine, now + Duration::from_secs(60), &mut notes));
+    assert_eq!(player.position, 60.0);
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetNext(None))));
+    let file = &player.book.as_ref().unwrap().files[1];
+    let ended = Event::Ended { track_id: file.id.clone(), token: file.token };
+    engine.state.set(PlayState::Stopped);
+    let _ = ctx.run_logic(&input, |_| player.event(&ended, &engine, now + Duration::from_secs(100), &mut notes));
+    assert!(matches!(notes.last(), Some(Note::Report { update, close: true }) if update.finished && update.position.secs() == 100.0));
+    assert!(!player.active);
+    assert_eq!(ctx.cumulative_pass_nr(), 0);
+}
+
+#[test]
+fn the_report_clock_sleeps_while_paused_and_stopped() {
+    let now = Instant::now();
+    let mut clock = ReportClock::new(now);
+    for state in [PlayState::Paused, PlayState::Stopped] {
+        clock.poll(state, now);
+        for second in 1..=600 {
+            assert!(clock.poll(state, now + Duration::from_secs(second)).is_none());
+        }
+    }
+}
+
+#[test]
+fn buffering_and_loading_do_not_accrue_listening_across_recovery() {
+    let engine = Fake::default();
+    let mut player = Player::default();
+    let now = Instant::now();
+    player.load(opened(true), 1.0, &engine, now).unwrap();
+    let mut notes = Vec::new();
+    for (second, state) in [
+        (0, PlayState::Playing),
+        (10, PlayState::Playing),
+        (11, PlayState::Buffering),
+        (40, PlayState::Buffering),
+        (41, PlayState::Loading),
+        (70, PlayState::Loading),
+        (71, PlayState::Playing),
+        (81, PlayState::Playing),
+    ] {
+        engine.state.set(state);
+        player.tick(&engine, now + Duration::from_secs(second), true, &mut notes);
+    }
+    player.control(Control::Stop, 0.0, &engine, now + Duration::from_secs(81), &mut notes);
+    let listened: Duration = notes
+        .iter()
+        .filter_map(|n| match n {
+            Note::Report { update, .. } => Some(update.listened),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(listened, Duration::from_secs(20));
+}
+
+#[test]
+fn a_hidden_file_end_starts_the_next_file_when_gapless_playback_was_unavailable() {
+    let engine = Fake::default();
+    let mut player = Player::default();
+    let now = Instant::now();
+    let mut open = opened(false);
+    open.position = 0.0;
+    player.load(open, 1.0, &engine, now).unwrap();
+    let file = &player.book.as_ref().unwrap().files[0];
+    let ended = Event::Ended { track_id: file.id.clone(), token: file.token };
+    let ctx = egui::Context::default();
+    let mut notes = Vec::new();
+    let _ = ctx.run_logic(&egui::RawInput::default(), |_| player.event(&ended, &engine, now, &mut notes));
+    assert!(engine.sent.borrow().iter().any(|cmd| matches!(cmd,
+        Command::PlayFrom(src, at) if src.id.ends_with("file-2") && at.is_zero()
+    )));
+    assert!(player.active);
+    assert!(notes.is_empty());
+    assert_eq!(ctx.cumulative_pass_nr(), 0);
 }

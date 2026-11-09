@@ -18,7 +18,7 @@ impl RedeApp {
             let cache =
                 streamcache::StreamCache::new(config, rt.handle().clone()).map_err(|e| Failure::Local(format!("Couldn't open the stream cache: {e}")))?;
             let engine = audio::spawn(audio::EngineConfig::default(), audio::default_backend(), Some(cache));
-            self.bridge.engine_events(&engine);
+            self.bridge.engine_events(&engine, self.ctx.clone());
             self.engine = Some(engine);
         }
         Ok(())
@@ -149,13 +149,22 @@ impl RedeApp {
         self.playback_notes(notes);
     }
 
-    pub(super) fn playback_tick(&mut self, ctx: &egui::Context) {
+    pub(super) fn report_playback(&mut self, report: bool) {
         let mut notes = Vec::new();
         if let Some(engine) = &self.engine {
-            self.player.tick(engine, Instant::now(), &mut notes);
-            Live(self.player.active && !self.player.paused && engine.status.state() == audio::PlayState::Playing).request(ctx);
+            self.player.tick(engine, Instant::now(), report, &mut notes);
         }
         self.playback_notes(notes);
+    }
+
+    pub(super) fn playback_tick(&mut self, ctx: &egui::Context) {
+        self.report_playback(false);
+        if let Some(engine) = &self.engine {
+            // Hidden windows run logic without a UI pass. Their reporting clock
+            // and engine events suffice; only a visible bar needs animation.
+            let visible = ctx.input(|i| i.viewport().visible().unwrap_or(true));
+            Live(visible && self.player.active && !self.player.paused && engine.status.state() == audio::PlayState::Playing).request(ctx);
+        }
     }
 
     pub(super) fn playback_keys(&mut self, ctx: &egui::Context) {

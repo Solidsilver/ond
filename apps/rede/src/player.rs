@@ -87,7 +87,6 @@ pub struct Player {
     serial: u64,
     paused_at: Option<Instant>,
     last_tick: Instant,
-    last_report: Instant,
     listened: Duration,
     audible: bool,
 }
@@ -104,7 +103,6 @@ impl Default for Player {
             serial: 0,
             paused_at: None,
             last_tick: Instant::now(),
-            last_report: Instant::now(),
             listened: Duration::ZERO,
             audible: false,
         }
@@ -138,7 +136,6 @@ impl Player {
         self.listened = Duration::ZERO;
         self.audible = false;
         self.last_tick = now;
-        self.last_report = now;
         engine.send(Command::SetSpeed(self.speed));
         self.play_from(at, engine);
         Ok(())
@@ -176,13 +173,14 @@ impl Player {
     }
 
     fn account_time(&mut self, engine: &dyn Transport, now: Instant) {
-        if self.active && !self.paused && self.audible && engine.state() == PlayState::Playing {
+        let state = engine.state();
+        if self.active && !self.paused && self.audible && state == PlayState::Playing {
             self.listened += now.saturating_duration_since(self.last_tick);
         }
-        self.audible = self.active && !self.paused && engine.state() == PlayState::Playing;
+        self.audible = self.active && !self.paused && state == PlayState::Playing;
         self.last_tick = now;
         if self.active
-            && engine.state() != PlayState::Stopped
+            && state != PlayState::Stopped
             && !self.pending
             && let Some(book) = &self.book
         {
@@ -190,7 +188,7 @@ impl Player {
         }
     }
 
-    fn report(&mut self, now: Instant, close: bool, finished: bool, notes: &mut Vec<Note>) {
+    fn report(&mut self, close: bool, finished: bool, notes: &mut Vec<Note>) {
         let Some(book) = &self.book else { return };
         notes.push(Note::Report {
             update: ProgressUpdate {
@@ -202,13 +200,12 @@ impl Player {
             },
             close,
         });
-        self.last_report = now;
     }
 
-    pub fn tick(&mut self, engine: &dyn Transport, now: Instant, notes: &mut Vec<Note>) {
+    pub fn tick(&mut self, engine: &dyn Transport, now: Instant, report: bool, notes: &mut Vec<Note>) {
         self.account_time(engine, now);
-        if self.active && !self.paused && now.saturating_duration_since(self.last_report) >= Duration::from_secs(15) {
-            self.report(now, false, false, notes);
+        if report && self.active && !self.paused {
+            self.report(false, false, notes);
         }
     }
 
@@ -225,7 +222,7 @@ impl Player {
                     self.play_from(0.0, engine);
                 } else if rewind > 0.0 {
                     self.seek(self.position - rewind, engine);
-                    self.report(now, false, false, notes);
+                    self.report(false, false, notes);
                 }
                 self.paused = false;
                 self.active = true;
@@ -236,11 +233,11 @@ impl Player {
                 self.paused = true;
                 self.paused_at = Some(now);
                 engine.send(Command::Pause);
-                self.report(now, false, false, notes);
+                self.report(false, false, notes);
             }
             Control::Stop => {
                 if self.active {
-                    self.report(now, true, false, notes);
+                    self.report(true, false, notes);
                 }
                 self.active = false;
                 self.paused = true;
@@ -260,7 +257,7 @@ impl Player {
                     _ => unreachable!(),
                 };
                 self.seek(at, engine);
-                self.report(now, false, false, notes);
+                self.report(false, false, notes);
             }
         }
     }
@@ -296,7 +293,7 @@ impl Player {
                 } else {
                     self.account_time(engine, now);
                     self.position = self.book.as_ref().unwrap().timeline.duration;
-                    self.report(now, true, true, notes);
+                    self.report(true, true, notes);
                     self.active = false;
                     self.paused = true;
                 }
@@ -328,6 +325,30 @@ impl Player {
         }
         book.session.tracks = tracks;
         self.play_from(self.position, engine);
+    }
+}
+
+/// The engine event forwarder owns this clock so reporting does not depend
+/// on painted frames. State changes also wake accounting across buffer holds.
+pub struct ReportClock {
+    state: PlayState,
+    last: Instant,
+}
+impl ReportClock {
+    pub fn new(now: Instant) -> Self {
+        Self { state: PlayState::Stopped, last: now }
+    }
+
+    pub fn poll(&mut self, state: PlayState, now: Instant) -> Option<bool> {
+        let changed = state != self.state;
+        let due = matches!(state, PlayState::Playing | PlayState::Buffering) && now.saturating_duration_since(self.last) >= Duration::from_secs(15);
+        self.state = state;
+        if changed || due {
+            self.last = now;
+            Some(due)
+        } else {
+            None
+        }
     }
 }
 

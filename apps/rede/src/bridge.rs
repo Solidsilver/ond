@@ -33,6 +33,11 @@ pub enum Msg {
         session: u64,
         event: audio::Event,
     },
+    /// The engine clock wakes logic even when no UI is painted.
+    PlaybackTick {
+        session: u64,
+        report: bool,
+    },
     /// Something the user asked for failed.
     Error(Failure),
 }
@@ -128,17 +133,21 @@ impl Bridge {
         crate::listening::spawn(&self.rt, source, shelf, device, move || live.current(), move |event| this.playback(event))
     }
 
-    pub fn engine_events(&self, engine: &audio::EngineHandle) {
+    pub fn engine_events(&self, engine: &audio::EngineHandle, ctx: egui::Context) {
         let this = self.scoped();
         let events = engine.events.clone();
         let status = engine.status.clone();
         self.rt.spawn_blocking(move || {
-            let mut previous = status.state();
+            let mut clock = crate::player::ReportClock::new(std::time::Instant::now());
             while this.current() {
                 let state = status.state();
-                if state != previous {
-                    (this.notify)();
-                    previous = state;
+                if let Some(report) = clock.poll(state, std::time::Instant::now())
+                    && this.current()
+                {
+                    let _ = this.tx.send(Msg::PlaybackTick { session: this.scope.expect("engine events are scoped"), report });
+                    // Coalesce with the visible bar's existing repaint deadline;
+                    // hidden windows need only these clock and engine wakeups.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
                 }
                 match events.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(event) => this.send(Msg::Engine { session: this.scope.unwrap_or_else(|| this.session()), event }),

@@ -80,6 +80,7 @@ async fn a_real_book_plays_twenty_seconds_and_leaves_no_progress() {
         let mut player = Player::default();
         player.load(*opened, 1.0, &engine, Instant::now())?;
         let deadline = Instant::now() + Duration::from_secs(75);
+        let mut clock = crate::player::ReportClock::new(Instant::now());
         let mut heard = Duration::ZERO;
         let mut last = Instant::now();
         while heard < Duration::from_secs(20) {
@@ -96,7 +97,7 @@ async fn a_real_book_plays_twenty_seconds_and_leaves_no_progress() {
                 heard += now - last;
             }
             last = now;
-            player.tick(&engine, now, &mut notes);
+            player.tick(&engine, now, clock.poll(engine.status.state(), now).unwrap_or(false), &mut notes);
             report(notes, &listening)?;
             while let Ok(event) = events.try_recv() {
                 match event {
