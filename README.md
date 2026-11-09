@@ -7,8 +7,8 @@ I wanted a client that treats playback quality as the main feature and stays out
 Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
 <a href="https://0rwx.com"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0rwx-ai-x-dark.png">
-  <img alt="AI:X — AI made (0rwx)" src="docs/images/0rwx-ai-x-light.png" height="32">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0rwx-ai-x-dark.svg">
+  <img alt="AI:X — AI made (0rwx)" src="docs/images/0rwx-ai-x-light.svg" height="32">
 </picture></a>
 
 <picture>
