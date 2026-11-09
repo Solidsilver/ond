@@ -6,36 +6,10 @@ use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use egui::{Color32, Rect, Response, Sense, Ui, vec2};
 pub use shell::kit::{
-    Head, KV_VALUE, ROW_PAD, chip, choice, divider, elide, elide_job, group, icon_choice, kv_row, kv_section, kv_text, link, link_line, managed, menu_label,
-    section, switch, switch_tinted, thin_slider, thin_slider_marked,
+    Head, KV_VALUE, ROW_PAD, chip, choice, divider, elide, elide_job, group, heart_button, hover_heart, icon_choice, kv_row, kv_section, kv_text, link,
+    link_line, managed, menu_label, section, switch, switch_tinted, thin_slider, thin_slider_marked,
 };
 pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
-
-/// A heart that loves / unloves: filled accent when on, a quiet outline when off.
-pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
-    let t = Tokens::of(ui);
-    let (icon, color, label) = if on { (crate::icons::Icon::HeartFilled, t.accent, "Unlove") } else { (crate::icons::Icon::Heart, t.muted, "Love") };
-    crate::icons::sized_button(ui, icon, label, vec2(size, size), glyph, Some(color))
-}
-
-/// The heart over a row or display: drawn filled when loved, as an outline when
-/// `reveal` (its row is hovered) or when it's hovered itself, and always
-/// clickable. `label` names it for accessibility ("Love", "Unlove (⇧⌘L)").
-pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: bool, glyph: f32, label: &str) -> Response {
-    let t = Tokens::of(ui);
-    let resp = ui.interact(rect, id, Sense::click());
-    // Focused, it shows (as when hovered), or Tab would land on nothing.
-    let hot = resp.hovered() || resp.has_focus();
-    if loved || reveal || hot {
-        let (icon, color) = if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if hot { t.text } else { t.muted }) };
-        crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
-    }
-    let side = glyph + 6.0;
-    focus_ring(ui, &resp, Rect::from_center_size(rect.center(), vec2(side, side)), side / 2.0);
-    let label = crate::keys::shown(label).into_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    resp
-}
 
 /// One choice in a rating menu: `rating` stars drawn as icons, filled up to
 /// it, with a check when it's the current rating.

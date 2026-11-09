@@ -10,6 +10,7 @@
 //!   finding in tinted text), and the one [`empty_state`].
 //! - [`buttons`]: the filled [`primary`], [`secondary`], [`danger`] (and
 //!   [`primary_unavailable`], [`secondary_danger`]), the [`quiet_button`],
+//!   [`heart_button`] and [`hover_heart`],
 //!   and the [`focus_ring`] every self-painted control shows under Tab.
 //! - [`controls`]: the segmented pill ([`segmented`], [`segmented_wide`],
 //!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]

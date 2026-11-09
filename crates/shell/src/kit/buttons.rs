@@ -1,6 +1,8 @@
 //! Buttons that paint themselves: the filled ones ([`primary`],
-//! [`secondary`], [`danger`] and their kin), the [`quiet_button`], and the
-//! [`focus_ring`] every self-painted control shows when Tab lands on it.
+//! [`secondary`], [`danger`] and their kin), the [`quiet_button`], the
+//! hearts that love something ([`heart_button`], and [`hover_heart`] over a
+//! row), and the [`focus_ring`] every self-painted control shows when Tab
+//! lands on it.
 
 use crate::icons::Icon;
 use crate::theme::{Tokens, semibold};
@@ -108,5 +110,31 @@ pub fn quiet_button(ui: &mut Ui, icon: Option<Icon>, text: &str) -> Response {
     }
     let (label, enabled) = (text.to_owned(), ui.is_enabled());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &label));
+    resp
+}
+
+/// A heart that loves / unloves: filled accent when on, a quiet outline when off.
+pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
+    let t = Tokens::of(ui);
+    let (icon, color, label) = if on { (crate::icons::Icon::HeartFilled, t.accent, "Unlove") } else { (crate::icons::Icon::Heart, t.muted, "Love") };
+    crate::icons::sized_button(ui, icon, label, vec2(size, size), glyph, Some(color))
+}
+
+/// The heart over a row or display: drawn filled when loved, as an outline when
+/// `reveal` (its row is hovered) or when it's hovered itself, and always
+/// clickable. `label` names it for accessibility ("Love", "Unlove (⇧⌘L)").
+pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: bool, glyph: f32, label: &str) -> Response {
+    let t = Tokens::of(ui);
+    let resp = ui.interact(rect, id, Sense::click());
+    // Focused, it shows (as when hovered), or Tab would land on nothing.
+    let hot = resp.hovered() || resp.has_focus();
+    if loved || reveal || hot {
+        let (icon, color) = if loved { (crate::icons::Icon::HeartFilled, t.accent) } else { (crate::icons::Icon::Heart, if hot { t.text } else { t.muted }) };
+        crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, color);
+    }
+    let side = glyph + 6.0;
+    focus_ring(ui, &resp, Rect::from_center_size(rect.center(), vec2(side, side)), side / 2.0);
+    let label = crate::keys::shown(label).into_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
 }
