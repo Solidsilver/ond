@@ -20,9 +20,10 @@ mod widgets;
 
 use shell::window::Plan;
 
-/// The library's books need room; the book page has one column of its own.
+/// The library's books need room, and the book page sets its description and
+/// chapters side by side when it has it. At the smallest size the page stacks.
 const SIZE: [f32; 2] = [1100.0, 720.0];
-const MIN_SIZE: [f32; 2] = [640.0, 420.0];
+pub(crate) const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 
 fn main() -> eframe::Result {
     init_logging();

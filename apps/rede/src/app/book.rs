@@ -1,11 +1,13 @@
-//! A book's page: its cover, what the listing knows (title, authors,
-//! narrators, series and number, length), the description and the chapters,
-//! fetched with the book's details when the page opens.
+//! A book's page, in Ond's album-page idiom: the cover with the title,
+//! authors, a line of facts (narrators, series and number, length) and Play
+//! set on its bottom edge; under them the description and the chapters, side
+//! by side in reading-width columns when the window is wide, one above the
+//! other when it isn't. The details are fetched when the page opens.
 //!
 //! Playback isn't here yet (the engine work is on another branch), so the Play
-//! button is drawn disabled and says so.
+//! button is drawn faded and says so.
 
-use super::library::authors_line;
+use super::library::{COVER_RADIUS, authors_line};
 use super::view_ctx::ViewCtx;
 use super::{Action, Details};
 use crate::fmt;
@@ -15,8 +17,25 @@ use shell::icons::Icon;
 use shell::theme::{Tokens, semibold};
 use sources::ItemSummary;
 
-/// A square cover, matching the library tiles.
-const COVER_W: f32 = 176.0;
+/// Below this width the cover sits above the text instead of beside it.
+const HEADER_STACK_BELOW: f32 = 480.0;
+/// The cover's side beside the text: 30% of the width, within these. A little
+/// larger than Ond's album art, since the page is about this one book.
+const COVER_MIN: f32 = 176.0;
+const COVER_MAX: f32 = 260.0;
+/// The header text's height before it's first measured.
+const HEADER_TEXT_H_GUESS: f32 = 140.0;
+/// From this width the description and the chapters sit side by side.
+const SPLIT_FROM: f32 = 760.0;
+const COLUMN_GAP: f32 = 48.0;
+/// The widest a column gets: prose stays readable, and a chapter's length
+/// stays near its title instead of drifting to the far edge of the window.
+const READING_W: f32 = 600.0;
+const CHAPTER_ROW_H: f32 = 32.0;
+/// A chapter's number ends here (right-aligned, as Ond numbers tracks), and
+/// its title starts at `CHAPTER_TITLE_X`.
+const CHAPTER_NUMBER_RIGHT: f32 = 18.0;
+const CHAPTER_TITLE_X: f32 = 34.0;
 /// What a disabled Play button says when hovered.
 const PLAY_LATER: &str = "Playback comes next";
 
@@ -27,54 +46,51 @@ impl ViewCtx<'_> {
         if crate::widgets::link(ui, back, FontId::proportional(12.0), t.muted).clicked() {
             self.actions.push(Action::Back);
         }
-        ui.add_space(8.0);
+        ui.add_space(10.0);
         let Some(book) = self.books.by_id(id).cloned() else {
             shell::widgets::empty_state(ui, Icon::Headphones, "This book isn't here", "It may have been removed from the server. Sync again to see.");
             return;
         };
         egui::ScrollArea::vertical().id_salt(("book", id)).auto_shrink(false).show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                let (rect, _) = ui.allocate_exact_size(vec2(COVER_W, COVER_W), Sense::hover());
-                self.art.paint(ui, rect, book.cover.as_deref(), 6.0);
-                ui.add_space(22.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&book.title).font(FontId::new(24.0, semibold())).color(t.text));
-                    if let Some(subtitle) = &book.subtitle {
-                        ui.label(RichText::new(subtitle).size(14.0).color(t.muted));
-                    }
-                    ui.add_space(2.0);
-                    ui.label(RichText::new(authors_line(&book)).size(14.0).color(t.text));
-                    let facts = facts_line(&book);
-                    if !facts.is_empty() {
-                        ui.add_space(2.0);
-                        ui.label(RichText::new(facts).size(12.0).color(t.muted));
-                    }
-                    ui.add_space(14.0);
-                    // Playback is the engine branch's work: the button shows
-                    // where it will be, and says when it comes.
-                    let play = egui::Button::new(RichText::new("Play").font(FontId::new(13.0, semibold())).color(t.on_accent))
-                        .fill(t.accent)
-                        .corner_radius(7)
-                        .min_size(vec2(96.0, 32.0));
-                    ui.add_enabled(false, play).on_disabled_hover_text(PLAY_LATER);
-                });
-            });
-            ui.add_space(20.0);
+            self.book_header(ui, &t, &book);
+            ui.add_space(32.0);
             self.details(ui, id, &t);
-            ui.add_space(10.0);
             if let Some(Details::Loaded(item)) = self.books.details.get(id).cloned() {
-                if let Some(description) = item.description.as_deref().filter(|d| !d.is_empty()) {
-                    ui.label(RichText::new("About this book").font(FontId::new(15.0, semibold())).color(t.text));
-                    ui.add_space(4.0);
-                    ui.scope(|ui| {
-                        ui.set_max_width(ui.available_width().min(720.0));
-                        ui.add(egui::Label::new(RichText::new(description).size(13.0).color(t.text)).wrap());
-                    });
-                    ui.add_space(18.0);
-                }
-                chapters(ui, &t, &item.chapters);
+                book_body(ui, &t, &item);
             }
             ui.add_space(24.0);
+        });
+    }
+
+    /// The cover beside the title, authors, facts and Play, or above them
+    /// when there's no room.
+    fn book_header(&mut self, ui: &mut Ui, t: &Tokens, book: &ItemSummary) {
+        let avail = ui.available_width();
+        let stacked = avail < HEADER_STACK_BELOW;
+        let side = if stacked { avail.min(COVER_MAX) } else { (avail * 0.3).clamp(COVER_MIN, COVER_MAX) };
+        let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
+        ui.with_layout(layout, |ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+            self.art.paint(ui, rect, book.cover.as_deref(), COVER_RADIUS);
+            ui.add_space(if stacked { 16.0 } else { 24.0 });
+            // The text sits on the cover's bottom edge, as on Ond's album
+            // page. Its height (it wraps) is known only once drawn, so this
+            // uses last frame's and redoes the frame when it changed.
+            let measured = ui.scope_id().with(("book-header-h", &book.id));
+            let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(HEADER_TEXT_H_GUESS);
+            let block = ui.vertical(|ui| {
+                if !stacked {
+                    ui.add_space((side - last_h).max(0.0));
+                }
+                let top = ui.cursor().top();
+                header_text(ui, t, book);
+                ui.min_rect().bottom() - top
+            });
+            let h = block.inner.round();
+            if (h - last_h).abs() > 0.5 {
+                ui.data_mut(|d| d.insert_temp(measured, h));
+                ui.ctx().request_discard("book header height changed");
+            }
         });
     }
 
@@ -98,6 +114,75 @@ impl ViewCtx<'_> {
     }
 }
 
+/// The title, any subtitle, the authors, the facts and Play.
+fn header_text(ui: &mut Ui, t: &Tokens, book: &ItemSummary) {
+    ui.add(egui::Label::new(RichText::new(&book.title).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
+    if let Some(subtitle) = book.subtitle.as_deref().filter(|s| !s.is_empty()) {
+        ui.add(egui::Label::new(RichText::new(subtitle).size(15.0).color(t.muted)).wrap());
+    }
+    ui.add_space(2.0);
+    ui.add(egui::Label::new(RichText::new(authors_line(book)).size(17.0).color(t.text)).wrap());
+    let facts = facts_line(book);
+    if !facts.is_empty() {
+        ui.add_space(2.0);
+        ui.add(egui::Label::new(RichText::new(facts).size(12.0).color(t.muted)).wrap());
+    }
+    ui.add_space(12.0);
+    // Playback is the engine branch's work: the button shows where it will
+    // be, and says when it comes.
+    shell::widgets::primary_unavailable(ui, Some(Icon::Play), "Play").on_disabled_hover_text(PLAY_LATER);
+}
+
+/// The description and the chapters: two columns from [`SPLIT_FROM`], else
+/// one above the other, each no wider than [`READING_W`].
+fn book_body(ui: &mut Ui, t: &Tokens, item: &sources::Item) {
+    let description = item.description.as_deref().map(str::trim).filter(|d| !d.is_empty());
+    let chapters = item.chapters.as_slice();
+    let avail = ui.available_width();
+    let column = |ui: &mut Ui, w: f32, draw: &dyn Fn(&mut Ui)| {
+        ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(w);
+            draw(ui);
+        });
+    };
+    if avail >= SPLIT_FROM && description.is_some() && !chapters.is_empty() {
+        let w = ((avail - COLUMN_GAP) / 2.0).min(READING_W);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            column(ui, w, &|ui| about(ui, t, description));
+            ui.add_space(COLUMN_GAP);
+            column(ui, w, &|ui| chapter_list(ui, t, chapters));
+        });
+    } else {
+        let w = avail.min(READING_W);
+        if description.is_some() {
+            column(ui, w, &|ui| about(ui, t, description));
+            ui.add_space(24.0);
+        }
+        column(ui, w, &|ui| chapter_list(ui, t, chapters));
+    }
+}
+
+/// A section's name, with a quiet count or note beside it when there is one.
+fn section_heading(ui: &mut Ui, t: &Tokens, title: &str, note: Option<String>) {
+    ui.horizontal(|ui| {
+        // Its own spacing: the columns it sits in set theirs to nothing.
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
+        if let Some(note) = note {
+            ui.label(RichText::new(note).size(12.0).color(t.muted));
+        }
+    });
+    ui.add_space(6.0);
+}
+
+/// "About this book" and the description, set for reading.
+fn about(ui: &mut Ui, t: &Tokens, description: Option<&str>) {
+    let Some(description) = description else { return };
+    section_heading(ui, t, "About this book", None);
+    ui.add(egui::Label::new(RichText::new(description).size(13.0).line_height(Some(20.0)).color(t.text)).wrap());
+}
+
 /// The line under the authors: narrators, series and number, and how long the
 /// book is, each only when the server said.
 pub fn facts_line(book: &ItemSummary) -> String {
@@ -117,31 +202,32 @@ pub fn facts_line(book: &ItemSummary) -> String {
     parts.join(" · ")
 }
 
-/// The chapter list: each chapter's title and how long it runs.
-fn chapters(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter]) {
+/// The chapter list: each chapter's number, title and how long it runs.
+fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter]) {
     if chapters.is_empty() {
         return;
     }
-    ui.label(RichText::new("Chapters").font(FontId::new(15.0, semibold())).color(t.text));
-    ui.add_space(6.0);
-    // A column, like the description: a chapter's length belongs beside its
-    // title, not at the far edge of a wide window.
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(720.0));
-        // A book rarely has more than a few hundred chapters, and this list is
-        // drawn only while the book's page is open.
-        for (n, chapter) in chapters.iter().enumerate() {
-            let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-            let length = fmt::clock((chapter.end - chapter.start).max(0.0));
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{} · {}", chapter.title, length)));
-            let number = format!("{}", n + 1);
-            ui.painter().text(pos2(row.left(), row.center().y), egui::Align2::LEFT_CENTER, number, FontId::proportional(12.0), t.muted);
-            let title = elide(ui, &chapter.title, FontId::proportional(13.0), t.text, row.width() - 120.0);
-            ui.painter().galley(pos2(row.left() + 34.0, row.center().y - title.size().y / 2.0), title, t.text);
-            let time = elide(ui, &length, FontId::proportional(12.0), t.muted, 64.0);
-            ui.painter().galley(pos2(row.right() - time.size().x, row.center().y - time.size().y / 2.0), time, t.muted);
+    let count = if chapters.len() == 1 { "1 chapter".to_owned() } else { format!("{} chapters", chapters.len()) };
+    section_heading(ui, t, "Chapters", Some(count));
+    ui.spacing_mut().item_spacing.y = 0.0;
+    // A book rarely has more than a few hundred chapters, and this list is
+    // drawn only while the book's page is open.
+    for (n, chapter) in chapters.iter().enumerate() {
+        let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), CHAPTER_ROW_H), Sense::hover());
+        let length = fmt::clock((chapter.end - chapter.start).max(0.0));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{} · {}", chapter.title, length)));
+        if !ui.is_rect_visible(row) {
+            continue;
         }
-    });
+        let cy = row.center().y;
+        let number = format!("{}", n + 1);
+        ui.painter().text(pos2(row.left() + CHAPTER_NUMBER_RIGHT, cy), egui::Align2::RIGHT_CENTER, number, FontId::proportional(12.0), t.muted);
+        let time = elide(ui, &length, FontId::proportional(12.0), t.muted, 72.0);
+        let time_w = time.size().x;
+        ui.painter().galley(pos2(row.right() - time_w, cy - time.size().y / 2.0), time, t.muted);
+        let title = elide(ui, &chapter.title, FontId::proportional(13.0), t.text, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
+        ui.painter().galley(pos2(row.left() + CHAPTER_TITLE_X, cy - title.size().y / 2.0), title, t.text);
+    }
 }
 
 #[cfg(test)]

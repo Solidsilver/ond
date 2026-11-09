@@ -95,6 +95,15 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // The same page at the smallest window Rede opens: the cover goes
+    // above the text and the columns stack.
+    h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
+    scene(h, s, "book-narrow", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        app.go(book_route(0));
+        app
+    });
+    h.set_size(egui::vec2(FULL[0], FULL[1]));
     // Dropping the app (and its runtime) before the next theme.
     *h.state_mut() = None;
 }
