@@ -194,6 +194,7 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
         s.put_account(signed_in.clone());
         s.show_panel = false;
     });
+    app.shown = PrefsView::read(&app.prefs);
     app.session = Session { account: Some(signed_in), source: None, shelf: Some(shelf.clone()), connecting: false };
     app.handle(crate::bridge::LibraryMsg::Books(listed));
     for (n, book) in all.iter().enumerate().take(books) {

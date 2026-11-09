@@ -85,21 +85,25 @@ impl RedeApp {
         if self.ui.panel.narrow { self.ui.panel.sheet } else { self.shown.show_panel }
     }
 
+    /// Applied between frames, so it reads the preference itself rather than
+    /// the frame's copy, which an earlier action may have outdated.
     pub(super) fn apply_panel(&mut self, action: PanelAction) {
-        let was = self.panel_shown();
+        let docked = self.prefs.get(|s| s.show_panel);
+        let shown = |app: &Self| if app.ui.panel.narrow { app.ui.panel.sheet } else { app.prefs.get(|s| s.show_panel) };
+        let was = shown(self);
         match action {
             PanelAction::Toggle => {
                 if self.ui.panel.narrow {
                     self.ui.panel.sheet = !self.ui.panel.sheet;
                 } else {
-                    self.apply_prefs(PrefsAction::ShowPanel(!self.shown.show_panel));
+                    self.apply_prefs(PrefsAction::ShowPanel(!docked));
                 }
             }
             PanelAction::Show(tab) => {
                 self.ui.panel.tab = tab;
                 if self.ui.panel.narrow {
                     self.ui.panel.sheet = true;
-                } else if !self.shown.show_panel {
+                } else if !docked {
                     self.apply_prefs(PrefsAction::ShowPanel(true));
                 }
                 self.ui.panel.reveal = true;
@@ -107,7 +111,7 @@ impl RedeApp {
             PanelAction::Tab(tab) => self.ui.panel.tab = tab,
             PanelAction::CloseSheet => self.ui.panel.sheet = false,
         }
-        if !was && self.panel_shown() {
+        if !was && shown(self) {
             self.ui.panel.reveal = true;
         }
         self.ctx.request_repaint();
