@@ -29,7 +29,8 @@
 //!   [`switch_row`], and [`menu_label`] (a quiet button with a chevron that
 //!   opens one).
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
-//!   in) and [`sheet_header`] (its title, and a × that closes it).
+//!   in), [`sheet_header`] (its title, and a × that closes it), and the
+//!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
 //!   fade, or stay with a button until clicked away.
 
