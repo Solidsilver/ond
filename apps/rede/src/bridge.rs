@@ -85,6 +85,7 @@ pub enum AccountMsg {
         session: u64,
         pending: Option<Box<crate::openid::Pending>>,
     },
+    #[cfg(any(target_os = "macos", test))]
     Redirect(String),
     OpenIdAuthenticated {
         session: u64,

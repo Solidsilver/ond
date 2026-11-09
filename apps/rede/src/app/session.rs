@@ -184,6 +184,7 @@ impl RedeApp {
                     self.openid_redirect(url);
                 }
             }
+            #[cfg(any(target_os = "macos", test))]
             AccountMsg::Redirect(url) => self.openid_redirect(url),
             AccountMsg::OpenIdAuthenticated { session, account, client, login, warning } => {
                 if session != self.bridge.session() {
