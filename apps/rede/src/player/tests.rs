@@ -390,6 +390,55 @@ fn buffering_and_loading_do_not_accrue_listening_across_recovery() {
     assert_eq!(listened, Duration::from_secs(20));
 }
 
+#[tokio::test]
+async fn refreshed_urls_reuse_the_account_qualified_cache_file_without_tokens() {
+    let engine = Fake::default();
+    let mut player = Player::default();
+    let input = opened(true);
+    let mut other = opened(true);
+    other.key.account = AccountId::new();
+    for fallback in [false, true] {
+        let mut input = Opened { key: input.key.clone(), item: input.item.clone(), session: input.session.clone(), position: input.position };
+        if fallback {
+            input.item.tracks[0].content_id.clear();
+        }
+        let before = SessionSources.track(&input.key, &input.item, &input.session.tracks[0], 1);
+        let other = SessionSources.track(&other.key, &input.item, &input.session.tracks[0], 1);
+        let key = streamcache::CacheKey::original(before.id.clone(), before.suffix.clone());
+        let other_key = streamcache::CacheKey::original(other.id, other.suffix);
+        player.load(input, 1.0, &engine, Instant::now()).unwrap();
+        let mut refreshed = player.book.as_ref().unwrap().session.tracks.clone();
+        refreshed[0].url = "https://example.com/file?token=rotated-private-token".into();
+        player.refreshed(refreshed, &engine);
+        let sent = engine.sent.borrow();
+        let after = sent
+            .iter()
+            .rev()
+            .find_map(|cmd| match cmd {
+                Command::PlayFrom(source, _) => Some(source),
+                _ => None,
+            })
+            .unwrap();
+        let after_key = streamcache::CacheKey::original(after.id.clone(), after.suffix.clone());
+        assert_eq!(key, after_key);
+        assert_eq!(key.file_name(), after_key.file_name());
+        assert_ne!(key.file_name(), other_key.file_name());
+        assert!(!key.file_name().contains("secret"));
+        assert!(!after_key.file_name().contains("rotated-private-token"));
+        assert_ne!(before.url, after.url);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(key.file_name()), b"cached book audio").unwrap();
+        let cache = streamcache::StreamCache::new(streamcache::CacheConfig::new(dir.path()), tokio::runtime::Handle::current()).unwrap();
+        for url in [&before.url, &after.url] {
+            let mut cached = cache.open(&after_key, url, std::sync::Arc::new(|| true)).unwrap();
+            assert!(matches!(cached, streamcache::CachedSource::File { .. }));
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut cached, &mut bytes).unwrap();
+            assert_eq!(bytes, b"cached book audio");
+        }
+    }
+}
+
 #[test]
 fn a_hidden_file_end_starts_the_next_file_when_gapless_playback_was_unavailable() {
     let engine = Fake::default();
