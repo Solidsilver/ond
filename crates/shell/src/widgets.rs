@@ -62,8 +62,9 @@ fn filled(ui: &mut Ui, icon: Option<Icon>, text: &str, f: Fill) -> Response {
         }
         ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, f.text);
     }
-    let label = text.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    // A button in a disabled scope says so where a screen reader looks.
+    let (label, enabled) = (text.to_owned(), ui.is_enabled());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &label));
     resp
 }
 
@@ -71,6 +72,21 @@ fn filled(ui: &mut Ui, icon: Option<Icon>, text: &str, f: Fill) -> Response {
 pub fn primary(ui: &mut Ui, icon: Option<Icon>, text: &str) -> Response {
     let t = Tokens::of(ui);
     filled(ui, icon, text, Fill { text: t.on_accent, rest: t.accent, hover: t.accent.gamma_multiply(0.88), pad: 32.0 })
+}
+
+/// [`primary`] for an action that isn't there yet: the same shape, in the
+/// quiet field fill with muted ink, so it reads as waiting rather than broken
+/// in either theme. It takes hovers, so a tooltip can say why
+/// (`on_disabled_hover_text`), but not clicks.
+pub fn primary_unavailable(ui: &mut Ui, icon: Option<Icon>, text: &str) -> Response {
+    let t = Tokens::of(ui);
+    ui.scope(|ui| {
+        // These colours are already the disabled look; egui's own fade on
+        // top would wash them out.
+        ui.visuals_mut().disabled_alpha = 1.0;
+        ui.add_enabled_ui(false, |ui| filled(ui, icon, text, Fill { text: t.muted, rest: t.field, hover: t.field, pad: 32.0 })).inner
+    })
+    .inner
 }
 
 /// A filled button for a destructive choice (Delete in a confirmation).
