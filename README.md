@@ -6,6 +6,11 @@ I wanted a client that treats playback quality as the main feature and stays out
 
 Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
+<a href="https://0rwx.com"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0rwx-ai-x-dark.png">
+  <img alt="AI:X — AI made (0rwx)" src="docs/images/0rwx-ai-x-light.png" height="32">
+</picture></a>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/library-dark.png">
   <img alt="Ond's main window: the sidebar, a grid of recently added albums, the now-playing display in the toolbar and the queue on the right" src="docs/images/library-light.png">
@@ -139,6 +144,8 @@ Some things need real hardware or a real server. [TESTING.md](TESTING.md) lists 
 ## AI Disclosure
 
 I built Ond with Claude Opus 5.5 in Claude Code. I came up with the initial idea, did research on the UI design, made all of the design decisions, and tested on my own library and hardware. Claude wrote most of the code. 
+
+Ond is labelled [AI:X](https://0rwx.com) on the 0rwx scale, meaning AI made: agents write and review most of the code while I direct the work, decide the design and test it. Rede, the audiobook player in this repository, is built the same way.
 
 ## License
 
