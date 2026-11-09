@@ -6,7 +6,7 @@ use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Color32, FontId, Galley, Rect, Response, Sense, Ui, pos2, vec2};
-pub use shell::widgets::empty_state;
+pub use shell::widgets::{danger, empty_state, focus_ring, primary, secondary, secondary_danger};
 use std::sync::Arc;
 
 /// One line of text cut to `width` with an ellipsis. The one way the app
@@ -94,57 +94,6 @@ fn link_with(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: TextWr
     (resp.on_hover_cursor(egui::CursorIcon::PointingHand), cut)
 }
 
-/// How a filled button looks: text colour, fill at rest and on hover, and the
-/// horizontal padding (both sides together).
-struct Fill {
-    text: Color32,
-    rest: Color32,
-    hover: Color32,
-    pad: f32,
-}
-
-/// An accent ring just outside `rect` while `resp` has keyboard focus, for
-/// the controls that paint themselves. A click never focuses them, so the
-/// ring shows only when Tab got there.
-pub fn focus_ring(ui: &Ui, resp: &Response, rect: Rect, radius: f32) {
-    if resp.has_focus() {
-        let ring = egui::Stroke::new(1.5, Tokens::of(ui).accent);
-        ui.painter().rect_stroke(rect.expand(2.0), radius + 2.0, ring, egui::StrokeKind::Inside);
-    }
-}
-
-/// The body every filled button shares: an optional icon, then the label.
-fn filled(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str, f: Fill) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), f.text);
-    let icon_w = if icon.is_some() { 16.0 } else { 0.0 };
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + icon_w + f.pad, 30.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(rect, 6.0, if resp.hovered() { f.hover } else { f.rest });
-        focus_ring(ui, &resp, rect, 6.0);
-        let mut x = rect.left() + f.pad / 2.0;
-        if let Some(icon) = icon {
-            crate::icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(x + 5.0, rect.center().y), vec2(10.0, 10.0)), icon, f.text);
-            x += icon_w;
-        }
-        ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, f.text);
-    }
-    let label = text.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    resp
-}
-
-/// The filled accent button (Play).
-pub fn primary(ui: &mut Ui, icon: Option<crate::icons::Icon>, text: &str) -> Response {
-    let t = Tokens::of(ui);
-    filled(ui, icon, text, Fill { text: t.on_accent, rest: t.accent, hover: t.accent.gamma_multiply(0.88), pad: 32.0 })
-}
-
-/// A filled button for a destructive choice (Delete in a confirmation).
-pub fn danger(ui: &mut Ui, text: &str) -> Response {
-    let t = Tokens::of(ui);
-    filled(ui, None, text, Fill { text: Color32::WHITE, rest: t.danger, hover: t.danger.gamma_multiply(0.88), pad: 32.0 })
-}
-
 /// A heart that loves / unloves: filled accent when on, a quiet outline when off.
 pub fn heart_button(ui: &mut Ui, on: bool, size: f32, glyph: f32) -> Response {
     let t = Tokens::of(ui);
@@ -199,19 +148,6 @@ pub fn rating_choice(ui: &mut Ui, rating: u8, current: bool) -> Response {
     let label = crate::fmt::stars(rating);
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, true, current, &label));
     resp
-}
-
-/// A quiet button with a tinted fill (Shuffle next to Play).
-pub fn secondary(ui: &mut Ui, text: &str) -> Response {
-    let t = Tokens::of(ui);
-    filled(ui, None, text, Fill { text: t.accent, rest: t.field, hover: t.selected, pad: 28.0 })
-}
-
-/// [`secondary`] for something that can't be taken back (Sign out): red
-/// text, the same quiet fill.
-pub fn secondary_danger(ui: &mut Ui, text: &str) -> Response {
-    let t = Tokens::of(ui);
-    filled(ui, None, text, Fill { text: t.danger, rest: t.field, hover: t.selected, pad: 28.0 })
 }
 
 /// Mutually exclusive choices in a pill (Up Next / History, sort order).
