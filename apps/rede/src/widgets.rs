@@ -1,61 +1,21 @@
-//! The few pieces Rede draws with that the family's `shell` doesn't have yet:
-//! elided text, quiet links, and the segmented pill that picks a sort.
-//!
-//! Buttons are real egui widgets, so every control is named for the
-//! accessibility tree without a view having to say so.
+//! The kit's text and choice pieces under the names Rede's views use:
+//! elided text, the quiet link, and the segmented pill (the library's order,
+//! the chapters column's tabs). They're Ond's, from `shell::kit`, so the two
+//! apps draw them alike.
 
-use egui::text::{LayoutJob, TextWrapping};
-use egui::{Color32, FontId, Galley, Response, Ui, vec2};
-use shell::theme::Tokens;
-use std::sync::Arc;
+use egui::Ui;
+pub use shell::kit::{elide, link};
 
-/// One line of text cut to `width` with an ellipsis: the one way a view
-/// shortens a name to fit.
-pub fn elide(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
-    let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = TextWrapping { max_width: width.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    ui.painter().layout_job(job)
-}
-
-/// Text that reads as plain until hovered, then underlines: a link where it
-/// earns one, without turning the page blue.
-pub fn link(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> Response {
-    let resp = ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(color)).selectable(false).sense(egui::Sense::click()));
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let y = resp.rect.bottom() - 1.0;
-        ui.painter().line_segment([egui::pos2(resp.rect.left(), y), egui::pos2(resp.rect.right(), y)], egui::Stroke::new(1.0, color));
-    }
-    resp
-}
-
-/// Mutually exclusive choices in a pill (the library's order). Writes the pick
-/// into `current` and says whether it changed. Each choice is a real button, so
-/// it's named where the accessibility tree looks.
+/// Mutually exclusive choices in Ond's segmented pill, each segment fitting
+/// its label. Writes the pick into `current` and says whether it changed.
 pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, all: &[T], current: &mut T, label: impl Fn(T) -> String) -> bool {
-    let t = Tokens::of(ui);
-    let mut changed = false;
-    egui::Frame::new().fill(t.field).corner_radius(7.0).inner_margin(egui::Margin::same(2)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-            ui.spacing_mut().button_padding = vec2(9.0, 4.0);
-            for &value in all {
-                let on = value == *current;
-                let text = egui::RichText::new(label(value)).size(12.0).color(if on { t.text } else { t.muted });
-                let resp = ui.add(egui::Button::new(text).fill(if on { t.bg } else { Color32::TRANSPARENT }).stroke(egui::Stroke::NONE).corner_radius(5));
-                if resp.clicked() && !on {
-                    *current = value;
-                    changed = true;
-                }
-            }
-        });
-    });
-    changed
+    shell::kit::choice(ui, all, current, None, label)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::FontId;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
