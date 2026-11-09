@@ -243,11 +243,70 @@ pub struct ProgressUpdate {
 
 ### Reconciling
 
-When Rede starts, regains focus or opens a book, it fetches the server's progress for that book and compares it with the newest local entry by time:
+When Rede starts, regains focus, opens a book or resumes a paused book, its
+listening worker replays pending progress, then pulls the server's positions.
+Focus pulls are independent of the five-minute library-listing throttle. Opens,
+reports, bookmark sync and reconciliation share that worker, so a pull cannot
+race another worker's blind progress PATCH.
 
-- The newer one wins (last write wins, as ABS itself does).
-- If the server is newer and differs by more than a minute (you listened on your phone), Rede moves to it and shows a toast: "Picked up where you left off on another device, 1h 12m in. Undo." Undo restores the local position. This avoids both silently rewinding you and silently ignoring the phone.
-- Pending offline entries are sent before the comparison, so they aren't lost to it.
+- The newer timestamp wins; equal timestamps choose the server. Accepted server
+  positions are saved as snapshots, without inventing local listening or pending
+  progress entries. A newer local position is reported back when needed.
+- If the server is newer and differs by more than a minute in either direction,
+  Rede saves both positions in `Reconciled` state. Its message is: "Picked up where
+  you left off on another device, 1h 12m in." The toast's Undo action restores the
+  saved local position. With no prior local position, Undo restores the start.
+- Exactly a minute or less updates the position without the toast. A paused
+  player's engine moves with the accepted snapshot and remains paused. Resuming
+  waits for that pull before restarting audio; an unreachable server still lets
+  it resume the saved local position.
+- While the same book is actively playing on this device, local wins regardless
+  of the phone's timestamp, and is reported back. Moving running audio beneath
+  its listener would interrupt this device's session. The app also refuses to
+  move audio if it resumed while a paused pull was in flight.
+- Undo is a new durable progress entry and a server write, with a timestamp after
+  both the accepted phone stamp and now. This prevents the old phone position
+  returning on the next pull, even if the phone clock was ahead. Restoring an
+  unfinished position over a finished ABS row clears `isFinished` first, then
+  writes the position separately: ABS drops a position sent with the reset.
+  The server can still auto-finish a restored position within its end threshold.
+- Pending entries replay before comparison, oldest log first, coalesced to the
+  newest position per item. ABS PATCH is a blind overwrite, so each replay checks
+  server timestamps first and discards older local entries. Offline listening
+  statistics through timestamped ABS local sessions remain M4 work.
+
+### Bookmarks
+
+Bookmarks belong to the account's shelf and use `(item, exact book time)` as their
+server identity. The source model carries item, position, title and creation time.
+Title formatting may round a display time; the position itself always retains
+all f64 bits, including through postcard and the ABS delete URL. Renaming changes
+only the title; moving a bookmark is delete followed by create.
+
+Local create, rename and delete commit the optimistic row and an ordered journal
+entry in one transaction. They survive offline use and restart. The listening
+worker replays them on startup, focus, full library sync, book open/resume and a
+30-second retry that runs only while an edit is still queued. A pull installs the
+authoritative server list and overlays edits queued during the request; it asks
+the server again after a write, and once when there was nothing to write. Snapshot
+revisions prevent a delayed UI message from erasing a newer optimistic edit. The
+UI reads a memo keyed by bookmark generation and ItemKey, sorted by book time;
+drawing never reads the database.
+
+ABS has no bookmark revision timestamp. The simple conflict rule compares the
+server title (or absence) with the title seen when an edit was queued. If they
+differ, the server wins and the queued edit is acknowledged without overwriting
+it. A missing renamed bookmark stays deleted. A row already at the desired title,
+or an already absent deletion, also acknowledges the edit: this makes retrying a
+lost HTTP response idempotent. Creation time is not compared, because the server
+assigns it when an offline create is uploaded. Edits that delete and recreate the
+same title cannot be distinguished; ABS supplies no compare-and-swap, so phone
+writes between the comparison and mutation can still race. A final pull keeps
+whatever the server ended with.
+
+Schema v2 adds a frozen bookmark-edit journal without changing any v1 row bytes.
+Existing v1 bookmarks become pending creates during migration, so upgrading does
+not discard bookmarks saved before server sync existed.
 
 ### Listening with others
 
@@ -275,7 +334,7 @@ Records:
 - **Tracks:** per item, the files with their start offset, duration, suffix and size (for offline downloads and the stream cache).
 - **Chapters:** start, end, title.
 - **Progress log** and the current position per item.
-- **Bookmarks:** item, position, note, created.
+- **Bookmarks:** item, position, title, created, and the ordered journal of edits that haven't reached the server yet (schema v2; a v1 file's bookmarks become queued creates on upgrade).
 - **Sync state:** per library, where the listing got to and the newest `updatedAt` seen.
 
 Sync for ABS: every run pages through each library's minified item list (ABS has no "changed since" filter) and compares `updatedAt`; that is cheap even for large libraries. Full item details (tracks, chapters) are fetched when a book is opened or downloaded, and kept.
