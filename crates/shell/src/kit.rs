@@ -11,6 +11,8 @@
 //!   its value in a popover), [`key_cap`] (a combo drawn as a key).
 //! - Settings rows: a [`group`] of [`setting`]s (or [`row_with`] and its
 //!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock one.
+//! - Popovers and sheets: [`menu_row`] (a command in a menu), and
+//!   [`sheet_frame`] (the frame a sheet over the window is drawn in).
 
 use crate::theme::{Tokens, semibold};
 use crate::widgets::focus_ring;
@@ -448,6 +450,34 @@ fn row_text(ui: &mut Ui, head: Head<'_>, at: egui::Pos2, room: f32) -> f32 {
         }
     }
     text.min_rect().bottom()
+}
+
+/// A row in a popover menu, hovered as a sidebar row is. True when chosen,
+/// and the menu closes.
+pub fn menu_row(ui: &mut Ui, label: &str) -> bool {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 5.0, t.hover);
+        }
+        focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
+        ui.painter().text(egui::pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
+    }
+    let label = label.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
+    if resp.clicked() {
+        ui.close();
+        return true;
+    }
+    false
+}
+
+/// The frame every sheet over the window is drawn in (a dialog, the
+/// keyboard shortcuts): the popup's fill, stroke and shadow, rounder, with
+/// room inside.
+pub fn sheet_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(20)).corner_radius(12)
 }
 
 #[cfg(test)]

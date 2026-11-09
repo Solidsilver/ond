@@ -70,7 +70,7 @@ impl OndApp {
         let visualizer = self.ui.prefs.experimental.visualizer;
         let Some(overlay) = self.ui.overlay.as_mut() else { return };
         let id = egui::Id::unique("overlay");
-        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(20)).corner_radius(12);
+        let frame = shell::kit::sheet_frame(ctx);
         let mut done: Option<Option<Action>> = None;
         let modal = egui::Modal::new(id).frame(frame).show(ctx, |ui| {
             let t = Tokens::of(ui);

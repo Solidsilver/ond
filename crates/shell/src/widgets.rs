@@ -1,6 +1,7 @@
 //! Widgets every app in the family draws the same way.
 
 use crate::icons::Icon;
+pub use crate::kit::menu_row;
 use crate::theme::{Tokens, semibold};
 use egui::{Color32, FontId, Rect, Response, Sense, Ui, vec2};
 
@@ -137,27 +138,6 @@ pub fn sidebar_row(ui: &mut Ui, label: &str, on: bool, trailing: f32, name: &str
     let name = name.to_owned();
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, &name));
     resp
-}
-
-/// A row in a popover menu, hovered as a sidebar row is. True when chosen,
-/// and the menu closes.
-pub fn menu_row(ui: &mut Ui, label: &str) -> bool {
-    let t = Tokens::of(ui);
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 5.0, t.hover);
-        }
-        focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
-        ui.painter().text(egui::pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
-    }
-    let label = label.to_owned();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
-    if resp.clicked() {
-        ui.close();
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]
