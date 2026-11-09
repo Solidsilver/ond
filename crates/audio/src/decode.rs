@@ -768,10 +768,17 @@ impl Ctx {
     /// Anything interrupted leaves a cut behind: a seek can still resolve to
     /// nothing, and the piece that was dropped carried the origin the output
     /// was following, so the next kept frames have to publish their own.
+    /// Sonic's buffered tail belongs to the dropped piece too: it is thrown
+    /// away with a fresh stretcher, or it would play after the new anchor.
     fn speech_piece(&mut self, samples: &[f32], origin: Origin, saved: f64, o: &mut Out) -> Push {
         let result = self.speech_piece_at(samples, origin, saved, o);
         if matches!(result, Push::Interrupted) {
             o.cut = true;
+            if o.stretch.is_some()
+                && let Ok(stretch) = stretch::speech(o.src_rate, o.format.channels, self.speed)
+            {
+                o.stretch = stretch;
+            }
         }
         result
     }

@@ -122,7 +122,7 @@ impl Silence {
         if power < QUIET_POWER {
             self.quiet += count;
             if self.cutting {
-                self.hold_lead(start, emit);
+                self.hold_lead(start / self.channels, emit);
                 return;
             }
             if self.quiet <= self.window * 40 {
@@ -143,8 +143,20 @@ impl Silence {
             self.runs.clear();
             self.cutting = true;
         } else {
-            // The lead-in carries the fade; the words themselves play as they are.
+            // The lead-in carries the fade; the words themselves play as they
+            // are. Speech straight after a cut has no lead held, so it fades
+            // in briefly rather than starting on a step from silence.
+            let bare = self.cutting && self.lead.is_empty();
             self.release_lead(emit);
+            if bare {
+                let fade = (self.rate as usize / 200).max(1).min(count);
+                for (i, frame) in self.samples[..fade * self.channels].chunks_exact_mut(self.channels).enumerate() {
+                    let gain = i as f32 / fade as f32;
+                    for sample in frame {
+                        *sample *= gain;
+                    }
+                }
+            }
             let total = self.samples.len() / self.channels;
             self.emit(0, total, false, emit);
             self.samples.clear();
@@ -154,8 +166,9 @@ impl Silence {
         }
     }
 
-    /// Holds this window of quiet as the lead-in to returning speech, letting
-    /// the oldest held window go (as removed time) once the ring is full.
+    /// Holds this window of quiet (from frame `start` of the buffer) as the
+    /// lead-in to returning speech, letting the oldest held window go (as
+    /// removed time) once the ring is full.
     fn hold_lead(&mut self, start: usize, emit: &mut impl FnMut(&[f32], Origin, f64)) {
         let total = self.samples.len() / self.channels;
         self.lead.extend_from_slice(&self.samples[start * self.channels..]);
