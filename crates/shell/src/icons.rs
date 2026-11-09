@@ -84,6 +84,8 @@ pub enum Icon {
     Moon,
     /// A ribbon with a notch cut in its foot: a bookmark.
     Bookmark,
+    /// A window with a column down its left side: show or hide a sidebar.
+    Sidebar,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -219,6 +221,10 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.85), p(0.85, 0.85)), r * 0.2, line, egui::StrokeKind::Middle);
             painter.rect_filled(Rect::from_min_max(p(-0.45, -0.55), p(0.45, 0.2)), r * 0.08, color);
             painter.line_segment([p(-0.45, 0.5), p(0.45, 0.5)], line);
+        }
+        Icon::Sidebar => {
+            painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
+            painter.line_segment([p(-0.3, -0.7), p(-0.3, 0.7)], line);
         }
         Icon::Expand => {
             painter.add(Shape::line(vec![p(0.15, -0.8), p(0.8, -0.8), p(0.8, -0.15)], line));
