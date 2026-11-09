@@ -12,6 +12,8 @@
 //! - `library`: the books the shelf has, in the order drawn
 //! - `nav`: where the window is, and how it got there
 //! - `playing`: playback actions, engine events and the listening worker
+//! - `bookmarks`: the bookmarks a book has, the edits that sync them, and the
+//!   position another device left behind
 //! - `controls`: chapter seeking and the listening controls
 //! - `title_bar`: the player in the title bar, and the window's controls
 //! - `sidebar`: the places and the account, in the column at the left
@@ -46,6 +48,7 @@
 //!    control needs a `widget_info`), and a scene in `snapshots.rs`.
 
 mod book;
+mod bookmarks;
 mod controls;
 mod library;
 mod nav;
@@ -131,6 +134,30 @@ pub enum Action {
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
     PlayBook(String),
+    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
+    AddBookmark {
+        item: sources::ItemKey,
+        time: f64,
+        title: String,
+    },
+    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
+    RenameBookmark {
+        item: sources::ItemKey,
+        time: f64,
+        title: String,
+    },
+    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
+    DeleteBookmark {
+        item: sources::ItemKey,
+        time: f64,
+    },
+    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
+    JumpToBookmark {
+        item: sources::ItemKey,
+        time: f64,
+    },
+    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
+    UndoReconcile,
     Playback(crate::player::Control),
     Mode(crate::window::Mode),
     Shortcuts,
@@ -177,9 +204,12 @@ pub struct RedeApp {
     listening: Option<crate::listening::Listening>,
     playback_generation: u64,
     opening: bool,
+    resume_pending: bool,
     sleep_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
     positions: std::collections::HashMap<String, sources::Progress>,
     stream_dir: std::path::PathBuf,
+    pub bookmarks: bookmarks::State,
+    pub reconciliation: Option<crate::listening::Reconciled>,
 }
 
 impl RedeApp {
@@ -247,8 +277,11 @@ impl RedeApp {
             listening: None,
             playback_generation: 0,
             opening: false,
+            resume_pending: false,
             sleep_wake: Default::default(),
             positions: std::collections::HashMap::new(),
+            bookmarks: bookmarks::State::default(),
+            reconciliation: None,
             stream_dir: paths.art_cache.with_file_name("streams"),
         })
     }
@@ -291,6 +324,8 @@ impl RedeApp {
                 LibraryMsg::Book { key, item } => self.books.loaded(&key.item, *item),
                 LibraryMsg::BookFailed { key, error } => self.books.failed(&key.item, error),
             },
+            Msg::Bookmarks { session, event } if session == self.bridge.session() => self.bookmark_event(event),
+            Msg::Bookmarks { .. } => {}
             Msg::Playback { session, event } if session == self.bridge.session() => self.playback_event(event),
             Msg::Playback { .. } => {}
             Msg::Engine { session, event } if session == self.bridge.session() => self.engine_event(event),
@@ -316,6 +351,18 @@ impl RedeApp {
     /// Shows what failed. A read or write on this computer says nothing about
     /// the server, so only what came from the network is retried quietly.
     pub(crate) fn show_failure(&mut self, e: Failure) {
+        if e.is_network() {
+            let offline = self.sync.offline;
+            self.sync.offline = true;
+            if self.sync.retry_at.is_none() {
+                let wait = Duration::from_secs(30);
+                self.sync.retry_at = Some(Instant::now() + wait);
+                self.ctx.request_repaint_after(wait);
+            }
+            if offline {
+                return;
+            }
+        }
         self.show_error(e.into_message());
     }
 
@@ -342,6 +389,11 @@ impl RedeApp {
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
             Action::PlayBook(id) => self.play_book(id, None),
+            Action::AddBookmark { item, time, title } => self.edit_bookmark(item, time, title, shelf::BookmarkChange::Create),
+            Action::RenameBookmark { item, time, title } => self.edit_bookmark(item, time, title, shelf::BookmarkChange::Rename),
+            Action::DeleteBookmark { item, time } => self.edit_bookmark(item, time, String::new(), shelf::BookmarkChange::Delete),
+            Action::JumpToBookmark { item, time } => self.jump_to_bookmark(item, time),
+            Action::UndoReconcile => self.undo_reconcile(),
             Action::Playback(control) => self.playback_control(control),
             Action::Mode(mode) => self.set_mode(mode),
             Action::Shortcuts => self.shortcuts = !self.shortcuts,
@@ -491,14 +543,16 @@ impl RedeApp {
         }
         self.expire_openid(std::time::SystemTime::now());
         self.playback_tick(ctx);
-        // The window came to the front: catch up with the server, at most every
-        // few minutes. Idle windows never ask.
-        if self.session.signed_in()
-            && !self.sync.running
-            && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true))))
-            && self.sync.due()
-        {
-            self.actions.push(Action::SyncNow);
+        // The window came to the front: replay what's queued and pull the
+        // server's positions and bookmarks. The library listing has its own,
+        // slower throttle and pulls too when it's due, so only one asks.
+        if self.session.signed_in() && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            if self.sync.running || !self.sync.due() {
+                self.pull_listening();
+            } else {
+                self.send_activity();
+                self.actions.push(Action::SyncNow);
+            }
         }
         // A sync the server asked us to hold off on, or one to try again after
         // the network failed.

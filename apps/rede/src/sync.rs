@@ -138,6 +138,58 @@ pub fn stored_books(shelf: &Shelf, libraries: &[crate::settings::KnownLibrary]) 
     Ok(books)
 }
 
+/// Serialized by the listening worker, including full-sync, focus and open
+/// pulls. ABS has no bookmark revision stamp: a changed title or a deletion
+/// compared with the queued baseline wins over the local edit. Matching the
+/// desired title also makes a lost write response safe to retry.
+pub async fn bookmarks(source: &dyn Source, shelf: &Shelf) -> Result<shelf::BookmarkSnapshot, Failure> {
+    let local = |e| Failure::Local(format!("Couldn't save bookmarks: {e}"));
+    if !source.capabilities().bookmarks {
+        return shelf.bookmark_snapshot().map_err(local);
+    }
+    let mut remote = source.bookmarks().await.map_err(Failure::from)?;
+    let mut wrote = false;
+    for pending in shelf.pending_bookmarks().map_err(local)? {
+        let desired = &pending.bookmark;
+        let found = remote.iter().position(|b| b.item == desired.item && b.position == desired.position);
+        let current = found.map(|i| &remote[i]);
+        let same = |a: Option<&sources::Bookmark>, b: Option<&sources::Bookmark>| a.map(|b| &b.title) == b.map(|b| &b.title);
+        let already = match pending.change {
+            shelf::BookmarkChange::Delete => current.is_none(),
+            _ => current.is_some_and(|b| b.title == desired.title),
+        };
+        if !already && same(current, pending.base.as_ref()) {
+            wrote = true;
+            let result = match pending.change {
+                shelf::BookmarkChange::Create => source.create_bookmark(&desired.item.item, desired.position, &desired.title).await.map(Some),
+                shelf::BookmarkChange::Rename => source.rename_bookmark(&desired.item.item, desired.position, &desired.title).await.map(Some),
+                shelf::BookmarkChange::Delete => source.delete_bookmark(&desired.item.item, desired.position).await.map(|()| None),
+            };
+            match result {
+                Ok(bookmark) => {
+                    if let Some(i) = found {
+                        remote.remove(i);
+                    }
+                    if let Some(bookmark) = bookmark {
+                        remote.push(bookmark);
+                    }
+                }
+                Err(e) if e.status() == Some(404) => {
+                    remote = source.bookmarks().await.map_err(Failure::from)?;
+                }
+                Err(e) => return Err(Failure::from(e)),
+            }
+        }
+        shelf.acknowledge_bookmark(pending.id).map_err(local)?;
+    }
+    // Fetch again after writing: a phone edit concurrent with the replay is
+    // authoritative too. A pull that sent nothing already holds the server's
+    // list, and pulls happen on every focus, so it isn't asked twice.
+    let remote = if wrote { source.bookmarks().await.map_err(Failure::from)? } else { remote };
+    shelf.replace_bookmarks(&remote).map_err(local)?;
+    shelf.bookmark_snapshot().map_err(local)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

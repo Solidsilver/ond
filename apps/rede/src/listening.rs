@@ -10,10 +10,32 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 pub enum Request {
-    Open { generation: u64, key: ItemKey, at: Option<f64> },
-    Report { generation: u64, update: ProgressUpdate, close: bool },
-    Refresh { generation: u64 },
+    Open {
+        generation: u64,
+        key: ItemKey,
+        at: Option<f64>,
+    },
+    Report {
+        generation: u64,
+        update: ProgressUpdate,
+        close: bool,
+    },
+    Refresh {
+        generation: u64,
+    },
     Reconcile,
+    Resume {
+        generation: u64,
+    },
+    /// The app sends this before a focus pull and after playback changes.
+    Activity {
+        item: Option<ItemKey>,
+    },
+    Bookmark {
+        bookmark: sources::Bookmark,
+        change: shelf::BookmarkChange,
+    },
+    Undo(ProgressUpdate),
     Finish(oneshot::Sender<()>),
 }
 
@@ -23,7 +45,27 @@ pub enum Event {
     Opened { generation: u64, result: Result<Box<Opened>, Failure> },
     Refreshed { generation: u64, result: Result<Vec<sources::SessionTrack>, Failure> },
     Positions(Vec<Progress>),
+    ResumeReady { generation: u64 },
     Error(Failure),
+    Bookmarks(Result<shelf::BookmarkSnapshot, Failure>),
+    Reconciled(Reconciled),
+}
+
+/// The UI keeps this until dismissed or undone; the old position is carried
+/// explicitly so Undo never depends on a later shelf lookup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reconciled {
+    pub previous: Progress,
+    pub current: Progress,
+}
+
+impl Reconciled {
+    #[allow(dead_code, reason = "the separate toast UI consumes this text")]
+    pub fn message(&self) -> String {
+        let minutes = (self.current.position.secs().max(0.0) / 60.0) as u64;
+        let at = if minutes >= 60 { format!("{}h {}m", minutes / 60, minutes % 60) } else { format!("{minutes}m") };
+        format!("Picked up where you left off on another device, {at} in.")
+    }
 }
 
 #[derive(Clone)]
@@ -56,6 +98,7 @@ struct Worker {
     shelf: Arc<Shelf>,
     device: DeviceInfo,
     session: Option<Session>,
+    active: Option<ItemKey>,
 }
 
 pub fn spawn(
@@ -73,30 +116,31 @@ pub fn spawn(
     let errors = notify.clone();
     rt.spawn(async move {
         while let Some(request) = journal.recv().await {
-            let id = if let Request::Report { update, .. } = &request {
-                match stored.append_progress(update) {
-                    Ok(id) => Some(id),
-                    Err(error) => {
-                        errors(Event::Error(local_error(error)));
-                        continue;
-                    }
-                }
-            } else {
-                None
+            let saved = match &request {
+                Request::Report { update, .. } | Request::Undo(update) => stored.append_progress(update).map(Some),
+                Request::Bookmark { bookmark, change } => stored.queue_bookmark(bookmark, *change).map(|_| None),
+                _ => Ok(None),
             };
+            let id = match saved {
+                Ok(id) => id,
+                Err(error) => {
+                    errors(Event::Error(local_error(error)));
+                    continue;
+                }
+            };
+            if matches!(request, Request::Bookmark { .. }) {
+                errors(Event::Bookmarks(stored.bookmark_snapshot().map_err(local_error)));
+            }
             if ready.send(Envelope { request, id }).is_err() {
                 break;
             }
         }
     });
     rt.spawn(async move {
-        let mut worker = Worker { source, shelf, device, session: None };
+        let mut worker = Worker { source, shelf, device, session: None, active: None };
+        notify(Event::Bookmarks(worker.shelf.bookmark_snapshot().map_err(local_error)));
         let mut received = worker.shelf.pending_progress().ok().and_then(|p| p.last().map(|p| p.id)).unwrap_or(0);
-        if let Err(e) = worker.replay(None).await && !e.is_network() { notify(Event::Error(e)); }
-        match worker.positions().await {
-            Ok(positions) => notify(Event::Positions(positions)),
-            Err(e) => if !e.is_network() { notify(Event::Error(e)); },
-        }
+        if current() { worker.pull(None, &*notify).await; }
         let period = std::time::Duration::from_secs(30);
         let mut retry = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -107,6 +151,7 @@ pub fn spawn(
                     let Some(Envelope { request, id }) = request else { break };
                     match request {
                         Request::Open { generation, key, at } if current() => {
+                            worker.pull(Some(received.saturating_add(1)), &*notify).await;
                             let result = worker.open(generation, key, at).await.map(Box::new);
                             notify(Event::Opened { generation, result });
                         }
@@ -125,12 +170,27 @@ pub fn spawn(
                             }
                             notify(Event::Positions(vec![Progress { item: update.item, position: update.position, finished: update.finished, at: Some(update.at) }]));
                         }
-                        Request::Reconcile if current() => {
-                            match worker.positions().await {
-                                Ok(positions) => notify(Event::Positions(positions)),
-                                Err(error) if !error.is_network() => notify(Event::Error(error)),
-                                Err(_) => {},
+                        Request::Activity { item } if current() => { worker.active = item; }
+                        Request::Bookmark { .. } if current() => {
+                            notify(Event::Bookmarks(crate::sync::bookmarks(&*worker.source, &worker.shelf).await));
+                        }
+                        Request::Undo(update) if current() => {
+                            let id = id.expect("Undo is durable");
+                            received = id;
+                            let result = worker.source.set_progress(std::slice::from_ref(&update)).await.map_err(Failure::from);
+                            match result {
+                                Ok(()) => { if let Err(e) = worker.shelf.mark_synced(&[id]) { notify(Event::Error(local_error(e))); } }
+                                Err(e) => notify(Event::Error(e)),
                             }
+                            if let Some(session) = &mut worker.session && session.key == update.item { session.position = update.position; }
+                            notify(Event::Positions(vec![Progress { item: update.item, position: update.position, finished: update.finished, at: Some(update.at) }]));
+                        }
+                        Request::Resume { generation } if current() => {
+                            worker.pull(Some(received.saturating_add(1)), &*notify).await;
+                            notify(Event::ResumeReady { generation });
+                        }
+                        Request::Reconcile if current() => {
+                            worker.pull(Some(received.saturating_add(1)), &*notify).await;
                         }
                         Request::Finish(done) => {
                             let _ = worker.close().await;
@@ -142,7 +202,16 @@ pub fn spawn(
                 }
                 _ = retry.tick() => {
                     if !current() { continue; }
-                    if let Err(e) = worker.replay(Some(received.saturating_add(1))).await && !e.is_network() { notify(Event::Error(e)); }
+                    if let Err(e) = worker.replay(Some(received.saturating_add(1))).await { notify(Event::Error(e)); }
+                    // Only queued bookmark edits are retried here: a pull already
+                    // asks when the window is focused, so an idle app asks nothing.
+                    match worker.shelf.pending_bookmarks() {
+                        Ok(pending) if !pending.is_empty() => {
+                            notify(Event::Bookmarks(crate::sync::bookmarks(&*worker.source, &worker.shelf).await));
+                        }
+                        Ok(_) => {}
+                        Err(e) => notify(Event::Error(local_error(e))),
+                    }
                 }
             }
         }
@@ -151,15 +220,57 @@ pub fn spawn(
 }
 
 impl Worker {
-    async fn positions(&self) -> Result<Vec<Progress>, Failure> {
+    async fn pull(&mut self, before: Option<shelf::ProgressId>, notify: &(dyn Fn(Event) + Sync)) {
+        match self.replay(before).await {
+            Ok(()) => match self.positions(notify).await {
+                Ok(positions) => notify(Event::Positions(positions)),
+                Err(e) => notify(Event::Error(e)),
+            },
+            Err(e) => notify(Event::Error(e)),
+        }
+        notify(Event::Bookmarks(crate::sync::bookmarks(&*self.source, &self.shelf).await));
+    }
+
+    async fn positions(&mut self, notify: &(dyn Fn(Event) + Sync)) -> Result<Vec<Progress>, Failure> {
         let remote = self.source.progress().await.map_err(Failure::from)?;
-        remote
-            .into_iter()
-            .map(|p| {
-                let local = self.shelf.position(&p.item).map_err(local_error)?;
-                Ok(newer(local, Some(p)).expect("a remote position exists"))
-            })
-            .collect()
+        let mut positions = Vec::new();
+        for remote in remote {
+            let local = self.shelf.position(&remote.item).map_err(local_error)?;
+            // Moving audio under an active listener would interrupt this device.
+            // It reports its own position; paused books may pick up the phone.
+            let active = self.active.as_ref() == Some(&remote.item);
+            let local_wins = local.as_ref().is_some_and(|p| active || p.at > remote.at);
+            if local_wins {
+                let local = local.unwrap();
+                if local.at > remote.at || local.position != remote.position || local.finished != remote.finished {
+                    self.source
+                        .set_progress(&[ProgressUpdate {
+                            item: local.item.clone(),
+                            position: local.position,
+                            finished: local.finished,
+                            at: local.at.unwrap_or(std::time::SystemTime::now()),
+                            listened: std::time::Duration::ZERO,
+                        }])
+                        .await
+                        .map_err(Failure::from)?;
+                }
+                positions.push(local);
+            } else if !active && self.shelf.accept_position(&remote).map_err(local_error)? {
+                let previous = local.unwrap_or_else(|| Progress { item: remote.item.clone(), position: Position::default(), finished: false, at: None });
+                if remote.at > previous.at && (remote.position.secs() - previous.position.secs()).abs() > 60.0 {
+                    notify(Event::Reconciled(Reconciled { previous, current: remote.clone() }));
+                }
+                if let Some(session) = &mut self.session
+                    && session.key == remote.item
+                {
+                    session.position = remote.position;
+                }
+                positions.push(remote);
+            } else if let Some(local) = self.shelf.position(&remote.item).map_err(local_error)? {
+                positions.push(local);
+            }
+        }
+        Ok(positions)
     }
 
     async fn open(&mut self, generation: u64, key: ItemKey, at: Option<f64>) -> Result<Opened, Failure> {
@@ -168,12 +279,9 @@ impl Worker {
         let _ = self.close().await;
         let item = self.source.item(&key.item).await.map_err(Failure::from)?;
         self.shelf.set_details(&key, &item).map_err(local_error)?;
-        let remote = self.source.progress().await.map_err(Failure::from)?.into_iter().find(|p| p.item == key);
         let local = self.shelf.position(&key).map_err(local_error)?;
-        let local_is_newer = local.as_ref().is_some_and(|local| remote.as_ref().is_none_or(|remote| local.at > remote.at));
         let session = self.source.open(&key.item, &self.device).await.map_err(Failure::from)?;
-        let position =
-            at.unwrap_or_else(|| if local_is_newer { local.map_or(0.0, |p| if p.finished { 0.0 } else { p.position.secs() }) } else { session.start.secs() });
+        let position = at.unwrap_or_else(|| local.map_or(session.start.secs(), |p| if p.finished { 0.0 } else { p.position.secs() }));
         self.session = Some(Session { generation, key: key.clone(), session: session.clone(), position: Position::from_secs(position) });
         Ok(Opened { key, item, session, position })
     }

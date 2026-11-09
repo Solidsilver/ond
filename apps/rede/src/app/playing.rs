@@ -52,10 +52,30 @@ impl RedeApp {
         self.player.book = None;
         self.playback_generation += 1;
         self.opening = true;
+        self.resume_pending = false;
         self.listening.as_ref().unwrap().send(Request::Open { generation: self.playback_generation, key, at });
     }
 
     pub(super) fn playback_control(&mut self, control: Control) {
+        // Resuming asks the server first: the phone may have moved on since this
+        // was paused. A second press while that's in flight plays at once.
+        if control == Control::Toggle
+            && self.player.active
+            && self.player.paused
+            && !self.sync.offline
+            && !self.resume_pending
+            && let Some(listening) = &self.listening
+        {
+            self.resume_pending = true;
+            self.send_activity();
+            listening.send(Request::Resume { generation: self.playback_generation });
+            return;
+        }
+        self.resume_pending = false;
+        self.apply_playback_control(control);
+    }
+
+    fn apply_playback_control(&mut self, control: Control) {
         if !self.player.active
             && let Some(book) = &self.player.book
             && control == Control::Toggle
@@ -79,6 +99,7 @@ impl RedeApp {
             self.shown.playback.speed = speed;
         }
         self.playback_notes(notes);
+        self.send_activity();
     }
 
     fn playback_notes(&mut self, notes: Vec<Note>) {
@@ -126,6 +147,7 @@ impl RedeApp {
                         if let Err(error) = result {
                             self.show_error(error);
                         }
+                        self.send_activity();
                     }
                     Err(error) => self.show_failure(error),
                 }
@@ -147,9 +169,23 @@ impl RedeApp {
                 for position in positions {
                     let old = self.positions.remove(&position.item.item);
                     let latest = crate::listening::newer(old, Some(position)).unwrap();
+                    if self.player.paused && self.player.book.as_ref().is_some_and(|b| b.key == latest.item) && self.player.position != latest.position.secs() {
+                        self.move_to_reconciled(latest.position.secs());
+                    }
                     self.positions.insert(latest.item.item.clone(), latest);
                 }
             }
+            Event::ResumeReady { generation } if generation == self.playback_generation && self.resume_pending => {
+                self.resume_pending = false;
+                if self.player.paused {
+                    self.apply_playback_control(Control::Toggle);
+                }
+            }
+            Event::Reconciled(reconciled) => self.reconciled(reconciled),
+            Event::Bookmarks(result) => match result {
+                Ok(rows) => self.bookmark_event(crate::bridge::BookmarkMsg::Updated(rows)),
+                Err(e) => self.show_failure(e),
+            },
             Event::Error(error) => self.show_failure(error),
             _ => {}
         }
@@ -161,6 +197,7 @@ impl RedeApp {
             self.player.event(&event, engine, Instant::now(), &mut notes);
         }
         self.playback_notes(notes);
+        self.send_activity();
     }
 
     pub(super) fn report_playback(&mut self, report: bool) {
