@@ -29,6 +29,11 @@ fn every_view_draws() {
     frame(&ctx, &mut app);
     app.player.paused = true;
     frame(&ctx, &mut app);
+    for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
+        app.mode = mode;
+        frame(&ctx, &mut app);
+    }
+    app.mode = crate::window::Mode::Full;
     // The trail went Library → book → book → gone; back walks it.
     assert!(app.ui.nav.can_back());
     app.back();

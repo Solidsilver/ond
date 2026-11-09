@@ -21,12 +21,9 @@ mod sync;
 mod timeline;
 mod tokens;
 mod widgets;
+mod window;
 
-use shell::window::Plan;
-
-/// The library's books need room, and the book page sets its description and
-/// chapters side by side when it has it. At the smallest size the page stacks.
-const SIZE: [f32; 2] = [1100.0, 720.0];
+/// The smallest library window stacks the book cover above its description.
 pub(crate) const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 
 fn main() -> eframe::Result {
@@ -77,8 +74,9 @@ fn log_dir() -> Option<std::path::PathBuf> {
 }
 
 /// One window, one mode, and what a framed window draws its title bar with.
-fn window() -> Plan<()> {
-    Plan::framed((), SIZE, MIN_SIZE)
+fn window() -> shell::window::Plan<window::Mode> {
+    let settings = settings::Paths::resolve().ok().map(|p| prefs::Prefs::open(&p.config_file).0.snapshot());
+    settings.map_or_else(window::Windows::default, |s| s.window).plan()
 }
 
 /// The window icon uses the platform's padding, as Ond's does.

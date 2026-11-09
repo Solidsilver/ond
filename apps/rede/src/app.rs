@@ -45,13 +45,16 @@ mod book;
 mod library;
 mod nav;
 mod player_bar;
+mod player_view;
 mod playing;
 mod prefs_view;
 mod session;
+mod shortcuts;
 mod sleep;
 mod ui_state;
 mod view_ctx;
 mod virtual_list;
+mod window;
 
 #[cfg(test)]
 mod fixture;
@@ -115,6 +118,9 @@ pub enum Action {
     Prefs(PrefsAction),
     PlayBook(String),
     Playback(crate::player::Control),
+    Mode(crate::window::Mode),
+    Shortcuts,
+    ToggleMini,
 }
 
 pub struct RedeApp {
@@ -145,6 +151,9 @@ pub struct RedeApp {
     ui: UiState,
     actions: Vec<Action>,
     player: crate::player::Player,
+    mode: crate::window::Mode,
+    window: window::State,
+    shortcuts: bool,
     engine: Option<audio::EngineHandle>,
     listening: Option<crate::listening::Listening>,
     playback_generation: u64,
@@ -200,6 +209,9 @@ impl RedeApp {
             ui,
             actions: Vec::new(),
             player: crate::player::Player::default(),
+            mode: saved.window.mode,
+            window: window::State::default(),
+            shortcuts: false,
             engine: None,
             listening: None,
             playback_generation: 0,
@@ -279,6 +291,9 @@ impl RedeApp {
             Action::Prefs(a) => self.apply_prefs(a),
             Action::PlayBook(id) => self.play_book(id, None),
             Action::Playback(control) => self.playback_control(control),
+            Action::Mode(mode) => self.set_mode(mode),
+            Action::Shortcuts => self.shortcuts = !self.shortcuts,
+            Action::ToggleMini => self.set_mode(self.prefs.get(|s| s.window.mini())),
         }
     }
 
@@ -353,7 +368,10 @@ impl RedeApp {
         full.max.x -= reserved(ui.ctx(), Side::Right);
         let right = egui::Rect::from_min_max(egui::pos2(full.right() - 240.0, full.top()), full.max);
         ui.scope_builder(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-            self.title_right(ui);
+            if self.mode == crate::window::Mode::Full {
+                self.title_right(ui);
+            }
+            self.view().mode_buttons(ui);
         });
     }
 
@@ -405,24 +423,34 @@ impl RedeApp {
         self.shown = PrefsView::read(&self.prefs);
         let t = Tokens::of(ui);
         self.art.poll();
-        egui::Panel::top("title-bar").exact_size(crate::app::BAR_H).resizable(false).frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| self.title_bar(ui));
+        if self.mode != crate::window::Mode::Mini {
+            egui::Panel::top("title-bar").exact_size(crate::app::BAR_H).resizable(false).frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| self.title_bar(ui));
+        }
+        self.window_keys(ui.ctx());
         self.playback_keys(ui.ctx());
-        self.player_panel(ui);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 })).show(
-            ui,
-            |ui| {
-                self.notice_bar(ui);
-                self.view().sleep_notice(ui);
-                let route = self.ui.nav.current().clone();
-                match &route {
-                    Route::Library => self.view().library_page(ui),
-                    Route::Book(id) => {
-                        let id = id.clone();
-                        self.view().book_page(ui, &id);
-                    }
-                }
-            },
-        );
+        match self.mode {
+            crate::window::Mode::Player => self.player_window(ui),
+            crate::window::Mode::Mini => self.mini_window(ui),
+            crate::window::Mode::Full => {
+                self.player_panel(ui);
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 })).show(
+                    ui,
+                    |ui| {
+                        self.notice_bar(ui);
+                        self.view().sleep_notice(ui);
+                        let route = self.ui.nav.current().clone();
+                        match &route {
+                            Route::Library => self.view().library_page(ui),
+                            Route::Book(id) => {
+                                let id = id.clone();
+                                self.view().book_page(ui, &id);
+                            }
+                        }
+                    },
+                );
+            }
+        }
+        self.shortcuts_ui(ui.ctx());
         // What the views asked for this frame. Applying an action never queues
         // another, so one pass takes them all.
         for a in std::mem::take(&mut self.actions) {
@@ -457,7 +485,8 @@ impl RedeApp {
         for a in std::mem::take(&mut self.actions) {
             self.apply(a);
         }
-        shell::chrome::sync(ctx, shell::chrome::Bar { height: Some(BAR_H) });
+        self.track_window(ctx);
+        shell::chrome::sync(ctx, shell::chrome::Bar { height: (self.mode != crate::window::Mode::Mini).then_some(BAR_H) });
     }
 }
 
@@ -473,10 +502,13 @@ impl eframe::App for RedeApp {
             self.main_ui(ui);
         }
         // Window buttons and resize edges where the system draws none (Linux).
-        shell::csd::overlay(ui.ctx(), Some(BAR_H));
+        shell::csd::overlay(ui.ctx(), (self.mode != crate::window::Mode::Mini).then_some(BAR_H));
     }
 
     fn on_exit(&mut self) {
+        if let Some(seen) = self.window.seen {
+            self.prefs.edit(|s| s.window.remember(seen));
+        }
         self.finish_playback();
         self.prefs.flush();
     }

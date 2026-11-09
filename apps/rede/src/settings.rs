@@ -88,6 +88,8 @@ pub struct Settings {
     pub sort: LibrarySort,
     #[serde(default)]
     pub playback: PlaybackSettings,
+    #[serde(default)]
+    pub window: crate::window::Windows,
 }
 
 /// Listening preferences are separate from engine time: skip and rewind are

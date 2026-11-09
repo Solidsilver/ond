@@ -153,7 +153,7 @@ impl ViewCtx<'_> {
 
     /// The speed pill's menu: common speeds at a click, the slider between
     /// them, then the playback preferences and Stop.
-    fn speed_menu(&mut self, pill: &Response) {
+    pub(super) fn speed_menu(&mut self, pill: &Response) {
         egui::Popup::menu(pill).show(|ui| {
             let t = Tokens::of(ui);
             ui.set_min_width(250.0);
@@ -204,7 +204,7 @@ impl ViewCtx<'_> {
 
 /// The primary control, as Ond's Player draws it: a round button in the
 /// text colour with the glyph knocked out in the background's.
-fn play_pause(ui: &mut Ui, t: &Tokens, paused: bool) -> Response {
+pub(super) fn play_pause(ui: &mut Ui, t: &Tokens, paused: bool) -> Response {
     let (icon, label) = if paused { (Icon::Play, "Play") } else { (Icon::Pause, "Pause") };
     let (slot, resp) = ui.allocate_exact_size(vec2(PLAY_D, PLAY_D), Sense::click());
     let fill = if resp.hovered() { t.text.gamma_multiply(0.85) } else { t.text };
@@ -218,7 +218,7 @@ fn play_pause(ui: &mut Ui, t: &Tokens, paused: bool) -> Response {
 }
 
 /// The speed as a small pill with a chevron, so it reads as the menu it opens.
-fn speed_pill(ui: &mut Ui, t: &Tokens, speed: f32) -> Response {
+pub(super) fn speed_pill(ui: &mut Ui, t: &Tokens, speed: f32) -> Response {
     let text = crate::timeline::speed_label(speed);
     let galley = ui.painter().layout_no_wrap(text.clone(), FontId::new(12.0, semibold()), t.text);
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, READOUT_H), Sense::click());
@@ -234,7 +234,7 @@ fn speed_pill(ui: &mut Ui, t: &Tokens, speed: f32) -> Response {
 /// The whole book as a hairline under the scrubber: muted, not the text
 /// colour, and broken where each chapter begins, so it reads as the book's
 /// chapters rather than a second seek bar. It doesn't seek.
-fn book_line(ui: &mut Ui, timeline: &Timeline, at: f64, t: &Tokens) {
+pub(super) fn book_line(ui: &mut Ui, timeline: &Timeline, at: f64, t: &Tokens) {
     let (slot, resp) = ui.allocate_exact_size(vec2(ui.available_width(), BOOK_H), Sense::hover());
     let line = Rect::from_center_size(slot.center(), vec2(slot.width(), BOOK_LINE));
     let duration = timeline.duration.max(1.0);
@@ -257,7 +257,7 @@ fn book_line(ui: &mut Ui, timeline: &Timeline, at: f64, t: &Tokens) {
 /// strip that's easy to grab, played part in the text colour, a knob while
 /// it's hovered or held. Returns the position to show (the pointer's while
 /// dragging) and where to seek, if anywhere.
-fn scrubber(ui: &mut Ui, at: f64, start: f64, end: f64, t: &Tokens) -> (f64, Option<f64>) {
+pub(super) fn scrubber(ui: &mut Ui, at: f64, start: f64, end: f64, t: &Tokens) -> (f64, Option<f64>) {
     let (slot, response) = ui.allocate_exact_size(vec2(ui.available_width(), SCRUB_H), Sense::click_and_drag());
     shell::widgets::focus_ring(ui, &response, slot, 4.0);
     let line = Rect::from_center_size(slot.center(), vec2(slot.width(), 4.0));

@@ -55,7 +55,7 @@ fn window(theme: egui::Theme) -> Harness<'static, Option<RedeApp>> {
                 } else {
                     app.main_ui(ui);
                 }
-                shell::chrome::stand_in_lights(ui.ctx(), Some(super::BAR_H));
+                shell::chrome::stand_in_lights(ui.ctx(), (app.mode != crate::window::Mode::Mini).then_some(super::BAR_H));
             },
             None,
         )
@@ -151,6 +151,16 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         playing(&mut app, true);
         app
     });
+    for (mode, name) in [(crate::window::Mode::Player, "mode-player"), (crate::window::Mode::Mini, "mode-mini")] {
+        let size = mode.size();
+        h.set_size(egui::vec2(size[0], size[1]));
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, true);
+            app.mode = mode;
+            app
+        });
+    }
     h.set_size(egui::vec2(FULL[0], FULL[1]));
     // Dropping the app (and its runtime) before the next theme.
     *h.state_mut() = None;

@@ -53,6 +53,22 @@ fn every_view_names_its_controls() {
         }
         h.get_by_label(if paused { "Play" } else { "Pause" });
     }
+    for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
+        app_mut(&mut h).mode = mode;
+        let size = mode.size();
+        h.set_size(egui::vec2(size[0], size[1]));
+        h.run_steps(3);
+        h.check_accessibility();
+        for label in ["Back 15 seconds", "Forward 30 seconds", "Play"] {
+            h.get_by_label(label);
+        }
+        if mode == crate::window::Mode::Player {
+            h.get_by_label("Chapter position");
+            h.get_by_label("Sleep timer");
+        }
+    }
+    app_mut(&mut h).mode = crate::window::Mode::Full;
+    h.set_size(egui::vec2(FULL[0], FULL[1]));
     // The sign-in screen, and the same with an error under the button.
     *h.state_mut() = Some(signed_out(&h.ctx.clone(), dir.path()));
     h.run_steps(3);
@@ -233,5 +249,40 @@ fn playback_shortcuts_enqueue_the_same_controls_as_the_buttons() {
         let mut out = ctx.run_ui(input, |ui| app.playback_keys(ui.ctx()));
         out.textures_delta.clear();
         assert!(matches!(app.actions.pop(), Some(Action::Playback(control)) if control == expected));
+    }
+}
+
+#[test]
+fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(3);
+    h.get_by_label("Player window (⌥⌘2)").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Player);
+    h.get_by_label("Mini player (⇧⌘M)").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Mini);
+    h.get_by_label("Full window (⌥⌘1)").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Full);
+    h.get_by_label("Keyboard shortcuts (⌘/)").click();
+    h.run_steps(3);
+    h.get_by_label("Close shortcuts").click();
+    h.run_steps(3);
+    assert!(!app_mut(&mut h).shortcuts);
+}
+
+#[test]
+fn sleep_options_and_custom_defaults_are_accessible_from_the_bar() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    h.run_steps(3);
+    h.get_by_label("Sleep timer").click();
+    h.run_steps(3);
+    h.check_accessibility();
+    for label in ["5 minutes", "120 minutes", "End of chapter", "Custom minutes", "Start 30 minute timer"] {
+        h.get_by_label(label);
     }
 }

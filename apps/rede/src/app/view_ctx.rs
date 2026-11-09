@@ -18,6 +18,7 @@ pub struct ViewCtx<'a> {
     pub sort: LibrarySort,
     pub playback: crate::settings::PlaybackSettings,
     pub opening: bool,
+    pub mode: crate::window::Mode,
     pub player: &'a crate::player::Player,
     pub positions: &'a std::collections::HashMap<String, sources::Progress>,
     /// Covers load as they're first drawn.
@@ -36,6 +37,7 @@ impl RedeApp {
             sort: self.shown.sort,
             playback: self.shown.playback,
             opening: self.opening,
+            mode: self.mode,
             player: &self.player,
             positions: &self.positions,
             art: &mut self.art,
