@@ -38,6 +38,14 @@ pub enum Msg {
         session: u64,
         report: bool,
     },
+    #[cfg(target_os = "macos")]
+    Remote(shell::now_playing::Remote),
+    #[cfg(target_os = "macos")]
+    Artwork {
+        session: u64,
+        id: String,
+        bytes: Vec<u8>,
+    },
     /// Something the user asked for failed.
     Error(Failure),
 }
@@ -131,6 +139,29 @@ impl Bridge {
         let this = self.scoped();
         let live = this.clone();
         crate::listening::spawn(&self.rt, source, shelf, device, move || live.current(), move |event| this.playback(event))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn media_keys(&self) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        shell::now_playing::install(
+            Arc::new(move |command| {
+                let _ = tx.send(Msg::Remote(command));
+                notify();
+            }),
+            true,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn artwork(&self, source: Arc<dyn Source>, id: String, cover: String) {
+        let this = self.scoped();
+        self.rt.spawn(async move {
+            if let Ok(bytes) = source.cover(&cover, Some(512)).await {
+                this.send(Msg::Artwork { session: this.scope.expect("artwork is scoped"), id, bytes: bytes.to_vec() });
+            }
+        });
     }
 
     pub fn engine_events(&self, engine: &audio::EngineHandle, ctx: egui::Context, timer: Arc<std::sync::atomic::AtomicBool>) {

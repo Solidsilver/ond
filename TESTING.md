@@ -108,3 +108,23 @@ its progress cleanup are described in [Rede playback](docs/rede/playback.md).
 - [ ] Restart ABS during listening: the next report reopens a session without interrupting the audio. Interrupt the network, keep listening from buffered audio, reconnect and confirm the final position reaches ABS.
 - [ ] Switch books, stop, sign out and quit: the old session closes when reachable, and resuming keeps the final position. At the end the book is finished on ABS.
 - [ ] Leave the library and book page paused: CPU settles and the UI does not keep repainting. Resize to the minimum window and inspect the bottom bar and speed menu.
+
+
+## Rede M2: sleep, window modes and macOS controls
+Run Rede in release mode. These checks need a real output device and, for
+streaming/session persistence, an Audiobookshelf account; automated fixtures
+and snapshots do not sign in to a server.
+
+- [ ] Start a sleep timer, hide or minimize Rede through the final minute, and listen for a smooth ten-second fade followed by pause. Show it again: resume is audible at the original volume and starts ten book seconds before the fade ended; restart Rede and confirm that saved position.
+- [ ] Choose End of chapter on a chapter spanning two audio files, change speed to 1.5× and then 0.75×, and confirm it still pauses at that chapter's end. Test the final chapter too: sleep must leave the book unfinished with the rewound position.
+- [ ] During the final-minute notice, click Extend 10 minutes once. The fade stops, volume returns, and the countdown gains ten minutes. Cancel a fading timer and confirm volume returns. Try a custom duration and custom sleep rewind in the speed menu's playback settings; defaults survive relaunch.
+- [ ] Switch Full / Player / Mini using buttons, ⇧⌘N, ⇧⌘M and ⌥⌘1/2/3 (Ctrl/Alt equivalents elsewhere). Mini stays above other windows, drags by the cover, stays square while resizing, and double-click returns to its originating mode. Each mode restores its geometry, including after relaunch; test a maximized Full window on Linux.
+- [ ] In Player, check the large cover, book/chapter titles, both progress bars, chapter/skip/play controls, speed and sleep menus in light and dark. In Mini check chapter text, skip/play controls and the extension notice at the smallest size. Check keyboard and screen reader focus, including ⌘/ and Escape for the shortcuts list.
+- [ ] macOS Control Center shows Rede's book title, chapter subtitle, chapter number/count where supported, cover and whole-book duration/elapsed time. At 1.5× its progress advances at the real speed; pause and buffering stop the clock. Scrubbing seeks to the same whole-book position across chapters/files. Switching books must not show stale artwork.
+- [ ] Change Rede's skip intervals; Control Center's skip commands use the new preferred intervals. F7/F8/F9 and headphone play/pause/skip work with Rede hidden and minimized. Repeat after a sleep stop, and confirm pause/play commands are idempotent.
+- [ ] Ond retains its existing macOS controls: next/previous tracks, skip commands disabled, unity playback rate, artwork and seeking, including while hidden.
+
+Rede's output device picker is deferred: Ond's current panel combines device
+preferences and bit-perfect controls. Rede continues following system output;
+select AirPlay or another output in the system controls for now. ⌘B bookmarks
+and ⌘K search remain for later milestones.

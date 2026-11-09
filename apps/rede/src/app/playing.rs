@@ -82,6 +82,14 @@ impl RedeApp {
     }
 
     fn playback_notes(&mut self, notes: Vec<Note>) {
+        #[cfg(target_os = "macos")]
+        if self.now_playing.update(&self.player, self.engine.as_ref().map_or(audio::PlayState::Stopped, |e| e.status.state()), Instant::now())
+            && let (Some(book), Some(source)) = (&self.player.book, &self.session.source)
+            && let Some(cover) = &book.item.summary.cover
+        {
+            self.bridge.artwork(source.clone(), book.key.to_string(), cover.clone());
+        }
+
         self.sleep_wake.store(self.player.sleep.is_some(), std::sync::atomic::Ordering::Relaxed);
         for note in notes {
             match note {

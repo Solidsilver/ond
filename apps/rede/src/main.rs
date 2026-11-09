@@ -13,6 +13,8 @@ mod failure;
 mod fmt;
 mod listening;
 mod memo;
+#[cfg(any(target_os = "macos", test))]
+mod now_playing;
 mod player;
 mod prefs;
 mod settings;

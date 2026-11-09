@@ -155,6 +155,8 @@ pub struct RedeApp {
     window: window::State,
     shortcuts: bool,
     engine: Option<audio::EngineHandle>,
+    #[cfg(target_os = "macos")]
+    now_playing: crate::now_playing::Publisher,
     listening: Option<crate::listening::Listening>,
     playback_generation: u64,
     opening: bool,
@@ -167,7 +169,10 @@ impl RedeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         // The window opened from this plan (see `main`); our title bar follows it.
         crate::window().apply_frame(&cc.egui_ctx);
-        Self::build(&cc.egui_ctx, Paths::resolve()?)
+        let app = Self::build(&cc.egui_ctx, Paths::resolve()?)?;
+        #[cfg(target_os = "macos")]
+        app.bridge.media_keys();
+        Ok(app)
     }
 
     fn build(ctx: &egui::Context, paths: Paths) -> anyhow::Result<Self> {
@@ -191,6 +196,8 @@ impl RedeApp {
         // A saved account is resumed with the tokens the keyring kept; without
         // one, the sign-in form starts empty.
         let login = saved.account().is_none().then(LoginForm::default);
+        #[cfg(target_os = "macos")]
+        shell::now_playing::intervals(f64::from(saved.playback.skip_back), f64::from(saved.playback.skip_forward));
         if let Some(account) = saved.account() {
             bridge.start(account.clone());
         }
@@ -213,6 +220,8 @@ impl RedeApp {
             window: window::State::default(),
             shortcuts: false,
             engine: None,
+            #[cfg(target_os = "macos")]
+            now_playing: Default::default(),
             listening: None,
             playback_generation: 0,
             opening: false,
@@ -261,6 +270,18 @@ impl RedeApp {
             Msg::Engine { .. } => {}
             Msg::PlaybackTick { session, report } if session == self.bridge.session() => self.report_playback(report),
             Msg::PlaybackTick { .. } => {}
+            #[cfg(target_os = "macos")]
+            Msg::Remote(remote) => {
+                if let Some(control) = crate::now_playing::control(remote, &self.player, self.shown.playback.skip_back, self.shown.playback.skip_forward) {
+                    self.playback_control(control);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Msg::Artwork { session, id, bytes } => {
+                if session == self.bridge.session() && self.player.book.as_ref().is_some_and(|b| b.key.to_string() == id) {
+                    shell::now_playing::set_artwork(id, bytes);
+                }
+            }
             Msg::Error(e) => self.show_failure(e),
         }
     }
@@ -309,6 +330,8 @@ impl RedeApp {
                 playback.sleep_rewind = playback.sleep_rewind.min(60);
                 self.prefs.edit(|s| s.playback = playback);
                 self.shown.playback = playback;
+                #[cfg(target_os = "macos")]
+                shell::now_playing::intervals(f64::from(playback.skip_back), f64::from(playback.skip_forward));
             }
             PrefsAction::Sort(sort) => {
                 if self.prefs.get(|s| s.sort) == sort {
@@ -509,6 +532,8 @@ impl eframe::App for RedeApp {
         if let Some(seen) = self.window.seen {
             self.prefs.edit(|s| s.window.remember(seen));
         }
+        #[cfg(target_os = "macos")]
+        shell::now_playing::publish(None, shell::now_playing::State::Stopped, 0.0);
         self.finish_playback();
         self.prefs.flush();
     }

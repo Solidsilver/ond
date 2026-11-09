@@ -558,6 +558,10 @@ fn a_paused_timer_wakes_without_frames_and_goes_idle_after_cancelling() {
     assert_eq!(clock.poll_for(PlayState::Paused, now + Duration::from_secs(60), false), None);
 }
 
+pub fn load_for_metadata(player: &mut Player) {
+    player.load(opened(true), 1.5, &Fake::default(), Instant::now()).unwrap();
+}
+
 #[test]
 fn sleeping_at_the_books_end_reopens_the_rewound_file_paused() {
     let (mut player, engine, now, mut notes) = sleeping(false, 1.5, 95.0);
