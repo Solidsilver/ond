@@ -1097,8 +1097,24 @@ impl Ctx {
             o.pushed = 0;
             o.rs_base = 0;
             o.saved = self.status.silence_saved_secs();
-            o.silence = self.skip_silence.then(|| Silence::new(o.src_rate, o.format.channels, o.saved));
-            o.voice = self.voice_boost.then(|| Voice::new(o.src_rate, o.format.channels));
+            // The lookahead is a fixed 410 ms buffer: reseating the detector keeps
+            // it instead of allocating another one on every seek.
+            if self.skip_silence {
+                match &mut o.silence {
+                    Some(silence) => silence.reset(o.src_rate, o.format.channels, o.saved),
+                    None => o.silence = Some(Silence::new(o.src_rate, o.format.channels, o.saved)),
+                }
+            } else {
+                o.silence = None;
+            }
+            if self.voice_boost {
+                match &mut o.voice {
+                    Some(voice) => voice.reset(o.src_rate, o.format.channels),
+                    None => o.voice = Some(Voice::new(o.src_rate, o.format.channels)),
+                }
+            } else {
+                o.voice = None;
+            }
             o.cut = false;
             o.output_seq = seq;
             if let Some(r) = o.resampler.as_mut() {

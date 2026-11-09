@@ -1,7 +1,8 @@
 //! Optional speech processing on the decoder thread. Silence lookahead is
-//! bounded at 410 ms; origins travel with buffered frames so a quiet run can
-//! cross file boundaries without assigning its tail to the following file.
-//! Both processors allocate their channel/window storage only at construction.
+//! bounded at 410 ms; origins travel with buffered frames, one record per run
+//! of frames, so a quiet run can cross file boundaries without assigning its
+//! tail to the following file. Both processors allocate their channel/window
+//! storage at construction, and a seek resets those buffers in place.
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Origin {
@@ -10,12 +11,21 @@ pub(crate) struct Origin {
     pub bits: Option<u32>,
 }
 
+/// A contiguous span of frames that share one origin. Buffered origins are
+/// stored this way: a 410 ms window holds tens of thousands of frames but only
+/// a few files, so the lookahead costs bytes instead of half a megabyte.
+#[derive(Clone, Copy)]
+struct Run {
+    origin: Origin,
+    frames: usize,
+}
+
 pub(crate) struct Silence {
     channels: usize,
     rate: u32,
     window: usize,
     samples: Vec<f32>,
-    origins: Vec<Origin>,
+    runs: Vec<Run>,
     partial: usize,
     quiet: usize,
     cutting: bool,
@@ -31,7 +41,7 @@ impl Silence {
             rate,
             window,
             samples: Vec::with_capacity(window * 41 * channels as usize),
-            origins: Vec::with_capacity(window * 41),
+            runs: Vec::with_capacity(48),
             partial: 0,
             quiet: 0,
             cutting: false,
@@ -40,14 +50,30 @@ impl Silence {
         }
     }
 
+    /// Clears detection state for a seek or an internal restart, keeping the
+    /// buffers when the format hasn't changed: the lookahead is reserved once.
+    pub fn reset(&mut self, rate: u32, channels: u16, saved: f64) {
+        if rate != self.rate || channels as usize != self.channels {
+            *self = Self::new(rate, channels, saved);
+            return;
+        }
+        self.samples.clear();
+        self.runs.clear();
+        self.partial = 0;
+        self.quiet = 0;
+        self.cutting = false;
+        self.fade_in = 0;
+        self.saved = saved;
+    }
+
     pub fn has_pending(&self) -> bool {
-        !self.origins.is_empty()
+        !self.runs.is_empty()
     }
 
     pub fn process(&mut self, samples: &[f32], mut origin: Origin, mut emit: impl FnMut(&[f32], Origin, f64)) {
         for frame in samples.chunks_exact(self.channels) {
             self.samples.extend_from_slice(frame);
-            self.origins.push(origin);
+            push_run(&mut self.runs, Run { origin, frames: 1 });
             origin.frame += 1;
             self.partial += 1;
             if self.partial == self.window {
@@ -66,9 +92,10 @@ impl Silence {
 
     pub fn finish(&mut self, mut emit: impl FnMut(&[f32], Origin, f64)) {
         self.boundary(&mut emit);
-        self.emit(0, self.origins.len(), false, &mut emit);
+        let total = self.samples.len() / self.channels;
+        self.emit(0, total, false, &mut emit);
         self.samples.clear();
-        self.origins.clear();
+        self.runs.clear();
     }
 
     fn measure(&mut self, emit: &mut impl FnMut(&[f32], Origin, f64)) {
@@ -90,12 +117,12 @@ impl Silence {
                         }
                     }
                     self.emit(0, keep, false, emit);
-                    self.emit(keep, self.origins.len(), true, emit);
+                    self.emit(keep, total_frames(&self.samples, self.channels), true, emit);
                 } else {
-                    self.emit(0, self.origins.len(), true, emit);
+                    self.emit(0, total_frames(&self.samples, self.channels), true, emit);
                 }
                 self.samples.clear();
-                self.origins.clear();
+                self.runs.clear();
                 self.cutting = true;
                 self.fade_in = (self.rate as usize / 200).max(1);
             }
@@ -110,37 +137,76 @@ impl Silence {
                     self.fade_in -= 1;
                 }
             }
-            self.emit(0, self.origins.len(), false, emit);
+            self.emit(0, total_frames(&self.samples, self.channels), false, emit);
             self.samples.clear();
-            self.origins.clear();
+            self.runs.clear();
             self.quiet = 0;
             self.cutting = false;
         }
     }
 
-    fn emit(&mut self, mut start: usize, end: usize, removed: bool, emit: &mut impl FnMut(&[f32], Origin, f64)) {
-        while start < end {
-            let mut stop = start + 1;
-            while stop < end && self.origins[stop].seq == self.origins[start].seq {
-                stop += 1;
-            }
-            let mut origin = self.origins[start];
-            if removed {
-                self.saved += (stop - start) as f64 / self.rate as f64;
-                origin.frame = self.origins[stop - 1].frame + 1;
-                emit(&[], origin, self.saved);
-            } else {
-                emit(&self.samples[start * self.channels..stop * self.channels], origin, self.saved);
-            }
-            start = stop;
-        }
+    fn emit(&mut self, start: usize, end: usize, removed: bool, emit: &mut impl FnMut(&[f32], Origin, f64)) {
+        emit_span(&self.samples, &self.runs, self.channels, self.rate, start, end, removed, &mut self.saved, emit);
     }
+}
+
+fn total_frames(samples: &[f32], channels: usize) -> usize {
+    samples.len() / channels
+}
+
+/// Publishes frames `[start, end)` of `samples`/`runs` as kept audio, or as a
+/// source-time jump when they were removed. A piece never spans two files: its
+/// origin is its own first frame.
+#[allow(clippy::too_many_arguments)]
+fn emit_span(
+    samples: &[f32],
+    runs: &[Run],
+    channels: usize,
+    rate: u32,
+    start: usize,
+    end: usize,
+    removed: bool,
+    saved: &mut f64,
+    emit: &mut impl FnMut(&[f32], Origin, f64),
+) {
+    let mut at = 0;
+    for run in runs {
+        let run_end = at + run.frames;
+        let (lo, hi) = (start.max(at), end.min(run_end));
+        if lo < hi {
+            let mut origin = run.origin;
+            if removed {
+                *saved += (hi - lo) as f64 / f64::from(rate.max(1));
+                // One past the last removed frame: the next kept frame lands here.
+                origin.frame += (hi - at) as u64;
+                emit(&[], origin, *saved);
+            } else {
+                origin.frame += (lo - at) as u64;
+                emit(&samples[lo * channels..hi * channels], origin, *saved);
+            }
+        }
+        at = run_end;
+    }
+}
+
+/// Appends one run, folding it into the last when they're contiguous.
+fn push_run(runs: &mut Vec<Run>, run: Run) {
+    if let Some(last) = runs.last_mut()
+        && last.origin.seq == run.origin.seq
+        && last.origin.bits == run.origin.bits
+        && last.origin.frame + last.frames as u64 == run.origin.frame
+    {
+        last.frames += run.frames;
+        return;
+    }
+    runs.push(run);
 }
 
 /// A linked peak compressor keeps the stereo image steady. Its 20 ms attack
 /// leaves consonants intact; the final instantaneous limiter catches those
 /// transients without relying on the compressor having settled first.
 pub(crate) struct Voice {
+    rate: u32,
     filters: Vec<[f32; 2]>,
     b: [f32; 3],
     a: [f32; 2],
@@ -161,6 +227,7 @@ impl Voice {
         let a = 10f32.powf(3.0 / 40.0);
         let norm = 1.0 + alpha / a;
         Self {
+            rate,
             filters: vec![[0.0; 2]; channels as usize],
             b: [(1.0 + alpha * a) / norm, -2.0 * w.cos() / norm, (1.0 - alpha * a) / norm],
             a: [-2.0 * w.cos() / norm, (1.0 - alpha / a) / norm],
@@ -172,6 +239,20 @@ impl Voice {
             wet: 0.0,
             step: 1.0 / (rate as f32 * 0.005),
         }
+    }
+
+    /// Clears the filter and envelope state before a seek plays on, keeping the
+    /// filters when the format hasn't changed; a different one needs fresh
+    /// coefficients.
+    pub fn reset(&mut self, rate: u32, channels: u16) {
+        if self.rate != rate || self.filters.len() != channels as usize {
+            *self = Self::new(rate, channels);
+            return;
+        }
+        self.filters.iter_mut().for_each(|state| *state = [0.0; 2]);
+        self.envelope = 0.0;
+        self.limiter = 1.0;
+        self.wet = 0.0;
     }
 
     pub fn process(&mut self, samples: &mut [f32]) {
@@ -226,14 +307,29 @@ mod tests {
     fn a_short_pause_is_preserved_bit_for_bit_and_storage_never_grows() {
         let mut silence = Silence::new(48_000, 2, 0.0);
         let input = vec![0.001; 48_000 * 2 / 5];
-        let capacities = (silence.samples.capacity(), silence.origins.capacity());
+        let capacities = (silence.samples.capacity(), silence.runs.capacity());
         let mut output = Vec::new();
         for piece in input.chunks(714) {
             silence.process(piece, Origin::default(), |samples, _, _| output.extend_from_slice(samples));
         }
         silence.finish(|samples, _, _| output.extend_from_slice(samples));
         assert_eq!(output, input);
-        assert_eq!((silence.samples.capacity(), silence.origins.capacity()), capacities);
+        assert_eq!((silence.samples.capacity(), silence.runs.capacity()), capacities);
+    }
+
+    #[test]
+    fn lookahead_origins_are_stored_per_run_and_a_seek_resets_in_place() {
+        let mut silence = Silence::new(48_000, 2, 0.0);
+        let capacities = (silence.samples.capacity(), silence.runs.capacity());
+        let window = vec![0.001; 48_000 / 10 * 2];
+        for seq in 0..4 {
+            silence.process(&window, Origin { seq, ..Default::default() }, |_, _, _| {});
+        }
+        assert_eq!(silence.runs.len(), 4, "one origin record per file, not one per frame");
+        silence.boundary(|_, _, _| {});
+        silence.reset(48_000, 2, 1.5);
+        assert!(!silence.has_pending());
+        assert_eq!((silence.samples.capacity(), silence.runs.capacity()), capacities);
     }
 
     #[test]
