@@ -99,9 +99,8 @@ fn every_record_round_trips_through_a_reopen() {
         shelf.apply_changes(&library(), &changes(&[summary("li-1", "Dune"), summary("li-2", "Children of Dune")], &[])).unwrap();
         shelf.set_details(&dune, &item("li-1")).unwrap();
         let progress = shelf.append_progress(&update(3725.5, false, 1_767_000_000_000, 300)).unwrap();
-        let bookmark = shelf
-            .add_bookmark(&dune, Position::from_secs(3600.5), Some("The sandworm bit".into()), Stamp::from_millis(1_767_000_000_000).system_time())
-            .unwrap();
+        shelf.queue_bookmark(&source_bookmark("li-1", 3600.5, "The sandworm bit"), BookmarkChange::Create).unwrap();
+        let bookmark = shelf.bookmarks(&dune).unwrap()[0].id;
         let state = SyncState { cursor: Some("page=3".into()), newest: Some(Stamp::from_millis(1_766_000_000_000)) };
         shelf.set_sync_state("lib-1", &state).unwrap();
         (progress, bookmark)
@@ -173,7 +172,7 @@ fn apply_changes_removes_deleted_items_with_their_tracks_and_chapters() {
     shelf.set_details(&children, &item("li-2")).unwrap();
     assert_eq!(shelf.row_counts().unwrap(), (2, 2, 2));
     shelf.append_progress(&update(3725.5, false, 1_767_000_000_000, 300)).unwrap();
-    shelf.add_bookmark(&dune, Position::from_secs(3600.5), None, Stamp::from_millis(1_767_000_000_000).system_time()).unwrap();
+    shelf.queue_bookmark(&source_bookmark("li-1", 3600.5, ""), BookmarkChange::Create).unwrap();
 
     shelf.apply_changes(&library(), &changes(&[], &["li-1"])).unwrap();
     assert_eq!(shelf.row_counts().unwrap(), (1, 1, 1));
@@ -223,19 +222,20 @@ fn an_item_moving_to_another_library_leaves_the_old_listing() {
 fn bookmarks_come_back_in_book_order_and_can_be_removed() {
     let dir = tempfile::tempdir().unwrap();
     let shelf = shelf(&dir);
-    let at = |secs: f64| Position::from_secs(secs);
-    let made = Stamp::from_millis(1_767_000_000_000).system_time();
-    let late = shelf.add_bookmark(&key("li-1"), at(7200.0), None, made).unwrap();
-    let early = shelf.add_bookmark(&key("li-1"), at(60.0), Some("Start".into()), made).unwrap();
-    let ids: Vec<_> = shelf.bookmarks(&key("li-1")).unwrap().iter().map(|b| b.id).collect();
-    assert_eq!(ids, [early, late]);
+    shelf.queue_bookmark(&source_bookmark("li-1", 7200.0, ""), BookmarkChange::Create).unwrap();
+    shelf.queue_bookmark(&source_bookmark("li-1", 60.0, "Start"), BookmarkChange::Create).unwrap();
+    let saved = shelf.bookmarks(&key("li-1")).unwrap();
+    let (early, late) = (saved[0].id, saved[1].id);
+    assert_eq!(saved.iter().map(|b| b.position.secs()).collect::<Vec<_>>(), [60.0, 7200.0]);
 
     assert!(shelf.remove_bookmark(&key("li-1"), late).unwrap());
     assert!(!shelf.remove_bookmark(&key("li-1"), late).unwrap());
     assert_eq!(shelf.bookmarks(&key("li-1")).unwrap().len(), 1);
     // Another item's bookmarks are untouched, and an id is never reused.
     assert!(shelf.bookmarks(&key("li-2")).unwrap().is_empty());
-    assert_ne!(shelf.add_bookmark(&key("li-1"), at(10.0), None, made).unwrap(), late);
+    shelf.queue_bookmark(&source_bookmark("li-1", 10.0, ""), BookmarkChange::Create).unwrap();
+    assert!(shelf.bookmarks(&key("li-1")).unwrap().iter().all(|b| b.id != late));
+    assert_ne!(shelf.bookmarks(&key("li-1")).unwrap()[0].id, early);
 }
 
 #[test]

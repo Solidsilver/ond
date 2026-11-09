@@ -410,22 +410,6 @@ impl Shelf {
         Ok(get_row::<PositionV1>(&rt.open_table(POSITIONS)?, &account, &key.item)?.map(|row| row.progress(key)))
     }
 
-    /// Saves a local-only place without a server journal. Server-backed edits
-    /// use [`Self::queue_bookmark`] so the row and intent commit together.
-    pub fn add_bookmark(&self, key: &ItemKey, at: Position, note: Option<String>, created: SystemTime) -> Result<BookmarkId> {
-        let account = key.account.to_string();
-        let row = BookmarkV1 { position: at.secs(), note, created_ms: Stamp::from(created).millis() };
-        let wt = self.db.begin_write()?;
-        let id = {
-            let mut counters = wt.open_table(COUNTERS)?;
-            let id = next_id(&mut counters, NEXT_BOOKMARK)?;
-            wt.open_table(BOOKMARKS)?.insert((account.as_str(), key.item.as_str(), id), encode(&row)?.as_slice())?;
-            id
-        };
-        wt.commit()?;
-        Ok(id)
-    }
-
     /// An item's bookmarks, in the order they fall in the book.
     pub fn bookmarks(&self, key: &ItemKey) -> Result<Vec<Bookmark>> {
         let account = key.account.to_string();
