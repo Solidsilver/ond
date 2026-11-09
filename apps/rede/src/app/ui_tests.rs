@@ -497,6 +497,25 @@ fn discovered_methods_name_only_the_controls_the_server_offers() {
     h.run_steps(3);
     h.check_accessibility();
     h.get_by_label("Finish signing in in your browser");
+    // Opening the page again opens the same attempt: the same page, the same
+    // pending sign-in, no new request to the server.
+    let session = app_mut(&mut h).bridge.session();
+    let url = app_mut(&mut h).openid.pending.as_ref().unwrap().flow.browser_url().to_owned();
+    h.get_by_label("Open the browser again").click();
+    h.step();
+    let opened: Vec<_> = h
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, std::slice::from_ref(&url));
+    assert_eq!(app_mut(&mut h).bridge.session(), session);
+    assert_eq!(app_mut(&mut h).openid.pending.as_ref().unwrap().flow.browser_url(), url);
     h.get_by_label("Cancel").click();
     h.run_steps(3);
     assert!(app_mut(&mut h).openid.pending.is_none());

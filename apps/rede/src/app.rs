@@ -115,6 +115,9 @@ pub enum Action {
     CheckServer,
     /// Start a browser sign-in with the server's provider.
     OpenId,
+    /// Open the waiting browser sign-in's page again: the same attempt, not a
+    /// new one.
+    ReopenBrowser,
     CancelSignIn,
     /// Back to the sign-in screen; the saved tokens are forgotten. The shelf
     /// and its books stay.
@@ -330,6 +333,7 @@ impl RedeApp {
             Action::SignIn => self.sign_in(),
             Action::CheckServer => self.check_server(),
             Action::OpenId => self.begin_openid(),
+            Action::ReopenBrowser => self.reopen_browser(),
             Action::CancelSignIn => self.cancel_sign_in(abs::OpenIdError::Cancelled),
             Action::SignOut => self.sign_out(),
             Action::SyncNow => self.sync_now(),

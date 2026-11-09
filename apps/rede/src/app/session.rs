@@ -562,13 +562,23 @@ impl RedeApp {
             self.apply(action);
         }
     }
+
+    /// Opens the pending browser sign-in's page again, for a tab that was
+    /// closed or lost. It's the same transaction (the same state and
+    /// verifier), so whichever tab finishes, the redirect still matches.
+    pub(super) fn reopen_browser(&mut self) {
+        if let Some(pending) = self.openid.pending.as_ref().filter(|_| !self.openid.exchanging) {
+            self.ctx.open_url(egui::OpenUrl::new_tab(pending.flow.browser_url()));
+        }
+    }
 }
 
 /// The sign-in column's width, Ond's.
 const FORM_W: f32 = 320.0;
 
-/// Waiting for the browser: what's happening, and a way out. Centred, since
-/// there's nothing to fill in.
+/// Waiting for the browser: what's happening, a way out, and a way back to
+/// the page if its tab went missing. Centred, since there's nothing to fill
+/// in.
 fn waiting_ui(ui: &mut egui::Ui, t: &Tokens, pending: &crate::openid::Pending, exchanging: bool, spin: bool) -> Option<Action> {
     let mut action = None;
     ui.vertical_centered(|ui| {
@@ -587,6 +597,12 @@ fn waiting_ui(ui: &mut egui::Ui, t: &Tokens, pending: &crate::openid::Pending, e
         ui.add_space(20.0);
         if shell::widgets::secondary(ui, "Cancel").clicked() {
             action = Some(Action::CancelSignIn);
+        }
+        if !exchanging {
+            ui.add_space(12.0);
+            if crate::widgets::link(ui, "Open the browser again", egui::FontId::proportional(12.0), t.accent).clicked() {
+                action = Some(Action::ReopenBrowser);
+            }
         }
     });
     if pending.flow.used_fallback() {
