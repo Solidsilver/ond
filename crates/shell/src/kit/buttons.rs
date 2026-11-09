@@ -1,7 +1,7 @@
 //! Buttons that paint themselves: the filled ones ([`primary`],
 //! [`secondary`], [`danger`] and their kin), the [`quiet_button`], the
 //! hearts that love something ([`heart_button`], and [`hover_heart`] over a
-//! row), and the [`focus_ring`] every self-painted control shows when Tab
+//! row), the round [`tile_button`] on a tile's art, and the [`focus_ring`] every self-painted control shows when Tab
 //! lands on it.
 
 use crate::icons::Icon;
@@ -137,4 +137,27 @@ pub fn hover_heart(ui: &mut Ui, rect: Rect, id: egui::Id, loved: bool, reveal: b
     let label = crate::keys::shown(label).into_owned();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     resp
+}
+
+/// The round button on a tile's art (play on an album, shuffle on an
+/// artist), 32 points across at `at`. It's there while the tile or the
+/// button itself is hovered (on the button, the tile doesn't read as
+/// hovered), filled with the accent under the pointer. True when clicked.
+pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bool, icon: Icon, label: &str) -> bool {
+    let resp = ui.interact(at, id, Sense::click());
+    if !(tile_hovered || resp.hovered()) {
+        return false;
+    }
+    let fill = if resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
+    let fg = if resp.hovered() { t.on_accent } else { t.text };
+    ui.painter().circle_filled(at.center(), 16.0, fill);
+    // The play triangle sits a point right of centre so it looks centred.
+    let glyph = if matches!(icon, Icon::Play) {
+        Rect::from_center_size(at.center() + vec2(1.0, 0.0), vec2(12.0, 12.0))
+    } else {
+        Rect::from_center_size(at.center(), vec2(13.0, 13.0))
+    };
+    crate::icons::paint(ui.painter(), glyph, icon, fg);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.clicked()
 }

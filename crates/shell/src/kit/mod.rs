@@ -10,7 +10,8 @@
 //!   finding in tinted text), and the one [`empty_state`].
 //! - [`buttons`]: the filled [`primary`], [`secondary`], [`danger`] (and
 //!   [`primary_unavailable`], [`secondary_danger`]), the [`quiet_button`],
-//!   [`heart_button`] and [`hover_heart`],
+//!   [`heart_button`] and [`hover_heart`], [`tile_button`] (round, on a
+//!   tile's art),
 //!   and the [`focus_ring`] every self-painted control shows under Tab.
 //! - [`controls`]: the segmented pill ([`segmented`], [`segmented_wide`],
 //!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]), [`switch`]
@@ -19,7 +20,8 @@
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
 //!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
 //!   one; [`kv_section`], [`kv_row`] and [`kv_text`] (a label and its value,
-//!   the values lined up, as an info panel lists facts); and [`sidebar_row`].
+//!   the values lined up, as an info panel lists facts); [`row_fill`] (a list
+//!   row's selection or hover); and [`sidebar_row`].
 //! - [`menus`]: [`popover`] (or [`popover_at`]) in the theme's frame,
 //!   [`padded`] to line a block up with its rows, [`popover_title`],
 //!   [`popover_rule`], [`menu_row`] (a command), [`info_row`] (a fact),

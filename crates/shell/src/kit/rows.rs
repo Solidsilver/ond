@@ -1,7 +1,8 @@
 //! Rows: the settings rows every page is built from (a [`group`] of
 //! [`setting`]s, or [`row_with`] and its [`Head`], hairlines between them,
 //! [`managed`] to lock one); the facts a panel lists, a [`kv_section`] of
-//! [`kv_row`]s (or [`kv_text`]); and the [`sidebar_row`] a place in a sidebar is.
+//! [`kv_row`]s (or [`kv_text`]); a list row's [`row_fill`]; and the
+//! [`sidebar_row`] a place in a sidebar is.
 
 use super::focus_ring;
 use super::text::{elide, elide_middle, section};
@@ -211,4 +212,15 @@ pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
     kv_row(ui, label, |ui| {
         ui.add(egui::Label::new(egui::RichText::new(value).size(KV_VALUE).color(t.text)).wrap());
     });
+}
+
+/// A list row's background: the selection, else the hover tint, else none.
+pub fn row_fill(t: &Tokens, selected: bool, hovered: bool) -> Color32 {
+    if selected {
+        t.selected
+    } else if hovered {
+        t.hover
+    } else {
+        Color32::TRANSPARENT
+    }
 }

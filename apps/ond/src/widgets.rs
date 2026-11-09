@@ -2,12 +2,12 @@
 //! segmented control, a thin slider, a switch and a menu label, and the rows
 //! Settings is built from (a [`group`] of [`setting`]s).
 
-use crate::icons::{self, Icon};
+use crate::icons::Icon;
 use crate::theme::Tokens;
 use egui::{Color32, Rect, Response, Sense, Ui, vec2};
 pub use shell::kit::{
     Head, KV_VALUE, ROW_PAD, chip, choice, divider, elide, elide_job, group, heart_button, hover_heart, icon_choice, kv_row, kv_section, kv_text, link,
-    link_line, managed, menu_label, section, switch, switch_tinted, thin_slider, thin_slider_marked,
+    link_line, managed, menu_label, row_fill, section, switch, switch_tinted, thin_slider, thin_slider_marked, tile_button,
 };
 pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
 
@@ -56,17 +56,6 @@ pub fn view_picker(ui: &mut Ui, current: &mut crate::settings::ViewMode) -> bool
     }
 }
 
-/// A list row's background: the selection, else the hover tint, else none.
-pub fn row_fill(t: &Tokens, selected: bool, hovered: bool) -> Color32 {
-    if selected {
-        t.selected
-    } else if hovered {
-        t.hover
-    } else {
-        Color32::TRANSPARENT
-    }
-}
-
 /// A track title's colour in a list: the accent while it plays, dimmed when it
 /// can't play right now (offline and not downloaded).
 pub fn track_color(t: &Tokens, playing: bool, playable: bool) -> Color32 {
@@ -103,29 +92,6 @@ pub fn bit_perfect_switch(ui: &mut Ui, name: &str, mode: &mut audio::PlaybackMod
     let resp = switch_tinted(ui, &mut on, &format!("Bit-perfect on {name}"), Tokens::of(ui).ok);
     *mode = if on { audio::PlaybackMode::BitPerfect } else { audio::PlaybackMode::Normal };
     resp
-}
-
-/// The round button on a tile's art (play on an album, shuffle on an
-/// artist), 32 points across at `at`. It's there while the tile or the
-/// button itself is hovered (on the button, the tile doesn't read as
-/// hovered), filled with the accent under the pointer. True when clicked.
-pub fn tile_button(ui: &Ui, t: &Tokens, at: Rect, id: egui::Id, tile_hovered: bool, icon: Icon, label: &str) -> bool {
-    let resp = ui.interact(at, id, Sense::click());
-    if !(tile_hovered || resp.hovered()) {
-        return false;
-    }
-    let fill = if resp.hovered() { t.accent } else { t.bg.gamma_multiply(0.92) };
-    let fg = if resp.hovered() { t.on_accent } else { t.text };
-    ui.painter().circle_filled(at.center(), 16.0, fill);
-    // The play triangle sits a point right of centre so it looks centred.
-    let glyph = if matches!(icon, Icon::Play) {
-        Rect::from_center_size(at.center() + vec2(1.0, 0.0), vec2(12.0, 12.0))
-    } else {
-        Rect::from_center_size(at.center(), vec2(13.0, 13.0))
-    };
-    icons::paint(ui.painter(), glyph, icon, fg);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-    resp.clicked()
 }
 
 #[cfg(test)]
