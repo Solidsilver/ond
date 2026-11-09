@@ -243,6 +243,31 @@ fn format_change_starts_a_new_ring() {
 }
 
 #[test]
+fn a_cut_quiet_tail_at_a_format_change_carries_its_savings_to_the_next_ring() {
+    // Half a second of tone, then a long pause that ends the file: the pause's
+    // savings belong to the ring the format change closes, and the next ring
+    // has no way to recover time the old one saved.
+    let mut a = pcm(RATE as usize, 1);
+    a.extend(std::iter::repeat_n(32i16, RATE as usize * 10 * 2));
+    let dir = tempfile::tempdir().unwrap();
+    let status = bit_perfect_status();
+    status.skip_silence.store(true, Ordering::Relaxed);
+    let s = Session::start(file_source(&dir, "a", &a), None, config(0.05), status.clone(), None, None, Arc::default());
+    s.set_next(0, Some(source_at(&dir, "b", 48_000, &pcm(2 * 4_000, 2))));
+    let (input, _) = wait_ring(&s);
+    let mut dev = Device { input, status: status.clone(), played: Vec::new() };
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    while !dev.tick(512).0 {
+        assert!(Instant::now() < deadline, "the first ring never drained");
+        thread::sleep(Duration::from_micros(200));
+    }
+    let (input, _) = wait_ring(&s);
+    play_f32(&s, input, &status, 48_000);
+    // Ten seconds of pause kept their first 200 ms.
+    assert!((status.silence_saved_secs() - 9.8).abs() < 1e-9, "saved {}", status.silence_saved_secs());
+}
+
+#[test]
 fn seek_cuts_stale_audio_and_resumes_at_the_exact_frame() {
     // 2 s of stereo; the ring fills long before the end, so the decoder is mid-file.
     let a = pcm(RATE as usize * 2 * 2, 0);

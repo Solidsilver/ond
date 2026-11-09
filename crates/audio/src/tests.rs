@@ -2028,3 +2028,25 @@ fn seeking_after_a_cut_keeps_heard_savings_and_restarts_the_source_clock() {
     assert_eq!(engine.status.silence_saved_secs(), saved);
     engine.shutdown(Duration::from_secs(2));
 }
+
+#[test]
+fn a_rate_change_between_files_keeps_the_savings_already_heard() {
+    let dir = tempfile::tempdir().unwrap();
+    // The pause ends the first file and the format change closes its ring, so
+    // the time the pause saved has to survive into the ring that follows.
+    let first: Vec<_> = voice(44_100, 1).into_iter().chain(std::iter::repeat_n(32, 44_100 * 2)).collect();
+    let a = file_source(&dir, "before-format", &first);
+    let b = source_at(&dir, "after-format", 48_000, &voice(48_000, 1));
+    let mut backend = FakeBackend::new(caps(None, 192_000));
+    backend.own_rate = Some(48_000);
+    let opens = backend.opens.clone();
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
+    engine.send(Command::SetSkipSilence(true));
+    engine.send(Command::Play(a));
+    engine.send(Command::SetNext(Some(b)));
+    let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
+    assert_eq!(starts(&seen), [("before-format".into(), false, false), ("after-format".into(), false, false)], "{seen:?}");
+    assert_eq!(opens.load(Ordering::Relaxed), 2);
+    assert!((engine.status.silence_saved_secs() - 0.8).abs() < 1e-9);
+    engine.shutdown(Duration::from_secs(2));
+}

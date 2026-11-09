@@ -927,6 +927,7 @@ impl Ctx {
     /// the same rate stays gapless.
     fn attach(&mut self, output: StreamFormat, feed: Feed, origin: Origin, out: &mut Option<Out>) -> Result<Attached, String> {
         let format = StreamFormat { bits_per_sample: None, ..output };
+        let mut saved = self.status.silence_saved_secs();
         if let Some(o) = out.as_mut() {
             if o.format == format && o.src_rate == feed.rate && o.src_channels == feed.channels {
                 o.input_origin = origin;
@@ -959,6 +960,10 @@ impl Ctx {
                 self.silence_finish(o, true);
                 self.finish_stretch(o);
             }
+            // The last callback can still be publishing its endpoint after
+            // freeing the ring's final slots. Carry the decoder's complete
+            // total rather than racing that status publication on a new ring.
+            saved = o.saved;
             // Different format: the device has to be reopened. Play the old ring out first.
             self.flush_resampler(o);
             if o.silence.is_some() {
@@ -1001,12 +1006,12 @@ impl Ctx {
             src_channels,
             resampler,
             stretch: stretch::speech(feed.rate, format.channels, self.speed).map_err(|e| format!("stretch: {e}"))?,
-            silence: self.skip_silence.then(|| Silence::new(feed.rate, format.channels, self.status.silence_saved_secs())),
+            silence: self.skip_silence.then(|| Silence::new(feed.rate, format.channels, saved)),
             voice: self.voice_boost.then(|| Voice::new(feed.rate, format.channels)),
             input_origin: origin,
             output_seq: origin.seq,
             cut: false,
-            saved: self.status.silence_saved_secs(),
+            saved,
             rs_base: 0,
         });
         if !self.segment(out.as_mut().expect("new ring"), 0, origin.frame) {
