@@ -198,6 +198,8 @@ pub fn chip_button(ui: &mut Ui, rect: Rect, id: egui::Id, chip: ChipButton<'_>) 
     };
     ui.painter().rect_filled(rect, chip.radius, fill);
     focus_ring(ui, &resp, rect, chip.radius);
+    // A disabled chip reads as one, as egui's own buttons do.
+    let chip = if ui.is_enabled() { chip } else { ChipButton { ink: ui.visuals().weak_text_color(), ..chip } };
     let galley = chip.text.map(|text| ui.painter().layout_no_wrap(text.to_owned(), FontId::new(chip.size, semibold()), chip.ink));
     let glyph = if chip.icon.is_some() { chip.size } else { 0.0 };
     let gap = if chip.icon.is_some() && galley.is_some() { 3.0 } else { 0.0 };
