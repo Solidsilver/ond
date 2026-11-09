@@ -336,3 +336,25 @@ fn the_window_shortcuts_match_onds_bindings_without_a_loaded_book() {
     out.textures_delta.clear();
     assert!(matches!(app.actions.pop(), Some(Action::Shortcuts)));
 }
+
+#[test]
+fn discovered_methods_name_only_the_controls_the_server_offers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), 0);
+    for both in [false, true] {
+        *h.state_mut() = Some(signin(&h.ctx.clone(), dir.path(), both, false));
+        h.run_steps(3);
+        h.check_accessibility();
+        h.get_by_label("Sign in with Book Club");
+        assert_eq!(h.query_all_by_label("Username").next().is_some(), both);
+        assert_eq!(h.query_all_by_label("Password").next().is_some(), both);
+    }
+    *h.state_mut() = Some(signin(&h.ctx.clone(), dir.path(), false, true));
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Finish signing in in your browser");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(app_mut(&mut h).openid.pending.is_none());
+    assert!(!app_mut(&mut h).login.as_ref().unwrap().busy);
+}

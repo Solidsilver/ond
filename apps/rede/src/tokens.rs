@@ -78,6 +78,15 @@ impl Keeper {
         let _ = self.tx.send(Write::Forget(account));
     }
 
+    /// A cancelled login must not leave a token pair queued behind its last
+    /// network response, or let that client's hook write again.
+    pub fn cancel_login(&self) {
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(account) = current.take() {
+            let _ = self.tx.send(Write::Forget((*account).clone()));
+        }
+    }
+
     /// The hook for this login: enqueue without waiting for the keychain.
     pub fn hook(&self) -> impl Fn(AuthEvent) + Send + Sync + 'static {
         let current = self.current.clone();

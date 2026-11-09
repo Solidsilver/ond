@@ -15,6 +15,7 @@ mod listening;
 mod memo;
 #[cfg(any(target_os = "macos", test))]
 mod now_playing;
+mod openid;
 mod player;
 mod prefs;
 mod settings;
@@ -30,6 +31,8 @@ pub(crate) const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 
 fn main() -> eframe::Result {
     init_logging();
+    #[cfg(target_os = "macos")]
+    openid::macos::install();
     let plan = window();
     let options = eframe::NativeOptions {
         // The app id names the window for Wayland and X11 desktops.

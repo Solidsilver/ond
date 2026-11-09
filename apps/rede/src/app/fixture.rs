@@ -160,6 +160,7 @@ pub fn paths(dir: &Path) -> Paths {
 /// otherwise), so an empty library is the same app with none.
 pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
+    app.bridge.use_openid_store(crate::openid::TestStore::default());
     app.login = None;
     let shelf = shelf(dir);
     let all = summaries();
@@ -197,6 +198,7 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
 /// An app at its sign-in screen, with nothing saved.
 pub fn signed_out(ctx: &egui::Context, dir: &Path) -> RedeApp {
     let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
+    app.bridge.use_openid_store(crate::openid::TestStore::default());
     app.login = Some(LoginForm::default());
     app.session = Session::default();
     app
@@ -255,4 +257,35 @@ pub fn playing(app: &mut RedeApp, paused: bool) {
         .unwrap();
     app.player.paused = paused;
     app.prefs.edit(|p| p.playback.speed = 1.5);
+}
+
+/// Server discovery and pending-keyring replies for sign-in screenshots and
+/// UI tests. These are wire fixtures, never real browser credentials.
+pub fn signin(ctx: &egui::Context, dir: &Path, both: bool, waiting: bool) -> RedeApp {
+    let mut app = signed_out(ctx, dir);
+    {
+        let form = app.login.as_mut().unwrap();
+        form.server = "https://books.example.com".into();
+        form.checked_server = form.server.clone();
+    }
+    let methods = if both { vec!["local".into(), "openid".into()] } else { vec!["openid".into()] };
+    app.handle(crate::bridge::AccountMsg::Status {
+        session: app.bridge.session(),
+        status: abs::ServerStatus {
+            auth_methods: methods,
+            auth_form_data: abs::AuthFormData { auth_open_id_button_text: Some("Sign in with Book Club".into()), ..Default::default() },
+            ..Default::default()
+        },
+        warning: None,
+    });
+    if waiting {
+        app.handle(crate::bridge::AccountMsg::OpenIdRestored { session: 0, pending: Some(Box::new(pending_openid())) });
+    } else {
+        app.openid.restored = true;
+    }
+    app
+}
+
+pub fn pending_openid() -> crate::openid::Pending {
+    crate::openid::test_pending()
 }

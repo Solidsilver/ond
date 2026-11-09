@@ -58,6 +58,9 @@ pub struct LoginForm {
     pub account: Option<Account>,
     /// The first empty field was given focus: once, so the user can move it.
     pub focused: bool,
+    pub status: Option<abs::ServerStatus>,
+    pub checked_server: String,
+    pub warning: Option<String>,
 }
 
 impl LoginForm {
@@ -77,6 +80,8 @@ impl RedeApp {
         let changed = self.session.account.as_ref().map(|a| a.id) != Some(account.id);
         self.session = Session { account: Some(account.clone()), source: Some(source.clone()), shelf: Some(shelf.clone()), connecting: false };
         self.login = None;
+        self.openid.pending = None;
+        self.openid.exchanging = false;
         self.art.set_source(Some(source.clone()));
         self.listening = Some(self.bridge.listening(
             source,
@@ -105,6 +110,9 @@ impl RedeApp {
     /// From a saved login whose shelf wouldn't open: the form, filled in.
     pub(super) fn sign_in_failed(&mut self, error: String) {
         self.session.connecting = false;
+        self.openid.pending = None;
+        self.openid.exchanging = false;
+        self.bridge.clear_openid();
         if let Some(form) = self.login.as_mut() {
             form.busy = false;
             form.password.clear();
@@ -123,8 +131,140 @@ impl RedeApp {
         self.session.connecting = false;
     }
 
+    pub(super) fn check_server(&mut self) {
+        let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
+        if form.server.trim().is_empty() {
+            form.error = Some("Enter the server's address, for example https://books.example.com.".into());
+            return;
+        }
+        form.busy = true;
+        form.status = None;
+        form.error = None;
+        form.checked_server = form.server.trim().to_owned();
+        self.bridge.server_status(Account::new(&form.checked_server, ""));
+    }
+
+    pub(super) fn begin_openid(&mut self) {
+        let Some(form) = self.login.as_mut().filter(|f| !f.busy && f.status.is_some() && f.server.trim() == f.checked_server) else { return };
+        form.busy = true;
+        form.error = None;
+        let account =
+            form.account.clone().map(|a| Account { server: form.checked_server.clone(), ..a }).unwrap_or_else(|| Account::new(&form.checked_server, ""));
+        self.bridge.begin_openid(account, form.warning.clone());
+    }
+
+    pub(super) fn handle_sign_in(&mut self, msg: crate::bridge::AccountMsg) {
+        use crate::bridge::AccountMsg;
+        match msg {
+            AccountMsg::Status { session, status, warning } if session == self.bridge.session() => {
+                let Some(form) = self.login.as_mut() else { return };
+                form.busy = false;
+                form.warning = warning;
+                let launch = status.auth_methods.iter().any(|m| m == "openid") && status.auth_form_data.auth_open_id_auto_launch;
+                form.status = Some(status);
+                if launch {
+                    self.begin_openid();
+                }
+            }
+            AccountMsg::OpenIdReady { session, pending } if session == self.bridge.session() => {
+                self.ctx.open_url(egui::OpenUrl::new_tab(pending.flow.browser_url()));
+                self.wait_for_openid(*pending);
+            }
+            AccountMsg::OpenIdRestored { session, pending } => {
+                self.openid.restored = true;
+                if session == 0
+                    && self.bridge.session() == session
+                    && let Some(pending) = pending
+                {
+                    self.bridge.end_session();
+                    self.session = Session::default();
+                    self.wait_for_openid(*pending);
+                }
+                if let Some(url) = self.openid.early_redirect.take() {
+                    self.openid_redirect(url);
+                }
+            }
+            AccountMsg::Redirect(url) => self.openid_redirect(url),
+            AccountMsg::OpenIdAuthenticated { session, account, client, login, warning } => {
+                if session != self.bridge.session() {
+                    self.bridge.discard_login(client);
+                    return;
+                }
+                let username = login.user.username.unwrap_or_default();
+                let account = if account.username.is_empty() || account.username == username {
+                    Account { username, ..account }
+                } else {
+                    Account::new(account.server, username)
+                };
+                self.bridge.accept_openid(account, client, login.tokens, warning);
+            }
+            _ => {}
+        }
+    }
+
+    fn wait_for_openid(&mut self, pending: crate::openid::Pending) {
+        let form = self.login.get_or_insert_with(|| LoginForm::for_account(Some(&pending.account)));
+        if form.server != pending.account.server {
+            form.status = None;
+            form.checked_server.clear();
+        }
+        form.server = pending.account.server.clone();
+        form.account = Some(pending.account.clone());
+        form.busy = true;
+        form.password.clear();
+        form.error = None;
+        self.session.connecting = false;
+        self.ctx.request_repaint_after(pending.remaining(std::time::SystemTime::now()));
+        self.openid.exchanging = false;
+        self.openid.pending = Some(pending);
+    }
+
+    fn openid_redirect(&mut self, url: String) {
+        if !self.openid.restored {
+            self.openid.early_redirect = Some(url);
+            return;
+        }
+        self.expire_openid(std::time::SystemTime::now());
+        let Some(pending) = &self.openid.pending else {
+            tracing::info!("ignored an OpenID redirect without a pending sign-in");
+            return;
+        };
+        match pending.flow.validate_callback(&url) {
+            Ok(()) => {
+                if self.openid.exchanging {
+                    return;
+                }
+                self.openid.exchanging = true;
+                self.bridge.complete_openid(pending.clone(), url);
+            }
+            Err(abs::Error::OpenId(abs::OpenIdError::StateMismatch)) => tracing::warn!("ignored an OpenID redirect with an unmatched state or target"),
+            Err(e) => self.cancel_sign_in(match e {
+                abs::Error::OpenId(e) => e,
+                _ => abs::OpenIdError::Server { status: 400 },
+            }),
+        }
+    }
+
+    pub(super) fn cancel_sign_in(&mut self, reason: abs::OpenIdError) {
+        self.bridge.cancel_login();
+        self.openid.exchanging = false;
+        self.openid.pending = None;
+        self.openid.early_redirect = None;
+        self.sign_in_failed(reason.to_string());
+    }
+
+    pub(super) fn expire_openid(&mut self, now: std::time::SystemTime) {
+        if self.openid.pending.as_ref().is_some_and(|p| p.remaining(now).is_zero()) {
+            self.cancel_sign_in(abs::OpenIdError::TimedOut);
+        }
+    }
+
     /// Connects with what the form holds.
     pub(super) fn sign_in(&mut self) {
+        if self.login.as_ref().is_some_and(|f| f.status.is_none() || f.server.trim() != f.checked_server) {
+            self.check_server();
+            return;
+        }
         let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
         let server = form.server.trim().to_owned();
         let username = form.username.trim().to_owned();
@@ -253,27 +393,19 @@ impl RedeApp {
         self.session.connecting.then(|| "Connecting…".to_owned())
     }
 
-    /// The sign-in screen: the app's name, three fields and the button, in the
-    /// family's quiet look.
+    /// The server chooses which credential controls the form offers.
     pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
-        let locked = false;
         let Some(form) = self.login.as_mut() else { return };
         let t = Tokens::of(ui);
-        let mut submit = false;
-        let first = if !form.focused && !form.busy {
-            form.focused = true;
-            Some(if form.server.trim().is_empty() {
-                0
-            } else if form.username.trim().is_empty() {
-                1
-            } else {
-                2
-            })
-        } else {
-            None
-        };
+        let waiting = self.openid.pending.as_ref();
+        let mut action = None;
+        let status = form.status.as_ref().filter(|_| form.checked_server == form.server.trim());
+        let local = status.is_some_and(|s| s.auth_methods.is_empty() || s.auth_methods.iter().any(|m| m == "local"));
+        let oidc = status.is_some_and(|s| s.auth_methods.iter().any(|m| m == "openid"));
+        let oidc_first = status.is_some_and(|s| s.auth_form_data.auth_open_id_auto_launch);
+        let oidc_label = status.and_then(|s| s.auth_form_data.auth_open_id_button_text.as_deref()).unwrap_or("Sign in with OpenID");
+        let custom_message = status.and_then(|s| s.auth_form_data.auth_login_custom_message.as_deref());
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
-            // The top strip is the title bar here too.
             let strip = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), super::BAR_H));
             let bar = ui.interact(strip, ui.scope_id().with("login-titlebar"), egui::Sense::click_and_drag());
             if bar.drag_started() {
@@ -282,9 +414,8 @@ impl RedeApp {
             if bar.double_clicked() {
                 shell::chrome::title_double_click(ui.ctx());
             }
-            const W: f32 = 320.0;
-            const FORM_H: f32 = 330.0;
-            ui.add_space(((ui.available_height() - FORM_H) * 0.42).max(24.0));
+            const W: f32 = 340.0;
+            ui.add_space(((ui.available_height() - 420.0) * 0.42).max(24.0));
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("Rede").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
                 ui.add_space(4.0);
@@ -295,97 +426,99 @@ impl RedeApp {
                 ui.add_space(((ui.available_width() - W) / 2.0).max(0.0));
                 ui.vertical(|ui| {
                     ui.set_width(W);
-                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    if let Some(pending) = waiting {
+                        ui.label(egui::RichText::new("Finish signing in in your browser").color(t.text));
+                        if !pending.remaining(std::time::SystemTime::now()).is_zero() {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                                shell::icons::paint(ui.painter(), rect, Icon::Spinner, t.muted);
+                                ui.label(egui::RichText::new("Waiting for your browser…").size(12.0).color(t.muted));
+                            });
+                            ui.ctx().request_repaint_after(SPIN_FRAME);
+                        }
+                        if pending.flow.used_fallback() {
+                            ui.add(egui::Label::new(egui::RichText::new(crate::openid::FALLBACK).size(12.0).color(t.muted)).wrap());
+                        }
+                        if ui.button("Cancel").clicked() {
+                            action = Some(Action::CancelSignIn);
+                        }
+                        return;
+                    }
+                    if let Some(message) = custom_message.filter(|m| !m.is_empty()) {
+                        ui.add(egui::Label::new(message).wrap());
+                    }
                     let mut enter = false;
                     ui.add_enabled_ui(!form.busy, |ui| {
-                        let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool, focus: bool| {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
-                                if locked {
-                                    ui.label(egui::RichText::new("Managed by your system settings").size(11.0).color(t.muted));
-                                }
-                            });
-                            if locked {
-                                egui::Frame::new()
-                                    .fill(t.field)
-                                    .corner_radius(ui.visuals().widgets.inactive.corner_radius)
-                                    .inner_margin(egui::Margin::symmetric(10, 7))
-                                    .show(ui, |ui| {
-                                        ui.set_width(W - 20.0);
-                                        ui.add(egui::Label::new(egui::RichText::new(text.as_str()).color(t.text)).truncate());
-                                    });
-                                return false;
+                        enter |= login_field(ui, &t, "Server", &mut form.server, false, !form.focused);
+                        form.focused = true;
+                        ui.label(egui::RichText::new("Your Audiobookshelf server's address").size(11.0).color(t.muted));
+                        let openid_button = |ui: &mut egui::Ui| {
+                            if ui.add_sized([W, 34.0], egui::Button::new(egui::RichText::new(oidc_label).color(t.on_accent)).fill(t.accent)).clicked() {
+                                Some(Action::OpenId)
+                            } else {
+                                None
                             }
-                            let r = ui.add(
-                                egui::TextEdit::singleline(text)
-                                    .hint_text(hint)
-                                    .password(password)
-                                    .desired_width(W)
-                                    .margin(egui::vec2(10.0, 7.0))
-                                    .background_color(t.field),
-                            );
-                            // The label above is painted text; a field still
-                            // needs its own name where a screen reader looks.
-                            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
-                            if focus {
-                                r.request_focus();
-                            }
-                            r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
                         };
-                        enter |= field(ui, "Server", &mut form.server, "https://books.example.com", false, first == Some(0));
-                        if !locked {
-                            ui.label(egui::RichText::new("Your server's address, for example https://books.example.com").size(11.0).color(t.muted));
+                        if oidc && (oidc_first || !local) {
+                            action = openid_button(ui);
                         }
-                        ui.add_space(10.0);
-                        enter |= field(ui, "Username", &mut form.username, "", false, first == Some(1));
-                        ui.add_space(10.0);
-                        enter |= field(ui, "Password", &mut form.password, "", true, first == Some(2));
+                        if local {
+                            enter |= login_field(ui, &t, "Username", &mut form.username, false, false);
+                            enter |= login_field(ui, &t, "Password", &mut form.password, true, false);
+                            if ui.add_sized([W, 34.0], egui::Button::new(egui::RichText::new("Sign in").color(t.on_accent)).fill(t.accent)).clicked() || enter {
+                                action = Some(Action::SignIn);
+                            }
+                        }
+                        if oidc && local && !oidc_first {
+                            action = openid_button(ui).or(action.take());
+                        }
+                        if status.is_none()
+                            && (ui.add_sized([W, 34.0], egui::Button::new(egui::RichText::new("Sign in").color(t.on_accent)).fill(t.accent)).clicked() || enter)
+                        {
+                            action = Some(Action::CheckServer);
+                        }
+                        if status.is_some() && !local && !oidc {
+                            ui.label("This server offers no supported sign-in method.");
+                        }
                     });
-                    ui.add_space(18.0);
-                    let label = if form.busy { "Connecting…" } else { "Sign in" };
-                    // Painted as Ond paints Connect: the label centred, a
-                    // lighter fill on hover, a faded one while connecting.
-                    let sense = if form.busy { egui::Sense::hover() } else { egui::Sense::click() };
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, 34.0), sense);
-                    let fill = if form.busy {
-                        t.accent.gamma_multiply(0.6)
-                    } else if resp.hovered() {
-                        t.accent.gamma_multiply(0.88)
-                    } else {
-                        t.accent
-                    };
-                    ui.painter().rect_filled(rect, 7.0, fill);
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::new(13.0, theme::semibold()), t.on_accent);
-                    let ready = !form.busy;
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ready, label));
                     if form.busy {
-                        let r = egui::Rect::from_center_size(egui::pos2(resp.rect.left() + 18.0, resp.rect.center().y), egui::vec2(14.0, 14.0));
-                        shell::icons::paint(ui.painter(), r, Icon::Spinner, t.on_accent);
-                        // A server that takes the connection and says nothing
-                        // gives up after its timeout; until then the spinner
-                        // turns, but not for ever.
+                        ui.label("Connecting…");
                         let now = ui.input(|i| i.time);
                         let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(signing_in_since(), || now));
                         if now - since < CONNECT_SPIN_SECS {
                             ui.ctx().request_repaint_after(SPIN_FRAME);
                         }
+                        if ui.button("Cancel").clicked() {
+                            action = Some(Action::CancelSignIn);
+                        }
                     } else {
                         ui.data_mut(|d| d.remove::<f64>(signing_in_since()));
                     }
-                    submit = resp.clicked() || enter;
-                    if let Some(e) = &form.error {
-                        ui.add_space(12.0);
-                        ui.add(egui::Label::new(egui::RichText::new(e).size(12.0).color(ui.visuals().error_fg_color)).wrap());
+                    if let Some(warning) = &form.warning {
+                        ui.add(egui::Label::new(egui::RichText::new(warning).size(12.0).color(t.muted)).wrap());
+                    }
+                    if let Some(error) = &form.error {
+                        ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(ui.visuals().error_fg_color)).wrap());
                     }
                 });
             });
         });
-        if submit && !form.busy {
-            self.actions.push(Action::SignIn);
+        if let Some(action) = action {
+            self.actions.push(action);
         }
-        // What the form asked for, applied once it's drawn.
-        for a in std::mem::take(&mut self.actions) {
-            self.apply(a);
+        for action in std::mem::take(&mut self.actions) {
+            self.apply(action);
         }
     }
+}
+
+fn login_field(ui: &mut egui::Ui, t: &Tokens, label: &str, text: &mut String, password: bool, focus: bool) -> bool {
+    ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
+    let r = ui.add(egui::TextEdit::singleline(text).password(password).desired_width(f32::INFINITY).margin(egui::vec2(10.0, 7.0)).background_color(t.field));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
+    if focus {
+        r.request_focus();
+    }
+    r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
 }

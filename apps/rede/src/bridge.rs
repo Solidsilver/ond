@@ -64,9 +64,35 @@ pub enum AccountMsg {
         warning: Option<String>,
     },
     /// The sign-in didn't work, and `error` says why in plain words.
-    SignInFailed { session: u64, error: String },
+    SignInFailed {
+        session: u64,
+        error: String,
+    },
     /// The account is on file but its tokens aren't: sign in again.
-    NoTokens,
+    NoTokens {
+        session: u64,
+    },
+    Status {
+        session: u64,
+        status: abs::ServerStatus,
+        warning: Option<String>,
+    },
+    OpenIdReady {
+        session: u64,
+        pending: Box<crate::openid::Pending>,
+    },
+    OpenIdRestored {
+        session: u64,
+        pending: Option<Box<crate::openid::Pending>>,
+    },
+    Redirect(String),
+    OpenIdAuthenticated {
+        session: u64,
+        account: Account,
+        client: abs::Client,
+        login: Box<abs::Login>,
+        warning: Option<String>,
+    },
 }
 
 /// The library: the shelf's books, the sync that filled it, and a book's
@@ -109,6 +135,7 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 #[derive(Clone)]
 pub struct Bridge {
     rt: tokio::runtime::Handle,
+    openid_store: Arc<std::sync::Mutex<OpenIdSlot>>,
     tx: Sender<Msg>,
     notify: Notify,
     /// Persists the tokens the client rotates, off the task that rotated them.
@@ -126,9 +153,31 @@ pub struct Bridge {
     scope: Option<u64>,
 }
 
+/// Serializes blocking keyring operations. A delayed cleanup may remove an
+/// older attempt, but never one saved by a newer login session.
+struct OpenIdSlot {
+    generation: u64,
+    store: Box<dyn crate::openid::Store>,
+}
+
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, keeper: Keeper, paths: Arc<Paths>) -> Self {
-        Self { rt, tx, notify, keeper, paths, session: Arc::default(), pass: Arc::default(), scope: None }
+        Self {
+            rt,
+            openid_store: Arc::new(std::sync::Mutex::new(OpenIdSlot { generation: 0, store: Box::new(crate::openid::Keyring) })),
+            tx,
+            notify,
+            keeper,
+            paths,
+            session: Arc::default(),
+            pass: Arc::default(),
+            scope: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_openid_store(&mut self, store: impl crate::openid::Store + 'static) {
+        self.openid_store = Arc::new(std::sync::Mutex::new(OpenIdSlot { generation: 0, store: Box::new(store) }));
     }
 
     fn playback(&self, event: crate::listening::Event) {
@@ -242,7 +291,7 @@ impl Bridge {
             if !this.live(session) {
                 return;
             }
-            let Some(tokens) = tokens else { return this.send(AccountMsg::NoTokens) };
+            let Some(tokens) = tokens else { return this.send(AccountMsg::NoTokens { session }) };
             let client = match abs::Client::new(&account.server, account.device()) {
                 Ok(c) => c.with_tokens(tokens),
                 Err(e) => return this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
@@ -250,6 +299,157 @@ impl Bridge {
             client.set_auth_hook(hook);
             this.ready(session, account, client, None).await;
         });
+    }
+
+    /// Discovers authentication before showing credential controls.
+    pub fn server_status(&self, account: Account) {
+        self.end_session();
+        let this = self.scoped();
+        self.rt.spawn(async move {
+            let session = this.scope.unwrap();
+            let result = async {
+                let client = abs::Client::new(&account.server, account.device())?;
+                let status = client.status().await?;
+                if status.app.as_deref().is_some_and(|app| app != "audiobookshelf") {
+                    return Err(abs::Error::Decode("not Audiobookshelf".into()));
+                }
+                Ok(status)
+            }
+            .await;
+            match result {
+                Ok(status) => {
+                    let warning = match check_version(status.version()) {
+                        VersionCheck::TooOld(error) => return this.send(AccountMsg::SignInFailed { session, error }),
+                        VersionCheck::Warn(why) => Some(why),
+                        VersionCheck::Fine => None,
+                    };
+                    this.send(AccountMsg::Status { session, status, warning });
+                }
+                Err(e) => this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
+            }
+        });
+    }
+
+    pub fn begin_openid(&self, account: Account, warning: Option<String>) {
+        self.end_session();
+        let this = self.scoped();
+        self.rt.spawn(async move {
+            let session = this.scope.unwrap();
+            let result = async {
+                let client = abs::Client::new(&account.server, account.device())?;
+                client.begin_openid().await
+            }
+            .await;
+            let flow = match result {
+                Ok(flow) => flow,
+                Err(e) => return this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
+            };
+            let pending = crate::openid::Pending { account, flow, started: std::time::SystemTime::now(), warning };
+            let save = this.clone();
+            let saved = pending.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let mut slot = save.openid_store.lock().unwrap_or_else(|e| e.into_inner());
+                if !save.current() {
+                    return Ok(());
+                }
+                slot.generation = session;
+                slot.store.save(&saved)
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => this.send(AccountMsg::OpenIdReady { session, pending: Box::new(pending) }),
+                _ => {
+                    this.send(AccountMsg::SignInFailed { session, error: "Couldn't keep the browser sign-in in the keyring. Unlock it and try again.".into() })
+                }
+            }
+        });
+    }
+
+    /// Read once at startup. Early Apple Events wait in the app until this
+    /// ordered message arrives, so a cold redirect cannot overtake recovery.
+    pub fn restore_openid(&self) {
+        let this = self.clone();
+        let session = this.session();
+        self.rt.spawn_blocking(move || {
+            let slot = this.openid_store.lock().unwrap_or_else(|e| e.into_inner());
+            let store = &slot.store;
+            let pending = if this.live(session) {
+                let pending = store.load().filter(|p| !p.remaining(std::time::SystemTime::now()).is_zero());
+                if pending.is_none() {
+                    store.clear();
+                }
+                pending
+            } else {
+                None
+            };
+            // The app must learn that recovery finished even if a user action
+            // already invalidated the transaction loaded here.
+            this.send(AccountMsg::OpenIdRestored { session, pending: pending.map(Box::new) });
+        });
+    }
+
+    pub fn cancel_login(&self) {
+        self.end_session();
+        self.keeper.cancel_login();
+    }
+
+    pub fn clear_openid(&self) {
+        let this = self.clone();
+        let generation = self.scope.unwrap_or_else(|| self.session());
+        self.rt.spawn_blocking(move || {
+            let slot = this.openid_store.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.generation <= generation {
+                slot.store.clear();
+            }
+        });
+    }
+
+    pub fn complete_openid(&self, pending: crate::openid::Pending, callback: String) {
+        let this = self.scoped();
+        let account = pending.account;
+        self.rt.spawn(async move {
+            let session = this.scope.unwrap();
+            let client = match abs::Client::new(&account.server, account.device()) {
+                Ok(c) => c,
+                Err(e) => return this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
+            };
+            // The server chooses the username. Persist only after identifying
+            // which local account owns these tokens.
+            let login = match client.complete_openid(pending.flow, &callback).await {
+                Ok(login) => login,
+                Err(e) => return this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
+            };
+            if !this.current() {
+                let _ = client.logout().await;
+                return;
+            }
+            this.send(AccountMsg::OpenIdAuthenticated { session, account, client, login: Box::new(login), warning: pending.warning });
+        });
+    }
+
+    /// The UI has identified the account and accepted this session's result.
+    pub fn accept_openid(&self, account: Account, client: abs::Client, tokens: abs::Tokens, warning: Option<String>) {
+        let this = self.scoped();
+        self.keeper.use_account(account.clone());
+        let hook = self.keeper.hook();
+        hook(abs::AuthEvent::Tokens(tokens));
+        client.set_auth_hook(hook);
+        self.clear_openid();
+        self.rt.spawn(async move {
+            this.ready(this.scope.unwrap(), account, client, warning).await;
+        });
+    }
+
+    pub fn discard_login(&self, client: abs::Client) {
+        self.rt.spawn(async move {
+            let _ = client.logout().await;
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn receive_urls(&self) {
+        let this = self.clone();
+        crate::openid::macos::attach(Arc::new(move |url| this.send(AccountMsg::Redirect(url))));
     }
 
     /// Signs in with a username and password. The server is asked its version
@@ -472,6 +672,7 @@ fn open_shelf(path: &std::path::Path) -> Result<Shelf, String> {
 /// What the user reads when signing in fails: the gist, without the plumbing.
 pub fn sign_in_error(e: &abs::Error) -> String {
     match e {
+        abs::Error::OpenId(e) => e.to_string(),
         abs::Error::Url(_) => "That doesn't look like a server address. Try something like https://books.example.com.".into(),
         abs::Error::Network(h) if h.is_connect() || h.is_timeout() => "Couldn't reach the server. Check the address and that it's running.".into(),
         abs::Error::Network(h) => format!("Couldn't reach the server: {h}"),
@@ -691,7 +892,7 @@ mod tests {
         // The keyring has nothing for this account (it was never signed in), so
         // the app is told rather than left waiting.
         until(&rt, &rx, &mut got, |m| !m.is_empty());
-        assert!(matches!(got[0], Msg::Account(AccountMsg::NoTokens)));
+        assert!(matches!(got[0], Msg::Account(AccountMsg::NoTokens { .. })));
     }
 
     /// The hook a client gets is `Send + Sync`, as `set_auth_hook` needs; it
@@ -707,5 +908,147 @@ mod tests {
         // The keeper's thread takes it from there; nothing was sent to the UI.
         assert!(rx.try_iter().next().is_none());
         drop(bridge);
+    }
+
+    #[test]
+    fn browser_sign_in_uses_the_keyring_transaction_and_the_existing_token_keeper() {
+        use crate::openid::Store;
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    request.push_str(&line);
+                }
+                let target = request.split_whitespace().nth(1).unwrap();
+                let (status, headers, body) = if target == "/status" {
+                    ("200 OK", String::new(), r#"{"app":"audiobookshelf","serverVersion":"2.35.0","authMethods":["openid"],"authFormData":{"authOpenIDButtonText":"Sign in with Book Club"}}"#.to_owned())
+                } else if target.starts_with("/auth/openid?") {
+                    let state = target.split("state=").nth(1).unwrap().split('&').next().unwrap();
+                    (
+                        "302 Found",
+                        format!(
+                            "Location: https://id.example/authorize?state={state}\r\nSet-Cookie: connect.sid=session; HttpOnly\r\nSet-Cookie: auth_method=openid-mobile; HttpOnly\r\n"
+                        ),
+                        String::new(),
+                    )
+                } else {
+                    assert!(target.starts_with("/auth/openid/callback?"));
+                    assert!(target.contains("code_verifier="));
+                    assert!(request.to_lowercase().contains("cookie: connect.sid=session; auth_method=openid-mobile"));
+                    (
+                        "200 OK",
+                        String::new(),
+                        r#"{"user":{"id":"user-1","username":"sam","accessToken":"access","refreshToken":"refresh"},"serverSettings":{"version":"2.35.0"}}"#
+                            .to_owned(),
+                    )
+                };
+                write!(stream, "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        struct Saved(Sender<(Account, abs::Tokens)>);
+        impl crate::tokens::TokenStore for Saved {
+            fn store(&self, a: &Account, t: &abs::Tokens) {
+                self.0.send((a.clone(), t.clone())).unwrap();
+            }
+            fn forget(&self, _: &Account) {}
+        }
+        let (stored, tokens) = channel();
+        let keeper = Keeper::with_store(Saved(stored));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (tx, rx) = channel();
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = Bridge::new(
+            rt.handle().clone(),
+            tx,
+            Arc::new(|| {}),
+            keeper,
+            Arc::new(Paths { config_file: dir.path().join("settings.json"), shelves: dir.path().join("accounts"), art_cache: dir.path().join("art") }),
+        );
+        let pending_store = crate::openid::TestStore::default();
+        bridge.use_openid_store(pending_store.clone());
+        let account = Account::new(server, "");
+        bridge.server_status(account.clone());
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Account(AccountMsg::Status { .. }))));
+        let Some(Msg::Account(AccountMsg::Status { status, warning, .. })) = got.pop() else {
+            panic!("expected discovery");
+        };
+        assert_eq!(status.auth_form_data.auth_open_id_button_text.as_deref(), Some("Sign in with Book Club"));
+        assert!(warning.is_some());
+        bridge.begin_openid(account, warning);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Account(AccountMsg::OpenIdReady { .. }))));
+        let Some(Msg::Account(AccountMsg::OpenIdReady { pending, .. })) = got.pop() else {
+            panic!("expected browser preparation");
+        };
+        let recovered = pending_store.load().expect("stored before opening the browser");
+        assert_eq!(pending.flow.browser_url(), recovered.flow.browser_url());
+        let state = recovered.flow.browser_url().split("state=").nth(1).unwrap();
+        let callback = format!("rede://oauth?code=provider-code&state={state}");
+        bridge.complete_openid(recovered, callback);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Account(AccountMsg::OpenIdAuthenticated { .. }))));
+        let Some(Msg::Account(AccountMsg::OpenIdAuthenticated { mut account, client, login, warning, .. })) = got.pop() else {
+            panic!("expected authentication");
+        };
+        account.username = login.user.username.unwrap();
+        bridge.accept_openid(account, client, login.tokens, warning);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Account(AccountMsg::SignedIn { .. }))));
+        let (account, tokens) = tokens.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(account.username, "sam");
+        assert_eq!(tokens.refresh(), "refresh");
+        assert!(pending_store.load().is_none());
+        assert_eq!(served.join().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn expired_keyring_transactions_are_cleared_and_not_resumed() {
+        use crate::openid::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, mut bridge, rx, _) = rig(dir.path());
+        let store = crate::openid::TestStore::default();
+        let mut pending = crate::openid::test_pending();
+        pending.started = std::time::SystemTime::now() - crate::openid::TIMEOUT;
+        store.save(&pending).unwrap();
+        bridge.use_openid_store(store.clone());
+        bridge.restore_openid();
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| !m.is_empty());
+        assert!(matches!(&got[0], Msg::Account(AccountMsg::OpenIdRestored { pending: None, .. })));
+        assert!(store.load().is_none());
+    }
+
+    #[test]
+    fn delayed_cleanup_for_a_cancelled_attempt_cannot_delete_a_newer_attempt() {
+        use crate::openid::Store;
+        for newer in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (rt, mut bridge, _, _) = rig(dir.path());
+            let store = crate::openid::TestStore::default();
+            bridge.use_openid_store(store.clone());
+            let old = bridge.scoped();
+            bridge.end_session();
+            if newer {
+                bridge.openid_store.lock().unwrap().generation = bridge.session();
+            }
+            store.save(&crate::openid::test_pending()).unwrap();
+            old.clear_openid();
+            // Runtime shutdown joins blocking storage work, with no sleep or
+            // assumptions about which worker acquired the lock first.
+            drop(rt);
+            assert_eq!(store.load().is_some(), newer);
+        }
     }
 }

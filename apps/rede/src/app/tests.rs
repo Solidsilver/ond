@@ -44,6 +44,11 @@ fn every_view_draws() {
     frame(&ctx, &mut login);
     login.login.as_mut().unwrap().error = Some("Wrong username or password.".into());
     frame(&ctx, &mut login);
+    drop(login);
+    for (both, waiting) in [(false, false), (true, false), (false, true)] {
+        let mut login = signin(&ctx, dir.path(), both, waiting);
+        frame(&ctx, &mut login);
+    }
 }
 
 #[test]
@@ -73,7 +78,10 @@ fn signing_in_with_an_empty_form_says_what_is_missing() {
     // nothing is sent.
     app.sign_in();
     assert_eq!(app.login.as_ref().unwrap().error.as_deref(), Some("Enter the server's address, for example https://books.example.com."));
-    app.login.as_mut().unwrap().server = "https://books.example.com".into();
+    let form = app.login.as_mut().unwrap();
+    form.server = "https://books.example.com".into();
+    form.checked_server = form.server.clone();
+    form.status = Some(abs::ServerStatus { auth_methods: vec!["local".into()], ..Default::default() });
     app.sign_in();
     assert_eq!(app.login.as_ref().unwrap().error.as_deref(), Some("Enter your username."));
     app.login.as_mut().unwrap().username = "sam".into();
@@ -230,4 +238,73 @@ fn needing_credentials_returns_a_small_window_to_full_size() {
     assert_eq!(app.prefs.get(|s| s.window.mode), crate::window::Mode::Full);
     assert!(app.login.is_some());
     frame(&ctx, &mut app);
+}
+
+#[test]
+fn a_mismatched_browser_redirect_cannot_finish_or_cancel_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = signin(&ctx, dir.path(), false, true);
+    let session = app.bridge.session();
+    app.handle(AccountMsg::Redirect("rede://oauth?state=wrong&code=untrusted".into()));
+    app.handle(AccountMsg::Redirect("rede://oauth?state=wrong&error=access_denied".into()));
+    app.handle(AccountMsg::Redirect("audiobookshelf://oauth?state=fixture-state&code=untrusted".into()));
+    assert!(app.openid.pending.is_some());
+    assert!(!app.openid.exchanging);
+    assert_eq!(app.bridge.session(), session);
+    assert!(app.login.as_ref().unwrap().error.is_none());
+}
+
+#[test]
+fn cancel_and_timeout_drop_the_attempt_and_ignore_late_redirects() {
+    for timeout in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = signin(&ctx, dir.path(), false, true);
+        let session = app.bridge.session();
+        if timeout {
+            let deadline = app.openid.pending.as_ref().unwrap().started + crate::openid::TIMEOUT;
+            app.expire_openid(deadline - Duration::from_secs(1));
+            assert!(app.openid.pending.is_some());
+            app.expire_openid(deadline);
+        } else {
+            app.apply(Action::CancelSignIn);
+        }
+        assert!(app.openid.pending.is_none());
+        assert!(!app.login.as_ref().unwrap().busy);
+        assert!(app.login.as_ref().unwrap().error.as_ref().unwrap().contains(if timeout { "timed out" } else { "cancelled" }));
+        assert!(app.bridge.session() > session);
+        app.handle(AccountMsg::Redirect("rede://oauth?state=fixture-state&code=late".into()));
+        assert!(!app.openid.exchanging);
+        assert!(app.openid.pending.is_none());
+    }
+}
+
+#[test]
+fn a_launch_redirect_waits_for_keyring_recovery_and_is_then_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = signed_out(&ctx, dir.path());
+    app.handle(AccountMsg::Redirect("rede://oauth?state=wrong&code=launch".into()));
+    assert!(app.openid.early_redirect.is_some());
+    app.handle(AccountMsg::OpenIdRestored { session: 0, pending: Some(Box::new(pending_openid())) });
+    assert!(app.openid.restored);
+    assert!(app.openid.early_redirect.is_none());
+    assert!(app.openid.pending.is_some());
+    assert!(!app.openid.exchanging, "an unmatched launch URL leaves the real attempt available");
+}
+
+#[test]
+fn a_cancelled_discovery_cannot_reopen_the_browser_or_restore_a_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = signed_out(&ctx, dir.path());
+    let session = app.bridge.session();
+    app.apply(Action::CancelSignIn);
+    app.handle(AccountMsg::OpenIdReady { session, pending: Box::new(pending_openid()) });
+    app.handle(AccountMsg::OpenIdRestored { session, pending: Some(Box::new(pending_openid())) });
+    app.handle(AccountMsg::NoTokens { session });
+    assert!(app.openid.pending.is_none());
+    assert!(!app.login.as_ref().unwrap().busy);
+    assert!(app.login.as_ref().unwrap().error.as_ref().unwrap().contains("cancelled"));
 }

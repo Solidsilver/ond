@@ -73,6 +73,9 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     // The sign-in screen, as a first start shows it.
     let dir = tempfile::tempdir().unwrap();
     scene(h, s, "signin", || signed_out(&ctx, dir.path()));
+    for (name, both, waiting) in [("signin-openid", false, false), ("signin-both", true, false), ("signin-waiting", false, true)] {
+        scene(h, s, name, || signin(&ctx, dir.path(), both, waiting));
+    }
     // A library with nothing in it yet.
     scene(h, s, "library-empty", || app(&ctx, dir.path(), 0));
     // Twelve books, in each of the orders the pill offers.

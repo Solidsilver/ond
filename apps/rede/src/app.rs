@@ -108,6 +108,9 @@ pub enum Action {
     Back,
     /// Connect with what's typed in the sign-in form.
     SignIn,
+    CheckServer,
+    OpenId,
+    CancelSignIn,
     /// Back to the sign-in screen; the saved tokens are forgotten. The shelf
     /// and its books stay.
     SignOut,
@@ -143,6 +146,7 @@ pub struct RedeApp {
     /// Who's signed in, and what their shelf is.
     session: Session,
     login: Option<LoginForm>,
+    openid: crate::openid::State,
     /// The shelf's books, and the order they're drawn in.
     books: Books,
     /// Where the running sync is.
@@ -171,7 +175,11 @@ impl RedeApp {
         crate::window().apply_frame(&cc.egui_ctx);
         let app = Self::build(&cc.egui_ctx, Paths::resolve()?)?;
         #[cfg(target_os = "macos")]
-        app.bridge.media_keys();
+        {
+            app.bridge.media_keys();
+            app.bridge.receive_urls();
+        }
+        app.bridge.restore_openid();
         Ok(app)
     }
 
@@ -211,6 +219,7 @@ impl RedeApp {
             art,
             session: Session { connecting: saved.account().is_some(), ..Session::default() },
             login,
+            openid: Default::default(),
             books: Books::default(),
             sync: SyncState::default(),
             ui,
@@ -248,7 +257,12 @@ impl RedeApp {
                     }
                     self.sign_in_failed(error);
                 }
-                AccountMsg::NoTokens => self.needs_sign_in(None),
+                AccountMsg::NoTokens { session } => {
+                    if session == self.bridge.session() {
+                        self.needs_sign_in(None);
+                    }
+                }
+                m => self.handle_sign_in(m),
             },
             Msg::Library(m) => match m {
                 LibraryMsg::Books(books) => {
@@ -307,6 +321,9 @@ impl RedeApp {
             Action::Go(route) => self.go(route),
             Action::Back => self.back(),
             Action::SignIn => self.sign_in(),
+            Action::CheckServer => self.check_server(),
+            Action::OpenId => self.begin_openid(),
+            Action::CancelSignIn => self.cancel_sign_in(abs::OpenIdError::Cancelled),
             Action::SignOut => self.sign_out(),
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
@@ -487,6 +504,7 @@ impl RedeApp {
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg);
         }
+        self.expire_openid(std::time::SystemTime::now());
         self.playback_tick(ctx);
         // The window came to the front: catch up with the server, at most every
         // few minutes. Idle windows never ask.
