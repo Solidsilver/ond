@@ -38,7 +38,8 @@ Status: design, being built. Written November 2026. Claims about Ond's code, the
 | Platform | macOS first. |
 | Network speakers | AirPlay through the system, as Ond does now. Chromecast and older Sonos later. |
 | Early audio features | Speed with pitch kept, voice boost, silence removal. |
-| Where playback controls live | In the title bar, as Ond's: transport, a capsule with the chapter scrubber that widens with the window (0.44 of it, 180 to 960 pt), speed and sleep. Chapters, bookmarks and info sit in Ond's right-hand panel slot. A bottom bar cost too much height on every screen. |
+| Where playback controls live | In the title bar, as Ond's, and nothing else there: the transport at the left; a capsule centred on the window that widens with it (0.47 of it, 330 to 1000 pt) holding the cover (a click opens the Player), the book, the chapter with the book's time left, the chapter scrubber, and the speed and sleep chips stacked at its right end where Ond's heart sits; the chapters column's toggle at the right end. Chapters, bookmarks and info sit in Ond's right-hand panel slot. The account, the places and the shortcuts are the sidebar's; Mini is ⇧⌘M and a button in the Player. A bottom bar cost too much height on every screen; a bar holding the account and the mode buttons too was crowded and lopsided. |
+| Sidebar | Ond's: the places under the libraries' name (Library now; Series, Authors, Collections and Downloads join it), the account at the foot with its state (connected, syncing, connecting, offline) and menu, and the shortcuts beside it. Folds to a rail of icons (⌥⌘S, remembered), and a window too narrow for it shows the rail. The account's libraries share one shelf, so the heading names them; switching between them comes with per-library browsing. |
 | Sign-in | Password and OpenID. OpenID uses ABS's app flow with PKCE, redirecting to `rede://oauth`, falling back to `audiobookshelf://oauth` (the only URI a server allows by default). Done before M3, since most accounts use it. |
 
 ## The family and the repository
@@ -396,7 +397,7 @@ MPRIS (Linux) and SMTC (Windows) get the same changes when those platforms come.
 - Play with resume, chapters, skip, speed, sleep timer, session sync to ABS.
 - Player and Mini modes, now playing and media keys.
 
-**M2.5: done after M2.** OpenID sign-in; the player moved to the title bar with a chapters panel; book descriptions rendered from their HTML.
+**M2.5: done after M2.** OpenID sign-in; the player moved to the title bar with a chapters panel; book descriptions rendered from their HTML; a sidebar with the library and the account, and the bar cleared down to the transport, the capsule (with speed and sleep inside it) and the chapters toggle.
 
 **M3: listening.**
 - Voice boost and silence removal.

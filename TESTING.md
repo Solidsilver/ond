@@ -126,12 +126,15 @@ and snapshots do not sign in to a server.
 
 ## Rede: the player in the title bar
 
-- [ ] Drag the window by the title bar's empty parts and by the capsule (not its scrubber); double-click them to zoom. In full screen the transport moves to the window's edge.
+- [ ] Drag the window by the title bar's empty parts, including the wide stretch between the capsule and the chapters toggle, and by the capsule (not its scrubber, cover or chips); double-click them to zoom. In full screen the transport moves to the window's edge.
+- [ ] Hover the capsule's cover: it dims with the Player's glyph and a tooltip; click it and the Player opens. Mini is ⇧⌘M, and a button in the Player's bar; both return to the full window as before.
+- [ ] Click the speed chip and the sleep chip: their menus open beside them. Start a timer: the sleep chip lights with the minutes left ("End" for the chapter's end), counts down, and goes back to the moon when cancelled.
 - [ ] Drag the capsule's scrubber through an hour-long chapter at 1440, 1920 and full-screen widths: the times follow the drag and the release lands where they said. Arrow keys, Home and End move it when it has focus.
-- [ ] Resize from the widest to the smallest window: the capsule grows to 960 points and no more, and shrinks without anything overlapping; the time left, the account's name and the chapter buttons go, in that order, then the title and the cover.
+- [ ] Resize from the widest to the smallest window: the capsule grows to 1000 points and no more, stays centred on the window as the sidebar folds and the chapters column opens, and shrinks without anything overlapping. On macOS the chapter buttons and the cover stay down to the smallest window; inside the capsule the book's time left goes before the chapter's name is cut, then the title.
 - [ ] Click the chapter's name: the chapters column opens on Chapters with the playing one in view. Click a chapter: playback goes to its start. Toggle with the button and ⌥⌘U; the choice survives a relaunch. In a narrow window the column is a sheet that Esc or a click outside closes.
 - [ ] Play a book with a hundred or more chapters (the test server has one with 178): the column scrolls smoothly and the title bar's book line drops its chapter breaks rather than turning into dashes.
 - [ ] On Linux, with the window buttons on the right and on the left, nothing in the title bar runs under them.
+- [ ] The sidebar: fold it with its button and ⌥⌘S, relaunch, and it stays as left. Narrow the window and it becomes the rail with no expand button; widen it and the full column returns. The account at its foot shows the server while connected, a turning spinner while syncing (which stops after half a minute if the sync stalls), and "Offline · retrying" with the network off, back to the server when the next sync gets through. Its menu has Sync now, Keyboard shortcuts and Sign out, and opens up from the foot. The ? beside it and ⌘/ open the shortcuts.
 
 Rede's output device picker is deferred: Ond's current panel combines device
 preferences and bit-perfect controls. Rede continues following system output;

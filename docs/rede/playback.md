@@ -5,12 +5,15 @@ session's position unless the shelf has a newer local position. Finishing a
 book starts its next play at the beginning. Equal timestamps favour the server.
 
 The title bar is the player, as Ond's toolbar is: the transport at the left,
-then a capsule with the cover, the book and the current chapter. Its scrubber
-seeks within that chapter; the thin line underneath shows progress through the
-whole book. The capsule grows with the window (0.44 of its width, from 180 to
-960 points), so a wide window gets a finer scrubber. Clicking the chapter's
-name opens the chapters column at the right (⌥⌘U shows and hides it), which
-lists the chapters, the bookmarks to come, and the book's details. The speed
+then a capsule with the cover, the book, the current chapter and the book's
+time left at the current speed. Its scrubber seeks within that chapter; the
+thin line underneath shows progress through the whole book. The capsule grows
+with the window (0.47 of its width, from 330 to 1000 points), so a wide window
+gets a finer scrubber. Clicking the cover opens the Player; clicking the
+chapter's name opens the chapters column at the right (⌥⌘U shows and hides
+it), which lists the chapters, the bookmarks to come, and the book's details.
+At the capsule's right end, two small chips show the speed and the sleep
+timer (lit, with what's left, while it runs) and open their menus. The speed
 menu also holds skip intervals, rewind on resume, the sleep settings and
 Stop. Space toggles playback, Left and Right skip, Shift+Left and Shift+Right
 change chapters, and `[` and `]` change speed by 0.05. Text fields keep their
