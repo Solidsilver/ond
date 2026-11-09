@@ -151,6 +151,23 @@ impl Source for AbsSource {
         session(id, played, &self.client)
     }
 
+    async fn refresh_tracks(&self, session: &PlaySession) -> Result<Vec<SessionTrack>> {
+        // A report may already have rotated the token. Only spend a refresh
+        // when the rejected URL still carries the current token.
+        let paths: Vec<_> = session
+            .tracks
+            .iter()
+            .map(|t| {
+                let url = abs_url_path(&t.url)?;
+                Ok((url.clone(), self.client.file_url(&url)?.to_string() == t.url))
+            })
+            .collect::<Result<_>>()?;
+        if paths.iter().any(|(_, current)| *current) {
+            self.client.refresh().await?;
+        }
+        session.tracks.iter().zip(paths).map(|(track, (path, _))| Ok(SessionTrack { url: self.client.file_url(&path)?.to_string(), ..track.clone() })).collect()
+    }
+
     async fn report(&self, session: &PlaySession, at: Position, listened: Duration) -> Result<()> {
         let sync = abs::SessionSync { current_time: at.secs(), time_listened: listened.as_secs_f64(), duration: session.duration };
         Ok(self.client.sync_session(&session.id, &sync).await?)
@@ -171,6 +188,16 @@ impl Source for AbsSource {
         let updates: Vec<abs::ItemProgressUpdate> = batch.iter().map(progress_update).collect();
         Ok(self.client.update_progress_batch(&updates).await?)
     }
+}
+
+/// Session URLs were created by this client; discard their query before
+/// rebuilding so a rotated token never sits alongside the expired one.
+fn abs_url_path(url: &str) -> Result<String> {
+    let path = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+        .ok_or_else(|| Error::Decode("a session track has no URL path".into()))?;
+    Ok(path.split('?').next().unwrap_or(path).to_owned())
 }
 
 /// A library in Rede's terms. A media type this build doesn't know has no side

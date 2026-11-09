@@ -270,3 +270,57 @@ fn the_source_is_one_trait_object_of_any_kind() {
     let source: Arc<dyn Source> = Arc::new(source);
     assert_eq!(source.capabilities(), capabilities);
 }
+
+#[tokio::test]
+async fn an_expired_file_token_is_rotated_and_every_url_is_rebuilt() {
+    use std::io::{BufRead, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/books/", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut reader = std::io::BufReader::new(&stream);
+        let mut first = String::new();
+        reader.read_line(&mut first).unwrap();
+        assert!(first.starts_with("POST /books/auth/refresh "));
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((_, value)) = line.to_ascii_lowercase().split_once("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let body = r#"{"user":{"id":"user","accessToken":"access-2","refreshToken":"refresh-2"}}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+    let client = abs::Client::new(&base, abs::DeviceInfo::new("device", "1")).unwrap().with_tokens(Tokens::new("access-1", "refresh-1"));
+    let source = AbsSource::new(account(), client, vec![]);
+    let session = PlaySession {
+        id: "s".into(),
+        item: "book".into(),
+        start: Position::default(),
+        duration: Some(100.0),
+        tracks: (1..=2)
+            .map(|index| SessionTrack {
+                index,
+                url: source.client.file_url(&format!("/api/items/book/file/{index}")).unwrap().to_string(),
+                ..Default::default()
+            })
+            .collect(),
+    };
+    let tracks = source.refresh_tracks(&session).await.unwrap();
+    server.join().unwrap();
+    for (i, track) in tracks.iter().enumerate() {
+        assert_eq!(track.url, format!("{base}api/items/book/file/{}?token=access-2", i + 1));
+    }
+    // A report can refresh before the decoder's rejection arrives. Reusing
+    // that rotation must not spend another login-limiter request.
+    let again = source.refresh_tracks(&session).await.unwrap();
+    assert_eq!(again, tracks);
+}

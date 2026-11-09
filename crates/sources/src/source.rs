@@ -62,6 +62,12 @@ pub trait Source: Send + Sync {
     /// to count listening and to close it again.
     async fn open(&self, id: &str, device: &DeviceInfo) -> Result<PlaySession>;
 
+    /// Rebuilds file URLs after an expired credential was rejected by a
+    /// downloader. Sources without expiring URLs need not implement this.
+    async fn refresh_tracks(&self, _session: &PlaySession) -> Result<Vec<crate::SessionTrack>> {
+        Err(crate::Error::NotSupported("This source cannot refresh file URLs".into()))
+    }
+
     /// The position now, and the time listened since the last report.
     async fn report(&self, session: &PlaySession, at: Position, listened: Duration) -> Result<()>;
 

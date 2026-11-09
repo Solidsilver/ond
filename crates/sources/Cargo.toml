@@ -19,6 +19,7 @@ uuid = { version = "1.29.0", features = ["v4", "serde"] }
 workspace = true
 
 [dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt", "macros"] }
 # Only to prove that an item key survives `file_name`, which both the stream
 # cache and the offline store use to name files.
 streamcache = { version = "0.4.4", path = "../streamcache" }
