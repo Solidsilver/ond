@@ -2,9 +2,9 @@
 //! and its title bar, the widgets every app draws with, and the machinery
 //! under a cover-art cache.
 //!
-//! Code comes here from an app when a second app needs it, not before, so
-//! what's here has been used twice (or is about to be). Nothing in it knows
-//! which app it's drawing for.
+//! The widgets are in [`kit`]: anything either app could draw goes there
+//! first, so the two look alike; what's one app's own stays in that app as a
+//! thin wrapper. Nothing here knows which app it's drawing for.
 
 pub mod art;
 pub mod chrome;
