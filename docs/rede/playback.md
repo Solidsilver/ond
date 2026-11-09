@@ -26,6 +26,8 @@ Playback settings live under `playback` in Rede's `settings.json`:
 | `skip_back` | Book seconds to skip back | `15` |
 | `skip_forward` | Book seconds to skip forward | `30` |
 | `speed` | Default speed, 0.5–3 in 0.05 steps | `1.0` |
+| `voice_boost` | Speech compressor, presence boost and limiter | `false` |
+| `skip_silence` | Shorten long quiet pauses | `false` |
 | `rewind` | Book seconds to rewind after more than five minutes paused; 0 disables it | `5` |
 
 ## Implementation
@@ -76,6 +78,75 @@ follows Ond's toolbar without sharing its code, so Ond's rendering code is
 unchanged. The cache retains
 streamcache's existing file-based eviction; whole-book eviction and pinned
 downloads remain later work.
+
+## Speech processing
+
+Both switches are saved under `playback`, are off for a new installation, and
+are applied when the engine is created and whenever preferences change. Views
+can send `PrefsAction::VoiceBoost(bool)` and `PrefsAction::SkipSilence(bool)`;
+`PrefsView::playback` contains the current values. No speech controls are added
+by the engine implementation; the playback popover supplies those switches.
+
+The decoder runs channel mapping, silence removal, pitch-preserving stretch,
+voice boost and device-rate resampling, in that order. Volume remains in the
+output callback. With both switches off the optional processors are absent;
+the unity-speed path still passes original float samples through bit for bit.
+Ond sends neither switch and keeps its existing audio path.
+
+Silence removal measures RMS across all channels in 10 ms windows. The
+threshold is absolute −45 dBFS: no cheap book loudness measurement is currently
+available. Runs of at most 400 ms are kept unchanged. A longer run keeps its
+first 200 ms, fades the last 5 ms to zero, discards the remaining quiet frames,
+and fades the first 5 ms of returning speech in. Detection is quantized to
+windows; a window containing speech is preserved. Lookahead is bounded at
+410 ms of source audio and is allocated once. Short pauses can therefore add
+up to 400 ms of decoder lookahead, independently of speed.
+
+Buffered frames retain their file sequence and source frame. A quiet run can
+span gapless files, including a boundary inside the first 400 ms, without
+retaining another pause for each file. A first file entirely inside lookahead
+allows up to 100 ms for the engine to name its next file. File format changes
+flush lookahead and restart the detector. Seeks discard pending windows and
+start detection at the new source position.
+
+At a cut, the stretch tail is drained and its storage reused. The resampler
+is drained/reset there too, so a wholly quiet tail cannot strand source-time
+metadata behind its filter. Consecutive removed windows become one source-time
+jump at the next retained frame or EOF. Gapless file boundaries retain their
+own markers and source origins; EOF has an exact source endpoint. Between
+jumps, speed still gives the source/output ratio. Sonic's existing local
+pitch alignment tolerance (up to two 65 Hz periods, about 31 ms) remains;
+silence removal adds no accumulating position drift.
+
+`Status::silence_saved_secs()` reports removed **source seconds** after the
+output reaches each cut, including gapless files. It excludes savings still
+queued ahead, retains heard savings through seeks, speed changes and internal
+restarts, and counts another pass through a pause again. Stop retains the last
+total; a new `Play`/`PlayFrom` resets it. It is a play-session counter, not a
+persistent lifetime counter for the book. Wall-clock savings from silence
+alone are this value divided by speed; the remaining-book display stays an
+estimate because future silences have not been decoded.
+
+Voice boost uses a stereo-linked 2:1 peak compressor with a −18 dBFS threshold,
+20 ms attack and 150 ms release. A peaking EQ adds 3 dB at 3 kHz (Q 0.8), with
+3 dB makeup gain. A linked limiter has instantaneous attack and 50 ms release;
+a final full-scale guard also catches resampler overshoot. A 5 ms wet ramp
+starts the stage. The slow compressor attack preserves consonants; the limiter
+catches exceptional peaks. Per-book loudness levelling is deferred.
+
+`Command::SetVoiceBoost(bool)` and `Command::SetSkipSilence(bool)` use the
+existing hold/fade/flush seek handshake at the current source position. They
+take effect before refilling, preserve pause and the latest pending seek,
+and survive file and speed changes. `Status::voice_boost()` and
+`Status::skip_silence()` expose the requested settings. Speech processing is
+reported as unavailable for bit-perfect output when explicitly enabled.
+
+The new silence and voice processors do not allocate while processing blocks;
+window/origin and filter storage is allocated at construction, and voice
+processing uses a fixed stack buffer. Existing Sonic and resampler buffering
+remain on the decoder thread. The callback only consumes bounded sample,
+marker and segment queues and publishes atomics; it adds no locks, allocation,
+channels or logging.
 
 ## Hidden windows
 
