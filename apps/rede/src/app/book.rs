@@ -29,7 +29,7 @@ const COLUMN_GAP: f32 = 48.0;
 /// The widest a column gets: prose stays readable, and a chapter's length
 /// stays near its title instead of drifting to the far edge of the window.
 const READING_W: f32 = 600.0;
-const CHAPTER_ROW_H: f32 = 32.0;
+pub(super) const CHAPTER_ROW_H: f32 = 32.0;
 /// A chapter's number ends here (right-aligned, as Ond numbers tracks), and
 /// its title starts at `CHAPTER_TITLE_X`.
 const CHAPTER_NUMBER_RIGHT: f32 = 18.0;
@@ -91,21 +91,24 @@ impl ViewCtx<'_> {
                 } else {
                     self.positions.get(&book.id).filter(|p| !p.finished).map_or(0.0, |p| p.position.secs())
                 };
-                let label = if position > 0.0 {
-                    format!(
-                        "Resume · {}",
-                        crate::timeline::left(
-                            (book.duration.unwrap_or(0.0) - position).max(0.0) / f64::from(crate::timeline::normalize_speed(self.playback.speed)),
-                            self.playback.speed
-                        )
-                    )
+                let left = crate::timeline::left(
+                    (book.duration.unwrap_or(0.0) - position).max(0.0) / f64::from(crate::timeline::normalize_speed(self.playback.speed)),
+                    self.playback.speed,
+                );
+                // While this book is the one sounding, the button pauses it,
+                // as the title bar's play/pause would.
+                let sounding = self.player.active && !self.player.paused && self.player.book.as_ref().is_some_and(|b| b.key.item == book.id);
+                let (icon, label) = if sounding {
+                    (Icon::Pause, format!("Pause · {left}"))
+                } else if position > 0.0 {
+                    (Icon::Play, format!("Resume · {left}"))
                 } else {
-                    "Play".into()
+                    (Icon::Play, "Play".into())
                 };
                 if self.opening {
                     shell::widgets::primary_unavailable(ui, None, "Opening…");
-                } else if shell::widgets::primary(ui, Some(Icon::Play), &label).clicked() {
-                    self.actions.push(Action::PlayBook(book.id.clone()));
+                } else if shell::widgets::primary(ui, Some(icon), &label).clicked() {
+                    self.actions.push(if sounding { Action::Playback(crate::player::Control::Toggle) } else { Action::PlayBook(book.id.clone()) });
                 }
                 ui.min_rect().bottom() - top
             });
@@ -237,43 +240,46 @@ fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter], at: Opti
         if !ui.is_rect_visible(row) {
             continue;
         }
-        let current = at.is_some_and(|at| at >= chapter.start && at < chapter.end);
-        let finished = at.is_some_and(|at| at >= chapter.end);
-        let ink = if current {
-            t.accent
-        } else if finished {
-            t.muted
-        } else {
-            t.text
-        };
-        if current && let Some(at) = at {
-            // The chapter playing: tinted, with how far into it along the
-            // foot of the row, as the player bar's scrubber shows it.
-            ui.painter().rect_filled(row, 4.0, t.accent.gamma_multiply(0.1));
-            let fraction = ((at - chapter.start) / (chapter.end - chapter.start).max(1.0)).clamp(0.0, 1.0) as f32;
-            let foot = egui::Rect::from_min_max(pos2(row.left() + 4.0, row.bottom() - 2.0), pos2(row.right() - 4.0, row.bottom()));
-            ui.painter().rect_filled(egui::Rect::from_min_max(foot.min, pos2(foot.left() + foot.width() * fraction, foot.bottom())), 1.0, t.accent);
-        }
-        let cy = row.center().y;
-        if current {
-            let icon = egui::Rect::from_center_size(pos2(row.left() + CHAPTER_NUMBER_RIGHT - 5.0, cy), vec2(10.0, 10.0));
-            shell::icons::paint(ui.painter(), icon, Icon::Play, t.accent);
-        } else {
-            ui.painter().text(
-                pos2(row.left() + CHAPTER_NUMBER_RIGHT, cy),
-                egui::Align2::RIGHT_CENTER,
-                format!("{}", n + 1),
-                FontId::proportional(12.0),
-                t.muted,
-            );
-        }
-        let time = elide(ui, &length, FontId::proportional(12.0), t.muted, 72.0);
-        let time_w = time.size().x;
-        ui.painter().galley(pos2(row.right() - time_w, cy - time.size().y / 2.0), time, t.muted);
-        let font = if current { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-        let title = elide(ui, &chapter.title, font, ink, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
-        ui.painter().galley(pos2(row.left() + CHAPTER_TITLE_X, cy - title.size().y / 2.0), title, ink);
+        chapter_row(ui, t, row, n, chapter, at);
     }
+}
+
+/// One chapter's row in `row`: its number, title and length, as the page
+/// and the chapters column both draw it. `at` is where the book is, if it's
+/// been started: the chapter there is tinted, with how far into it along
+/// the row's foot, and the ones before it are dimmed.
+pub(super) fn chapter_row(ui: &Ui, t: &Tokens, row: egui::Rect, n: usize, chapter: &sources::Chapter, at: Option<f64>) {
+    let length = fmt::clock((chapter.end - chapter.start).max(0.0));
+    let current = at.is_some_and(|at| at >= chapter.start && at < chapter.end);
+    let finished = at.is_some_and(|at| at >= chapter.end);
+    let ink = if current {
+        t.accent
+    } else if finished {
+        t.muted
+    } else {
+        t.text
+    };
+    if current && let Some(at) = at {
+        // The chapter playing: tinted, with how far into it along the
+        // foot of the row, as the title bar's scrubber shows it.
+        ui.painter().rect_filled(row, 4.0, t.accent.gamma_multiply(0.1));
+        let fraction = ((at - chapter.start) / (chapter.end - chapter.start).max(1.0)).clamp(0.0, 1.0) as f32;
+        let foot = egui::Rect::from_min_max(pos2(row.left() + 4.0, row.bottom() - 2.0), pos2(row.right() - 4.0, row.bottom()));
+        ui.painter().rect_filled(egui::Rect::from_min_max(foot.min, pos2(foot.left() + foot.width() * fraction, foot.bottom())), 1.0, t.accent);
+    }
+    let cy = row.center().y;
+    if current {
+        let icon = egui::Rect::from_center_size(pos2(row.left() + CHAPTER_NUMBER_RIGHT - 5.0, cy), vec2(10.0, 10.0));
+        shell::icons::paint(ui.painter(), icon, Icon::Play, t.accent);
+    } else {
+        ui.painter().text(pos2(row.left() + CHAPTER_NUMBER_RIGHT, cy), egui::Align2::RIGHT_CENTER, format!("{}", n + 1), FontId::proportional(12.0), t.muted);
+    }
+    let time = elide(ui, &length, FontId::proportional(12.0), t.muted, 72.0);
+    let time_w = time.size().x;
+    ui.painter().galley(pos2(row.right() - time_w, cy - time.size().y / 2.0), time, t.muted);
+    let font = if current { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
+    let title = elide(ui, &chapter.title, font, ink, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
+    ui.painter().galley(pos2(row.left() + CHAPTER_TITLE_X, cy - title.size().y / 2.0), title, ink);
 }
 
 #[cfg(test)]
