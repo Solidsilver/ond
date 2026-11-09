@@ -40,6 +40,16 @@ fn every_view_draws() {
         frame(&ctx, &mut app);
     }
     app.mode = crate::window::Mode::Full;
+    // The sidebar as its rail, and the account syncing, connecting and
+    // offline.
+    app.apply_prefs(PrefsAction::CollapseSidebar(true));
+    frame(&ctx, &mut app);
+    app.apply_prefs(PrefsAction::CollapseSidebar(false));
+    for state in 0..3 {
+        (app.sync.running, app.session.connecting, app.sync.offline) = (state == 0, state == 1, state == 2);
+        frame(&ctx, &mut app);
+    }
+    (app.sync.running, app.session.connecting, app.sync.offline) = (false, false, false);
     // The trail went Library → book → book → gone; back walks it.
     assert!(app.ui.nav.can_back());
     app.back();
@@ -199,6 +209,15 @@ fn an_idle_window_asks_for_no_frames() {
     idle(&mut h, "a paused player");
     app_mut(&mut h).apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Chapters));
     idle(&mut h, "the chapters column, paused");
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(true));
+    idle(&mut h, "the sidebar's rail");
+    app_mut(&mut h).sync.offline = true;
+    idle(&mut h, "an account offline");
+    // A running sync is something moving: its spinner turns (for at most
+    // half a minute, which is more frames than this test steps).
+    app_mut(&mut h).sync.running = true;
+    h.step();
+    assert!(h.ctx.has_requested_repaint(), "the spinner turns at first");
 }
 
 #[test]

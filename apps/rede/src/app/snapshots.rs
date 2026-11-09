@@ -181,7 +181,8 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
-    // The speed and sleep menus, open from the title bar, a timer running.
+    // The speed and sleep menus, open from the capsule's chips, a timer
+    // running.
     for (label, name) in [("Playback speed, 1.5×", "title-speed-menu"), ("Sleep timer, ", "title-sleep-menu")] {
         *h.state_mut() = None;
         *h.state_mut() = Some({
@@ -197,6 +198,55 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         s.shoot(h, name);
         egui::Popup::close_all(&ctx);
     }
+    // The sidebar folded to its rail; the account syncing, connecting and
+    // out of reach; an account with several libraries on one shelf; and
+    // the account's menu open.
+    scene(h, s, "sidebar-collapsed", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app.prefs.edit(|p| p.sidebar_collapsed = true);
+        app
+    });
+    for (name, state) in [("sidebar-syncing", 0), ("sidebar-connecting", 1), ("sidebar-offline", 2)] {
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            (app.sync.running, app.sync.applied, app.session.connecting, app.sync.offline) = (state == 0, 40, state == 1, state == 2);
+            app
+        });
+    }
+    scene(h, s, "sidebar-collapsed-offline", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        app.prefs.edit(|p| p.sidebar_collapsed = true);
+        app.sync.offline = true;
+        app
+    });
+    scene(h, s, "sidebar-libraries", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        if let Some(account) = app.session.account.as_mut() {
+            account.libraries.push(crate::settings::KnownLibrary { id: "lib-kids".into(), name: "Kids".into() });
+        }
+        app
+    });
+    *h.state_mut() = None;
+    *h.state_mut() = Some(app(&ctx, dir.path(), BOOKS.len()));
+    h.run_steps(2);
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "account-menu");
+    egui::Popup::close_all(&ctx);
+    // The capsule's cover under the pointer: the way to the Player.
+    *h.state_mut() = None;
+    *h.state_mut() = Some({
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app
+    });
+    h.run_steps(2);
+    let cover = h.get_by_label("Open the Player").rect().center();
+    h.hover_at(cover);
+    s.shoot(h, "capsule-cover-hover");
+    h.event(egui::Event::PointerGone);
     // The capsule at the window's smallest width, then as it grows with the
     // window: Ond's 1440, a 1920 display, a 2560 one full screen.
     for width in [crate::MIN_SIZE[0], 1440.0, 1920.0, 2560.0] {
@@ -315,8 +365,9 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     s.shoot(h, "mode-player-sleep-menu");
     egui::Popup::close_all(&ctx);
     h.set_size(egui::vec2(FULL[0], FULL[1]));
-    // The title bar with a timer running, and its notice over the page.
-    for (timer, name) in [(Sleep::Running, "playing-sleep"), (Sleep::Ending, "playing-notice")] {
+    // The title bar with a timer running (the sleep chip lit), one waiting
+    // for the chapter's end, and the notice over the page.
+    for (timer, name) in [(Sleep::Running, "playing-sleep"), (Sleep::Chapter, "playing-sleep-chapter"), (Sleep::Ending, "playing-notice")] {
         scene(h, s, name, || {
             let mut app = app(&ctx, dir.path(), BOOKS.len());
             playing(&mut app, false);

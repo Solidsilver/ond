@@ -86,6 +86,31 @@ fn every_view_names_its_controls() {
     }
     app_mut(&mut h).mode = crate::window::Mode::Full;
     h.set_size(egui::vec2(FULL[0], FULL[1]));
+    // The sidebar, full and as its rail, in each of the account's states,
+    // and the account's menu.
+    for collapsed in [false, true] {
+        app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
+        for state in 0..4 {
+            let app = app_mut(&mut h);
+            (app.sync.running, app.session.connecting, app.sync.offline) = (state == 1, state == 2, state == 3);
+            h.run_steps(3);
+            h.check_accessibility();
+            h.get_by_label("Keyboard shortcuts (⌘/)");
+            h.get_by_label("Library");
+        }
+        h.get_by_label_contains("sam, ").click();
+        h.run_steps(4);
+        h.check_accessibility();
+        for label in ["Keyboard shortcuts", "Sign out"] {
+            h.get_by_label(label);
+        }
+        egui::Popup::close_all(&h.ctx);
+        h.run_steps(2);
+    }
+    h.get_by_label("Expand sidebar (⌥⌘S)");
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(false));
+    h.run_steps(3);
+    h.get_by_label("Collapse sidebar (⌥⌘S)");
     // The sign-in screen, and the same with an error under the button.
     *h.state_mut() = Some(signed_out(&h.ctx.clone(), dir.path()));
     h.run_steps(3);
@@ -545,4 +570,58 @@ fn discovered_methods_name_only_the_controls_the_server_offers() {
     h.run_steps(3);
     assert!(app_mut(&mut h).openid.pending.is_none());
     assert!(!app_mut(&mut h).login.as_ref().unwrap().busy);
+}
+
+#[test]
+fn the_sidebar_folds_to_its_rail_and_the_window_remembers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(3);
+    h.get_by_label("Collapse sidebar (⌥⌘S)").click();
+    h.run_steps(3);
+    assert!(app_mut(&mut h).prefs.get(|s| s.sidebar_collapsed), "saved with the preferences");
+    // The rail keeps every place and the account.
+    h.get_by_label("Library");
+    h.get_by_label_contains("sam, ");
+    h.get_by_label("Expand sidebar (⌥⌘S)").click();
+    h.run_steps(3);
+    assert!(!app_mut(&mut h).prefs.get(|s| s.sidebar_collapsed));
+    // ⌥⌘S does the same.
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::S);
+    h.run_steps(3);
+    assert!(app_mut(&mut h).prefs.get(|s| s.sidebar_collapsed));
+    // A window too narrow for the full column shows the rail whatever the
+    // preference, and doesn't offer to expand it.
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(false));
+    h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
+    h.run_steps(3);
+    assert_eq!(h.query_all_by_label_contains("sidebar (⌥⌘S)").count(), 0);
+    h.get_by_label("Library");
+    h.get_by_label("Keyboard shortcuts (⌘/)");
+}
+
+#[test]
+fn the_account_says_when_the_server_is_out_of_reach_and_when_it_is_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(3);
+    h.get_by_label("sam, books.example.com");
+    app_mut(&mut h).sync_done(crate::sync::Outcome::Failed(crate::failure::Failure::Network("down".into())));
+    h.run_steps(3);
+    h.get_by_label("sam, Offline · retrying");
+    app_mut(&mut h).sync_done(crate::sync::Outcome::Done(crate::sync::Report::default()));
+    h.run_steps(3);
+    h.get_by_label("sam, books.example.com");
+}
+
+#[test]
+fn the_shortcuts_are_in_the_account_menu_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("Keyboard shortcuts").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).shortcuts, "the sheet opens");
 }
