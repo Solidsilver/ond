@@ -177,14 +177,20 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
-    // The speed and sleep menus, open from the capsule's chips, a timer
-    // running.
-    for (label, name) in [("Playback speed, 1.5×", "title-speed-menu"), ("Sleep timer, ", "title-sleep-menu")] {
+    // The Playback and Sleep timer popovers, open from the capsule's chips:
+    // the timer off, then running.
+    for (label, name, timer) in [
+        ("Playback speed, 1.5×", "title-speed-menu", None),
+        ("Sleep timer", "title-sleep-menu", None),
+        ("Sleep timer, ", "title-sleep-running", Some(Sleep::Running)),
+    ] {
         *h.state_mut() = None;
         *h.state_mut() = Some({
             let mut app = app(&ctx, dir.path(), BOOKS.len());
             playing(&mut app, false);
-            sleep(&mut app, Sleep::Running);
+            if let Some(timer) = timer {
+                sleep(&mut app, timer);
+            }
             app
         });
         h.run_steps(2);
@@ -231,6 +237,15 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.event(egui::Event::PointerGone);
     s.shoot(h, "account-menu");
     egui::Popup::close_all(&ctx);
+    // The sheets: the keyboard shortcuts and the playback settings.
+    for (sheet, name) in [(super::sheets::Sheet::Shortcuts, "sheet-shortcuts"), (super::sheets::Sheet::PlaybackSettings, "sheet-playback-settings")] {
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, false);
+            app.sheet = Some(sheet);
+            app
+        });
+    }
     // The capsule's cover under the pointer: the way to the Player.
     *h.state_mut() = None;
     *h.state_mut() = Some({
@@ -360,6 +375,19 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.event(egui::Event::PointerGone);
     s.shoot(h, "mode-player-sleep-menu");
     egui::Popup::close_all(&ctx);
+    // The Playback popover over the Player, and the shortcuts in one column.
+    h.get_by_label_contains("Playback speed, ").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "mode-player-speed-menu");
+    egui::Popup::close_all(&ctx);
+    if let Some(app) = h.state_mut().as_mut() {
+        app.sheet = Some(super::sheets::Sheet::Shortcuts);
+    }
+    s.shoot(h, "mode-player-shortcuts");
+    if let Some(app) = h.state_mut().as_mut() {
+        app.sheet = None;
+    }
     h.set_size(egui::vec2(FULL[0], FULL[1]));
     // The title bar with a timer running (the sleep chip lit), one waiting
     // for the chapter's end, and the notice over the page.

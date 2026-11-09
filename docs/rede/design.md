@@ -72,7 +72,7 @@ Moving `crates/app` touches `nix/package.nix`, the three bundle scripts and the 
 
 ### Extracting shared code
 
-Code moves out of Ond's app crate into `crates/shell` when Rede needs it, not ahead of time: the second use shows what the shared shape really is. Ond's snapshot tests (`apps/ond/src/app/snapshots.rs`) guard it while things move. Likely early candidates, in the order Rede needs them: theme and widgets, window and chrome (`window.rs`, `chrome.rs`, `csd.rs`), settings and keyring, managed settings, the artwork cache, toasts, the command palette and fuzzy search, now-playing integrations, the update check.
+The pieces popovers, sheets and settings rows are built from (Ond's segmented pill, slider, switch, settings rows, key caps and sheet frame, and the chips and steppers Rede added) are in `shell::kit`. Code moves out of Ond's app crate into `crates/shell` when Rede needs it, not ahead of time: the second use shows what the shared shape really is. Ond's snapshot tests (`apps/ond/src/app/snapshots.rs`) guard it while things move. Likely early candidates, in the order Rede needs them: theme and widgets, window and chrome (`window.rs`, `chrome.rs`, `csd.rs`), settings and keyring, managed settings, the artwork cache, toasts, the command palette and fuzzy search, now-playing integrations, the update check.
 
 The shared crates stay free of anything specific to one app, so a third app (podcasts split out, or video) is possible later. The engine is audio only; a video app would use its own (libmpv) and share the rest.
 
@@ -344,7 +344,7 @@ Rede borrows Ond's look (type, spacing, colours, the quiet style) and its three 
 - **Bookmarks:** per book, with notes; jump to one with a click.
 - **Downloads:** what's downloaded, what's in progress, space used, per source.
 - **Sources:** the accounts, their state, add and remove, which are listener only.
-- **Settings:** playback (skip intervals, default speed, rewind a few seconds after a long pause), sleep timer defaults, audio (voice boost, silence removal, mono), downloads, appearance, updates.
+- **Settings:** playback (skip intervals, default speed, rewind a few seconds after a long pause), sleep timer defaults, audio (voice boost, silence removal, mono), downloads, appearance, updates. Until there is a Settings window, the playback ones (skip intervals, the rewinds after a long pause and after sleep, the timer's length) are a Playback settings sheet, opened from the account menu and from Settings… in the Playback popover; they become its Playback page. The speed chip's Playback popover holds only what you change while listening: the speed, with voice boost and skip silence to join it in M3.
 
 Podcasts, when they come, get their own Home (new episodes as an inbox), Shows and Episodes, behind the Books/Podcasts switch, with an optional combined Home.
 
