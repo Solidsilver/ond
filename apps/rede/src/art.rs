@@ -16,6 +16,7 @@
 
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureOptions, Ui};
 use shell::art::{Lane, Lru, Queue, SIZES, bucket};
+use shell::icons::Icon;
 use sources::Source;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,11 @@ use std::time::SystemTime;
 const TEXTURE_BUDGET: usize = 96 * 1024 * 1024;
 /// Disk budget for downloaded covers.
 const DISK_BUDGET: u64 = 256 * 1024 * 1024;
+/// The headphones mark on a tile without a cover: its share of the tile's
+/// side, and how much of the muted ink it takes, so it sits back like a
+/// watermark rather than reading as an icon to click.
+const PLACEHOLDER_MARK: f32 = 0.2;
+const PLACEHOLDER_INK: f32 = 0.35;
 /// Textures uploaded per frame at most: a screenful of covers arriving at once
 /// spreads over a few frames instead of stalling one.
 const UPLOADS_PER_FRAME: usize = 8;
@@ -226,9 +232,11 @@ impl Art {
         }
     }
 
-    /// Fits the whole cover on a quiet backdrop, or shows its title while art
-    /// is missing or still loading. Both views use the same square bounds.
-    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, title: &str, radius: impl Into<CornerRadius>) {
+    /// Fits the whole cover on a quiet backdrop. While there's no cover (none
+    /// on the server, or still loading) the tile carries a faint headphones
+    /// mark instead: every cover is drawn beside or above the book's title,
+    /// so the tile doesn't say it a second time. Both use the same square.
+    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>) {
         let radius = radius.into();
         let t = shell::theme::Tokens::of(ui);
         let painter = ui.painter();
@@ -242,11 +250,9 @@ impl Art {
                 painter.add(egui::epaint::RectShape::filled(fitted, radius, Color32::WHITE).with_texture(texture.id(), uv));
             }
             None => {
-                let content = rect.shrink(16.0);
-                let painter = painter.with_clip_rect(painter.clip_rect().intersect(content));
-                let title = painter.layout(title.to_owned(), egui::FontId::proportional(14.0), t.muted, content.width());
-                let top = (rect.center().y - title.size().y / 2.0).max(content.top());
-                painter.galley(egui::pos2(content.left(), top), title, t.muted);
+                let side = (rect.width().min(rect.height()) * PLACEHOLDER_MARK).clamp(12.0, 64.0);
+                let mark = Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+                shell::icons::paint(painter, mark, Icon::Headphones, t.muted.gamma_multiply(PLACEHOLDER_INK));
             }
         }
     }
@@ -318,7 +324,7 @@ mod tests {
         let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 200.0));
         for (size, expected) in [([100, 200], egui::vec2(100.0, 200.0)), ([200, 100], egui::vec2(200.0, 100.0)), ([200, 200], rect.size())] {
             art.preload("book", ColorImage::filled(size, Color32::WHITE));
-            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, Some("book"), "A book", 5));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, Some("book"), 5));
             out.textures_delta.clear();
             let painted = out
                 .shapes
@@ -335,28 +341,28 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_loading_cover_shows_a_wrapped_and_clipped_title() {
+    fn a_missing_or_loading_cover_is_a_quiet_tile_that_does_not_repeat_the_title() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut art = Art::new(rt.handle().clone(), ctx.clone(), dir.path().to_owned());
         let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(176.0, 176.0));
-        let title = "The Long Title of a Book Without Artwork ".repeat(20);
         for cover in [None, Some("not-loaded")] {
-            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, cover, &title, 5));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, cover, 6));
             out.textures_delta.clear();
-            let (clip, text) = out
+            assert!(!out.shapes.iter().any(|s| matches!(s.shape, egui::Shape::Text(_))), "the caption names the book, not the tile");
+            let tile = out.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Rect(r) => Some(r.rect),
+                _ => None,
+            });
+            assert_eq!(tile, Some(rect), "the tile keeps the cover's square, so nothing shifts when the art lands");
+            // The mark is drawn inside the tile, well clear of its edges.
+            let inside = out
                 .shapes
                 .iter()
-                .find_map(|s| match &s.shape {
-                    egui::Shape::Text(t) => Some((s.clip_rect, t)),
-                    _ => None,
-                })
-                .expect("the placeholder names the book");
-            assert_eq!(text.galley.text(), title);
-            assert!(text.galley.rows.len() > 1);
-            assert!(text.galley.size().x <= rect.width() - 32.0);
-            assert_eq!(clip, rect.shrink(16.0));
+                .skip(1)
+                .all(|s| s.shape.visual_bounding_rect().is_negative() || rect.shrink(40.0).contains_rect(s.shape.visual_bounding_rect()));
+            assert!(inside, "the mark sits in the middle of the tile");
         }
     }
 

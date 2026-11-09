@@ -26,6 +26,8 @@ use std::sync::Arc;
 const TILE_MIN: f32 = 172.0;
 const GAP_X: f32 = 20.0;
 const GAP_Y: f32 = 24.0;
+/// A cover's corners, as Ond rounds an album's.
+pub const COVER_RADIUS: f32 = 6.0;
 /// Title and author under the art.
 const LABEL_H: f32 = 42.0;
 /// The rows just past either end whose covers load ahead.
@@ -222,13 +224,13 @@ impl ViewCtx<'_> {
         let book = &self.books.all()[idx];
         if ui.is_rect_visible(rect) {
             let art = Rect::from_min_size(rect.min, vec2(tile, cover_h));
-            self.art.paint(ui, art, book.cover.as_deref(), &book.title, 5.0);
+            self.art.paint(ui, art, book.cover.as_deref(), COVER_RADIUS);
             let title = elide(ui, &book.title, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
             let author = author_of(book);
             let author = if author.is_empty() { "Unknown author" } else { author };
             let line = elide(ui, author, FontId::proportional(12.0), t.muted, tile);
-            ui.painter().galley(pos2(rect.left(), art.bottom() + 25.0), line, t.muted);
+            ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), line, t.muted);
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}", book.title, authors_line(book))));
         if resp.clicked() {

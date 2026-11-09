@@ -35,7 +35,7 @@ impl ViewCtx<'_> {
         egui::ScrollArea::vertical().id_salt(("book", id)).auto_shrink(false).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let (rect, _) = ui.allocate_exact_size(vec2(COVER_W, COVER_W), Sense::hover());
-                self.art.paint(ui, rect, book.cover.as_deref(), &book.title, 6.0);
+                self.art.paint(ui, rect, book.cover.as_deref(), 6.0);
                 ui.add_space(22.0);
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&book.title).font(FontId::new(24.0, semibold())).color(t.text));
