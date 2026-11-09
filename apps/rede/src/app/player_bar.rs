@@ -11,7 +11,7 @@ use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction, RedeApp};
 use crate::player::Control;
 use crate::timeline::Timeline;
-use egui::{Align, FontId, Layout, Rect, Response, RichText, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Color32, FontId, Layout, Rect, Response, RichText, Sense, Ui, UiBuilder, pos2, vec2};
 use shell::{
     icons::{self, Icon},
     theme::{Tokens, semibold},
@@ -135,10 +135,11 @@ impl ViewCtx<'_> {
         row_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{chapter}, {elapsed} in, {left} left")));
         let mut readout = ui.new_child(UiBuilder::new().id_salt("player-readout").max_rect(row).layout(Layout::right_to_left(Align::Center)));
         readout.spacing_mut().item_spacing.x = 6.0;
-        let pill = speed_pill(&mut readout, &t, speed);
+        let pill = speed_pill(&mut readout, &t, speed, Pill::BAR);
         self.speed_menu(&pill);
         readout.label(RichText::new(format!("{} at", crate::timeline::span_left(book_left))).size(12.0).color(t.muted));
-        self.sleep_menu(&mut readout);
+        readout.add_space(6.0);
+        self.sleep_control(&mut readout, Pill::BAR);
         let room = readout.available_width() - 24.0;
         let times = format!("  {elapsed} · {left} left");
         let times_w = ui.painter().layout_no_wrap(times.clone(), FontId::proportional(12.0), t.muted).size().x;
@@ -177,15 +178,15 @@ impl ViewCtx<'_> {
             let mut prefs = self.playback;
             // Each value is named by the label beside it, for a screen reader too.
             egui::Grid::new("playback-prefs").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                for (label, value, range) in [
-                    ("Skip back", &mut prefs.skip_back, 1..=300),
-                    ("Skip forward", &mut prefs.skip_forward, 1..=300),
-                    ("Rewind after a long pause", &mut prefs.rewind, 0..=60),
-                    ("Sleep timer duration", &mut prefs.sleep_minutes, 5..=120),
-                    ("Rewind after sleep", &mut prefs.sleep_rewind, 0..=60),
+                for (label, value, range, unit) in [
+                    ("Skip back", &mut prefs.skip_back, 1..=300, " s"),
+                    ("Skip forward", &mut prefs.skip_forward, 1..=300, " s"),
+                    ("Rewind after a long pause", &mut prefs.rewind, 0..=60, " s"),
+                    ("Sleep timer duration", &mut prefs.sleep_minutes, 5..=120, " min"),
+                    ("Rewind after sleep", &mut prefs.sleep_rewind, 0..=60, " s"),
                 ] {
                     let name = ui.label(label).id;
-                    ui.add(egui::DragValue::new(value).range(range).suffix(" s")).labelled_by(name);
+                    ui.add(egui::DragValue::new(value).range(range).suffix(unit)).labelled_by(name);
                     ui.end_row();
                 }
             });
@@ -205,28 +206,82 @@ impl ViewCtx<'_> {
 /// The primary control, as Ond's Player draws it: a round button in the
 /// text colour with the glyph knocked out in the background's.
 pub(super) fn play_pause(ui: &mut Ui, t: &Tokens, paused: bool) -> Response {
+    round_play(ui, PLAY_D, t.text, t.bg, paused)
+}
+
+/// The round play/pause at any diameter `d`: filled with `fill`, the glyph
+/// knocked out in `knock`, both in proportion to the bar's.
+pub(super) fn round_play(ui: &mut Ui, d: f32, fill: Color32, knock: Color32, paused: bool) -> Response {
     let (icon, label) = if paused { (Icon::Play, "Play") } else { (Icon::Pause, "Pause") };
-    let (slot, resp) = ui.allocate_exact_size(vec2(PLAY_D, PLAY_D), Sense::click());
-    let fill = if resp.hovered() { t.text.gamma_multiply(0.85) } else { t.text };
-    ui.painter().circle_filled(slot.center(), PLAY_D / 2.0, fill);
-    shell::widgets::focus_ring(ui, &resp, slot, PLAY_D / 2.0);
+    let (slot, resp) = ui.allocate_exact_size(vec2(d, d), Sense::click());
+    let fill = if resp.hovered() { fill.gamma_multiply(0.85) } else { fill };
+    ui.painter().circle_filled(slot.center(), d / 2.0, fill);
+    shell::widgets::focus_ring(ui, &resp, slot, d / 2.0);
     // A triangle's weight sits left of its box's centre; nudged, it looks centred.
-    let nudge = if paused { vec2(1.5, 0.0) } else { vec2(0.0, 0.0) };
-    icons::paint(ui.painter(), Rect::from_center_size(slot.center() + nudge, vec2(16.0, 16.0)), icon, t.bg);
+    let nudge = if paused { vec2(d * 0.0375, 0.0) } else { vec2(0.0, 0.0) };
+    icons::paint(ui.painter(), Rect::from_center_size(slot.center() + nudge, vec2(d * 0.4, d * 0.4)), icon, knock);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{label} (Space)"))
 }
 
-/// The speed as a small pill with a chevron, so it reads as the menu it opens.
-pub(super) fn speed_pill(ui: &mut Ui, t: &Tokens, speed: f32) -> Response {
-    let text = crate::timeline::speed_label(speed);
-    let galley = ui.painter().layout_no_wrap(text.clone(), FontId::new(12.0, semibold()), t.text);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, READOUT_H), Sense::click());
+/// How large a pill is drawn: the bar's, or the Player's, which is read from
+/// across the room. Padding and glyphs scale with the type.
+#[derive(Clone, Copy)]
+pub(super) struct Pill {
+    pub height: f32,
+    pub font: f32,
+}
+
+impl Pill {
+    pub const BAR: Self = Self { height: READOUT_H, font: 12.0 };
+    pub const ROOM: Self = Self { height: 30.0, font: 14.0 };
+
+    fn scale(self) -> f32 {
+        self.font / 12.0
+    }
+}
+
+/// How wide [`pill`] draws with this content.
+pub(super) fn pill_width(ui: &Ui, size: Pill, icon: Option<Icon>, text: Option<&str>) -> f32 {
+    let text_w = text.map_or(0.0, |text| ui.painter().layout_no_wrap(text.to_owned(), FontId::new(size.font, semibold()), Color32::WHITE).size().x);
+    pill_layout(size, icon.is_some(), text.is_some(), text_w).0
+}
+
+/// The pill's width, and where its icon and its text start from its left.
+fn pill_layout(size: Pill, icon: bool, text: bool, text_w: f32) -> (f32, f32, f32) {
+    let s = size.scale();
+    let glyph = if icon { size.font + if text { 5.0 * s } else { 0.0 } } else { 0.0 };
+    let pad = 10.0 * s;
+    (pad + glyph + text_w + 22.0 * s, pad, pad + glyph)
+}
+
+/// A small pill with a chevron, so it reads as the menu it opens: an icon,
+/// some text, or both. `lit` draws the icon in the text colour rather than
+/// muted, for a setting that's on.
+pub(super) fn pill(ui: &mut Ui, t: &Tokens, size: Pill, icon: Option<Icon>, text: Option<&str>, lit: bool) -> Response {
+    let s = size.scale();
+    let galley = text.map(|text| ui.painter().layout_no_wrap(text.to_owned(), FontId::new(size.font, semibold()), t.text));
+    let (w, icon_x, text_x) = pill_layout(size, icon.is_some(), galley.is_some(), galley.as_ref().map_or(0.0, |g| g.size().x));
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, size.height), Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     ui.painter().rect_filled(rect, rect.height() / 2.0, if resp.hovered() || open { t.selected } else { t.field });
     shell::widgets::focus_ring(ui, &resp, rect, rect.height() / 2.0);
-    ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
-    icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y + 0.5), vec2(8.0, 8.0)), Icon::ChevronDown, t.muted);
+    if let Some(icon) = icon {
+        let glyph = Rect::from_min_size(pos2(rect.left() + icon_x, rect.center().y - size.font / 2.0), vec2(size.font, size.font));
+        icons::paint(ui.painter(), glyph, icon, if lit { t.text } else { t.muted });
+    }
+    if let Some(galley) = galley {
+        ui.painter().galley(pos2(rect.left() + text_x, rect.center().y - galley.size().y / 2.0), galley, t.text);
+    }
+    let chevron = Rect::from_center_size(pos2(rect.right() - 12.0 * s, rect.center().y + 0.5), vec2(8.0 * s, 8.0 * s));
+    icons::paint(ui.painter(), chevron, Icon::ChevronDown, t.muted);
+    resp
+}
+
+/// The speed as a pill, in the bar or the Player.
+pub(super) fn speed_pill(ui: &mut Ui, t: &Tokens, speed: f32, size: Pill) -> Response {
+    let text = crate::timeline::speed_label(speed);
+    let resp = pill(ui, t, size, None, Some(&text), true);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Playback speed, {text}")));
     resp.on_hover_text("Playback speed ([ and ])")
 }

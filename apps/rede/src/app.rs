@@ -459,8 +459,8 @@ impl RedeApp {
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 })).show(
                     ui,
                     |ui| {
+                        let within = ui.max_rect();
                         self.notice_bar(ui);
-                        self.view().sleep_notice(ui);
                         let route = self.ui.nav.current().clone();
                         match &route {
                             Route::Library => self.view().library_page(ui),
@@ -469,6 +469,8 @@ impl RedeApp {
                                 self.view().book_page(ui, &id);
                             }
                         }
+                        // Floats over the foot of the page, just above the bar.
+                        self.view().sleep_notice(ui, within);
                     },
                 );
             }

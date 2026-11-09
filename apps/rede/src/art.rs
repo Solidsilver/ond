@@ -237,10 +237,18 @@ impl Art {
     /// mark instead: every cover is drawn beside or above the book's title,
     /// so the tile doesn't say it a second time. Both use the same square.
     pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>) {
+        let backdrop = shell::theme::Tokens::of(ui).placeholder;
+        self.paint_on(ui, rect, cover, radius, backdrop);
+    }
+
+    /// The same on a backdrop of the caller's choosing: Mini fills its whole
+    /// window with the cover, and a light band beside a tall cover would
+    /// glare there in either theme.
+    pub fn paint_on(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>, backdrop: Color32) {
         let radius = radius.into();
         let t = shell::theme::Tokens::of(ui);
         let painter = ui.painter();
-        painter.rect_filled(rect, radius, t.placeholder);
+        painter.rect_filled(rect, radius, backdrop);
         match cover.and_then(|c| self.texture(c, rect.width().max(rect.height()))) {
             Some(texture) => {
                 let size = texture.size_vec2();

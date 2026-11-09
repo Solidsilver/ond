@@ -34,6 +34,11 @@ impl Timer {
         }
     }
 
+    /// Whether it waits for the chapter to end, rather than a clock.
+    pub fn at_chapter_end(&self) -> bool {
+        matches!(self.target, Target::Chapter(_))
+    }
+
     pub fn extend(&mut self, position: f64, speed: f32, now: Instant) {
         self.target = Target::Time(now + Duration::from_secs_f64(self.remaining(position, speed, now) + 600.0));
     }

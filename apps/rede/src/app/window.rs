@@ -59,17 +59,24 @@ impl RedeApp {
 
 impl ViewCtx<'_> {
     pub(super) fn mode_buttons(&mut self, ui: &mut egui::Ui) {
+        self.mode_buttons_sized(ui, 28.0, 14.0, None);
+    }
+
+    /// The other modes and the shortcuts, right to left, as `side` square
+    /// buttons with `glyph` icons in `color` (the theme's when `None`).
+    pub(super) fn mode_buttons_sized(&mut self, ui: &mut egui::Ui, side: f32, glyph: f32, color: Option<egui::Color32>) {
         use shell::icons::{self, Icon};
+        let size = egui::vec2(side, side);
         for (mode, icon, label) in [
             (Mode::Full, Icon::Expand, "Full window (⌥⌘1)"),
             (Mode::Player, Icon::Player, "Player window (⌥⌘2)"),
             (Mode::Mini, Icon::MiniPlayer, "Mini player (⇧⌘M)"),
         ] {
-            if mode != self.mode && icons::sized_button(ui, icon, label, egui::vec2(28.0, 28.0), 14.0, None).clicked() {
+            if mode != self.mode && icons::sized_button(ui, icon, label, size, glyph, color).clicked() {
                 self.actions.push(Action::Mode(mode));
             }
         }
-        if icons::sized_button(ui, Icon::More, "Keyboard shortcuts (⌘/)", egui::vec2(28.0, 28.0), 14.0, None).clicked() {
+        if icons::sized_button(ui, Icon::More, "Keyboard shortcuts (⌘/)", size, glyph, color).clicked() {
             self.actions.push(Action::Shortcuts);
         }
     }
