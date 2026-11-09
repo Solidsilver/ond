@@ -764,9 +764,21 @@ impl Ctx {
         o.silence = Some(silence);
     }
 
+    /// A piece of speech-processed audio, with the source-time anchor it needs.
+    /// Anything interrupted leaves a cut behind: a seek can still resolve to
+    /// nothing, and the piece that was dropped carried the origin the output
+    /// was following, so the next kept frames have to publish their own.
+    fn speech_piece(&mut self, samples: &[f32], origin: Origin, saved: f64, o: &mut Out) -> Push {
+        let result = self.speech_piece_at(samples, origin, saved, o);
+        if matches!(result, Push::Interrupted) {
+            o.cut = true;
+        }
+        result
+    }
+
     /// A removed range is a discontinuity, never input to Sonic. Drain its
     /// old tail first so overlap cannot leak across the source-time jump.
-    fn speech_piece(&mut self, samples: &[f32], origin: Origin, saved: f64, o: &mut Out) -> Push {
+    fn speech_piece_at(&mut self, samples: &[f32], origin: Origin, saved: f64, o: &mut Out) -> Push {
         if self.cancel.load(Ordering::Relaxed) {
             return Push::Cancelled;
         }

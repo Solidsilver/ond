@@ -796,3 +796,87 @@ fn join_halves(suffix: &str, frames: usize) {
     }
     assert!(longest <= 2, "a silent stretch of {longest} frames");
 }
+
+/// A decoder context and a ring that skip silence and nothing else: the pieces
+/// of `queue` that need no real session. The ring's consumers are kept here so
+/// the producers stay live.
+struct Bench {
+    ctx: Ctx,
+    out: Out,
+    segments: rtrb::Consumer<Segment>,
+    _samples: rtrb::Consumer<f32>,
+    _markers: rtrb::Consumer<Marker>,
+    _inbox: Receiver<DecoderMsg>,
+    _seeks: Sender<SeekReq>,
+}
+
+fn speech_bench(ring: usize) -> Bench {
+    let status = Arc::new(Status::default());
+    status.skip_silence.store(true, Ordering::Relaxed);
+    let (msgs, inbox) = unbounded();
+    let (seeks, seek_rx) = unbounded();
+    let ctx = Ctx {
+        config: EngineConfig::default(),
+        speed: 1.0,
+        voice_boost: false,
+        skip_silence: true,
+        stretched: Vec::new(),
+        status,
+        cache: None,
+        msgs,
+        cancel: Arc::default(),
+        publish: Arc::default(),
+        seek_pending: Arc::default(),
+        at_seq: Arc::default(),
+        track_id: String::new(),
+        seek_rx,
+        next: Arc::default(),
+        caps: None,
+        gain: Arc::default(),
+        resampled: Vec::new(),
+        mapped: Vec::new(),
+    };
+    let (samples, sample_consumer) = RingBuffer::new(ring);
+    let (markers, marker_consumer) = RingBuffer::new(MARKER_CAP);
+    let (segments, segment_consumer) = RingBuffer::new(MARKER_CAP + 1);
+    let out = Out {
+        format: StreamFormat { sample_rate: 1000, channels: 1, bits_per_sample: Some(16) },
+        src_rate: 1000,
+        samples,
+        markers,
+        segments,
+        done: Arc::default(),
+        ctl: Arc::default(),
+        pushed: 0,
+        src_channels: 1,
+        resampler: None,
+        stretch: None,
+        silence: Some(Silence::new(1000, 1, 0.0)),
+        voice: None,
+        input_origin: Origin::default(),
+        output_seq: 0,
+        cut: false,
+        saved: 0.0,
+        file_start: 0,
+        rs_base: 0,
+    };
+    Bench { ctx, out, segments: segment_consumer, _samples: sample_consumer, _markers: marker_consumer, _inbox: inbox, _seeks: seeks }
+}
+
+#[test]
+fn an_interrupted_piece_marks_a_cut_so_the_next_one_reanchors_source_time() {
+    // A seek arrives as the kept quiet after a cut is pushed. The detector has
+    // already let go of it, and the seek may resolve to nothing (a stale flag),
+    // so those frames are lost: without a cut the next kept piece would carry
+    // no origin and the source clock would run behind the audio.
+    let mut bench = speech_bench(1024);
+    let kept = [0.2f32; 200];
+    bench.ctx.seek_pending.store(true, Ordering::Release);
+    assert!(matches!(bench.ctx.speech_piece(&kept, Origin::default(), 0.21, &mut bench.out), Push::Interrupted));
+    assert!(bench.out.cut, "the interrupted piece left a cut behind");
+    bench.ctx.seek_pending.store(false, Ordering::Release);
+    let pushed = bench.out.pushed;
+    assert!(matches!(bench.ctx.speech_piece(&kept, Origin { frame: 650, ..Default::default() }, 0.21, &mut bench.out), Push::Done));
+    let segment = bench.segments.pop().expect("the next kept piece is anchored in source time");
+    assert_eq!((segment.at, segment.source_frame), (pushed, 650.0));
+}
