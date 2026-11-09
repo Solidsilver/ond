@@ -591,7 +591,7 @@ fn waiting_ui(ui: &mut egui::Ui, t: &Tokens, pending: &crate::openid::Pending, e
         let body = format!("Signing in to {host}. When you're done, your browser brings you back here.");
         ui.add(egui::Label::new(egui::RichText::new(body).size(12.0).color(t.muted)).wrap());
         ui.add_space(20.0);
-        if shell::widgets::secondary(ui, "Cancel").clicked() {
+        if shell::kit::secondary(ui, "Cancel").clicked() {
             action = Some(Action::CancelSignIn);
         }
         if !exchanging {
@@ -670,7 +670,7 @@ fn form_button(ui: &mut egui::Ui, label: &str, primary: bool, busy: Option<bool>
             let r = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(14.0, 14.0));
             shell::icons::paint(p, r, Icon::Spinner, ink);
         }
-        shell::widgets::focus_ring(ui, &resp, rect, 7.0);
+        shell::kit::focus_ring(ui, &resp, rect, 7.0);
     }
     let (text, enabled) = (text.to_owned(), ui.is_enabled() && busy.is_none());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &text));
