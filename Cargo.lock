@@ -3927,6 +3927,7 @@ dependencies = [
  "abs",
  "anyhow",
  "async-trait",
+ "audio",
  "bytes",
  "directories",
  "eframe",
@@ -3939,6 +3940,7 @@ dependencies = [
  "shelf",
  "shell",
  "sources",
+ "streamcache",
  "tempfile",
  "tokio",
  "tracing",
@@ -4654,6 +4656,7 @@ dependencies = [
  "serde_json",
  "streamcache",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "uuid",
 ]

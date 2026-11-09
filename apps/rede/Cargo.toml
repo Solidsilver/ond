@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 abs = { version = "0.4.4", path = "../../crates/abs" }
+audio = { version = "0.4.4", path = "../../crates/audio" }
+streamcache = { version = "0.4.4", path = "../../crates/streamcache" }
 anyhow = "1.0.104"
 directories = "6.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "accesskit", "clipboard", "links"] }
