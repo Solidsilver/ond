@@ -471,7 +471,7 @@ pub(super) fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Rout
     app.sync.albums = false;
     app.sync.tracks = false;
     app.sync.progress = None;
-    app.ui.toasts = super::toasts::Toasts::default();
+    app.ui.toasts = shell::kit::Toasts::default();
     app.session.unreachable = false;
     app.session.connecting = false;
     app.session.sign_in = None;

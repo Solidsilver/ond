@@ -30,6 +30,8 @@
 //!   opens one).
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
 //!   in) and [`sheet_header`] (its title, and a × that closes it).
+//! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
+//!   fade, or stay with a button until clicked away.
 
 pub mod buttons;
 pub mod controls;
@@ -37,6 +39,7 @@ pub mod menus;
 pub mod rows;
 pub mod sheets;
 pub mod text;
+pub mod toasts;
 
 pub use buttons::*;
 pub use controls::*;
@@ -44,6 +47,7 @@ pub use menus::*;
 pub use rows::*;
 pub use sheets::*;
 pub use text::*;
+pub use toasts::Toasts;
 
 /// A harness whose first frame installs the theme (its fonts arrive a
 /// frame later) and whose later frames draw `body`.

@@ -1,8 +1,8 @@
 //! Transient messages over the bottom of the window. Notices fade after a few
 //! seconds (hovering holds them); errors and offers (a message with a button,
-//! like "Switch back") stay until clicked away.
+//! like "Switch back") stay until clicked away. An offer's button hands back
+//! the app's own action, `A`, for the app to run after the frame.
 
-use super::Action;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use egui::{Color32, FontId, Rect, Sense, pos2, vec2};
@@ -12,29 +12,35 @@ const NOTICE_SECS: f64 = 4.0;
 const MAX: usize = 3;
 const WIDTH: f32 = 420.0;
 
-struct Toast {
+struct Toast<A> {
     id: u64,
     text: String,
     error: bool,
     /// When it goes away (notices only), set the first time it's drawn.
     until: Option<f64>,
     /// A button's label and what it does. A toast with one stays until clicked away.
-    action: Option<(&'static str, Action)>,
+    action: Option<(&'static str, A)>,
 }
 
-impl Toast {
+impl<A> Toast<A> {
     fn fades(&self) -> bool {
         !self.error && self.action.is_none()
     }
 }
 
-#[derive(Default)]
-pub struct Toasts {
-    items: Vec<Toast>,
+/// The toasts showing, and what each offer's button does (`A`).
+pub struct Toasts<A> {
+    items: Vec<Toast<A>>,
     next: u64,
 }
 
-impl Toasts {
+impl<A> Default for Toasts<A> {
+    fn default() -> Self {
+        Self { items: Vec::new(), next: 0 }
+    }
+}
+
+impl<A> Toasts<A> {
     /// Starts with every startup notice showing.
     pub fn with_notices(notices: Vec<String>) -> Self {
         let mut t = Self::default();
@@ -45,7 +51,6 @@ impl Toasts {
     }
 
     /// The messages showing, oldest first.
-    #[cfg(test)]
     pub fn texts(&self) -> Vec<&str> {
         self.items.iter().map(|t| t.text.as_str()).collect()
     }
@@ -62,7 +67,7 @@ impl Toasts {
 
     /// Adds a message with a button that does `action`; the same text again
     /// replaces the one showing.
-    pub fn offer(&mut self, text: String, label: &'static str, action: Action) {
+    pub fn offer(&mut self, text: String, label: &'static str, action: A) {
         self.remove(&text);
         self.add(Toast { id: 0, text, error: false, until: None, action: Some((label, action)) });
     }
@@ -72,7 +77,7 @@ impl Toasts {
         self.items.retain(|t| t.text != text);
     }
 
-    fn add(&mut self, mut toast: Toast) {
+    fn add(&mut self, mut toast: Toast<A>) {
         self.next += 1;
         toast.id = self.next;
         self.items.push(toast);
@@ -94,7 +99,7 @@ impl Toasts {
 
     /// Draws the stack bottom-centre over `within`, oldest on top. A clicked
     /// button's action goes into `actions`.
-    pub fn ui(&mut self, ctx: &egui::Context, within: Rect, actions: &mut Vec<Action>) {
+    pub fn ui(&mut self, ctx: &egui::Context, within: Rect, actions: &mut Vec<A>) {
         if self.items.is_empty() {
             return;
         }
@@ -212,7 +217,7 @@ mod tests {
 
     #[test]
     fn errors_outlive_notices_when_full() {
-        let mut t = Toasts::default();
+        let mut t = Toasts::<&str>::default();
         t.push("a".into(), true);
         t.push("b".into(), false);
         t.push("c".into(), false);
@@ -224,8 +229,8 @@ mod tests {
 
     #[test]
     fn offers_stay_and_outlive_notices() {
-        let mut t = Toasts::default();
-        t.offer("DAC is back".into(), "Switch back", Action::Back);
+        let mut t = Toasts::<&str>::default();
+        t.offer("DAC is back".into(), "Switch back", "back");
         t.push("b".into(), false);
         t.push("c".into(), false);
         t.push("d".into(), false);
@@ -237,7 +242,7 @@ mod tests {
 
     #[test]
     fn same_text_is_not_stacked() {
-        let mut t = Toasts::default();
+        let mut t = Toasts::<&str>::default();
         t.push("offline".into(), false);
         t.push("offline".into(), false);
         assert_eq!(t.items.len(), 1);
