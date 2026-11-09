@@ -204,7 +204,7 @@ impl ViewCtx<'_> {
         ui.add_space(8.0);
         match tab {
             Tab::Chapters => self.chapters_tab(ui, &t),
-            Tab::Bookmarks => shell::widgets::empty_state(ui, Icon::Bookmark, "No bookmarks yet", "Bookmarks come with the next update."),
+            Tab::Bookmarks => shell::kit::empty_state(ui, Icon::Bookmark, "No bookmarks yet", "Bookmarks come with the next update."),
             Tab::Info => self.info_tab(ui, &t),
         }
     }
@@ -214,12 +214,12 @@ impl ViewCtx<'_> {
     /// rows on screen are laid out: a book can have a few hundred.
     fn chapters_tab(&mut self, ui: &mut Ui, t: &Tokens) {
         let Some(book) = &self.player.book else {
-            shell::widgets::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its chapters here.");
+            shell::kit::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its chapters here.");
             return;
         };
         let chapters = &book.timeline.chapters;
         if chapters.is_empty() {
-            shell::widgets::empty_state(ui, Icon::Headphones, "No chapters", "This book plays as one long track.");
+            shell::kit::empty_state(ui, Icon::Headphones, "No chapters", "This book plays as one long track.");
             return;
         }
         let at = self.player.position;
@@ -246,7 +246,7 @@ impl ViewCtx<'_> {
                 if resp.hovered() && !current {
                     ui.painter().rect_filled(row, 4.0, t.hover);
                 }
-                shell::widgets::focus_ring(ui, &resp, row, 4.0);
+                shell::kit::focus_ring(ui, &resp, row, 4.0);
                 chapter_row(ui, t, row, n, chapter, Some(at));
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     self.actions.push(Action::Playback(Control::Seek(chapter.start)));
@@ -262,7 +262,7 @@ impl ViewCtx<'_> {
         // mutably while the book is read.
         let player = self.player;
         let Some(book) = &player.book else {
-            shell::widgets::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its details here.");
+            shell::kit::empty_state(ui, Icon::Headphones, "Nothing playing", "Play a book to see its details here.");
             return;
         };
         let item = &book.item;

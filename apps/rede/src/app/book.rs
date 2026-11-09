@@ -44,7 +44,7 @@ impl ViewCtx<'_> {
         }
         ui.add_space(10.0);
         let Some(book) = self.books.by_id(id).cloned() else {
-            shell::widgets::empty_state(ui, Icon::Headphones, "This book isn't here", "It may have been removed from the server. Sync again to see.");
+            shell::kit::empty_state(ui, Icon::Headphones, "This book isn't here", "It may have been removed from the server. Sync again to see.");
             return;
         };
         egui::ScrollArea::vertical().id_salt(("book", id)).auto_shrink(false).show(ui, |ui| {
@@ -106,8 +106,8 @@ impl ViewCtx<'_> {
                     (Icon::Play, "Play".into())
                 };
                 if self.opening {
-                    shell::widgets::primary_unavailable(ui, None, "Opening…");
-                } else if shell::widgets::primary(ui, Some(icon), &label).clicked() {
+                    shell::kit::primary_unavailable(ui, None, "Opening…");
+                } else if shell::kit::primary(ui, Some(icon), &label).clicked() {
                     self.actions.push(if sounding { Action::Playback(crate::player::Control::Toggle) } else { Action::PlayBook(book.id.clone()) });
                 }
                 ui.min_rect().bottom() - top

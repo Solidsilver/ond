@@ -186,7 +186,7 @@ impl ViewCtx<'_> {
             } else {
                 ("No books yet", "Books show up here as they're added to the server's library.")
             };
-            shell::widgets::empty_state(ui, Icon::Headphones, title, body);
+            shell::kit::empty_state(ui, Icon::Headphones, title, body);
             return;
         }
         let ids = self.books.order(sort);

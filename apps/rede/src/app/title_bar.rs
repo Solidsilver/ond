@@ -391,7 +391,7 @@ impl ViewCtx<'_> {
             ui.painter().rect_filled(art, 6.0, egui::Color32::from_black_alpha(110));
             icons::paint(ui.painter(), Rect::from_center_size(art.center(), vec2(16.0, 16.0)), Icon::Player, shell::over_art::LIGHT);
         }
-        shell::widgets::focus_ring(ui, &resp, art, 6.0);
+        shell::kit::focus_ring(ui, &resp, art, 6.0);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Open the Player"));
         let label = shell::keys::shown("Open the Player (⇧⌘N)");
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&*label).clicked() {

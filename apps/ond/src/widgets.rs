@@ -1,15 +1,17 @@
-//! Small shared pieces: elided text, quiet links, the accent button, a
-//! segmented control, a thin slider, a switch and a menu label, and the rows
-//! Settings is built from (a [`group`] of [`setting`]s).
+//! The kit's widgets ([`shell::kit`]) under the names Ond's views use, and
+//! the few that are Ond's own: a rating menu's choice, a track title's
+//! colour, the grid/list picker over Ond's view modes, settings rows that say
+//! when managed.json locks them (a [`group`] of [`setting`]s), and
+//! bit-perfect's switch.
 
 use crate::icons::Icon;
 use crate::theme::Tokens;
 use egui::{Color32, Rect, Response, Sense, Ui, vec2};
 pub use shell::kit::{
-    Head, KV_VALUE, ROW_PAD, chip, choice, divider, elide, elide_job, group, heart_button, hover_heart, icon_choice, kv_row, kv_section, kv_text, link,
-    link_line, managed, menu_label, row_fill, section, switch, switch_tinted, thin_slider, thin_slider_marked, tile_button,
+    Head, KV_VALUE, ROW_PAD, chip, choice, danger, divider, elide, elide_job, empty_state, focus_ring, group, heart_button, hover_heart, icon_choice, kv_row,
+    kv_section, kv_text, link, link_line, managed, menu_label, menu_row, primary, row_fill, secondary, secondary_danger, section, sidebar_row, switch,
+    switch_tinted, thin_slider, thin_slider_marked, tile_button,
 };
-pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
 
 /// One choice in a rating menu: `rating` stars drawn as icons, filled up to
 /// it, with a check when it's the current rating.

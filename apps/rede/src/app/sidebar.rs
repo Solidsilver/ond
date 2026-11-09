@@ -197,7 +197,7 @@ impl ViewCtx<'_> {
         ui.add_space(4.0);
         let active = self.active_place();
         for (i, (label, route, _)) in PLACES.into_iter().enumerate() {
-            if shell::widgets::sidebar_row(ui, label, active == Some(i), 0.0, label).clicked() {
+            if shell::kit::sidebar_row(ui, label, active == Some(i), 0.0, label).clicked() {
                 self.actions.push(Action::Go(route));
             }
         }
@@ -294,7 +294,7 @@ impl ViewCtx<'_> {
                 egui::Color32::TRANSPARENT
             };
             ui.painter().rect_filled(rect, 6.0, fill);
-            shell::widgets::focus_ring(ui, &resp, rect, 6.0);
+            shell::kit::focus_ring(ui, &resp, rect, 6.0);
             let avatar = egui::pos2(rect.left() + 8.0 + AVATAR / 2.0, rect.center().y);
             paint_avatar(ui, avatar, &account.username);
             let x = avatar.x + AVATAR / 2.0 + 8.0;
@@ -325,7 +325,7 @@ impl ViewCtx<'_> {
         if resp.hovered() {
             ui.painter().rect_filled(rect, 6.0, t.hover);
         }
-        shell::widgets::focus_ring(ui, &resp, rect, 6.0);
+        shell::kit::focus_ring(ui, &resp, rect, 6.0);
         paint_avatar(ui, rect.center(), &account.username);
         let badge = rect.center() + vec2(AVATAR / 2.0 - 1.0, AVATAR / 2.0 - 1.0);
         ui.painter().circle_filled(badge, 5.5, t.sidebar);
