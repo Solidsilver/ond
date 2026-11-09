@@ -228,14 +228,20 @@ fn the_title_bar_holds_the_player_at_every_width_without_overlaps() {
         for label in BAR_CONTROLS {
             rects.push((label, h.get_by_label(label).rect()));
         }
+        // The cover, the way to the Player, stays at every width. So do the
+        // chapter buttons in a real window (the placement's own tests); the
+        // harness's margin takes 16 pt from the smallest, enough to let them
+        // go there.
+        rects.push(("cover", h.get_by_label("Open the Player").rect()));
         let chapters = h.query_all_by_label("Previous chapter (⇧←)").count() == 1;
-        assert_eq!(chapters, width > crate::MIN_SIZE[0], "the chapter buttons go only in the smallest window ({width})");
+        assert!(chapters || width <= crate::MIN_SIZE[0], "the chapter buttons stay at {width}");
         if chapters {
             rects.push(("previous", h.get_by_label("Previous chapter (⇧←)").rect()));
             rects.push(("next", h.get_by_label("Next chapter (⇧→)").rect()));
         }
+        // The harness draws the window inside an 8 pt margin.
         for (label, rect) in &rects {
-            assert!(rect.min.y >= 0.0 && rect.max.y <= super::BAR_H, "{label} at {width}: {rect:?}");
+            assert!(rect.min.y >= 8.0 && rect.max.y <= 8.0 + super::BAR_H, "{label} at {width}: {rect:?}");
             assert!(rect.min.x >= 0.0 && rect.max.x <= width, "{label} at {width}: {rect:?}");
         }
         for (i, (a, ra)) in rects.iter().enumerate() {
@@ -278,12 +284,26 @@ fn the_title_bar_buttons_enqueue_their_controls() {
         let actions = std::mem::take(&mut app_mut(&mut h).actions);
         assert!(matches!(actions.as_slice(), [Action::Playback(control)] if *control == expected), "{label}: {} actions", actions.len());
     }
-    // The cover, which is the capsule's own (the middle has the chapter's link).
+    // The chips open their menus rather than asking for anything.
+    for label in ["Playback speed, 1.5×", "Sleep timer"] {
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        assert!(app_mut(&mut h).actions.is_empty(), "{label} only opens its menu");
+        egui::Popup::close_all(&h.ctx);
+        h.run_steps(2);
+    }
+    // The cover opens the Player.
+    h.get_by_label("Open the Player").click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions.as_slice(), [Action::Mode(crate::window::Mode::Player)]), "the cover opens the Player: {} actions", actions.len());
+    // The rest of the capsule (here its title, over the chapter's link)
+    // opens the book's page.
     let capsule = h.get_by_label_contains("Now playing: The Left Hand of Darkness").rect();
-    let cover = capsule.left_center() + egui::vec2(capsule.height() / 2.0, 0.0);
-    h.event(egui::Event::PointerMoved(cover));
+    let title = capsule.center_top() + egui::vec2(0.0, 10.0);
+    h.event(egui::Event::PointerMoved(title));
     for pressed in [true, false] {
-        h.event(egui::Event::PointerButton { pos: cover, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos: title, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
         h.step();
     }
     h.run_steps(2);
@@ -395,7 +415,11 @@ fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     h.run_steps(3);
-    h.get_by_label("Player window (⌥⌘2)").click();
+    // The full window's bar has no mode buttons: the Player is a key away
+    // (and a click on the cover, with a book), and its own bar has the rest.
+    assert_eq!(h.query_all_by_label_contains("window (⌥⌘").count(), 0);
+    assert_eq!(h.query_all_by_label("Mini player (⇧⌘M)").count(), 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N);
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Player);
     h.get_by_label("Mini player (⇧⌘M)").click();

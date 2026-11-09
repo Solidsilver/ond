@@ -24,8 +24,6 @@ const SCRUB_KNOB: f32 = 6.0;
 /// The book line's hover strip, and the line inside it.
 const BOOK_H: f32 = 8.0;
 const BOOK_LINE: f32 = 2.0;
-/// The title bar's pill height.
-const BAR_PILL_H: f32 = 22.0;
 
 /// The speeds the speed menu offers at a click; the slider has the rest.
 const SPEEDS: [f32; 6] = [0.8, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -97,8 +95,7 @@ pub(super) fn round_play(ui: &mut Ui, d: f32, fill: Color32, knock: Color32, pau
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{label} (Space)"))
 }
 
-/// How large a pill is drawn: the title bar's, or the Player's, which is
-/// read from across the room. Padding and glyphs scale with the type.
+/// How large a pill is drawn: the Player's is read from across the room. Padding and glyphs scale with the type.
 #[derive(Clone, Copy)]
 pub(super) struct Pill {
     pub height: f32,
@@ -106,7 +103,6 @@ pub(super) struct Pill {
 }
 
 impl Pill {
-    pub const BAR: Self = Self { height: BAR_PILL_H, font: 12.0 };
     pub const ROOM: Self = Self { height: 30.0, font: 14.0 };
 
     fn scale(self) -> f32 {
@@ -151,7 +147,7 @@ pub(super) fn pill(ui: &mut Ui, t: &Tokens, size: Pill, icon: Option<Icon>, text
     resp
 }
 
-/// The speed as a pill, in the title bar or the Player.
+/// The speed as a pill, in the Player.
 pub(super) fn speed_pill(ui: &mut Ui, t: &Tokens, speed: f32, size: Pill) -> Response {
     let text = crate::timeline::speed_label(speed);
     let resp = pill(ui, t, size, None, Some(&text), true);

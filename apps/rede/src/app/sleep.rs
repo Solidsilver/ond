@@ -29,7 +29,16 @@ impl ViewCtx<'_> {
         Some(if self.sleeps_at_chapter_end() { "End of chapter".into() } else { crate::fmt::clock(left.ceil()) })
     }
 
-    fn sleeps_at_chapter_end(&self) -> bool {
+    /// What the capsule's sleep chip says while a timer runs, short enough
+    /// for the chip beside the moon: whole minutes, seconds in the last one,
+    /// and "End" while it waits for the chapter's end (its tooltip and menu
+    /// say which end). `None` while there's no timer.
+    pub(super) fn sleep_chip_text(&self) -> Option<String> {
+        let left = self.player.sleep_remaining(Instant::now())?;
+        Some(if self.sleeps_at_chapter_end() { "End".into() } else { short_left(left) })
+    }
+
+    pub(super) fn sleeps_at_chapter_end(&self) -> bool {
         self.player.sleep.as_ref().is_some_and(crate::sleep::Timer::at_chapter_end)
     }
 
@@ -44,12 +53,17 @@ impl ViewCtx<'_> {
             egui::WidgetInfo::labeled(egui::Role::Button, true, name)
         });
         let response = response.on_hover_text(if left.is_some() { "Sleep timer" } else { "Sleep timer: off" });
-        self.sleep_menu(&response, left);
+        self.sleep_menu_with(&response, left);
     }
 
     /// Laid out as the speed menu is: a heading, the common choices at a
     /// click, the custom length, then what changes a running timer.
-    fn sleep_menu(&mut self, pill: &Response, left: Option<f64>) {
+    pub(super) fn sleep_menu(&mut self, pill: &Response) {
+        let left = self.player.sleep_remaining(Instant::now());
+        self.sleep_menu_with(pill, left);
+    }
+
+    fn sleep_menu_with(&mut self, pill: &Response, left: Option<f64>) {
         egui::Popup::menu(pill).show(|ui| {
             let t = Tokens::of(ui);
             // Fixed, or the time at the heading's right end would stretch
@@ -159,6 +173,12 @@ impl ViewCtx<'_> {
     }
 }
 
+/// "12m", or "48s" in the last minute: a countdown that fits a chip.
+fn short_left(seconds: f64) -> String {
+    let seconds = seconds.max(0.0).ceil() as u64;
+    if seconds >= 60 { format!("{}m", seconds.div_ceil(60)) } else { format!("{seconds}s") }
+}
+
 const EXTEND: &str = "Extend 10 minutes";
 const NOTICE_INSET: f32 = 12.0;
 const PAD_X: f32 = 14.0;
@@ -210,5 +230,17 @@ impl Notice {
         } else {
             Rect::from_min_size(pos2(card.right() - PAD_X + BUTTON_PAD - w, card.center().y - BUTTON_H / 2.0), vec2(w, BUTTON_H))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_chip_counts_down_in_minutes_then_seconds() {
+        assert_eq!(super::short_left(23.0 * 60.0 + 41.0), "24m");
+        assert_eq!(super::short_left(120.0 * 60.0), "120m");
+        assert_eq!(super::short_left(60.0), "1m");
+        assert_eq!(super::short_left(48.2), "49s");
+        assert_eq!(super::short_left(0.0), "0s");
     }
 }
