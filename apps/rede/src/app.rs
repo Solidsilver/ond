@@ -15,6 +15,8 @@
 //! - `controls`: chapter seeking and the listening controls
 //! - `title_bar`: the player in the title bar, and the window's controls
 //! - `sidebar`: the places and the account, in the column at the left
+//! - `sheets`: the keyboard shortcuts and the playback settings, over the
+//!   window
 //! - `panel`: the chapters column at the right
 //! - `ui_state`: the notice line, the trail, and what a frame reads
 //! - `prefs_view`: the preferences a frame reads, and the actions that change
@@ -54,6 +56,7 @@ mod player_view;
 mod playing;
 mod prefs_view;
 mod session;
+mod sheets;
 mod shortcuts;
 mod sidebar;
 mod sleep;
@@ -133,7 +136,12 @@ pub enum Action {
     PlayBook(String),
     Playback(crate::player::Control),
     Mode(crate::window::Mode),
+    /// The keyboard shortcuts' sheet: open it, or close it if it's open.
     Shortcuts,
+    /// The playback settings' sheet (skips, rewinds, the timer's length).
+    PlaybackSettings,
+    /// Whichever sheet is open goes.
+    CloseSheet,
     ToggleMini,
     /// The chapters column: shown, hidden, or on another tab.
     Panel(panel::PanelAction),
@@ -170,7 +178,8 @@ pub struct RedeApp {
     player: crate::player::Player,
     mode: crate::window::Mode,
     window: window::State,
-    shortcuts: bool,
+    /// The sheet over the window, if one is open.
+    sheet: Option<sheets::Sheet>,
     engine: Option<audio::EngineHandle>,
     #[cfg(target_os = "macos")]
     now_playing: crate::now_playing::Publisher,
@@ -240,7 +249,7 @@ impl RedeApp {
             player: crate::player::Player::default(),
             mode: saved.window.mode,
             window: window::State::default(),
-            shortcuts: false,
+            sheet: None,
             engine: None,
             #[cfg(target_os = "macos")]
             now_playing: Default::default(),
@@ -344,7 +353,11 @@ impl RedeApp {
             Action::PlayBook(id) => self.play_book(id, None),
             Action::Playback(control) => self.playback_control(control),
             Action::Mode(mode) => self.set_mode(mode),
-            Action::Shortcuts => self.shortcuts = !self.shortcuts,
+            Action::Shortcuts => {
+                self.sheet = (self.sheet != Some(sheets::Sheet::Shortcuts)).then_some(sheets::Sheet::Shortcuts);
+            }
+            Action::PlaybackSettings => self.sheet = Some(sheets::Sheet::PlaybackSettings),
+            Action::CloseSheet => self.sheet = None,
             Action::ToggleMini => self.set_mode(self.prefs.get(|s| s.window.mini())),
             Action::Panel(a) => self.apply_panel(a),
         }
@@ -477,7 +490,7 @@ impl RedeApp {
                 self.panel_sheet(ui.ctx(), content.response.rect);
             }
         }
-        self.shortcuts_ui(ui.ctx());
+        self.sheet_ui(ui.ctx());
         // What the views asked for this frame. Applying an action never queues
         // another, so one pass takes them all.
         for a in std::mem::take(&mut self.actions) {

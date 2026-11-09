@@ -17,6 +17,7 @@ use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction, RedeApp};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use shell::icons::{self, Icon};
+use shell::kit;
 use shell::theme::{Tokens, semibold};
 use std::time::Duration;
 
@@ -36,6 +37,8 @@ pub(super) const FOOT_MARGIN: i8 = 12;
 const FOOTER_BUTTON: f32 = 28.0;
 const RAIL_BUTTON: f32 = 32.0;
 const TOGGLE: f32 = 22.0;
+/// The account menu's width: Ond's server popover's.
+const ACCOUNT_MENU_W: f32 = 250.0;
 
 /// The places to browse, in order: what they're called, where they lead, and
 /// the rail's icon for them.
@@ -334,55 +337,56 @@ impl ViewCtx<'_> {
         self.account_menu(&resp, &state);
     }
 
-    /// Who's signed in and where, the server's state, Sync now, and Sign
-    /// out, under `resp`.
+    /// Who's signed in and where, the server's state, then Sync now, the
+    /// playback settings, the shortcuts, and Sign out, under `resp`: Ond's
+    /// server popover, from the kit.
     fn account_menu(&mut self, resp: &egui::Response, state: &AccountState) {
         let Some(account) = self.session.account.clone() else { return };
         // Up from the foot of the window, where there's room for it.
-        egui::Popup::menu(resp).align(egui::RectAlign::TOP_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        kit::popover_at(resp, ACCOUNT_MENU_W, egui::RectAlign::TOP_START, |ui| {
             let t = Tokens::of(ui);
-            ui.set_width(240.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.add_space(6.0);
-            for (text, font, color) in
-                [(account.username.as_str(), FontId::new(13.0, semibold()), t.text), (account.server.as_str(), FontId::proportional(11.0), t.muted)]
-            {
+            kit::padded(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(color)).truncate());
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    let (r, _) = ui.allocate_exact_size(vec2(AVATAR + 4.0, AVATAR + 4.0), Sense::hover());
+                    paint_avatar(ui, r.center(), &account.username);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        let room = ui.available_width();
+                        let name = crate::widgets::elide(ui, &account.username, FontId::new(13.0, semibold()), t.text, room);
+                        ui.add(egui::Label::new(name).selectable(false));
+                        let server = crate::widgets::elide(ui, &account.server, FontId::proportional(11.0), t.muted, room);
+                        ui.add(egui::Label::new(server).selectable(false));
+                    });
                 });
-                ui.add_space(2.0);
-            }
-            ui.add_space(6.0);
+            });
+            ui.add_space(8.0);
             let (status, color) = match state {
                 AccountState::Connected => ("Connected".to_owned(), t.text),
                 AccountState::Syncing(label) => (label.clone(), t.text),
                 AccountState::Connecting => ("Connecting…".to_owned(), t.text),
                 AccountState::Offline => ("Can't reach the server · retrying".to_owned(), t.warn),
             };
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Status").size(12.0).color(t.muted));
-                ui.add_space(8.0);
-                ui.add(egui::Label::new(egui::RichText::new(status).size(12.0).color(color)).truncate());
-            });
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(2.0);
+            kit::info_row(ui, "Status", &status, color);
+            let libraries = account.libraries.len();
+            if libraries > 1 {
+                kit::info_row(ui, "Libraries", &libraries.to_string(), t.text);
+            }
+            kit::popover_rule(ui, 6.0);
             let can_sync = self.session.source.is_some() && !self.sync.running;
-            if can_sync && shell::widgets::menu_row(ui, "Sync now") {
+            if can_sync && kit::menu_row(ui, "Sync now") {
                 self.actions.push(Action::SyncNow);
             }
-            if shell::widgets::menu_row(ui, "Keyboard shortcuts") {
+            if kit::menu_row(ui, "Playback settings…") {
+                self.actions.push(Action::PlaybackSettings);
+            }
+            if kit::menu_row(ui, "Keyboard shortcuts") {
                 self.actions.push(Action::Shortcuts);
             }
-            ui.add_space(2.0);
-            ui.separator();
-            ui.add_space(2.0);
-            if shell::widgets::menu_row(ui, "Sign out") {
+            kit::popover_rule(ui, 6.0);
+            if kit::menu_row(ui, "Sign out") {
                 self.actions.push(Action::SignOut);
             }
-            ui.add_space(2.0);
         });
     }
 

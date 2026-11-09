@@ -444,9 +444,9 @@ fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Full);
     h.get_by_label("Keyboard shortcuts (⌘/)").click();
     h.run_steps(3);
-    h.get_by_label("Close shortcuts").click();
+    h.get_by_label("Close (esc)").click();
     h.run_steps(3);
-    assert!(!app_mut(&mut h).shortcuts);
+    assert_eq!(app_mut(&mut h).sheet, None);
 }
 
 #[test]
@@ -461,6 +461,58 @@ fn sleep_options_and_custom_defaults_are_accessible_from_the_title_bar() {
     for label in ["5 minutes", "120 minutes", "End of chapter", "Custom minutes", "Start 30 minute timer"] {
         h.get_by_label(label);
     }
+}
+
+#[test]
+fn the_playback_settings_sheet_steps_each_setting_and_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(2);
+    h.get_by_label("Playback settings…").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::PlaybackSettings));
+    h.check_accessibility();
+    for (label, more) in [
+        ("skip back, 15 s", "More skip back"),
+        ("skip forward, 30 s", "More skip forward"),
+        ("rewind after a pause, 5 s", "More rewind after a pause"),
+        ("rewind after sleep, 10 s", "More rewind after sleep"),
+        ("timer length, 30 min", "More timer length"),
+    ] {
+        h.get_by_label(label);
+        h.get_by_label(more).click();
+        h.run_steps(2);
+    }
+    let p = app_mut(&mut h).prefs.get(|s| s.playback);
+    assert_eq!((p.skip_back, p.skip_forward, p.rewind, p.sleep_rewind, p.sleep_minutes), (20, 45, 10, 15, 45));
+    h.get_by_label("Less rewind after a pause").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.playback.rewind), 5);
+    h.get_by_label("Close (esc)").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).sheet, None);
+    // Esc closes it too.
+    app_mut(&mut h).sheet = Some(super::sheets::Sheet::PlaybackSettings);
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).sheet, None);
+}
+
+#[test]
+fn the_shortcuts_sheet_lists_each_group_with_its_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).sheet = Some(super::sheets::Sheet::Shortcuts);
+    h.run_steps(3);
+    h.check_accessibility();
+    for label in ["Playback", "Chapters", "Window", "Navigation", "Play / pause", "Show / hide chapters", "Full, Player, Mini"] {
+        h.get_by_label(label);
+    }
+    h.get_by_label("Space");
+    h.get_by_label(&shell::keys::shown("⌥⌘3"));
 }
 
 #[test]
@@ -612,7 +664,7 @@ fn the_shortcuts_are_in_the_account_menu_too() {
     h.run_steps(4);
     h.get_by_label("Keyboard shortcuts").click();
     h.run_steps(2);
-    assert!(app_mut(&mut h).shortcuts, "the sheet opens");
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Shortcuts), "the sheet opens");
 }
 
 /// The account at the foot of the column, and the rail's, sit inside the

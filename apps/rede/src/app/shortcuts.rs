@@ -12,10 +12,10 @@ impl RedeApp {
             if i.consume_key(Modifiers::COMMAND, Key::Slash) {
                 self.actions.push(Action::Shortcuts);
             }
-            // Esc is the shortcuts window's only while it's open; otherwise it
-            // closes whatever else is open (the chapters sheet, a menu).
-            if self.shortcuts && i.consume_key(Modifiers::NONE, Key::Escape) {
-                self.actions.push(Action::Shortcuts);
+            // Esc is an open sheet's; otherwise it closes whatever else is
+            // open (the chapters sheet, a menu).
+            if self.sheet.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.actions.push(Action::CloseSheet);
             }
             if i.consume_key(shift, Key::N) {
                 Some(self.prefs.get(|s| s.window.player()))
@@ -43,35 +43,5 @@ impl RedeApp {
         if let Some(mode) = mode {
             self.actions.push(Action::Mode(mode));
         }
-    }
-
-    pub(super) fn shortcuts_ui(&mut self, ctx: &egui::Context) {
-        if !self.shortcuts {
-            return;
-        }
-        egui::Window::new("Keyboard shortcuts").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).show(ctx, |ui| {
-            egui::Grid::new("shortcuts").spacing([28.0, 8.0]).show(ui, |ui| {
-                for (keys, label) in [
-                    ("Space", "Play / pause"),
-                    ("← / →", "Skip back / forward"),
-                    ("⇧← / ⇧→", "Previous / next chapter"),
-                    ("[ / ]", "Speed down / up"),
-                    ("⇧⌘N", "Switch to Player and back"),
-                    ("⇧⌘M", "Switch to Mini and back"),
-                    ("⌥⌘1 / 2 / 3", "Full / Player / Mini"),
-                    ("⌥⌘S", "Collapse / expand sidebar"),
-                    ("⌥⌘U", "Show / hide chapters"),
-                    ("⌘/", "Keyboard shortcuts"),
-                ] {
-                    ui.label(shell::keys::shown(keys));
-                    ui.label(label);
-                    ui.end_row();
-                }
-            });
-            ui.separator();
-            if ui.button("Close shortcuts").clicked() {
-                self.actions.push(Action::Shortcuts);
-            }
-        });
     }
 }
