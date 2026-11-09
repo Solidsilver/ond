@@ -1,9 +1,10 @@
 //! Rows: the settings rows every page is built from (a [`group`] of
 //! [`setting`]s, or [`row_with`] and its [`Head`], hairlines between them,
-//! [`managed`] to lock one), and the [`sidebar_row`] a place in a sidebar is.
+//! [`managed`] to lock one); the facts a panel lists, a [`kv_section`] of
+//! [`kv_row`]s (or [`kv_text`]); and the [`sidebar_row`] a place in a sidebar is.
 
 use super::focus_ring;
-use super::text::{elide_middle, section};
+use super::text::{elide, elide_middle, section};
 use crate::theme::{Tokens, semibold};
 use egui::{Color32, FontId, Rect, Response, Sense, Ui, pos2, vec2};
 
@@ -175,4 +176,39 @@ pub fn sidebar_row(ui: &mut Ui, label: &str, on: bool, trailing: f32, name: &str
     let name = name.to_owned();
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, on, &name));
     resp
+}
+
+/// The label column of [`kv_row`]s, so values line up down a section.
+const KV_LABEL_W: f32 = 96.0;
+/// Value text size in [`kv_row`]s.
+pub const KV_VALUE: f32 = 12.5;
+
+/// A [`section`] label with room above it, heading a run of [`kv_row`]s.
+pub fn kv_section(ui: &mut Ui, title: &str) {
+    ui.add_space(18.0);
+    section(ui, title);
+    ui.add_space(6.0);
+}
+
+/// A muted label in a fixed column, then the value laid out by `value`
+/// (a song's or a book's facts, an album's details).
+pub fn kv_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
+    let t = Tokens::of(ui);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (r, _) = ui.allocate_exact_size(vec2(KV_LABEL_W, KV_VALUE + 4.0), Sense::hover());
+        let g = elide(ui, label, FontId::proportional(12.0), t.muted, KV_LABEL_W - 4.0);
+        ui.painter().galley(r.min + vec2(0.0, 1.0), g, t.muted);
+        let rest = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(rest, 0.0), egui::Layout::top_down(egui::Align::Min), value);
+    });
+    ui.add_space(6.0);
+}
+
+/// A [`kv_row`] whose value is plain, wrapping text.
+pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
+    let t = Tokens::of(ui);
+    kv_row(ui, label, |ui| {
+        ui.add(egui::Label::new(egui::RichText::new(value).size(KV_VALUE).color(t.text)).wrap());
+    });
 }

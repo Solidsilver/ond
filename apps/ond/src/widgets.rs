@@ -4,10 +4,10 @@
 
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
-use egui::{Color32, FontId, Rect, Response, Sense, Ui, vec2};
+use egui::{Color32, Rect, Response, Sense, Ui, vec2};
 pub use shell::kit::{
-    Head, ROW_PAD, chip, choice, divider, elide, elide_job, group, icon_choice, link, link_line, managed, menu_label, section, switch, switch_tinted,
-    thin_slider, thin_slider_marked,
+    Head, KV_VALUE, ROW_PAD, chip, choice, divider, elide, elide_job, group, icon_choice, kv_row, kv_section, kv_text, link, link_line, managed, menu_label,
+    section, switch, switch_tinted, thin_slider, thin_slider_marked,
 };
 pub use shell::widgets::{danger, empty_state, focus_ring, menu_row, primary, secondary, secondary_danger, sidebar_row};
 
@@ -103,41 +103,6 @@ pub fn track_color(t: &Tokens, playing: bool, playable: bool) -> Color32 {
     } else {
         t.muted.gamma_multiply(0.75)
     }
-}
-
-/// The label column of [`kv_row`]s, so values line up down a section.
-const KV_LABEL_W: f32 = 96.0;
-/// Value text size in [`kv_row`]s.
-pub const KV_VALUE: f32 = 12.5;
-
-/// A [`section`] label with room above it, heading a run of [`kv_row`]s.
-pub fn kv_section(ui: &mut Ui, title: &str) {
-    ui.add_space(18.0);
-    section(ui, title);
-    ui.add_space(6.0);
-}
-
-/// A muted label in a fixed column, then the value laid out by `value`
-/// (Info tab, album details, the Player's details).
-pub fn kv_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
-    let t = Tokens::of(ui);
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (r, _) = ui.allocate_exact_size(vec2(KV_LABEL_W, KV_VALUE + 4.0), Sense::hover());
-        let g = elide(ui, label, FontId::proportional(12.0), t.muted, KV_LABEL_W - 4.0);
-        ui.painter().galley(r.min + vec2(0.0, 1.0), g, t.muted);
-        let rest = ui.available_width();
-        ui.allocate_ui_with_layout(vec2(rest, 0.0), egui::Layout::top_down(egui::Align::Min), value);
-    });
-    ui.add_space(6.0);
-}
-
-/// A [`kv_row`] whose value is plain, wrapping text.
-pub fn kv_text(ui: &mut Ui, label: &str, value: &str) {
-    let t = Tokens::of(ui);
-    kv_row(ui, label, |ui| {
-        ui.add(egui::Label::new(egui::RichText::new(value).size(KV_VALUE).color(t.text)).wrap());
-    });
 }
 
 /// One setting: its name and a short hint on the left, its control on the

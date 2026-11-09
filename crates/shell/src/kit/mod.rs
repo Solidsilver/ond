@@ -17,7 +17,8 @@
 //!   [`choice_chip`] (one of a grid of choices, lit when on).
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
 //!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
-//!   one; and [`sidebar_row`].
+//!   one; [`kv_section`], [`kv_row`] and [`kv_text`] (a label and its value,
+//!   the values lined up, as an info panel lists facts); and [`sidebar_row`].
 //! - [`menus`]: [`popover`] (or [`popover_at`]) in the theme's frame,
 //!   [`padded`] to line a block up with its rows, [`popover_title`],
 //!   [`popover_rule`], [`menu_row`] (a command), [`info_row`] (a fact),
