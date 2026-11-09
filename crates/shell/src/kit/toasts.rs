@@ -2,6 +2,12 @@
 //! seconds (hovering holds them); errors and offers (a message with a button,
 //! like "Switch back") stay until clicked away. An offer's button hands back
 //! the app's own action, `A`, for the app to run after the frame.
+//!
+//! Two variations on those: a [`Toasts::note`] is a notice with a button
+//! that still fades (a confirmation with a way to look, like "Bookmarked ·
+//! Show"), and an offer made with [`Toasts::offer_or`] hands back a second
+//! action when it's clicked away, for an app whose state says the offer is
+//! open and has to hear that it closed.
 
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
@@ -18,13 +24,18 @@ struct Toast<A> {
     error: bool,
     /// When it goes away (notices only), set the first time it's drawn.
     until: Option<f64>,
-    /// A button's label and what it does. A toast with one stays until clicked away.
+    /// A button's label and what it does. A toast with one stays until
+    /// clicked away, unless it's `brief`.
     action: Option<(&'static str, A)>,
+    /// Fades as a notice does, button or not.
+    brief: bool,
+    /// What clicking it away does, besides taking it away.
+    dismissed: Option<A>,
 }
 
 impl<A> Toast<A> {
     fn fades(&self) -> bool {
-        !self.error && self.action.is_none()
+        !self.error && (self.action.is_none() || self.brief)
     }
 }
 
@@ -62,14 +73,29 @@ impl<A> Toasts<A> {
             t.error |= error;
             return;
         }
-        self.add(Toast { id: 0, text, error, until: None, action: None });
+        self.add(Toast { id: 0, text, error, until: None, action: None, brief: false, dismissed: None });
     }
 
     /// Adds a message with a button that does `action`; the same text again
     /// replaces the one showing.
     pub fn offer(&mut self, text: String, label: &'static str, action: A) {
         self.remove(&text);
-        self.add(Toast { id: 0, text, error: false, until: None, action: Some((label, action)) });
+        self.add(Toast { id: 0, text, error: false, until: None, action: Some((label, action)), brief: false, dismissed: None });
+    }
+
+    /// [`offer`](Self::offer), and `dismissed` when it's clicked away rather
+    /// than its button taken.
+    pub fn offer_or(&mut self, text: String, label: &'static str, action: A, dismissed: A) {
+        self.remove(&text);
+        self.add(Toast { id: 0, text, error: false, until: None, action: Some((label, action)), brief: false, dismissed: Some(dismissed) });
+    }
+
+    /// A notice with a button: it fades as a notice does (hovering holds it),
+    /// and the button does `action` while it shows. The same text again
+    /// replaces the one showing.
+    pub fn note(&mut self, text: String, label: &'static str, action: A) {
+        self.remove(&text);
+        self.add(Toast { id: 0, text, error: false, until: None, action: Some((label, action)), brief: true, dismissed: None });
     }
 
     /// Takes away the message `text`, if it's showing.
@@ -92,7 +118,7 @@ impl<A> Toasts<A> {
     /// progress notice moving on), else adds it.
     pub fn replace(&mut self, old: Option<&str>, text: String, error: bool) {
         match self.items.iter_mut().find(|t| Some(t.text.as_str()) == old) {
-            Some(t) => *t = Toast { id: t.id, text, error, until: None, action: None },
+            Some(t) => *t = Toast { id: t.id, text, error, until: None, action: None, brief: false, dismissed: None },
             None => self.push(text, error),
         }
     }
@@ -152,6 +178,9 @@ impl<A> Toasts<A> {
             }
             if resp.clicked() {
                 gone.push(toast.id);
+                if let Some(dismissed) = toast.dismissed.take() {
+                    actions.push(dismissed);
+                }
             }
             if pressed.as_ref().is_some_and(|b| b.clicked())
                 && let Some((_, action)) = toast.action.take()
@@ -238,6 +267,36 @@ mod tests {
         assert!(!t.items[0].fades());
         t.remove("DAC is back");
         assert!(!t.texts().contains(&"DAC is back"));
+    }
+
+    #[test]
+    fn a_note_fades_with_its_button_and_an_offer_can_hear_it_was_dismissed() {
+        let mut t = Toasts::<&str>::default();
+        t.note("Bookmarked".into(), "Show", "show");
+        assert!(t.items[0].fades(), "a confirmation goes on its own, button and all");
+        t.offer_or("Picked up".into(), "Undo", "undo", "dismissed");
+        assert!(!t.items[1].fades());
+        assert_eq!(t.items[1].dismissed, Some("dismissed"));
+    }
+
+    #[test]
+    fn clicking_an_offer_away_hands_back_its_dismissal_and_its_button_its_action() {
+        use egui_kittest::kittest::Queryable;
+        let mut toasts = Toasts::<&str>::default();
+        toasts.offer_or("Picked up".into(), "Undo", "undo", "dismissed");
+        let mut h = super::super::themed((toasts, Vec::new()), |ui, (toasts, actions): &mut (Toasts<&str>, Vec<&str>)| {
+            toasts.ui(&ui.ctx().clone(), ui.ctx().content_rect(), actions);
+        });
+        h.run_steps(2);
+        h.get_by_label("Picked up").click();
+        h.run_steps(2);
+        assert_eq!(h.state().1.1, ["dismissed"]);
+        assert!(h.state().1.0.texts().is_empty());
+        h.state_mut().1.0.offer_or("Picked up".into(), "Undo", "undo", "dismissed");
+        h.run_steps(2);
+        h.get_by_label("Undo").click();
+        h.run_steps(2);
+        assert_eq!(h.state().1.1, ["dismissed", "undo"], "the button's action, and not the dismissal too");
     }
 
     #[test]
