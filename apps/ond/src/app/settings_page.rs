@@ -14,7 +14,7 @@ use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
 use crate::widgets::{Head, ROW_PAD, choice, divider, group, managed, menu_label, row_with, secondary, secondary_danger, setting, switch, thin_slider};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use shell::kit::{readout, step_slider};
+use shell::kit::{self, readout, step_slider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Section {
@@ -61,9 +61,7 @@ impl Section {
     }
 }
 
-const NAV_W: f32 = 176.0;
-/// The right pane's content width (it scrolls when taller than the window).
-const PANE_PAD: f32 = 28.0;
+const NAV_W: f32 = kit::SETTINGS_NAV_W;
 
 impl OndApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -87,47 +85,26 @@ impl OndApp {
                 ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
 
                 // Section list.
-                let mut nav = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(vec2(10.0, 16.0))).layout(egui::Layout::top_down(egui::Align::Min)));
-                nav.spacing_mut().item_spacing.y = 2.0;
-                nav.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Settings").font(FontId::new(15.0, semibold())).color(t.text));
-                });
-                nav.add_space(12.0);
-                for s in Section::ALL {
-                    if self.place(&mut nav, s.label(), self.ui.settings_section == s).clicked() {
-                        self.ui.settings_section = s;
-                    }
+                let labels = Section::ALL.map(Section::label);
+                let at = Section::ALL.iter().position(|s| *s == self.ui.settings_section).unwrap_or(0);
+                if let Some(i) = kit::settings_nav(ui, side, &labels, at) {
+                    self.ui.settings_section = Section::ALL[i];
                 }
 
                 // The pane.
                 let pane = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
-                let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(pane).layout(egui::Layout::top_down(egui::Align::Min)));
-                egui::ScrollArea::vertical().id_salt(("settings-pane", self.ui.settings_section)).auto_shrink(false).show(&mut ui, |ui| {
-                    ui.add_space(20.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(PANE_PAD);
-                        ui.vertical(|ui| {
-                            let width = pane.width() - PANE_PAD * 2.0;
-                            ui.set_width(width);
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.label(egui::RichText::new(self.ui.settings_section.label()).font(FontId::new(20.0, semibold())).color(t.text));
-                            ui.add_space(16.0);
-                            match self.ui.settings_section {
-                                Section::General => self.general_settings(ui),
-                                Section::Appearance => self.appearance_settings(ui),
-                                Section::Playback => self.playback_settings(ui),
-                                Section::Queue => self.queue_settings(ui),
-                                Section::Output => self.output_settings(ui),
-                                Section::Offline => self.offline_settings(ui),
-                                Section::Library => self.library_settings(ui),
-                                Section::Account => self.account_settings(ui),
-                                Section::Experimental => self.experimental_settings(ui),
-                                Section::About => self.about(ui),
-                            }
-                            ui.add_space(24.0);
-                        });
-                    });
+                let section = self.ui.settings_section;
+                kit::settings_pane(ui, pane, ("settings-pane", section), section.label(), |ui| match section {
+                    Section::General => self.general_settings(ui),
+                    Section::Appearance => self.appearance_settings(ui),
+                    Section::Playback => self.playback_settings(ui),
+                    Section::Queue => self.queue_settings(ui),
+                    Section::Output => self.output_settings(ui),
+                    Section::Offline => self.offline_settings(ui),
+                    Section::Library => self.library_settings(ui),
+                    Section::Account => self.account_settings(ui),
+                    Section::Experimental => self.experimental_settings(ui),
+                    Section::About => self.about(ui),
                 });
             });
         if modal.should_close() {
