@@ -81,7 +81,7 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 
 ## Releases and updates
 - [ ] Push an `ond-v` tag whose version isn't the crate's: the release workflow stops at its first job. With the right version, it builds and publishes "Ond X.Y.Z" with the notes from `.github/release-notes/ond/`, and GitHub's changelog starts at Ond's previous tag.
-- [ ] Push a `rede-v` tag: only the first job runs, with a notice that Rede has no bundles yet; no release is published.
+- [ ] Push a `rede-v` tag: only the first job runs, with a notice that Rede release packaging is not enabled in CI; no release is published.
 - [ ] A GitHub build older than the newest Ond release: Settings › About says the new version is available, shows its notes, and Download opens its page. A Rede release newer than it doesn't change that.
 
 ## Analysis
@@ -128,3 +128,55 @@ Rede's output device picker is deferred: Ond's current panel combines device
 preferences and bit-perfect controls. Rede continues following system output;
 select AirPlay or another output in the system controls for now. ⌘B bookmarks
 and ⌘K search remain for later milestones.
+
+## Rede OpenID sign-in on macOS
+
+These checks require a person signing in to an identity provider. Automated
+checks use local fake ABS servers only. Do not put a password, verifier, state,
+code or token in terminal commands, screenshots or bug reports.
+
+Build and launch a dev bundle (release code, ad-hoc signature, no archives):
+
+```sh
+scripts/bundle-rede-macos.sh --dev
+open target/bundle/Rede.app
+```
+
+`cargo run -p rede` does not register the bundle's URL schemes and cannot receive
+the OAuth redirect. Launch the bundle with `open`. If another Audiobookshelf app
+owns `audiobookshelf://`, choose Rede in macOS's handler prompt or explicitly
+select Rede as that scheme's handler for the fallback test. `rede://` avoids
+this shared-scheme ambiguity. Ad-hoc bundles may need approval in macOS Privacy
+& Security on first launch. Keep the keyring unlocked; Rede must save the
+pending transaction before it opens a browser.
+
+- [ ] Enter the server address and click Sign in. Test servers with OpenID only,
+  local only, and both methods: only enabled methods appear, the configured
+  OpenID button text is used, local appears first unless OpenID auto-launch is
+  enabled, and a configured custom message is readable. With auto-launch on,
+  discovery opens the browser once; Cancel leaves the methods available.
+- [ ] Allow `rede://oauth` in ABS's OpenID mobile redirect URIs. Click the OpenID
+  button, finish sign-in in the system browser, approve opening Rede, and confirm
+  the library loads. Restart Rede and confirm it resumes with stored tokens.
+- [ ] Leave ABS's default whitelist (`audiobookshelf://oauth` only). Sign in and
+  confirm the waiting screen says the server uses `audiobookshelf://oauth` and
+  that the admin can add `rede://oauth`. Finish through that fallback scheme.
+  A different server error must produce an error without retrying the fallback.
+- [ ] While Rede is already running, finish browser sign-in: the Apple Event
+  reaches its inbox and the waiting screen completes. Repeat, but quit Rede
+  after the browser opens and before finishing. The redirect must launch the
+  bundle, recover its pending verifier/session from the keyring, and finish the
+  same login. Repeat with each scheme. Finish within five minutes.
+- [ ] Cancel while waiting; finish the old browser page afterward. The late
+  redirect is ignored and cannot sign in. Start again and wait five minutes:
+  the spinner stops, the attempt times out, and retry creates a fresh attempt.
+  Quit while waiting, leave it for five minutes, then finish: the expired
+  transaction is discarded on launch. Deny access at the provider and confirm
+  Cancel/timeout remains available if it does not return to Rede.
+- [ ] Confirm an ABS version below 2.26 is refused and a version below 2.36
+  retains the existing warning. Inspect `~/Library/Logs/Rede/rede.log` for
+  value-free unmatched-redirect messages and no OAuth credentials.
+
+`scripts/bundle-rede-macos.sh` without `--dev` also builds Rede's zip and dmg;
+`--universal` builds both architectures. Ond continues to use its unchanged
+`scripts/bundle-macos.sh` and `packaging/macos/Info.plist.in`.

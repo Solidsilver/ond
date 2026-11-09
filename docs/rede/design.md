@@ -129,7 +129,7 @@ An account is one source with its credentials:
 
 | Kind | Sign-in | Notes |
 |---|---|---|
-| Audiobookshelf | URL, username, password | Access and refresh tokens in the keyring. |
+| Audiobookshelf | URL, browser OpenID or username/password | Access and refresh tokens in the keyring. |
 | Local folders | none | A list of folders. |
 | RSS (later) | none | The subscriptions. |
 | Jellyfin, Subsonic (maybe later) | as their servers want | Subsonic's bookmark endpoints exist for keeping audiobook positions. |
@@ -172,6 +172,16 @@ The app never checks which kind of source it has; it checks capabilities and hid
 ABS libraries are either book or podcast libraries. Every library in Rede carries a kind (`Books`, later `Podcasts`), which decides which side of the app shows it. Local folders are book libraries; RSS feeds are podcast libraries.
 
 ### Audiobookshelf
+
+OpenID sign-in uses ABS's PKCE mobile flow in the system browser, alongside
+password sign-in when `/status` offers it. Rede first tries `rede://oauth`, then
+`audiobookshelf://oauth` only on the server's exact invalid-redirect rejection.
+The [verified protocol](abs-api.md#18-native-openid-sign-in-verified-mobile-flow)
+records the cookie/session exchange. On macOS the app bundle registers both
+schemes and an Apple Event receiver handles running and newly launched apps.
+Linux `.desktop` `x-scheme-handler` entries and a Windows registry protocol
+handler come later; there is no URL handler registration for those platforms yet.
+
 
 What the `abs` crate talks to. The official API docs are marked as no longer maintained, so everything here gets checked against the server source before it's relied on. The checked request and response shapes are in [abs-api.md](abs-api.md).
 
