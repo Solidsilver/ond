@@ -15,6 +15,7 @@ mod memo;
 mod prefs;
 mod settings;
 mod sync;
+mod timeline;
 mod tokens;
 mod widgets;
 
