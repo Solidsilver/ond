@@ -14,6 +14,7 @@ pub mod icons;
 pub mod keys;
 pub mod now_playing;
 pub mod over_art;
+pub mod rich;
 pub mod theme;
 pub mod widgets;
 pub mod window;
