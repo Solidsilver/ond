@@ -7,6 +7,10 @@ use crate::listening::{Event, Request};
 use crate::player::{Control, Live, Note};
 use std::time::{Duration, Instant};
 
+/// How long a resume waits for the server before playing from the local
+/// position. A lossy connection must not hold the play press.
+const RESUME_WAIT: Duration = Duration::from_millis(2_500);
+
 impl RedeApp {
     fn ensure_engine(&mut self) -> Result<(), Failure> {
         if self.engine.is_none() {
@@ -53,10 +57,38 @@ impl RedeApp {
         self.player.book = None;
         self.playback_generation += 1;
         self.opening = true;
+        self.resume_pending = false;
+        self.resume_deadline = None;
         self.listening.as_ref().unwrap().send(Request::Open { generation: self.playback_generation, key, at });
     }
 
     pub(super) fn playback_control(&mut self, control: Control) {
+        // Resuming asks the server first: the phone may have moved on since this
+        // was paused. A second press while that's in flight plays at once.
+        if control == Control::Toggle
+            && self.player.active
+            && self.player.paused
+            && !self.sync.offline
+            && !self.resume_pending
+            && let Some(listening) = &self.listening
+        {
+            self.resume_pending = true;
+            self.resume_deadline = Some(Instant::now() + RESUME_WAIT);
+            self.send_activity();
+            listening.send(Request::Resume { generation: self.playback_generation });
+            return;
+        }
+        // A seek during the pull is the listener's choice and must not cancel
+        // the play press: ResumeReady still starts the book. Any other control
+        // (a second play press included) takes over at once.
+        if !matches!(control, Control::Seek(_)) {
+            self.resume_pending = false;
+            self.resume_deadline = None;
+        }
+        self.apply_playback_control(control);
+    }
+
+    fn apply_playback_control(&mut self, control: Control) {
         if !self.player.active
             && let Some(book) = &self.player.book
             && control == Control::Toggle
@@ -80,6 +112,7 @@ impl RedeApp {
             self.shown.playback.speed = speed;
         }
         self.playback_notes(notes);
+        self.send_activity();
     }
 
     fn playback_notes(&mut self, notes: Vec<Note>) {
@@ -127,6 +160,7 @@ impl RedeApp {
                         if let Err(error) = result {
                             self.show_error(error);
                         }
+                        self.send_activity();
                     }
                     Err(error) => self.show_failure(error),
                 }
@@ -148,9 +182,30 @@ impl RedeApp {
                 for position in positions {
                     let old = self.positions.remove(&position.item.item);
                     let latest = crate::listening::newer(old, Some(position)).unwrap();
+                    // A paused book is moved only for a real change. Comparing
+                    // exact f64s made an unchanged position look different on
+                    // every pull and re-seeked the engine.
+                    if self.player.paused
+                        && self.player.book.as_ref().is_some_and(|b| b.key == latest.item)
+                        && (self.player.position - latest.position.secs()).abs() > 0.5
+                    {
+                        self.move_to_reconciled(latest.position.secs());
+                    }
                     self.positions.insert(latest.item.item.clone(), latest);
                 }
             }
+            Event::ResumeReady { generation } if generation == self.playback_generation && self.resume_pending => {
+                self.resume_pending = false;
+                self.resume_deadline = None;
+                if self.player.paused {
+                    self.apply_playback_control(Control::Toggle);
+                }
+            }
+            Event::Reconciled(reconciled) => self.reconciled(reconciled),
+            Event::Bookmarks(result) => match result {
+                Ok(rows) => self.bookmark_event(crate::bridge::BookmarkMsg::Updated(rows)),
+                Err(e) => self.show_failure(e),
+            },
             Event::Error(error) => self.show_failure(error),
             _ => {}
         }
@@ -162,6 +217,7 @@ impl RedeApp {
             self.player.event(&event, engine, Instant::now(), &mut notes);
         }
         self.playback_notes(notes);
+        self.send_activity();
     }
 
     pub(super) fn report_playback(&mut self, report: bool) {
@@ -173,6 +229,21 @@ impl RedeApp {
     }
 
     pub(super) fn playback_tick(&mut self, ctx: &egui::Context) {
+        // A resume pull that never answers falls back to the local position,
+        // rather than leaving a play press waiting on a lossy network.
+        if self.resume_pending {
+            let deadline = *self.resume_deadline.get_or_insert_with(|| Instant::now() + RESUME_WAIT);
+            let now = Instant::now();
+            if now >= deadline {
+                self.resume_pending = false;
+                self.resume_deadline = None;
+                if self.player.paused {
+                    self.apply_playback_control(Control::Toggle);
+                }
+            } else {
+                ctx.request_repaint_after(deadline - now);
+            }
+        }
         self.report_playback(false);
         if let Some(engine) = &self.engine {
             // Hidden windows run logic without a UI pass. Their reporting clock
@@ -223,5 +294,53 @@ impl RedeApp {
             let done = listening.finish();
             let _ = rt.block_on(async { tokio::time::timeout(Duration::from_secs(2), done).await });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_paused_book_ignores_a_position_change_under_half_a_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = super::super::fixture::app(&ctx, dir.path(), 1);
+        super::super::fixture::playing(&mut app, true);
+        let key = app.player.book.as_ref().unwrap().key.clone();
+        app.player.position = 100.0;
+        let positions = |secs: f64| {
+            vec![sources::Progress { item: key.clone(), position: sources::Position::from_secs(secs), finished: false, at: Some(std::time::SystemTime::now()) }]
+        };
+        app.playback_event(Event::Positions(positions(100.4)));
+        assert_eq!(app.player.position, 100.0, "a fraction of a second is the same place");
+        app.playback_event(Event::Positions(positions(102.0)));
+        assert_eq!(app.player.position, 102.0, "a real move still moves the book");
+    }
+
+    #[test]
+    fn a_seek_during_a_resume_pull_keeps_the_play_press_and_other_controls_take_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = super::super::fixture::app(&ctx, dir.path(), 1);
+        super::super::fixture::playing(&mut app, true);
+        app.resume_pending = true;
+        app.playback_control(Control::Seek(60.0));
+        assert!(app.resume_pending, "the seek must not drop the play that is waiting on the pull");
+        app.playback_control(Control::Stop);
+        assert!(!app.resume_pending, "stopping cancels it");
+    }
+
+    #[test]
+    fn a_resume_pull_that_outlasts_its_deadline_plays_from_the_local_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = super::super::fixture::app(&ctx, dir.path(), 1);
+        super::super::fixture::playing(&mut app, true);
+        app.resume_pending = true;
+        app.resume_deadline = Some(Instant::now() - Duration::from_millis(1));
+        app.playback_tick(&ctx);
+        assert!(!app.resume_pending, "the wait is over and playback may start");
+        assert_eq!(app.resume_deadline, None);
     }
 }

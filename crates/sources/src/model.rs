@@ -229,6 +229,7 @@ pub struct PlaySession {
 pub struct Capabilities {
     /// Search on the server rather than in the local mirror.
     pub server_search: bool,
+    /// Bookmarks live on the server ([`Source::bookmarks`](crate::Source::bookmarks)).
     pub bookmarks: bool,
     /// Pushes changes as they happen (Audiobookshelf's socket.io).
     pub live_updates: bool,
@@ -296,4 +297,14 @@ mod tests {
         assert!(Position::from_secs(1.5) > Position::from_secs(1.0));
         assert_eq!(Position::from_secs(90.5).secs(), 90.5);
     }
+}
+
+/// A saved place. Position is the source's exact book time: rounding it would
+/// change the identity of an Audiobookshelf bookmark.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bookmark {
+    pub item: ItemKey,
+    pub position: Position,
+    pub title: String,
+    pub created: SystemTime,
 }

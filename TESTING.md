@@ -218,3 +218,47 @@ on macOS) and relaunch.
   Check a minutes timer separately; it follows elapsed listening time.
 - [ ] Play music in Ond with its default settings and compare its usual output
   and signal path; neither speech stage is enabled there.
+
+## Rede M3: bookmarks and reconciliation
+
+Use a release build, a dedicated Audiobookshelf account and a second client
+(such as a phone). The backend exposes Actions, bookmark snapshots and reconcile
+state; the bookmarks panel, shortcut and toast are wired by the UI change.
+
+- [ ] Add a bookmark with ⌘B and through the Bookmarks tab. The default title
+  names the chapter and time. Rename it, jump to it, then delete it; verify the
+  same changes on the phone, including a fractional-second bookmark.
+- [ ] Add, rename and delete on the phone, then focus Rede without waiting five
+  minutes: its Bookmarks tab reflects the phone. Repeat with an ABS version
+  before 2.36 to exercise the `/api/me` fallback.
+- [ ] Disconnect the server, make several bookmark edits, quit and relaunch.
+  They remain visible locally. Reconnect and confirm they arrive in order and
+  deleted bookmarks remain deleted. Edit the same title on the phone while Rede
+  is offline: the phone wins on reconnect. A phone deletion defeats a local
+  rename rather than resurrecting it.
+- [ ] Pause Rede, listen on the phone for more than a minute, and focus Rede.
+  It stays paused at the newer position and offers "Picked up where you left off
+  on another device, … in." Repeat by quitting/reopening Rede and by resuming a
+  paused book; resume must pull before audio starts.
+- [ ] Undo that reconciliation. The old local position returns in Rede and on
+  the server; focusing again and restarting Rede must not bring the old phone
+  position back. Repeat after the phone finished the book: Undo restores the
+  unfinished local position, except inside ABS's automatic finish threshold.
+- [ ] Change the phone position while Rede is actively playing the same book:
+  Rede keeps playing from its local position and reports it. Pause Rede and
+  listen later on the phone: the next pull can adopt that newer position.
+- [ ] Make a newer local offline position and reconnect after an older phone
+  position: local wins and is reported. A server change of exactly one minute
+  or less updates paused progress without the reconciliation toast.
+- [ ] Sign out or switch accounts while pulls are pending: no old bookmark or
+  reconciliation result appears in the new session. Offline network errors are
+  quiet after the first; a server refusal or local storage error is shown.
+
+The opt-in `abs::a_real_server_round_trip` test uses one login and one explicit
+refresh, creates/renames/lists/deletes a fractional bookmark, exercises progress,
+and cleans the dedicated account back to zero bookmarks and progress. It refuses
+to run against an account that already has progress or bookmarks, so use a
+throwaway one. Run with `ABS_TEST_URL`, `ABS_TEST_USER` and `ABS_TEST_PASSWORD` in
+the environment: `cargo test -p abs --test live -- --ignored --nocapture`. It
+requires no audio hardware. Never include the environment values in logs or
+reports.

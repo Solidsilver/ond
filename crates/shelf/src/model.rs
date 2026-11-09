@@ -318,3 +318,14 @@ pub(crate) struct LibrarySyncV1 {
     pub cursor: Option<String>,
     pub newest_ms: Option<i64>,
 }
+
+/// Ordered bookmark intent. All nested rows are frozen independently of the
+/// live source model; kind 0=create, 1=rename, 2=delete is part of this format.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct BookmarkEditV1 {
+    pub account: String,
+    pub item: String,
+    pub kind: u8,
+    pub value: BookmarkV1,
+    pub base: Option<BookmarkV1>,
+}

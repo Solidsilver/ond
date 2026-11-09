@@ -25,6 +25,10 @@ use std::sync::mpsc::Sender;
 pub enum Msg {
     Account(AccountMsg),
     Library(LibraryMsg),
+    Bookmarks {
+        session: u64,
+        event: BookmarkMsg,
+    },
     Playback {
         session: u64,
         event: crate::listening::Event,
@@ -113,6 +117,12 @@ pub enum LibraryMsg {
     BookFailed { key: ItemKey, error: Failure },
 }
 
+/// Local optimistic snapshots and the subsequent server result use one group.
+pub enum BookmarkMsg {
+    Updated(shelf::BookmarkSnapshot),
+    Failed(Failure),
+}
+
 impl From<AccountMsg> for Msg {
     fn from(m: AccountMsg) -> Self {
         Msg::Account(m)
@@ -182,7 +192,16 @@ impl Bridge {
     }
 
     fn playback(&self, event: crate::listening::Event) {
-        self.send(Msg::Playback { session: self.scope.unwrap_or_else(|| self.session()), event });
+        let session = self.scope.unwrap_or_else(|| self.session());
+        if let crate::listening::Event::Bookmarks(result) = event {
+            let event = match result {
+                Ok(bookmarks) => BookmarkMsg::Updated(bookmarks),
+                Err(e) => BookmarkMsg::Failed(e),
+            };
+            self.send(Msg::Bookmarks { session, event });
+        } else {
+            self.send(Msg::Playback { session, event });
+        }
     }
 
     pub fn listening(&self, source: Arc<dyn Source>, shelf: Arc<Shelf>, device: sources::DeviceInfo) -> crate::listening::Listening {

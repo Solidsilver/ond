@@ -77,6 +77,26 @@ pub trait Source: Send + Sync {
     /// Everything the source remembers, for reconciling with the local log.
     async fn progress(&self) -> Result<Vec<Progress>>;
 
+    /// All bookmarks for this account, when supported.
+    async fn bookmarks(&self) -> Result<Vec<crate::Bookmark>> {
+        Err(crate::Error::NotSupported("This source cannot sync bookmarks".into()))
+    }
+    async fn create_bookmark(&self, _item: &str, _time: Position, _title: &str) -> Result<crate::Bookmark> {
+        Err(crate::Error::NotSupported("This source cannot create bookmarks".into()))
+    }
+    /// Changes only the title; changing time requires delete followed by create.
+    async fn rename_bookmark(&self, _item: &str, _time: Position, _title: &str) -> Result<crate::Bookmark> {
+        Err(crate::Error::NotSupported("This source cannot rename bookmarks".into()))
+    }
+    async fn delete_bookmark(&self, _item: &str, _time: Position) -> Result<()> {
+        Err(crate::Error::NotSupported("This source cannot delete bookmarks".into()))
+    }
+
     /// Writes log entries back to the source, oldest first.
-    async fn set_progress(&self, batch: &[ProgressUpdate]) -> Result<()>;
+    ///
+    /// `remote` is what [`progress`](Source::progress) just answered with, so a
+    /// source can tell that an unfinished position is replacing a finished row
+    /// without asking for the list a second time. Callers that don't have the
+    /// list fetch it first.
+    async fn set_progress(&self, batch: &[ProgressUpdate], remote: &[Progress]) -> Result<()>;
 }

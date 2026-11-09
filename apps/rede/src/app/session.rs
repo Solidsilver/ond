@@ -309,6 +309,8 @@ impl RedeApp {
         }
         self.player = crate::player::Player::default();
         self.positions.clear();
+        self.bookmarks = super::bookmarks::State::default();
+        self.reconciliation = None;
         self.session = Session::default();
         self.books.clear();
         self.art.set_source(None);
@@ -372,8 +374,8 @@ impl RedeApp {
             Outcome::SignedOut => self.signed_out_and_say(SIGNED_OUT),
             Outcome::Failed(f) => {
                 let network = f.is_network();
-                self.sync.offline = network;
                 self.show_failure(f);
+                self.sync.offline = network;
                 if network {
                     self.retry_in(Duration::from_secs(60));
                 }
