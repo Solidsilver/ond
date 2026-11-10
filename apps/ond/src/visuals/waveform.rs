@@ -116,7 +116,7 @@ impl Waveforms {
     /// test that shouldn't wait on either.
     #[cfg(test)]
     pub fn for_test(ctx: egui::Context) -> Self {
-        Self::with(ctx, Duration::from_millis(20), false)
+        Self::with(ctx, Duration::from_millis(200), false)
     }
 
     /// Whether a read for `id` finished with nothing, so it isn't asked for
@@ -236,7 +236,7 @@ mod tests {
         assert!(!asked, "looked again within the look interval");
         assert!(w.bars("t", 10).is_none());
 
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(250));
         std::fs::write(&path, wav()).unwrap();
         w.want("t", Some("wav"), || Some(path.clone()));
         // The read is off this thread, at normal priority: generous, and far
@@ -273,7 +273,7 @@ mod tests {
         }
         w.want("bad", Some("flac"), || panic!("tried again"));
         // Past the look interval too: the failure, not the throttle, is why.
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(250));
         w.want("bad", Some("flac"), || panic!("tried again later"));
     }
 }
