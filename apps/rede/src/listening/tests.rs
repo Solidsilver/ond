@@ -7,6 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, SystemTime};
+use testkit::{Answer, JsonFake};
 
 type Result<T> = sources::Result<T>;
 
@@ -677,6 +678,181 @@ async fn a_bookmark_edit_refused_for_want_of_sign_in_stays_queued() {
     rig.event(|e| matches!(e, Event::Bookmarks(Err(_)))).await;
     assert_eq!(rig.shelf.pending_bookmarks().unwrap().len(), 1, "a 401 from a lapsed gate keeps the edit for the next try");
     *rig.fake.refuse_bookmark.lock().unwrap() = None;
+    rig.finish().await;
+}
+
+/// A worker over the real Audiobookshelf source and a fake server, so a test
+/// checks the request Audiobookshelf reads rather than what a stand-in
+/// records.
+struct AbsRig {
+    _dir: tempfile::TempDir,
+    shelf: Arc<Shelf>,
+    server: JsonFake,
+    listening: Listening,
+    events: mpsc::UnboundedReceiver<Event>,
+    key: ItemKey,
+}
+
+impl AbsRig {
+    /// `progress` is the `mediaProgress` list `GET /api/me` answers with: what
+    /// the server already holds.
+    async fn new(progress: &str) -> Self {
+        let progress = progress.to_owned();
+        let server = JsonFake::start(move |seen| match seen.path() {
+            "/api/me" => Answer::ok(format!(r#"{{"id":"user","mediaProgress":{progress}}}"#)),
+            "/api/me/bookmarks" => Answer::ok(r#"{"bookmarks":[]}"#),
+            _ => Answer::ok(""),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = Arc::new(Shelf::open(dir.path().join("shelf.redb")).unwrap());
+        let client = abs::Client::new(server.base(), abs::DeviceInfo::new("device", "1")).unwrap().with_tokens(abs::Tokens::new("access", "refresh"));
+        let source: Arc<dyn Source> = Arc::new(sources::AbsSource::new(test_account(), client, Vec::new()));
+        let key = ItemKey::new(test_account(), "book");
+        let (tx, events) = mpsc::unbounded_channel();
+        let listening = spawn(
+            &tokio::runtime::Handle::current(),
+            source,
+            shelf.clone(),
+            DeviceInfo::default(),
+            || true,
+            move |event| {
+                let _ = tx.send(event);
+            },
+        );
+        let mut rig = Self { _dir: dir, shelf, server, listening, events, key };
+        rig.event(|e| matches!(e, Event::Positions(_))).await;
+        rig
+    }
+
+    async fn event(&mut self, predicate: impl Fn(&Event) -> bool) -> Event {
+        tokio::time::timeout(testkit::slack(testkit::WAIT), async {
+            loop {
+                let event = self.events.recv().await.unwrap();
+                if predicate(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    /// What the progress endpoints were sent, in order.
+    fn progress_bodies(&self) -> Vec<serde_json::Value> {
+        self.server.seen().into_iter().filter(|seen| seen.method == "PATCH" && seen.path().starts_with("/api/me/progress")).map(|seen| seen.json()).collect()
+    }
+
+    async fn finish(self) {
+        self.listening.finish().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn finishing_a_book_online_writes_the_finish_abs_stores_and_shows_it() {
+    let mut rig = AbsRig::new("[]").await;
+    let at = SystemTime::now();
+    rig.listening.send(Request::Set(ProgressUpdate {
+        item: rig.key.clone(),
+        position: Position::from_secs(3_600.0),
+        finished: true,
+        at,
+        listened: Duration::ZERO,
+    }));
+    let Event::Positions(positions) = rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.finished))).await else { unreachable!() };
+    assert_eq!(positions[0].position.secs(), 3_600.0);
+    let bodies = rig.progress_bodies();
+    assert_eq!(bodies.len(), 1, "a finish needs no reset before it: {bodies:?}");
+    assert_eq!(bodies[0], serde_json::json!([{ "libraryItemId": "book", "currentTime": 3_600.0, "isFinished": true, "lastUpdate": Stamp::from(at).millis() }]));
+    assert!(rig.shelf.position(&rig.key).unwrap().unwrap().finished);
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn un_finishing_a_book_resets_the_finish_first_and_then_writes_its_place() {
+    let remote = r#"[{"id":"p","libraryItemId":"book","currentTime":4200.0,"isFinished":true,"lastUpdate":400000}]"#;
+    let mut rig = AbsRig::new(remote).await;
+    let at = Stamp::from_millis(400_001).system_time();
+    rig.listening.send(Request::Set(ProgressUpdate {
+        item: rig.key.clone(),
+        position: Position::from_secs(1_234.5),
+        finished: false,
+        at,
+        listened: Duration::ZERO,
+    }));
+    let Event::Positions(positions) = rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.position.secs() == 1_234.5))).await else {
+        unreachable!()
+    };
+    assert!(!positions[0].finished);
+    let bodies = rig.progress_bodies();
+    assert_eq!(bodies.len(), 2, "ABS drops a place sent with the reset: {bodies:?}");
+    assert_eq!(bodies[0], serde_json::json!({ "isFinished": false, "lastUpdate": 400_000 }), "the reset is stamped a millisecond before the place");
+    assert_eq!(bodies[1], serde_json::json!([{ "libraryItemId": "book", "currentTime": 1_234.5, "lastUpdate": 400_001 }]));
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn finishing_the_loaded_book_closes_its_session_before_the_finish_goes_out() {
+    let mut rig = Rig::new(None, None).await;
+    rig.open(1, rig.key.clone()).await;
+    // What the app sends when the listener finishes the book it is playing:
+    // stopping reports and closes at the old place, then the finish follows.
+    rig.listening.send(Request::Report { generation: 1, update: update(&rig.key, 40.0, false), close: true });
+    rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.position.secs() == 40.0))).await;
+    rig.listening.send(Request::Set(update(&rig.key, 40.0, true)));
+    rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.finished))).await;
+    let calls = rig.fake.calls();
+    assert!(calls.ends_with(&[Call::Close(40.0), Call::Patch(40.0, true)]), "the close comes first: a sync after the finish un-finishes the book: {calls:?}");
+    assert!(rig.fake.remote.lock().unwrap()[0].finished);
+    // The session is closed, so nothing of this device's writes the old place
+    // again; a pull keeps what the finish said.
+    rig.listening.send(Request::Reconcile);
+    let Event::Positions(positions) = rig.event(|e| matches!(e, Event::Positions(_))).await else { unreachable!() };
+    assert!(positions.iter().all(|p| p.finished));
+    assert!(rig.shelf.position(&rig.key).unwrap().unwrap().finished);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn settling_a_book_offline_keeps_every_intent_and_the_last_one_wins_on_replay() {
+    let mut rig = Rig::new(None, None).await;
+    rig.fake.patch_fails.store(true, Ordering::Relaxed);
+    for (at, finished) in [(90.0, true), (50.0, false), (0.0, false)] {
+        rig.listening.send(Request::Set(update(&rig.key, at, finished)));
+        rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.position.secs() == at && p.finished == finished))).await;
+    }
+    assert_eq!(rig.shelf.pending_progress().unwrap().len(), 3, "every intent waits in the log");
+    assert_eq!(rig.shelf.position(&rig.key).unwrap().unwrap().position.secs(), 0.0);
+    rig.fake.patch_fails.store(false, Ordering::Relaxed);
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.position.secs() == 0.0 && !p.finished))).await;
+    assert!(rig.shelf.pending_progress().unwrap().is_empty(), "the log is sent oldest first and done");
+    assert_eq!(*rig.fake.batches.lock().unwrap().last().unwrap(), vec![0.0], "the newest place per item is the one sent");
+    assert!(!rig.fake.remote.lock().unwrap()[0].finished);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_pull_that_races_a_finish_cannot_bring_the_old_place_back() {
+    let mut rig = Rig::new(None, None).await;
+    let served = Stamp::from_millis(1_800_000_000_000).system_time();
+    let old = Progress { item: rig.key.clone(), position: Position::from_secs(40.0), finished: false, at: Some(served) };
+    *rig.fake.remote.lock().unwrap() = vec![old.clone()];
+    // The app stamps a finish after the row it saw, even when that row's clock
+    // is ahead of this one.
+    let mut finish = update(&rig.key, 40.0, true);
+    finish.at = served + Duration::from_millis(1);
+    rig.listening.send(Request::Set(finish));
+    rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.finished))).await;
+    // A pull answered before the write landed carries the old row back.
+    *rig.fake.remote.lock().unwrap() = vec![old];
+    rig.listening.send(Request::Reconcile);
+    let Event::Positions(positions) = rig.event(|e| matches!(e, Event::Positions(_))).await else { unreachable!() };
+    assert!(positions[0].finished, "the newer entry wins");
+    assert_eq!(positions[0].at, Some(served + Duration::from_millis(1)));
+    assert!(rig.shelf.position(&rig.key).unwrap().unwrap().finished);
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
     rig.finish().await;
 }
 
