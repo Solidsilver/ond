@@ -509,13 +509,6 @@ pub(super) fn adapt(h: &mut Harness<'_, Option<OndApp>>) {
     app_mut(h).prefs.edit(|s| s.adapt_colors = true);
 }
 
-/// Turns on the experimental visuals `on` sets (the rest stay off).
-pub(super) fn experiment(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::visuals::Experimental)) {
-    let mut x = crate::visuals::Experimental::default();
-    on(&mut x);
-    looks(h, |s| s.experimental = x);
-}
-
 /// Turns the visuals that can be turned on (Appearance's and Experimental's)
 /// off, then `on` the ones a scene shows.
 pub(super) fn looks(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut crate::settings::Settings)) {

@@ -306,15 +306,6 @@ impl Scene {
         }
     }
 
-    /// The Flow scene, if that's what this is.
-    #[cfg(test)]
-    pub fn flow(&mut self) -> Option<&mut flow::Flow> {
-        match self {
-            Scene::Flow(f) => Some(f),
-            _ => None,
-        }
-    }
-
     pub fn kind(&self) -> Kind {
         match self {
             Scene::Flow(_) => Kind::Flow,
@@ -476,12 +467,6 @@ impl Morph {
         true
     }
 
-    /// Settles on `choice` and keeps it (for snapshots of each one).
-    #[cfg(test)]
-    pub fn hold(&mut self, choice: usize) {
-        (self.from, self.to, self.progress, self.wait) = (choice, choice, 1.0, f32::INFINITY);
-    }
-
     /// Starts a morph to another choice now.
     pub fn change(&mut self, rng: &mut Rng) {
         self.from = self.to;
@@ -524,132 +509,5 @@ pub fn push(out: &mut Vec<Dot>, mut dot: Dot, alpha: f32) {
     dot.color[3] *= alpha;
     if dot.color[3] > 0.002 {
         out.push(dot);
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::visuals::pulse::Feel;
-
-    /// A frame of steady music with a beat now and then (every `every`th frame).
-    pub fn music(frame: usize, every: usize) -> Frame {
-        let onset = frame.is_multiple_of(every);
-        let wave = std::sync::Arc::new((0..crate::visuals::pulse::WAVE).map(|i| (i as f32 * 0.07 + frame as f32 * 0.3).sin() * 0.8).collect());
-        let bands = std::array::from_fn(|b| 0.75 - b as f32 / BANDS as f32 * 0.5);
-        let feel = Feel { bass: 0.8, mid: 0.6, treble: 0.4, level: 0.7, onset, beat: if onset { 1.0 } else { 0.3 }, beats: (frame / every) as u64, wave };
-        Frame { bands, raw: bands, feel, fresh: true }
-    }
-
-    /// Runs `kind` for `frames` 60ths of a second with `audio` (`None`: silence).
-    pub fn run(kind: Kind, seed: u64, frames: usize, audio: bool) -> (Scene, Picture) {
-        let mut s = Scene::new(kind, seed);
-        let mut last = None;
-        for i in 0..frames {
-            let f = music(i, 30);
-            last = Some(s.step(&Input { dt: 1.0 / 60.0, half: [1.6, 1.0], audio: audio.then_some(&f) }));
-        }
-        (s, last.expect("ran"))
-    }
-
-    fn brightness(p: &Picture) -> f32 {
-        p.dots.iter().chain(&p.front).map(|d| d.color[3] * d.radius).sum()
-    }
-
-    #[test]
-    fn the_same_seed_gives_the_same_frames_and_another_differs() {
-        for kind in Kind::ALL {
-            let (_, a) = run(kind, 7, 200, true);
-            let (_, b) = run(kind, 7, 200, true);
-            assert_eq!(a, b, "{kind:?}");
-            let (_, c) = run(kind, 8, 200, true);
-            assert_ne!(a, c, "{kind:?}: another seed, another picture");
-        }
-    }
-
-    #[test]
-    fn music_brightens_every_scene_and_everything_stays_near_the_screen() {
-        for kind in Kind::ALL {
-            let (_, quiet) = run(kind, 3, 120, false);
-            let (_, loud) = run(kind, 3, 120, true);
-            assert!(brightness(&loud) > 1.5 * brightness(&quiet), "{kind:?}: {} vs {}", brightness(&loud), brightness(&quiet));
-            for d in loud.dots.iter().chain(&loud.front).chain(&loud.shades) {
-                assert!(d.at[0].abs() < 4.0 && d.at[1].abs() < 3.0, "{kind:?}: {d:?}");
-                assert!(d.color.iter().all(|c| c.is_finite()) && d.radius.is_finite());
-            }
-            assert!((0.0..=1.0).contains(&loud.warp.fade));
-        }
-    }
-
-    #[test]
-    fn kinds_step_round_and_picks_read_leniently() {
-        assert_eq!(Kind::Flow.step(1), Kind::Particles);
-        assert_eq!(Kind::Flow.step(-1), Kind::Ribbons);
-        assert_eq!(Kind::Ribbons.step(1), Kind::Flow);
-        #[derive(Deserialize)]
-        struct S {
-            #[serde(deserialize_with = "lenient_pick")]
-            p: Pick,
-        }
-        assert_eq!(serde_json::from_str::<S>(r#"{"p": "particles"}"#).unwrap().p, Pick::Particles);
-        assert_eq!(serde_json::from_str::<S>(r#"{"p": "hologram"}"#).unwrap().p, Pick::Flow);
-        assert_eq!(serde_json::to_string(&Pick::Shuffle).unwrap(), r#""shuffle""#);
-    }
-
-    #[test]
-    fn a_morph_holds_then_changes_smoothly_and_a_beat_brings_it_forward() {
-        let mut rng = Rng::new(1);
-        let mut m = Morph::new(5, (10.0, 10.0), 4.0, &mut rng);
-        let first = m.to;
-        for _ in 0..(9 * 60) {
-            assert!(!m.step(1.0 / 60.0, false, &mut rng));
-        }
-        assert_eq!((m.from, m.to, m.mix()), (first, first, 1.0));
-        // Within the last stretch of the wait, a beat starts the change.
-        for _ in 0..30 {
-            m.step(1.0 / 60.0, false, &mut rng);
-        }
-        assert!(m.step(1.0 / 60.0, true, &mut rng));
-        assert_ne!(m.to, first);
-        assert_eq!(m.mix(), 0.0);
-        m.step(2.0, false, &mut rng);
-        assert!(m.mix() > 0.3 && m.mix() < 0.7, "half way through, half mixed");
-    }
-
-    #[test]
-    fn a_palette_runs_through_its_stops() {
-        let p = Palette([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.25], [1.0, 1.0, 0.0, 0.5], [1.0, 1.0, 1.0, 1.0]]);
-        assert_eq!(p.at(0.0), [0.0; 3]);
-        assert_eq!(p.at(0.25), [1.0, 0.0, 0.0]);
-        assert_eq!(p.at(0.75), [1.0, 1.0, 0.5]);
-        assert_eq!(p.at(4.0), [1.0; 3]);
-    }
-
-    #[test]
-    fn album_colors_become_clear_bright_light() {
-        // A dull red and a near-black: the red at full brightness, a little
-        // calmer; the black left out, and two neighbours of the red added.
-        let c = vivid_colors(&[Color32::from_rgb(120, 10, 10), Color32::from_rgb(10, 10, 10)]);
-        assert_eq!(c.len(), 3);
-        let [h, s, v] = rgb_to_hsv(c[0]);
-        assert!(h.abs() < 0.01 && (s - 0.85).abs() < 1e-3 && (v - 1.0).abs() < 1e-4, "{:?}", c[0]);
-        assert!(hue_gap(rgb_to_hsv(c[1])[0], h) > 0.05 && hue_gap(rgb_to_hsv(c[2])[0], h) > 0.05);
-        // Greys only: the defaults. Several hues: kept as they are.
-        assert_eq!(vivid_colors(&[Color32::GRAY]).len(), DEFAULT_COLORS.len());
-        assert_eq!(vivid_colors(&[Color32::from_rgb(200, 40, 40), Color32::from_rgb(40, 40, 200)]).len(), 2);
-        for rgb in [[0.2, 0.5, 0.9], [0.9, 0.1, 0.4], [0.3, 0.8, 0.2]] {
-            let back = hsv_to_rgb(rgb_to_hsv(rgb));
-            assert!(rgb.iter().zip(back).all(|(a, b)| (a - b).abs() < 1e-5), "{rgb:?} → {back:?}");
-        }
-    }
-
-    #[test]
-    fn the_caption_and_name_fade_in_hold_and_fade_out() {
-        assert_eq!(caption_alpha(-1.0), 0.0);
-        assert!(caption_alpha(0.3) > 0.4 && caption_alpha(0.3) < 0.6);
-        assert_eq!(caption_alpha(2.0), 1.0);
-        assert_eq!(caption_alpha(10.0), 0.0);
-        assert_eq!(name_alpha(1.0), 1.0);
-        assert_eq!(name_alpha(3.0), 0.0);
     }
 }

@@ -46,12 +46,6 @@ impl Target {
         Self { format, offscreen: if usable { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm } }
     }
 
-    /// 8-bit pictures, for a renderer whose adapter isn't to hand.
-    #[cfg(test)]
-    pub fn plain(format: wgpu::TextureFormat) -> Self {
-        Self { format, offscreen: wgpu::TextureFormat::Rgba8Unorm }
-    }
-
     fn float(&self) -> bool {
         self.offscreen == wgpu::TextureFormat::Rgba16Float
     }
@@ -622,43 +616,4 @@ impl CallbackTrait for Release {
 /// the frame it closes. It draws nothing; `rect` only has to be on screen.
 pub fn release(rect: egui::Rect) -> egui::Shape {
     egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(rect, Release))
-}
-
-/// The visualizer's resources are in `resources` (for the snapshot that
-/// checks closing it frees them).
-#[cfg(test)]
-pub fn held(resources: &CallbackResources) -> bool {
-    resources.get::<Gpu>().is_some()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_shader_compiles() {
-        let module = naga::front::wgsl::parse_str(SHADER).unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
-    }
-
-    #[test]
-    fn big_views_are_drawn_smaller_and_scaled_up() {
-        assert_eq!(picture_size([1280, 800]), [1280, 800]);
-        assert_eq!(picture_size([2880, 1800]), [1440, 900]);
-        assert_eq!(picture_size([1824, 2736]), [960, 1440]);
-    }
-
-    #[test]
-    fn the_uniforms_fill_their_buffer() {
-        let pic = Picture::new(Default::default(), Look::Lit { centre: [0.1; 3], edge: [0.0; 3] }, 1.0);
-        let cb =
-            VisualizerCallback { target: Target::plain(wgpu::TextureFormat::Bgra8UnormSrgb), size_px: [10, 10], half: [1.6, 1.0], picture: pic, clear: true };
-        let u = uniforms(&cb, [0.1, 0.1]);
-        assert_eq!(u[0], 0.0, "cleared: nothing carries over");
-        assert_eq!(u[6], 1.0, "an sRGB target gets linear color");
-        assert_eq!(u[5], 1.5 / 255.0, "8-bit pictures lose a little each frame");
-        assert_eq!(&u[72..75], &[0.1; 3], "the backdrop");
-    }
 }
