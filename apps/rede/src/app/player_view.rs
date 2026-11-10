@@ -128,7 +128,7 @@ impl ViewCtx<'_> {
                 color: Color32::from_black_alpha(if ui.visuals().dark_mode { 110 } else { 46 }),
             };
             ui.painter().add(shadow.as_shape(cover, 8));
-            self.art.paint(ui, cover, book.item.summary.cover.as_deref(), 8);
+            self.art.paint(ui, cover, book.item.summary.cover.as_deref(), 8, &super::library::stand_in(&book.item.summary));
             ui.add_space(COVER_GAP);
             ui.add(egui::Label::new(title).selectable(false));
             ui.add_space(TITLE_GAP);
@@ -234,7 +234,12 @@ impl ViewCtx<'_> {
     fn mini_player(&mut self, ui: &mut Ui) {
         let full = ui.max_rect();
         let book = self.player.book.as_ref();
-        self.art.paint_on(ui, full, book.and_then(|b| b.item.summary.cover.as_deref()), 0, MINI_BACKDROP);
+        match book {
+            Some(b) => self.art.paint_on(ui, full, b.item.summary.cover.as_deref(), 0, MINI_BACKDROP, &super::library::stand_in(&b.item.summary)),
+            None => {
+                ui.painter().rect_filled(full, 0, MINI_BACKDROP);
+            }
+        }
         // No title bar: the cover moves the window, and a double-click goes
         // back. The controls drawn after it take the pointer where they are.
         let drag = ui.interact(full, ui.scope_id().with("mini-drag"), Sense::click_and_drag());

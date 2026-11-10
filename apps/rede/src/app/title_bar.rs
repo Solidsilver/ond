@@ -265,7 +265,7 @@ impl ViewCtx<'_> {
         let cover = rect.width() >= COVER_FROM;
         if cover {
             let art = Rect::from_min_size(rect.min, vec2(side, side));
-            self.art.paint(ui, art.shrink(1.0), cover_id.as_deref(), 6.0);
+            self.art.paint(ui, art.shrink(1.0), cover_id.as_deref(), 6.0, &super::library::stand_in(&book.item.summary));
             self.cover_button(ui, art.shrink(1.0), id.with("cover"));
         }
         let chips = Rect::from_min_max(pos2(rect.right() - side, rect.top()), rect.max);

@@ -179,6 +179,15 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // The same book without its cover: the capsule's thumbnail and the info
+    // column's are generated.
+    scene(h, s, "panel-info-missing-art", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        without_art(&mut app);
+        app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Info));
+        app
+    });
     // The bookmarks tab with rows (the third, just behind where the book
     // is, marked), and one being renamed.
     scene(h, s, "panel-bookmarks-rows", || {
@@ -447,6 +456,18 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
                 app
             });
         }
+    }
+    // A book with no cover playing: the Player and Mini draw its generated one.
+    for (mode, name) in [(Mode::Player, "mode-player-missing-art"), (Mode::Mini, "mode-mini-missing-art")] {
+        let size = mode.size();
+        h.set_size(egui::vec2(size[0], size[1]));
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, true);
+            without_art(&mut app);
+            app.mode = mode;
+            app
+        });
     }
     // The sleep menu, open over the Player with a timer waiting for the
     // chapter's end.

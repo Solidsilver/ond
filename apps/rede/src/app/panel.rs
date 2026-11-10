@@ -274,7 +274,7 @@ impl ViewCtx<'_> {
             ui.add_space(4.0);
             ui.horizontal_top(|ui| {
                 let (cover, _) = ui.allocate_exact_size(vec2(INFO_COVER, INFO_COVER), Sense::hover());
-                self.art.paint(ui, cover, summary.cover.as_deref(), 4.0);
+                self.art.paint(ui, cover, summary.cover.as_deref(), 4.0, &super::library::stand_in(summary));
                 ui.add_space(10.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
