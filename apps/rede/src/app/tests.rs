@@ -45,7 +45,7 @@ fn every_view_draws() {
     app.apply_panel(super::panel::PanelAction::Tab(super::panel::Tab::Bookmarks));
     frame(&ctx, &mut app);
     // The toasts: a bookmark made, and a position from another device.
-    app.bookmarked("Chapter 5 · 3:56:40");
+    app.bookmarked("Chapter 5", 14_200.0);
     reconciled(&mut app);
     frame(&ctx, &mut app);
     for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
@@ -434,7 +434,7 @@ fn command_b_asks_for_a_bookmark_where_the_book_is_named_for_its_chapter() {
         let Some(Action::AddBookmark { item, time, title }) = app.actions.pop() else { panic!("⌘B asks for a bookmark in {mode:?}") };
         assert_eq!(item, sources::ItemKey::new(account().id, "book-0"));
         assert_eq!(time, 14_200.0);
-        assert_eq!(title, "Chapter 5 · 3:56:40");
+        assert_eq!(title, "Chapter 5");
     }
 }
 
@@ -454,7 +454,7 @@ fn toasts_stop_asking_for_frames() {
     let ctx = h.ctx.clone();
     *h.state_mut() = Some(app(&ctx, dir.path(), BOOKS.len()));
     playing(app_mut(&mut h), true);
-    app_mut(&mut h).bookmarked("Chapter 5 · 3:56:40");
+    app_mut(&mut h).bookmarked("Chapter 5", 14_200.0);
     h.step();
     assert!(h.ctx.has_requested_repaint(), "a confirmation fades");
     idle(&mut h, "a faded confirmation");

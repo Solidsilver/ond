@@ -48,12 +48,12 @@ impl State {
 }
 
 /// Both the keyboard shortcut and the panel button use chapter metadata here;
-/// only the label is formatted, never the bookmark's identity/time.
+/// only the label is formatted, never the bookmark's identity/time. The title
+/// is the chapter alone: every row shows its time beside it already.
 pub fn at_current_position(player: &crate::player::Player) -> Option<Action> {
     let book = player.book.as_ref()?;
     let time = player.position;
-    let clock = crate::fmt::clock(time);
-    let title = book.timeline.chapter(time).map_or_else(|| clock.clone(), |i| format!("{} · {clock}", book.timeline.chapters[i].title));
+    let title = book.timeline.chapter(time).map_or_else(|| crate::fmt::clock(time), |i| book.timeline.chapters[i].title.clone());
     Some(Action::AddBookmark { item: book.key.clone(), time, title })
 }
 
@@ -99,8 +99,9 @@ impl RedeApp {
 
     /// The confirmation for a bookmark just made. In the full window, unless
     /// the Bookmarks tab is already in view, it offers to show it.
-    pub(super) fn bookmarked(&mut self, title: &str) {
-        let text = format!("Bookmarked {}", title.trim());
+    pub(super) fn bookmarked(&mut self, title: &str, time: f64) {
+        let (title, clock) = (title.trim(), crate::fmt::clock(time));
+        let text = if title == clock { format!("Bookmarked {clock}") } else { format!("Bookmarked {title} at {clock}") };
         let in_view = self.panel_shown() && self.ui.panel.tab == super::panel::Tab::Bookmarks;
         if self.mode == crate::window::Mode::Full && !in_view {
             self.ui.toasts.note(text, "Show", Action::Panel(super::panel::PanelAction::Show(super::panel::Tab::Bookmarks)));
@@ -266,8 +267,8 @@ mod tests {
         };
         assert_eq!(item, app.player.book.as_ref().unwrap().key);
         assert_eq!(time.to_bits(), app.player.position.to_bits());
-        assert!(title.contains("20:34"));
-        assert!(title.contains('·'));
+        let chapter = app.player.book.as_ref().unwrap().timeline.chapter(time).unwrap();
+        assert_eq!(title, app.player.book.as_ref().unwrap().timeline.chapters[chapter].title, "the title is the chapter; the row shows the time");
         app.bookmark_event(BookmarkMsg::Updated(shelf::BookmarkSnapshot {
             revision: 1,
             bookmarks: vec![Bookmark { item: item.clone(), position: Position::from_secs(time), title, created: SystemTime::UNIX_EPOCH }],

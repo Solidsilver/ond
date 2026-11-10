@@ -225,7 +225,7 @@ Use a release build, a dedicated Audiobookshelf account and a second client
 
 - [ ] Add a bookmark with ⌘B (in the full window, the Player and Mini), with
   Add bookmark on the Bookmarks tab, and with the Player's bookmark button.
-  The default title names the chapter and time, and a toast confirms it; its
+  The default title is the chapter (the row shows the time), and a toast confirms it with the time; its
   Show opens the tab. Rename one from its … menu and from a right-click (Enter
   keeps it, Esc doesn't, an empty title isn't taken), jump to it with a click,
   then delete it and use the toast's Undo. Verify the same changes on the

@@ -407,7 +407,7 @@ impl RedeApp {
             Action::PlayBook(id) => self.play_book(id, None),
             Action::AddBookmark { item, time, title } => {
                 if self.edit_bookmark(item, time, title.clone(), shelf::BookmarkChange::Create) {
-                    self.bookmarked(&title);
+                    self.bookmarked(&title, time);
                 }
             }
             Action::RenameBookmark { item, time, title } => {

@@ -355,11 +355,11 @@ pub fn whole_window(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
 pub fn bookmarks(app: &mut RedeApp) {
     let item = ItemKey::new(account().id, "book-0");
     let rows = [
-        (312.5, "Prologue · 5:12"),
+        (312.5, "Prologue"),
         (7_020.0, "Genly meets the king"),
-        (13_955.25, "Chapter 5 · 3:52:35"),
+        (13_955.25, "Chapter 5"),
         (14_480.0, "Estraven's warning, the whole speech"),
-        (30_100.0, "Chapter 9 · 8:21:40"),
+        (30_100.0, "Chapter 9"),
     ];
     let bookmarks = rows
         .iter()

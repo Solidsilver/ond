@@ -74,7 +74,7 @@ fn every_view_names_its_controls() {
     // The toasts, with their buttons (the confirmation offers the tab when
     // it isn't in view).
     app_mut(&mut h).ui.panel.tab = super::panel::Tab::Chapters;
-    app_mut(&mut h).bookmarked("Chapter 5 · 3:56:40");
+    app_mut(&mut h).bookmarked("Chapter 5", 14_200.0);
     reconciled(app_mut(&mut h));
     h.run_steps(3);
     h.check_accessibility();
@@ -845,7 +845,7 @@ fn a_bookmark_jumps_on_a_click_and_its_menu_renames_it_in_place_or_deletes_it() 
     h.check_accessibility();
     h.get_by_label("5 bookmarks");
     // The chapter is in the name only when the title doesn't already say it.
-    h.get_by_label("Chapter 5 · 3:52:35, 3:52:35, jump there");
+    h.get_by_label("Chapter 5, 3:52:35, jump there");
     h.get_by_label("Genly meets the king, 1:57:00, Chapter 3, jump there").click();
     h.run_steps(2);
     assert_eq!(asked(&mut h), [("jump", 7_020.0, String::new())]);
@@ -903,7 +903,7 @@ fn the_bookmarks_tab_adds_where_the_book_is_and_says_how_when_there_are_none() {
     h.get_by_label_contains("to mark this spot.");
     h.get_by_label("Add bookmark").click();
     h.run_steps(2);
-    assert_eq!(asked(&mut h), [("add", 14_200.0, "Chapter 5 · 3:56:40".to_owned())]);
+    assert_eq!(asked(&mut h), [("add", 14_200.0, "Chapter 5".to_owned())]);
 }
 
 #[test]
@@ -911,18 +911,18 @@ fn a_new_bookmark_is_confirmed_with_a_way_to_the_tab() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     playing(app_mut(&mut h), true);
-    app_mut(&mut h).bookmarked("Chapter 5 · 3:56:40");
+    app_mut(&mut h).bookmarked("Chapter 5", 14_200.0);
     h.run_steps(3);
     h.check_accessibility();
-    h.get_by_label("Bookmarked Chapter 5 · 3:56:40");
+    h.get_by_label("Bookmarked Chapter 5 at 3:56:40");
     h.get_by_label("Show").click();
     h.run_steps(3);
     let app = app_mut(&mut h);
     assert!(app.panel_shown() && app.ui.panel.tab == super::panel::Tab::Bookmarks);
     // With the tab in view, there's nothing to show: the toast just says so.
-    app.bookmarked("Here");
+    app.bookmarked("Here", 60.0);
     h.run_steps(2);
-    h.get_by_label("Bookmarked Here");
+    h.get_by_label("Bookmarked Here at 1:00");
     assert!(h.query_by_label("Show").is_none());
 }
 

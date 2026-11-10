@@ -210,7 +210,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     scene(h, s, "toast-bookmarked", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         playing(&mut app, true);
-        app.bookmarked("Chapter 5 · 3:56:40");
+        app.bookmarked("Chapter 5", 14_200.0);
         app
     });
     scene(h, s, "toast-reconciled", || {
@@ -223,7 +223,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         playing(&mut app, true);
         reconciled(&mut app);
-        app.bookmarked("Chapter 5 · 3:56:40");
+        app.bookmarked("Chapter 5", 14_200.0);
         app
     });
     // The Playback and Sleep timer popovers, open from the capsule's chips:
@@ -466,7 +466,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     // A bookmark made in the Player: the confirmation over its foot.
     if let Some(app) = h.state_mut().as_mut() {
         app.player.sleep = None;
-        app.bookmarked("Chapter 5 · 3:56:40");
+        app.bookmarked("Chapter 5", 14_200.0);
         reconciled(app);
     }
     s.shoot(h, "mode-player-bookmarked");
