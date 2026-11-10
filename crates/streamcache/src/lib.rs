@@ -391,6 +391,14 @@ impl StreamCache {
         Some(Progress { downloaded: st.ranges.total(), len: st.len, complete: st.complete })
     }
 
+    /// The offset a blocked reader of `key`'s download has asked for, if any:
+    /// tests wait on it to know a seek landed before they let the server go.
+    #[cfg(test)]
+    pub(crate) fn wanted(&self, key: &CacheKey) -> Option<u64> {
+        let dl = self.inner.lock_index().active.get(&key.file_name())?.clone();
+        dl.lock().wanted
+    }
+
     /// Cancels every download and the prefetch. Completed files stay.
     ///
     /// The cancelled downloads leave the index at once, so an `open` right

@@ -87,9 +87,9 @@ fn seek_forward_past_download_point_then_backward() {
     let rt = runtime();
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
-    // 2 MB, with the first 1 MB held open: nothing past it arrives in order.
+    // 2 MB, held open after the first 64 KB: nothing past it arrives in order.
     let body = data(2_000_000);
-    let server = RangeServer::start(body.clone(), Serve { gate_after: Some(1_000_000), ..Serve::fast() });
+    let server = RangeServer::start(body.clone(), Serve { gate_after: Some(64 * 1024), ..Serve::fast() });
     let key = CacheKey::new("t2", None);
 
     let mut src = cache.open(&key, &server.url(), never()).unwrap();
@@ -472,7 +472,7 @@ fn a_backward_seek_into_a_gap_fetches_it() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(2_000_000);
-    let server = RangeServer::start(body.clone(), Serve { gate_after: Some(1_000_000), ..Serve::fast() });
+    let server = RangeServer::start(body.clone(), Serve { gate_after: Some(64 * 1024), ..Serve::fast() });
     let key = CacheKey::new("gap", None);
 
     let mut src = cache.open(&key, &server.url(), never()).unwrap();
@@ -593,9 +593,9 @@ fn a_seek_while_reconnecting_is_not_lost() {
         (got, src)
     });
     asked.recv().unwrap();
-    // A seek is a local call into the download's state; give that thread the
-    // moment it needs to make it, so the ask lands while the gate is shut.
-    thread::sleep(Duration::from_millis(20));
+    // The ask has to land while the gate is shut, or a late reader is served
+    // by the reconnect's wake and the test passes with the bug.
+    wait_until("reader waiting", || cache.wanted(&key) == Some(far));
     let t = Instant::now();
     gate.store(true, Ordering::Relaxed);
     let (got, _src) = reader.join().unwrap();
@@ -636,13 +636,17 @@ fn ranges_without_a_total_fill_the_skipped_part() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(2_000_000);
-    let server = RangeServer::start(body.clone(), Serve { star_total: true, gate_after: Some(1_500_000), ..Serve::fast() });
+    // Held well short of the seek: only a relocated request can answer it in
+    // time, where a gate at the seek point let the stall's retry pass instead.
+    let server = RangeServer::start(body.clone(), Serve { star_total: true, gate_after: Some(64 * 1024), ..Serve::fast() });
     let key = CacheKey::new("star", None);
 
     let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(src.byte_len(), None);
     assert_eq!(read_at(&mut src, 0, 1024), body[..1024]);
+    let t = Instant::now();
     assert_eq!(read_at(&mut src, 1_500_000, 64 * 1024), body[1_500_000..1_500_000 + 64 * 1024]);
+    assert!(t.elapsed() < slack(Duration::from_secs(1)), "far read waited {:?}", t.elapsed());
     assert!(server.requests().contains(&Some(1_500_000)), "no ranged request: {:?}", server.requests());
 
     server.open_gate();
