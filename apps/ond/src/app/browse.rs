@@ -12,7 +12,7 @@ use crate::settings::ViewMode;
 use crate::theme::{Tokens, semibold};
 use crate::widgets::{choice, elide, view_picker};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use shell::kit::page_heading;
+use shell::kit::{NavClick, page_heading};
 use std::sync::Arc;
 
 const TILE_MIN: f32 = 160.0;
@@ -137,41 +137,13 @@ impl OndApp {
 
     /// Back / forward and the breadcrumb trail of recent places.
     fn trail_bar(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let back = ui
-                .add_enabled_ui(self.ui.nav.can_back(), |ui| icons::sized_button(ui, Icon::ChevronLeft, "Back (⌘[)", vec2(26.0, 26.0), 10.0, Some(t.text)))
-                .inner;
-            if back.clicked() {
-                self.actions.push(Action::Back);
-            }
-            let fwd = ui
-                .add_enabled_ui(self.ui.nav.can_forward(), |ui| {
-                    icons::sized_button(ui, Icon::ChevronRight, "Forward (⌘])", vec2(26.0, 26.0), 10.0, Some(t.text))
-                })
-                .inner;
-            if fwd.clicked() {
-                self.actions.push(Action::Forward);
-            }
-            ui.add_space(8.0);
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let trail = self.ui.nav.trail();
-            let n = trail.len();
-            let labels: Vec<String> = trail.iter().map(|r| route_label(r, &self.data)).collect();
-            for (i, label) in labels.iter().enumerate() {
-                if i + 1 == n {
-                    ui.label(egui::RichText::new(label).size(12.0).color(t.text));
-                } else {
-                    if crate::widgets::link(ui, label, FontId::proportional(12.0), t.muted).clicked() {
-                        self.actions.push(Action::BackBy(n - 1 - i));
-                    }
-                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 12.0), Sense::hover());
-                    icons::paint(ui.painter(), r.shrink(1.5), Icon::ChevronRight, t.muted);
-                }
-            }
-        });
-        ui.add_space(6.0);
+        let labels: Vec<String> = self.ui.nav.trail().iter().map(|r| route_label(r, &self.data)).collect();
+        match shell::kit::nav_row(ui, self.ui.nav.can_back(), self.ui.nav.can_forward(), &labels) {
+            Some(NavClick::Back) => self.actions.push(Action::Back),
+            Some(NavClick::Forward) => self.actions.push(Action::Forward),
+            Some(NavClick::BackBy(steps)) => self.actions.push(Action::BackBy(steps)),
+            None => {}
+        }
     }
 
     /// An artist's albums, then the albums that credit them elsewhere (from

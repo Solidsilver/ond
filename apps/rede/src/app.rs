@@ -131,6 +131,9 @@ impl Drop for AppRuntime {
 pub enum Action {
     Go(Route),
     Back,
+    Forward,
+    /// An earlier breadcrumb: back this many steps.
+    BackBy(usize),
     /// Connect with what's typed in the sign-in form.
     SignIn,
     CheckServer,
@@ -432,6 +435,16 @@ impl RedeApp {
         match action {
             Action::Go(route) => self.go(route),
             Action::Back => self.back(),
+            Action::Forward => {
+                self.ui.landing = false;
+                self.ui.nav.forward();
+                self.on_arrive();
+            }
+            Action::BackBy(steps) => {
+                self.ui.landing = false;
+                self.ui.nav.back_by(steps);
+                self.on_arrive();
+            }
             Action::SignIn => self.sign_in(),
             Action::CheckServer => self.check_server(),
             Action::OpenId => self.begin_openid(),
@@ -691,10 +704,11 @@ impl RedeApp {
                 self.sidebar_panel(ui, sidebar, width);
                 self.side_panel(ui);
                 let content = egui::CentralPanel::default()
-                    .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 0 }))
+                    .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
                     .show(ui, |ui| {
                         let within = ui.max_rect();
                         self.notice_bar(ui);
+                        self.view().nav_row(ui);
                         let route = self.ui.nav.current().clone();
                         match &route {
                             Route::Home => self.view().home_page(ui),

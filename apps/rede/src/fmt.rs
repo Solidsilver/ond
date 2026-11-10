@@ -19,6 +19,14 @@ pub fn span(secs: f64) -> String {
     }
 }
 
+/// How far into a book, and how long it is, in the tiles' short words:
+/// "6h 25m of 11h 24m". The time in is rounded down (it isn't there yet),
+/// the length up, as [`span`] rounds it.
+pub fn of_span(at: f64, duration: f64) -> String {
+    let hm = |mins: u64| if mins >= 60 { format!("{}h {}m", mins / 60, mins % 60) } else { format!("{mins}m") };
+    format!("{} of {}", hm((at.max(0.0) / 60.0).floor() as u64), hm((duration.max(0.0) / 60.0).ceil() as u64))
+}
+
 /// How long ago, in Ond's words: "just now", "5 minutes ago", "3 hours ago",
 /// "2 days ago".
 pub fn ago(at: std::time::SystemTime) -> String {
@@ -35,6 +43,12 @@ pub fn ago(at: std::time::SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn how_far_reads_in_hours_and_minutes() {
+        assert_eq!(of_span(23_100.0, 41_000.0), "6h 25m of 11h 24m");
+        assert_eq!(of_span(59.0, 1_800.0), "0m of 30m");
+    }
 
     #[test]
     fn lengths_read_like_clocks() {

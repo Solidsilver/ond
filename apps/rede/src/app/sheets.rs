@@ -43,6 +43,7 @@ const SHORTCUTS: [Group; 4] = [
     (
         "Navigation",
         &[
+            ("Back, forward", &["⌘[", "⌘]"]),
             ("Search", &["⌘K", "⌘F", "/"]),
             ("Collapse / expand sidebar", &["⌥⌘S"]),
             ("Settings", &["⌘,"]),

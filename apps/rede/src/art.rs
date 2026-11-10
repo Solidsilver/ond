@@ -45,9 +45,30 @@ struct Key {
 /// What a load reports: the cover, or that the disk cache missed and it needs a
 /// download.
 enum Outcome {
-    Image(Option<ColorImage>),
+    Image(Option<Decoded>),
     Miss,
 }
+
+/// A decoded cover, and for one that isn't square its small blurred copy,
+/// the ground a square tile draws it on.
+struct Decoded {
+    image: ColorImage,
+    blurred: Option<ColorImage>,
+}
+
+impl Decoded {
+    fn new(image: ColorImage) -> Self {
+        let [w, h] = image.size;
+        let square = w == 0 || h == 0 || (w as f32 / h as f32 - 1.0).abs() < SQUARE_WITHIN;
+        let blurred = if square { None } else { shell::art::blurred(&image).map(|(b, _)| b) };
+        Self { image, blurred }
+    }
+}
+
+/// A cover this close to square fills its tile; past it, it gets a ground.
+const SQUARE_WITHIN: f32 = 0.02;
+/// The blurred ground, dimmed so the cover on it stays the thing seen.
+const GROUND_TINT: Color32 = Color32::from_gray(190);
 
 /// A finished job: its key, its number in the queue and what it found.
 type Loaded = (Key, u64, Outcome);
@@ -63,6 +84,8 @@ pub struct Art {
     covers: HashMap<Arc<str>, u32>,
     names: Vec<Arc<str>>,
     textures: HashMap<Key, TextureHandle>,
+    /// The blurred grounds of the covers that aren't square, by the same key.
+    grounds: HashMap<Key, TextureHandle>,
     lru: Lru<Key>,
     queue: Queue<Key>,
     /// Running downloads, by job, so a scrolled-past one can be aborted.
@@ -88,6 +111,7 @@ impl Art {
             covers: HashMap::new(),
             names: Vec::new(),
             textures: HashMap::new(),
+            grounds: HashMap::new(),
             lru: Lru::new(TEXTURE_BUDGET),
             queue: Queue::new(),
             downloads: HashMap::new(),
@@ -138,7 +162,7 @@ impl Art {
                     image
                 }
             };
-            let Some(image) = image else {
+            let Some(decoded) = image else {
                 self.missing.insert(key);
                 continue;
             };
@@ -147,12 +171,8 @@ impl Art {
                 // There may be more waiting: the next frame takes them.
                 self.ctx.request_repaint();
             }
-            let weight = image.width() * image.height() * 4;
-            let tex = self.ctx.load_texture(format!("cover:{}:{}", self.names[key.cover as usize], key.size), image, TextureOptions::LINEAR);
-            for gone in self.lru.insert(key, weight) {
-                self.textures.remove(&gone);
-            }
-            self.textures.insert(key, tex);
+            let name = format!("{}:{}", self.names[key.cover as usize], key.size);
+            self.upload(key, &name, decoded);
         }
         for key in self.queue.next_frame() {
             if let Some((_, task)) = self.downloads.remove(&key) {
@@ -160,6 +180,23 @@ impl Art {
             }
         }
         self.launch();
+    }
+
+    /// Puts a decoded cover (and its ground) on the GPU under `key`, making
+    /// room in the budget.
+    fn upload(&mut self, key: Key, name: &str, decoded: Decoded) {
+        let ground_weight = decoded.blurred.as_ref().map_or(0, |b| b.width() * b.height() * 4);
+        let weight = decoded.image.width() * decoded.image.height() * 4 + ground_weight;
+        let tex = self.ctx.load_texture(format!("cover:{name}"), decoded.image, TextureOptions::LINEAR);
+        for gone in self.lru.insert(key, weight) {
+            self.textures.remove(&gone);
+            self.grounds.remove(&gone);
+        }
+        self.textures.insert(key, tex);
+        match decoded.blurred {
+            Some(b) => self.grounds.insert(key, self.ctx.load_texture(format!("ground:{name}"), b, TextureOptions::LINEAR)),
+            None => self.grounds.remove(&key),
+        };
     }
 
     /// The best texture for `cover` drawn at `points` wide. Starts a load when
@@ -248,20 +285,47 @@ impl Art {
         self.draw(ui, rect, cover, radius.into(), backdrop, stand_in, true);
     }
 
+    /// Where `cover` sits drawn at its own shape within `bounds`, placed by
+    /// `align`, so a page can draw it without the backdrop around it. Until
+    /// its art is here (and for a book without any, whose generated cover is
+    /// square) that's all of `bounds`.
+    pub fn fitted(&mut self, bounds: Rect, cover: Option<&str>, align: egui::Align2) -> Rect {
+        let points = bounds.width().max(bounds.height());
+        let Some(size) = cover.and_then(|c| self.texture(c, points)).map(|t| t.size_vec2()).filter(|s| s.x > 0.0 && s.y > 0.0) else {
+            return bounds;
+        };
+        let scale = (bounds.width() / size.x).min(bounds.height() / size.y);
+        align.align_size_within_rect(size * scale, bounds)
+    }
+
     /// `bare`: a book without a cover gets only its generated ground, no
     /// title.
     #[allow(clippy::too_many_arguments)]
     fn draw(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: CornerRadius, backdrop: Color32, stand_in: &Generated, bare: bool) {
         let points = rect.width().max(rect.height());
-        let texture = cover.and_then(|c| self.texture(c, points));
+        let key = cover.and_then(|c| self.shown(c, points));
+        let texture = key.and_then(|k| self.textures.get(&k).cloned());
         let painter = ui.painter();
         match texture {
             Some(texture) => {
-                painter.rect_filled(rect, radius, backdrop);
                 let size = texture.size_vec2();
                 let scale = (rect.width() / size.x).min(rect.height() / size.y);
                 let fitted = Rect::from_center_size(rect.center(), size * scale);
                 let uv = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+                // Where the cover doesn't fill the tile, the tile is the cover
+                // itself blurred and dimmed (cropped to the tile, not
+                // stretched), else the quiet backdrop. Mini picks its own
+                // (`bare`).
+                let ground = key.filter(|_| !bare && size.x > 0.0 && size.y > 0.0).and_then(|k| self.grounds.get(&k));
+                match ground {
+                    Some(ground) => {
+                        let crop = shell::art::crop_uv(size.y / size.x * rect.width() / rect.height());
+                        painter.add(egui::epaint::RectShape::filled(rect, radius, GROUND_TINT).with_texture(ground.id(), crop));
+                    }
+                    None => {
+                        painter.rect_filled(rect, radius, backdrop);
+                    }
+                }
                 painter.add(egui::epaint::RectShape::filled(fitted, radius, Color32::WHITE).with_texture(texture.id(), uv));
             }
             None if cover.is_some_and(|c| !self.is_missing(c, points)) => {
@@ -291,18 +355,13 @@ impl Art {
     #[cfg(test)]
     pub fn preload(&mut self, cover: &str, image: ColorImage) {
         let key = self.key(cover, 512);
-        let weight = image.width() * image.height() * 4;
-        let texture = self.ctx.load_texture(cover, image, TextureOptions::LINEAR);
-        for gone in self.lru.insert(key, weight) {
-            self.textures.remove(&gone);
-        }
-        self.textures.insert(key, texture);
+        self.upload(key, cover, Decoded::new(image));
     }
 }
 
 /// The cached file for `cover` at `size`, else the account's (cached on the
 /// way); `None` when neither has it, or there's no account to ask.
-async fn fetch(source: Option<&dyn Source>, dir: &Path, cover: &str, size: u32) -> Option<ColorImage> {
+async fn fetch(source: Option<&dyn Source>, dir: &Path, cover: &str, size: u32) -> Option<Decoded> {
     let bytes = match read_cached(dir, cover, size).await {
         Some(b) => b,
         None => fetch_cached(source?, dir, cover, size).await?,
@@ -319,8 +378,8 @@ async fn read_cached(dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<ColorImage> {
-    tokio::task::spawn_blocking(move || shell::art::decode(&bytes, size)).await.ok().flatten()
+async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<Decoded> {
+    tokio::task::spawn_blocking(move || shell::art::decode(&bytes, size).map(Decoded::new)).await.ok().flatten()
 }
 
 /// Fetches `cover` at `size` px from the account into the cache (written whole,
@@ -346,7 +405,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn non_square_covers_are_centred_and_fitted_without_cropping() {
+    fn non_square_covers_are_centred_and_fitted_without_cropping_on_their_blurred_selves() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
@@ -356,14 +415,23 @@ mod tests {
             art.preload("book", ColorImage::filled(size, Color32::WHITE));
             let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, Some("book"), 5, &STAND_IN));
             out.textures_delta.clear();
-            let painted = out
+            let textured: Vec<_> = out
                 .shapes
                 .iter()
-                .find_map(|s| match &s.shape {
+                .filter_map(|s| match &s.shape {
                     egui::Shape::Rect(r) if r.fill_texture_id() != egui::TextureId::default() => Some(r),
                     _ => None,
                 })
-                .expect("the cover is painted");
+                .collect();
+            let painted = textured.last().expect("the cover is painted");
+            // A cover that isn't square lies on its own blurred copy, which
+            // fills the tile; a square one needs none.
+            if expected == rect.size() {
+                assert_eq!(textured.len(), 1);
+            } else {
+                assert_eq!(textured.len(), 2);
+                assert_eq!(textured[0].rect, rect, "the ground fills the tile");
+            }
             assert_eq!(painted.rect.size(), expected);
             assert_eq!(painted.rect.center(), rect.center());
             assert_eq!(painted.brush.as_ref().unwrap().uv, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)));

@@ -150,6 +150,20 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // A book partway, opened from Home (the breadcrumb says so), with how
+    // far along it is under Resume; and a finished one.
+    scene(h, s, "book-started", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app.go(book_route(2));
+        app
+    });
+    scene(h, s, "book-finished", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app.go(book_route(4));
+        app
+    });
     // Home with books partway (the one heard last first) and one finished,
     // as the window opens with something in progress; Home with nothing
     // begun; and the library with the same mix on its covers.
@@ -470,6 +484,12 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     scene(h, s, "book-narrow", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         app.go(book_route(0));
+        app
+    });
+    scene(h, s, "book-started-narrow", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app.go(book_route(2));
         app
     });
     scene(h, s, "home-narrow", || {
