@@ -42,7 +42,7 @@ pub enum Icon {
     Grid,
     /// Songs.
     Note,
-    /// Lyrics: a speech bubble with lines of text.
+    /// Lyrics: lines of words with a note beside them.
     Lyrics,
     /// Offline.
     Download,
@@ -370,12 +370,16 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(tri(vec![p(x - stem, top), p(right, top + 0.22), p(right, top + 0.56), p(x - stem, top + 0.34)]));
         }
         Icon::Lyrics => {
-            painter.add(Shape::line(
-                vec![p(-0.85, -0.7), p(0.85, -0.7), p(0.85, 0.4), p(-0.2, 0.4), p(-0.55, 0.8), p(-0.55, 0.4), p(-0.85, 0.4), p(-0.85, -0.7)],
-                line,
-            ));
-            painter.line_segment([p(-0.5, -0.3), p(0.5, -0.3)], line);
-            painter.line_segment([p(-0.5, 0.05), p(0.2, 0.05)], line);
+            // Lines of words, shortening as a verse does, and a note beside
+            // them. A bubble round the lines read as a chat.
+            for (y, end) in [(-0.62, 0.2), (0.0, 0.0), (0.62, -0.25)] {
+                painter.line_segment([p(-0.9, y), p(end, y)], line);
+            }
+            let (head, x) = (0.24, 0.72);
+            let stem = (r * 0.16).max(1.0) / r;
+            painter.circle_filled(p(x - head, 0.6), r * head, color);
+            painter.rect_filled(Rect::from_min_max(p(x - stem, -0.85), p(x, 0.6)), 0.0, color);
+            painter.add(tri(vec![p(x - stem, -0.85), p(1.0, -0.68), p(1.0, -0.42), p(x - stem, -0.58)]));
         }
         Icon::Download => {
             painter.line_segment([p(0.0, -0.85), p(0.0, 0.3)], line);
