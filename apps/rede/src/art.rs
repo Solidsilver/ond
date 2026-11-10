@@ -381,7 +381,7 @@ mod tests {
         art.preload_missing("gone");
         // The theme's fonts (its semibold) arrive a frame after they're installed.
         shell::theme::install(&ctx, shell::theme::ThemePref::Light);
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| ());
+        ctx.run_ui(egui::RawInput::default(), |_| ()).textures_delta.clear();
         let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(176.0, 176.0));
         let texts = |out: &egui::FullOutput| out.shapes.iter().filter(|s| matches!(s.shape, egui::Shape::Text(_))).count();
         let tile = |out: &egui::FullOutput| {
