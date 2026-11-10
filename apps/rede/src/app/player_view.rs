@@ -4,8 +4,9 @@
 //! The Player is for reading across the room: the cover as large as the
 //! window allows, the book and chapter under it, the chapter scrubber over
 //! the whole-book hairline with the chapter's times at its ends, the
-//! transport, and a last row with the sleep timer and the book's time left
-//! at the speed it plays. Everything under the cover has a fixed height, so
+//! transport, and a last row with a bookmark button, the sleep timer and the
+//! book's time left at the speed it plays (whose popover has voice boost and
+//! skip silence). Everything under the cover has a fixed height, so
 //! the cover takes what's left and nothing moves as the readouts change.
 //!
 //! Mini is Ond's Mini: the cover fills the square window, the mode buttons
@@ -55,7 +56,7 @@ const PLAYER_TRANSPORT_GAP: f32 = 16.0;
 
 /// Mini's scrim along the foot of the cover, its padding, and the transport
 /// on it; the capsule of mode buttons in the corner.
-const MINI_PANEL_H: f32 = 112.0;
+pub(super) const MINI_PANEL_H: f32 = 112.0;
 const MINI_PAD_X: f32 = 14.0;
 const MINI_PAD_Y: f32 = 10.0;
 const MINI_PLAY_D: f32 = 40.0;
@@ -165,8 +166,8 @@ impl ViewCtx<'_> {
         }
     }
 
-    /// The sleep pill, then the book's time left at the speed in its pill,
-    /// centred as one group under the transport.
+    /// The bookmark and sleep pills, then the book's time left at the speed
+    /// in its pill, centred as one group under the transport.
     fn room_controls(&mut self, ui: &mut Ui, t: &Tokens, book_left: f64) {
         let size = Pill::ROOM;
         let speed = self.player.speed;
@@ -176,7 +177,7 @@ impl ViewCtx<'_> {
         let sleep_w = controls::pill_width(ui, size, Some(Icon::Moon), self.sleep_text().as_deref());
         let speed_w = controls::pill_width(ui, size, None, Some(&crate::timeline::speed_label(speed)));
         let (group_gap, gap) = (14.0, 6.0);
-        let total = sleep_w + group_gap + text_w + gap + speed_w;
+        let total = size.height + gap + sleep_w + group_gap + text_w + gap + speed_w;
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), size.height), Sense::hover());
         let start = row.left() + ((row.width() - total) / 2.0).max(0.0);
         let mut line = ui.new_child(
@@ -186,6 +187,11 @@ impl ViewCtx<'_> {
                 .layout(Layout::left_to_right(Align::Center)),
         );
         line.spacing_mut().item_spacing.x = gap;
+        if controls::pill_button(&mut line, t, size, Icon::Bookmark, "Add bookmark (⌘B)").clicked()
+            && let Some(add) = super::bookmarks::at_current_position(self.player)
+        {
+            self.actions.push(add);
+        }
         self.sleep_control(&mut line, size);
         line.add_space(group_gap - gap);
         line.label(egui::RichText::new(text).font(font).color(t.muted));

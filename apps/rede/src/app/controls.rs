@@ -36,18 +36,17 @@ const PLAYBACK_W: f32 = 296.0;
 
 impl ViewCtx<'_> {
     /// The Playback popover the speed chip and pill open: the speed, large,
-    /// with its presets, a slider and its steppers; then Stop, and the way
-    /// to Settings' Playback tab. The skip lengths and rewinds are settings,
-    /// not controls, so they live there.
+    /// with its presets, a slider and its steppers; voice boost and skip
+    /// silence, with what skipping has saved in this book; then Stop, and the
+    /// way to Settings' Playback tab. The skip lengths and rewinds are
+    /// settings, not controls, so they live there.
     pub(super) fn playback_menu(&mut self, anchor: &Response) {
         kit::popover(anchor, PLAYBACK_W, |ui| {
             kit::popover_title(ui, "Playback", None);
             ui.add_space(10.0);
             kit::padded(ui, |ui| self.speed_controls(ui));
-            // M3: voice boost and skip silence go here, under a
-            // `kit::popover_rule(ui, 8.0)`, as two `kit::switch_row`s
-            // ("Voice boost", "Skip silence") that push their PrefsAction.
-            // The rows inset themselves, so they sit straight in the popover.
+            kit::popover_rule(ui, 8.0);
+            self.speech_switches(ui);
             kit::popover_rule(ui, 8.0);
             ui.horizontal(|ui| {
                 ui.add_space(kit::POPOVER_PAD - 8.0);
@@ -65,6 +64,25 @@ impl ViewCtx<'_> {
                 });
             });
         });
+    }
+
+    /// Voice boost and skip silence, the two switches you'd flip while
+    /// listening; under them, once skipping has cut something from this
+    /// book, how much.
+    fn speech_switches(&mut self, ui: &mut Ui) {
+        let mut voice = self.playback.voice_boost;
+        if kit::switch_row(ui, "Voice boost", &mut voice) {
+            self.actions.push(Action::Prefs(super::PrefsAction::VoiceBoost(voice)));
+        }
+        let mut skip = self.playback.skip_silence;
+        if kit::switch_row(ui, "Skip silence", &mut skip) {
+            self.actions.push(Action::Prefs(super::PrefsAction::SkipSilence(skip)));
+        }
+        if let Some(saved) = saved_line(self.playback.skip_silence, self.player.silence_saved) {
+            let t = Tokens::of(ui);
+            kit::padded(ui, |ui| ui.label(RichText::new(saved).size(11.5).color(t.muted)));
+            ui.add_space(4.0);
+        }
     }
 
     /// The speed: its value large, the `[` and `]` that step it, the presets
@@ -121,6 +139,21 @@ impl ViewCtx<'_> {
             }
         });
     }
+}
+
+/// "Saved 3m 12s in this book": what skip silence has cut, once it's on and
+/// has cut a whole second.
+fn saved_line(on: bool, saved: f64) -> Option<String> {
+    if !on || saved < 1.0 {
+        return None;
+    }
+    let s = saved as u64;
+    let span = match (s / 3600, s / 60 % 60, s % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, m, _) => format!("{h}h {m}m"),
+    };
+    Some(format!("Saved {span} in this book"))
 }
 
 /// A speed on the slider's 0.05 grid, within its range.
@@ -193,6 +226,19 @@ pub(super) fn pill(ui: &mut Ui, t: &Tokens, size: Pill, icon: Option<Icon>, text
     let chevron = Rect::from_center_size(pos2(rect.right() - 12.0 * s, rect.center().y + 0.5), vec2(8.0 * s, 8.0 * s));
     icons::paint(ui.painter(), chevron, Icon::ChevronDown, t.muted);
     resp
+}
+
+/// A round button the size of a pill, for a command rather than a menu: no
+/// chevron, the glyph centred. The Player's bookmark.
+pub(super) fn pill_button(ui: &mut Ui, t: &Tokens, size: Pill, icon: Icon, label: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size.height, size.height), Sense::click());
+    ui.painter().rect_filled(rect, rect.height() / 2.0, if resp.hovered() { t.selected } else { t.field });
+    shell::kit::focus_ring(ui, &resp, rect, rect.height() / 2.0);
+    let glyph = size.font;
+    icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(glyph, glyph)), icon, if resp.hovered() { t.text } else { t.muted });
+    let label = shell::keys::shown(label).into_owned();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(label)
 }
 
 /// The speed as a pill, in the Player.
@@ -310,5 +356,17 @@ impl Scrub {
             None
         };
         (shown, seek, live)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_saved_line_waits_for_a_whole_second_and_reads_in_minutes() {
+        assert_eq!(super::saved_line(false, 192.0), None, "skip silence is off");
+        assert_eq!(super::saved_line(true, 0.4), None, "nothing worth saying yet");
+        assert_eq!(super::saved_line(true, 42.9).as_deref(), Some("Saved 42s in this book"));
+        assert_eq!(super::saved_line(true, 192.0).as_deref(), Some("Saved 3m 12s in this book"));
+        assert_eq!(super::saved_line(true, 3_900.0).as_deref(), Some("Saved 1h 5m in this book"));
     }
 }
