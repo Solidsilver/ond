@@ -6,10 +6,10 @@ use super::commands::PlaylistAction;
 use super::{Action, OndApp};
 use crate::keys::{BINDINGS, GROUPS};
 use crate::theme::{Tokens, semibold};
-use crate::widgets::{danger, primary, secondary};
+use crate::widgets::{primary, secondary};
 use egui::{FontId, Key, Modifiers, vec2};
 use library::Track;
-use shell::kit::{ShortcutGroup, shortcuts_sheet};
+use shell::kit::{DIALOG_W, ShortcutGroup, confirm, shortcuts_sheet};
 
 pub enum Overlay {
     Shortcuts,
@@ -48,8 +48,6 @@ impl Overlay {
         Overlay::NewPlaylist { name: String::new(), tracks }
     }
 }
-
-const DIALOG_W: f32 = 340.0;
 
 /// Whether the open name dialog has focused its field yet. Cleared whenever
 /// no name dialog is up, however it closed, so the next one focuses again.
@@ -123,55 +121,17 @@ impl OndApp {
                     }
                 }
                 Overlay::SignOut { host, .. } => {
-                    ui.set_width(DIALOG_W);
                     let title = if host.is_empty() { "Sign out?".to_owned() } else { format!("Sign out of {host}?") };
-                    ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("Playback stops and the queue clears. Ond forgets the password. Downloads stay on this computer.")
-                                .size(12.0)
-                                .color(t.muted),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(18.0);
-                    let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if danger(ui, "Sign out").clicked() || enter {
-                                done = Some(Some(Action::SignOut));
-                            }
-                            ui.add_space(4.0);
-                            if secondary(ui, "Cancel").clicked() {
-                                done = Some(None);
-                            }
-                        });
-                    });
+                    let body = "Playback stops and the queue clears. Ond forgets the password. Downloads stay on this computer.";
+                    if let Some(yes) = confirm(ui, &title, body, "Sign out") {
+                        done = Some(yes.then_some(Action::SignOut));
+                    }
                 }
                 Overlay::Delete { id, name } => {
-                    ui.set_width(DIALOG_W);
-                    ui.label(egui::RichText::new(format!("Delete “{name}”?")).font(FontId::new(15.0, semibold())).color(t.text));
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("This deletes the playlist on the server. The songs stay in your library.").size(12.0).color(t.muted),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(18.0);
-                    let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if danger(ui, "Delete").clicked() || enter {
-                                done = Some(Some(Action::PlaylistEdit(PlaylistAction::Delete { id: id.clone() })));
-                            }
-                            ui.add_space(4.0);
-                            if secondary(ui, "Cancel").clicked() {
-                                done = Some(None);
-                            }
-                        });
-                    });
+                    let body = "This deletes the playlist on the server. The songs stay in your library.";
+                    if let Some(yes) = confirm(ui, &format!("Delete “{name}”?"), body, "Delete") {
+                        done = Some(yes.then(|| Action::PlaylistEdit(PlaylistAction::Delete { id: id.clone() })));
+                    }
                 }
             }
         });

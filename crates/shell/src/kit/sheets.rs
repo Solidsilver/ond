@@ -1,6 +1,7 @@
 //! Sheets over the window: the [`sheet_frame`] they're drawn in, the
-//! [`sheet_header`] with its ×, and the one [`shortcuts_sheet`] both apps
-//! fill with their own keys (and the [`fade_below`] it scrolls with).
+//! [`sheet_header`] with its ×, a [`confirm`] that asks before something
+//! that can't be taken back, and the one [`shortcuts_sheet`] both apps fill
+//! with their own keys (and the [`fade_below`] it scrolls with).
 
 use crate::icons::Icon;
 use crate::theme::{Tokens, semibold};
@@ -26,6 +27,35 @@ pub fn sheet_header(ui: &mut Ui, title: &str) -> bool {
         });
     });
     close
+}
+
+/// A dialog's width.
+pub const DIALOG_W: f32 = 340.0;
+
+/// A question in a sheet: `title`, what happens in `body`, and Cancel beside
+/// the red `verb`, which ⏎ answers too. `Some(true)` for `verb`,
+/// `Some(false)` for Cancel.
+pub fn confirm(ui: &mut Ui, title: &str, body: &str, verb: &str) -> Option<bool> {
+    let t = Tokens::of(ui);
+    ui.set_width(DIALOG_W);
+    ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
+    ui.add_space(6.0);
+    ui.add(egui::Label::new(egui::RichText::new(body).size(12.0).color(t.muted)).wrap());
+    ui.add_space(18.0);
+    let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    let mut answer = None;
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if super::danger(ui, verb).clicked() || enter {
+                answer = Some(true);
+            }
+            ui.add_space(4.0);
+            if super::secondary(ui, "Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    answer
 }
 
 /// One group in the [`shortcuts_sheet`]: its name, and each row's
