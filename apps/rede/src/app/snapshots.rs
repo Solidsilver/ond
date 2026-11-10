@@ -301,6 +301,12 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.sheet = Some(super::sheets::Sheet::Shortcuts);
         app
     });
+    // The palette (⌘K): the books in progress for an empty query, what a
+    // query finds (books, then the author as a name of her own), and a query
+    // that finds nothing.
+    for (name, query) in [("palette-empty", ""), ("palette-query", "le guin"), ("palette-none", "zzqx")] {
+        scene(h, s, name, || palette(&ctx, dir.path(), query));
+    }
     // The question before signing out.
     scene(h, s, "sheet-sign-out", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
@@ -395,6 +401,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.go(book_route(0));
         app
     });
+    scene(h, s, "palette-narrow", || palette(&ctx, dir.path(), "earthsea"));
     scene(h, s, "library-playing-narrow", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         playing(&mut app, true);
@@ -502,6 +509,23 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     }
     // Dropping the app (and its runtime) before the next theme.
     *h.state_mut() = None;
+}
+
+/// The palette open over the library with `query` typed, a book playing
+/// and another half listened to.
+fn palette(ctx: &egui::Context, dir: &std::path::Path, query: &str) -> RedeApp {
+    let mut app = app(ctx, dir, BOOKS.len());
+    playing(&mut app, true);
+    in_progress(&mut app);
+    let item = sources::ItemKey::new(account().id, "book-0");
+    let yesterday = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let paused = sources::Progress { item, position: sources::Position::from_secs(14_200.0), finished: false, at: Some(yesterday) };
+    app.positions.insert("book-0".into(), paused);
+    app.apply(Action::OpenPalette);
+    if let Some(p) = app.ui.palette.as_mut() {
+        p.typed(query);
+    }
+    app
 }
 
 /// The sleep timers the scenes show.
