@@ -89,8 +89,17 @@ impl ViewCtx<'_> {
     /// headings, inside the page's own scroll area). Click selects,
     /// double-click (or ⏎) plays from there; ⌥⏎ plays next, ⇧⏎ adds to the
     /// queue. Hovering a row shows its composer and the queue actions; a
-    /// loved track keeps its heart. Rows drag onto a sidebar playlist.
+    /// loved track keeps its heart. Rows drag onto a sidebar playlist. No
+    /// wider than [`LIST_W`](shell::kit::LIST_W), from the left.
     pub(super) fn track_list(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
+        let w = ui.available_width().min(shell::kit::LIST_W);
+        ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_max_width(w);
+            self.track_list_in(ui, tracks, source, opts);
+        });
+    }
+
+    fn track_list_in(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
         let moved = self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
         let list = List::new(ui, self.player, tracks, source, &opts);
         let discs = if opts.numbers { tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1) } else { 1 };
@@ -120,7 +129,8 @@ impl ViewCtx<'_> {
 
     /// [`track_list`](Self::track_list) in its own scroll area, laying out
     /// only the rows on screen (a playlist or Favorites can run to thousands):
-    /// every row is the same height, and none has a disc heading. Within the
+    /// every row is the same height, and none has a disc heading. As wide as
+    /// [`track_list`](Self::track_list)'s. Within the
     /// user's own playlist, rows also drag to a new place in it.
     pub(super) fn track_list_rows(&mut self, ui: &mut Ui, scroll: egui::ScrollArea, tracks: &[Track], source: &Source, opts: ListOpts) {
         let moved = self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
@@ -137,6 +147,8 @@ impl ViewCtx<'_> {
         // Rows sit flush: the scroll area places them by the same height.
         ui.spacing_mut().item_spacing.y = 0.0;
         scroll.show_rows(ui, h, tracks.len(), |ui, range| {
+            // The scroll bar stays at the window's edge; the rows stop short.
+            ui.set_max_width(ui.available_width().min(shell::kit::LIST_W));
             if let Some((i, align)) = bring {
                 let top = ui.cursor().top() + (i as f32 - range.start as f32) * h;
                 ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(ui.available_width(), h)), align);

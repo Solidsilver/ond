@@ -9,6 +9,12 @@ use super::text::{elide, elide_middle, section};
 use crate::theme::{Tokens, semibold};
 use egui::{Color32, FontId, Rect, Response, Sense, Ui, pos2, vec2};
 
+/// The widest a list of rows grows (tracks, downloads), however wide the
+/// window: past it a row's end drifts so far from its name that the two stop
+/// reading as one line. Wider than a column of prose; a row holds a name, a
+/// few short facts and its buttons.
+pub const LIST_W: f32 = 680.0;
+
 /// A titled block of rows with hairlines between them: the title, 4, the
 /// rows, 20 to the next.
 pub fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {

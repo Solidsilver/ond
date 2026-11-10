@@ -363,7 +363,7 @@ impl ViewCtx<'_> {
         if !open {
             return;
         }
-        let width = ui.available_width().min(720.0);
+        let width = ui.available_width().min(shell::kit::LIST_W);
         ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;

@@ -145,6 +145,14 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Album(album_id(0)));
     s.shoot(h, "album");
 
+    // A very wide window: the track list stops at its width, under the
+    // heading, and the Songs table spreads its columns.
+    let wide = vec2(2400.0, 900.0);
+    reset(h, wide, Route::Album(album_id(0)));
+    s.shoot(h, "album-wide");
+    reset(h, wide, Route::Songs);
+    s.shoot(h, "songs-wide");
+
     reset(h, FULL, Route::Album(album_id(0)));
     let main = egui::Rect::from_min_max(pos2(216.0, 52.0), pos2(1120.0, 876.0));
     if !hover_label(h, "Solar", main) {
