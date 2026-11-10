@@ -97,7 +97,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         let form = app.login.as_mut().unwrap();
         form.username = "sam".into();
         form.error = Some(crate::bridge::sign_in_error(&abs::Error::Auth(abs::AuthError::BadCredentials)));
-        form.warning = Some("This server version has a known security issue; update it.".into());
+        form.warning = Some("Audiobookshelf 2.35.1 has a known security issue. Update the server to 2.36 or newer.".into());
     };
     scene(h, s, "signin-error", || {
         let mut app = signin_with(&ctx, dir.path(), &["local"], None);

@@ -698,8 +698,19 @@ enum VersionCheck {
 fn check_version(version: Option<Version>) -> VersionCheck {
     match version {
         Some(v) if v < Version::TOKENS => VersionCheck::TooOld(format!("This server is version {v}. Rede needs Audiobookshelf 2.26 or newer.")),
-        Some(v) if v < Version::REFRESH_FIX => VersionCheck::Warn("This server version has a known security issue; update it.".to_owned()),
+        Some(v) if v < Version::REFRESH_FIX => VersionCheck::Warn(security_warning(Some(v))),
         _ => VersionCheck::Fine,
+    }
+}
+
+/// The warning about a server with the refresh-token hole: its version when it
+/// said one, and the update that closes the hole either way.
+fn security_warning(version: Option<Version>) -> String {
+    let fix = Version::REFRESH_FIX;
+    let newer = format!("{}.{} or newer", fix.0, fix.1);
+    match version {
+        Some(v) => format!("Audiobookshelf {v} has a known security issue. Update the server to {newer}."),
+        None => format!("This server has a known security issue. Update it to Audiobookshelf {newer}."),
     }
 }
 
@@ -926,11 +937,13 @@ mod tests {
         );
         // The first version Rede signs in to is also one to warn about: the
         // refresh-token fix came ten minor versions later.
-        assert_eq!(check_version(Version::parse("2.26.0")), VersionCheck::Warn("This server version has a known security issue; update it.".into()));
-        assert_eq!(check_version(Version::parse("2.35.9")), VersionCheck::Warn("This server version has a known security issue; update it.".into()));
+        let old = "Audiobookshelf 2.26.0 has a known security issue. Update the server to 2.36 or newer.";
+        assert_eq!(check_version(Version::parse("2.26.0")), VersionCheck::Warn(old.into()));
+        assert_eq!(check_version(Version::parse("2.35.9")), VersionCheck::Warn(old.replace("2.26.0", "2.35.9")));
         assert_eq!(check_version(Version::parse("2.36.0")), VersionCheck::Fine);
         assert_eq!(check_version(Version::parse("2.37.2")), VersionCheck::Fine);
         assert_eq!(check_version(None), VersionCheck::Fine, "a server that doesn't say its version is given the benefit of the doubt");
+        assert_eq!(security_warning(None), "This server has a known security issue. Update it to Audiobookshelf 2.36 or newer.");
     }
 
     #[test]
