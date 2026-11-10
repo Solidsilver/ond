@@ -10,7 +10,8 @@
 //!
 //! - `session`: signing in, resuming, and signing out
 //! - `library`: the books the shelf has, in the order drawn
-//! - `progress`: how a cover says where a book is
+//! - `home`: the books in progress and the newest
+//! - `progress`: where each book is, and how a cover says it
 //! - `nav`: where the window is, and how it got there
 //! - `playing`: playback actions, engine events and the listening worker
 //! - `bookmarks`: the bookmarks a book has, the edits that sync them, and the
@@ -57,6 +58,7 @@ mod book;
 mod bookmarks;
 mod bookmarks_tab;
 mod controls;
+mod home;
 mod library;
 mod nav;
 mod panel;
@@ -227,7 +229,7 @@ pub struct RedeApp {
     /// position instead.
     resume_deadline: Option<Instant>,
     sleep_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    positions: std::collections::HashMap<String, sources::Progress>,
+    positions: progress::Positions,
     stream_dir: std::path::PathBuf,
     pub bookmarks: bookmarks::State,
     pub reconciliation: Option<crate::listening::Reconciled>,
@@ -301,7 +303,7 @@ impl RedeApp {
             resume_pending: false,
             resume_deadline: None,
             sleep_wake: Default::default(),
-            positions: std::collections::HashMap::new(),
+            positions: progress::Positions::default(),
             bookmarks: bookmarks::State::default(),
             reconciliation: None,
             stream_dir: paths.art_cache.with_file_name("streams"),
@@ -505,13 +507,35 @@ impl RedeApp {
     }
 
     fn go(&mut self, route: Route) {
+        self.ui.landing = false;
         self.ui.nav.go(route);
         self.on_arrive();
     }
 
     fn back(&mut self) {
+        self.ui.landing = false;
         self.ui.nav.back();
         self.on_arrive();
+    }
+
+    /// Opens on Home rather than the library when a book is in progress, once
+    /// the positions are known. Only while the window is where it opened: a
+    /// pull that comes later never moves the user. `known` says these
+    /// positions held something; an empty first answer (a fresh shelf) waits
+    /// for the server's.
+    fn land(&mut self, known: bool) {
+        if !self.ui.landing {
+            return;
+        }
+        if !self.ui.nav.untouched() {
+            self.ui.landing = false;
+        } else if self.positions.any_in_progress() {
+            self.ui.landing = false;
+            self.ui.nav.land(Route::Home);
+            self.ctx.request_repaint();
+        } else if known {
+            self.ui.landing = false;
+        }
     }
 
     /// Loads what the place just arrived at needs. A book's page asks for its
@@ -602,6 +626,7 @@ impl RedeApp {
                         self.notice_bar(ui);
                         let route = self.ui.nav.current().clone();
                         match &route {
+                            Route::Home => self.view().home_page(ui),
                             Route::Library => self.view().library_page(ui),
                             Route::Book(id) => {
                                 let id = id.clone();

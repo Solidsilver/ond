@@ -9,7 +9,7 @@
 use super::Action;
 use super::nav::Route;
 use super::prefs_view::PrefsAction;
-use super::progress::Listened;
+use super::progress::{Listened, Positions};
 use super::view_ctx::ViewCtx;
 use super::virtual_list::{VirtualList, near};
 use crate::memo::Memo;
@@ -44,6 +44,10 @@ pub struct Books {
     all: Arc<Vec<ItemSummary>>,
     /// Indices into `all`, in the order drawn, per library version and sort.
     order: Memo<(u64, LibrarySort), Vec<usize>>,
+    /// Home's lists: the books in progress, per library and positions
+    /// version, and the newest, per library version.
+    in_progress: Memo<(u64, u64), Vec<usize>>,
+    recent: Memo<u64, Vec<usize>>,
     /// A book's details once its page asked for them. By the book's own id:
     /// one account is shown for now.
     pub details: HashMap<String, Details>,
@@ -96,6 +100,20 @@ impl Books {
         let key = (self.version, sort);
         let books = &self.all;
         self.order.get(key, || sorted_ids(books, sort))
+    }
+
+    /// Indices into [`all`](Self::all) of the books in progress, the one
+    /// listened to last first.
+    pub fn in_progress(&mut self, positions: &Positions) -> Arc<Vec<usize>> {
+        let books = &self.all;
+        self.in_progress.get((self.version, positions.version()), || super::progress::in_progress(books, positions))
+    }
+
+    /// Indices into [`all`](Self::all), newest first. Its own memo, so Home
+    /// doesn't undo the library's order.
+    pub fn recent(&mut self) -> Arc<Vec<usize>> {
+        let books = &self.all;
+        self.recent.get(self.version, || sorted_ids(books, LibrarySort::Added))
     }
 
     pub fn loaded(&mut self, id: &str, item: Item) {
@@ -224,7 +242,7 @@ impl ViewCtx<'_> {
     }
 
     /// One grid row of covers, followed by the row gap.
-    fn book_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32, cover_h: f32) {
+    pub(super) fn book_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32, cover_h: f32) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = GAP_X;
             for &i in ids {

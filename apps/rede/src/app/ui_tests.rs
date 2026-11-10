@@ -33,14 +33,19 @@ fn app_mut<'a>(h: &'a mut Harness<'static, Option<RedeApp>>) -> &'a mut RedeApp 
 fn every_view_names_its_controls() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
-    for route in [Route::Library, book_route(0), Route::Book("book-gone".into())] {
+    for route in [Route::Home, Route::Library, book_route(0), Route::Book("book-gone".into())] {
         app_mut(&mut h).go(route);
         h.run_steps(3);
         h.check_accessibility();
     }
-    // The library with books partway and one finished: the tiles say how
-    // far along each book is.
+    // Home and the library with books partway and one finished: the cards,
+    // their resume buttons, and the tiles say how far along each book is.
     listened(app_mut(&mut h));
+    app_mut(&mut h).go(Route::Home);
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Resume Piranesi");
+    h.get_by_label_contains("Piranesi by Susanna Clarke, 2h 10m left at 1×");
     app_mut(&mut h).go(Route::Library);
     h.run_steps(3);
     h.check_accessibility();
@@ -166,6 +171,48 @@ fn a_cover_opens_its_book_and_back_returns() {
     h.get_by_label("← Back").click();
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Library);
+}
+
+#[test]
+fn a_card_on_home_opens_its_book_and_its_button_resumes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    listened(app_mut(&mut h));
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Home);
+    // The fixture has no server, so resuming says so; it doesn't open the
+    // book the card is for.
+    h.get_by_label("Resume Dune").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Home);
+    assert!(app_mut(&mut h).ui.notice.as_ref().is_some_and(|n| n.text.starts_with("Not connected")), "the resume asked to play");
+    h.get_by_label("Dune by Frank Herbert, 15h 29m left at 1×").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Book("book-1".into()));
+    // The sidebar's Library, and Home again.
+    h.get_by_role_and_label(egui::accesskit::Role::ListBoxOption, "Library").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Library);
+    // The sidebar's row, not the page's own heading.
+    h.get_by_role_and_label(egui::accesskit::Role::ListBoxOption, "Home").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Home);
+}
+
+#[test]
+fn home_with_nothing_in_progress_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).go(Route::Home);
+    h.run_steps(2);
+    h.get_by_label("Nothing in progress. Start a book and it shows up here.");
+    h.get_by_label("Recently added");
+    // The last app lets go of its shelf before the next one opens it.
+    *h.state_mut() = None;
+    *h.state_mut() = Some(app(&h.ctx.clone(), dir.path(), 0));
+    app_mut(&mut h).go(Route::Home);
+    h.run_steps(2);
+    h.get_by_label("No books yet");
 }
 
 #[test]

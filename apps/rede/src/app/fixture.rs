@@ -392,7 +392,8 @@ pub fn reconciled(app: &mut RedeApp) {
 /// Where the fixture's listening is: four books partway, at different
 /// points and last heard at different times (Piranesi most recently, then
 /// Dune, Kindred and Wolf Hall), and A Wizard of Earthsea finished. Arrives
-/// as the shelf's positions would.
+/// as the shelf's positions would, so an app still where it opened goes
+/// Home.
 pub fn listened(app: &mut RedeApp) {
     let now = std::time::SystemTime::now();
     let at = |n: usize, secs: f64, finished: bool, hours_ago: u64| sources::Progress {

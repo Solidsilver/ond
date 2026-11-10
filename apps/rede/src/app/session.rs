@@ -97,6 +97,7 @@ impl RedeApp {
         if changed {
             self.books.clear();
             self.ui.nav = super::Nav::default();
+            self.ui.landing = true;
         }
         if let Some(warning) = warning {
             self.show_notice(warning);
