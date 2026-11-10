@@ -943,6 +943,8 @@ fn appearance_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     fixture_waveform(app_mut(h));
     settle_look(h);
     s.shoot(h, "x-together-player");
+    // Leave them off: what follows is the ordinary window's.
+    looks(h, |_| ());
 }
 
 #[test]
