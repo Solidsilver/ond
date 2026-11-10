@@ -174,6 +174,7 @@ async fn exercise(client: &Client, book: &LibraryItem) -> Outcome {
         ItemProgressUpdate { library_item_id: book.id.clone(), episode_id: None, update: ProgressUpdate { current_time: Some(50.0), ..Default::default() } };
     client.update_progress_batch(&[batch]).await?;
     assert_eq!(client.item_progress(&book.id, None).await?.and_then(|p| p.current_time), Some(50.0));
+    settle(client, book, finish_stamp()).await?;
     assert!(client.items_in_progress(25).await?.iter().any(|i| i.id == book.id));
     assert!(client.progress().await?.iter().any(|p| p.id == synced.id));
     client.delete_progress(&synced.id).await?;
@@ -190,6 +191,55 @@ async fn exercise(client: &Client, book: &LibraryItem) -> Outcome {
     assert!(client.bookmarks().await?.iter().any(|b| b.library_item_id == book.id && b.time == time));
     client.delete_bookmark(&book.id, made.time).await?;
     assert!(!client.bookmarks().await?.iter().any(|b| b.library_item_id == book.id && b.time == time));
+    Ok(())
+}
+
+/// Milliseconds since the epoch, as the server stores them.
+fn finish_stamp() -> i64 {
+    i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap()
+}
+
+/// The three ways Rede settles a book by hand, and the server rules they rest
+/// on (abs-api.md §12): a finish is stored with the client's stamp, clearing
+/// one resets the place and cannot carry one with it, and the place written
+/// after the reset is the one the book keeps. A place within ten seconds of
+/// the end finishes the book again.
+async fn settle(client: &Client, book: &LibraryItem, stamp: i64) -> Outcome {
+    let finish = ItemProgressUpdate {
+        library_item_id: book.id.clone(),
+        episode_id: None,
+        update: ProgressUpdate { current_time: Some(50.0), is_finished: Some(true), last_update: Some(stamp), ..Default::default() },
+    };
+    client.update_progress_batch(&[finish]).await?;
+    let finished = client.item_progress(&book.id, None).await?.ok_or("a finish leaves the row")?;
+    assert_eq!(finished.is_finished, Some(true), "the finish is stored");
+    assert_eq!(finished.last_update, Some(stamp), "the client's stamp is kept");
+
+    let reset = ProgressUpdate { is_finished: Some(false), last_update: Some(stamp - 1), ..Default::default() };
+    client.update_progress(&book.id, None, &reset).await?;
+    let cleared = client.item_progress(&book.id, None).await?.ok_or("clearing a finish leaves the row")?;
+    assert_eq!(cleared.is_finished, Some(false));
+    assert_eq!(cleared.current_time, Some(0.0), "clearing a finish resets the place, so the place goes in a second write");
+
+    let place = ProgressUpdate { current_time: Some(50.0), last_update: Some(stamp), ..Default::default() };
+    client.update_progress(&book.id, None, &place).await?;
+    let restored = client.item_progress(&book.id, None).await?.ok_or("the row is still there")?;
+    assert_eq!(restored.current_time, Some(50.0), "the place written after the reset is kept");
+    assert_eq!(restored.is_finished, Some(false));
+
+    if let Some(duration) = book.media.as_ref().and_then(|m| m.duration).filter(|d| *d > 15.0) {
+        let near_end = ProgressUpdate {
+            current_time: Some(duration - 5.0),
+            duration: Some(duration),
+            is_finished: Some(false),
+            last_update: Some(stamp + 1),
+            ..Default::default()
+        };
+        client.update_progress(&book.id, None, &near_end).await?;
+        let row = client.item_progress(&book.id, None).await?.ok_or("the row is still there")?;
+        println!("a place within ten seconds of the end reads finished: {:?}", row.is_finished);
+        assert_eq!(row.is_finished, Some(true), "ABS finishes a place inside its end threshold");
+    }
     Ok(())
 }
 
