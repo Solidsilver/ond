@@ -2,6 +2,8 @@
 //! its tabs down the grey side and one calm pane beside them. Esc or a click
 //! outside closes it (see `sheets`).
 //!
+//! Appearance has the zoom (⌘+, ⌘−, ⌘0 do the same).
+//!
 //! Playback holds the preferences that used to be a sheet: the skips, the
 //! rewinds, the sleep timer's length, and the two speech switches. The speed
 //! isn't here: the one saved is the one playing, and the Playback popover
@@ -20,16 +22,18 @@ use shell::theme::Tokens;
 pub enum Tab {
     #[default]
     Playback,
+    Appearance,
     Account,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Playback, Tab::Account, Tab::About];
+    pub const ALL: [Tab; 4] = [Tab::Playback, Tab::Appearance, Tab::Account, Tab::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Playback => "Playback",
+            Tab::Appearance => "Appearance",
             Tab::Account => "Account",
             Tab::About => "About",
         }
@@ -50,6 +54,7 @@ impl ViewCtx<'_> {
     pub(super) fn settings_tab(&mut self, ui: &mut Ui, tab: Tab) {
         match tab {
             Tab::Playback => self.playback_settings(ui),
+            Tab::Appearance => self.appearance_settings(ui),
             Tab::Account => self.account_settings(ui),
             Tab::About => about(ui),
         }
@@ -88,6 +93,17 @@ impl ViewCtx<'_> {
             let hint = "Shortens long pauses. Your place in the book stays exact.";
             if kit::setting(ui, "Skip silence", hint, |ui| kit::switch(ui, &mut on, "Skip silence")).changed() {
                 self.actions.push(Action::Prefs(PrefsAction::SkipSilence(on)));
+            }
+        });
+    }
+
+    /// How large Rede is drawn.
+    fn appearance_settings(&mut self, ui: &mut Ui) {
+        kit::group(ui, "Size", |ui| {
+            let mut zoom = self.zoom;
+            let hint = "⌘+ and ⌘− also zoom; ⌘0 goes back to 100%.";
+            if kit::setting(ui, "Zoom", hint, |ui| kit::stepper(ui, &mut zoom, &shell::zoom::STEPS, "zoom", shell::zoom::label)) {
+                self.actions.push(Action::Prefs(PrefsAction::Zoom(zoom)));
             }
         });
     }

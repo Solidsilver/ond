@@ -7,6 +7,8 @@ use crate::settings::LibrarySort;
 
 pub struct PrefsView {
     pub sort: LibrarySort,
+    /// How large the interface is drawn, in percent.
+    pub zoom: u16,
     pub playback: crate::settings::PlaybackSettings,
     /// The chapters column is docked at the right (when the window has room).
     pub show_panel: bool,
@@ -16,7 +18,7 @@ pub struct PrefsView {
 
 impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
-        prefs.get(|s| Self { sort: s.sort, playback: s.playback, show_panel: s.show_panel, sidebar_collapsed: s.sidebar_collapsed })
+        prefs.get(|s| Self { sort: s.sort, zoom: s.zoom, playback: s.playback, show_panel: s.show_panel, sidebar_collapsed: s.sidebar_collapsed })
     }
 }
 
@@ -26,6 +28,8 @@ impl PrefsView {
 pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
+    /// The interface's size, in percent.
+    Zoom(u16),
     Playback(crate::settings::PlaybackSettings),
     /// Voice boost or skip silence on its own, from a switch, so a switch
     /// never writes back the rest of the playback settings as it last saw

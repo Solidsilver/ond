@@ -17,6 +17,8 @@ pub struct ViewCtx<'a> {
     /// The library's order, as this frame's copy of the preferences has it.
     pub sort: LibrarySort,
     pub playback: crate::settings::PlaybackSettings,
+    /// The zoom, in percent.
+    pub zoom: u16,
     pub opening: bool,
     pub mode: crate::window::Mode,
     pub player: &'a crate::player::Player,
@@ -45,6 +47,7 @@ impl RedeApp {
             nav: &self.ui.nav,
             sort: self.shown.sort,
             playback: self.shown.playback,
+            zoom: self.shown.zoom,
             opening: self.opening,
             mode: self.mode,
             player: &self.player,

@@ -500,6 +500,38 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // Zoomed to 150%. Sizes are in points: a 1100×720 window is 733×480 of
+    // them, and the narrowest library window is its minimum in points at any
+    // zoom. The Player's and Mini's usual sizes are under their minimums at
+    // 150%, so they open at those. A folder of their own, so the saved zoom
+    // doesn't carry into another scene's app.
+    let zoomed = tempfile::tempdir().unwrap();
+    let at_150 = |mut app: RedeApp| {
+        app.apply_prefs(PrefsAction::Zoom(150));
+        app.ui.toasts = shell::kit::Toasts::default();
+        app
+    };
+    for (size, mode, name) in [
+        ([FULL[0] / 1.5, FULL[1] / 1.5], Mode::Full, "zoom-150-library"),
+        (crate::MIN_SIZE, Mode::Full, "zoom-150-library-narrow"),
+        (Mode::Player.min_size(), Mode::Player, "zoom-150-player"),
+        (Mode::Mini.min_size(), Mode::Mini, "zoom-150-mini"),
+    ] {
+        h.set_size(egui::vec2(size[0], size[1]));
+        scene(h, s, name, || {
+            let mut app = at_150(app(&ctx, zoomed.path(), BOOKS.len()));
+            playing(&mut app, mode != Mode::Full);
+            app.mode = mode;
+            app
+        });
+    }
+    h.set_size(egui::vec2(FULL[0] / 1.5, FULL[1] / 1.5));
+    scene(h, s, "zoom-150-settings-appearance", || {
+        let mut app = at_150(app(&ctx, zoomed.path(), BOOKS.len()));
+        app.apply(Action::OpenSettings(super::settings_page::Tab::Appearance));
+        app
+    });
+    h.set_size(egui::vec2(FULL[0], FULL[1]));
     // Dropping the app (and its runtime) before the next theme.
     *h.state_mut() = None;
 }

@@ -234,7 +234,7 @@ pub struct RedeApp {
 impl RedeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         // The window opened from this plan (see `main`); our title bar follows it.
-        crate::window().apply_frame(&cc.egui_ctx);
+        crate::window().0.apply_frame(&cc.egui_ctx);
         let app = Self::build(&cc.egui_ctx, Paths::resolve()?)?;
         #[cfg(target_os = "macos")]
         {
@@ -256,6 +256,8 @@ impl RedeApp {
         let bridge = Bridge::new(rt.handle().clone(), tx, std::sync::Arc::new(move || repaint.request_repaint()), Keeper::start(), paths.clone());
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
+        // Before the first frame, so the window never shows at 100% first.
+        shell::zoom::install(ctx, saved.zoom);
         let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
         let shown = PrefsView::read(&prefs);
         let mut ui = UiState::new();
@@ -488,6 +490,18 @@ impl RedeApp {
                 // without waiting for the next frame's read.
                 self.shown.sort = sort;
                 self.ctx.request_repaint();
+            }
+            PrefsAction::Zoom(percent) => {
+                let percent = shell::zoom::nearest(f64::from(percent));
+                if self.prefs.get(|s| s.zoom) == percent {
+                    return;
+                }
+                self.prefs.edit(|s| s.zoom = percent);
+                self.shown.zoom = percent;
+                shell::zoom::set(&self.ctx, percent);
+                // The window's minimum is the content's, so it follows.
+                self.prefs.get(|s| s.window.plan()).refit(&self.ctx, self.window.seen);
+                shell::zoom::announce(&mut self.ui.toasts, percent);
             }
             PrefsAction::ShowPanel(show) => {
                 self.prefs.edit(|s| s.show_panel = show);

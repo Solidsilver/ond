@@ -33,10 +33,11 @@ fn main() -> eframe::Result {
     init_logging();
     #[cfg(target_os = "macos")]
     openid::macos::install();
-    let plan = window();
+    let (plan, zoom) = window();
     let options = eframe::NativeOptions {
         // The app id names the window for Wayland and X11 desktops.
-        viewport: plan.builder(egui::ViewportBuilder::default().with_title("Rede").with_icon(icon()).with_app_id("dev.solidsilver.rede"), 1.0),
+        viewport: plan
+            .builder(egui::ViewportBuilder::default().with_title("Rede").with_icon(icon()).with_app_id("dev.solidsilver.rede"), shell::zoom::factor(zoom)),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
@@ -78,10 +79,11 @@ fn log_dir() -> Option<std::path::PathBuf> {
     Some(dirs.state_dir().unwrap_or(dirs.data_local_dir()).join("logs"))
 }
 
-/// One window, one mode, and what a framed window draws its title bar with.
-fn window() -> shell::window::Plan<window::Mode> {
-    let settings = settings::Paths::resolve().ok().map(|p| prefs::Prefs::open(&p.config_file).0.snapshot());
-    settings.map_or_else(window::Windows::default, |s| s.window).plan()
+/// One window, one mode, and what a framed window draws its title bar with;
+/// and the zoom it opens at.
+fn window() -> (shell::window::Plan<window::Mode>, u16) {
+    let settings = settings::Paths::resolve().ok().map(|p| prefs::Prefs::open(&p.config_file).0.snapshot()).unwrap_or_default();
+    (settings.window.plan(), settings.zoom)
 }
 
 /// The window icon uses the platform's padding, as Ond's does.
