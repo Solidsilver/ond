@@ -247,12 +247,9 @@ impl OndApp {
         self.view().heading(ui, name, sub);
         if albums {
             ui.horizontal(|ui| {
-                if crate::widgets::primary(ui, Some(Icon::Shuffle), "Shuffle").clicked() {
-                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::Play { start: 0 }));
-                }
-                ui.add_space(4.0);
-                if crate::widgets::secondary(ui, "Play next").clicked() {
-                    self.actions.push(Action::Artist(name.to_owned(), QueueAction::PlayNext));
+                // Play takes their albums in the page's order; Shuffle mixes them.
+                if let Some(a) = play_shuffle(ui) {
+                    self.actions.push(Action::Artist(name.to_owned(), a));
                 }
                 // Only artists the server knows by id can be loved.
                 if let Route::Artist { id: Some(id), .. } = route {
@@ -266,6 +263,8 @@ impl OndApp {
                         });
                     }
                 }
+                let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(Tokens::of(ui).accent));
+                egui::Popup::menu(&more).show(|ui| collection_menu(ui, &Collection::Artist(name.to_owned()), false, false, None, &mut self.actions));
             });
         }
     }
@@ -367,8 +366,8 @@ pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: bool, shor
     let mut items = Vec::new();
     if play {
         match c {
-            // Playing an artist shuffles across their albums.
-            Collection::Artist(_) => items.push(("Shuffle all", QueueAction::Play { start: 0 })),
+            // An artist's menu offers the shuffle across their albums.
+            Collection::Artist(_) => items.push(("Shuffle all", QueueAction::Shuffle)),
             _ => items.extend([("Play", QueueAction::Play { start: 0 }), ("Shuffle", QueueAction::Shuffle)]),
         }
     }

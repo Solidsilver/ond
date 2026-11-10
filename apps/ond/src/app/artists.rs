@@ -116,7 +116,7 @@ impl ViewCtx<'_> {
             let shuffle = Rect::from_center_size(at, vec2(32.0, 32.0));
             let id = ui.scope_id().with(("artist-shuffle", &a.name));
             if crate::widgets::tile_button(ui, t, shuffle, id, resp.hovered(), Icon::Shuffle, "Shuffle artist") {
-                self.actions.push(Action::Artist(a.name.clone(), QueueAction::Play { start: 0 }));
+                self.actions.push(Action::Artist(a.name.clone(), QueueAction::Shuffle));
                 return;
             }
         }

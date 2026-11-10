@@ -141,6 +141,10 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: None });
     s.shoot(h, "artist");
+    // Its ⋯: Play next and Add to queue.
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    s.shoot(h, "artist-more");
 
     reset(h, FULL, Route::Album(album_id(0)));
     s.shoot(h, "album");

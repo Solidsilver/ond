@@ -133,7 +133,8 @@ impl ViewCtx<'_> {
                         self.actions.push(Action::Go(Route::Artist { name, id }));
                         return;
                     }
-                    Verb::Play => QueueAction::Play { start: 0 },
+                    // Playing an artist from here shuffles across their albums.
+                    Verb::Play => QueueAction::Shuffle,
                     Verb::PlayNext => QueueAction::PlayNext,
                     Verb::Add => QueueAction::Add,
                     // A whole artist is a lot to download by accident; do it per album.
