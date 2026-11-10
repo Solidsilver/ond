@@ -22,6 +22,8 @@ const QUERY_H: f32 = 52.0;
 const HINTS_H: f32 = 34.0;
 /// A group's title line.
 const GROUP_H: f32 = 24.0;
+/// Room left either side in a window narrower than the sheet.
+const MARGIN: f32 = 16.0;
 
 /// What a palette keeps between frames: what's typed and which row is
 /// selected.
@@ -107,7 +109,8 @@ pub fn palette(ctx: &egui::Context, id: &str, text: &PaletteText, state: &mut Pa
     let screen = ctx.content_rect();
     let top = (screen.height() * 0.12).clamp(24.0, 120.0);
     let list_max = (screen.height() * 0.72 - QUERY_H - HINTS_H).max(ROW_H * 3.0);
-    let width = WIDTH;
+    // A narrow window keeps a margin either side.
+    let width = WIDTH.min(screen.width() - 2.0 * MARGIN).max(240.0);
     let id = egui::Id::unique(id);
     let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, vec2(0.0, top));
     let modal = egui::Modal::new(id).area(area).frame(egui::Frame::popup(&ctx.global_style()).inner_margin(0).corner_radius(12)).show(ctx, |ui| {
@@ -253,7 +256,17 @@ fn hints_bar(ui: &mut egui::Ui, t: &Tokens, width: f32, footer: &str) {
     let (bar, _) = ui.allocate_exact_size(vec2(width, HINTS_H), Sense::hover());
     ui.painter().rect_filled(bar, egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 }, t.sidebar);
     ui.painter().hline(bar.x_range(), bar.top(), egui::Stroke::new(1.0, t.hairline));
-    ui.painter().text(pos2(bar.left() + 18.0, bar.center().y), egui::Align2::LEFT_CENTER, crate::keys::shown(footer), FontId::proportional(11.0), t.muted);
+    let footer = crate::keys::shown(footer);
+    let at = pos2(bar.left() + 18.0, bar.center().y);
+    let room = width - 36.0;
+    let whole = ui.painter().layout_no_wrap(footer.to_string(), FontId::proportional(11.0), t.muted);
+    if whole.size().x <= room {
+        ui.painter().text(at, egui::Align2::LEFT_CENTER, footer, FontId::proportional(11.0), t.muted);
+    } else {
+        // In a narrow window the hints that don't fit trail off.
+        let g = elide(ui, &footer, FontId::proportional(11.0), t.muted, room);
+        ui.painter().galley(pos2(at.x, at.y - g.size().y / 2.0), g, t.muted);
+    }
 }
 
 /// The field at the top of a sidebar that opens the palette: "Search", with
