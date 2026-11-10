@@ -833,3 +833,75 @@ fn an_empty_queue_keeps_its_column() {
     assert!(tiles > 0, "the grid was drawn");
     *h.state_mut() = None;
 }
+
+/// A failed load says so in an error that stays, and its Retry asks again:
+/// a queue action that gave up waits for the tracks once more.
+#[test]
+fn a_failed_loads_retry_asks_for_the_tracks_again() {
+    use crate::bridge::{LibraryMsg, ListKey};
+    use crate::failure::Failure;
+    use crate::player::QueueAction;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let app = app_mut(&mut h);
+    app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+    app.apply(Action::Album("al-missing".into(), QueueAction::Play { start: 0 }));
+    assert_eq!(app.pending.len(), 1, "waits for the tracks");
+    let text = "Couldn't load the album: the server said no";
+    app.handle(LibraryMsg::LoadFailed { key: ListKey::Album("al-missing".into()), error: Some(Failure::Server(text.into())) });
+    assert!(app.pending.is_empty(), "gave up");
+    assert!(app.ui.toasts.is_error(text), "{:?}", app.ui.toasts.texts());
+    assert_eq!(app.ui.toasts.button(text), Some("Retry"));
+    h.run_steps(2);
+    h.get_by_label("Retry").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert_eq!(app.pending.len(), 1, "Retry asked again");
+    assert!(app.ui.toasts.texts().is_empty(), "and took the error away");
+
+    // A failed sync offers the same.
+    let app = app_mut(&mut h);
+    app.handle(LibraryMsg::AlbumSyncDone(Err(Failure::Server("Couldn't sync: the server said no".into()))));
+    assert_eq!(app.ui.toasts.button("Couldn't sync: the server said no"), Some("Retry"));
+}
+
+/// Clear says how much it took, and its Undo puts the queue back as it was.
+#[test]
+fn undo_puts_back_a_cleared_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let app = app_mut(&mut h);
+    fill_queue(app);
+    let before: Vec<u64> = app.player.queue.upcoming.iter().map(|i| i.uid).collect();
+    app.apply(Action::Queue(QueueEdit::Clear));
+    assert!(app.player.queue.upcoming.is_empty());
+    let text = format!("Cleared {} songs from the queue", before.len());
+    assert_eq!(app.ui.toasts.button(&text), Some("Undo"), "{:?}", app.ui.toasts.texts());
+    h.run_steps(2);
+    h.get_by_label("Undo").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert_eq!(app.player.queue.upcoming.iter().map(|i| i.uid).collect::<Vec<_>>(), before);
+}
+
+/// Removing a song from a playlist offers Undo, which puts it back where it was.
+#[test]
+fn undo_puts_back_a_song_removed_from_a_playlist() {
+    use super::commands::PlaylistAction;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let app = app_mut(&mut h);
+    let id = app.data.playlists[0].id.clone();
+    app.data.playlist_tracks.insert(id.clone(), std::sync::Arc::new(filler(20, 4)));
+    let before: Vec<String> = app.data.playlist_tracks[&id].iter().map(|t| t.id.clone()).collect();
+    app.apply(Action::PlaylistEdit(PlaylistAction::Remove { id: id.clone(), index: 1 }));
+    assert_eq!(app.data.playlist_tracks[&id].len(), 3);
+    h.run_steps(2);
+    h.get_by_label("Undo").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert_eq!(app.data.playlist_tracks[&id].iter().map(|t| t.id.clone()).collect::<Vec<_>>(), before);
+}

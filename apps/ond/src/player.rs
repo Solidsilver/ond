@@ -64,6 +64,8 @@ pub trait Sources {
 pub enum Note {
     Notice(String),
     Error(String),
+    /// Clear took this many items, and can be undone.
+    Cleared(usize),
     /// Playback failed: the server may have gone away.
     Probe,
     /// A queue item started playing (`restart`: the engine restarted it, e.g.
@@ -104,6 +106,8 @@ pub struct Player {
     /// one named next: where it plays from (a file, or the server's stream).
     pub playing_from: Option<TrackSource>,
     next_from: Option<TrackSource>,
+    /// What the last Clear took, for its Undo.
+    cleared: Option<crate::queue::Cleared>,
 }
 
 impl Player {
@@ -419,6 +423,8 @@ pub enum QueueEdit {
     /// One step earlier (-1) or later (+1).
     MoveBy(u64, isize),
     Clear,
+    /// Put back what the last Clear took, if the queue hasn't moved on.
+    UndoClear,
     SetEnd(crate::queue::EndAction),
     /// Brings what the user added, split into groups, together.
     GatherAdded,
@@ -457,7 +463,17 @@ impl Player {
             QueueEdit::MoveBy(uid, delta) => {
                 q.move_by(uid, delta);
             }
-            QueueEdit::Clear => q.clear(),
+            QueueEdit::Clear => {
+                self.cleared = q.clear();
+                if let Some(c) = &self.cleared {
+                    cx.notes.push(Note::Cleared(c.removed));
+                }
+            }
+            QueueEdit::UndoClear => {
+                if !self.cleared.take().is_some_and(|c| q.undo_clear(c)) {
+                    cx.notes.push(Note::Notice("The queue has changed since, so Clear can't be undone".into()));
+                }
+            }
             QueueEdit::SetEnd(end) => q.end = end,
             QueueEdit::GatherAdded => q.gather_added(),
         }

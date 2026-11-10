@@ -113,7 +113,7 @@ mod ui_tests;
 
 use crate::analyze;
 use crate::art::Art;
-use crate::bridge::{AnalysisMsg, Bridge, Msg};
+use crate::bridge::{AnalysisMsg, Bridge, ListKey, Msg};
 use crate::failure::Failure;
 use crate::favorites::{Favorites, StarKind};
 use crate::keys::{Cmd, EditCmd};
@@ -136,7 +136,7 @@ use std::time::Duration;
 // What the tests (here, in `fixture` and its users) build their fixtures from.
 #[cfg(test)]
 use {
-    crate::bridge::{LibraryMsg, ListKey, OfflineMsg},
+    crate::bridge::{LibraryMsg, OfflineMsg},
     crate::nav::Nav,
     crate::search::SearchIndex,
     crate::settings::Settings,
@@ -208,6 +208,8 @@ pub enum Action {
     NeedLyrics(Box<Track>),
     /// Re-read the library from the server (albums, then tracks).
     SyncNow,
+    /// Load an album's or a playlist's tracks again (a failed load's Retry).
+    Reload(ListKey),
     /// Stop the track sync that's running.
     StopSync,
     /// Delete the cover art kept on disk (and forget what's loaded).
@@ -619,13 +621,22 @@ impl OndApp {
     /// offline pill already says so. A database that won't read says
     /// nothing about the server, so it's only shown.
     pub(crate) fn show_failure(&mut self, e: Failure) {
+        self.show_failure_or_retry(e, None);
+    }
+
+    /// [`show_failure`](Self::show_failure), offering Retry when trying
+    /// again is `retry`: something safe to repeat, like a load or a sync.
+    pub(crate) fn show_failure_or_retry(&mut self, e: Failure, retry: Option<Action>) {
         if e.is_network() {
             self.probe();
             if !self.session.online {
                 return;
             }
         }
-        self.show_error(e.into_message());
+        match retry {
+            Some(action) => self.ui.toasts.error(e.into_message(), "Retry", action),
+            None => self.show_error(e.into_message()),
+        }
     }
 
     /// Shows an error. Every message gets its own toast, so two failures in
@@ -748,6 +759,11 @@ impl OndApp {
                 }
             }
             Action::StopSync => self.bridge.cancel_sync(),
+            Action::Reload(key) => match key {
+                ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
+                ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
+                ListKey::Artist(_) => {}
+            },
             Action::ClearArtCache => self.art.clear(),
             Action::ClearStreamCache => self.cache.clear(),
             Action::MeasureLatency => self.refresh_latency(),
