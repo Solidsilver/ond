@@ -18,7 +18,7 @@ fn every_view_draws() {
         app.apply_prefs(PrefsAction::Sort(sort));
         frame(&ctx, &mut app);
     }
-    let mut routes = vec![Route::Library, book_route(0), book_route(5), Route::Book("book-gone".into())];
+    let mut routes = vec![Route::Home, Route::Library, book_route(0), book_route(5), Route::Book("book-gone".into())];
     for route in routes.drain(..) {
         app.go(route);
         for _ in 0..2 {
@@ -74,6 +74,14 @@ fn every_view_draws() {
     app.back();
     frame(&ctx, &mut app);
     assert_eq!(app.ui.nav.current(), &book_route(5));
+    // Home and the library again, with books partway and one finished.
+    listened(&mut app);
+    for route in [Route::Home, Route::Library] {
+        app.go(route);
+        for _ in 0..2 {
+            frame(&ctx, &mut app);
+        }
+    }
     // And the sign-in screen, with and without an error.
     let mut login = signed_out(&ctx, dir.path());
     frame(&ctx, &mut login);
@@ -467,4 +475,49 @@ fn toasts_stop_asking_for_frames() {
     reconciled(app_mut(&mut h));
     idle(&mut h, "the other-device notice");
     assert_eq!(app_mut(&mut h).ui.toasts.texts().len(), 1, "still offering Undo");
+}
+
+#[test]
+fn the_window_opens_on_home_only_when_a_book_is_in_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    // Nothing begun: the library, as before, and a later pull doesn't move it.
+    let mut app = super::fixture::app(&ctx, dir.path(), BOOKS.len());
+    app.playback_event(crate::listening::Event::Positions(vec![sources::Progress {
+        item: sources::ItemKey::new(account().id, "book-3"),
+        position: sources::Position::from_secs(0.0),
+        finished: false,
+        at: None,
+    }]));
+    assert_eq!(app.ui.nav.current(), &Route::Library);
+    listened(&mut app);
+    assert_eq!(app.ui.nav.current(), &Route::Library, "the first answer decided; a later one never moves the window");
+    drop(app);
+    // A book partway: Home, with no step back to the library.
+    let mut app = super::fixture::app(&ctx, dir.path(), BOOKS.len());
+    listened(&mut app);
+    assert_eq!(app.ui.nav.current(), &Route::Home);
+    assert!(!app.ui.nav.can_back());
+    drop(app);
+    // An empty first answer (a fresh shelf) waits for the server's, but not
+    // past the user going somewhere.
+    let mut app = super::fixture::app(&ctx, dir.path(), BOOKS.len());
+    app.playback_event(crate::listening::Event::Positions(Vec::new()));
+    app.go(book_route(3));
+    listened(&mut app);
+    assert_eq!(app.ui.nav.current(), &book_route(3));
+}
+
+#[test]
+fn home_lists_the_books_in_progress_last_heard_first_and_the_newest() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    listened(&mut app);
+    let titles = |ids: &[usize], app: &RedeApp| ids.iter().map(|&i| app.books.all()[i].title.clone()).collect::<Vec<_>>();
+    let ids = app.books.in_progress(&app.positions);
+    assert_eq!(titles(&ids, &app), ["Piranesi", "Dune", "Kindred", "Wolf Hall"]);
+    assert!(std::sync::Arc::ptr_eq(&ids, &app.books.in_progress(&app.positions)), "worked out once, not every frame");
+    let recent = app.books.recent();
+    assert_eq!(titles(&recent[..2], &app), ["The Left Hand of Darkness", "Dune"]);
 }

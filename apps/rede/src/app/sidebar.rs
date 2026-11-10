@@ -4,7 +4,7 @@
 //! the keyboard shortcuts beside it.
 //!
 //! The places are a list so Series, Authors, Collections and Downloads join
-//! Library as rows when they come. The account's libraries are listed
+//! Home and Library as rows when they come. The account's libraries are listed
 //! together on one shelf, so the heading names them rather than switching
 //! between them; a switcher comes with per-library browsing.
 //!
@@ -42,7 +42,7 @@ const ACCOUNT_MENU_W: f32 = 250.0;
 
 /// The places to browse, in order: what they're called, where they lead, and
 /// the rail's icon for them.
-const PLACES: [(&str, Route, Icon); 1] = [("Library", Route::Library, Icon::Grid)];
+const PLACES: [(&str, Route, Icon); 2] = [("Home", Route::Home, Icon::Home), ("Library", Route::Library, Icon::Grid)];
 
 /// How wide the column draws in a window `width` wide: the full column, or
 /// `None` for the rail (collapsed, or no room).

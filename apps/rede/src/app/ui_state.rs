@@ -69,11 +69,15 @@ pub struct UiState {
     /// The other-device notice the toasts are showing, so a new pick-up
     /// replaces it and an undone one takes it away.
     pub reconcile_toast: Option<String>,
+    /// Whether the window may still open on Home: armed at a start or a
+    /// sign-in, until the first positions say whether anything is in
+    /// progress or the user goes somewhere first.
+    pub landing: bool,
 }
 
 impl UiState {
     pub fn new() -> Self {
-        Self::default()
+        Self { landing: true, ..Self::default() }
     }
 }
 

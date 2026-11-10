@@ -150,6 +150,25 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // Home with books partway (the one heard last first) and one finished,
+    // as the window opens with something in progress; Home with nothing
+    // begun; and the library with the same mix on its covers.
+    scene(h, s, "home", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app
+    });
+    scene(h, s, "home-nothing", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        app.go(Route::Home);
+        app
+    });
+    scene(h, s, "library-progress", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app.go(Route::Library);
+        app
+    });
     // Nothing playing: the capsule's quiet line, and the column saying so.
     scene(h, s, "nothing-playing", || {
         let app = app(&ctx, dir.path(), BOOKS.len());
@@ -393,6 +412,11 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     scene(h, s, "book-narrow", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         app.go(book_route(0));
+        app
+    });
+    scene(h, s, "home-narrow", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
         app
     });
     scene(h, s, "library-playing-narrow", || {

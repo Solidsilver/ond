@@ -25,7 +25,7 @@ pub struct ViewCtx<'a> {
     pub panel: super::panel::PanelState,
     /// Settings' tab.
     pub settings: super::settings_page::Tab,
-    pub positions: &'a std::collections::HashMap<String, sources::Progress>,
+    pub positions: &'a super::progress::Positions,
     /// The loaded book's bookmarks, sorted by time.
     pub bookmarks: std::sync::Arc<Vec<sources::Bookmark>>,
     /// Covers load as they're first drawn.

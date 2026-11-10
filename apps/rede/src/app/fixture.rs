@@ -388,3 +388,25 @@ pub fn reconciled(app: &mut RedeApp) {
     };
     app.reconciliation = Some(crate::listening::Reconciled { previous: at(9_000.0, 3_600), current: at(app.player.position, 60) });
 }
+
+/// Where the fixture's listening is: four books partway, at different
+/// points and last heard at different times (Piranesi most recently, then
+/// Dune, Kindred and Wolf Hall), and A Wizard of Earthsea finished. Arrives
+/// as the shelf's positions would, so an app still where it opened goes
+/// Home.
+pub fn listened(app: &mut RedeApp) {
+    let now = std::time::SystemTime::now();
+    let at = |n: usize, secs: f64, finished: bool, hours_ago: u64| sources::Progress {
+        item: ItemKey::new(account().id, format!("book-{n}")),
+        position: sources::Position::from_secs(secs),
+        finished,
+        at: Some(now - std::time::Duration::from_secs(hours_ago * 3_600)),
+    };
+    app.playback_event(crate::listening::Event::Positions(vec![
+        at(2, 18_000.0, false, 2),
+        at(1, 20_000.0, false, 26),
+        at(5, 3_000.0, false, 72),
+        at(7, 60_000.0, false, 216),
+        at(4, 25_500.0, true, 400),
+    ]));
+}

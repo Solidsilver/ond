@@ -88,6 +88,8 @@ pub enum Icon {
     Bookmark,
     /// A window with a column down its left side: show or hide a sidebar.
     Sidebar,
+    /// A house with a door: the place an app opens on.
+    Home,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -227,6 +229,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Sidebar => {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
             painter.line_segment([p(-0.3, -0.7), p(-0.3, 0.7)], line);
+        }
+        Icon::Home => {
+            painter.add(Shape::line(vec![p(-0.9, -0.02), p(0.0, -0.82), p(0.9, -0.02)], line));
+            painter.add(Shape::line(vec![p(-0.62, -0.26), p(-0.62, 0.82), p(0.62, 0.82), p(0.62, -0.26)], line));
+            painter.add(Shape::line(vec![p(-0.17, 0.82), p(-0.17, 0.32), p(0.17, 0.32), p(0.17, 0.82)], line));
         }
         Icon::Expand => {
             painter.add(Shape::line(vec![p(0.15, -0.8), p(0.8, -0.8), p(0.8, -0.15)], line));

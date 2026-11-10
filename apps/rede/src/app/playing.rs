@@ -179,6 +179,7 @@ impl RedeApp {
                 }
             },
             Event::Positions(positions) => {
+                let any = !positions.is_empty();
                 for position in positions {
                     let old = self.positions.remove(&position.item.item);
                     let latest = crate::listening::newer(old, Some(position)).unwrap();
@@ -193,6 +194,7 @@ impl RedeApp {
                     }
                     self.positions.insert(latest.item.item.clone(), latest);
                 }
+                self.land(any);
             }
             Event::ResumeReady { generation } if generation == self.playback_generation && self.resume_pending => {
                 self.resume_pending = false;

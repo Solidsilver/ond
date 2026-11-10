@@ -3,6 +3,8 @@
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Route {
+    /// Where the listening is: the books in progress, and the newest.
+    Home,
     /// The books the shelf has.
     Library,
     /// One book, by its own id.
@@ -43,6 +45,17 @@ impl Nav {
     pub fn can_back(&self) -> bool {
         !self.back.is_empty()
     }
+
+    /// Whether the window is still where it opened: nowhere gone, nothing to
+    /// go back to.
+    pub fn untouched(&self) -> bool {
+        self.back.is_empty() && self.current == Route::Library
+    }
+
+    /// Opens on `at` instead, as if it had started there: no step back.
+    pub fn land(&mut self, at: Route) {
+        self.current = at;
+    }
 }
 
 #[cfg(test)]
@@ -66,5 +79,19 @@ mod tests {
         // Back at the top, back does nothing (the book gone from a fresh start).
         nav.back();
         assert_eq!(nav.current(), &Route::Library);
+    }
+
+    #[test]
+    fn landing_elsewhere_leaves_no_step_back() {
+        let mut nav = Nav::default();
+        assert!(nav.untouched());
+        nav.land(Route::Home);
+        assert_eq!(nav.current(), &Route::Home);
+        assert!(!nav.can_back());
+        assert!(!nav.untouched());
+        let mut nav = Nav::default();
+        nav.go(Route::Book("b".into()));
+        nav.back();
+        assert!(nav.untouched(), "back where it opened");
     }
 }
