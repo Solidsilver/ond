@@ -262,13 +262,10 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Which place the page belongs to: the library, for a book opened from
-    /// it.
+    /// Which place the page belongs to: for a book, the one it was opened
+    /// from.
     fn active_place(&self) -> Option<usize> {
-        let route = match self.nav.current() {
-            Route::Book(_) => &Route::Library,
-            route => route,
-        };
+        let route = self.nav.place();
         PLACES.iter().position(|(_, r, _)| r == route)
     }
 

@@ -97,6 +97,16 @@ impl Nav {
         if out.len() == 1 { Vec::new() } else { out }
     }
 
+    /// The sidebar place the page belongs to: itself when it is one, else the
+    /// place it was opened from, as the breadcrumb says (a book reached from
+    /// Home belongs to Home), and the library when the trail has no place.
+    pub fn place(&self) -> &Route {
+        if self.current.is_root() {
+            return &self.current;
+        }
+        self.trail().into_iter().find(|r| r.is_root()).unwrap_or(&Route::Library)
+    }
+
     /// Whether the window is still where it opened: nowhere gone, nothing to
     /// go back to.
     pub fn untouched(&self) -> bool {
@@ -138,6 +148,22 @@ impl super::view_ctx::ViewCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_book_belongs_to_the_place_it_was_opened_from() {
+        let mut nav = Nav::default();
+        nav.go(Route::Book("b".into()));
+        assert_eq!(nav.place(), &Route::Library);
+        let mut nav = Nav::default();
+        nav.go(Route::Home);
+        assert_eq!(nav.place(), &Route::Home);
+        nav.go(Route::Book("b".into()));
+        assert_eq!(nav.place(), &Route::Home, "as its breadcrumb says");
+        nav.back();
+        nav.go(Route::Library);
+        nav.go(Route::Book("b".into()));
+        assert_eq!(nav.place(), &Route::Library);
+    }
 
     #[test]
     fn going_somewhere_new_remembers_the_last_place() {
