@@ -19,7 +19,6 @@ use shell::kit::{self, readout, step_slider};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Section {
     #[default]
-    General,
     Appearance,
     Playback,
     Queue,
@@ -32,8 +31,7 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 10] = [
-        Section::General,
+    pub const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Playback,
         Section::Queue,
@@ -47,7 +45,6 @@ impl Section {
 
     pub fn label(self) -> &'static str {
         match self {
-            Section::General => "General",
             Section::Appearance => "Appearance",
             Section::Playback => "Playback",
             Section::Queue => "Queue",
@@ -67,7 +64,6 @@ impl OndApp {
         let at = Section::ALL.iter().position(|s| *s == self.ui.settings_section).unwrap_or(0);
         // Below the toolbar, so a narrow window's display keeps its times.
         let window = kit::settings_window(ctx, super::toolbar::TOOLBAR_H, &labels, at, "settings-pane", |ui, i| match Section::ALL[i] {
-            Section::General => self.general_settings(ui),
             Section::Appearance => self.appearance_settings(ui),
             Section::Playback => self.playback_settings(ui),
             Section::Queue => self.queue_settings(ui),
@@ -86,25 +82,10 @@ impl OndApp {
         }
     }
 
-    fn general_settings(&mut self, ui: &mut Ui) {
-        group(ui, "Listening", |ui| {
-            let hint = "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.";
-            self.pref_switch(ui, "scrobble", "Scrobble plays", hint, self.ui.prefs.scrobble, PrefsAction::Scrobble);
-        });
-        group(ui, "Advanced", |ui| {
-            let hint = "The signal path, buffer, downloads, sync and server timing, in a thin bar along the bottom (⌥⌘I).";
-            self.pref_switch(ui, "diagnostics_bar", "Show diagnostics bar", hint, self.ui.prefs.diagnostics_bar, PrefsAction::Diagnostics);
-            if crate::csd::SUPPORTED {
-                let hint = "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.";
-                let on = self.ui.prefs.system_title_bar;
-                self.pref_switch(ui, "window.system_title_bar", "Use the system title bar", hint, on, WindowAction::SetSystemTitleBar);
-            }
-        });
-    }
-
     /// The app and its version, whether Ond looks for newer ones (copies
-    /// from the GitHub releases; a package manager updates its own), and a
-    /// newer release's notes.
+    /// from the GitHub releases; a package manager updates its own), a newer
+    /// release's notes, and the few settings about the app itself rather than
+    /// about the music.
     fn about(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let current = crate::updates::Version::current();
@@ -137,6 +118,10 @@ impl OndApp {
                     }
                 }
             });
+        });
+        group(ui, "Advanced", |ui| {
+            let hint = "The signal path, buffer, downloads, sync and server timing, in a thin bar along the bottom (⌥⌘I).";
+            self.pref_switch(ui, "diagnostics_bar", "Show diagnostics bar", hint, self.ui.prefs.diagnostics_bar, PrefsAction::Diagnostics);
         });
     }
 
@@ -264,9 +249,20 @@ impl OndApp {
             let hint = "Each artist's photo from the server beside their name in Artists, or their albums' covers or initials when the server has none.";
             self.pref_switch(ui, "artist_photos", "Artist photos", hint, self.ui.prefs.artist_photos, PrefsAction::ArtistPhotos);
         });
+        if crate::csd::SUPPORTED {
+            group(ui, "Window", |ui| {
+                let hint = "Your desktop's own title bar and window frame, in place of Ond's buttons in the toolbar.";
+                let on = self.ui.prefs.system_title_bar;
+                self.pref_switch(ui, "window.system_title_bar", "Use the system title bar", hint, on, WindowAction::SetSystemTitleBar);
+            });
+        }
     }
 
     fn playback_settings(&mut self, ui: &mut Ui) {
+        group(ui, "Listening", |ui| {
+            let hint = "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.";
+            self.pref_switch(ui, "scrobble", "Scrobble plays", hint, self.ui.prefs.scrobble, PrefsAction::Scrobble);
+        });
         let mut p: PlaybackPrefs = self.output.prefs().clone();
         let before = p.clone();
         group(ui, "Volume", |ui| {

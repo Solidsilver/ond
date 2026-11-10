@@ -782,7 +782,6 @@ fn every_view_names_its_controls() {
         h.check_accessibility();
     }
     for section in [
-        settings_page::Section::General,
         settings_page::Section::Appearance,
         settings_page::Section::Playback,
         settings_page::Section::Queue,

@@ -492,9 +492,10 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.run_steps(2);
     s.shoot(h, "narrow-diagnostics-bar");
 
+    // Settings › About, where the diagnostics bar's row lives.
     reset(h, FULL, Route::Recent);
-    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::General));
-    s.shoot(h, "settings-general-diagnostics");
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::About));
+    s.shoot(h, "settings-about-diagnostics");
 
     // A newer Ond is out: the notice above the footer, the rail's dot, and
     // Settings › About with the release notes (the GitHub copy's rows with
@@ -1054,11 +1055,11 @@ fn managed_snapshots() {
 
 fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     for section in [
-        settings_page::Section::General,
         settings_page::Section::Appearance,
         settings_page::Section::Playback,
         settings_page::Section::Output,
         settings_page::Section::Offline,
+        settings_page::Section::About,
     ] {
         reset(h, FULL, Route::Recent);
         app_mut(h).actions.push(Action::OpenSettings(section));
