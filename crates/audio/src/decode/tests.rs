@@ -246,7 +246,10 @@ fn format_change_starts_a_new_ring() {
 fn a_cut_quiet_tail_at_a_format_change_carries_its_savings_to_the_next_ring() {
     // Half a second of tone, then a long pause that ends the file: the pause's
     // savings belong to the ring the format change closes, and the next ring
-    // has no way to recover time the old one saved.
+    // has no way to recover time the old one saved. A callback frees the old
+    // ring's last slots a moment before it consumes its endpoint segment, which
+    // is where that total is published; here the device holds the timeline back
+    // so the decoder makes the new ring in exactly that window.
     let mut a = pcm(RATE as usize, 1);
     a.extend(std::iter::repeat_n(32i16, RATE as usize * 10 * 2));
     let dir = tempfile::tempdir().unwrap();
@@ -256,14 +259,29 @@ fn a_cut_quiet_tail_at_a_format_change_carries_its_savings_to_the_next_ring() {
     s.set_next(0, Some(source_at(&dir, "b", 48_000, &pcm(2 * 4_000, 2))));
     let (input, _) = wait_ring(&s);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
+    let held = dev.input.hold_timeline().expect("a timeline");
+    // Play the first ring out, freeing every slot, with nothing published.
     let deadline = Instant::now() + slack(Duration::from_secs(5));
     while !dev.tick(512).0 {
         assert!(Instant::now() < deadline, "the first ring never drained");
         thread::sleep(Duration::from_micros(200));
     }
-    let (input, _) = wait_ring(&s);
+    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let input = loop {
+        if let Some(DecoderMsg::Ring { input, .. }) = s.try_msg() {
+            break input;
+        }
+        assert!(Instant::now() < deadline, "no second ring");
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(status.silence_saved_secs(), 0.0, "the old ring's endpoint is still held");
+    // The next callback publishes it, as a real device one buffer later would.
+    dev.input.resume_timeline(held);
+    dev.tick(64);
+    assert!((status.silence_saved_secs() - 9.8).abs() < 1e-9, "saved {}", status.silence_saved_secs());
+    // The new ring must carry that total, not whatever `Status` said when it
+    // was made: its own segments overwrite the status as it plays.
     play_f32(&s, input, &status, 48_000);
-    // Ten seconds of pause kept their first 200 ms.
     assert!((status.silence_saved_secs() - 9.8).abs() < 1e-9, "saved {}", status.silence_saved_secs());
 }
 
@@ -400,13 +418,20 @@ fn seek_with_resampling_restarts_cleanly_at_the_target() {
 
 /// Serves `body` over HTTP with Range support, 16 KB every 30 ms.
 pub(crate) fn slow_server(body: Vec<u8>) -> String {
+    slow_server_until(body, None)
+}
+
+/// [`slow_server`], holding the body at `gate.0` bytes until `gate.1` is set,
+/// then sending the rest at once: a download that is provably still running,
+/// without waiting on a trickle.
+pub(crate) fn slow_server_until(body: Vec<u8>, gate: Option<(usize, Arc<AtomicBool>)>) -> String {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rest/stream", listener.local_addr().unwrap());
     let body = Arc::new(body);
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
-            let body = body.clone();
+            let (body, gate) = (body.clone(), gate.clone());
             thread::spawn(move || {
                 let mut reader = BufReader::new(conn.try_clone().unwrap());
                 let mut start = 0usize;
@@ -429,11 +454,22 @@ pub(crate) fn slow_server(body: Vec<u8>) -> String {
                 if out.write_all(head.as_bytes()).is_err() {
                     return;
                 }
-                for chunk in body[start..].chunks(16 * 1024) {
+                let held = gate.as_ref().map(|(until, _)| (*until).min(len)).unwrap_or(len).max(start);
+                for chunk in body[start..held].chunks(16 * 1024) {
                     if out.write_all(chunk).is_err() {
                         return;
                     }
                     thread::sleep(Duration::from_millis(30));
+                }
+                if let Some((until, open)) = &gate {
+                    if start < *until {
+                        while !open.load(Ordering::Relaxed) {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                    }
+                }
+                if out.write_all(&body[held..]).is_err() {
+                    return;
                 }
             });
         }
