@@ -1,118 +1,10 @@
 use super::*;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
-
-/// A tiny HTTP/1.1 file server: optional Range support, throttled chunks, a
-/// gate that holds the body part-way, and a log of the `Range` start each
-/// request asked for.
-struct Server {
-    url: String,
-    requests: Arc<Mutex<Vec<Option<u64>>>>,
-    gate: Arc<AtomicBool>,
-}
-
-#[derive(Clone, Copy)]
-struct Opts {
-    ranges: bool,
-    chunk: usize,
-    delay: Duration,
-    /// Hold the body at this byte until [`Server::open_gate`]: a download that
-    /// is provably unfinished, without a trickle. Requests past it send at once.
-    gate_after: Option<usize>,
-    /// Claimed in `Content-Range` beyond the real length (an estimated transcode size).
-    declared_extra: u64,
-    /// `Content-Range: bytes a-b/*`: no total.
-    star_total: bool,
-    /// No `Content-Length`: the body ends when the connection closes.
-    no_length: bool,
-    /// Claimed in `Content-Length` beyond the bytes actually sent.
-    short_by: u64,
-}
-
-impl Server {
-    fn start(data: Vec<u8>, opts: Opts) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/rest/stream?id=x&format=raw", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let gate = Arc::new(AtomicBool::new(false));
-        let (data, log, open) = (Arc::new(data), requests.clone(), gate.clone());
-        thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(conn) = conn else { break };
-                let (data, log, gate) = (data.clone(), log.clone(), open.clone());
-                thread::spawn(move || serve(conn, &data, opts, &log, &gate));
-            }
-        });
-        Self { url, requests, gate }
-    }
-
-    fn requests(&self) -> Vec<Option<u64>> {
-        self.requests.lock().unwrap().clone()
-    }
-
-    fn open_gate(&self) {
-        self.gate.store(true, Ordering::Relaxed);
-    }
-}
-
-fn serve(conn: TcpStream, data: &[u8], opts: Opts, log: &Mutex<Vec<Option<u64>>>, gate: &AtomicBool) {
-    let mut reader = BufReader::new(conn.try_clone().unwrap());
-    let mut range = None;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("range: bytes=") {
-            range = v.trim().trim_end_matches('-').parse::<u64>().ok();
-        }
-    }
-    log.lock().unwrap().push(range);
-    let mut out = conn;
-    let len = data.len() as u64;
-    let total = if opts.star_total { "*".to_owned() } else { (len + opts.declared_extra).to_string() };
-    let (status, start) = match range {
-        Some(s) if opts.ranges && s >= len => {
-            let _ = write!(out, "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-            return;
-        }
-        Some(s) if opts.ranges => (format!("206 Partial Content\r\nContent-Range: bytes {s}-{}/{total}", len - 1), s),
-        _ => ("200 OK".to_owned(), 0),
-    };
-    let body = &data[start as usize..];
-    let length = if opts.no_length { String::new() } else { format!("Content-Length: {}\r\n", body.len() as u64 + opts.short_by) };
-    let head = format!("HTTP/1.1 {status}\r\n{length}Accept-Ranges: bytes\r\nConnection: close\r\n\r\n");
-    if out.write_all(head.as_bytes()).is_err() {
-        return;
-    }
-    let start = start as usize;
-    let gate_at = opts.gate_after.map_or(data.len(), |at| at.min(data.len()));
-    let paced = |out: &mut TcpStream, bytes: &[u8]| {
-        for chunk in bytes.chunks(opts.chunk) {
-            if out.write_all(chunk).is_err() {
-                return false;
-            }
-            thread::sleep(opts.delay);
-        }
-        true
-    };
-    if opts.gate_after.is_some_and(|at| start < at.min(data.len())) {
-        if !paced(&mut out, &data[start..gate_at]) {
-            return;
-        }
-        // The response stays open, unfinished, until the test says so.
-        while !gate.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(1));
-        }
-        let _ = out.write_all(&data[gate_at..]);
-    } else {
-        paced(&mut out, body);
-    }
-}
+use testkit::{RangeServer, Serve, WAIT, slack, wait_until};
 
 fn data(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 31 % 251) as u8).collect()
@@ -126,14 +18,6 @@ fn never() -> Abort {
     Arc::new(|| false)
 }
 
-fn wait_until(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
-    let deadline = Instant::now() + timeout;
-    while !f() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 fn read_at(src: &mut CachedSource, pos: u64, n: usize) -> Vec<u8> {
     src.seek(SeekFrom::Start(pos)).unwrap();
     let mut buf = vec![0; n];
@@ -141,19 +25,16 @@ fn read_at(src: &mut CachedSource, pos: u64, n: usize) -> Vec<u8> {
     buf
 }
 
-const FAST: Opts =
-    Opts { ranges: true, chunk: 16 * 1024, delay: Duration::ZERO, gate_after: None, declared_extra: 0, star_total: false, no_length: false, short_by: 0 };
-
 /// Reads `src` from `from` to the end on another thread, failing the test
-/// instead of hanging if that takes longer than `timeout`. Hands the source back.
-fn read_to_end_within(mut src: CachedSource, from: u64, timeout: Duration) -> (io::Result<Vec<u8>>, CachedSource) {
+/// instead of hanging if that takes longer than [`WAIT`]. Hands the source back.
+fn read_from(mut src: CachedSource, from: u64) -> (io::Result<Vec<u8>>, CachedSource) {
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let mut out = Vec::new();
         let r = src.seek(SeekFrom::Start(from)).and_then(|_| src.read_to_end(&mut out)).map(|_| out);
         let _ = tx.send((r, src));
     });
-    rx.recv_timeout(timeout).expect("read timed out")
+    rx.recv_timeout(slack(WAIT)).expect("read timed out")
 }
 
 /// `got == want`, reported as lengths and the first differing offset rather
@@ -177,23 +58,23 @@ fn sequential_read_then_cached() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(300_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(1), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(1), ..Serve::fast() });
     let key = CacheKey::new("t1", Some("flac".into()));
 
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(src.byte_len(), Some(300_000));
     let mut out = Vec::new();
     src.read_to_end(&mut out).unwrap();
     assert_eq!(out, body);
 
-    wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
     assert_eq!(std::fs::read(dir.path().join("t1.flac")).unwrap(), body);
     assert_eq!(cache.size(), 300_000);
     drop(src);
 
     // A second open is served from disk without a request.
     let before = server.requests().len();
-    let mut again = cache.open(&key, &server.url, never()).unwrap();
+    let mut again = cache.open(&key, &server.url(), never()).unwrap();
     assert!(matches!(again, CachedSource::File { .. }));
     let mut out = Vec::new();
     again.read_to_end(&mut out).unwrap();
@@ -208,10 +89,10 @@ fn seek_forward_past_download_point_then_backward() {
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     // 2 MB, with the first 1 MB held open: nothing past it arrives in order.
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { gate_after: Some(1_000_000), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { gate_after: Some(1_000_000), ..Serve::fast() });
     let key = CacheKey::new("t2", None);
 
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(read_at(&mut src, 0, 1024), body[..1024]);
 
     let t = Instant::now();
@@ -224,7 +105,7 @@ fn seek_forward_past_download_point_then_backward() {
 
     // The skipped middle is filled in afterwards and the file completes.
     server.open_gate();
-    wait_until("gap fill", slack(Duration::from_secs(10)), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("gap fill", || cache.progress(&key).is_some_and(|p| p.complete));
     let mut all = Vec::new();
     src.seek(SeekFrom::Start(0)).unwrap();
     src.read_to_end(&mut all).unwrap();
@@ -238,14 +119,14 @@ fn server_ignoring_range_is_read_sequentially() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(400_000);
-    let server = Server::start(body.clone(), Opts { ranges: false, delay: Duration::from_millis(2), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { ranges: false, delay: Duration::from_millis(2), ..Serve::fast() });
     let key = CacheKey::new("t3", Some("wav".into()));
 
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(src.byte_len(), Some(400_000));
     assert_eq!(read_at(&mut src, 390_000, 10_000), body[390_000..]);
     assert_eq!(read_at(&mut src, 0, 100), body[..100]);
-    wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
     // One request: no relocation attempts against a server that can't do them.
     assert_eq!(server.requests().len(), 1);
 }
@@ -256,12 +137,12 @@ fn blocked_read_aborts_and_dropping_cancels() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(1_000_000);
-    let server = Server::start(body, Opts { ranges: false, chunk: 1024, delay: Duration::from_millis(50), ..FAST });
+    let server = RangeServer::start(body, Serve { ranges: false, chunk: 1024, delay: Duration::from_millis(50), ..Serve::fast() });
     let key = CacheKey::new("t4", None);
 
     let abort = Arc::new(AtomicBool::new(false));
     let flag = abort.clone();
-    let mut src = cache.open(&key, &server.url, Arc::new(move || flag.load(Ordering::Relaxed))).unwrap();
+    let mut src = cache.open(&key, &server.url(), Arc::new(move || flag.load(Ordering::Relaxed))).unwrap();
     src.seek(SeekFrom::Start(900_000)).unwrap();
     let reader = thread::spawn(move || {
         let mut buf = [0u8; 16];
@@ -277,8 +158,8 @@ fn blocked_read_aborts_and_dropping_cancels() {
 
     // The only holder goes away: the download stops and its partial file is removed.
     drop(src);
-    wait_until("cancel", Duration::from_secs(2), || cache.progress(&key).is_none());
-    wait_until("part cleanup", Duration::from_secs(2), || std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    wait_until("cancel", || cache.progress(&key).is_none());
+    wait_until("part cleanup", || std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
 #[test]
@@ -287,15 +168,15 @@ fn lru_eviction_keeps_recent_files() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = CacheConfig { max_bytes: 3_000, ..CacheConfig::new(dir.path()) };
     let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
-    let server = Server::start(data(1_200), FAST);
+    let server = RangeServer::start(data(1_200), Serve::fast());
     // Waits for the index, not the download's progress: a download reports
     // complete just before it's indexed (and stamped as used).
     let fetch = |id: &str, size_after: u64| {
         let key = CacheKey::new(id, None);
-        let mut src = cache.open(&key, &server.url, never()).unwrap();
+        let mut src = cache.open(&key, &server.url(), never()).unwrap();
         let mut out = Vec::new();
         src.read_to_end(&mut out).unwrap();
-        wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == size_after);
+        wait_until("indexed", || cache.size() == size_after);
     };
 
     fetch("a", 1_200);
@@ -307,7 +188,7 @@ fn lru_eviction_keeps_recent_files() {
     fetch("c", 2_400); // 3 600 bytes > 3 000: b goes
 
     // The evicted file is deleted just after the index lets it go.
-    wait_until("eviction", slack(Duration::from_secs(5)), || !dir.path().join("b").exists());
+    wait_until("eviction", || !dir.path().join("b").exists());
     assert!(dir.path().join("a").exists());
     assert!(dir.path().join("c").exists());
     assert_eq!(cache.size(), 2_400);
@@ -331,20 +212,20 @@ fn prefetch_downloads_without_a_reader_and_replaces_the_previous_one() {
     let rt = runtime();
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
-    let slow = Server::start(data(1_000_000), Opts { chunk: 1024, delay: Duration::from_millis(50), ..FAST });
-    let fast = Server::start(data(100_000), FAST);
+    let slow = RangeServer::start(data(1_000_000), Serve { chunk: 1024, delay: Duration::from_millis(50), ..Serve::fast() });
+    let fast = RangeServer::start(data(100_000), Serve::fast());
     let (k1, k2) = (CacheKey::new("p1", None), CacheKey::new("p2", None));
 
-    cache.prefetch(&k1, &slow.url);
-    wait_until("p1 started", Duration::from_secs(2), || cache.progress(&k1).is_some_and(|p| p.downloaded > 0));
+    cache.prefetch(&k1, &slow.url());
+    wait_until("p1 started", || cache.progress(&k1).is_some_and(|p| p.downloaded > 0));
     // A reader attaching to the prefetch shares the same download.
-    let src = cache.open(&k1, &slow.url, never()).unwrap();
+    let src = cache.open(&k1, &slow.url(), never()).unwrap();
     assert_eq!(slow.requests().len(), 1);
     drop(src);
 
-    cache.prefetch(&k2, &fast.url);
-    wait_until("p1 cancelled", Duration::from_secs(2), || cache.progress(&k1).is_none());
-    wait_until("p2 complete", Duration::from_secs(5), || cache.progress(&k2).is_some_and(|p| p.complete));
+    cache.prefetch(&k2, &fast.url());
+    wait_until("p1 cancelled", || cache.progress(&k1).is_none());
+    wait_until("p2 complete", || cache.progress(&k2).is_some_and(|p| p.complete));
 }
 
 #[test]
@@ -369,7 +250,8 @@ fn an_error_reply_the_check_flags_is_not_cached_as_audio() {
     let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
     assert!(!dir.path().join("old.flac").exists());
 
-    let url = fixed_reply("audio/flac", b"ERROR 40: wrong password");
+    let server = RangeServer::start(b"ERROR 40: wrong password".to_vec(), Serve { content_type: Some("audio/flac"), ..Serve::fast() });
+    let url = server.url();
     let key = CacheKey::new("bad", Some("flac".into()));
     // The open waits for the headers or a failure, so it ends in the error.
     let err = cache.open(&key, &url, never()).err().expect("an error reply opened as audio");
@@ -387,12 +269,13 @@ fn a_cache_without_a_check_keeps_every_reply() {
     assert!(dir.path().join("old.flac").exists());
 
     let body = b"ERROR 40: wrong password";
-    let url = fixed_reply("text/plain", body);
+    let server = RangeServer::start(body.to_vec(), Serve { content_type: Some("text/plain"), ..Serve::fast() });
+    let url = server.url();
     let key = CacheKey::new("kept", Some("flac".into()));
     let mut got = Vec::new();
     cache.open(&key, &url, never()).unwrap().read_to_end(&mut got).unwrap();
     assert_eq!(got, body);
-    wait_until("kept complete", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("kept complete", || cache.progress(&key).is_some_and(|p| p.complete));
 }
 
 /// A reverse proxy's login page, answered 200 on the stream URL, is no track.
@@ -402,33 +285,14 @@ fn a_html_page_answering_200_is_not_cached_as_audio() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = CacheConfig { reply_check: refusals(), ..CacheConfig::new(dir.path()) };
     let cache = StreamCache::new(cfg, rt.handle().clone()).unwrap();
-    let url = fixed_reply("text/html; charset=utf-8", b"<!DOCTYPE html><html><head><title>Sign in</title></head><body>SSO</body></html>");
+    let page = b"<!DOCTYPE html><html><head><title>Sign in</title></head><body>SSO</body></html>";
+    let url = RangeServer::start(page.to_vec(), Serve { content_type: Some("text/html; charset=utf-8"), ..Serve::fast() }).url();
     let key = CacheKey::new("sso", Some("flac".into()));
     let err = cache.open(&key, &url, never()).err().expect("a page opened as audio");
     assert!(err.to_string().contains("Sign in"), "{err}");
     assert!(!dir.path().join("sso.flac").exists());
     assert!(cache.complete_path(&key).is_none());
     assert_eq!(cache.size(), 0);
-}
-
-/// A server that answers every request with one fixed 200 body.
-fn fixed_reply(content_type: &'static str, body: &'static [u8]) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/rest/stream?id=x", listener.local_addr().unwrap());
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut conn) = conn else { break };
-            let mut reader = BufReader::new(conn.try_clone().unwrap());
-            let mut line = String::new();
-            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
-                line.clear();
-            }
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-            let _ = conn.write_all(head.as_bytes());
-            let _ = conn.write_all(body);
-        }
-    });
-    url
 }
 
 #[test]
@@ -457,21 +321,21 @@ fn a_cached_file_deleted_behind_our_back_is_downloaded_again() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(5_000);
-    let server = Server::start(body.clone(), FAST);
+    let server = RangeServer::start(body.clone(), Serve::fast());
     let key = CacheKey::new("gone", Some("flac".into()));
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     src.read_to_end(&mut Vec::new()).unwrap();
-    wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
     drop(src);
     assert_eq!(server.requests().len(), 1);
 
     std::fs::remove_file(dir.path().join("gone.flac")).unwrap();
-    let mut again = cache.open(&key, &server.url, never()).unwrap();
+    let mut again = cache.open(&key, &server.url(), never()).unwrap();
     let mut out = Vec::new();
     again.read_to_end(&mut out).unwrap();
     assert_eq!(out, body);
     assert_eq!(server.requests().len(), 2, "it went back to the server");
-    wait_until("the second completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("the second completion", || cache.progress(&key).is_some_and(|p| p.complete));
     assert_eq!(cache.size(), 5_000, "the stale entry's bytes aren't counted twice");
     assert_eq!(std::fs::read(dir.path().join("gone.flac")).unwrap(), body);
 }
@@ -542,19 +406,19 @@ fn clearing_forgets_and_deletes_every_file() {
     let rt = runtime();
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
-    let server = Server::start(data(1_200), FAST);
+    let server = RangeServer::start(data(1_200), Serve::fast());
     for id in ["a", "b"] {
         let key = CacheKey::new(id, None);
-        let mut src = cache.open(&key, &server.url, never()).unwrap();
+        let mut src = cache.open(&key, &server.url(), never()).unwrap();
         let mut out = Vec::new();
         src.read_to_end(&mut out).unwrap();
-        wait_until("completion", Duration::from_secs(5), || cache.progress(&key).is_some_and(|p| p.complete));
+        wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
     }
     assert_eq!(cache.size(), 2_400);
     cache.clear();
     assert_eq!(cache.size(), 0);
     assert!(cache.complete_path(&CacheKey::new("a", None)).is_none());
-    wait_until("deletion", Duration::from_secs(5), || !dir.path().join("a").exists() && !dir.path().join("b").exists());
+    wait_until("deletion", || !dir.path().join("a").exists() && !dir.path().join("b").exists());
 }
 
 /// The audio engine cancels everything and then opens the next track, while
@@ -566,20 +430,20 @@ fn cancel_all_then_open_starts_a_fresh_download() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(600_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..Serve::fast() });
     let key = CacheKey::new("c1", None);
 
-    let mut old = cache.open(&key, &server.url, never()).unwrap();
+    let mut old = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(read_at(&mut old, 0, 1024), body[..1024]);
     cache.cancel_all();
-    let new = cache.open(&key, &server.url, never()).unwrap();
-    let (out, _new) = read_to_end_within(new, 0, slack(Duration::from_secs(10)));
+    let new = cache.open(&key, &server.url(), never()).unwrap();
+    let (out, _new) = read_from(new, 0);
     assert_bytes(&out.unwrap(), &body);
 
     // The old reader letting go doesn't cancel its replacement.
     drop(old);
-    wait_until("completion", slack(Duration::from_secs(5)), || cache.progress(&key).is_some_and(|p| p.complete));
-    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 600_000);
+    wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("indexed", || cache.size() == 600_000);
     assert_bytes(&std::fs::read(dir.path().join("c1")).unwrap(), &body);
 }
 
@@ -589,15 +453,15 @@ fn a_200_without_content_length_is_read_to_its_end() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(300_000);
-    let server = Server::start(body.clone(), Opts { ranges: false, no_length: true, delay: Duration::from_millis(1), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { ranges: false, no_length: true, delay: Duration::from_millis(1), ..Serve::fast() });
     let key = CacheKey::new("chunked", None);
 
-    let src = cache.open(&key, &server.url, never()).unwrap();
+    let src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(src.byte_len(), None);
-    let (out, src) = read_to_end_within(src, 0, slack(Duration::from_secs(5)));
+    let (out, src) = read_from(src, 0);
     assert_bytes(&out.unwrap(), &body);
     assert_eq!(src.byte_len(), Some(300_000));
-    wait_until("completion", slack(Duration::from_secs(5)), || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
     assert_eq!(cache.progress(&key).unwrap().len, Some(300_000));
     assert_eq!(server.requests().len(), 1);
 }
@@ -608,10 +472,10 @@ fn a_backward_seek_into_a_gap_fetches_it() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { gate_after: Some(1_000_000), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { gate_after: Some(1_000_000), ..Serve::fast() });
     let key = CacheKey::new("gap", None);
 
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(read_at(&mut src, 0, 1024), body[..1024]);
     assert_eq!(read_at(&mut src, 1_500_000, 4096), body[1_500_000..1_504_096]);
     // Behind the relocated stream and past what the first one fetched.
@@ -621,7 +485,7 @@ fn a_backward_seek_into_a_gap_fetches_it() {
     assert!(server.requests().contains(&Some(800_000)), "no ranged request: {:?}", server.requests());
 
     server.open_gate();
-    let (out, _src) = read_to_end_within(src, 0, slack(Duration::from_secs(10)));
+    let (out, _src) = read_from(src, 0);
     assert_bytes(&out.unwrap(), &body);
 }
 
@@ -635,18 +499,18 @@ fn two_readers_seek_independently() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..Serve::fast() });
     let key = CacheKey::new("two", None);
 
-    let a = cache.open(&key, &server.url, never()).unwrap();
-    let b = cache.open(&key, &server.url, never()).unwrap();
+    let a = cache.open(&key, &server.url(), never()).unwrap();
+    let b = cache.open(&key, &server.url(), never()).unwrap();
     let from_b = 1_200_000;
-    let b_thread = thread::spawn(move || read_to_end_within(b, from_b, slack(Duration::from_secs(10))).0);
-    let (out_a, _a) = read_to_end_within(a, 0, slack(Duration::from_secs(10)));
+    let b_thread = thread::spawn(move || read_from(b, from_b).0);
+    let (out_a, _a) = read_from(a, 0);
     assert_bytes(&out_a.unwrap(), &body);
     assert_bytes(&b_thread.join().unwrap().unwrap(), &body[from_b as usize..]);
-    wait_until("completion", slack(Duration::from_secs(5)), || cache.progress(&key).is_some_and(|p| p.complete));
-    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 2_000_000);
+    wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("indexed", || cache.size() == 2_000_000);
     assert_bytes(&std::fs::read(dir.path().join("two")).unwrap(), &body);
 }
 
@@ -717,7 +581,7 @@ fn a_seek_while_reconnecting_is_not_lost() {
     });
     let key = CacheKey::new("reconnect", None);
     let src = cache.open(&key, &url, never()).unwrap();
-    wait_until("reconnect", slack(Duration::from_secs(5)), || starts.lock().unwrap().len() >= 2);
+    wait_until("reconnect", || starts.lock().unwrap().len() >= 2);
     // The download is now waiting on the reconnect's answer. A reader asks for
     // a far offset, where there's nothing: it blocks there.
     let far = 1_500_000;
@@ -749,16 +613,16 @@ fn a_declared_length_past_the_real_end_ends_at_the_data() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(300_000);
-    let server = Server::start(body.clone(), Opts { declared_extra: 50_000, ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { declared_extra: 50_000, ..Serve::fast() });
     let key = CacheKey::new("long", None);
 
-    let src = cache.open(&key, &server.url, never()).unwrap();
+    let src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(src.byte_len(), Some(350_000));
-    let (out, src) = read_to_end_within(src, 0, slack(Duration::from_secs(5)));
+    let (out, src) = read_from(src, 0);
     assert_bytes(&out.unwrap(), &body);
     assert_eq!(src.byte_len(), Some(300_000), "the reader learns the real length");
 
-    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 300_000);
+    wait_until("indexed", || cache.size() == 300_000);
     assert_bytes(&std::fs::read(dir.path().join("long")).unwrap(), &body);
     assert_eq!(server.requests(), [Some(0), Some(300_000)]);
 }
@@ -772,20 +636,20 @@ fn ranges_without_a_total_fill_the_skipped_part() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { star_total: true, gate_after: Some(1_500_000), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { star_total: true, gate_after: Some(1_500_000), ..Serve::fast() });
     let key = CacheKey::new("star", None);
 
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(src.byte_len(), None);
     assert_eq!(read_at(&mut src, 0, 1024), body[..1024]);
     assert_eq!(read_at(&mut src, 1_500_000, 64 * 1024), body[1_500_000..1_500_000 + 64 * 1024]);
     assert!(server.requests().contains(&Some(1_500_000)), "no ranged request: {:?}", server.requests());
 
     server.open_gate();
-    let (out, _src) = read_to_end_within(src, 0, slack(Duration::from_secs(10)));
+    let (out, _src) = read_from(src, 0);
     assert_bytes(&out.unwrap(), &body);
-    wait_until("completion", slack(Duration::from_secs(5)), || cache.progress(&key).is_some_and(|p| p.complete));
-    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 2_000_000);
+    wait_until("completion", || cache.progress(&key).is_some_and(|p| p.complete));
+    wait_until("indexed", || cache.size() == 2_000_000);
     assert_bytes(&std::fs::read(dir.path().join("star")).unwrap(), &body);
 }
 
@@ -798,18 +662,18 @@ fn a_seek_past_the_end_of_a_file_without_a_total_reads_as_the_end() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(1_000_000);
-    let server = Server::start(body.clone(), Opts { star_total: true, delay: Duration::from_millis(5), ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { star_total: true, delay: Duration::from_millis(5), ..Serve::fast() });
     let key = CacheKey::new("past", None);
 
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(read_at(&mut src, 0, 1024), body[..1024]);
-    let (tail, src) = read_to_end_within(src, 1_800_000, slack(Duration::from_secs(5)));
+    let (tail, src) = read_from(src, 1_800_000);
     assert_eq!(tail.unwrap().len(), 0);
     assert!(server.requests().contains(&Some(1_800_000)), "no ranged request: {:?}", server.requests());
 
-    let (out, _src) = read_to_end_within(src, 0, slack(Duration::from_secs(10)));
+    let (out, _src) = read_from(src, 0);
     assert_bytes(&out.unwrap(), &body);
-    wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 1_000_000);
+    wait_until("indexed", || cache.size() == 1_000_000);
     assert_bytes(&std::fs::read(dir.path().join("past")).unwrap(), &body);
 }
 
@@ -821,23 +685,23 @@ fn a_late_eviction_spares_a_file_downloaded_again() {
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
     let body = data(1_200);
-    let server = Server::start(body.clone(), FAST);
+    let server = RangeServer::start(body.clone(), Serve::fast());
     let key = CacheKey::new("again", None);
     let fetch = || {
-        let mut src = cache.open(&key, &server.url, never()).unwrap();
+        let mut src = cache.open(&key, &server.url(), never()).unwrap();
         let mut out = Vec::new();
         src.read_to_end(&mut out).unwrap();
-        wait_until("indexed", slack(Duration::from_secs(5)), || cache.size() == 1_200);
+        wait_until("indexed", || cache.size() == 1_200);
     };
 
     fetch();
     cache.clear();
-    wait_until("deletion", slack(Duration::from_secs(5)), || !dir.path().join("again").exists());
+    wait_until("deletion", || !dir.path().join("again").exists());
     fetch();
     // The delete from the clear, arriving only now.
     cache.inner.remove(vec![key.file_name()]);
     assert_eq!(std::fs::read(dir.path().join("again")).unwrap(), body);
-    let mut src = cache.open(&key, &server.url, never()).unwrap();
+    let mut src = cache.open(&key, &server.url(), never()).unwrap();
     assert!(matches!(src, CachedSource::File { .. }));
     let mut out = Vec::new();
     src.read_to_end(&mut out).unwrap();
@@ -847,7 +711,7 @@ fn a_late_eviction_spares_a_file_downloaded_again() {
     cache.clear();
     cache.inner.remove(vec![key.file_name()]);
     assert!(!dir.path().join("again").exists());
-    wait_until("background deletion", slack(Duration::from_secs(5)), || std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    wait_until("background deletion", || std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
 #[test]
@@ -856,17 +720,17 @@ fn a_200_with_a_content_length_longer_than_the_body_ends_in_an_error_not_a_loop(
     let dir = tempfile::tempdir().unwrap();
     let cache = StreamCache::new(CacheConfig { retry: Duration::from_millis(1), ..CacheConfig::new(dir.path()) }, rt.handle().clone()).unwrap();
     let body = data(100_000);
-    let server = Server::start(body.clone(), Opts { ranges: false, short_by: 50_000, ..FAST });
+    let server = RangeServer::start(body.clone(), Serve { ranges: false, short_by: 50_000, ..Serve::fast() });
     let key = CacheKey::new("short", Some("mp3".into()));
 
-    let src = cache.open(&key, &server.url, never()).unwrap();
+    let src = cache.open(&key, &server.url(), never()).unwrap();
     assert_eq!(src.byte_len(), Some(150_000));
     // A reader at the missing tail gets an error once the tries run out,
     // instead of waiting forever.
-    let (r, _src) = read_to_end_within(src, 120_000, slack(Duration::from_secs(10)));
+    let (r, _src) = read_from(src, 120_000);
     assert!(r.is_err(), "read past the real end should fail");
     assert_eq!(server.requests().len(), 5, "one request plus four retries: {:?}", server.requests());
-    wait_until("the download to end", slack(Duration::from_secs(2)), || active(&cache, &key).is_none());
+    wait_until("the download to end", || active(&cache, &key).is_none());
     assert!(!cache.is_complete(CacheKeyRef::Original { id: "short", suffix: Some("mp3") }));
 }
 
@@ -900,10 +764,4 @@ fn is_complete_matches_the_index() {
     assert!(!cache.is_complete(CacheKeyRef::Original { id: "a/b", suffix: Some("mp3") }));
     assert!(cache.is_complete(CacheKeyRef::Transcode { id: "t1", format: "opus", kbps: 128 }));
     assert!(!cache.is_complete(CacheKeyRef::Transcode { id: "t1", format: "opus", kbps: 96 }));
-}
-
-/// Time budgets in these tests are tight on purpose (they guard real
-/// performance), but shared CI runners are slower and noisier: allow 10× there.
-fn slack(d: std::time::Duration) -> std::time::Duration {
-    if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }
