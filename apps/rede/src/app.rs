@@ -524,6 +524,14 @@ impl RedeApp {
                 self.shown.sort = sort;
                 self.ctx.request_repaint();
             }
+            PrefsAction::Filter(filter) => {
+                if self.prefs.get(|s| s.filter) == filter {
+                    return;
+                }
+                self.prefs.edit(|s| s.filter = filter);
+                self.shown.filter = filter;
+                self.ctx.request_repaint();
+            }
             PrefsAction::Zoom(percent) => {
                 let percent = shell::zoom::nearest(f64::from(percent));
                 if self.prefs.get(|s| s.zoom) == percent {

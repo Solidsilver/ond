@@ -129,7 +129,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.set_size(egui::vec2(FULL[0], FULL[1]));
     // A library with nothing in it yet.
     scene(h, s, "library-empty", || app(&ctx, dir.path(), 0));
-    // Twelve books, in each of the orders the pill offers.
+    // Twelve books, by title and by author.
     for (sort, name) in [(crate::settings::LibrarySort::Title, "title"), (crate::settings::LibrarySort::Author, "author")] {
         scene(h, s, &format!("library-{name}"), || {
             let app = app(&ctx, dir.path(), BOOKS.len());
@@ -167,6 +167,43 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         listened(&mut app);
         app.go(Route::Library);
+        app
+    });
+    // The library narrowed to each stage, by the books heard last, with the
+    // order's menu open, and narrowed to nothing. A folder of their own, so
+    // the saved order and filter don't carry into another scene's app.
+    use crate::settings::{LibraryFilter, LibrarySort};
+    let shelf_dir = tempfile::tempdir().unwrap();
+    let library = |filter: LibraryFilter, sort: LibrarySort, begun: bool| {
+        let mut app = app(&ctx, shelf_dir.path(), BOOKS.len());
+        if begun {
+            listened(&mut app);
+        }
+        app.apply_prefs(PrefsAction::Filter(filter));
+        app.apply_prefs(PrefsAction::Sort(sort));
+        app.go(Route::Library);
+        app
+    };
+    for (filter, name) in [(LibraryFilter::InProgress, "in-progress"), (LibraryFilter::NotStarted, "not-started"), (LibraryFilter::Finished, "finished")] {
+        scene(h, s, &format!("library-{name}"), || library(filter, LibrarySort::Title, true));
+    }
+    scene(h, s, "library-listened", || library(LibraryFilter::All, LibrarySort::Listened, true));
+    scene(h, s, "library-filter-empty", || library(LibraryFilter::InProgress, LibrarySort::Title, false));
+    scene(h, s, "library-sort-menu", || library(LibraryFilter::All, LibrarySort::Progress, true));
+    h.get_by_label("Sort: Progress").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "library-sort-menu");
+    // Where the heading has less room: beside the chapters column, and with
+    // the sidebar folded to its rail.
+    scene(h, s, "library-panel-in-progress", || {
+        let app = library(LibraryFilter::InProgress, LibrarySort::Listened, true);
+        app.prefs.edit(|p| p.show_panel = true);
+        app
+    });
+    scene(h, s, "library-collapsed-finished", || {
+        let app = library(LibraryFilter::Finished, LibrarySort::Title, true);
+        app.prefs.edit(|p| p.sidebar_collapsed = true);
         app
     });
     // Nothing playing: the capsule's quiet line, and the column saying so.
@@ -440,6 +477,13 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         playing(&mut app, true);
         app
     });
+    scene(h, s, "library-in-progress-narrow", || library(LibraryFilter::InProgress, LibrarySort::Listened, true));
+    scene(h, s, "library-filter-empty-narrow", || library(LibraryFilter::Finished, LibrarySort::Title, false));
+    scene(h, s, "library-sort-menu-narrow", || library(LibraryFilter::NotStarted, LibrarySort::Added, true));
+    h.get_by_label("Sort: Recently added").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "library-sort-menu-narrow");
     // There the column is a sheet over the page.
     scene(h, s, "panel-sheet-narrow", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());

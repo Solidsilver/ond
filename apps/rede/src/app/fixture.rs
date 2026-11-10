@@ -191,11 +191,13 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     let listed: Vec<ItemSummary> = all.iter().take(books).cloned().collect();
     let signed_in = account();
     // The settings file is shared by every app a test builds in `dir`; the
-    // column starts hidden and the sidebar open whatever the last one left.
+    // column starts hidden, the sidebar open and the library unfiltered
+    // whatever the last one left.
     app.prefs.edit(|s| {
         s.put_account(signed_in.clone());
         s.show_panel = false;
         s.sidebar_collapsed = false;
+        s.filter = Default::default();
     });
     app.shown = PrefsView::read(&app.prefs);
     app.session = Session { account: Some(signed_in), source: None, shelf: Some(shelf.clone()), connecting: false };

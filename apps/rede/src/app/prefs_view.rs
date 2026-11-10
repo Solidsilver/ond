@@ -3,10 +3,12 @@
 //! are asked for as actions and applied after the frame.
 
 use crate::prefs::Prefs;
-use crate::settings::LibrarySort;
+use crate::settings::{LibraryFilter, LibrarySort};
 
 pub struct PrefsView {
     pub sort: LibrarySort,
+    /// Which books the library shows.
+    pub filter: LibraryFilter,
     /// How large the interface is drawn, in percent.
     pub zoom: u16,
     pub playback: crate::settings::PlaybackSettings,
@@ -18,7 +20,14 @@ pub struct PrefsView {
 
 impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
-        prefs.get(|s| Self { sort: s.sort, zoom: s.zoom, playback: s.playback, show_panel: s.show_panel, sidebar_collapsed: s.sidebar_collapsed })
+        prefs.get(|s| Self {
+            sort: s.sort,
+            filter: s.filter,
+            zoom: s.zoom,
+            playback: s.playback,
+            show_panel: s.show_panel,
+            sidebar_collapsed: s.sidebar_collapsed,
+        })
     }
 }
 
@@ -28,6 +37,8 @@ impl PrefsView {
 pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
+    /// Which books the library shows.
+    Filter(LibraryFilter),
     /// The interface's size, in percent.
     Zoom(u16),
     Playback(crate::settings::PlaybackSettings),

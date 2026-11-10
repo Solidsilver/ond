@@ -85,7 +85,24 @@ pub enum Listened {
     Finished,
 }
 
+/// How far along a book is, without the figures: what the library's filter
+/// sorts books by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    NotStarted,
+    InProgress,
+    Finished,
+}
+
 impl Listened {
+    pub fn stage(&self) -> Stage {
+        match self {
+            Self::NotStarted => Stage::NotStarted,
+            Self::InProgress { .. } => Stage::InProgress,
+            Self::Finished => Stage::Finished,
+        }
+    }
+
     /// `progress` as saved, or `playing_at` when the book is the one loaded
     /// (the player is ahead of the last report). Time left is at `speed`.
     pub fn of(book: &ItemSummary, progress: Option<&Progress>, playing_at: Option<f64>, speed: f32) -> Self {
@@ -122,6 +139,17 @@ impl ViewCtx<'_> {
     pub(super) fn listened(&self, book: &ItemSummary) -> Listened {
         let playing_at = self.player.book.as_ref().filter(|b| b.key.item == book.id).map(|_| self.player.position);
         Listened::of(book, self.positions.get(&book.id), playing_at, self.playback.speed)
+    }
+
+    /// The loaded book's stage, when the player is ahead of what was saved
+    /// for it (started, and not reported yet): the library's filter goes by
+    /// what its tile shows.
+    pub(super) fn loaded_stage(&self) -> Option<(String, Stage)> {
+        let loaded = self.player.book.as_ref()?;
+        let id = &loaded.key.item;
+        let saved = Listened::of(&loaded.item.summary, self.positions.get(id), None, 1.0).stage();
+        let shown = Listened::of(&loaded.item.summary, self.positions.get(id), Some(self.player.position), 1.0).stage();
+        (shown != saved).then(|| (id.clone(), shown))
     }
 }
 
