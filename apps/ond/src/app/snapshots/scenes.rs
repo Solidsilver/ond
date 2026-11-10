@@ -701,6 +701,21 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(760.0, 640.0), Route::Albums);
     s.shoot(h, "narrow-rail");
 
+    // Repeat queue with the queue hidden: a badge on its toggle says so,
+    // wide and narrow, and its tooltip names it.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).player.queue.end = crate::queue::EndAction::RepeatQueue;
+    app_mut(h).prefs.edit(|s| s.show_queue = false);
+    h.run_steps(2);
+    s.shoot(h, "queue-repeat-hidden");
+    h.get_by_label(&crate::keys::shown("Show queue (⌥⌘U). Then: Repeat queue")).hover();
+    h.run_steps(30);
+    s.shoot_now(h, "queue-repeat-hover");
+    reset(h, vec2(760.0, 640.0), Route::Albums);
+    app_mut(h).player.queue.end = crate::queue::EndAction::RepeatQueue;
+    s.shoot(h, "narrow-queue-repeat");
+    app_mut(h).player.queue.end = crate::queue::EndAction::Stop;
+
     reset(h, vec2(900.0, 700.0), Route::Album(album_id(7)));
     s.shoot(h, "narrow-long-album");
 
