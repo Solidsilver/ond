@@ -468,9 +468,20 @@ impl RedeApp {
                             ui.add_space(14.0);
                         }
                         let mut enter = false;
+                        // The error, if there is one, goes under the field it's
+                        // about; one about the sign-in as a whole waits below
+                        // the buttons.
+                        let error = form.error.clone();
+                        let on = error.as_deref().and_then(error_field);
                         ui.add_enabled_ui(!form.busy, |ui| {
-                            enter |= login_field(ui, &t, "Server", &mut form.server, "https://books.example.com", false, !form.focused);
+                            enter |=
+                                login_field(ui, &t, Field::Server, &mut form.server, "https://books.example.com", !form.focused, on == Some(Field::Server));
                             form.focused = true;
+                            if on == Some(Field::Server)
+                                && let Some(error) = &error
+                            {
+                                field_error(ui, &t, Field::Server, error);
+                            }
                             if !(compact && status.is_some()) {
                                 ui.label(egui::RichText::new("Your Audiobookshelf server's address").size(11.0).color(t.muted));
                             }
@@ -515,9 +526,19 @@ impl RedeApp {
                                 ui.add_space(10.0);
                             }
                             ui.add_enabled_ui(!form.busy, |ui| {
-                                enter |= login_field(ui, &t, "Username", &mut form.username, "", false, false);
+                                enter |= login_field(ui, &t, Field::Username, &mut form.username, "", false, on == Some(Field::Username));
+                                if on == Some(Field::Username)
+                                    && let Some(error) = &error
+                                {
+                                    field_error(ui, &t, Field::Username, error);
+                                }
                                 ui.add_space(10.0);
-                                enter |= login_field(ui, &t, "Password", &mut form.password, "", true, false);
+                                enter |= login_field(ui, &t, Field::Password, &mut form.password, "", false, on == Some(Field::Password));
+                                if on == Some(Field::Password)
+                                    && let Some(error) = &error
+                                {
+                                    field_error(ui, &t, Field::Password, error);
+                                }
                             });
                             ui.add_space(gap);
                             if button(ui, "Sign in", !oidc, password_busy || !oidc) || enter {
@@ -533,9 +554,12 @@ impl RedeApp {
                                 "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID.",
                             );
                         }
-                        if let Some(error) = &form.error {
+                        if let Some(error) = &form.error
+                            && error_field(error).is_none()
+                        {
                             ui.add_space(12.0);
-                            ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(ui.visuals().error_fg_color)).wrap());
+                            let shown = ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(t.danger)).wrap());
+                            shown.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Sign-in error: {error}")));
                         }
                         if let Some(warning) = &form.warning {
                             ui.add_space(14.0);
@@ -707,19 +731,106 @@ fn notice(ui: &mut egui::Ui, t: &Tokens, title: &str, body: &str) {
     });
 }
 
-fn login_field(ui: &mut egui::Ui, t: &Tokens, label: &str, text: &mut String, hint: &str, password: bool, focus: bool) -> bool {
+fn login_field(ui: &mut egui::Ui, t: &Tokens, field: Field, text: &mut String, hint: &str, focus: bool, refused: bool) -> bool {
+    let label = field.label();
     ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
     let r = ui.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
-            .password(password)
+            .password(field == Field::Password)
             .desired_width(f32::INFINITY)
             .margin(egui::vec2(10.0, 7.0))
             .background_color(t.field),
     );
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
+    // The border says which field the error below it is about.
+    if refused {
+        ui.painter().rect_stroke(r.rect, 4.0, egui::Stroke::new(1.0, t.danger), egui::StrokeKind::Inside);
+    }
     if focus {
         r.request_focus();
     }
     r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+}
+
+/// The field a sign-in error is about, so it can be shown under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Field {
+    Server,
+    Username,
+    Password,
+}
+
+impl Field {
+    fn label(self) -> &'static str {
+        match self {
+            Field::Server => "Server",
+            Field::Username => "Username",
+            Field::Password => "Password",
+        }
+    }
+}
+
+/// Which field an error is about. Only a mistyped or refused address or name
+/// goes under a field; a rate limit, a server too old, a sign-in that timed
+/// out or an account whose shelf wouldn't open is about the sign-in as a
+/// whole and stays under the buttons.
+fn error_field(error: &str) -> Option<Field> {
+    if error == "Wrong username or password." || error == "Enter your password." {
+        return Some(Field::Password);
+    }
+    if error == "Enter your username." {
+        return Some(Field::Username);
+    }
+    let address = error.starts_with("Enter the server's address")
+        || error.starts_with("That doesn't look like a server address")
+        || error.starts_with("Couldn't reach the server")
+        || error.contains("not like an Audiobookshelf server")
+        || error.contains("instead of the server's API");
+    address.then_some(Field::Server)
+}
+
+/// What went wrong with one field, under it in the danger colour and named
+/// with the field, so a screen reader says which one it's about.
+fn field_error(ui: &mut egui::Ui, t: &Tokens, field: Field, error: &str) {
+    let resp = ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(t.danger)).wrap());
+    let name = format!("{}: {error}", field.label());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &name));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each way signing in fails, as `sign_in_error` words it, and the field
+    /// it belongs under.
+    #[test]
+    fn each_kind_of_sign_in_error_finds_its_field() {
+        let bad = crate::bridge::sign_in_error(&abs::Error::Auth(abs::AuthError::BadCredentials));
+        assert_eq!(error_field(&bad), Some(Field::Password));
+        let limited = crate::bridge::sign_in_error(&abs::Error::Auth(abs::AuthError::RateLimited { retry_after: Some(Duration::from_secs(90)) }));
+        assert_eq!(error_field(&limited), None, "a rate limit is about the sign-in, not a field");
+        let refused = crate::bridge::sign_in_error(&abs::Error::Server { status: 502, message: None });
+        assert_eq!(error_field(&refused), None, "the server is up; it just refused");
+        let signed_out = crate::bridge::sign_in_error(&abs::Error::Auth(abs::AuthError::SignedOut));
+        assert_eq!(error_field(&signed_out), None);
+        let url = crate::bridge::sign_in_error(&abs::Client::new("books example", abs::DeviceInfo::new("device", "0")).err().unwrap());
+        assert_eq!(error_field(&url), Some(Field::Server));
+        let page = crate::bridge::sign_in_error(&abs::Error::NotApi(Some("Sign in".into())));
+        assert_eq!(error_field(&page), Some(Field::Server));
+        let not_abs = crate::bridge::sign_in_error(&abs::Error::Decode("not Audiobookshelf".into()));
+        assert_eq!(error_field(&not_abs), Some(Field::Server), "the address is the one to change");
+        // The network, in the words `sign_in_error` gives it.
+        assert_eq!(error_field("Couldn't reach the server. Check the address and that it's running."), Some(Field::Server));
+        assert_eq!(error_field("Couldn't reach the server: connection reset"), Some(Field::Server));
+        // What the form itself says about an empty field.
+        assert_eq!(error_field("Enter the server's address, for example https://books.example.com."), Some(Field::Server));
+        assert_eq!(error_field("Enter your username."), Some(Field::Username));
+        assert_eq!(error_field("Enter your password."), Some(Field::Password));
+        // And what is about the sign-in as a whole, which stays under the buttons.
+        assert_eq!(error_field("This server is version 2.19.0. Rede needs Audiobookshelf 2.26 or newer."), None);
+        assert_eq!(error_field(crate::failure::SIGNED_OUT), None);
+        assert_eq!(error_field("Couldn't open this account's library: no room"), None);
+        assert_eq!(error_field("cancelled"), None);
+    }
 }
