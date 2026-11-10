@@ -27,6 +27,16 @@ impl RedeApp {
                 let now = self.prefs.get(|s| s.zoom);
                 self.actions.push(Action::Prefs(super::PrefsAction::Zoom(step.from(now))));
             }
+            // Back and forward through the pages, as in Ond; only the full
+            // window has pages.
+            if self.mode == Mode::Full && self.ui.palette.is_none() && self.sheet.is_none() {
+                if i.consume_key(Modifiers::COMMAND, Key::OpenBracket) {
+                    self.actions.push(Action::Back);
+                }
+                if i.consume_key(Modifiers::COMMAND, Key::CloseBracket) {
+                    self.actions.push(Action::Forward);
+                }
+            }
             if i.consume_key(Modifiers::COMMAND, Key::Comma) {
                 self.actions.push(Action::OpenSettings(self.ui.settings));
             }

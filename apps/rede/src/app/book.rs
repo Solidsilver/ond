@@ -38,11 +38,6 @@ pub(super) const CHAPTER_TITLE_X: f32 = 34.0;
 impl ViewCtx<'_> {
     pub(super) fn book_page(&mut self, ui: &mut Ui, id: &str) {
         let t = Tokens::of(ui);
-        let back = if self.nav.can_back() { "← Back" } else { "← Library" };
-        if crate::widgets::link(ui, back, FontId::proportional(12.0), t.muted).clicked() {
-            self.actions.push(Action::Back);
-        }
-        ui.add_space(10.0);
         let Some(book) = self.books.by_id(id).cloned() else {
             shell::kit::empty_state(ui, Icon::Headphones, "This book isn't here", "It may have been removed from the server. Sync again to see.");
             return;

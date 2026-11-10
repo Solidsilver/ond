@@ -140,7 +140,8 @@ fn every_view_names_its_controls() {
             h.get_by_label("Keyboard shortcuts (⌘/)");
             h.get_by_label("Settings (⌘,)");
             h.get_by_label("Search (⌘K)");
-            h.get_by_label("Library");
+            // The sidebar's, and on a book's page the breadcrumb's too.
+            assert!(h.query_all_by_label("Library").count() >= 1);
         }
         h.get_by_label_contains("sam, ").click();
         h.run_steps(4);
@@ -181,9 +182,39 @@ fn a_cover_opens_its_book_and_back_returns() {
     h.get_by_label_contains("Dune by Frank Herbert").click();
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Book("book-1".into()));
-    h.get_by_label("← Back").click();
+    // The row above the page names the way here, and the chevrons retrace it.
+    assert_eq!(h.query_all_by_label("Library").count(), 2, "the sidebar's, and the crumb");
+    assert!(h.query_all_by_label("Dune").count() >= 2, "the crumb, as well as the page's title");
+    h.get_by_label_contains("Back (").click();
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Library);
+    h.get_by_label_contains("Forward (").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Book("book-1".into()));
+    // The crumb before the book goes back to it: the one right of the sidebar.
+    let crumb = h.query_all_by_label("Library").max_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).unwrap();
+    crumb.click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Library);
+}
+
+#[test]
+fn command_brackets_go_back_and_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).go(Route::Home);
+    app_mut(&mut h).go(book_route(0));
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::OpenBracket);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Home);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(0));
+    // A plain [ is still the speed's, not a step back.
+    h.key_press(egui::Key::OpenBracket);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(0));
 }
 
 #[test]
