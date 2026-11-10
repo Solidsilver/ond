@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn a_check_row_says_whether_it_is_the_current_choice_and_reports_a_click() {
-        use egui_kittest::kittest::Queryable;
+        use egui_kittest::kittest::{NodeT, Queryable};
         let mut h = themed(None, |ui, picked: &mut Option<usize>| {
             for (i, label) in ["Title", "Author"].into_iter().enumerate() {
                 if check_row(ui, label, i == 1) {
@@ -193,8 +193,8 @@ mod tests {
             }
         });
         h.run();
-        assert_eq!(h.get_by_label("Author").accesskit_node().is_selected(), Some(true));
-        assert_ne!(h.get_by_label("Title").accesskit_node().is_selected(), Some(true));
+        let checked = |label: &str| h.get_by_label(label).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True);
+        assert!(checked("Author") && !checked("Title"));
         h.get_by_label("Title").click();
         h.run();
         assert_eq!(h.state().1, Some(0));

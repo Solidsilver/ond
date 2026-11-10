@@ -18,6 +18,11 @@ fn every_view_draws() {
         app.apply_prefs(PrefsAction::Sort(sort));
         frame(&ctx, &mut app);
     }
+    for filter in crate::settings::LibraryFilter::ALL {
+        app.apply_prefs(PrefsAction::Filter(filter));
+        frame(&ctx, &mut app);
+    }
+    app.apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::All));
     let mut routes = vec![Route::Home, Route::Library, book_route(0), book_route(5), Route::Book("book-gone".into())];
     for route in routes.drain(..) {
         app.go(route);

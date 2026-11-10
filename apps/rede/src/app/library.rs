@@ -352,7 +352,7 @@ impl ViewCtx<'_> {
         if changed {
             self.actions.push(Action::Prefs(PrefsAction::Filter(filter)));
         }
-        ui.add_space(22.0);
+        ui.add_space(12.0);
     }
 
     /// "Sort: Title" and a chevron, quiet at the heading's right end, opening

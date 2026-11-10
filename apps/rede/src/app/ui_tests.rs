@@ -5,7 +5,7 @@
 use super::fixture::*;
 use super::*;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use std::path::Path;
 
 /// A window with the app in it, its state left for the test to look at.
@@ -52,6 +52,19 @@ fn every_view_names_its_controls() {
     h.get_by_label("A Wizard of Earthsea by Ursula K. Le Guin, finished");
     h.get_by_label("Piranesi by Susanna Clarke, 2h 10m left");
     h.get_by_label("The Dispossessed by Ursula K. Le Guin");
+    // The order's menu, open, and the library narrowed to nothing.
+    h.get_by_label("Sort: Title").click();
+    h.run_steps(2);
+    h.check_accessibility();
+    h.key_press(egui::Key::Escape);
+    app_mut(&mut h).apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::Finished));
+    app_mut(&mut h).positions.clear();
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Nothing finished yet");
+    app_mut(&mut h).apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::All));
+    listened(app_mut(&mut h));
+    h.run_steps(2);
     for tab in super::settings_page::Tab::ALL {
         app_mut(&mut h).apply(Action::OpenSettings(tab));
         h.run_steps(3);
@@ -228,17 +241,79 @@ fn home_with_nothing_in_progress_says_so() {
     h.get_by_label("No books yet");
 }
 
+/// The covers on screen, by title, in the order drawn.
+fn tiles(h: &Harness<'static, Option<RedeApp>>) -> Vec<String> {
+    h.query_all_by_label_contains(" by ").filter_map(|n| n.accesskit_node().label().map(|l| l.split(" by ").next().unwrap_or_default().to_owned())).collect()
+}
+
 #[test]
-fn the_sort_pill_reorders_the_shelf_and_is_saved() {
+fn the_sort_menu_reorders_the_shelf_and_is_saved() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     h.run_steps(2);
-    h.get_by_label("Author").click();
+    h.get_by_label("Sort: Title").click();
+    h.run_steps(2);
+    // The orders are in the menu, the one in use checked.
+    for sort in crate::settings::LibrarySort::ALL {
+        let row = h.get_by_role_and_label(egui::accesskit::Role::MenuItem, sort.label());
+        let checked = row.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True);
+        assert_eq!(checked, sort == crate::settings::LibrarySort::Title, "{}", sort.label());
+    }
+    h.get_by_role_and_label(egui::accesskit::Role::MenuItem, "Author").click();
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).prefs.get(|s| s.sort), crate::settings::LibrarySort::Author);
+    assert!(h.query_by_role_and_label(egui::accesskit::Role::MenuItem, "Title").is_none(), "the menu closes");
+    h.get_by_label("Sort: Author");
     // The first cover on screen is the first book by author: Brontë's.
-    let first = h.query_all_by_label_contains(" by ").next().map(|n| format!("{n:?}")).unwrap_or_default();
-    assert!(first.contains("Jane Eyre"), "the shelf is in author order: {first}");
+    assert_eq!(tiles(&h).first().map(String::as_str), Some("Jane Eyre"), "the shelf is in author order");
+    // By listening: the book heard last first.
+    listened(app_mut(&mut h));
+    app_mut(&mut h).go(Route::Library);
+    h.run_steps(2);
+    h.get_by_label("Sort: Author").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::MenuItem, "Recently listened").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.sort), crate::settings::LibrarySort::Listened);
+    assert_eq!(tiles(&h).first().map(String::as_str), Some("Piranesi"), "the book heard two hours ago leads");
+}
+
+#[test]
+fn the_filter_narrows_the_shelf_counts_what_it_shows_and_is_saved() {
+    use crate::settings::LibraryFilter;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    listened(app_mut(&mut h));
+    app_mut(&mut h).go(Route::Library);
+    h.run_steps(2);
+    h.get_by_label("12 books");
+    h.get_by_label("In progress").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.filter), LibraryFilter::InProgress);
+    let shown = tiles(&h);
+    assert_eq!(shown.len(), 4, "the four books partway: {shown:?}");
+    assert!(shown.iter().any(|t| t == "Piranesi") && !shown.iter().any(|t| t == "A Wizard of Earthsea"), "{shown:?}");
+    h.get_by_label("4 books");
+    h.get_by_label("Finished").click();
+    h.run_steps(2);
+    assert_eq!(tiles(&h), ["A Wizard of Earthsea"]);
+    h.get_by_label("1 book");
+    h.get_by_label("Not started").click();
+    h.run_steps(2);
+    assert!(!tiles(&h).iter().any(|t| t == "Piranesi" || t == "A Wizard of Earthsea"));
+    h.get_by_label("7 books");
+    // With nothing begun, In progress says so rather than showing a blank
+    // page, and not as an empty library would.
+    app_mut(&mut h).positions.clear();
+    h.get_by_label("In progress").click();
+    h.run_steps(2);
+    assert!(tiles(&h).is_empty());
+    h.get_by_label("Nothing in progress");
+    assert!(h.query_by_label("No books yet").is_none());
+    h.get_by_label("All").click();
+    h.run_steps(2);
+    h.get_by_label("12 books");
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.filter), LibraryFilter::All);
 }
 
 #[test]
