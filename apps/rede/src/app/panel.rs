@@ -187,7 +187,7 @@ impl ViewCtx<'_> {
             }
             if let Some(left) = left {
                 let w = ui.painter().layout_no_wrap(left.clone(), FontId::proportional(11.0), t.muted).size().x;
-                if ui.available_width() >= w + 16.0 {
+                if ui.available_width() >= w + 8.0 {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
                         ui.label(RichText::new(left).size(11.0).color(t.muted)).on_hover_text(ENDS_HINT);
