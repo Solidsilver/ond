@@ -43,6 +43,10 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    app_mut(&mut h).apply(Action::AskSignOut);
+    h.run_steps(3);
+    h.check_accessibility();
+    app_mut(&mut h).sheet = None;
     for paused in [false, true] {
         playing(app_mut(&mut h), paused);
         app_mut(&mut h).go(book_route(0));
@@ -120,12 +124,13 @@ fn every_view_names_its_controls() {
             h.run_steps(3);
             h.check_accessibility();
             h.get_by_label("Keyboard shortcuts (⌘/)");
+            h.get_by_label("Settings (⌘,)");
             h.get_by_label("Library");
         }
         h.get_by_label_contains("sam, ").click();
         h.run_steps(4);
         h.check_accessibility();
-        for label in ["Keyboard shortcuts", "Sign out"] {
+        for label in ["Keyboard shortcuts", "Sign out…"] {
             h.get_by_label(label);
         }
         egui::Popup::close_all(&h.ctx);
@@ -223,6 +228,19 @@ fn signing_out_is_in_the_account_menu() {
     h.get_by_label("sam, books.example.com").click();
     // The menu opens up from the foot, placed once its size is known.
     h.run_steps(4);
+    // It asks first; Esc keeps you signed in, and doesn't open Settings.
+    h.get_by_label("Sign out…").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::SignOut { from_settings: false }));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).sheet, None);
+    assert!(app_mut(&mut h).login.is_none());
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("Sign out…").click();
+    h.run_steps(3);
+    h.get_by_label("Sign out of books.example.com?");
     h.get_by_label("Sign out").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).login.is_some(), "the sign-in screen comes back");
@@ -267,7 +285,7 @@ fn the_player_exposes_speed_and_listening_preferences() {
     app_mut(&mut h).ui.settings = super::settings_page::Tab::About;
     h.get_by_label("Settings…").click();
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
     assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Playback);
 }
 
@@ -524,7 +542,7 @@ fn a_running_timer_shows_what_is_left_and_how_to_change_it() {
 }
 
 #[test]
-fn the_settings_page_steps_each_playback_setting_and_goes_back() {
+fn the_settings_window_steps_each_playback_setting_and_closes_over_the_page() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     app_mut(&mut h).go(book_route(0));
@@ -533,8 +551,10 @@ fn the_settings_page_steps_each_playback_setting_and_goes_back() {
     h.run_steps(2);
     h.get_by_label("Settings…").click();
     h.run_steps(3);
-    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
     assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Playback);
+    // A window over the book, not a page in its place.
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(0));
     h.check_accessibility();
     for (label, more) in [
         ("skip back, 15 s", "More skip back"),
@@ -559,16 +579,48 @@ fn the_settings_page_steps_each_playback_setting_and_goes_back() {
     h.get_by_role_and_label(egui::accesskit::Role::Switch, "Skip silence").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).prefs.get(|s| s.playback.voice_boost && s.playback.skip_silence));
-    // Back returns to the book it was opened over; Esc does too.
-    h.get_by_label("← Back").click();
+    // Esc closes it, leaving the book where it was; ⌘, brings it back, and a
+    // click outside closes it too.
+    h.key_press(egui::Key::Escape);
     h.run_steps(2);
+    assert_eq!(app_mut(&mut h).sheet, None);
     assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(0));
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
-    h.key_press(egui::Key::Escape);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
+    h.hover_at(egui::pos2(8.0, FULL[1] - 8.0));
+    h.event(egui::Event::PointerButton {
+        pos: egui::pos2(8.0, FULL[1] - 8.0),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    h.event(egui::Event::PointerButton {
+        pos: egui::pos2(8.0, FULL[1] - 8.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(0));
+    assert_eq!(app_mut(&mut h).sheet, None, "a click outside closes it");
+}
+
+#[test]
+fn the_sidebar_gear_opens_settings_in_the_column_and_the_rail() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    for collapsed in [false, true] {
+        app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
+        app_mut(&mut h).ui.settings = super::settings_page::Tab::Account;
+        h.run_steps(3);
+        h.get_by_label("Settings (⌘,)").click();
+        h.run_steps(3);
+        assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
+        assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account, "on the tab it was last on");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert_eq!(app_mut(&mut h).sheet, None);
+    }
 }
 
 #[test]
@@ -581,12 +633,26 @@ fn settings_lists_its_tabs_and_each_names_its_controls() {
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account);
     h.check_accessibility();
-    for label in ["https://books.example.com", "sam", "Password", "Sync now", "Sign out"] {
+    for label in ["https://books.example.com", "sam", "Sync now", "Sign out…"] {
         h.get_by_label(label);
     }
+    h.get_by_label_contains("Signed in with a password.");
+    // Sign out… asks first; Cancel goes back to Settings.
+    h.get_by_label("Sign out…").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::SignOut { from_settings: true }));
+    h.get_by_label("Sign out of books.example.com?");
+    h.check_accessibility();
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings), "Settings is back");
+    assert!(app_mut(&mut h).login.is_none());
+    h.get_by_label("Sign out…").click();
+    h.run_steps(3);
     h.get_by_label("Sign out").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).login.is_some(), "signed out, to the sign-in screen");
+    assert_eq!(app_mut(&mut h).sheet, None);
     let mut h = window(dir.path(), BOOKS.len());
     app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::About));
     h.run_steps(3);
@@ -609,8 +675,8 @@ fn opening_settings_from_the_player_returns_to_the_full_window() {
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
         h.run_steps(2);
         assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Full);
-        assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Settings);
-        app_mut(&mut h).back();
+        assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
+        app_mut(&mut h).sheet = None;
     }
 }
 

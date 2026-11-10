@@ -7,12 +7,6 @@ use egui::{Key, Modifiers};
 
 impl RedeApp {
     pub(super) fn window_keys(&mut self, ctx: &egui::Context) {
-        // Settings' Esc waits for a menu or the chapters sheet to close first.
-        let settings = self.mode == Mode::Full
-            && *self.ui.nav.current() == super::Route::Settings
-            && !self.ui.panel.sheet
-            && !egui::Popup::is_any_open(ctx)
-            && !ctx.memory(|m| m.focused().is_some());
         let mode = ctx.input_mut(|i| {
             let shift = Modifiers::COMMAND | Modifiers::SHIFT;
             let alt = Modifiers::COMMAND | Modifiers::ALT;
@@ -29,13 +23,10 @@ impl RedeApp {
             {
                 self.actions.push(add);
             }
-            // Esc is an open sheet's; otherwise it closes whatever else is
-            // open (the chapters sheet, a menu), and with nothing open it
-            // leaves Settings for where you were.
+            // Esc is an open sheet's (Settings is one); otherwise it closes
+            // whatever else is open (the chapters sheet, a menu).
             if self.sheet.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.actions.push(Action::CloseSheet);
-            } else if settings && i.consume_key(Modifiers::NONE, Key::Escape) {
-                self.actions.push(Action::Back);
             }
             if i.consume_key(shift, Key::N) {
                 Some(self.prefs.get(|s| s.window.player()))

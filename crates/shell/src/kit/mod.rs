@@ -33,9 +33,11 @@
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
 //!   in), [`sheet_header`] (its title, and a × that closes it), and the
 //!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
-//! - [`settings`]: a Settings page's tab list ([`settings_nav`], its width
-//!   [`SETTINGS_NAV_W`]), the pane beside it ([`settings_pane`]), and
-//!   About's [`about_header`] with the [`app_icon`].
+//! - [`settings`]: the Settings window over the app ([`settings_window`],
+//!   which says what happened in a [`SettingsWindow`]), its tab list
+//!   ([`settings_nav`], its width [`SETTINGS_NAV_W`]), the pane beside it
+//!   ([`settings_pane`]), and About's [`about_header`] with the
+//!   [`app_icon`].
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
 //!   fade, or stay with a button until clicked away (a [`Toasts::note`]
 //!   fades with its button).

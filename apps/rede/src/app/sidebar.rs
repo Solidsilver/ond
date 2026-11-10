@@ -201,7 +201,7 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::Go(route));
             }
         }
-        // The foot: the account, and the shortcuts beside it. Its row is
+        // The foot: the account, and the shortcuts and Settings beside it. Its row is
         // given its height up front: a `horizontal` in a bottom-up layout
         // starts a control's height tall and grows downwards, which put the
         // account's second line under the window's edge.
@@ -209,16 +209,19 @@ impl ViewCtx<'_> {
             let size = vec2(ui.available_width(), ACCOUNT_H);
             ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let w = (ui.available_width() - FOOTER_BUTTON - 2.0).max(40.0);
+                let w = (ui.available_width() - 2.0 * (FOOTER_BUTTON + 2.0)).max(40.0);
                 self.account_row(ui, w);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.help_button(ui, FOOTER_BUTTON));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.settings_button(ui);
+                    self.help_button(ui, FOOTER_BUTTON);
+                });
             });
         });
     }
 
     /// The rail: the toggle that brings the column back (when the window has
-    /// room for it), an icon per place, and the account and shortcuts at the
-    /// foot.
+    /// room for it), an icon per place, and Settings, the shortcuts and the
+    /// account at the foot, as on Ond's.
     pub(super) fn sidebar_rail(&mut self, ui: &mut Ui, width: f32) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.y = 4.0;
@@ -244,8 +247,9 @@ impl ViewCtx<'_> {
             }
         });
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            self.rail_account(ui);
+            self.settings_button(ui);
             self.help_button(ui, FOOTER_BUTTON);
+            self.rail_account(ui);
         });
     }
 
@@ -338,7 +342,7 @@ impl ViewCtx<'_> {
     }
 
     /// Who's signed in and where, the server's state, then Sync now,
-    /// Settings (on the tab it was last on), the shortcuts, and Sign out, under
+    /// Settings (on the tab it was last on), the shortcuts, and Sign out…, under
     /// `resp`: Ond's server popover, from the kit.
     fn account_menu(&mut self, resp: &egui::Response, state: &AccountState) {
         let Some(account) = self.session.account.clone() else { return };
@@ -384,10 +388,18 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::Shortcuts);
             }
             kit::popover_rule(ui, 6.0);
-            if kit::menu_row(ui, "Sign out") {
-                self.actions.push(Action::SignOut);
+            if kit::menu_row(ui, "Sign out…") {
+                self.actions.push(Action::AskSignOut);
             }
         });
+    }
+
+    /// The gear: Settings, on the tab it was last on.
+    fn settings_button(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        if icons::sized_button(ui, Icon::Gear, "Settings (⌘,)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted)).clicked() {
+            self.actions.push(Action::OpenSettings(self.settings));
+        }
     }
 
     /// A question mark in a circle: the keyboard shortcuts, as on Ond's

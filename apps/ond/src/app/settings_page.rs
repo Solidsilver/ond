@@ -61,53 +61,27 @@ impl Section {
     }
 }
 
-const NAV_W: f32 = kit::SETTINGS_NAV_W;
-
 impl OndApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
-        let screen = ctx.content_rect();
-        let w = (screen.width() - 64.0).clamp(480.0, 760.0);
+        let labels = Section::ALL.map(Section::label);
+        let at = Section::ALL.iter().position(|s| *s == self.ui.settings_section).unwrap_or(0);
         // Below the toolbar, so a narrow window's display keeps its times.
-        let h = (screen.height() - 96.0).clamp(340.0, 540.0).min((screen.height() - super::toolbar::TOOLBAR_H - 16.0).max(200.0));
-        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::ZERO).corner_radius(12);
-        let modal = egui::Modal::new(egui::Id::unique("settings-window"))
-            .frame(frame)
-            .area(
-                egui::Modal::default_area(egui::Id::unique("settings-window")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, super::toolbar::TOOLBAR_H / 2.0)),
-            )
-            .show(ctx, |ui| {
-                let t = Tokens::of(ui);
-                let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-                let esc = ui.painter().layout_no_wrap("esc".into(), FontId::proportional(11.0), t.muted);
-                ui.painter().galley(pos2(rect.right() - 14.0 - esc.size().x, rect.top() + 16.0), esc, t.muted);
-                let side = Rect::from_min_size(rect.min, vec2(NAV_W, h));
-                ui.painter().rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ..Default::default() }, t.sidebar);
-                ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
-
-                // Section list.
-                let labels = Section::ALL.map(Section::label);
-                let at = Section::ALL.iter().position(|s| *s == self.ui.settings_section).unwrap_or(0);
-                if let Some(i) = kit::settings_nav(ui, side, &labels, at) {
-                    self.ui.settings_section = Section::ALL[i];
-                }
-
-                // The pane.
-                let pane = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
-                let section = self.ui.settings_section;
-                kit::settings_pane(ui, pane, ("settings-pane", section), section.label(), |ui| match section {
-                    Section::General => self.general_settings(ui),
-                    Section::Appearance => self.appearance_settings(ui),
-                    Section::Playback => self.playback_settings(ui),
-                    Section::Queue => self.queue_settings(ui),
-                    Section::Output => self.output_settings(ui),
-                    Section::Offline => self.offline_settings(ui),
-                    Section::Library => self.library_settings(ui),
-                    Section::Account => self.account_settings(ui),
-                    Section::Experimental => self.experimental_settings(ui),
-                    Section::About => self.about(ui),
-                });
-            });
-        if modal.should_close() {
+        let window = kit::settings_window(ctx, super::toolbar::TOOLBAR_H, &labels, at, "settings-pane", |ui, i| match Section::ALL[i] {
+            Section::General => self.general_settings(ui),
+            Section::Appearance => self.appearance_settings(ui),
+            Section::Playback => self.playback_settings(ui),
+            Section::Queue => self.queue_settings(ui),
+            Section::Output => self.output_settings(ui),
+            Section::Offline => self.offline_settings(ui),
+            Section::Library => self.library_settings(ui),
+            Section::Account => self.account_settings(ui),
+            Section::Experimental => self.experimental_settings(ui),
+            Section::About => self.about(ui),
+        });
+        if let Some(i) = window.clicked {
+            self.ui.settings_section = Section::ALL[i];
+        }
+        if window.close {
             self.ui.overlay = None;
         }
     }

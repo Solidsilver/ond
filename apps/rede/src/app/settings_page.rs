@@ -1,18 +1,17 @@
-//! The Settings page (⌘,): Ond's Settings in the page's place, its tabs down
-//! the left and one calm pane beside them. A page rather than a window over
-//! the library, so the sidebar and the player stay where they are and Back
-//! (or Esc) returns to where you were.
+//! Settings' tabs (⌘,), in the kit's Settings window over the app, Ond's:
+//! its tabs down the grey side and one calm pane beside them. Esc or a click
+//! outside closes it (see `sheets`).
 //!
 //! Playback holds the preferences that used to be a sheet: the skips, the
 //! rewinds, the sleep timer's length, and the two speech switches. The speed
 //! isn't here: the one saved is the one playing, and the Playback popover
 //! sets it. Account says who's signed in where, and has Sync now and Sign
-//! out (the account menu keeps them too, a click from the sidebar). About is
+//! out… (the account menu keeps them too, a click from the sidebar). About is
 //! Ond's About without the updates, which Rede doesn't look for yet.
 
 use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction};
-use egui::{FontId, Rect, Ui, pos2, vec2};
+use egui::{FontId, Ui};
 use shell::kit;
 use shell::theme::Tokens;
 
@@ -43,41 +42,17 @@ const SKIPS: [u32; 11] = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300];
 const REWINDS: [u32; 10] = [0, 1, 2, 3, 5, 10, 15, 20, 30, 60];
 const TIMER: [u32; 10] = [5, 10, 15, 20, 30, 45, 60, 75, 90, 120];
 
-/// Below this page width the tab list narrows, so the pane keeps room for a
-/// row's name beside its control.
-const NARROW_BELOW: f32 = 620.0;
-const NAV_NARROW_W: f32 = 140.0;
-/// The widest the pane gets: in a wide window a row's control would drift
-/// far from its name.
-const PANE_MAX_W: f32 = 720.0;
-
 /// Where the source lives, and where problems go.
 const REPO: &str = "https://github.com/Solidsilver/ond";
 
 impl ViewCtx<'_> {
-    pub(super) fn settings_page(&mut self, ui: &mut Ui) {
-        let t = Tokens::of(ui);
-        if crate::widgets::link(ui, "← Back", FontId::proportional(12.0), t.muted).clicked() {
-            self.actions.push(Action::Back);
-        }
-        ui.add_space(6.0);
-        let area = ui.available_rect_before_wrap();
-        let nav_w = if area.width() < NARROW_BELOW { NAV_NARROW_W } else { kit::SETTINGS_NAV_W };
-        let side = Rect::from_min_size(area.min, vec2(nav_w, area.height()));
-        ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
-        let labels = Tab::ALL.map(Tab::label);
-        let at = Tab::ALL.iter().position(|tab| *tab == self.settings).unwrap_or(0);
-        if let Some(i) = kit::settings_nav(ui, side, &labels, at) {
-            self.actions.push(Action::OpenSettings(Tab::ALL[i]));
-        }
-        let pane = Rect::from_min_max(pos2(side.right() + 1.0, area.top()), pos2(area.right().min(side.right() + 1.0 + PANE_MAX_W), area.bottom()));
-        let tab = self.settings;
-        kit::settings_pane(ui, pane, ("rede-settings", tab), tab.label(), |ui| match tab {
+    /// What's on `tab`, in the window's pane.
+    pub(super) fn settings_tab(&mut self, ui: &mut Ui, tab: Tab) {
+        match tab {
             Tab::Playback => self.playback_settings(ui),
             Tab::Account => self.account_settings(ui),
             Tab::About => about(ui),
-        });
-        ui.advance_cursor_after_rect(area);
+        }
     }
 
     /// The rows the Playback settings sheet had, each a stepper, then voice
@@ -150,14 +125,11 @@ impl ViewCtx<'_> {
             });
         });
         kit::group(ui, "Signed in", |ui| {
-            kit::setting(ui, "User name", "", |ui| value(ui, &account.username, t.muted));
-            if let Some(method) = account.sign_in {
-                kit::setting(ui, "Sign-in method", "", |ui| value(ui, method.label(), t.muted));
-            }
-            let hint = "Signing out forgets the saved sign-in. Your books and your place in each stay on this computer.";
-            kit::setting(ui, "Sign out of this server", hint, |ui| {
-                if kit::secondary_danger(ui, "Sign out").clicked() {
-                    self.actions.push(Action::SignOut);
+            let how = account.sign_in.map(|m| format!("Signed in with {}. ", m.phrase())).unwrap_or_default();
+            let hint = format!("{how}Signing out forgets the saved sign-in. Your books and your place in each stay on this computer.");
+            kit::setting(ui, &account.username, &hint, |ui| {
+                if kit::secondary_danger(ui, "Sign out…").clicked() {
+                    self.actions.push(Action::AskSignOut);
                 }
             });
         });

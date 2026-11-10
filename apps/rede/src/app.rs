@@ -18,8 +18,9 @@
 //! - `controls`: chapter seeking and the listening controls
 //! - `title_bar`: the player in the title bar, and the window's controls
 //! - `sidebar`: the places and the account, in the column at the left
-//! - `sheets`: the keyboard shortcuts, over the window
-//! - `settings_page`: Settings, a page with its tabs (⌘,)
+//! - `sheets`: the keyboard shortcuts, Settings and the sign-out question,
+//!   over the window
+//! - `settings_page`: Settings' tabs and what's on them (⌘,)
 //! - `panel`: the chapters column at the right
 //! - `ui_state`: the notice line, the toasts, the trail, and what a frame
 //!   reads
@@ -132,6 +133,9 @@ pub enum Action {
     /// new one.
     ReopenBrowser,
     CancelSignIn,
+    /// Ask before signing out: playback stops and the sign-in has to be
+    /// done again.
+    AskSignOut,
     /// Back to the sign-in screen; the saved tokens are forgotten. The shelf
     /// and its books stay.
     SignOut,
@@ -167,8 +171,8 @@ pub enum Action {
     Mode(crate::window::Mode),
     /// The keyboard shortcuts' sheet: open it, or close it if it's open.
     Shortcuts,
-    /// Settings, on this tab. From Player or Mini, the full window comes back
-    /// first, as Ond's Settings does.
+    /// Settings, on this tab, in its window over the app. From Player or
+    /// Mini, the full window comes back first, as Ond's Settings does.
     OpenSettings(settings_page::Tab),
     /// Whichever sheet is open goes.
     CloseSheet,
@@ -401,7 +405,14 @@ impl RedeApp {
             Action::OpenId => self.begin_openid(),
             Action::ReopenBrowser => self.reopen_browser(),
             Action::CancelSignIn => self.cancel_sign_in(abs::OpenIdError::Cancelled),
-            Action::SignOut => self.sign_out(),
+            Action::AskSignOut => {
+                let from_settings = self.sheet == Some(sheets::Sheet::Settings);
+                self.sheet = Some(sheets::Sheet::SignOut { from_settings });
+            }
+            Action::SignOut => {
+                self.sheet = None;
+                self.sign_out();
+            }
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
             Action::PlayBook(id) => self.play_book(id, None),
@@ -431,11 +442,14 @@ impl RedeApp {
             }
             Action::OpenSettings(tab) => {
                 self.ui.settings = tab;
-                self.sheet = None;
                 self.set_mode(crate::window::Mode::Full);
-                self.go(Route::Settings);
+                self.sheet = Some(sheets::Sheet::Settings);
             }
-            Action::CloseSheet => self.sheet = None,
+            Action::CloseSheet => {
+                // A No to signing out asked from Settings goes back there.
+                let back = matches!(self.sheet, Some(sheets::Sheet::SignOut { from_settings: true }));
+                self.sheet = back.then_some(sheets::Sheet::Settings);
+            }
             Action::ToggleMini => self.set_mode(self.prefs.get(|s| s.window.mini())),
             Action::Panel(a) => self.apply_panel(a),
         }
@@ -591,7 +605,6 @@ impl RedeApp {
                                 let id = id.clone();
                                 self.view().book_page(ui, &id);
                             }
-                            Route::Settings => self.view().settings_page(ui),
                         }
                         // Floats over the foot of the page.
                         self.view().sleep_notice(ui, within);

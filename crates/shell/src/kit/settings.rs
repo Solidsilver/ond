@@ -1,17 +1,66 @@
-//! A Settings page's parts: the tab list down its side ([`settings_nav`]),
-//! the pane beside it that scrolls under the tab's title
-//! ([`settings_pane`]), and About's header ([`about_header`], with the
-//! [`app_icon`] it shows). Ond draws them in a window over the library, Rede
-//! in the page's place; what frames them (a fill, a hairline, the "esc"
-//! hint) is the app's.
+//! Settings, as both apps show it: a window over the dimmed app
+//! ([`settings_window`]) with the tab list down its grey side
+//! ([`settings_nav`]), the pane beside it that scrolls under the tab's title
+//! ([`settings_pane`]), and an "esc" hint at the top right; Esc or a click
+//! outside closes it. About's header ([`about_header`], with the
+//! [`app_icon`] it shows) is here too. The tabs and what's on them are the
+//! app's.
 
 use crate::theme::{Tokens, semibold};
-use egui::{FontId, Rect, Ui, vec2};
+use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 /// The tab list's width.
 pub const SETTINGS_NAV_W: f32 = 176.0;
 /// The pane's side margins.
 const PANE_PAD: f32 = 28.0;
+
+/// What [`settings_window`] saw this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsWindow {
+    /// The tab clicked, which the pane already shows.
+    pub clicked: Option<usize>,
+    /// Esc, or a click outside the window: close it.
+    pub close: bool,
+}
+
+/// The Settings window over the dimmed app: `tabs` down its side, the one at
+/// `selected` lit, and the pane beside them, which `pane` fills for the tab
+/// it's given (the one clicked this frame, or else `selected`). `top` is the
+/// height of the bar along the top of the app (Ond's toolbar, Rede's title
+/// bar): the window centres in the room below it and keeps clear of it, so
+/// what the bar shows stays in view. `id` names the pane's scroll positions,
+/// one per tab.
+pub fn settings_window(
+    ctx: &egui::Context,
+    top: f32,
+    tabs: &[&str],
+    selected: usize,
+    id: impl std::hash::Hash + std::fmt::Debug + Copy,
+    pane: impl FnOnce(&mut Ui, usize),
+) -> SettingsWindow {
+    let screen = ctx.content_rect();
+    let w = (screen.width() - 64.0).clamp(480.0, 760.0);
+    let h = (screen.height() - 96.0).clamp(340.0, 540.0).min((screen.height() - top - 16.0).max(200.0));
+    let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::ZERO).corner_radius(12);
+    let mut clicked = None;
+    let modal = egui::Modal::new(egui::Id::unique("settings-window"))
+        .frame(frame)
+        .area(egui::Modal::default_area(egui::Id::unique("settings-window")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, top / 2.0)))
+        .show(ctx, |ui| {
+            let t = Tokens::of(ui);
+            let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+            let esc = ui.painter().layout_no_wrap("esc".into(), FontId::proportional(11.0), t.muted);
+            ui.painter().galley(pos2(rect.right() - 14.0 - esc.size().x, rect.top() + 16.0), esc, t.muted);
+            let side = Rect::from_min_size(rect.min, vec2(SETTINGS_NAV_W, h));
+            ui.painter().rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ..Default::default() }, t.sidebar);
+            ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, t.hairline));
+            clicked = settings_nav(ui, side, tabs, selected);
+            let shown = clicked.unwrap_or(selected).min(tabs.len().saturating_sub(1));
+            let area = Rect::from_min_max(pos2(side.right() + 1.0, rect.top()), rect.max);
+            settings_pane(ui, area, (id, shown), tabs.get(shown).copied().unwrap_or_default(), |ui| pane(ui, shown));
+        });
+    SettingsWindow { clicked, close: modal.should_close() }
+}
 
 /// "Settings" over a row per section, in `side`, the one at `selected` lit.
 /// Returns the one clicked.
@@ -96,6 +145,31 @@ mod tests {
     use super::*;
     use crate::kit::themed;
     use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn the_window_shows_the_tab_clicked_at_once_and_closes_on_esc() {
+        let tabs = ["Playback", "Account", "About"];
+        let mut h = themed((0usize, false), move |ui, (at, closed): &mut (usize, bool)| {
+            let w = settings_window(ui.ctx(), 52.0, &tabs, *at, "test-settings", |ui, shown| {
+                ui.label(format!("body of {}", tabs[shown]));
+            });
+            if let Some(i) = w.clicked {
+                *at = i;
+            }
+            *closed |= w.close;
+        });
+        h.set_size(vec2(900.0, 640.0));
+        h.run_steps(4);
+        h.get_by_label("body of Playback");
+        h.get_by_label("Account").click();
+        h.run();
+        assert_eq!(h.state().1.0, 1);
+        h.get_by_label("body of Account");
+        assert!(!h.state().1.1);
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.state().1.1, "Esc closes it");
+    }
 
     #[test]
     fn the_tab_list_lights_the_tab_shown_and_says_which_was_clicked() {

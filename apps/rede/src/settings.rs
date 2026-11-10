@@ -73,10 +73,11 @@ pub enum SignInMethod {
 }
 
 impl SignInMethod {
-    pub fn label(self) -> &'static str {
+    /// How Settings says it: "Signed in with …".
+    pub fn phrase(self) -> &'static str {
         match self {
-            SignInMethod::Password => "Password",
-            SignInMethod::OpenId => "Single sign-on (OpenID)",
+            SignInMethod::Password => "a password",
+            SignInMethod::OpenId => "single sign-on (OpenID)",
         }
     }
 }
