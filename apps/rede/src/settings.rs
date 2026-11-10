@@ -203,13 +203,36 @@ pub struct PlaybackSettings {
     pub voice_boost: bool,
     #[serde(default)]
     pub skip_silence: bool,
+    /// The listening level, 0..=1. The sleep timer's fade scales from it, so
+    /// the book comes back to this level rather than to full.
+    pub volume: f32,
+    /// Silent, keeping `volume` to go back to.
+    pub muted: bool,
     pub rewind: u32,
     pub sleep_minutes: u32,
     pub sleep_rewind: u32,
 }
 impl Default for PlaybackSettings {
     fn default() -> Self {
-        Self { skip_back: 15, skip_forward: 30, speed: 1.0, voice_boost: false, skip_silence: false, rewind: 5, sleep_minutes: 30, sleep_rewind: 10 }
+        Self {
+            skip_back: 15,
+            skip_forward: 30,
+            speed: 1.0,
+            voice_boost: false,
+            skip_silence: false,
+            volume: 1.0,
+            muted: false,
+            rewind: 5,
+            sleep_minutes: 30,
+            sleep_rewind: 10,
+        }
+    }
+}
+
+impl PlaybackSettings {
+    /// What the engine's volume is: the level, or silence while muted.
+    pub fn level(self) -> f32 {
+        if self.muted { 0.0 } else { self.volume.clamp(0.0, 1.0) }
     }
 }
 
@@ -356,6 +379,21 @@ mod tests {
 
     fn login() -> Settings {
         Settings { accounts: vec![Account::new("https://books.example.com", "sam")], ..Default::default() }
+    }
+
+    #[test]
+    fn the_volume_is_full_until_it_is_moved_and_survives_a_save() {
+        assert_eq!(Settings::default().playback.volume, 1.0, "100%");
+        assert!(!Settings::default().playback.muted);
+        let old = Settings::from_json(br#"{ "playback": { "speed": 1.5 } }"#).unwrap();
+        assert_eq!((old.playback.volume, old.playback.muted), (1.0, false), "an older file has none");
+        let mut settings = old;
+        settings.playback.volume = 0.45;
+        settings.playback.muted = true;
+        let read = Settings::from_json(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(read, settings);
+        assert_eq!(read.playback.level(), 0.0, "muted is silence, with the level kept");
+        assert_eq!(PlaybackSettings { muted: false, ..read.playback }.level(), 0.45);
     }
 
     #[test]

@@ -33,18 +33,24 @@ const SPEED_RANGE: (f32, f32) = (0.5, 3.0);
 const SPEED_STEP: f32 = 0.05;
 /// The Playback popover's width: room for the six presets.
 const PLAYBACK_W: f32 = 296.0;
+/// The volume row's height, the switches' below it, and the speaker's button.
+const VOLUME_ROW: f32 = 30.0;
+const SPEAKER: f32 = 22.0;
+const SPEAKER_GLYPH: f32 = 15.0;
 
 impl ViewCtx<'_> {
     /// The Playback popover the speed chip and pill open: the speed, large,
-    /// with its presets, a slider and its steppers; voice boost and skip
-    /// silence, with what skipping has saved in this book; then Stop, and the
-    /// way to Settings' Playback tab. The skip lengths and rewinds are
+    /// with its presets, a slider and its steppers; the volume; voice boost
+    /// and skip silence, with what skipping has saved in this book; then Stop,
+    /// and the way to Settings' Playback tab. The skip lengths and rewinds are
     /// settings, not controls, so they live there.
     pub(super) fn playback_menu(&mut self, anchor: &Response) {
         kit::popover(anchor, PLAYBACK_W, |ui| {
             kit::popover_title(ui, "Playback", None);
             ui.add_space(10.0);
             kit::padded(ui, |ui| self.speed_controls(ui));
+            kit::popover_rule(ui, 8.0);
+            kit::padded(ui, |ui| self.volume_row(ui));
             kit::popover_rule(ui, 8.0);
             self.speech_switches(ui);
             kit::popover_rule(ui, 8.0);
@@ -63,6 +69,28 @@ impl ViewCtx<'_> {
                     }
                 });
             });
+        });
+    }
+
+    /// The volume: a speaker that mutes, and the level itself from silence to
+    /// full. The slider keeps its place while muted, so unmuting is a click.
+    fn volume_row(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let playback = self.playback;
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(width, VOLUME_ROW), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let (icon, label) = if playback.muted { (Icon::Muted, "Unmute") } else { (Icon::Volume, "Mute") };
+            if icons::sized_button(ui, icon, label, vec2(SPEAKER, SPEAKER), SPEAKER_GLYPH, Some(if playback.muted { t.muted } else { t.text })).clicked() {
+                self.actions.push(Action::Prefs(super::PrefsAction::Muted(!playback.muted)));
+            }
+            let readout = 52.0;
+            let level_w = (ui.available_width() - readout).max(80.0);
+            let mut level = playback.volume;
+            if kit::thin_slider(ui, &mut level, level_w, "Volume").changed() {
+                self.actions.push(Action::Prefs(super::PrefsAction::Volume(level)));
+            }
+            kit::readout(ui, &format!("{:.0}%", level * 100.0));
         });
     }
 

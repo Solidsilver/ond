@@ -294,12 +294,15 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app
     });
     // The Playback and Sleep timer popovers, open from the capsule's chips:
-    // the timer off, then running.
+    // the timer off, then running; the Playback one with the volume row, its
+    // level moved and muted.
     for (label, name, timer) in [
         ("Playback speed, 1.5×", "title-speed-menu", None),
         ("Sleep timer", "title-sleep-menu", None),
         ("Sleep timer, ", "title-sleep-running", Some(Sleep::Running)),
         ("Playback speed, 1.5×", "title-speed-menu-switches", None),
+        ("Playback speed, 1.5×", "title-speed-menu-volume", None),
+        ("Playback speed, 1.5×", "title-speed-menu-muted", None),
     ] {
         *h.state_mut() = None;
         *h.state_mut() = Some({
@@ -313,6 +316,12 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
                 app.prefs.edit(|p| (p.playback.voice_boost, p.playback.skip_silence) = (true, true));
                 app.player.silence_saved = 192.0;
             }
+            if name.ends_with("volume") {
+                app.prefs.edit(|p| p.playback.volume = 0.65);
+            }
+            if name.ends_with("muted") {
+                app.prefs.edit(|p| (p.playback.volume, p.playback.muted) = (0.4, true));
+            }
             app
         });
         h.run_steps(2);
@@ -320,6 +329,14 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         h.run_steps(2);
         h.event(egui::Event::PointerGone);
         s.shoot(h, name);
+        // The volume scenes move a preference every later picture's app reads
+        // from the same settings file; put it back. (The switches are on in
+        // every picture that shows them, so they stay.)
+        if (name.ends_with("volume") || name.ends_with("muted"))
+            && let Some(app) = h.state_mut().as_mut()
+        {
+            app.prefs.edit(|p| (p.playback.volume, p.playback.muted) = (1.0, false));
+        }
         egui::Popup::close_all(&ctx);
     }
     // The sidebar folded to its rail; the account syncing, connecting and

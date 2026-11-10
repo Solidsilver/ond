@@ -500,10 +500,14 @@ impl RedeApp {
                 playback.rewind = playback.rewind.min(60);
                 playback.sleep_minutes = playback.sleep_minutes.clamp(5, 120);
                 playback.sleep_rewind = playback.sleep_rewind.min(60);
+                playback.volume = playback.volume.clamp(0.0, 1.0);
                 self.prefs.edit(|s| s.playback = playback);
                 self.shown.playback = playback;
                 if let Some(engine) = &self.engine {
                     crate::player::apply_speech(playback, engine);
+                    // The sleep fade goes on top of this, so it's the level
+                    // and not the engine's whole volume.
+                    self.player.set_volume(playback.level(), engine);
                 }
                 #[cfg(target_os = "macos")]
                 shell::now_playing::intervals(f64::from(playback.skip_back), f64::from(playback.skip_forward));
@@ -513,6 +517,12 @@ impl RedeApp {
             }
             PrefsAction::SkipSilence(enabled) => {
                 self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { skip_silence: enabled, ..self.shown.playback }));
+            }
+            PrefsAction::Volume(level) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { volume: level, muted: false, ..self.shown.playback }));
+            }
+            PrefsAction::Muted(muted) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { muted, ..self.shown.playback }));
             }
             PrefsAction::Sort(sort) => {
                 if self.prefs.get(|s| s.sort) == sort {

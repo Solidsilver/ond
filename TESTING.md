@@ -120,6 +120,11 @@ its progress cleanup are described in [Rede playback](docs/rede/playback.md).
 - [ ] Switch books, stop, sign out and quit: the old session closes when reachable, and resuming keeps the final position. At the end the book is finished on ABS.
 - [ ] Leave the library and book page paused: CPU settles and the UI does not keep repainting. Resize to the minimum window and inspect the title bar and the Playback popover.
 
+## Rede: volume and signing in
+
+By ear, with a real output device; the sign-in checks need a live server.
+
+- [ ] Set the volume in the Playback popover and with ⌘↑ / ⌘↓, mute and unmute with the speaker, and relaunch: the level and the mute survive. Start a sleep timer at 40% and listen to the last ten seconds: the fade goes down from 40%, not from full, and cancelling it (or Extend 10 minutes) comes back to 40%.
 
 ## Rede M2: sleep, window modes and macOS controls
 Run Rede in release mode. These checks need a real output device and, for

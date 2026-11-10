@@ -101,6 +101,12 @@ pub struct Player {
     pub active: bool,
     pub sleep: Option<crate::sleep::Timer>,
     pub sleep_rewind: f64,
+    /// The listener's own level, 0..=1, which the sleep fade scales.
+    volume: f32,
+    /// The fade's factor: 1 until the timer's last ten seconds, then down to
+    /// silence. The engine's volume is `volume * fade`.
+    fade: f32,
+    /// The level last sent to the engine, so a fade doesn't repeat itself.
     gain: f32,
     pending: bool,
     refreshed: bool,
@@ -126,6 +132,8 @@ impl Default for Player {
             active: false,
             sleep: None,
             sleep_rewind: 10.0,
+            volume: 1.0,
+            fade: 1.0,
             gain: 1.0,
             pending: false,
             refreshed: false,
@@ -303,7 +311,7 @@ impl Player {
                 if let Some(timer) = &mut self.sleep {
                     timer.extend(self.position, self.speed, now);
                 }
-                self.set_gain(1.0, engine);
+                self.set_fade(1.0, engine);
             }
             Control::Stop => {
                 self.cancel_sleep(engine);
@@ -337,7 +345,23 @@ impl Player {
         self.sleep.as_ref().map(|timer| timer.remaining(self.position, self.speed, now))
     }
 
-    fn set_gain(&mut self, gain: f32, engine: &dyn Transport) {
+    /// The listener's level, as the settings hold it. The fade goes on top, so
+    /// changing the level during one keeps it relative to the new level.
+    pub fn set_volume(&mut self, level: f32, engine: &dyn Transport) {
+        let level = level.clamp(0.0, 1.0);
+        if (self.volume - level).abs() > 0.0001 {
+            self.volume = level;
+            self.send_gain(engine);
+        }
+    }
+
+    fn set_fade(&mut self, fade: f32, engine: &dyn Transport) {
+        self.fade = fade;
+        self.send_gain(engine);
+    }
+
+    fn send_gain(&mut self, engine: &dyn Transport) {
+        let gain = self.volume * self.fade;
         if (self.gain - gain).abs() > 0.0001 {
             self.gain = gain;
             engine.send(Command::SetVolume(gain));
@@ -346,13 +370,13 @@ impl Player {
 
     fn cancel_sleep(&mut self, engine: &dyn Transport) {
         self.sleep = None;
-        self.set_gain(1.0, engine);
+        self.set_fade(1.0, engine);
     }
 
     fn sleep_tick(&mut self, engine: &dyn Transport, now: Instant, notes: &mut Vec<Note>) {
         let Some(left) = self.sleep_remaining(now) else { return };
         if left > 0.0 {
-            self.set_gain((left / 10.0).min(1.0) as f32, engine);
+            self.set_fade((left / 10.0).min(1.0) as f32, engine);
             return;
         }
         // Pause before restoring gain, and seek before reporting so the journal

@@ -28,7 +28,17 @@ type Group = (&'static str, &'static [(&'static str, &'static [&'static str])]);
 /// balances them into two columns: Playback and Chapters, then Window and
 /// Navigation.
 const SHORTCUTS: [Group; 4] = [
-    ("Playback", &[("Play / pause", &["Space"]), ("Skip back", &["←"]), ("Skip forward", &["→"]), ("Slower", &["["]), ("Faster", &["]"])]),
+    (
+        "Playback",
+        &[
+            ("Play / pause", &["Space"]),
+            ("Skip back", &["←"]),
+            ("Skip forward", &["→"]),
+            ("Slower", &["["]),
+            ("Faster", &["]"]),
+            ("Volume up, volume down", &["⌘↑", "⌘↓"]),
+        ],
+    ),
     ("Chapters", &[("Previous chapter", &["⇧←"]), ("Next chapter", &["⇧→"]), ("Show / hide chapters", &["⌥⌘U"]), ("Add bookmark", &["⌘B"])]),
     (
         "Window",
