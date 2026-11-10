@@ -38,12 +38,17 @@
 //!   ([`settings_nav`], its width [`SETTINGS_NAV_W`]), the pane beside it
 //!   ([`settings_pane`]), and About's [`about_header`] with the
 //!   [`app_icon`].
+//! - [`covers`]: what's drawn for an item without art: a
+//!   [`generated_cover`] (a ground in a colour picked from a seed, the
+//!   title set on it), a [`generated_disc`] (a person's initials) and the
+//!   bare [`generated_ground`].
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
 //!   fade, or stay with a button until clicked away (a [`Toasts::note`]
 //!   fades with its button).
 
 pub mod buttons;
 pub mod controls;
+pub mod covers;
 pub mod menus;
 pub mod rows;
 pub mod settings;
@@ -53,6 +58,7 @@ pub mod toasts;
 
 pub use buttons::*;
 pub use controls::*;
+pub use covers::*;
 pub use menus::*;
 pub use rows::*;
 pub use settings::*;
