@@ -50,9 +50,10 @@
 //!   and what's laid over any cover to say how far along it is
 //!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
 //!   badge in its corner), with [`progress_bar`], the same line on its own.
-//! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
-//!   fade, or stay with a button until clicked away (a [`Toasts::note`]
-//!   fades with its button).
+//! - [`toasts`]: [`Toasts`], the messages over the foot of the window, in
+//!   one column of one width: notices fade, errors (with a Retry, through
+//!   [`Toasts::error`]) and offers stay until clicked away, and a
+//!   [`Toasts::note`] fades with its button (an Undo).
 
 pub mod buttons;
 pub mod controls;
