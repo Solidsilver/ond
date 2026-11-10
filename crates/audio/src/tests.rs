@@ -3,9 +3,68 @@
 use super::*;
 use crate::decode::tests::{file_source, pcm, wait_late};
 use crate::dither::Tpdf;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::Mutex;
 use std::time::Instant;
 use testkit::{Deadline, RangeServer, Serve, WAIT, slack, wait_until};
+
+/// The test build's allocator: the system's, counting the heap calls a thread
+/// makes while it's armed. [`FakeBackend`] arms its device thread around the
+/// callback, so every engine test also proves the callback never allocates or
+/// frees (a real device's thread can't wait on the allocator's locks).
+struct Counting;
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+thread_local! {
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+    static HEAP_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count_heap_call() {
+    // `try_with`: the allocator also runs while a thread's locals are torn down.
+    let _ = ARMED.try_with(|armed| {
+        if armed.get() {
+            HEAP_CALLS.with(|n| n.set(n.get() + 1));
+        }
+    });
+}
+
+// SAFETY: every call is passed straight to `System`; counting touches only
+// const-initialised thread locals, which never allocate.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count_heap_call();
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count_heap_call();
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        count_heap_call();
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        count_heap_call();
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+/// Runs `f` with this thread's heap calls counted; returns its result and how
+/// many it made.
+fn heap_calls_in<R>(f: impl FnOnce() -> R) -> (R, usize) {
+    HEAP_CALLS.with(|n| n.set(0));
+    ARMED.with(|a| a.set(true));
+    let r = f();
+    ARMED.with(|a| a.set(false));
+    (r, HEAP_CALLS.with(Cell::get))
+}
 
 /// Plays rings at roughly 11× real time and records what it played.
 struct FakeBackend {
@@ -189,7 +248,10 @@ impl OutputBackend for FakeBackend {
                 if stalled.load(Ordering::Relaxed) {
                     continue;
                 }
-                if input.fill_for_device(&mut buf, channels, format.sample_rate, &status, device_bits, &mut dither) {
+                let (ended, heap_calls) = heap_calls_in(|| input.fill_for_device(&mut buf, channels, format.sample_rate, &status, device_bits, &mut dither));
+                // Stops this device: the test then fails on its own wait, with this said in its output.
+                assert_eq!(heap_calls, 0, "the audio callback used the heap");
+                if ended {
                     drained.store(true, Ordering::Release);
                 }
                 positions.lock().unwrap().push((status.track_seq.load(Ordering::Acquire), status.position_secs(), status.source_position_secs()));
