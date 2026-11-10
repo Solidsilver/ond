@@ -1,5 +1,6 @@
 //! Window shortcuts remain available without a loaded book or keyboard focus;
-//! ⌘B is here too, since it works in every mode, and needs only a book.
+//! ⌘B is here too, since it works in every mode, and needs only a book. So is
+//! search: ⌘K and ⌘F anywhere, and / when it wouldn't be typed into a field.
 
 use super::{Action, RedeApp};
 use crate::window::Mode;
@@ -7,11 +8,20 @@ use egui::{Key, Modifiers};
 
 impl RedeApp {
     pub(super) fn window_keys(&mut self, ctx: &egui::Context) {
+        let typing = ctx.egui_wants_keyboard_input();
         let mode = ctx.input_mut(|i| {
             let shift = Modifiers::COMMAND | Modifiers::SHIFT;
             let alt = Modifiers::COMMAND | Modifiers::ALT;
             if i.consume_key(Modifiers::COMMAND, Key::Slash) {
                 self.actions.push(Action::Shortcuts);
+            }
+            let slash = !typing && self.ui.palette.is_none() && self.sheet.is_none() && i.consume_key(Modifiers::NONE, Key::Slash);
+            if slash {
+                // Not typed into the field the palette is about to focus.
+                i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == "/"));
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::K) | i.consume_key(Modifiers::COMMAND, Key::F) | slash {
+                self.actions.push(Action::OpenPalette);
             }
             if i.consume_key(Modifiers::COMMAND, Key::Comma) {
                 self.actions.push(Action::OpenSettings(self.ui.settings));

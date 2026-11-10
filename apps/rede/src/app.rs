@@ -18,6 +18,7 @@
 //! - `controls`: chapter seeking and the listening controls
 //! - `title_bar`: the player in the title bar, and the window's controls
 //! - `sidebar`: the places and the account, in the column at the left
+//! - `palette` and `search`: ⌘K, finding a book in the library in memory
 //! - `sheets`: the keyboard shortcuts, Settings and the sign-out question,
 //!   over the window
 //! - `settings_page`: Settings' tabs and what's on them (⌘,)
@@ -58,10 +59,12 @@ mod bookmarks_tab;
 mod controls;
 mod library;
 mod nav;
+mod palette;
 mod panel;
 mod player_view;
 mod playing;
 mod prefs_view;
+mod search;
 mod session;
 mod settings_page;
 mod sheets;
@@ -176,6 +179,12 @@ pub enum Action {
     OpenSettings(settings_page::Tab),
     /// Whichever sheet is open goes.
     CloseSheet,
+    /// The search palette, over the full window.
+    OpenPalette,
+    ClosePalette,
+    /// An author, narrator or series chosen in the palette: its name goes in
+    /// the field, which lists its books (they have no pages yet).
+    PaletteName(String),
     ToggleMini,
     /// The chapters column: shown, hidden, or on another tab.
     Panel(panel::PanelAction),
@@ -438,9 +447,11 @@ impl RedeApp {
             Action::Playback(control) => self.playback_control(control),
             Action::Mode(mode) => self.set_mode(mode),
             Action::Shortcuts => {
+                self.ui.palette = None;
                 self.sheet = (self.sheet != Some(sheets::Sheet::Shortcuts)).then_some(sheets::Sheet::Shortcuts);
             }
             Action::OpenSettings(tab) => {
+                self.ui.palette = None;
                 self.ui.settings = tab;
                 self.set_mode(crate::window::Mode::Full);
                 self.sheet = Some(sheets::Sheet::Settings);
@@ -449,6 +460,24 @@ impl RedeApp {
                 // A No to signing out asked from Settings goes back there.
                 let back = matches!(self.sheet, Some(sheets::Sheet::SignOut { from_settings: true }));
                 self.sheet = back.then_some(sheets::Sheet::Settings);
+            }
+            Action::OpenPalette => {
+                self.set_mode(crate::window::Mode::Full);
+                self.sheet = None;
+                if self.ui.palette.is_none() {
+                    self.ui.palette = Some(palette::Palette::default());
+                }
+                self.ctx.request_repaint();
+            }
+            Action::ClosePalette => {
+                self.ui.palette = None;
+                self.ctx.request_repaint();
+            }
+            Action::PaletteName(name) => {
+                if let Some(p) = self.ui.palette.as_mut() {
+                    p.show_name(name);
+                }
+                self.ctx.request_repaint();
             }
             Action::ToggleMini => self.set_mode(self.prefs.get(|s| s.window.mini())),
             Action::Panel(a) => self.apply_panel(a),
@@ -616,6 +645,9 @@ impl RedeApp {
         }
         if self.mode != crate::window::Mode::Full {
             self.toasts_ui(ui, ui.ctx().content_rect());
+        }
+        if self.mode == crate::window::Mode::Full {
+            self.view().palette_ui(ui.ctx());
         }
         self.sheet_ui(ui.ctx());
         // What the views asked for this frame. Applying an action never queues

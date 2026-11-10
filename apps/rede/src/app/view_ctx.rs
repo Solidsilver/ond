@@ -30,6 +30,8 @@ pub struct ViewCtx<'a> {
     pub bookmarks: std::sync::Arc<Vec<sources::Bookmark>>,
     /// Covers load as they're first drawn.
     pub art: &'a mut Art,
+    /// The search palette, while it's open: what's typed is its own.
+    pub palette: &'a mut Option<super::palette::Palette>,
     pub actions: &'a mut Vec<Action>,
 }
 
@@ -52,6 +54,7 @@ impl RedeApp {
             settings: self.ui.settings,
             positions: &self.positions,
             art: &mut self.art,
+            palette: &mut self.ui.palette,
             actions: &mut self.actions,
         }
     }

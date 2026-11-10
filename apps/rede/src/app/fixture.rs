@@ -388,3 +388,12 @@ pub fn reconciled(app: &mut RedeApp) {
     };
     app.reconciliation = Some(crate::listening::Reconciled { previous: at(9_000.0, 3_600), current: at(app.player.position, 60) });
 }
+
+/// Piranesi half listened to, and Dune finished.
+pub fn in_progress(app: &mut RedeApp) {
+    let at = |id: &str, secs: f64, finished: bool| {
+        let item = sources::ItemKey::new(account().id, id);
+        (id.to_owned(), sources::Progress { item, position: sources::Position::from_secs(secs), finished, at: Some(std::time::SystemTime::now()) })
+    };
+    app.positions.extend([at("book-2", 7_980.0, false), at("book-1", 75_720.0, true)]);
+}

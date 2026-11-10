@@ -69,6 +69,8 @@ pub struct UiState {
     /// The other-device notice the toasts are showing, so a new pick-up
     /// replaces it and an undone one takes it away.
     pub reconcile_toast: Option<String>,
+    /// The search palette, while it's open.
+    pub palette: Option<super::palette::Palette>,
 }
 
 impl UiState {
