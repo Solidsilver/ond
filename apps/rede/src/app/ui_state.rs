@@ -1,5 +1,6 @@
 //! What the window shows between messages: where the trail is, the one line at
-//! the top that says what failed, and how far the sync is.
+//! the top that says what failed, the toasts over the foot, and how far the
+//! sync is.
 //!
 //! Everything here changes only when a message or an action says so, so an idle
 //! window draws nothing and asks for nothing.
@@ -53,7 +54,7 @@ impl SyncState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct UiState {
     pub nav: Nav,
     /// The line above the page, until it's dismissed or replaced.
@@ -62,6 +63,12 @@ pub struct UiState {
     pub panel: super::panel::PanelState,
     /// Settings' tab, kept while the page is away.
     pub settings: super::settings_page::Tab,
+    /// Confirmations and offers over the foot of the window: a bookmark
+    /// made or deleted, a position picked up from another device.
+    pub toasts: shell::kit::Toasts<super::Action>,
+    /// The other-device notice the toasts are showing, so a new pick-up
+    /// replaces it and an undone one takes it away.
+    pub reconcile_toast: Option<String>,
 }
 
 impl UiState {

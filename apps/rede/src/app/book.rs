@@ -32,8 +32,8 @@ const READING_W: f32 = 600.0;
 pub(super) const CHAPTER_ROW_H: f32 = 32.0;
 /// A chapter's number ends here (right-aligned, as Ond numbers tracks), and
 /// its title starts at `CHAPTER_TITLE_X`.
-const CHAPTER_NUMBER_RIGHT: f32 = 18.0;
-const CHAPTER_TITLE_X: f32 = 34.0;
+pub(super) const CHAPTER_NUMBER_RIGHT: f32 = 18.0;
+pub(super) const CHAPTER_TITLE_X: f32 = 34.0;
 
 impl ViewCtx<'_> {
     pub(super) fn book_page(&mut self, ui: &mut Ui, id: &str) {

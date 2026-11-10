@@ -1,4 +1,5 @@
-//! Window shortcuts remain available without a loaded book or keyboard focus.
+//! Window shortcuts remain available without a loaded book or keyboard focus;
+//! ⌘B is here too, since it works in every mode, and needs only a book.
 
 use super::{Action, RedeApp};
 use crate::window::Mode;
@@ -20,6 +21,13 @@ impl RedeApp {
             }
             if i.consume_key(Modifiers::COMMAND, Key::Comma) {
                 self.actions.push(Action::OpenSettings(self.ui.settings));
+            }
+            // A bookmark where the book is, in any mode; with nothing
+            // loaded the key does nothing.
+            if i.consume_key(Modifiers::COMMAND, Key::B)
+                && let Some(add) = super::bookmarks::at_current_position(&self.player)
+            {
+                self.actions.push(add);
             }
             // Esc is an open sheet's; otherwise it closes whatever else is
             // open (the chapters sheet, a menu), and with nothing open it

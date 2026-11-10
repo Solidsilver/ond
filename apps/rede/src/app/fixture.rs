@@ -348,3 +348,43 @@ pub fn whole_window(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
         body(ui);
     });
 }
+
+/// The bookmarks the playing book (see [`playing`]) has: one in the
+/// prologue, a few around where it's paused (the third is the one just
+/// behind it), one renamed, and one far ahead.
+pub fn bookmarks(app: &mut RedeApp) {
+    let item = ItemKey::new(account().id, "book-0");
+    let rows = [
+        (312.5, "Prologue · 5:12"),
+        (7_020.0, "Genly meets the king"),
+        (13_955.25, "Chapter 5 · 3:52:35"),
+        (14_480.0, "Estraven's warning, the whole speech"),
+        (30_100.0, "Chapter 9 · 8:21:40"),
+    ];
+    let bookmarks = rows
+        .iter()
+        .map(|(time, title)| sources::Bookmark {
+            item: item.clone(),
+            position: sources::Position::from_secs(*time),
+            title: (*title).into(),
+            created: std::time::SystemTime::UNIX_EPOCH,
+        })
+        .collect();
+    app.handle(crate::bridge::Msg::Bookmarks {
+        session: app.bridge.session(),
+        event: crate::bridge::BookmarkMsg::Updated(shelf::BookmarkSnapshot { revision: 1, bookmarks }),
+    });
+}
+
+/// The playing book picked up from another device: it was at 2:30:00 here,
+/// and the phone left it where it is now.
+pub fn reconciled(app: &mut RedeApp) {
+    let item = ItemKey::new(account().id, "book-0");
+    let at = |secs: f64, ago: u64| sources::Progress {
+        item: item.clone(),
+        position: sources::Position::from_secs(secs),
+        finished: false,
+        at: Some(std::time::SystemTime::now() - std::time::Duration::from_secs(ago)),
+    };
+    app.reconciliation = Some(crate::listening::Reconciled { previous: at(9_000.0, 3_600), current: at(app.player.position, 60) });
+}

@@ -204,7 +204,7 @@ impl ViewCtx<'_> {
         ui.add_space(8.0);
         match tab {
             Tab::Chapters => self.chapters_tab(ui, &t),
-            Tab::Bookmarks => shell::kit::empty_state(ui, Icon::Bookmark, "No bookmarks yet", "Bookmarks come with the next update."),
+            Tab::Bookmarks => self.bookmarks_tab(ui, &t),
             Tab::Info => self.info_tab(ui, &t),
         }
     }

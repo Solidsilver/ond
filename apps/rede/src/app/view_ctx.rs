@@ -26,6 +26,8 @@ pub struct ViewCtx<'a> {
     /// Settings' tab.
     pub settings: super::settings_page::Tab,
     pub positions: &'a std::collections::HashMap<String, sources::Progress>,
+    /// The loaded book's bookmarks, sorted by time.
+    pub bookmarks: std::sync::Arc<Vec<sources::Bookmark>>,
     /// Covers load as they're first drawn.
     pub art: &'a mut Art,
     pub actions: &'a mut Vec<Action>,
@@ -34,7 +36,9 @@ pub struct ViewCtx<'a> {
 impl RedeApp {
     /// Lends the parts a view works with.
     pub(super) fn view(&mut self) -> ViewCtx<'_> {
+        let bookmarks = self.current_bookmarks();
         ViewCtx {
+            bookmarks,
             books: &mut self.books,
             session: &self.session,
             sync: &self.sync,

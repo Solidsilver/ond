@@ -196,8 +196,9 @@ pending transaction before it opens a browser.
 ## Rede speech processing (M3)
 
 These checks need real output and a person listening. Use a release build.
-The switches are on Settings › Playback (⌘,); the Playback popover gets
-them too in M3.
+The switches are on Settings › Playback (⌘,) and in the Playback popover
+(the speed chip, or the Player's speed pill), which also says how much skip
+silence has saved in the book.
 
 - [ ] Listen to speech with both switches on at 1×, 1.5× and 2×. Consonants stay
   clear, quiet passages are audible, stereo placement stays steady and loud
@@ -220,12 +221,15 @@ them too in M3.
 ## Rede M3: bookmarks and reconciliation
 
 Use a release build, a dedicated Audiobookshelf account and a second client
-(such as a phone). The backend exposes Actions, bookmark snapshots and reconcile
-state; the bookmarks panel, shortcut and toast are wired by the UI change.
+(such as a phone).
 
-- [ ] Add a bookmark with ⌘B and through the Bookmarks tab. The default title
-  names the chapter and time. Rename it, jump to it, then delete it; verify the
-  same changes on the phone, including a fractional-second bookmark.
+- [ ] Add a bookmark with ⌘B (in the full window, the Player and Mini), with
+  Add bookmark on the Bookmarks tab, and with the Player's bookmark button.
+  The default title names the chapter and time, and a toast confirms it; its
+  Show opens the tab. Rename one from its … menu and from a right-click (Enter
+  keeps it, Esc doesn't, an empty title isn't taken), jump to it with a click,
+  then delete it and use the toast's Undo. Verify the same changes on the
+  phone, including a fractional-second bookmark.
 - [ ] Add, rename and delete on the phone, then focus Rede without waiting five
   minutes: its Bookmarks tab reflects the phone. Repeat with an ABS version
   before 2.36 to exercise the `/api/me` fallback.
@@ -236,7 +240,8 @@ state; the bookmarks panel, shortcut and toast are wired by the UI change.
   rename rather than resurrecting it.
 - [ ] Pause Rede, listen on the phone for more than a minute, and focus Rede.
   It stays paused at the newer position and offers "Picked up where you left off
-  on another device, … in." Repeat by quitting/reopening Rede and by resuming a
+  on another device, … in." as a toast with Undo; clicking the toast away keeps
+  the newer position and the offer doesn't come back. Repeat by quitting/reopening Rede and by resuming a
   paused book; resume asks the server first but plays within about 2.5 s even
   when the server is slow or unreachable.
 - [ ] Undo that reconciliation. The old local position returns in Rede and on
