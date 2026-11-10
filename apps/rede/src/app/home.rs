@@ -33,6 +33,9 @@ const CARD_RADIUS: f32 = 10.0;
 /// Rows of cards at most; the rest are in the library, with their progress
 /// on their covers.
 const CARD_ROWS: usize = 2;
+/// A narrow window's single column still shows this many: two would hide
+/// most of what's in progress.
+const CARDS_AT_LEAST: usize = 4;
 /// Rows of the library's tiles under "Recently added".
 const RECENT_ROWS: usize = 2;
 /// The resume button's side.
@@ -67,11 +70,12 @@ impl ViewCtx<'_> {
     }
 
     /// The books in progress as cards, as many across as fit, in up to
-    /// [`CARD_ROWS`] rows.
+    /// [`CARD_ROWS`] rows (or [`CARDS_AT_LEAST`] cards, where fewer fit across).
     fn continue_cards(&mut self, ui: &mut Ui, ids: &[usize]) {
         let width = ui.available_width();
         let (cols, card_w) = card_metrics(width);
-        for row in ids.chunks(cols).take(CARD_ROWS) {
+        let shown = (cols * CARD_ROWS).max(CARDS_AT_LEAST).min(ids.len());
+        for row in ids[..shown].chunks(cols) {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = CARD_GAP;
                 for &i in row {
