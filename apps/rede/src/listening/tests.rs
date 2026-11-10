@@ -195,7 +195,7 @@ impl Rig {
         rig
     }
     async fn event(&mut self, predicate: impl Fn(&Event) -> bool) -> Event {
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(testkit::slack(testkit::WAIT), async {
             loop {
                 let event = self.events.recv().await.unwrap();
                 if predicate(&event) {
@@ -312,7 +312,7 @@ async fn new_positions_are_durable_while_an_earlier_network_report_is_stalled() 
     for at in [15.0, 30.0, 45.0] {
         rig.listening.send(Request::Report { generation: 1, update: update(&rig.key, at, false), close: false });
     }
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(testkit::slack(testkit::WAIT), async {
         while rig.shelf.pending_progress().unwrap().len() != 3 {
             tokio::task::yield_now().await;
         }

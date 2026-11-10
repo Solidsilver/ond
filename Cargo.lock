@@ -3973,6 +3973,7 @@ dependencies = [
  "sources",
  "streamcache",
  "tempfile",
+ "testkit",
  "tokio",
  "tracing",
  "tracing-subscriber",
