@@ -311,12 +311,19 @@ pub fn signin(ctx: &egui::Context, dir: &Path, both: bool, waiting: bool) -> Red
 }
 
 /// The sign-in screen after the server said which `methods` it offers, and
-/// waiting for the browser when there's a `waiting` sign-in.
+/// waiting for the browser when there's a `waiting` sign-in. `server` is the
+/// address that answered; the fixture's own unless a test says otherwise.
 pub fn signin_with(ctx: &egui::Context, dir: &Path, methods: &[&str], waiting: Option<crate::openid::Pending>) -> RedeApp {
+    signin_at(ctx, dir, SERVER, methods, waiting)
+}
+
+/// [`signin_with`] for a server at `server`: what a bare address typed in
+/// shows once it has answered.
+pub fn signin_at(ctx: &egui::Context, dir: &Path, server: &str, methods: &[&str], waiting: Option<crate::openid::Pending>) -> RedeApp {
     let mut app = signed_out(ctx, dir);
     {
         let form = app.login.as_mut().unwrap();
-        form.server = "https://books.example.com".into();
+        form.server = server.into();
         form.checked_server = form.server.clone();
     }
     app.handle(crate::bridge::AccountMsg::Status {
@@ -327,6 +334,7 @@ pub fn signin_with(ctx: &egui::Context, dir: &Path, methods: &[&str], waiting: O
             ..Default::default()
         },
         warning: None,
+        server: server.into(),
     });
     if let Some(pending) = waiting {
         app.handle(crate::bridge::AccountMsg::OpenIdRestored { session: 0, pending: Some(Box::new(pending)) });

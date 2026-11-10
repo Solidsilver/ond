@@ -125,6 +125,7 @@ its progress cleanup are described in [Rede playback](docs/rede/playback.md).
 By ear, with a real output device; the sign-in checks need a live server.
 
 - [ ] Set the volume in the Playback popover and with ⌘↑ / ⌘↓, mute and unmute with the speaker, and relaunch: the level and the mute survive. Start a sleep timer at 40% and listen to the last ten seconds: the fade goes down from 40%, not from full, and cancelling it (or Extend 10 minutes) comes back to 40%.
+- [ ] Sign in to an Audiobookshelf server on this network by its bare host (`192.168.1.5:13378`, `nas.local`) and one on the internet by its name (`books.example.com`): once the server answers, the field shows the full address that worked. A public host with no certificate must not be tried over plain http.
 
 ## Rede M2: sleep, window modes and macOS controls
 Run Rede in release mode. These checks need a real output device and, for

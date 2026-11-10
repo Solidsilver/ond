@@ -99,11 +99,19 @@ impl JsonFake {
 }
 
 fn serve(mut stream: TcpStream, respond: &(dyn Fn(&Seen) -> Answer + Send + Sync), log: &Mutex<Vec<Seen>>) {
-    let mut req = Vec::new();
+    let mut req: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
     let head_end = loop {
         if let Some(i) = req.windows(4).position(|w| w == b"\r\n\r\n") {
             break i + 4;
+        }
+        // A request starts with an uppercase method. Anything else on the
+        // port is a TLS handshake sent to a plain-http server, which a web
+        // server answers at once rather than waiting for a head that's never
+        // coming (a client trying https on a http port needs that answer).
+        if req.first().is_some_and(|b| !b.is_ascii_uppercase()) {
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
         }
         match stream.read(&mut buf) {
             Ok(0) | Err(_) => return,
@@ -138,6 +146,19 @@ fn serve(mut stream: TcpStream, respond: &(dyn Fn(&Seen) -> Answer + Send + Sync
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_that_isnt_http_is_turned_away_at_once() {
+        // What a client trying https on a plain-http port sends: a TLS
+        // handshake, whose first byte isn't a method's letter.
+        let fake = JsonFake::start(|_| Answer::ok("{}"));
+        let mut conn = TcpStream::connect(fake.base().trim_end_matches('/').trim_start_matches("http://")).unwrap();
+        conn.write_all(&[0x16, 0x03, 0x01, 0x00, 0xf8, 0x01]).unwrap();
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
+        assert!(fake.seen().is_empty(), "it never became a request");
+    }
 
     #[test]
     fn a_request_is_answered_by_the_closure_and_kept_with_its_body() {

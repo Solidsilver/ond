@@ -80,6 +80,9 @@ pub enum AccountMsg {
         session: u64,
         status: abs::ServerStatus,
         warning: Option<String>,
+        /// The address that answered, with its scheme: a bare host typed in
+        /// is kept as the full address it turned out to be.
+        server: String,
     },
     OpenIdReady {
         session: u64,
@@ -312,7 +315,10 @@ impl Bridge {
                 return;
             }
             let Some(tokens) = tokens else { return this.send(AccountMsg::NoTokens { session }) };
-            let client = match abs::Client::new(&account.server, account.device()) {
+            // A saved address from an older Rede may have no scheme; the first
+            // candidate is what a bare one means.
+            let server = crate::address::candidates(&account.server).swap_remove(0);
+            let client = match abs::Client::new(&server, account.device()) {
                 Ok(c) => c.with_tokens(tokens),
                 Err(e) => return this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
             };
@@ -328,22 +334,21 @@ impl Bridge {
         self.rt.spawn(async move {
             let session = this.scope.unwrap();
             let result = async {
-                let client = abs::Client::new(&account.server, account.device())?;
-                let status = client.status().await?;
+                let (_, status, server) = connect(&account).await?;
                 if status.app.as_deref().is_some_and(|app| app != "audiobookshelf") {
                     return Err(abs::Error::Decode("not Audiobookshelf".into()));
                 }
-                Ok(status)
+                Ok((status, server))
             }
             .await;
             match result {
-                Ok(status) => {
+                Ok((status, server)) => {
                     let warning = match check_version(status.version()) {
                         VersionCheck::TooOld(error) => return this.send(AccountMsg::SignInFailed { session, error }),
                         VersionCheck::Warn(why) => Some(why),
                         VersionCheck::Fine => None,
                     };
-                    this.send(AccountMsg::Status { session, status, warning });
+                    this.send(AccountMsg::Status { session, status, warning, server });
                 }
                 Err(e) => this.send(AccountMsg::SignInFailed { session, error: sign_in_error(&e) }),
             }
@@ -482,15 +487,14 @@ impl Bridge {
         let hook = self.keeper.hook();
         self.rt.spawn(async move {
             let failed = |error: String| Msg::Account(AccountMsg::SignInFailed { session, error });
-            let client = match abs::Client::new(&account.server, account.device()) {
-                Ok(c) => c,
+            // The address that answered is the account's from here on: a bare
+            // host typed in is saved with the scheme that worked.
+            let (client, status, server) = match connect(&account).await {
+                Ok(connected) => connected,
                 Err(e) => return this.send(failed(sign_in_error(&e))),
             };
             client.set_auth_hook(hook);
-            let status = match client.status().await {
-                Ok(s) => s,
-                Err(e) => return this.send(failed(sign_in_error(&e))),
-            };
+            let account = Account { server, ..account };
             if status.app.as_deref().is_some_and(|app| app != "audiobookshelf") {
                 return this.send(failed("That address answered, but not like an Audiobookshelf server.".into()));
             }
@@ -655,6 +659,27 @@ impl Bridge {
     }
 }
 
+/// Connects to the first of an account's addresses that answers, with the
+/// status it gave, and the address that answered. A bare host on this network
+/// usually runs without a certificate, so it's tried over https and then over
+/// plain http; anything else is only ever tried over https.
+async fn connect(account: &Account) -> Result<(abs::Client, abs::ServerStatus, String), abs::Error> {
+    let addresses = crate::address::candidates(&account.server);
+    let last = addresses.len().saturating_sub(1);
+    let mut unanswered = None;
+    for (i, server) in addresses.iter().enumerate() {
+        let client = abs::Client::new(server, account.device())?;
+        match client.status().await {
+            Ok(status) => return Ok((client, status, server.clone())),
+            // Only no answer at all sends us to the next address: an answer,
+            // even a refusal, is this server's to give.
+            Err(e) if i < last && e.is_network() => unanswered = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(unanswered.expect("a typed address makes at least one candidate"))
+}
+
 /// What a server's version means for signing in to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VersionCheck {
@@ -807,6 +832,51 @@ mod tests {
         });
         assert_eq!(bridge.session(), 1);
         assert!(rx.try_iter().next().is_none());
+    }
+
+    /// A server that answers `/status` as Audiobookshelf does, at the fake's
+    /// address, and the address as a user types it without a scheme.
+    fn fake_server() -> (JsonFake, String) {
+        let fake = JsonFake::start(|seen| {
+            if seen.target == "/status" {
+                Answer::ok(r#"{"app":"audiobookshelf","serverVersion":"2.36.0","authMethods":["local"]}"#)
+            } else {
+                Answer::new("404 Not Found", "")
+            }
+        });
+        let bare = fake.base().trim_end_matches('/').trim_start_matches("http://").to_owned();
+        (fake, bare)
+    }
+
+    #[test]
+    fn a_bare_address_on_this_network_falls_back_to_plain_http_and_says_where_it_answered() {
+        let (fake, bare) = fake_server();
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, bridge, rx, _keeper) = rig(dir.path());
+        bridge.server_status(Account::new(&bare, ""));
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| !m.is_empty());
+        let Some(Msg::Account(AccountMsg::Status { server, .. })) = got.pop() else {
+            panic!("expected discovery over http");
+        };
+        assert_eq!(server, format!("http://{bare}"), "the address the field shows is the one that answered");
+        assert!(fake.seen().iter().any(|seen| seen.target == "/status"), "the https try got no answer, so the http one did the work");
+    }
+
+    #[test]
+    fn an_address_with_a_scheme_is_used_as_typed_and_tried_once() {
+        let (fake, _) = fake_server();
+        let typed = fake.base().trim_end_matches('/').to_owned();
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, bridge, rx, _keeper) = rig(dir.path());
+        bridge.server_status(Account::new(&typed, ""));
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| !m.is_empty());
+        let Some(Msg::Account(AccountMsg::Status { server, .. })) = got.pop() else {
+            panic!("expected discovery");
+        };
+        assert_eq!(server, typed);
+        assert_eq!(fake.seen().iter().filter(|seen| seen.target == "/status").count(), 1, "a scheme is the user's choice, not a guess");
     }
 
     #[test]

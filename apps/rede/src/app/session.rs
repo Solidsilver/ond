@@ -135,7 +135,7 @@ impl RedeApp {
     pub(super) fn check_server(&mut self) {
         let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
         if form.server.trim().is_empty() {
-            form.error = Some("Enter the server's address, for example https://books.example.com.".into());
+            form.error = Some("Enter the server's address, for example books.example.com.".into());
             return;
         }
         form.busy = true;
@@ -157,10 +157,14 @@ impl RedeApp {
     pub(super) fn handle_sign_in(&mut self, msg: crate::bridge::AccountMsg) {
         use crate::bridge::AccountMsg;
         match msg {
-            AccountMsg::Status { session, status, warning } if session == self.bridge.session() => {
+            AccountMsg::Status { session, status, warning, server } if session == self.bridge.session() => {
                 let Some(form) = self.login.as_mut() else { return };
                 form.busy = false;
                 form.warning = warning;
+                // The address that answered, with its scheme: a bare host typed
+                // in is shown, and kept, as what it turned out to be.
+                form.server = server.clone();
+                form.checked_server = server;
                 let launch = status.auth_methods.iter().any(|m| m == "openid") && status.auth_form_data.auth_open_id_auto_launch;
                 form.status = Some(status);
                 if launch {
@@ -272,7 +276,7 @@ impl RedeApp {
         let server = form.server.trim().to_owned();
         let username = form.username.trim().to_owned();
         if server.is_empty() {
-            form.error = Some("Enter the server's address, for example https://books.example.com.".into());
+            form.error = Some("Enter the server's address, for example books.example.com.".into());
             return;
         }
         if username.is_empty() {
@@ -474,8 +478,7 @@ impl RedeApp {
                         let error = form.error.clone();
                         let on = error.as_deref().and_then(error_field);
                         ui.add_enabled_ui(!form.busy, |ui| {
-                            enter |=
-                                login_field(ui, &t, Field::Server, &mut form.server, "https://books.example.com", !form.focused, on == Some(Field::Server));
+                            enter |= login_field(ui, &t, Field::Server, &mut form.server, "books.example.com", !form.focused, on == Some(Field::Server));
                             form.focused = true;
                             if on == Some(Field::Server)
                                 && let Some(error) = &error
@@ -824,7 +827,7 @@ mod tests {
         assert_eq!(error_field("Couldn't reach the server. Check the address and that it's running."), Some(Field::Server));
         assert_eq!(error_field("Couldn't reach the server: connection reset"), Some(Field::Server));
         // What the form itself says about an empty field.
-        assert_eq!(error_field("Enter the server's address, for example https://books.example.com."), Some(Field::Server));
+        assert_eq!(error_field("Enter the server's address, for example books.example.com."), Some(Field::Server));
         assert_eq!(error_field("Enter your username."), Some(Field::Username));
         assert_eq!(error_field("Enter your password."), Some(Field::Password));
         // And what is about the sign-in as a whole, which stays under the buttons.
