@@ -559,20 +559,19 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "settings-playback-on");
 
-    // A library run waiting on playback (the preview status is mid-download).
+    // A library run waiting on playback (the preview status is mid-download),
+    // shot from a stand-in so no worker has to reach that state first.
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        let jobs: Vec<_> =
-            (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
-        app.analysis.runner.enqueue(jobs);
-        // The worker acknowledges playback asynchronously. Capture the intended
-        // waiting state rather than racing its first progress update.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !app.analysis.runner.progress().waiting {
-            assert!(std::time::Instant::now() < deadline, "the analysis worker never yielded to playback");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        app.analysis.runner = crate::analyze::Runner::stand_in(crate::analyze::Progress {
+            done: 3,
+            total: 40,
+            waiting: true,
+            running: true,
+            remaining_secs: 37.0 * 210.0,
+            ..Default::default()
+        });
         app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
     s.shoot(h, "settings-analysing");

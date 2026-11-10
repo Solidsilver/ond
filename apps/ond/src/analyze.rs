@@ -218,6 +218,33 @@ impl Runner {
         self.shared.lock().progress()
     }
 
+    /// A runner with no worker behind it, reporting `progress` as its state:
+    /// for a screenshot of a run that waits on playback, without racing a real
+    /// one's first update.
+    #[cfg(test)]
+    pub fn stand_in(progress: Progress) -> Self {
+        let shared = Arc::new(Shared { state: Mutex::default(), wake: Condvar::new(), quit: AtomicBool::new(false) });
+        {
+            let mut st = shared.lock();
+            st.done = progress.done;
+            st.failed = progress.failed;
+            st.paused = progress.paused;
+            st.waiting = progress.waiting;
+            // The queue holds what's left, so `total` and `remaining_secs` come
+            // out as asked.
+            let left = progress.total.saturating_sub(progress.done);
+            let each = if left > 0 { progress.remaining_secs / left as f64 } else { 0.0 };
+            let job = |id: String| Job { track_id: id, suffix: None, stamp: "stand-in".into(), secs: each, local: None };
+            for i in 0..left.saturating_sub(1) {
+                st.push_back(job(format!("stand-in-{i}")));
+            }
+            if left > 0 {
+                st.current = Some(job("stand-in".into()));
+            }
+        }
+        Self { shared }
+    }
+
     /// How many of `ids` are queued or being analysed.
     pub fn pending<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> usize {
         let st = self.shared.lock();

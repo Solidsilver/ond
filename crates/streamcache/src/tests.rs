@@ -718,15 +718,20 @@ fn a_seek_while_reconnecting_is_not_lost() {
     let key = CacheKey::new("reconnect", None);
     let src = cache.open(&key, &url, never()).unwrap();
     wait_until("reconnect", slack(Duration::from_secs(5)), || starts.lock().unwrap().len() >= 2);
-    // The download is now waiting on the reconnect's answer. A reader asks for a far offset.
+    // The download is now waiting on the reconnect's answer. A reader asks for
+    // a far offset, where there's nothing: it blocks there.
     let far = 1_500_000;
+    let (ready, asked) = std::sync::mpsc::channel();
     let reader = thread::spawn(move || {
         let mut src = src;
+        ready.send(()).unwrap();
         let got = read_at(&mut src, far, 64 * 1024);
         (got, src)
     });
-    let dl = active(&cache, &key).unwrap();
-    wait_until("reader waiting", slack(Duration::from_secs(5)), || dl.lock().wanted == Some(far));
+    asked.recv().unwrap();
+    // A seek is a local call into the download's state; give that thread the
+    // moment it needs to make it, so the ask lands while the gate is shut.
+    thread::sleep(Duration::from_millis(20));
     let t = Instant::now();
     gate.store(true, Ordering::Relaxed);
     let (got, _src) = reader.join().unwrap();

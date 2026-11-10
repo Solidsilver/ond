@@ -82,12 +82,48 @@ pub struct Waveforms {
     rx: Receiver<Done>,
     /// The last bars handed out, by track and count.
     bars: Memo<(String, usize), Vec<f32>>,
+    /// How often to look again for a playing track's file ([`LOOK_EVERY`] in
+    /// the app; tests choose their own so they aren't racing a second).
+    look_every: Duration,
+    /// Lower the reader thread to background priority. Off in tests: a
+    /// throttled thread is a test waiting on the scheduler.
+    background: bool,
 }
 
 impl Waveforms {
     pub fn new(ctx: egui::Context) -> Self {
+        Self::with(ctx, LOOK_EVERY, true)
+    }
+
+    fn with(ctx: egui::Context, look_every: Duration, background: bool) -> Self {
         let (tx, rx) = channel();
-        Self { ctx, peaks: HashMap::new(), lru: Lru::new(KEPT), pending: HashSet::new(), failed: HashSet::new(), looked: None, tx, rx, bars: Memo::default() }
+        Self {
+            ctx,
+            peaks: HashMap::new(),
+            lru: Lru::new(KEPT),
+            pending: HashSet::new(),
+            failed: HashSet::new(),
+            looked: None,
+            tx,
+            rx,
+            bars: Memo::default(),
+            look_every,
+            background,
+        }
+    }
+
+    /// A reader that looks again quickly and runs at normal priority, for a
+    /// test that shouldn't wait on either.
+    #[cfg(test)]
+    pub fn for_test(ctx: egui::Context) -> Self {
+        Self::with(ctx, Duration::from_millis(20), false)
+    }
+
+    /// Whether a read for `id` finished with nothing, so it isn't asked for
+    /// again this session (a test waits on this instead of looking inside).
+    #[cfg(test)]
+    pub fn gave_up(&self, id: &str) -> bool {
+        self.failed.contains(id)
     }
 
     /// Takes in finished reads. Call once per frame before drawing.
@@ -116,15 +152,17 @@ impl Waveforms {
         if self.peaks.contains_key(id) || self.pending.contains(id) || self.failed.contains(id) {
             return;
         }
-        if self.looked.as_ref().is_some_and(|(l, at)| l == id && at.elapsed() < LOOK_EVERY) {
+        if self.looked.as_ref().is_some_and(|(l, at)| l == id && at.elapsed() < self.look_every) {
             return;
         }
         self.looked = Some((id.to_owned(), Instant::now()));
         let Some(path) = file() else { return };
         self.pending.insert(id.to_owned());
-        let (tx, ctx, job, suffix) = (self.tx.clone(), self.ctx.clone(), id.to_owned(), suffix.map(str::to_owned));
+        let (tx, ctx, job, suffix, background) = (self.tx.clone(), self.ctx.clone(), id.to_owned(), suffix.map(str::to_owned), self.background);
         let spawned = std::thread::Builder::new().name("waveform".into()).spawn(move || {
-            crate::analyze::lower_priority();
+            if background {
+                crate::analyze::lower_priority();
+            }
             let peaks = read(&path, suffix.as_deref());
             if peaks.is_none() {
                 tracing::debug!("no waveform for {}", path.display());
@@ -187,7 +225,7 @@ mod tests {
     fn peaks_are_read_in_the_background_once_the_file_is_there() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.wav");
-        let mut w = Waveforms::new(egui::Context::default());
+        let mut w = Waveforms::for_test(egui::Context::default());
         // Still downloading: nothing to read yet, and not asked again at once.
         w.want("t", Some("wav"), || None);
         let mut asked = false;
@@ -195,14 +233,15 @@ mod tests {
             asked = true;
             None
         });
-        assert!(!asked, "looked again within the second");
+        assert!(!asked, "looked again within the look interval");
         assert!(w.bars("t", 10).is_none());
 
+        std::thread::sleep(Duration::from_millis(25));
         std::fs::write(&path, wav()).unwrap();
-        w.looked = None;
         w.want("t", Some("wav"), || Some(path.clone()));
-        // Generous: the read runs on a thread that a busy machine (CI, a parallel build) may starve.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // The read is off this thread, at normal priority: generous, and far
+        // under the half minute a background-QoS reader could take.
+        let deadline = Instant::now() + Duration::from_secs(5);
         let bars = loop {
             w.poll();
             if let Some(b) = w.bars("t", 10) {
@@ -224,16 +263,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.flac");
         std::fs::write(&path, b"not audio").unwrap();
-        let mut w = Waveforms::new(egui::Context::default());
+        let mut w = Waveforms::for_test(egui::Context::default());
         w.want("bad", Some("flac"), || Some(path.clone()));
-        // Generous: the read runs on a thread that a busy machine (CI, a parallel build) may starve.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !w.failed.contains("bad") {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !w.gave_up("bad") {
             w.poll();
-            assert!(Instant::now() < deadline);
+            assert!(Instant::now() < deadline, "the waveform never gave up on the file");
             std::thread::sleep(Duration::from_millis(5));
         }
-        w.looked = None;
         w.want("bad", Some("flac"), || panic!("tried again"));
+        // Past the look interval too: the failure, not the throttle, is why.
+        std::thread::sleep(Duration::from_millis(25));
+        w.want("bad", Some("flac"), || panic!("tried again later"));
     }
 }

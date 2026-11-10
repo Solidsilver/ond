@@ -128,6 +128,9 @@ pub struct Art {
     /// Images given by [`Art::preload`], so looks work without a server.
     #[cfg(test)]
     preloaded: HashMap<String, ColorImage>,
+    /// A size for [`Art::disk_size`] to report as it is (see `pin_disk_size`).
+    #[cfg(test)]
+    pinned_disk: Option<u64>,
 }
 
 impl Art {
@@ -163,6 +166,8 @@ impl Art {
             look_rx,
             #[cfg(test)]
             preloaded: HashMap::new(),
+            #[cfg(test)]
+            pinned_disk: None,
         }
     }
 
@@ -370,6 +375,10 @@ impl Art {
     /// Bytes of art on disk, recounted in the background every few seconds
     /// while asked for; `None` until first counted.
     pub fn disk_size(&mut self) -> Option<u64> {
+        #[cfg(test)]
+        if let Some(bytes) = self.pinned_disk {
+            return Some(bytes);
+        }
         if self.counted.is_none_or(|at| at.elapsed() > RECOUNT) {
             self.counted = Some(Instant::now());
             let (dir, disk, ctx) = (self.dir.clone(), self.disk.clone(), self.ctx.clone());
@@ -379,6 +388,13 @@ impl Art {
             });
         }
         Some(self.disk.load(Ordering::Relaxed)).filter(|&n| n != u64::MAX)
+    }
+
+    /// Reports `bytes` as the art on disk whatever the walk finds: a snapshot
+    /// shows one number, not whichever count finished first.
+    #[cfg(test)]
+    pub fn pin_disk_size(&mut self, bytes: u64) {
+        self.pinned_disk = Some(bytes);
     }
 
     /// Forgets every cover, here and on disk: what's on screen loads again
