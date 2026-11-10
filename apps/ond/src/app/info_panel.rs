@@ -179,7 +179,7 @@ impl ViewCtx<'_> {
         ui.horizontal_top(|ui| {
             let (art, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
             let data = self.data;
-            self.art.paint(ui, art, data.cover_for(track), 4.0);
+            self.art.paint_as(ui, art, data.cover_for(track), 4.0, &data.stand_in(track));
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;

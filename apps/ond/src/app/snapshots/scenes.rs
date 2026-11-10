@@ -633,6 +633,28 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Artists);
     s.shoot(h, "artists");
+    // No album covers loaded yet (Albums never opened): each disc is the
+    // artist's own colour with their initials.
+    app_mut(h).art.unload();
+    reset(h, FULL, Route::Artists);
+    s.shoot(h, "artists-initials");
+    let app = app_mut(h);
+    for i in 0..ALBUMS.len() {
+        app.art.preload(&album_id(i), cover(i));
+    }
+    // Albums the server has no cover for: generated ones beside the real
+    // covers, in the grid and on an album's page.
+    for i in (1..ALBUMS.len()).step_by(3) {
+        app_mut(h).art.preload_missing(&album_id(i));
+    }
+    reset(h, FULL, Route::Albums);
+    s.shoot(h, "albums-missing-art");
+    reset(h, FULL, Route::Album(album_id(1)));
+    s.shoot(h, "album-missing-art");
+    let app = app_mut(h);
+    for i in (1..ALBUMS.len()).step_by(3) {
+        app.art.preload(&album_id(i), cover(i));
+    }
     // Albums as a table, sorted by year the other way round (as a click on
     // its header twice leaves it).
     reset(h, FULL, Route::Albums);

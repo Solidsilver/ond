@@ -251,7 +251,7 @@ impl OndApp {
         group(ui, "Lists", |ui| {
             let hint = "Letters beside Albums, Artists and Songs when they're sorted by name. Click or drag along them to jump.";
             self.pref_switch(ui, "alpha_rail", "Alphabet rail", hint, self.ui.prefs.alpha_rail, PrefsAction::AlphaRail);
-            let hint = "Each artist's photo from the server beside their name in Artists, or their initial when the server has none.";
+            let hint = "Each artist's photo from the server beside their name in Artists, or their albums' covers or initials when the server has none.";
             self.pref_switch(ui, "artist_photos", "Artist photos", hint, self.ui.prefs.artist_photos, PrefsAction::ArtistPhotos);
         });
     }

@@ -3,7 +3,10 @@
 //!
 //! Callers ask for art only while drawing something visible, so scrolled-away
 //! rows never cost a request. A miss paints a neutral tile of the same size
-//! (no layout shift) and the finished load triggers a single repaint.
+//! (no layout shift) and the finished load triggers a single repaint. Art
+//! the server doesn't have (or an album with no cover at all) is drawn by
+//! [`Art::paint_as`] as a generated cover with the album's title and artist
+//! ([`shell::kit::generated_cover`]), so albums without art still look apart.
 //!
 //! Loads are asked for again every frame they're drawn, and the [`Queue`] runs
 //! the most recently asked first. One that goes unasked for a couple of frames
@@ -14,6 +17,7 @@
 
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureOptions, Ui};
 use shell::art::{Lane, Queue, SIZES, bucket};
+use shell::kit::Generated;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -423,6 +427,25 @@ impl Art {
         self.ctx.request_repaint();
     }
 
+    /// Forgets every loaded texture (the disk is left alone), as a session
+    /// that hasn't drawn any albums yet would have none at hand.
+    #[cfg(test)]
+    pub fn unload(&mut self) {
+        self.textures.clear();
+        self.prints.clear();
+        self.lru = Lru::new(TEXTURE_BUDGET);
+    }
+
+    /// Marks `cover` as art the server doesn't have, at every size.
+    #[cfg(test)]
+    pub fn preload_missing(&mut self, cover: &str) {
+        for size in SIZES {
+            let key = self.key(cover, size);
+            self.textures.remove(&key);
+            self.missing.insert(key);
+        }
+    }
+
     /// Makes `image` the art for `cover` at every size, without a server.
     #[cfg(test)]
     pub fn preload(&mut self, cover: &str, image: ColorImage) {
@@ -435,6 +458,35 @@ impl Art {
             self.textures.insert(key, tex.clone());
             self.prints.insert(key, print);
         }
+    }
+
+    /// [`Art::paint`], but art that isn't to be had (none on the server, or
+    /// no `cover` at all) is `stand_in`, a generated cover, rather than the
+    /// quiet tile that stands in while art loads.
+    pub fn paint_as(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>, stand_in: &Generated) {
+        let radius = radius.into();
+        let points = rect.width().max(rect.height());
+        if cover.is_none_or(|c| self.texture(c, points).is_none() && self.is_missing(c, points)) {
+            shell::kit::generated_cover(ui, rect, radius, stand_in);
+        } else {
+            self.paint(ui, rect, cover, radius);
+        }
+    }
+
+    /// Whether `cover` at `points` wide is known not to be had.
+    fn is_missing(&mut self, cover: &str, points: f32) -> bool {
+        let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
+        self.missing.contains(&key)
+    }
+
+    /// The largest size of `cover` already loaded, without asking for it
+    /// when there's none: for drawing what's at hand (an artist's albums on
+    /// their disc) without a request of its own.
+    pub fn loaded(&mut self, cover: &str) -> Option<TextureHandle> {
+        let &n = self.covers.get(cover)?;
+        let key = SIZES.iter().rev().map(|&size| Key { cover: n, size }).find(|k| self.textures.contains_key(k))?;
+        self.lru.touch(&key);
+        self.textures.get(&key).cloned()
     }
 
     /// Paints `cover` into `rect` (or the placeholder tile). A rect that isn't
@@ -454,6 +506,20 @@ impl Art {
                 painter.rect_filled(rect, radius, t.placeholder);
             }
         }
+    }
+}
+
+/// The cover an album without art gets: its title and artist.
+pub fn album_cover(album: &library::Album) -> Generated<'_> {
+    Generated { title: &album.name, byline: album.artist.as_deref(), seed: &album.id }
+}
+
+/// The cover a track without art gets: its album's, else its own title and
+/// artist (in its album's colour, so an album's tracks agree).
+pub fn track_cover<'a>(album: Option<&'a library::Album>, track: &'a library::Track) -> Generated<'a> {
+    match album {
+        Some(a) => album_cover(a),
+        None => Generated { title: &track.title, byline: track.artist.as_deref(), seed: &track.album_id },
     }
 }
 

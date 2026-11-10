@@ -183,7 +183,7 @@ impl ViewCtx<'_> {
         };
         let art = Rect::from_min_size(rect.min, vec2(rect.height(), rect.height()));
         let album = data.album(&item.track.album_id);
-        self.art.paint(ui, art.shrink(1.0), data.cover_for(&item.track), 6.0);
+        self.art.paint_as(ui, art.shrink(1.0), data.cover_for(&item.track), 6.0, &data.stand_in(&item.track));
 
         // The right column: the heart at the end, the format pill just left of
         // it, both centred vertically.

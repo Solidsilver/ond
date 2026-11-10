@@ -15,9 +15,9 @@ use crate::memo::Memo;
 use crate::nav::Route;
 use crate::search::ArtistEntry;
 use crate::settings::ViewMode;
-use crate::theme::{Tokens, semibold};
+use crate::theme::Tokens;
 use crate::widgets::elide;
-use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
+use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use std::sync::Arc;
 
 /// A row of the table, and the photo in it.
@@ -105,8 +105,9 @@ impl ViewCtx<'_> {
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, tile + LABEL_H), Sense::click());
         if ui.is_rect_visible(rect) {
             let photo = Rect::from_min_size(rect.min, vec2(tile, tile));
-            let cover = a.cover.as_deref().filter(|_| self.ui.prefs.artist_photos);
-            avatar(self.art, ui, t, photo, cover, &a.name);
+            // Photos off: no pictures at all, the initials alone.
+            let (cover, albums) = if self.ui.prefs.artist_photos { (a.cover.as_deref(), a.album_covers.as_slice()) } else { (None, &[][..]) };
+            avatar(self.art, ui, photo, cover, &a.name, albums);
             let name = elide(ui, &a.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.center().x - name.size().x / 2.0, photo.bottom() + 7.0), name, t.text);
             let sub = elide(ui, &albums_and_years(a), FontId::proportional(12.0), t.muted, tile);
@@ -161,7 +162,7 @@ impl ViewCtx<'_> {
             let mut x = c.name.left() + col::INSET;
             if photos {
                 let face = Rect::from_center_size(pos2(x + AVATAR / 2.0, row.cy()), vec2(AVATAR, AVATAR));
-                avatar(self.art, ui, t, face, a.cover.as_deref(), &a.name);
+                avatar(self.art, ui, face, a.cover.as_deref(), &a.name, &a.album_covers);
                 x = face.right() + 10.0;
             }
             row.line(ui, x, c.name.right() - col::INSET - x, &a.name, FontId::proportional(13.0), t.text);
@@ -231,20 +232,58 @@ fn albums_and_years(a: &ArtistEntry) -> String {
     }
 }
 
-/// An artist's photo in a circle, or their initial when the server has no
-/// photo of them (or it's still loading), or there's no `cover` to ask for.
-pub(super) fn avatar(art: &mut Art, ui: &Ui, t: &Tokens, rect: Rect, cover: Option<&str>, name: &str) {
+/// An artist's photo in a circle. Without one (the server has none, or it's
+/// still loading, or there's no `photo` to ask for), up to four of their
+/// `albums`' covers that are already loaded share the circle; with none of
+/// those either, it's a disc in a colour of their own with their initials.
+/// Album covers are only ever drawn here, never asked for: the disc costs no
+/// request of its own.
+pub(super) fn avatar(art: &mut Art, ui: &Ui, rect: Rect, photo: Option<&str>, name: &str, albums: &[String]) {
     let radius = egui::CornerRadius::same((rect.width() / 2.0).min(255.0) as u8);
-    match cover.and_then(|c| art.portrait(c, rect.width())) {
-        Some(tex) => {
-            let photo = egui::epaint::RectShape::filled(rect, radius, egui::Color32::WHITE).with_texture(tex.id(), crate::art::crop_uv(1.0));
-            ui.painter().add(photo);
+    if let Some(tex) = photo.and_then(|c| art.portrait(c, rect.width())) {
+        ui.painter().add(egui::epaint::RectShape::filled(rect, radius, egui::Color32::WHITE).with_texture(tex.id(), crate::art::crop_uv(1.0)));
+        return;
+    }
+    let mut covers: [Option<egui::TextureHandle>; 4] = Default::default();
+    let mut n = 0;
+    for album in albums {
+        if n == covers.len() {
+            break;
         }
-        None => {
-            ui.painter().rect_filled(rect, radius, t.placeholder);
-            let initial = name.chars().find(|c| c.is_alphanumeric()).map_or('#', |c| c.to_uppercase().next().unwrap_or(c));
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, FontId::new((rect.width() * 0.42).min(44.0), semibold()), t.muted);
+        if let Some(tex) = art.loaded(album) {
+            covers[n] = Some(tex);
+            n += 1;
         }
+    }
+    if n == 0 {
+        shell::kit::generated_disc(ui, rect, name, name);
+        return;
+    }
+    // Each cover fills its piece of the square (two halves, a half and two
+    // quarters, or four quarters) and the whole disc is drawn through that
+    // piece, so the circle's edge stays smooth.
+    let (c, min, max) = (rect.center(), rect.min, rect.max);
+    let halves = [Rect::from_min_max(min, pos2(c.x, max.y)), Rect::from_min_max(pos2(c.x, min.y), max)];
+    let quarters = [
+        Rect::from_min_max(min, c),
+        Rect::from_min_max(pos2(c.x, min.y), pos2(max.x, c.y)),
+        Rect::from_min_max(pos2(min.x, c.y), pos2(c.x, max.y)),
+        Rect::from_min_max(c, max),
+    ];
+    let pieces: &[Rect] = match n {
+        1 => &[rect],
+        2 => &halves,
+        3 => &[halves[0], quarters[1], quarters[3]],
+        _ => &quarters,
+    };
+    for (piece, tex) in pieces.iter().zip(covers.iter().flatten()) {
+        let crop = crate::art::crop_uv(piece.width() / piece.height());
+        let scale = crop.size() / piece.size();
+        let uv_min = crop.min - (piece.min - rect.min) * scale;
+        let uv = Rect::from_min_size(uv_min, rect.size() * scale);
+        ui.painter()
+            .with_clip_rect(piece.intersect(ui.clip_rect()))
+            .add(egui::epaint::RectShape::filled(rect, radius, egui::Color32::WHITE).with_texture(tex.id(), uv));
     }
 }
 
@@ -266,7 +305,7 @@ mod tests {
     use super::*;
 
     fn entry(name: &str, albums: usize) -> ArtistEntry {
-        ArtistEntry { id: None, name: name.into(), sort: name.into(), albums, cover: None, years: None, genre: None }
+        ArtistEntry { id: None, name: name.into(), sort: name.into(), albums, cover: None, years: None, genre: None, album_covers: Vec::new() }
     }
 
     #[test]

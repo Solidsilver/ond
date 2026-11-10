@@ -293,13 +293,15 @@ fn hit_row(ui: &mut egui::Ui, t: &Tokens, hits: &mut Hits, hit: Hit, selected: b
     let (main, sub) = match hit {
         Hit::Artist(i) => {
             let a = &index.artists[i];
-            ui.painter().circle_filled(tile.center(), 15.0, t.field);
-            icons::paint(ui.painter(), tile.shrink(8.0), Icon::Person, t.muted);
+            super::artists::avatar(hits.art, ui, tile, a.cover.as_deref(), &a.name, &a.album_covers);
             (a.name.as_str(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
         }
         Hit::Album(i) => {
             let a = &index.albums[i];
-            hits.art.paint(ui, tile, data.album(&a.id).and_then(|al| al.cover_art.as_deref()), 4.0);
+            match data.album(&a.id) {
+                Some(al) => hits.art.paint_as(ui, tile, al.cover_art.as_deref(), 4.0, &crate::art::album_cover(al)),
+                None => hits.art.paint(ui, tile, None, 4.0),
+            }
             let sub = match a.year {
                 Some(y) => format!("{} · {y}", a.artist),
                 None => a.artist.clone(),
@@ -308,7 +310,10 @@ fn hit_row(ui: &mut egui::Ui, t: &Tokens, hits: &mut Hits, hit: Hit, selected: b
         }
         Hit::Track(i) => {
             let tr = &index.tracks[i];
-            hits.art.paint(ui, tile, data.album(&tr.album_id).and_then(|al| al.cover_art.as_deref()), 4.0);
+            match data.album(&tr.album_id) {
+                Some(al) => hits.art.paint_as(ui, tile, al.cover_art.as_deref(), 4.0, &crate::art::album_cover(al)),
+                None => hits.art.paint(ui, tile, None, 4.0),
+            }
             (tr.title.as_str(), format!("Song · {} · {}", tr.artist, tr.album))
         }
     };
