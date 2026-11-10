@@ -642,6 +642,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     for i in 0..ALBUMS.len() {
         app.art.preload(&album_id(i), cover(i));
     }
+    app.art.preload(WHITE, white_cover());
     // Albums the server has no cover for: generated ones beside the real
     // covers, in the grid and on an album's page.
     for i in (1..ALBUMS.len()).step_by(3) {
