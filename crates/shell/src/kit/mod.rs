@@ -38,12 +38,16 @@
 //!   ([`settings_nav`], its width [`SETTINGS_NAV_W`]), the pane beside it
 //!   ([`settings_pane`]), and About's [`about_header`] with the
 //!   [`app_icon`].
+//! - [`covers`]: what's laid over a cover to say how far along it is
+//!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
+//!   badge in its corner), and [`progress_bar`], the same line on its own.
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
 //!   fade, or stay with a button until clicked away (a [`Toasts::note`]
 //!   fades with its button).
 
 pub mod buttons;
 pub mod controls;
+pub mod covers;
 pub mod menus;
 pub mod rows;
 pub mod settings;
@@ -53,6 +57,7 @@ pub mod toasts;
 
 pub use buttons::*;
 pub use controls::*;
+pub use covers::*;
 pub use menus::*;
 pub use rows::*;
 pub use settings::*;
