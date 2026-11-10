@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 egui = "0.37.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 nucleo-matcher = "0.3.1"
@@ -32,7 +33,7 @@ dispatch2 = "0.3.1"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSWindow", "NSResponder", "NSView", "NSButton", "NSControl"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "alloc", "block2", "NSArray", "NSString", "NSValue", "NSDictionary", "NSData", "NSObject"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "alloc", "block2", "NSArray", "NSString", "NSValue", "NSDictionary", "NSData", "NSObject", "NSDateFormatter", "NSFormatter", "NSLocale"] }
 objc2-media-player = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "MPMediaItem", "MPNowPlayingInfoCenter", "MPRemoteCommand", "MPRemoteCommandCenter", "MPRemoteCommandEvent"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]

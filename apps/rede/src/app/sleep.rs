@@ -9,7 +9,7 @@
 use super::controls::{Pill, pill};
 use super::{Action, PrefsAction, view_ctx::ViewCtx};
 use crate::{player::Control, sleep::Choice};
-use egui::{FontId, Rect, Response, RichText, Sense, Ui, pos2, vec2};
+use egui::{FontId, Rect, Response, Sense, Ui, pos2, vec2};
 use shell::{
     icons::{self, Icon},
     kit,
@@ -17,15 +17,19 @@ use shell::{
 };
 use std::time::Instant;
 
-/// The presets, in minutes, three to a row; the custom row has the rest.
+/// The presets, in minutes, three to a row; the custom cell has the rest.
 const PRESETS: [u32; 6] = [5, 15, 30, 45, 60, 90];
-/// The lengths the custom row steps through: the timer takes 5 to 120.
+/// The lengths the custom cell steps through: the timer takes 5 to 120.
 const SLEEP_LENGTHS: [u32; 10] = [5, 10, 15, 20, 30, 45, 60, 75, 90, 120];
 /// The popover's width, and the gap between its chips.
 const SLEEP_W: f32 = 264.0;
 const GRID_GAP: f32 = 6.0;
 /// What the running timer's button says: the engine's extension, 10 minutes.
 const EXTEND_SHORT: &str = "Add 10 min";
+/// What a timer waiting for the chapter's end offers instead.
+const ONE_MORE_CHAPTER: &str = "One more chapter";
+/// The custom cell's name for a screen reader: "custom timer, 40 min".
+const CUSTOM: &str = "custom timer";
 /// The notice shows this long before the timer stops playback.
 pub(super) const NOTICE_SECS: f64 = 60.0;
 
@@ -64,9 +68,10 @@ impl ViewCtx<'_> {
         self.sleep_menu_with(&response, left);
     }
 
-    /// The Sleep timer popover: while a timer runs, what's left, large, with
-    /// Add 10 min and Cancel; then the presets as a grid of chips, the
-    /// chapter's end, and a length of the user's own with Start.
+    /// The Sleep timer popover: while a timer runs, when it pauses, with the
+    /// way to have more of it (ten minutes, or the next chapter) and Cancel;
+    /// then the one grid of lengths: the presets, the chapter's end, and the
+    /// length of the user's own, whose − and + set it without starting it.
     pub(super) fn sleep_menu(&mut self, pill: &Response) {
         let left = self.player.sleep_remaining(Instant::now());
         self.sleep_menu_with(pill, left);
@@ -74,7 +79,6 @@ impl ViewCtx<'_> {
 
     fn sleep_menu_with(&mut self, pill: &Response, left: Option<f64>) {
         kit::popover(pill, SLEEP_W, |ui| {
-            let t = Tokens::of(ui);
             kit::popover_title(ui, "Sleep timer", left.is_none().then_some("Off"));
             ui.add_space(10.0);
             let at_chapter_end = self.sleeps_at_chapter_end();
@@ -83,66 +87,72 @@ impl ViewCtx<'_> {
                 kit::popover_rule(ui, 10.0);
             }
             kit::padded(ui, |ui| {
-                let label = if left.is_some() { "Start again with" } else { "Pause after" };
-                kit::section(ui, label);
+                kit::section(ui, if left.is_some() { "Change to" } else { "Pause after" });
                 ui.add_space(6.0);
-                let w = ui.available_width();
-                let cell = (w - 2.0 * GRID_GAP) / 3.0;
-                for row in PRESETS.chunks(3) {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = GRID_GAP;
-                        for &minutes in row {
-                            if kit::choice_chip(ui, &format!("{minutes} min"), false, Some(cell)).clicked() {
-                                self.actions.push(Action::Playback(Control::Sleep(Some(Choice::Minutes(minutes)))));
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.add_space(GRID_GAP);
-                }
-                if kit::choice_chip(ui, "End of chapter", at_chapter_end, Some(w)).clicked() && !at_chapter_end {
-                    self.actions.push(Action::Playback(Control::Sleep(Some(Choice::Chapter))));
-                    ui.close();
-                }
-            });
-            kit::popover_rule(ui, 10.0);
-            kit::padded(ui, |ui| {
-                let mut prefs = self.playback;
-                ui.horizontal(|ui| {
-                    ui.set_height(30.0);
-                    ui.label(RichText::new("Custom").size(13.0).color(t.text));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if shell::kit::secondary(ui, "Start").clicked() {
-                            self.actions.push(Action::Playback(Control::Sleep(Some(Choice::Minutes(prefs.sleep_minutes)))));
-                            ui.close();
-                        }
-                        if kit::stepper(ui, &mut prefs.sleep_minutes, &SLEEP_LENGTHS, "timer length", |m| format!("{m} min")) {
-                            self.actions.push(Action::Prefs(PrefsAction::Playback(prefs)));
-                        }
-                    });
-                });
+                self.sleep_grid(ui, at_chapter_end);
             });
         });
     }
 
-    /// A running timer: the time left, large and in the accent as the chip
-    /// is lit, what happens then, and the two things to do about it.
+    /// The lengths, three to a row, then the chapter's end and the custom
+    /// length side by side under them.
+    fn sleep_grid(&mut self, ui: &mut Ui, at_chapter_end: bool) {
+        let w = ui.available_width();
+        let cell = (w - 2.0 * GRID_GAP) / 3.0;
+        let start = |actions: &mut Vec<Action>, choice| actions.push(Action::Playback(Control::Sleep(Some(choice))));
+        for row in PRESETS.chunks(3) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = GRID_GAP;
+                for &minutes in row {
+                    if kit::choice_chip(ui, &format!("{minutes} min"), false, Some(cell)).clicked() {
+                        start(self.actions, Choice::Minutes(minutes));
+                        ui.close();
+                    }
+                }
+            });
+            ui.add_space(GRID_GAP);
+        }
+        let half = (w - GRID_GAP) / 2.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GRID_GAP;
+            if kit::choice_chip(ui, "End of chapter", at_chapter_end, Some(half)).clicked() && !at_chapter_end {
+                start(self.actions, Choice::Chapter);
+                ui.close();
+            }
+            let mut prefs = self.playback;
+            let custom = kit::stepper_chip(ui, &mut prefs.sleep_minutes, &SLEEP_LENGTHS, half, CUSTOM, |m| format!("{m} min"));
+            if custom.stepped {
+                self.actions.push(Action::Prefs(PrefsAction::Playback(prefs)));
+            }
+            if custom.chosen {
+                start(self.actions, Choice::Minutes(prefs.sleep_minutes));
+                ui.close();
+            }
+        });
+    }
+
+    /// A running timer: when it pauses, the time in the accent as the chip is
+    /// lit, and the two things to do about it. A timer waiting for the
+    /// chapter's end offers the next chapter rather than ten minutes, unless
+    /// this is the last.
     fn running_timer(&mut self, ui: &mut Ui, left: f64, at_chapter_end: bool) {
         let t = Tokens::of(ui);
-        let (big, size, caption) = if at_chapter_end {
-            ("End of chapter".to_owned(), 19.0, format!("Pauses when this chapter ends, in {}", crate::fmt::clock(left.ceil())))
-        } else {
-            (crate::fmt::clock(left.ceil()), 26.0, "left until playback pauses".to_owned())
-        };
-        ui.label(RichText::new(big).font(FontId::new(size, semibold())).color(t.accent));
-        ui.add_space(2.0);
-        ui.label(RichText::new(caption).size(12.0).color(t.muted));
+        let clock = crate::fmt::clock(left.ceil());
+        let lead = if at_chapter_end { "Pauses when this chapter ends, in " } else { "Pauses in " };
+        let mut job = egui::text::LayoutJob::default();
+        job.append(lead, 0.0, egui::TextFormat::simple(FontId::new(14.0, semibold()), t.text));
+        job.append(&clock, 0.0, egui::TextFormat::simple(FontId::new(14.0, semibold()), t.accent));
+        job.wrap.max_width = ui.available_width();
+        ui.add(egui::Label::new(job).wrap().selectable(false));
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if shell::kit::secondary(ui, EXTEND_SHORT).clicked() {
-                self.actions.push(Action::Playback(Control::ExtendSleep));
+            if !at_chapter_end {
+                if shell::kit::secondary(ui, EXTEND_SHORT).clicked() {
+                    self.actions.push(Action::Playback(Control::ExtendSleep));
+                }
+            } else if self.player.next_chapter_end().is_some() && shell::kit::secondary(ui, ONE_MORE_CHAPTER).clicked() {
+                self.actions.push(Action::Playback(Control::OneMoreChapter));
             }
             if kit::quiet_button(ui, None, "Cancel timer").clicked() {
                 self.actions.push(Action::Playback(Control::Sleep(None)));

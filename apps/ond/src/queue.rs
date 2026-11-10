@@ -512,8 +512,7 @@ pub fn end_offset(current_remaining: f64, upcoming: &[Item]) -> f64 {
 
 /// Wall-clock label for `offset` seconds after `now`, e.g. `10:56 PM`.
 pub fn clock_label(now: NaiveTime, offset: f64) -> String {
-    let at = now + chrono::TimeDelta::seconds(offset.round() as i64);
-    at.format("%-I:%M %p").to_string()
+    shell::clock::time_of_day(now + chrono::TimeDelta::seconds(offset.round() as i64), false)
 }
 
 #[cfg(test)]

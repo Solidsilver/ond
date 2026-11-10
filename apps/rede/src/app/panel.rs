@@ -2,7 +2,8 @@
 //! the playing book's chapters, its bookmarks and its facts, under a switch
 //! (Chapters · Bookmarks · Info). It follows playback; with nothing playing
 //! each tab says so, since the book page beside it already lists the viewed
-//! book's chapters and facts.
+//! book's chapters and facts. Over the chapters, when the book would end if
+//! played straight through at its speed.
 //!
 //! Docked beside the page when the window has room for both, as Ond docks its
 //! queue; in a narrower window the same column is a sheet over the page that
@@ -171,11 +172,13 @@ impl ViewCtx<'_> {
     pub(super) fn panel(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let mut tab = self.panel.tab;
-        // The book's time left goes beside the switch on the chapters, at the
-        // speed it depends on; below it when there's no room.
+        // When the book ends if played straight through at this speed,
+        // beside the switch on the chapters; below it when there's no room.
+        // Worked out from now whenever a frame is drawn, never a reason to
+        // draw one: paused, it stands still until something else moves.
         let left = self.player.book.as_ref().filter(|_| tab == Tab::Chapters).map(|book| {
             let (_, book_left) = book.timeline.remaining(self.player.position, self.player.speed);
-            crate::timeline::left(book_left, self.player.speed)
+            ends_label(wall_now(), book_left, twenty_four_hour())
         });
         let mut below = None;
         ui.horizontal(|ui| {
@@ -184,10 +187,10 @@ impl ViewCtx<'_> {
             }
             if let Some(left) = left {
                 let w = ui.painter().layout_no_wrap(left.clone(), FontId::proportional(11.0), t.muted).size().x;
-                if ui.available_width() >= w + 16.0 {
+                if ui.available_width() >= w + 8.0 {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        ui.label(RichText::new(left).size(11.0).color(t.muted));
+                        ui.label(RichText::new(left).size(11.0).color(t.muted)).on_hover_text(ENDS_HINT);
                     });
                 } else {
                     below = Some(left);
@@ -198,7 +201,7 @@ impl ViewCtx<'_> {
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 ui.add_space(8.0);
-                ui.label(RichText::new(left).size(11.0).color(t.muted));
+                ui.label(RichText::new(left).size(11.0).color(t.muted)).on_hover_text(ENDS_HINT);
             });
         }
         ui.add_space(8.0);
@@ -325,9 +328,42 @@ impl ViewCtx<'_> {
     }
 }
 
+/// What the end time beside the chapters assumes.
+const ENDS_HINT: &str = "When the book ends if played straight through at this speed";
+
+/// "ends 11:42 PM", or "ends Wed 1:10 AM" when that's not today: `book_left`
+/// seconds (already at speed) from `now`.
+fn ends_label(now: chrono::NaiveDateTime, book_left: f64, h24: bool) -> String {
+    format!("ends {}", shell::clock::after(now, book_left, h24))
+}
+
+#[cfg(not(test))]
+fn wall_now() -> chrono::NaiveDateTime {
+    chrono::Local::now().naive_local()
+}
+#[cfg(test)]
+fn wall_now() -> chrono::NaiveDateTime {
+    super::fixture::wall_clock()
+}
+
+/// The system's clock, but a 12-hour one in tests and snapshots, so they
+/// read the same on any machine.
+fn twenty_four_hour() -> bool {
+    !cfg!(test) && shell::clock::uses_24_hour()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_book_ends_at_a_time_of_day_and_names_the_day_when_not_today() {
+        let now = super::super::fixture::wall_clock();
+        assert_eq!(ends_label(now, 72.0 * 60.0, false), "ends 11:42 PM");
+        assert_eq!(ends_label(now, 72.0 * 60.0, true), "ends 23:42");
+        assert_eq!(ends_label(now, 160.0 * 60.0, false), "ends Wed 1:10 AM");
+        assert_eq!(ends_label(now, 160.0 * 60.0, true), "ends Wed 01:10");
+    }
 
     #[test]
     fn the_column_docks_only_where_the_page_keeps_its_room() {

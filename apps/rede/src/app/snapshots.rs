@@ -406,6 +406,12 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.hover_at(cover);
     s.shoot(h, "capsule-cover-hover");
     h.event(egui::Event::PointerGone);
+    // A right-click on the capsule: what its parts do, and Stop playback.
+    h.get_by_label_contains("Now playing: ").click_secondary();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "capsule-menu");
+    egui::Popup::close_all(&ctx);
     // The capsule at the window's smallest width, then as it grows with the
     // window: Ond's 1440, a 1920 display, a 2560 one full screen.
     for width in [crate::MIN_SIZE[0], 1440.0, 1920.0, 2560.0] {
@@ -567,6 +573,12 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.run_steps(2);
     h.event(egui::Event::PointerGone);
     s.shoot(h, "mode-player-speed-menu");
+    egui::Popup::close_all(&ctx);
+    // Its "…": the shortcuts, and Stop playback.
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "mode-player-more-menu");
     egui::Popup::close_all(&ctx);
     // A bookmark made in the Player: the confirmation over its foot.
     if let Some(app) = h.state_mut().as_mut() {

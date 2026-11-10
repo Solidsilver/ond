@@ -19,7 +19,8 @@
 //!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]; [`step_slider`] steps a
 //!   whole number on one, beside its [`readout`]), [`switch`]
 //!   (and [`switch_tinted`]), [`stepper`] and its [`step_button`], and
-//!   [`choice_chip`] (one of a grid of choices, lit when on).
+//!   [`choice_chip`] (one of a grid of choices, lit when on) and
+//!   [`stepper_chip`] (one whose value is the user's own, stepped in place).
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
 //!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
 //!   one; [`kv_section`], [`kv_row`] and [`kv_text`] (a label and its value,

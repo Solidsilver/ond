@@ -539,6 +539,25 @@ fn extending_a_fading_chapter_restores_volume_and_adds_ten_minutes() {
 }
 
 #[test]
+fn one_more_chapter_waits_for_the_next_chapters_end_and_restores_a_fading_volume() {
+    // Chapters end at 40 and 100: 7.5 s of the first left at 1.5×, fading.
+    let (mut player, engine, now, mut notes) = sleeping(true, 1.5, 28.75);
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Chapter)), 0.0, &engine, now, &mut notes);
+    player.tick(&engine, now, false, &mut notes);
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(gain)) if *gain < 1.0));
+    assert_eq!(player.next_chapter_end(), Some(100.0));
+    player.control(Control::OneMoreChapter, 0.0, &engine, now, &mut notes);
+    assert!(player.sleep.as_ref().unwrap().at_chapter_end(), "it still waits for a chapter, not a clock");
+    assert!((player.sleep_remaining(now).unwrap() - (100.0 - 28.75) / 1.5).abs() < 0.001);
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(1.0))));
+    assert_eq!(player.next_chapter_end(), None, "the last chapter has no next one");
+    player.control(Control::OneMoreChapter, 0.0, &engine, now, &mut notes);
+    assert!((player.sleep_remaining(now).unwrap() - (100.0 - 28.75) / 1.5).abs() < 0.001, "and asking again changes nothing");
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Minutes(5))), 0.0, &engine, now, &mut notes);
+    assert_eq!(player.next_chapter_end(), None, "a timer on the clock has no chapter to add");
+}
+
+#[test]
 fn a_paused_timer_wakes_without_frames_and_goes_idle_after_cancelling() {
     let now = Instant::now();
     let mut clock = ReportClock::new(now);

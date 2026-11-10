@@ -18,6 +18,12 @@ pub const LIBRARY: &str = "lib-books";
 /// book was added.
 const ADDED: i64 = 1_767_225_600_000;
 
+/// The wall clock the views read in tests and snapshots: a Tuesday evening
+/// (3 November 2026, 10:30 PM), so a book's end lands after midnight.
+pub fn wall_clock() -> chrono::NaiveDateTime {
+    chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap().and_hms_opt(22, 30, 0).unwrap()
+}
+
 pub fn account() -> Account {
     let mut account = Account::new(SERVER, "sam");
     account.id = sources::AccountId::from_uuid(uuid::Uuid::from_u128(42));

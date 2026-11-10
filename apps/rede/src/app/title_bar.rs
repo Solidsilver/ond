@@ -10,7 +10,8 @@
 //! under it broken where chapters begin; and at its right end, where Ond's
 //! heart sits, the speed and the sleep timer as two small chips stacked in a
 //! column as wide as the cover, so the text stays centred between them. The
-//! cover opens the Player; the rest of the capsule opens the book's page.
+//! cover opens the Player; the rest of the capsule opens the book's page. A
+//! right-click anywhere on it opens a menu of those, with Stop playback.
 //!
 //! Unlike Ond's display it grows with the window, since a wider scrubber is a
 //! finer one for an hour-long chapter: a share of the bar's width up to a
@@ -106,6 +107,8 @@ fn chip_look(ink: egui::Color32) -> ChipButton<'static> {
 
 /// The chapters column's toggle at the bar's right end.
 const BUTTON: f32 = 28.0;
+/// The capsule's right-click menu.
+const CAPSULE_MENU_W: f32 = 210.0;
 
 /// Where the bar's parts go, and whether the chapter buttons fit.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -263,10 +266,13 @@ impl ViewCtx<'_> {
 
         let side = rect.height();
         let cover = rect.width() >= COVER_FROM;
+        // Every part of the capsule that takes the pointer opens its menu on
+        // a right-click, as the whole capsule does.
+        let mut menu_on = Vec::new();
         if cover {
             let art = Rect::from_min_size(rect.min, vec2(side, side));
             self.art.paint(ui, art.shrink(1.0), cover_id.as_deref(), 6.0, &super::library::stand_in(&book.item.summary));
-            self.cover_button(ui, art.shrink(1.0), id.with("cover"));
+            menu_on.push(self.cover_button(ui, art.shrink(1.0), id.with("cover")));
         }
         let chips = Rect::from_min_max(pos2(rect.right() - side, rect.top()), rect.max);
         self.chips(ui, chips, id, &t);
@@ -292,6 +298,7 @@ impl ViewCtx<'_> {
         let scrub_resp = ui.interact(strip, id.with("scrub"), Sense::click_and_drag());
         let line = Rect::from_min_max(pos2(bar_left, scrub_y - SCRUB_LINE / 2.0), pos2(bar_right, scrub_y + SCRUB_LINE / 2.0));
         let (shown, seek, _) = Scrub { line, knob: SCRUB_KNOB, ring: strip }.run(ui, &scrub_resp, at, start, end, &t);
+        menu_on.push(scrub_resp);
         if let Some(position) = seek {
             self.actions.push(Action::Playback(Control::Seek(position)));
         }
@@ -370,6 +377,7 @@ impl ViewCtx<'_> {
             painter.line_segment([pos2(name_rect.left(), y), pos2(name_rect.right(), y)], egui::Stroke::new(1.0, ink));
         }
         link.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{chapter}, show chapters")));
+        menu_on.push(link.clone());
         if link.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Show chapters").clicked() {
             self.actions.push(Action::Panel(PanelAction::Show(Tab::Chapters)));
         }
@@ -377,15 +385,40 @@ impl ViewCtx<'_> {
         // The rest of the capsule opens the book's page.
         let label = format!("Now playing: {title}, {chapter}, {elapsed} in, {} left, {book_span} in the book", crate::fmt::clock(chapter_left));
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        menu_on.push(body.clone());
+        for part in &menu_on {
+            self.capsule_menu(part, &key);
+        }
         if body.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             self.actions.push(Action::Go(Route::Book(key)));
         }
     }
 
+    /// The capsule's right-click menu: what its parts do on a click, then
+    /// Stop playback, which has no button of its own in the bar.
+    fn capsule_menu(&mut self, part: &egui::Response, key: &str) {
+        part.context_menu(|ui| {
+            ui.set_width(CAPSULE_MENU_W);
+            if kit::menu_row(ui, "Go to the book") {
+                self.actions.push(Action::Go(Route::Book(key.to_owned())));
+            }
+            if kit::menu_row(ui, "Show chapters") {
+                self.actions.push(Action::Panel(PanelAction::Show(Tab::Chapters)));
+            }
+            if kit::menu_row(ui, &shell::keys::shown("Open the Player (⇧⌘N)")) {
+                self.actions.push(Action::Mode(crate::window::Mode::Player));
+            }
+            kit::popover_rule(ui, 4.0);
+            if kit::menu_row(ui, super::window::STOP) {
+                self.actions.push(Action::Playback(Control::Stop));
+            }
+        });
+    }
+
     /// The capsule's cover as the way to the Player: on hover it dims and
     /// shows the Player's glyph, so the click's meaning is plain before it's
     /// made.
-    fn cover_button(&mut self, ui: &mut Ui, art: Rect, id: egui::Id) {
+    fn cover_button(&mut self, ui: &mut Ui, art: Rect, id: egui::Id) -> egui::Response {
         let resp = ui.interact(art, id, Sense::click());
         if resp.hovered() || resp.has_focus() {
             ui.painter().rect_filled(art, 6.0, egui::Color32::from_black_alpha(110));
@@ -394,9 +427,11 @@ impl ViewCtx<'_> {
         shell::kit::focus_ring(ui, &resp, art, 6.0);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Open the Player"));
         let label = shell::keys::shown("Open the Player (⇧⌘N)");
-        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&*label).clicked() {
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&*label);
+        if resp.clicked() {
             self.actions.push(Action::Mode(crate::window::Mode::Player));
         }
+        resp
     }
 
     /// The speed and the sleep timer, stacked in `column` at the capsule's

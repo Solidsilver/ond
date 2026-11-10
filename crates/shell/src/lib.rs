@@ -4,11 +4,13 @@
 //!
 //! The widgets are in [`kit`]: anything either app could draw goes there
 //! first, so the two look alike; what's one app's own stays in that app as a
-//! thin wrapper. The ranking behind both apps' quick search is in [`search`].
+//! thin wrapper. The ranking behind both apps' quick search is in [`search`];
+//! how a time of day is said, in [`clock`].
 //! Nothing here knows which app it's drawing for.
 
 pub mod art;
 pub mod chrome;
+pub mod clock;
 pub mod colors;
 pub mod csd;
 pub mod icons;

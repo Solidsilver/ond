@@ -73,6 +73,8 @@ pub enum Control {
     Stop,
     Sleep(Option<crate::sleep::Choice>),
     ExtendSleep,
+    /// A timer waiting for this chapter's end waits for the next one's.
+    OneMoreChapter,
 }
 
 pub struct Opened {
@@ -305,6 +307,14 @@ impl Player {
                 }
                 self.set_gain(1.0, engine);
             }
+            Control::OneMoreChapter => {
+                if let Some(end) = self.next_chapter_end()
+                    && let Some(timer) = &mut self.sleep
+                {
+                    timer.wait_for_chapter(end);
+                    self.set_gain(1.0, engine);
+                }
+            }
             Control::Stop => {
                 self.cancel_sleep(engine);
                 if self.active {
@@ -335,6 +345,15 @@ impl Player {
 
     pub fn sleep_remaining(&self, now: Instant) -> Option<f64> {
         self.sleep.as_ref().map(|timer| timer.remaining(self.position, self.speed, now))
+    }
+
+    /// Where a timer waiting for this chapter's end would wait for with one
+    /// more chapter: the next chapter's end. `None` for a timer on the clock,
+    /// or in the book's last chapter.
+    pub fn next_chapter_end(&self) -> Option<f64> {
+        let end = self.sleep.as_ref()?.chapter_end()?;
+        let next = self.book.as_ref()?.timeline.chapter_range(end).1;
+        (next > end).then_some(next)
     }
 
     fn set_gain(&mut self, gain: f32, engine: &dyn Transport) {

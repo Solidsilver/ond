@@ -415,9 +415,10 @@ fn the_player_exposes_speed_and_listening_preferences() {
     h.get_by_label("Next chapter (⇧→)");
     h.get_by_label("Playback speed, 1.5×").click();
     h.run_steps(2);
-    for label in ["Speed", "Slower", "Faster", "Stop playback", "Settings…"] {
+    for label in ["Speed", "Slower", "Faster", "Settings…"] {
         h.get_by_label(label);
     }
+    assert_eq!(h.query_all_by_label("Stop playback").count(), 0, "stopping is a command, not a playback setting");
     // The speed playing shows large over its lit preset.
     for speed in ["0.8×", "1×", "1.25×", "1.75×", "2×"] {
         h.get_by_label(speed);
@@ -526,6 +527,34 @@ fn the_title_bar_buttons_enqueue_their_controls() {
 }
 
 #[test]
+fn stop_playback_is_in_the_capsules_menu_and_the_players_more_menu() {
+    use crate::player::Control;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = bar_only(dir.path());
+    // A right-click anywhere on the capsule: its body, or the chapter on it.
+    for part in ["Now playing: The Left Hand of Darkness", "Chapter 5, show chapters"] {
+        h.get_by_label_contains(part).click_secondary();
+        h.run_steps(2);
+        h.check_accessibility();
+        h.get_by_label("Stop playback").click();
+        h.run_steps(2);
+        let actions = std::mem::take(&mut app_mut(&mut h).actions);
+        assert!(matches!(actions.as_slice(), [Action::Playback(Control::Stop)]), "{part}: {} actions", actions.len());
+    }
+    // In the Player and Mini, the "…" in the corner.
+    for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
+        app_mut(&mut h).mode = mode;
+        h.run_steps(2);
+        h.get_by_label("More").click();
+        h.run_steps(2);
+        h.get_by_label("Stop playback").click();
+        h.run_steps(2);
+        let actions = std::mem::take(&mut app_mut(&mut h).actions);
+        assert!(matches!(actions.as_slice(), [Action::Playback(Control::Stop)]), "{mode:?}: {} actions", actions.len());
+    }
+}
+
+#[test]
 fn nothing_playing_leaves_a_quiet_capsule_and_an_unavailable_transport() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
@@ -572,6 +601,9 @@ fn a_chapter_in_the_column_seeks_to_its_start() {
     playing(&mut app, true);
     *h.state_mut() = Some(app);
     h.run_steps(2);
+    // Over the chapters, when the book ends: past midnight, so with its day.
+    h.get_by_label_contains("ends Wed ");
+    assert_eq!(h.query_all_by_label_contains("left at").count(), 0, "the time left is the capsule's to say");
     h.get_by_label("Chapter 2, 56:40").click();
     h.run_steps(2);
     let actions = std::mem::take(&mut app_mut(&mut h).actions);
@@ -636,6 +668,15 @@ fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
     h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N);
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Player);
+    // The Player's "…" has the shortcuts, and nothing to stop.
+    h.get_by_label("More").click();
+    h.run_steps(3);
+    assert_eq!(h.query_all_by_label("Stop playback").count(), 0, "nothing to stop");
+    h.get_by_label_contains("Keyboard shortcuts").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Shortcuts));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
     h.get_by_label("Mini player (⇧⌘M)").click();
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Mini);
@@ -658,14 +699,58 @@ fn sleep_options_and_custom_defaults_are_accessible_from_the_title_bar() {
     h.get_by_label("Sleep timer").click();
     h.run_steps(3);
     h.check_accessibility();
-    for label in ["5 min", "15 min", "30 min", "45 min", "60 min", "90 min", "End of chapter", "timer length, 30 min", "Start"] {
+    for label in ["5 min", "15 min", "30 min", "45 min", "60 min", "90 min", "End of chapter", "custom timer, 30 min", "Less custom timer"] {
         h.get_by_label(label);
     }
+    assert_eq!(h.query_all_by_label("Start").count(), 0, "the custom length is a cell of the grid, not a row with its own Start");
     // The custom length steps, and is saved for next time.
-    h.get_by_label("More timer length").click();
+    h.get_by_label("More custom timer").click();
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).prefs.get(|s| s.playback.sleep_minutes), 45);
-    h.get_by_label("timer length, 45 min");
+    h.get_by_label("custom timer, 45 min");
+}
+
+/// The title bar alone, with nothing applying what it asks for.
+fn bar_only(dir: &std::path::Path) -> Harness<'static, Option<RedeApp>> {
+    let mut h = Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).build_ui_state(
+        |ui, app: &mut Option<RedeApp>| {
+            if let Some(app) = app {
+                egui::Panel::top("bar").exact_size(super::BAR_H).show(ui, |ui| app.title_bar(ui));
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    let mut app = app(&ctx, dir, BOOKS.len());
+    playing(&mut app, true);
+    *h.state_mut() = Some(app);
+    h.run_steps(2);
+    h
+}
+
+#[test]
+fn the_custom_sleep_cell_sets_its_length_without_starting_and_starts_when_chosen() {
+    use crate::player::Control;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = bar_only(dir.path());
+    h.get_by_label("Sleep timer").click();
+    h.run_steps(2);
+    h.get_by_label("More custom timer").click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(
+        matches!(actions.as_slice(), [Action::Prefs(PrefsAction::Playback(p))] if p.sleep_minutes == 45),
+        "a step saves the length and starts nothing: {} actions",
+        actions.len()
+    );
+    for a in actions {
+        app_mut(&mut h).apply(a);
+    }
+    h.run_steps(2);
+    h.get_by_label("custom timer, 45 min").click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions.as_slice(), [Action::Playback(Control::Sleep(Some(crate::sleep::Choice::Minutes(45))))]), "{} actions", actions.len());
 }
 
 #[test]
@@ -679,10 +764,38 @@ fn a_running_timer_shows_what_is_left_and_how_to_change_it() {
     h.get_by_label_contains("Sleep timer, ").click();
     h.run_steps(3);
     h.check_accessibility();
-    for label in ["Add 10 min", "Cancel timer", "Start again with"] {
+    for label in ["Add 10 min", "Cancel timer", "Change to"] {
         h.get_by_label(label);
     }
-    h.get_by_label_contains("left until playback pauses");
+    h.get_by_label_contains("Pauses in ");
+    assert_eq!(h.query_all_by_label("One more chapter").count(), 0);
+}
+
+#[test]
+fn a_timer_at_the_chapters_end_offers_one_more_chapter_instead_of_ten_minutes() {
+    use crate::player::Control;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = bar_only(dir.path());
+    let app = app_mut(&mut h);
+    let end = app.player.book.as_ref().unwrap().timeline.chapter_range(app.player.position).1;
+    app.player.sleep = Some(crate::sleep::Timer::new(crate::sleep::Choice::Chapter, end, std::time::Instant::now()));
+    h.run_steps(2);
+    h.get_by_label_contains("Sleep timer, ").click();
+    h.run_steps(2);
+    h.get_by_label_contains("Pauses when this chapter ends, in ");
+    assert_eq!(h.query_all_by_label("Add 10 min").count(), 0, "ten minutes means nothing to a timer waiting for a chapter");
+    h.get_by_label("One more chapter").click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions.as_slice(), [Action::Playback(Control::OneMoreChapter)]), "{} actions", actions.len());
+    // In the book's last chapter there's no next one to wait for.
+    let app = app_mut(&mut h);
+    let last = app.player.book.as_ref().unwrap().timeline.duration;
+    app.player.position = last - 30.0;
+    app.player.sleep = Some(crate::sleep::Timer::new(crate::sleep::Choice::Chapter, last, std::time::Instant::now()));
+    h.run_steps(2);
+    assert_eq!(h.query_all_by_label("One more chapter").count(), 0);
+    h.get_by_label("Cancel timer");
 }
 
 #[test]
