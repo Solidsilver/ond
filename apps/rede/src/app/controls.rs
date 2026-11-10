@@ -37,9 +37,10 @@ const PLAYBACK_W: f32 = 296.0;
 impl ViewCtx<'_> {
     /// The Playback popover the speed chip and pill open: the speed, large,
     /// with its presets, a slider and its steppers; voice boost and skip
-    /// silence, with what skipping has saved in this book; then Stop, and the
-    /// way to Settings' Playback tab. The skip lengths and rewinds are
-    /// settings, not controls, so they live there.
+    /// silence, with what skipping has saved in this book; then the way to
+    /// Settings' Playback tab. The skip lengths and rewinds are settings, not
+    /// controls, so they live there; Stop playback is a command, not a
+    /// setting, so it's in the Player's "…" menu and the capsule's.
     pub(super) fn playback_menu(&mut self, anchor: &Response) {
         kit::popover(anchor, PLAYBACK_W, |ui| {
             kit::popover_title(ui, "Playback", None);
@@ -50,18 +51,10 @@ impl ViewCtx<'_> {
             kit::popover_rule(ui, 8.0);
             ui.horizontal(|ui| {
                 ui.add_space(kit::POPOVER_PAD - 8.0);
-                let playing = self.player.book.is_some();
-                if ui.add_enabled_ui(playing, |ui| kit::quiet_button(ui, None, "Stop playback")).inner.clicked() {
-                    self.actions.push(Action::Playback(Control::Stop));
+                if kit::quiet_button(ui, Some(Icon::Gear), "Settings…").clicked() {
+                    self.actions.push(Action::OpenSettings(super::settings_page::Tab::Playback));
                     ui.close();
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(kit::POPOVER_PAD - 8.0);
-                    if kit::quiet_button(ui, Some(Icon::Gear), "Settings…").clicked() {
-                        self.actions.push(Action::OpenSettings(super::settings_page::Tab::Playback));
-                        ui.close();
-                    }
-                });
             });
         });
     }

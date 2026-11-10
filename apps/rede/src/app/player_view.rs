@@ -9,6 +9,9 @@
 //! skip silence). Everything under the cover has a fixed height, so
 //! the cover takes what's left and nothing moves as the readouts change.
 //!
+//! Both keep the mode buttons in a corner, with a "…" menu holding the
+//! keyboard shortcuts and Stop playback.
+//!
 //! Mini is Ond's Mini: the cover fills the square window, the mode buttons
 //! sit on a dark capsule in its top corner and the chapter and transport on a
 //! scrim along its foot, in light colours that read on any cover. Unlike

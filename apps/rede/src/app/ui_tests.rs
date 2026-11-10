@@ -340,9 +340,10 @@ fn the_player_exposes_speed_and_listening_preferences() {
     h.get_by_label("Next chapter (⇧→)");
     h.get_by_label("Playback speed, 1.5×").click();
     h.run_steps(2);
-    for label in ["Speed", "Slower", "Faster", "Stop playback", "Settings…"] {
+    for label in ["Speed", "Slower", "Faster", "Settings…"] {
         h.get_by_label(label);
     }
+    assert_eq!(h.query_all_by_label("Stop playback").count(), 0, "stopping is a command, not a playback setting");
     // The speed playing shows large over its lit preset.
     for speed in ["0.8×", "1×", "1.25×", "1.75×", "2×"] {
         h.get_by_label(speed);
@@ -448,6 +449,34 @@ fn the_title_bar_buttons_enqueue_their_controls() {
     h.run_steps(2);
     let actions = std::mem::take(&mut app_mut(&mut h).actions);
     assert!(matches!(actions.as_slice(), [Action::Go(Route::Book(id))] if id == "book-0"), "the capsule opens the playing book's page");
+}
+
+#[test]
+fn stop_playback_is_in_the_capsules_menu_and_the_players_more_menu() {
+    use crate::player::Control;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = bar_only(dir.path());
+    // A right-click anywhere on the capsule: its body, or the chapter on it.
+    for part in ["Now playing: The Left Hand of Darkness", "Chapter 5, show chapters"] {
+        h.get_by_label_contains(part).click_secondary();
+        h.run_steps(2);
+        h.check_accessibility();
+        h.get_by_label("Stop playback").click();
+        h.run_steps(2);
+        let actions = std::mem::take(&mut app_mut(&mut h).actions);
+        assert!(matches!(actions.as_slice(), [Action::Playback(Control::Stop)]), "{part}: {} actions", actions.len());
+    }
+    // In the Player and Mini, the "…" in the corner.
+    for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
+        app_mut(&mut h).mode = mode;
+        h.run_steps(2);
+        h.get_by_label("More").click();
+        h.run_steps(2);
+        h.get_by_label("Stop playback").click();
+        h.run_steps(2);
+        let actions = std::mem::take(&mut app_mut(&mut h).actions);
+        assert!(matches!(actions.as_slice(), [Action::Playback(Control::Stop)]), "{mode:?}: {} actions", actions.len());
+    }
 }
 
 #[test]
@@ -561,6 +590,15 @@ fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
     h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N);
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Player);
+    // The Player's "…" has the shortcuts, and nothing to stop.
+    h.get_by_label("More").click();
+    h.run_steps(3);
+    assert_eq!(h.query_all_by_label("Stop playback").count(), 0, "nothing to stop");
+    h.get_by_label_contains("Keyboard shortcuts").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Shortcuts));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
     h.get_by_label("Mini player (⇧⌘M)").click();
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Mini);

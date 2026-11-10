@@ -62,14 +62,19 @@ impl RedeApp {
     }
 }
 
+/// The "…" menu's width, and the command it shares with the capsule's.
+const MORE_W: f32 = 200.0;
+pub(super) const STOP: &str = "Stop playback";
+
 impl ViewCtx<'_> {
     pub(super) fn mode_buttons(&mut self, ui: &mut egui::Ui) {
         self.mode_buttons_sized(ui, 28.0, 14.0, None);
     }
 
-    /// The other modes, and the shortcuts where there's no sidebar to hold
-    /// them (the Player and Mini), right to left, as `side` square buttons
-    /// with `glyph` icons in `color` (the theme's when `None`).
+    /// The other modes, and where there's no sidebar (the Player and Mini) a
+    /// "…" menu with the shortcuts and Stop playback, right to left, as
+    /// `side` square buttons with `glyph` icons in `color` (the theme's when
+    /// `None`).
     pub(super) fn mode_buttons_sized(&mut self, ui: &mut egui::Ui, side: f32, glyph: f32, color: Option<egui::Color32>) {
         use shell::icons::{self, Icon};
         let size = egui::vec2(side, side);
@@ -82,8 +87,19 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::Mode(mode));
             }
         }
-        if self.mode != Mode::Full && icons::sized_button(ui, Icon::More, "Keyboard shortcuts (⌘/)", size, glyph, color).clicked() {
-            self.actions.push(Action::Shortcuts);
+        if self.mode != Mode::Full {
+            let more = icons::sized_button(ui, Icon::More, "More", size, glyph, color);
+            shell::kit::popover_at(&more, MORE_W, egui::RectAlign::BOTTOM_END, |ui| {
+                if shell::kit::menu_row(ui, &shell::keys::shown("Keyboard shortcuts (⌘/)")) {
+                    self.actions.push(Action::Shortcuts);
+                }
+                if self.player.book.is_some() {
+                    shell::kit::popover_rule(ui, 4.0);
+                    if shell::kit::menu_row(ui, STOP) {
+                        self.actions.push(Action::Playback(crate::player::Control::Stop));
+                    }
+                }
+            });
         }
     }
 }
