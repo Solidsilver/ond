@@ -13,14 +13,16 @@
 //! - `nav`: where the window is, and how it got there
 //! - `playing`: playback actions, engine events and the listening worker
 //! - `bookmarks`: the bookmarks a book has, the edits that sync them, and the
-//!   position another device left behind
+//!   position another device left behind; `bookmarks_tab` draws them in the
+//!   column at the right
 //! - `controls`: chapter seeking and the listening controls
 //! - `title_bar`: the player in the title bar, and the window's controls
 //! - `sidebar`: the places and the account, in the column at the left
 //! - `sheets`: the keyboard shortcuts, over the window
 //! - `settings_page`: Settings, a page with its tabs (⌘,)
 //! - `panel`: the chapters column at the right
-//! - `ui_state`: the notice line, the trail, and what a frame reads
+//! - `ui_state`: the notice line, the toasts, the trail, and what a frame
+//!   reads
 //! - `prefs_view`: the preferences a frame reads, and the actions that change
 //!   them
 //! - `view_ctx` and the views: what a view gets, and the views themselves
@@ -51,6 +53,7 @@
 
 mod book;
 mod bookmarks;
+mod bookmarks_tab;
 mod controls;
 mod library;
 mod nav;
@@ -138,30 +141,28 @@ pub enum Action {
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
     PlayBook(String),
-    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
     AddBookmark {
         item: sources::ItemKey,
         time: f64,
         title: String,
     },
-    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
     RenameBookmark {
         item: sources::ItemKey,
         time: f64,
         title: String,
     },
-    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
     DeleteBookmark {
         item: sources::ItemKey,
         time: f64,
     },
-    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
     JumpToBookmark {
         item: sources::ItemKey,
         time: f64,
     },
-    #[allow(dead_code, reason = "constructed by the separate bookmarks UI")]
     UndoReconcile,
+    /// The other-device notice was clicked away: the position stays as it was
+    /// picked up, and Undo goes with the notice.
+    DismissReconcile,
     Playback(crate::player::Control),
     Mode(crate::window::Mode),
     /// The keyboard shortcuts' sheet: open it, or close it if it's open.
@@ -404,11 +405,25 @@ impl RedeApp {
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
             Action::PlayBook(id) => self.play_book(id, None),
-            Action::AddBookmark { item, time, title } => self.edit_bookmark(item, time, title, shelf::BookmarkChange::Create),
-            Action::RenameBookmark { item, time, title } => self.edit_bookmark(item, time, title, shelf::BookmarkChange::Rename),
-            Action::DeleteBookmark { item, time } => self.edit_bookmark(item, time, String::new(), shelf::BookmarkChange::Delete),
+            Action::AddBookmark { item, time, title } => {
+                if self.edit_bookmark(item, time, title.clone(), shelf::BookmarkChange::Create) {
+                    self.bookmarked(&title);
+                }
+            }
+            Action::RenameBookmark { item, time, title } => {
+                self.edit_bookmark(item, time, title, shelf::BookmarkChange::Rename);
+            }
+            Action::DeleteBookmark { item, time } => {
+                let title = self.bookmarks.title(&item, time);
+                if self.edit_bookmark(item.clone(), time, String::new(), shelf::BookmarkChange::Delete)
+                    && let Some(title) = title
+                {
+                    self.ui.toasts.note(format!("Deleted “{title}”"), "Undo", Action::AddBookmark { item, time, title });
+                }
+            }
             Action::JumpToBookmark { item, time } => self.jump_to_bookmark(item, time),
             Action::UndoReconcile => self.undo_reconcile(),
+            Action::DismissReconcile => self.reconciliation = None,
             Action::Playback(control) => self.playback_control(control),
             Action::Mode(mode) => self.set_mode(mode),
             Action::Shortcuts => {
@@ -511,6 +526,27 @@ impl RedeApp {
         ui.add_space(6.0);
     }
 
+    /// The toasts over the foot of `within`: above the sleep notice when it's
+    /// up, and above Mini's transport, so neither is covered. The Player has
+    /// controls all the way down, so there they hang near the top, over the
+    /// cover.
+    fn toasts_ui(&mut self, ui: &egui::Ui, within: egui::Rect) {
+        self.sync_reconcile_toast();
+        let mut within = within;
+        match self.mode {
+            crate::window::Mode::Mini => within.max.y -= player_view::MINI_PANEL_H - 8.0,
+            crate::window::Mode::Player => within.max.y = within.top() + BAR_H + 150.0,
+            crate::window::Mode::Full => {}
+        }
+        if self.mode != crate::window::Mode::Player
+            && let Some(h) = self.view().sleep_notice_height(ui, within.width())
+        {
+            within.max.y -= h + 12.0;
+        }
+        let ctx = ui.ctx().clone();
+        self.ui.toasts.ui(&ctx, within, &mut self.actions);
+    }
+
     fn main_ui(&mut self, ui: &mut egui::Ui) {
         // This frame's copy of the preferences, taken once before anything is
         // drawn (views never lock them).
@@ -559,9 +595,14 @@ impl RedeApp {
                         }
                         // Floats over the foot of the page.
                         self.view().sleep_notice(ui, within);
+                        within
                     });
                 self.panel_sheet(ui.ctx(), content.response.rect);
+                self.toasts_ui(ui, content.inner);
             }
+        }
+        if self.mode != crate::window::Mode::Full {
+            self.toasts_ui(ui, ui.ctx().content_rect());
         }
         self.sheet_ui(ui.ctx());
         // What the views asked for this frame. Applying an action never queues

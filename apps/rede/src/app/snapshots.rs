@@ -177,12 +177,62 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // The bookmarks tab with rows (the third, just behind where the book
+    // is, marked), and one being renamed.
+    scene(h, s, "panel-bookmarks-rows", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        bookmarks(&mut app);
+        app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Bookmarks));
+        app
+    });
+    *h.state_mut() = None;
+    *h.state_mut() = Some({
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        bookmarks(&mut app);
+        app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Bookmarks));
+        app
+    });
+    h.run_steps(2);
+    h.get_by_label("More for Genly meets the king").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "panel-bookmarks-menu");
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.get_by_label("Bookmark title").type_text("The king's fire");
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "panel-bookmarks-rename");
+    egui::Popup::close_all(&ctx);
+    // The toasts: a bookmark made with ⌘B, and a position picked up from
+    // another device; then both, stacked.
+    scene(h, s, "toast-bookmarked", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        app.bookmarked("Chapter 5 · 3:56:40");
+        app
+    });
+    scene(h, s, "toast-reconciled", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        reconciled(&mut app);
+        app
+    });
+    scene(h, s, "toast-both", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        reconciled(&mut app);
+        app.bookmarked("Chapter 5 · 3:56:40");
+        app
+    });
     // The Playback and Sleep timer popovers, open from the capsule's chips:
     // the timer off, then running.
     for (label, name, timer) in [
         ("Playback speed, 1.5×", "title-speed-menu", None),
         ("Sleep timer", "title-sleep-menu", None),
         ("Sleep timer, ", "title-sleep-running", Some(Sleep::Running)),
+        ("Playback speed, 1.5×", "title-speed-menu-switches", None),
     ] {
         *h.state_mut() = None;
         *h.state_mut() = Some({
@@ -190,6 +240,11 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             playing(&mut app, false);
             if let Some(timer) = timer {
                 sleep(&mut app, timer);
+            }
+            // Both switches on, and three minutes cut from the book.
+            if name.ends_with("switches") {
+                app.prefs.edit(|p| (p.playback.voice_boost, p.playback.skip_silence) = (true, true));
+                app.player.silence_saved = 192.0;
             }
             app
         });
@@ -344,6 +399,20 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Chapters));
         app
     });
+    scene(h, s, "panel-sheet-narrow-bookmarks", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        bookmarks(&mut app);
+        app.ui.panel.narrow = true;
+        app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Bookmarks));
+        app
+    });
+    scene(h, s, "toast-reconciled-narrow", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, true);
+        reconciled(&mut app);
+        app
+    });
     // The Player and Mini at their usual sizes and their smallest, with no
     // timer, with one running, and in its last minute with the notice up.
     use crate::window::Mode;
@@ -394,6 +463,16 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.event(egui::Event::PointerGone);
     s.shoot(h, "mode-player-speed-menu");
     egui::Popup::close_all(&ctx);
+    // A bookmark made in the Player: the confirmation over its foot.
+    if let Some(app) = h.state_mut().as_mut() {
+        app.player.sleep = None;
+        app.bookmarked("Chapter 5 · 3:56:40");
+        reconciled(app);
+    }
+    s.shoot(h, "mode-player-bookmarked");
+    if let Some(app) = h.state_mut().as_mut() {
+        app.reconciliation = None;
+    }
     if let Some(app) = h.state_mut().as_mut() {
         app.sheet = Some(super::sheets::Sheet::Shortcuts);
     }

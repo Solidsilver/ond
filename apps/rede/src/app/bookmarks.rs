@@ -1,5 +1,10 @@
-//! State and actions only. The panel, keyboard shortcut and toast draw from
-//! these snapshots; drawing never reads the database or performs a server call.
+//! State and actions only. The Bookmarks tab (`bookmarks_tab`), ⌘B and the
+//! toasts draw from these snapshots; drawing never reads the database or
+//! performs a server call.
+//!
+//! The position another device left behind is offered as a toast with Undo
+//! for as long as `reconciliation` holds it: Undo takes it, and so does
+//! clicking the toast away.
 
 use super::{Action, RedeApp};
 use crate::bridge::BookmarkMsg;
@@ -14,7 +19,6 @@ pub struct State {
     version: u64,
     received: Option<u64>,
     rows: Vec<Bookmark>,
-    #[allow(dead_code, reason = "the separate bookmarks UI consumes this cache")]
     sorted: crate::memo::Memo<(u64, ItemKey), Vec<Bookmark>>,
 }
 impl State {
@@ -29,7 +33,6 @@ impl State {
         }
     }
     /// A stable snapshot, rebuilt only for a new item or bookmark generation.
-    #[allow(dead_code, reason = "the separate bookmarks UI consumes this accessor")]
     pub fn for_book(&mut self, key: &ItemKey) -> Arc<Vec<Bookmark>> {
         self.sorted.get((self.version, key.clone()), || {
             let mut rows: Vec<_> = self.rows.iter().filter(|b| &b.item == key).cloned().collect();
@@ -37,11 +40,15 @@ impl State {
             rows
         })
     }
+
+    /// The title of the bookmark at exactly `time` in `item`, if there is one.
+    pub fn title(&self, item: &ItemKey, time: f64) -> Option<String> {
+        self.rows.iter().find(|b| &b.item == item && b.position.secs().to_bits() == time.to_bits()).map(|b| b.title.clone())
+    }
 }
 
 /// Both the keyboard shortcut and the panel button use chapter metadata here;
 /// only the label is formatted, never the bookmark's identity/time.
-#[allow(dead_code, reason = "the separate bookmarks UI constructs this action")]
 pub fn at_current_position(player: &crate::player::Player) -> Option<Action> {
     let book = player.book.as_ref()?;
     let time = player.position;
@@ -58,7 +65,6 @@ impl RedeApp {
         }
     }
 
-    #[allow(dead_code, reason = "the separate bookmarks UI consumes this accessor")]
     pub fn current_bookmarks(&mut self) -> Arc<Vec<Bookmark>> {
         match &self.player.book {
             Some(book) => self.bookmarks.for_book(&book.key),
@@ -66,24 +72,58 @@ impl RedeApp {
         }
     }
 
-    pub(super) fn edit_bookmark(&mut self, item: ItemKey, time: f64, title: String, change: shelf::BookmarkChange) {
+    /// Sends one edit to the listening worker. True when it went; false when
+    /// it was refused, and the reason is shown.
+    pub(super) fn edit_bookmark(&mut self, item: ItemKey, time: f64, title: String, change: shelf::BookmarkChange) -> bool {
         let title = title.trim().to_owned();
         if !time.is_finite() || time < 0.0 || (change != shelf::BookmarkChange::Delete && title.is_empty()) {
             self.show_failure(Failure::Local("Give the bookmark a title and a valid time.".into()));
-            return;
+            return false;
         }
         if self.session.account.as_ref().is_none_or(|a| a.id != item.account) {
             self.show_failure(Failure::Local("Not connected. Sign in to save bookmarks.".into()));
-            return;
+            return false;
         }
         if self.session.source.as_ref().is_none_or(|s| !s.capabilities().bookmarks) {
             self.show_failure(Failure::Local("This source cannot sync bookmarks.".into()));
-            return;
+            return false;
         }
         if let Some(listening) = &self.listening {
             listening.send(Request::Bookmark { bookmark: Bookmark { item, position: Position::from_secs(time), title, created: SystemTime::now() }, change });
+            true
         } else {
             self.show_failure(Failure::Local("Not connected. Sign in to save bookmarks.".into()));
+            false
+        }
+    }
+
+    /// The confirmation for a bookmark just made. In the full window, unless
+    /// the Bookmarks tab is already in view, it offers to show it.
+    pub(super) fn bookmarked(&mut self, title: &str) {
+        let text = format!("Bookmarked {}", title.trim());
+        let in_view = self.panel_shown() && self.ui.panel.tab == super::panel::Tab::Bookmarks;
+        if self.mode == crate::window::Mode::Full && !in_view {
+            self.ui.toasts.note(text, "Show", Action::Panel(super::panel::PanelAction::Show(super::panel::Tab::Bookmarks)));
+        } else {
+            self.ui.toasts.push(text, false);
+        }
+        self.ctx.request_repaint();
+    }
+
+    /// Keeps the other-device toast in step with `reconciliation`: shown
+    /// while it holds a position, replaced when a newer one arrives, gone
+    /// once it's undone or dismissed.
+    pub(super) fn sync_reconcile_toast(&mut self) {
+        let want = self.reconciliation.as_ref().map(Reconciled::message);
+        if want == self.ui.reconcile_toast {
+            return;
+        }
+        if let Some(old) = self.ui.reconcile_toast.take() {
+            self.ui.toasts.remove(&old);
+        }
+        if let Some(text) = want {
+            self.ui.toasts.offer_or(text.clone(), "Undo", Action::UndoReconcile, Action::DismissReconcile);
+            self.ui.reconcile_toast = Some(text);
         }
     }
 

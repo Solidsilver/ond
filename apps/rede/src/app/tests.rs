@@ -35,16 +35,24 @@ fn every_view_draws() {
     frame(&ctx, &mut app);
     app.player.paused = true;
     frame(&ctx, &mut app);
-    // The chapters column on each tab.
+    // The chapters column on each tab, the bookmarks empty and then not.
     app.apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Chapters));
     for tab in [super::panel::Tab::Chapters, super::panel::Tab::Bookmarks, super::panel::Tab::Info] {
         app.apply_panel(super::panel::PanelAction::Tab(tab));
         frame(&ctx, &mut app);
     }
+    bookmarks(&mut app);
+    app.apply_panel(super::panel::PanelAction::Tab(super::panel::Tab::Bookmarks));
+    frame(&ctx, &mut app);
+    // The toasts: a bookmark made, and a position from another device.
+    app.bookmarked("Chapter 5 · 3:56:40");
+    reconciled(&mut app);
+    frame(&ctx, &mut app);
     for mode in [crate::window::Mode::Player, crate::window::Mode::Mini] {
         app.mode = mode;
         frame(&ctx, &mut app);
     }
+    app.reconciliation = None;
     app.mode = crate::window::Mode::Full;
     // The sidebar as its rail, and the account syncing, connecting and
     // offline.
@@ -401,4 +409,57 @@ fn a_cancelled_discovery_cannot_reopen_the_browser_or_restore_a_login() {
     assert!(app.openid.pending.is_none());
     assert!(!app.login.as_ref().unwrap().busy);
     assert!(app.login.as_ref().unwrap().error.as_ref().unwrap().contains("cancelled"));
+}
+
+/// ⌘B in the window's keys, as a frame reads them.
+fn command_b(ctx: &egui::Context, app: &mut RedeApp) {
+    let modifiers = egui::Modifiers::COMMAND;
+    let key = egui::Event::Key { key: egui::Key::B, physical_key: None, pressed: true, repeat: false, modifiers };
+    let input = egui::RawInput { events: vec![key], ..Default::default() };
+    let mut out = ctx.run_ui(input, |ui| app.window_keys(ui.ctx()));
+    out.textures_delta.clear();
+}
+
+#[test]
+fn command_b_asks_for_a_bookmark_where_the_book_is_named_for_its_chapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    command_b(&ctx, &mut app);
+    assert!(app.actions.is_empty(), "with nothing loaded there's nowhere to mark");
+    playing(&mut app, true);
+    for mode in [crate::window::Mode::Full, crate::window::Mode::Player, crate::window::Mode::Mini] {
+        app.mode = mode;
+        command_b(&ctx, &mut app);
+        let Some(Action::AddBookmark { item, time, title }) = app.actions.pop() else { panic!("⌘B asks for a bookmark in {mode:?}") };
+        assert_eq!(item, sources::ItemKey::new(account().id, "book-0"));
+        assert_eq!(time, 14_200.0);
+        assert_eq!(title, "Chapter 5 · 3:56:40");
+    }
+}
+
+/// A confirmation fades on its own, and once it's gone the window is still
+/// again; the other-device notice waits for an answer without drawing.
+#[test]
+fn toasts_stop_asking_for_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).with_pixels_per_point(2.0).build_ui_state(
+        |ui, app: &mut Option<RedeApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(app(&ctx, dir.path(), BOOKS.len()));
+    playing(app_mut(&mut h), true);
+    app_mut(&mut h).bookmarked("Chapter 5 · 3:56:40");
+    h.step();
+    assert!(h.ctx.has_requested_repaint(), "a confirmation fades");
+    idle(&mut h, "a faded confirmation");
+    assert!(app_mut(&mut h).ui.toasts.texts().is_empty());
+    reconciled(app_mut(&mut h));
+    idle(&mut h, "the other-device notice");
+    assert_eq!(app_mut(&mut h).ui.toasts.texts().len(), 1, "still offering Undo");
 }

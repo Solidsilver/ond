@@ -405,13 +405,13 @@ Rede borrows Ond's look (type, spacing, colours, the quiet style) and its three 
 - **Series:** books in order with their sequence numbers; what's next is highlighted.
 - **Authors** and **Narrators:** their books.
 - **Book page:** cover, title, author, narrator, series and number, length, time left at the current speed, description, and the chapter list (each with its length; the current one marked; finished ones dimmed). Play or resume, download, mark finished, the progress choice for sharing.
-- **Player** (Ond's Player mode): large cover, book and chapter titles readable across the room, a chapter scrubber with the whole book shown as a thin bar under it, large skip back and forward buttons (15 and 30 seconds by default, both settable), speed, sleep timer, bookmarks, voice boost and silence removal switches, the output device.
+- **Player** (Ond's Player mode): large cover, book and chapter titles readable across the room, a chapter scrubber with the whole book shown as a thin bar under it, large skip back and forward buttons (15 and 30 seconds by default, both settable), and a last row with a bookmark button, the sleep timer, and the time left at the speed (whose popover holds the voice boost and skip silence switches). Its toasts hang near the top, over the cover, since its controls run to the foot. The output device comes later.
 - **Mini** (Ond's Mini mode): cover, chapter, play/pause, skip back and forward. Stays on top.
 - **Chapters panel:** takes the place of Ond's queue panel.
-- **Bookmarks:** per book, with notes; jump to one with a click.
+- **Bookmarks:** the Bookmarks tab of the column at the right, beside Chapters and Info, for the book playing. Rows as the chapters tab sets them: a bookmark glyph, the title, the book time at the right; the one at or just behind where the book is has its glyph in the accent, and hovering a row says its chapter. A click jumps there. A row's … (or a right-click) renames it in place (Enter keeps the new title, Esc the old, an empty title isn't taken) or deletes it, with Undo in the toast that says so. Add bookmark at the top does what ⌘B does: a bookmark at the current position titled "<chapter> · <time>", confirmed by a toast ("Bookmarked Chapter 5 · 3:56:40") that offers to show the tab when it isn't in view. With none yet, the tab says "No bookmarks yet" and how to add one. Titles are the notes; there are no separate notes yet.
 - **Downloads:** what's downloaded, what's in progress, space used, per source.
 - **Sources:** the accounts, their state, add and remove, which are listener only.
-- **Settings:** playback (skip intervals, default speed, rewind a few seconds after a long pause), sleep timer defaults, audio (voice boost, silence removal, mono), downloads, appearance, updates. Settings is a page in the main window (⌘,, Settings… in the account menu, or Settings… in the Playback popover, which opens it on Playback), with Ond's tab list down its side; from the Player or Mini it brings the full window back first, and Back or Esc returns to where you were. It starts with three tabs: Playback (skip intervals, the rewinds after a long pause and after sleep, the timer's length, voice boost and skip silence), Account (the server, the last sync with Sync now, who's signed in and how, Sign out) and About (Ond's About without the updates). The rest join it as tabs when they come. The speed isn't there: the one saved is the one playing, set from the speed chip's Playback popover, which holds only what you change while listening: the speed, with voice boost and skip silence to join it in M3.
+- **Settings:** playback (skip intervals, default speed, rewind a few seconds after a long pause), sleep timer defaults, audio (voice boost, silence removal, mono), downloads, appearance, updates. Settings is a page in the main window (⌘,, Settings… in the account menu, or Settings… in the Playback popover, which opens it on Playback), with Ond's tab list down its side; from the Player or Mini it brings the full window back first, and Back or Esc returns to where you were. It starts with three tabs: Playback (skip intervals, the rewinds after a long pause and after sleep, the timer's length, voice boost and skip silence), Account (the server, the last sync with Sync now, who's signed in and how, Sign out) and About (Ond's About without the updates). The rest join it as tabs when they come. The speed isn't there: the one saved is the one playing, set from the speed chip's Playback popover, which holds only what you change while listening: the speed, voice boost and skip silence.
 
 Podcasts, when they come, get their own Home (new episodes as an inbox), Shows and Episodes, behind the Books/Podcasts switch, with an optional combined Home.
 
@@ -466,10 +466,10 @@ MPRIS (Linux) and SMTC (Windows) get the same changes when those platforms come.
 
 **M2.5: done after M2.** OpenID sign-in; the player moved to the title bar with a chapters panel; book descriptions rendered from their HTML; a sidebar with the library and the account, and the bar cleared down to the transport, the capsule (with speed and sleep inside it) and the chapters toggle.
 
-**M3: listening.**
-- Voice boost and silence removal.
-- Bookmarks.
-- Reconciling with other devices (the "picked up where you left off" toast).
+**M3: listening.** Done.
+- Voice boost and silence removal: switches in the Playback popover (the speed chip and the Player's speed pill) and on Settings › Playback, with what skipping has saved in the book under them.
+- Bookmarks: the Bookmarks tab in the column at the right, ⌘B anywhere a book is loaded, and a bookmark button in the Player; a toast confirms each one.
+- Reconciling with other devices (the "picked up where you left off" toast, with Undo).
 
 **M4: offline.**
 - Downloads.

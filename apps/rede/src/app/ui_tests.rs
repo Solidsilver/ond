@@ -56,7 +56,8 @@ fn every_view_names_its_controls() {
         h.get_by_label("Chapter 5, show chapters");
         h.get_by_label_contains("Now playing: ");
     }
-    // The chapters column on each of its tabs, playing and not.
+    // The chapters column on each of its tabs, playing and not, and the
+    // bookmarks with rows in them.
     app_mut(&mut h).apply_prefs(PrefsAction::ShowPanel(true));
     for tab in [super::panel::Tab::Chapters, super::panel::Tab::Bookmarks, super::panel::Tab::Info] {
         app_mut(&mut h).ui.panel.tab = tab;
@@ -64,6 +65,27 @@ fn every_view_names_its_controls() {
         h.check_accessibility();
         h.get_by_label("Hide chapters (⌥⌘U)");
     }
+    bookmarks(app_mut(&mut h));
+    app_mut(&mut h).ui.panel.tab = super::panel::Tab::Bookmarks;
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Add bookmark");
+    h.get_by_label("More for Genly meets the king");
+    // The toasts, with their buttons (the confirmation offers the tab when
+    // it isn't in view).
+    app_mut(&mut h).ui.panel.tab = super::panel::Tab::Chapters;
+    app_mut(&mut h).bookmarked("Chapter 5 · 3:56:40");
+    reconciled(app_mut(&mut h));
+    h.run_steps(3);
+    h.check_accessibility();
+    for label in ["Show", "Undo"] {
+        h.get_by_label(label);
+    }
+    app_mut(&mut h).reconciliation = None;
+    app_mut(&mut h).ui.toasts = shell::kit::Toasts::default();
+    app_mut(&mut h).ui.reconcile_toast = None;
+    app_mut(&mut h).ui.panel.tab = super::panel::Tab::Info;
+    h.run_steps(3);
     h.get_by_label("George Guidall");
     app_mut(&mut h).playback_control(crate::player::Control::Stop);
     app_mut(&mut h).player.book = None;
@@ -83,6 +105,7 @@ fn every_view_names_its_controls() {
         if mode == crate::window::Mode::Player {
             h.get_by_label("Chapter position");
             h.get_by_label("Sleep timer");
+            h.get_by_label(&shell::keys::shown("Add bookmark (⌘B)"));
         }
     }
     app_mut(&mut h).mode = crate::window::Mode::Full;
@@ -598,7 +621,7 @@ fn the_shortcuts_sheet_lists_each_group_with_its_keys() {
     app_mut(&mut h).sheet = Some(super::sheets::Sheet::Shortcuts);
     h.run_steps(3);
     h.check_accessibility();
-    for label in ["Playback", "Chapters", "Window", "Navigation", "Play / pause", "Show / hide chapters", "Full, Player, Mini"] {
+    for label in ["Playback", "Chapters", "Window", "Navigation", "Play / pause", "Show / hide chapters", "Add bookmark", "Full, Player, Mini"] {
         h.get_by_label(label);
     }
     h.get_by_label("Space");
@@ -774,4 +797,218 @@ fn the_sidebar_foot_sits_inside_the_window() {
             assert!(room >= f32::from(super::sidebar::FOOT_MARGIN) - 0.5, "{label} (collapsed: {collapsed}) has {room} under it: {rect:?}");
         }
     }
+}
+
+/// The column alone, so what its controls ask for stays in `actions` to be
+/// read rather than applied: the playing book, paused, with its bookmarks.
+fn column(dir: &Path) -> Harness<'static, Option<RedeApp>> {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(super::panel::PANEL_W, 520.0))
+        .with_pixels_per_point(2.0)
+        .with_os(egui::os::OperatingSystem::Mac)
+        .build_ui_state(
+            |ui, app: &mut Option<RedeApp>| {
+                if let Some(app) = app {
+                    app.view().panel(ui);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    let mut app = app(&ctx, dir, BOOKS.len());
+    playing(&mut app, true);
+    bookmarks(&mut app);
+    app.ui.panel.tab = super::panel::Tab::Bookmarks;
+    *h.state_mut() = Some(app);
+    h
+}
+
+/// What the column asked for since the last look, as (kind, time, title).
+fn asked(h: &mut Harness<'static, Option<RedeApp>>) -> Vec<(&'static str, f64, String)> {
+    std::mem::take(&mut app_mut(h).actions)
+        .into_iter()
+        .map(|a| match a {
+            Action::AddBookmark { time, title, .. } => ("add", time, title),
+            Action::RenameBookmark { time, title, .. } => ("rename", time, title),
+            Action::DeleteBookmark { time, .. } => ("delete", time, String::new()),
+            Action::JumpToBookmark { time, .. } => ("jump", time, String::new()),
+            _ => ("other", 0.0, String::new()),
+        })
+        .collect()
+}
+
+#[test]
+fn a_bookmark_jumps_on_a_click_and_its_menu_renames_it_in_place_or_deletes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = column(dir.path());
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("5 bookmarks");
+    // The chapter is in the name only when the title doesn't already say it.
+    h.get_by_label("Chapter 5 · 3:52:35, 3:52:35, jump there");
+    h.get_by_label("Genly meets the king, 1:57:00, Chapter 3, jump there").click();
+    h.run_steps(2);
+    assert_eq!(asked(&mut h), [("jump", 7_020.0, String::new())]);
+
+    let rename = |h: &mut Harness<'static, Option<RedeApp>>| {
+        h.get_by_label("More for Genly meets the king").click();
+        h.run_steps(2);
+        h.get_by_label("Rename").click();
+        h.run_steps(3);
+    };
+    // The whole title is selected, so typing replaces it; Enter keeps it.
+    rename(&mut h);
+    h.check_accessibility();
+    h.get_by_label("Bookmark title").type_text("The king's fire");
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(asked(&mut h), [("rename", 7_020.0, "The king's fire".to_owned())]);
+    assert!(h.query_by_label("Bookmark title").is_none(), "the row is a row again");
+    // Esc keeps the old title.
+    rename(&mut h);
+    h.get_by_label("Bookmark title").type_text("Not this");
+    h.run_steps(1);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(asked(&mut h).is_empty());
+    assert!(h.query_by_label("Bookmark title").is_none());
+    // An empty title isn't one: Enter leaves the field open.
+    rename(&mut h);
+    h.key_press(egui::Key::Backspace);
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert!(asked(&mut h).is_empty());
+    h.get_by_label("Bookmark title");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    // Delete, from the same menu.
+    h.get_by_label("More for Estraven's warning, the whole speech").click();
+    h.run_steps(2);
+    h.get_by_label("Delete").click();
+    h.run_steps(2);
+    assert_eq!(asked(&mut h), [("delete", 14_480.0, String::new())]);
+}
+
+#[test]
+fn the_bookmarks_tab_adds_where_the_book_is_and_says_how_when_there_are_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = column(dir.path());
+    let app = app_mut(&mut h);
+    app.bookmark_event(crate::bridge::BookmarkMsg::Updated(shelf::BookmarkSnapshot { revision: 2, bookmarks: vec![] }));
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("No bookmarks yet");
+    h.get_by_label_contains("to mark this spot.");
+    h.get_by_label("Add bookmark").click();
+    h.run_steps(2);
+    assert_eq!(asked(&mut h), [("add", 14_200.0, "Chapter 5 · 3:56:40".to_owned())]);
+}
+
+#[test]
+fn a_new_bookmark_is_confirmed_with_a_way_to_the_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    app_mut(&mut h).bookmarked("Chapter 5 · 3:56:40");
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Bookmarked Chapter 5 · 3:56:40");
+    h.get_by_label("Show").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.panel_shown() && app.ui.panel.tab == super::panel::Tab::Bookmarks);
+    // With the tab in view, there's nothing to show: the toast just says so.
+    app.bookmarked("Here");
+    h.run_steps(2);
+    h.get_by_label("Bookmarked Here");
+    assert!(h.query_by_label("Show").is_none());
+}
+
+#[test]
+fn the_other_device_notice_offers_undo_and_either_way_it_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    // The toasts alone, so what they ask for can be read before it's applied.
+    let mut h = Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).with_pixels_per_point(2.0).build_ui_state(
+        |ui, app: &mut Option<RedeApp>| {
+            if let Some(app) = app {
+                app.toasts_ui(ui, ui.ctx().content_rect());
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(app(&ctx, dir.path(), BOOKS.len()));
+    playing(app_mut(&mut h), true);
+    reconciled(app_mut(&mut h));
+    let text = "Picked up where you left off on another device, 3h 56m in.";
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label(text);
+    h.get_by_label("Undo").click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions[..], [Action::UndoReconcile]));
+    for a in actions {
+        app_mut(&mut h).apply(a);
+    }
+    h.run_steps(2);
+    assert!(app_mut(&mut h).reconciliation.is_none(), "Undo takes the offer");
+    assert!(h.query_by_label(text).is_none());
+    // Clicked away instead, the position stays as picked up.
+    reconciled(app_mut(&mut h));
+    h.run_steps(3);
+    h.get_by_label(text).click();
+    h.run_steps(2);
+    let actions = std::mem::take(&mut app_mut(&mut h).actions);
+    assert!(matches!(actions[..], [Action::DismissReconcile]));
+    for a in actions {
+        app_mut(&mut h).apply(a);
+    }
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(app.reconciliation.is_none());
+    assert_eq!(app.player.position, 14_200.0);
+    assert!(app.ui.toasts.texts().is_empty());
+}
+
+#[test]
+fn the_playback_popover_has_the_speech_switches_and_what_skipping_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    h.run_steps(2);
+    h.get_by_label_contains("Playback speed, ").click();
+    h.run_steps(2);
+    h.check_accessibility();
+    assert!(h.query_by_label_contains("Saved ").is_none(), "skip silence is off");
+    h.get_by_label("Voice boost").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).prefs.get(|s| s.playback.voice_boost));
+    h.get_by_label("Skip silence").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).prefs.get(|s| s.playback.skip_silence));
+    app_mut(&mut h).player.silence_saved = 192.0;
+    h.run_steps(2);
+    h.get_by_label("Saved 3m 12s in this book");
+}
+
+#[test]
+fn a_rename_left_behind_comes_back_as_a_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = column(dir.path());
+    h.run_steps(2);
+    h.get_by_label("More for Genly meets the king").click();
+    h.run_steps(2);
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.get_by_label("Bookmark title");
+    // The tab goes away mid-rename, and comes back.
+    app_mut(&mut h).ui.panel.tab = super::panel::Tab::Info;
+    h.run_steps(3);
+    app_mut(&mut h).ui.panel.tab = super::panel::Tab::Bookmarks;
+    h.run_steps(3);
+    assert!(h.query_by_label("Bookmark title").is_none());
+    assert!(asked(&mut h).is_empty(), "nothing was kept");
 }

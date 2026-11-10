@@ -60,7 +60,6 @@ pub struct Reconciled {
 }
 
 impl Reconciled {
-    #[allow(dead_code, reason = "the separate toast UI consumes this text")]
     pub fn message(&self) -> String {
         let minutes = (self.current.position.secs().max(0.0) / 60.0) as u64;
         let at = if minutes >= 60 { format!("{}h {}m", minutes / 60, minutes % 60) } else { format!("{minutes}m") };

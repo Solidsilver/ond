@@ -37,7 +37,8 @@
 //!   [`SETTINGS_NAV_W`]), the pane beside it ([`settings_pane`]), and
 //!   About's [`about_header`] with the [`app_icon`].
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
-//!   fade, or stay with a button until clicked away.
+//!   fade, or stay with a button until clicked away (a [`Toasts::note`]
+//!   fades with its button).
 
 pub mod buttons;
 pub mod controls;
