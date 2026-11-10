@@ -73,6 +73,8 @@ pub struct UiState {
     /// sign-in, until the first positions say whether anything is in
     /// progress or the user goes somewhere first.
     pub landing: bool,
+    /// The search palette, while it's open.
+    pub palette: Option<super::palette::Palette>,
 }
 
 impl UiState {

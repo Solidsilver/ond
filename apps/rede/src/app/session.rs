@@ -314,6 +314,7 @@ impl RedeApp {
         self.positions.clear();
         self.bookmarks = super::bookmarks::State::default();
         self.reconciliation = None;
+        self.ui.palette = None;
         self.session = Session::default();
         self.books.clear();
         self.art.set_source(None);

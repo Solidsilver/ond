@@ -262,7 +262,7 @@ fn palette_opens_searches_and_queues() {
     frame(&ctx, &mut app, Vec::new());
     frame(&ctx, &mut app, vec![egui::Event::Text("album 12".into())]);
     frame(&ctx, &mut app, Vec::new());
-    assert_eq!(app.ui.palette.as_ref().map(|p| p.query.as_str()), Some("album 12"));
+    assert_eq!(app.ui.palette.as_ref().map(|p| p.state.query.as_str()), Some("album 12"));
     let before = app.player.queue.upcoming.len();
     let alt_enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
     frame(&ctx, &mut app, vec![alt_enter]);

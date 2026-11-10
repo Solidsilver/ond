@@ -33,7 +33,13 @@ const SHORTCUTS: [Group; 4] = [
     ("Window", &[("Player, and back", &["⇧⌘N"]), ("Mini, and back", &["⇧⌘M"]), ("Full, Player, Mini", &["⌥⌘1", "⌥⌘2", "⌥⌘3"])]),
     (
         "Navigation",
-        &[("Collapse / expand sidebar", &["⌥⌘S"]), ("Settings", &["⌘,"]), ("Keyboard shortcuts", &["⌘/"]), ("Back, or close a sheet or menu", &["esc"])],
+        &[
+            ("Search", &["⌘K", "⌘F", "/"]),
+            ("Collapse / expand sidebar", &["⌥⌘S"]),
+            ("Settings", &["⌘,"]),
+            ("Keyboard shortcuts", &["⌘/"]),
+            ("Back, or close a sheet or menu", &["esc"]),
+        ],
     ),
 ];
 

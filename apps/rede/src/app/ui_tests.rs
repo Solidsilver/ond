@@ -139,6 +139,7 @@ fn every_view_names_its_controls() {
             h.check_accessibility();
             h.get_by_label("Keyboard shortcuts (⌘/)");
             h.get_by_label("Settings (⌘,)");
+            h.get_by_label("Search (⌘K)");
             h.get_by_label("Library");
         }
         h.get_by_label_contains("sam, ").click();
@@ -154,6 +155,18 @@ fn every_view_names_its_controls() {
     app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(false));
     h.run_steps(3);
     h.get_by_label("Collapse sidebar (⌥⌘S)");
+    // The palette: the books in progress, then what a query finds (books
+    // and names).
+    in_progress(app_mut(&mut h));
+    app_mut(&mut h).apply(Action::OpenPalette);
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Piranesi");
+    type_in_palette(&mut h, "le guin");
+    h.check_accessibility();
+    // Her name is also on the book page behind the palette.
+    assert!(h.query_all_by_label("Ursula K. Le Guin").count() >= 2, "the author is a row of her own");
+    app_mut(&mut h).apply(Action::ClosePalette);
     // The sign-in screen, and the same with an error under the button.
     *h.state_mut() = Some(signed_out(&h.ctx.clone(), dir.path()));
     h.run_steps(3);
@@ -1133,4 +1146,109 @@ fn a_rename_left_behind_comes_back_as_a_row() {
     h.run_steps(3);
     assert!(h.query_by_label("Bookmark title").is_none());
     assert!(asked(&mut h).is_empty(), "nothing was kept");
+}
+
+/// Types `text` into the open palette's field, which has the keyboard.
+fn type_in_palette(h: &mut Harness<'static, Option<RedeApp>>, text: &str) {
+    h.event(egui::Event::Text(text.into()));
+    h.run_steps(3);
+    assert_eq!(app_mut(h).ui.palette.as_ref().map(|p| p.state.query.as_str()), Some(text));
+}
+
+#[test]
+fn command_k_command_f_and_slash_open_the_palette_and_esc_closes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    for (modifiers, key) in [(egui::Modifiers::COMMAND, egui::Key::K), (egui::Modifiers::COMMAND, egui::Key::F), (egui::Modifiers::NONE, egui::Key::Slash)] {
+        h.key_press_modifiers(modifiers, key);
+        h.run_steps(3);
+        let palette = app_mut(&mut h).ui.palette.as_ref().map(|p| p.state.query.clone());
+        assert_eq!(palette.as_deref(), Some(""), "{key:?} opens it, with nothing typed");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(app_mut(&mut h).ui.palette.is_none(), "esc closes it");
+    }
+    // The sidebar's field opens it too.
+    h.get_by_label("Search (⌘K)").click();
+    h.run_steps(3);
+    assert!(app_mut(&mut h).ui.palette.is_some());
+}
+
+#[test]
+fn slash_in_a_text_field_is_typed_not_a_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), true);
+    bookmarks(app_mut(&mut h));
+    app_mut(&mut h).apply_panel(super::panel::PanelAction::Show(super::panel::Tab::Bookmarks));
+    h.run_steps(2);
+    h.get_by_label("More for Genly meets the king").click();
+    h.run_steps(2);
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Slash);
+    h.run_steps(2);
+    assert!(app_mut(&mut h).ui.palette.is_none());
+}
+
+#[test]
+fn enter_opens_the_book_found_and_command_enter_plays_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    app_mut(&mut h).apply(Action::OpenPalette);
+    h.run_steps(3);
+    type_in_palette(&mut h, "piranesi");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(app_mut(&mut h).ui.palette.is_none());
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(2));
+    // ⌘⏎ plays, as the page's button does: the fixture has no server, so
+    // playing says so.
+    app_mut(&mut h).apply(Action::OpenPalette);
+    h.run_steps(3);
+    type_in_palette(&mut h, "dune");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    h.run_steps(3);
+    assert!(app_mut(&mut h).ui.palette.is_none());
+    let notice = app_mut(&mut h).ui.notice.clone().map(|n| n.text).unwrap_or_default();
+    assert!(notice.contains("Sign in to play"), "{notice}");
+}
+
+#[test]
+fn choosing_an_author_lists_their_books_with_the_first_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    app_mut(&mut h).apply(Action::OpenPalette);
+    h.run_steps(3);
+    type_in_palette(&mut h, "octavia");
+    h.get_by_label("Octavia E. Butler").click();
+    h.run_steps(4);
+    let palette = app_mut(&mut h).ui.palette.as_ref().map(|p| (p.state.query.clone(), p.state.selected));
+    let (query, selected) = palette.expect("still open");
+    assert_eq!(query, "Octavia E. Butler");
+    // ⏎ now opens her book rather than choosing her again.
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(5), "selected row {selected}");
+}
+
+#[test]
+fn an_empty_query_offers_the_books_in_progress_and_none_found_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    in_progress(app_mut(&mut h));
+    app_mut(&mut h).apply(Action::OpenPalette);
+    h.run_steps(3);
+    h.get_by_label("Piranesi");
+    assert!(h.query_by_label("Dune").is_none(), "a finished book isn't in progress");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &book_route(2), "⌘K ⏎ goes back to it");
+    app_mut(&mut h).apply(Action::OpenPalette);
+    h.run_steps(3);
+    type_in_palette(&mut h, "zzqx");
+    h.get_by_label("No books match");
 }

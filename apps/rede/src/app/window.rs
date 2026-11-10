@@ -20,6 +20,10 @@ impl RedeApp {
             self.prefs.edit(|s| s.window = windows.clone());
             self.mode = mode;
             self.window.seen = None;
+            // The palette searches the full window's library.
+            if mode != Mode::Full {
+                self.ui.palette = None;
+            }
             self.window.pending = Some((plan, Instant::now()));
             if self.ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
                 self.ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));

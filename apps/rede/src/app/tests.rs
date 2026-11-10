@@ -69,6 +69,18 @@ fn every_view_draws() {
         frame(&ctx, &mut app);
     }
     (app.sync.running, app.session.connecting, app.sync.offline) = (false, false, false);
+    // The palette: empty, a query, a name chosen, and nothing found.
+    app.apply(Action::OpenPalette);
+    frame(&ctx, &mut app);
+    for query in ["le guin", "zzqx"] {
+        if let Some(p) = app.ui.palette.as_mut() {
+            p.typed(query);
+        }
+        frame(&ctx, &mut app);
+    }
+    app.apply(Action::PaletteName("Ursula K. Le Guin".into()));
+    frame(&ctx, &mut app);
+    app.apply(Action::ClosePalette);
     // The trail went Library → book → book → gone; back walks it.
     assert!(app.ui.nav.can_back());
     app.back();

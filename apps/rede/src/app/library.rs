@@ -54,6 +54,8 @@ pub struct Books {
     /// Descriptions read as prose, by the book and the text it was given: a
     /// page drawn every frame parses its markup once.
     descriptions: Memo<(String, String), Vec<shell::rich::Block>>,
+    /// What the palette searches, per library version.
+    index: Memo<u64, super::search::BookIndex>,
 }
 
 /// What a book page knows about a book beyond its listing.
@@ -114,6 +116,13 @@ impl Books {
     pub fn recent(&mut self) -> Arc<Vec<usize>> {
         let books = &self.all;
         self.recent.get(self.version, || sorted_ids(books, LibrarySort::Added))
+    }
+
+    /// The palette's haystack for this listing, built once per version: a
+    /// keystroke only scores it.
+    pub fn index(&mut self) -> Arc<super::search::BookIndex> {
+        let books = &self.all;
+        self.index.get(self.version, || super::search::BookIndex::new(books))
     }
 
     pub fn loaded(&mut self, id: &str, item: Item) {

@@ -1,7 +1,7 @@
-//! The column at the left of the full window, in Ond's sidebar's idiom: the
-//! places to browse at the top, under the library's name, and the account at
-//! the foot, with its state (connected, syncing, offline) and its menu, and
-//! the keyboard shortcuts beside it.
+//! The column at the left of the full window, in Ond's sidebar's idiom: a
+//! search field that opens the palette (⌘K), the places to browse under the
+//! library's name, and the account at the foot, with its state (connected,
+//! syncing, offline) and its menu, and the keyboard shortcuts beside it.
 //!
 //! The places are a list so Series, Authors, Collections and Downloads join
 //! Home and Library as rows when they come. The account's libraries are listed
@@ -176,6 +176,11 @@ impl ViewCtx<'_> {
     pub(super) fn sidebar(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.y = 1.0;
+        // A field that opens the palette, as on Ond's sidebar.
+        if kit::search_field(ui, "⌘K").clicked() {
+            self.actions.push(Action::OpenPalette);
+        }
+        ui.add_space(14.0);
         // The heading names the libraries the shelf holds, with the button
         // that folds the column away at its end.
         ui.horizontal(|ui| {
@@ -234,6 +239,10 @@ impl ViewCtx<'_> {
                 }
                 ui.add_space(8.0);
             }
+            if icons::sized_button(ui, Icon::Search, "Search (⌘K)", size, 14.0, Some(t.muted)).clicked() {
+                self.actions.push(Action::OpenPalette);
+            }
+            ui.add_space(8.0);
             for (i, (label, route, icon)) in PLACES.into_iter().enumerate() {
                 let on = active == Some(i);
                 let resp = icons::sized_button(ui, icon, label, size, 15.0, Some(if on { t.text } else { t.muted }));

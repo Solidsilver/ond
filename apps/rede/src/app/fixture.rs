@@ -410,3 +410,14 @@ pub fn listened(app: &mut RedeApp) {
         at(4, 25_500.0, true, 400),
     ]));
 }
+
+/// Piranesi half listened to, and Dune finished.
+pub fn in_progress(app: &mut RedeApp) {
+    let at = |id: &str, secs: f64, finished: bool| {
+        let item = sources::ItemKey::new(account().id, id);
+        (id.to_owned(), sources::Progress { item, position: sources::Position::from_secs(secs), finished, at: Some(std::time::SystemTime::now()) })
+    };
+    for (id, progress) in [at("book-2", 7_980.0, false), at("book-1", 75_720.0, true)] {
+        app.positions.insert(id, progress);
+    }
+}
