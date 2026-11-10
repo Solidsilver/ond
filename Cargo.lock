@@ -3958,6 +3958,7 @@ dependencies = [
  "async-trait",
  "audio",
  "bytes",
+ "chrono",
  "directories",
  "eframe",
  "egui",
@@ -4502,6 +4503,7 @@ name = "shell"
 version = "0.4.4"
 dependencies = [
  "block2 0.6.2",
+ "chrono",
  "dispatch2",
  "egui",
  "egui_kittest",

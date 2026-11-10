@@ -526,6 +526,9 @@ fn a_chapter_in_the_column_seeks_to_its_start() {
     playing(&mut app, true);
     *h.state_mut() = Some(app);
     h.run_steps(2);
+    // Over the chapters, when the book ends: past midnight, so with its day.
+    h.get_by_label_contains("ends Wed ");
+    assert_eq!(h.query_all_by_label_contains("left at").count(), 0, "the time left is the capsule's to say");
     h.get_by_label("Chapter 2, 56:40").click();
     h.run_steps(2);
     let actions = std::mem::take(&mut app_mut(&mut h).actions);
