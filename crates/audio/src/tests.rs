@@ -1643,7 +1643,7 @@ fn source_time_after_starting_and_seeking_is_independent_of_speed() {
         let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
         assert!(!seen.iter().any(|e| matches!(e, Event::Error { .. })), "{speed}×: {seen:?}");
         let positions = positions.lock().unwrap();
-        assert!(positions.iter().any(|(_, _, source)| *source > 4.2), "{speed}× played on");
+        assert!(positions.iter().any(|(_, _, source)| *source > 4.95), "{speed}× played on to the end");
         // The clock is affine to within one output-frame rounding at the seek.
         // Sonic's local pitch overlap is bounded separately by two pitch periods.
         for (_, output, source) in positions.iter() {
