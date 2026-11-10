@@ -494,7 +494,9 @@ mod tests {
         let (prefs, _) = Prefs::open(&path);
         let volume = prefs.get(|s| s.volume);
         prefs.edit(|s| s.volume = volume);
-        std::thread::sleep(DEBOUNCE * 3);
+        // Dropping flushes: if the no-op edit had marked the file dirty, it
+        // would be written here.
+        drop(prefs);
         assert!(!path.exists(), "no change, no write");
     }
 

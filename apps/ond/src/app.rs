@@ -297,14 +297,24 @@ action_from!(WindowAction => Window, PrefsAction => Prefs, OutputAction => Outpu
 /// Dropping a `Runtime` waits for every `spawn_blocking` call still running,
 /// however long. Quitting gives them [`SHUTDOWN_WAIT`] and then goes: the work
 /// there (renames, copies, keychain calls) is written to survive being cut off.
-struct AppRuntime(Option<tokio::runtime::Runtime>);
+struct AppRuntime {
+    rt: Option<tokio::runtime::Runtime>,
+    /// How long those calls get. [`SHUTDOWN_WAIT`] unless a test says otherwise.
+    wait: Duration,
+}
 
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
+impl AppRuntime {
+    fn new(rt: tokio::runtime::Runtime) -> Self {
+        Self { rt: Some(rt), wait: SHUTDOWN_WAIT }
+    }
+}
+
 impl Drop for AppRuntime {
     fn drop(&mut self) {
-        if let Some(rt) = self.0.take() {
-            rt.shutdown_timeout(SHUTDOWN_WAIT);
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_timeout(self.wait);
         }
     }
 }
@@ -520,7 +530,7 @@ impl OndApp {
         player.queue.prefs = prefs.get(|s| s.queue);
         player.stop_on_unplayable = saved.offline_unplayable == crate::settings::Unplayable::Pause;
         Ok(Self {
-            _rt: AppRuntime(Some(rt)),
+            _rt: AppRuntime::new(rt),
             ctx: ctx.clone(),
             bridge,
             inbox,

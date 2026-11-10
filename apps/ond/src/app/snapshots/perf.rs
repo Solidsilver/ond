@@ -1,6 +1,7 @@
 //! Frame-time budget on a large library: 2,000 albums, 25,000 tracks, a
-//! 500-item queue and a 20,000-song playlist. Headless (no GPU): it times egui's layout and
-//! tessellation of the real views, which is the CPU cost per frame.
+//! 500-item queue and a 20,000-song playlist, and the search index's keystroke
+//! latency on a library its size. Headless (no GPU): it times egui's layout
+//! and tessellation of the real views, which is the CPU cost per frame.
 //!
 //! `cargo test -p ond-player --release perf -- --ignored --nocapture`
 
@@ -335,4 +336,56 @@ fn time_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) -> Duration {
 
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
+}
+
+/// Keystroke latency on a library the size of the user's (1866 albums, ~20k
+/// tracks). Generous bound for debug builds; `--nocapture` prints the numbers.
+#[test]
+#[ignore = "times a full library; run with --ignored"]
+fn search_keystrokes_stay_fast_on_a_full_library() {
+    use crate::search::SearchIndex;
+    use library::{Album, Artist, Track};
+    fn artist(id: &str, name: &str, albums: u32) -> Artist {
+        Artist { id: id.into(), name: name.into(), sort: None, album_count: albums, cover_art: None }
+    }
+    let words = ["blue", "night", "river", "song", "love", "light", "dance", "home", "road", "summer", "rain", "fire"];
+    let albums: Vec<Album> = (0..1866)
+        .map(|i| {
+            let mut a = album(i % ALBUMS.len());
+            a.id = format!("al{i}");
+            a.name = format!("{} {} {i}", words[(i * 7) % 12], words[(i * 5) % 12]);
+            a.artist = Some(format!("Artist {} {}", words[i % 12], i % 700));
+            a
+        })
+        .collect();
+    let artists: Vec<Artist> = (0..700).map(|i| artist(&format!("ar{i}"), &format!("Artist {} {i}", words[i % 12]), 3)).collect();
+    let tracks: Vec<Track> = (0..20_000)
+        .map(|i| Track {
+            id: format!("t{i}"),
+            album_id: format!("al{}", i % 1866),
+            title: format!("{} of the {} {i}", words[(i * 3) % 12], words[(i * 11) % 12]),
+            artist: Some("Someone".into()),
+            ..crate::test_tracks::track("t", "al0", "t")
+        })
+        .collect();
+    let built = Instant::now();
+    let mut idx = SearchIndex::new(&albums, &artists, &tracks);
+    let build = built.elapsed();
+    // Each keystroke's median of 5 runs, so one scheduler hiccup can't fail it;
+    // the worst median must stay well inside a frame budget in release.
+    let mut worst = Duration::ZERO;
+    for q in ["b", "bl", "blu", "blue", "blue n", "blue ni", "blue night", "zzzz", "artist 4", "summer rain 12"] {
+        let mut runs: Vec<Duration> = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                let _ = idx.search(q);
+                t.elapsed()
+            })
+            .collect();
+        runs.sort();
+        worst = worst.max(runs[2]);
+    }
+    println!("search index: build {build:?}, worst keystroke (median of 5) {worst:?}");
+    let budget = Duration::from_millis(if cfg!(debug_assertions) { 1000 } else { 40 });
+    assert!(worst < budget, "worst keystroke {worst:?} (budget {budget:?})");
 }

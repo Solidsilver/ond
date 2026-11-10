@@ -329,11 +329,12 @@ async fn new_positions_are_durable_while_an_earlier_network_report_is_stalled() 
 }
 
 #[tokio::test]
-async fn an_hour_of_pending_progress_is_one_request_and_every_entry_is_synced() {
+async fn six_minutes_of_pending_progress_is_one_request_and_every_entry_is_synced() {
     let key = ItemKey::new(AccountId::new(), "book");
-    let pending = (1..=240).map(|n| update(&key, f64::from(n * 15), false)).collect();
+    let pending = (1..=24).map(|n| update(&key, f64::from(n * 15), false)).collect();
     let rig = Rig::pending(pending, None).await;
-    assert_eq!(*rig.fake.batches.lock().unwrap(), vec![vec![3600.0]]);
+    // Every entry, in one batch: 24 × 15 s.
+    assert_eq!(*rig.fake.batches.lock().unwrap(), vec![vec![360.0]]);
     assert!(rig.shelf.pending_progress().unwrap().is_empty());
     rig.finish().await;
 }

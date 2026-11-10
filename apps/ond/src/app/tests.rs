@@ -107,9 +107,12 @@ fn quitting_waits_only_a_moment_for_blocking_work() {
         let _ = stuck.recv_timeout(Duration::from_secs(60));
     });
     started.recv().unwrap();
+    // The wait is a field so the test can hold its own: 50 ms, and the drop
+    // must be back well before the second is up.
+    let app_rt = AppRuntime { rt: Some(rt), wait: Duration::from_millis(50) };
     let t = std::time::Instant::now();
-    drop(AppRuntime(Some(rt)));
-    assert!(t.elapsed() < Duration::from_secs(30), "quitting waited {:?}", t.elapsed());
+    drop(app_rt);
+    assert!(t.elapsed() < Duration::from_secs(1), "quitting waited {:?}", t.elapsed());
     drop(release);
 }
 
