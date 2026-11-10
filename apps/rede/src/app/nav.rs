@@ -7,8 +7,6 @@ pub enum Route {
     Library,
     /// One book, by its own id.
     Book(String),
-    /// Settings, on the tab [`super::UiState`] keeps.
-    Settings,
 }
 
 #[derive(Debug)]

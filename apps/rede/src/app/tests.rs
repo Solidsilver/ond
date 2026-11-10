@@ -30,7 +30,12 @@ fn every_view_draws() {
         app.apply(Action::OpenSettings(tab));
         frame(&ctx, &mut app);
     }
-    app.back();
+    // The question before signing out, asked from Settings.
+    app.apply(Action::AskSignOut);
+    frame(&ctx, &mut app);
+    app.apply(Action::CloseSheet);
+    assert_eq!(app.sheet, Some(super::sheets::Sheet::Settings));
+    app.apply(Action::CloseSheet);
     playing(&mut app, false);
     frame(&ctx, &mut app);
     app.player.paused = true;

@@ -244,8 +244,15 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.sheet = Some(super::sheets::Sheet::Shortcuts);
         app
     });
-    // Settings on each tab, then in the narrowest window (the sidebar a
-    // rail, the tabs narrowed).
+    // The question before signing out.
+    scene(h, s, "sheet-sign-out", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app.apply(Action::AskSignOut);
+        app
+    });
+    // Settings, Ond's window, on each tab, then in the narrowest window (the
+    // sidebar a rail).
     for (size, suffix) in [(FULL, ""), (crate::MIN_SIZE, "-narrow")] {
         h.set_size(egui::vec2(size[0], size[1]));
         for tab in super::settings_page::Tab::ALL {
