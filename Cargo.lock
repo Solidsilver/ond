@@ -3407,6 +3407,7 @@ dependencies = [
  "streamcache",
  "subsonic",
  "tempfile",
+ "testkit",
  "tokio",
  "tracing",
  "tracing-subscriber",
