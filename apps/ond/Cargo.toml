@@ -47,9 +47,6 @@ audio = { version = "0.4.4", path = "../../crates/audio", features = ["preview"]
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
 # The Linux window controls on any platform, for the snapshots and UI tests.
 shell = { version = "0.4.4", path = "../../crates/shell", features = ["preview"] }
-# Validates the visualizer's WGSL in CI, where no GPU builds its pipelines.
-# Pinned to the version wgpu pulls in, so it's the same build.
-naga = { version = "=30.0.1", features = ["wgsl-in"] }
 tempfile = "3"
 testkit = { path = "../../crates/testkit" }
 
