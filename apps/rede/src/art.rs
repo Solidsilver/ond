@@ -248,6 +248,19 @@ impl Art {
         self.draw(ui, rect, cover, radius.into(), backdrop, stand_in, true);
     }
 
+    /// Where `cover` sits drawn at its own shape within `bounds`, placed by
+    /// `align`, so a page can draw it without the backdrop around it. Until
+    /// its art is here (and for a book without any, whose generated cover is
+    /// square) that's all of `bounds`.
+    pub fn fitted(&mut self, bounds: Rect, cover: Option<&str>, align: egui::Align2) -> Rect {
+        let points = bounds.width().max(bounds.height());
+        let Some(size) = cover.and_then(|c| self.texture(c, points)).map(|t| t.size_vec2()).filter(|s| s.x > 0.0 && s.y > 0.0) else {
+            return bounds;
+        };
+        let scale = (bounds.width() / size.x).min(bounds.height() / size.y);
+        align.align_size_within_rect(size * scale, bounds)
+    }
+
     /// `bare`: a book without a cover gets only its generated ground, no
     /// title.
     #[allow(clippy::too_many_arguments)]

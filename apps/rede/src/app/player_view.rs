@@ -120,7 +120,10 @@ impl ViewCtx<'_> {
         ui.spacing_mut().item_spacing.y = 0.0;
 
         ui.vertical_centered(|ui| {
-            let (cover, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+            let (bounds, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+            // The cover at its own shape, on the square's foot so it stays by
+            // the title: no backdrop around a cover that isn't square.
+            let cover = self.art.fitted(bounds, book.item.summary.cover.as_deref(), egui::Align2::CENTER_BOTTOM);
             let shadow = egui::Shadow {
                 offset: [0, (side / 40.0) as i8],
                 blur: (side / 14.0).min(28.0) as u8,

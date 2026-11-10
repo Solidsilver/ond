@@ -6,6 +6,7 @@
 //!
 
 use super::library::{COVER_RADIUS, authors_line};
+use super::progress::Listened;
 use super::view_ctx::ViewCtx;
 use super::{Action, Details};
 use crate::fmt;
@@ -21,6 +22,9 @@ const HEADER_STACK_BELOW: f32 = 480.0;
 /// larger than Ond's album art, since the page is about this one book.
 const COVER_MIN: f32 = 176.0;
 const COVER_MAX: f32 = 260.0;
+/// How far along the book is: the gap under Play, and the bar's widest.
+const PROGRESS_GAP: f32 = 14.0;
+const PROGRESS_W: f32 = 320.0;
 /// The header text's height before it's first measured.
 const HEADER_TEXT_H_GUESS: f32 = 140.0;
 /// From this width the description and the chapters sit side by side.
@@ -34,6 +38,11 @@ pub(super) const CHAPTER_ROW_H: f32 = 32.0;
 /// its title starts at `CHAPTER_TITLE_X`.
 pub(super) const CHAPTER_NUMBER_RIGHT: f32 = 18.0;
 pub(super) const CHAPTER_TITLE_X: f32 = 34.0;
+/// The lengths' column, whose numbers end at the row's right edge; the
+/// starts' column ends left of it. A row narrower than `CHAPTER_STARTS_FROM`
+/// shows the start only under the pointer.
+const CHAPTER_LENGTH_W: f32 = 56.0;
+const CHAPTER_STARTS_FROM: f32 = 340.0;
 
 impl ViewCtx<'_> {
     pub(super) fn book_page(&mut self, ui: &mut Ui, id: &str) {
@@ -50,7 +59,8 @@ impl ViewCtx<'_> {
                 let at = if self.player.book.as_ref().is_some_and(|b| b.key.item == id) {
                     Some(self.player.position)
                 } else {
-                    self.positions.get(id).map(|p| p.position.secs())
+                    // A finished book has every chapter behind it.
+                    self.positions.get(id).map(|p| if p.finished { f64::INFINITY } else { p.position.secs() })
                 };
                 let description = item.description.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(|text| self.books.description(id, text));
                 book_body(ui, &t, description.as_ref().map(|blocks| blocks.as_slice()), &item.chapters, at);
@@ -59,52 +69,36 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// The cover beside the title, authors, facts and Play, or above them
-    /// when there's no room.
+    /// The cover beside the title, authors, facts, Play and how far along
+    /// the book is, or above them when there's no room. The cover keeps its
+    /// own shape within a square of `side`: a tall one is narrower, a wide
+    /// one shorter, and the text sits on its bottom edge either way.
     fn book_header(&mut self, ui: &mut Ui, t: &Tokens, book: &ItemSummary) {
         let avail = ui.available_width();
         let stacked = avail < HEADER_STACK_BELOW;
         let side = if stacked { avail.min(COVER_MAX) } else { (avail * 0.3).clamp(COVER_MIN, COVER_MAX) };
+        let shape = self.art.fitted(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(side, side)), book.cover.as_deref(), egui::Align2::LEFT_BOTTOM).size();
+        // The text's height (it wraps) is known only once drawn, so this uses
+        // last frame's and redoes the frame when it changed.
+        let measured = ui.scope_id().with(("book-header-h", &book.id));
+        let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(HEADER_TEXT_H_GUESS);
         let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
         ui.with_layout(layout, |ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-            self.art.paint(ui, rect, book.cover.as_deref(), COVER_RADIUS, &super::library::stand_in(book));
+            // Beside the text, the row is as tall as the taller of the two,
+            // and both sit on its foot.
+            let row_h = if stacked { shape.y } else { shape.y.max(last_h) };
+            let (slot, _) = ui.allocate_exact_size(vec2(shape.x, row_h), Sense::hover());
+            let cover = egui::Align2::LEFT_BOTTOM.align_size_within_rect(shape, slot);
+            self.art.paint(ui, cover, book.cover.as_deref(), COVER_RADIUS, &super::library::stand_in(book));
             ui.add_space(if stacked { 16.0 } else { 24.0 });
-            // The text sits on the cover's bottom edge, as on Ond's album
-            // page. Its height (it wraps) is known only once drawn, so this
-            // uses last frame's and redoes the frame when it changed.
-            let measured = ui.scope_id().with(("book-header-h", &book.id));
-            let last_h = ui.data(|d| d.get_temp::<f32>(measured)).unwrap_or(HEADER_TEXT_H_GUESS);
             let block = ui.vertical(|ui| {
                 if !stacked {
-                    ui.add_space((side - last_h).max(0.0));
+                    ui.add_space((row_h - last_h).max(0.0));
                 }
                 let top = ui.cursor().top();
                 header_text(ui, t, book);
-                let position = if self.player.book.as_ref().is_some_and(|b| b.key.item == book.id) {
-                    self.player.position
-                } else {
-                    self.positions.get(&book.id).filter(|p| !p.finished).map_or(0.0, |p| p.position.secs())
-                };
-                let left = crate::timeline::left(
-                    (book.duration.unwrap_or(0.0) - position).max(0.0) / f64::from(crate::timeline::normalize_speed(self.playback.speed)),
-                    self.playback.speed,
-                );
-                // While this book is the one sounding, the button pauses it,
-                // as the title bar's play/pause would.
-                let sounding = self.player.active && !self.player.paused && self.player.book.as_ref().is_some_and(|b| b.key.item == book.id);
-                let (icon, label) = if sounding {
-                    (Icon::Pause, format!("Pause · {left}"))
-                } else if position > 0.0 {
-                    (Icon::Play, format!("Resume · {left}"))
-                } else {
-                    (Icon::Play, "Play".into())
-                };
-                if self.opening {
-                    shell::kit::primary_unavailable(ui, None, "Opening…");
-                } else if shell::kit::primary(ui, Some(icon), &label).clicked() {
-                    self.actions.push(if sounding { Action::Playback(crate::player::Control::Toggle) } else { Action::PlayBook(book.id.clone()) });
-                }
+                self.play_row(ui, book);
+                self.book_progress(ui, t, book);
                 ui.min_rect().bottom() - top
             });
             let h = block.inner.round();
@@ -113,6 +107,61 @@ impl ViewCtx<'_> {
                 ui.ctx().request_discard("book header height changed");
             }
         });
+    }
+
+    /// Play, Resume or Pause. A row of its own, so the book's other commands
+    /// can sit beside it.
+    fn play_row(&mut self, ui: &mut Ui, book: &ItemSummary) {
+        let position = if self.player.book.as_ref().is_some_and(|b| b.key.item == book.id) {
+            self.player.position
+        } else {
+            self.positions.get(&book.id).filter(|p| !p.finished).map_or(0.0, |p| p.position.secs())
+        };
+        let left = crate::timeline::left(
+            (book.duration.unwrap_or(0.0) - position).max(0.0) / f64::from(crate::timeline::normalize_speed(self.playback.speed)),
+            self.playback.speed,
+        );
+        // While this book is the one sounding, the button pauses it, as the
+        // title bar's play/pause would.
+        let sounding = self.player.active && !self.player.paused && self.player.book.as_ref().is_some_and(|b| b.key.item == book.id);
+        let (icon, label) = if sounding {
+            (Icon::Pause, format!("Pause · {left}"))
+        } else if position > 0.0 {
+            (Icon::Play, format!("Resume · {left}"))
+        } else {
+            (Icon::Play, "Play".into())
+        };
+        ui.horizontal(|ui| {
+            if self.opening {
+                shell::kit::primary_unavailable(ui, None, "Opening…");
+            } else if shell::kit::primary(ui, Some(icon), &label).clicked() {
+                self.actions.push(if sounding { Action::Playback(crate::player::Control::Toggle) } else { Action::PlayBook(book.id.clone()) });
+            }
+        });
+    }
+
+    /// How far along the whole book is, under Play: a bar and "6h 25m of
+    /// 11h 24m · 56%", or "Finished". Nothing for a book not started.
+    fn book_progress(&mut self, ui: &mut Ui, t: &Tokens, book: &ItemSummary) {
+        let listened = self.listened(book);
+        let (fraction, line) = match listened {
+            Listened::NotStarted => return,
+            Listened::Finished => (1.0, "Finished".to_owned()),
+            Listened::InProgress { fraction: Some(fraction), .. } => {
+                let duration = book.duration.unwrap_or(0.0);
+                let playing_at = self.player.book.as_ref().filter(|b| b.key.item == book.id).map(|_| self.player.position);
+                let at = playing_at.or_else(|| self.positions.get(&book.id).map(|p| p.position.secs())).unwrap_or(0.0);
+                (fraction, format!("{} · {}%", fmt::of_span(at, duration), (fraction * 100.0).floor() as u32))
+            }
+            Listened::InProgress { fraction: None, .. } => return,
+        };
+        ui.add_space(PROGRESS_GAP);
+        let w = ui.available_width().min(PROGRESS_W);
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, 4.0), Sense::hover());
+        shell::kit::progress_bar(ui.painter(), rect, fraction, t);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ProgressIndicator, true, &line));
+        ui.add_space(6.0);
+        ui.label(RichText::new(line).size(12.0).color(t.muted));
     }
 
     /// What the page says while the details are on their way, or when they
@@ -218,7 +267,8 @@ pub fn facts_line(book: &ItemSummary) -> String {
     parts.join(" · ")
 }
 
-/// The chapter list: each chapter's number, title and how long it runs.
+/// The chapter list: each chapter's number, title, where it starts in the
+/// book and how long it runs.
 fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter], at: Option<f64>) {
     if chapters.is_empty() {
         return;
@@ -231,7 +281,8 @@ fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter], at: Opti
     for (n, chapter) in chapters.iter().enumerate() {
         let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), CHAPTER_ROW_H), Sense::hover());
         let length = fmt::clock((chapter.end - chapter.start).max(0.0));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{} · {}", chapter.title, length)));
+        let start = fmt::clock(chapter.start);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{} · starts at {start} · {length}", chapter.title)));
         if !ui.is_rect_visible(row) {
             continue;
         }
@@ -239,8 +290,10 @@ fn chapter_list(ui: &mut Ui, t: &Tokens, chapters: &[sources::Chapter], at: Opti
     }
 }
 
-/// One chapter's row in `row`: its number, title and length, as the page
-/// and the chapters column both draw it. `at` is where the book is, if it's
+/// One chapter's row in `row`: its number, title, start and length, as the
+/// page and the chapters column both draw it. Where the row is narrow (the
+/// column) the start shows only under the pointer, so the title keeps its
+/// room. `at` is where the book is, if it's
 /// been started: the chapter there is tinted, with how far into it along
 /// the row's foot, and the ones before it are dimmed.
 pub(super) fn chapter_row(ui: &Ui, t: &Tokens, row: egui::Rect, n: usize, chapter: &sources::Chapter, at: Option<f64>) {
@@ -272,8 +325,18 @@ pub(super) fn chapter_row(ui: &Ui, t: &Tokens, row: egui::Rect, n: usize, chapte
     let time = elide(ui, &length, FontId::proportional(12.0), t.muted, 72.0);
     let time_w = time.size().x;
     ui.painter().galley(pos2(row.right() - time_w, cy - time.size().y / 2.0), time, t.muted);
+    // The start, quieter, right-aligned in a column of its own left of the
+    // lengths, so both columns of numbers line up down the list.
+    let mut text_right = row.right() - time_w;
+    if row.width() >= CHAPTER_STARTS_FROM || ui.rect_contains_pointer(row) {
+        let quiet = t.muted.gamma_multiply(0.75);
+        let start = elide(ui, &fmt::clock(chapter.start), FontId::proportional(12.0), quiet, CHAPTER_LENGTH_W);
+        let right = row.right() - CHAPTER_LENGTH_W - 12.0;
+        text_right = right - start.size().x;
+        ui.painter().galley(pos2(text_right, cy - start.size().y / 2.0), start, quiet);
+    }
     let font = if current { FontId::new(13.0, semibold()) } else { FontId::proportional(13.0) };
-    let title = elide(ui, &chapter.title, font, ink, row.width() - CHAPTER_TITLE_X - time_w - 16.0);
+    let title = elide(ui, &chapter.title, font, ink, text_right - row.left() - CHAPTER_TITLE_X - 16.0);
     ui.painter().galley(pos2(row.left() + CHAPTER_TITLE_X, cy - title.size().y / 2.0), title, ink);
 }
 
