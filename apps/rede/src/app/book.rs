@@ -12,7 +12,7 @@ use super::{Action, Details};
 use crate::fmt;
 use crate::widgets::elide;
 use egui::{FontId, RichText, Sense, Ui, pos2, vec2};
-use shell::icons::Icon;
+use shell::icons::{self, Icon};
 use shell::theme::{Tokens, semibold};
 use sources::ItemSummary;
 
@@ -25,6 +25,9 @@ const COVER_MAX: f32 = 260.0;
 /// How far along the book is: the gap under Play, and the bar's widest.
 const PROGRESS_GAP: f32 = 14.0;
 const PROGRESS_W: f32 = 320.0;
+/// The … beside Play: as tall as the button it sits by, and its menu's width.
+const MORE_SIDE: f32 = 32.0;
+const MORE_MENU_W: f32 = 190.0;
 /// The header text's height before it's first measured.
 const HEADER_TEXT_H_GUESS: f32 = 140.0;
 /// From this width the description and the chapters sit side by side.
@@ -137,7 +140,35 @@ impl ViewCtx<'_> {
             } else if shell::kit::primary(ui, Some(icon), &label).clicked() {
                 self.actions.push(if sounding { Action::Playback(crate::player::Control::Toggle) } else { Action::PlayBook(book.id.clone()) });
             }
+            self.more_menu(ui, book);
         });
+    }
+
+    /// The book's other commands, behind a … beside Play: settling where the
+    /// book stands by hand. Only what applies is offered: a finished book
+    /// can't be finished again, and one not begun has nothing to start over.
+    fn more_menu(&mut self, ui: &mut Ui, book: &ItemSummary) {
+        let t = Tokens::of(ui);
+        let more = icons::sized_button(ui, Icon::More, &format!("More for {}", book.title), vec2(MORE_SIDE, MORE_SIDE), 14.0, Some(t.muted));
+        let listened = self.listened(book);
+        let id = &book.id;
+        let chosen = shell::kit::popover(&more, MORE_MENU_W, |ui| {
+            let mut chosen = None;
+            if matches!(listened, Listened::Finished) {
+                if shell::kit::menu_row(ui, "Mark as unfinished") {
+                    chosen = Some(Action::MarkUnfinished(id.clone()));
+                }
+            } else if shell::kit::menu_row(ui, "Mark as finished") {
+                chosen = Some(Action::MarkFinished(id.clone()));
+            }
+            if !matches!(listened, Listened::NotStarted) && shell::kit::menu_row(ui, "Start over") {
+                chosen = Some(Action::StartOver(id.clone()));
+            }
+            chosen
+        });
+        if let Some(action) = chosen.flatten() {
+            self.actions.push(action);
+        }
     }
 
     /// How far along the whole book is, under Play: a bar and "6h 25m of

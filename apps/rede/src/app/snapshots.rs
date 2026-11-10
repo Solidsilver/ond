@@ -164,6 +164,17 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.go(book_route(4));
         app
     });
+    // The … beside Play, on a book partway: finish it, or start it over.
+    scene(h, s, "book-more-menu", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app.go(book_route(2));
+        app
+    });
+    h.get_by_label_contains("More for ").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "book-more-menu");
     // Home with books partway (the one heard last first) and one finished,
     // as the window opens with something in progress; Home with nothing
     // begun; and the library with the same mix on its covers.

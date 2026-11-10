@@ -360,6 +360,70 @@ fn the_book_page_offers_play_and_lists_its_chapters() {
     assert!(h.query_all_by_label_contains("Chapter 1").count() >= 1, "and the chapters are listed");
 }
 
+/// One book's page alone, so what it asks for stays in `actions` to be read
+/// instead of being applied.
+fn page(dir: &Path, n: usize) -> Harness<'static, Option<RedeApp>> {
+    let mut h = Harness::builder().with_size(egui::vec2(900.0, 700.0)).with_pixels_per_point(2.0).with_os(egui::os::OperatingSystem::Mac).build_ui_state(
+        move |ui, app: &mut Option<RedeApp>| {
+            if let Some(app) = app {
+                app.view().book_page(ui, &format!("book-{n}"));
+            }
+        },
+        None,
+    );
+    let ctx = h.ctx.clone();
+    let mut app = app(&ctx, dir, BOOKS.len());
+    listened(&mut app);
+    app.actions.clear();
+    *h.state_mut() = Some(app);
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn a_books_more_menu_offers_only_what_applies_and_asks_for_it() {
+    let asked = |h: &mut Harness<'static, Option<RedeApp>>| -> Vec<&'static str> {
+        std::mem::take(&mut app_mut(h).actions)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::MarkFinished(_) => Some("finished"),
+                Action::MarkUnfinished(_) => Some("unfinished"),
+                Action::StartOver(_) => Some("over"),
+                _ => None,
+            })
+            .collect()
+    };
+    // A shelf of its own for each page: one database opens once.
+    let open = |n: usize| {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = page(dir.path(), n);
+        h.get_by_label_contains("More for ").click();
+        h.run_steps(2);
+        (h, dir)
+    };
+    // Not begun: it can be finished, and there is nothing to start over.
+    let (mut h, _dir) = open(0);
+    h.check_accessibility();
+    assert!(h.query_by_label("Start over").is_none());
+    assert!(h.query_by_label("Mark as unfinished").is_none());
+    h.get_by_label("Mark as finished").click();
+    h.run_steps(2);
+    assert_eq!(asked(&mut h), ["finished"]);
+    // Partway: finished, or back to the start.
+    let (mut h, _dir) = open(2);
+    h.get_by_label("Mark as finished");
+    h.get_by_label("Start over").click();
+    h.run_steps(2);
+    assert_eq!(asked(&mut h), ["over"]);
+    // Finished: un-finished, or back to the start.
+    let (mut h, _dir) = open(4);
+    assert!(h.query_by_label("Mark as finished").is_none());
+    h.get_by_label("Start over");
+    h.get_by_label("Mark as unfinished").click();
+    h.run_steps(2);
+    assert_eq!(asked(&mut h), ["unfinished"]);
+}
+
 #[test]
 fn a_book_page_lists_its_chapters_with_their_lengths() {
     let dir = tempfile::tempdir().unwrap();

@@ -159,18 +159,14 @@ pub enum Action {
     /// and the server told. The loaded book is stopped first, so its session
     /// closes before the finish and cannot write the old position afterwards.
     ///
-    /// No control asks for the three settling actions yet; the app can apply
-    /// them, and the tests push them.
-    #[allow(dead_code)]
+    /// The book page's … menu asks for the three settling actions.
     MarkFinished(String),
     /// The book is no longer finished, at the place it was left. ABS drops the
     /// position in the request that clears a finish, so it is written in a
     /// second one; a book with no known place starts at the beginning.
-    #[allow(dead_code)]
     MarkUnfinished(String),
     /// The book starts again from the beginning, not finished. The loaded book
     /// moves there and stays as it was: paused or playing.
-    #[allow(dead_code)]
     StartOver(String),
     AddBookmark {
         item: sources::ItemKey,
