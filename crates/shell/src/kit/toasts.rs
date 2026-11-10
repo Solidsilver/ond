@@ -28,7 +28,7 @@ const NOTICE_SECS: f64 = 4.0;
 pub const MAX: usize = 3;
 /// The stack's widest, and its narrowest.
 const WIDTH: f32 = 420.0;
-const MIN_WIDTH: f32 = 200.0;
+const MIN_WIDTH: f32 = 160.0;
 /// From the toast's left edge to its text, and the room an error's mark takes.
 const PAD: f32 = 14.0;
 const MARK: f32 = 20.0;
@@ -60,9 +60,10 @@ impl<A> Toast<A> {
         !self.error && (self.action.is_none() || self.brief)
     }
 
-    /// Whether its × shows without the pointer on it.
+    /// Whether its × shows without the pointer on it: an error's, and any
+    /// with a button (a plain notice shows its × on hover).
     fn closable(&self) -> bool {
-        self.error || (self.action.is_some() && !self.brief)
+        self.error || self.action.is_some()
     }
 }
 
@@ -264,14 +265,16 @@ impl<A> Toasts<A> {
             painter.add(shadow.as_shape(rect, 10.0));
             painter.rect(rect, 10.0, t.panel.gamma_multiply(alpha), egui::Stroke::new(1.0, t.hairline.gamma_multiply(alpha)), egui::StrokeKind::Inside);
             let mut x = rect.left() + PAD;
-            let first_row = rect.top() + 9.0 + galley.rows.first().map_or(8.0, |r| r.height() / 2.0);
+            // The text centred top to bottom, so a line lines up with the button's.
+            let text_top = rect.center().y - galley.size().y / 2.0;
+            let first_row = text_top + galley.rows.first().map_or(8.0, |r| r.height() / 2.0);
             if toast.error {
                 let mut fade = painter.clone();
                 fade.multiply_opacity(alpha);
                 icons::status_mark(&fade, pos2(x + 6.0, first_row), 6.0, Status::Failed, None);
                 x += MARK;
             }
-            painter.galley(pos2(x, rect.top() + 9.0), galley, t.text.gamma_multiply(alpha));
+            painter.galley(pos2(x, text_top), galley, t.text.gamma_multiply(alpha));
             if let (Some(b), Some(r), Some(p)) = (button, button_rect, pressed.as_ref()) {
                 if p.hovered() {
                     painter.rect_filled(r, 6.0, t.hover);
