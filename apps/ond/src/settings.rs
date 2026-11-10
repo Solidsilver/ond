@@ -154,6 +154,10 @@ pub struct Settings {
     /// Light, dark, or follow the system.
     #[serde(default)]
     pub theme: crate::theme::ThemePref,
+    /// How large the interface is drawn, in percent (one of
+    /// [`shell::zoom::STEPS`]; any other number reads as the nearest).
+    #[serde(default = "shell::zoom::default_percent", deserialize_with = "shell::zoom::lenient")]
+    pub zoom: u16,
     /// The accent color, used whenever the album art doesn't give one.
     #[serde(default, deserialize_with = "crate::theme::lenient_accent")]
     pub accent: crate::theme::Accent,
@@ -271,6 +275,7 @@ impl Default for Settings {
             device_hidden: Default::default(),
             device_groups: Default::default(),
             theme: Default::default(),
+            zoom: shell::zoom::DEFAULT,
             accent: Default::default(),
             adapt_colors: false,
             backdrop: false,
@@ -422,6 +427,17 @@ mod tests {
 
     fn login(server: &str, user: &str) -> Settings {
         Settings { server: server.into(), username: user.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_zoom_level_off_the_steps_reads_as_the_nearest_and_costs_nothing_else() {
+        let read = |json: &str| serde_json::from_str::<Settings>(json).unwrap();
+        assert_eq!(read("{}").zoom, 100, "older files have none");
+        assert_eq!(read(r#"{ "zoom": 150 }"#).zoom, 150);
+        assert_eq!(read(r#"{ "zoom": 133, "theme": "dark" }"#).zoom, 125);
+        assert_eq!(read(r#"{ "zoom": 400 }"#).zoom, 200);
+        let odd = read(r#"{ "zoom": "huge", "theme": "dark" }"#);
+        assert_eq!((odd.zoom, odd.theme), (100, crate::theme::ThemePref::Dark));
     }
 
     #[test]

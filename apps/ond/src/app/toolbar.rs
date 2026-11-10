@@ -85,7 +85,7 @@ impl OndApp {
         use crate::csd::{Side, reserved};
         full.max.x -= reserved(ui.ctx(), Side::Right);
         let free_left = if crate::chrome::folded(ui.ctx()) {
-            whole.left() + crate::chrome::LIGHTS_W
+            whole.left() + crate::chrome::lights_w(ui.ctx())
         } else {
             (whole.left() + reserved(ui.ctx(), Side::Left)).max(full.left() + TRANSPORT_INSET)
         };

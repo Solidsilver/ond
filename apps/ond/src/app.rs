@@ -453,6 +453,8 @@ impl OndApp {
         }
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
+        // Before the first frame, so the window never shows at 100% first.
+        shell::zoom::install(ctx, saved.zoom);
         let mut cache_cfg = streamcache::CacheConfig::new(&paths.stream_cache);
         cache_cfg.reply_check = crate::bridge::reply_check();
         if let Some(mb) = saved.stream_cache_mb {
@@ -826,7 +828,8 @@ impl OndApp {
             cmds
         });
         for cmd in cmds {
-            if self.ui.overlay.is_none() || cmd == Cmd::Shortcuts {
+            // Zoom works over a sheet too, as it would in a browser.
+            if self.ui.overlay.is_none() || matches!(cmd, Cmd::Shortcuts | Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset) {
                 self.actions.push(Action::Command(cmd));
             }
         }

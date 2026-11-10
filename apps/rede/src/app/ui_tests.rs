@@ -732,6 +732,40 @@ fn settings_lists_its_tabs_and_each_names_its_controls() {
     h.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
 }
 
+/// ⌘+, ⌘− and ⌘0 step the zoom once a press, one toast says where it is,
+/// and Settings › Appearance shows the same level and sets it.
+#[test]
+fn the_zoom_keys_step_the_zoom_and_settings_follows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    let cmd = egui::Modifiers::COMMAND;
+    h.key_press_modifiers(cmd | egui::Modifiers::SHIFT, egui::Key::Plus);
+    h.run_steps(2);
+    assert_eq!(h.ctx.zoom_factor(), 1.1);
+    h.key_press_modifiers(cmd, egui::Key::Equals);
+    h.run_steps(2);
+    assert_eq!(h.ctx.zoom_factor(), 1.25, "one step a press");
+    let app = app_mut(&mut h);
+    assert_eq!(app.prefs.get(|s| s.zoom), 125);
+    let zoom_toasts: Vec<_> = app.ui.toasts.texts().into_iter().filter(|t| t.starts_with("Zoom")).map(str::to_owned).collect();
+    assert_eq!(zoom_toasts, ["Zoom 125%"], "the last toast replaces the one before");
+    h.key_press_modifiers(cmd, egui::Key::Minus);
+    h.run_steps(2);
+    assert_eq!(h.ctx.zoom_factor(), 1.1);
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::Appearance));
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("zoom, 110%");
+    h.get_by_label("More zoom").click();
+    h.run_steps(2);
+    assert_eq!((app_mut(&mut h).prefs.get(|s| s.zoom), h.ctx.zoom_factor()), (125, 1.25));
+    h.get_by_label("zoom, 125%");
+    h.key_press_modifiers(cmd, egui::Key::Num0);
+    h.run_steps(2);
+    assert_eq!((app_mut(&mut h).prefs.get(|s| s.zoom), h.ctx.zoom_factor()), (100, 1.0));
+}
+
 #[test]
 fn opening_settings_from_the_player_returns_to_the_full_window() {
     let dir = tempfile::tempdir().unwrap();

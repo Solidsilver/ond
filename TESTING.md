@@ -39,6 +39,16 @@ Frame times on a big library and the search index's keystroke latency:
 - [ ] Menu bar: all menus present; checkmarks follow queue/bit-perfect/appearance; ⌘C/⌘V still work in the search field.
 - [ ] Mini (⇧⌘M): on top, draggable; "Up next" grows into Compact; geometry restored per mode after relaunch.
 
+## Zoom (Ond and Rede)
+Snapshots draw each zoom offscreen; they can't move a real window. Check in both apps:
+- [ ] ⌘+ / ⌘= / ⌘− / ⌘0 step 80 → 200% one step a press (no extra tenth from egui), with one "Zoom N%" toast that replaces the last and fades. Ond: View › Zoom In / Zoom Out / Actual Size do the same.
+- [ ] Quit at 150% and relaunch: the first frame is already at 150% (no flash at 100%), and the window has its saved size.
+- [ ] At 200% the traffic lights sit centred in the title bar (Full and Player) and nothing is drawn under them; at 80% the transport doesn't slide under them either.
+- [ ] Full window: zooming in leaves its size alone unless it's under the new minimum, when it grows; shrinking it by hand stops at the minimum for that zoom. On a 1440×900 or 13" screen at 175–200% it stops at 90% of the screen instead (below the content's minimum; Ond's folded sidebar rail crowds at 200% there).
+- [ ] Player and Mini at 200%: switch to each (⌥⌘2, ⌥⌘3) and back. Each opens at least at its minimum for that zoom, Mini stays square, nothing is clipped, and Full comes back at its saved size. Zoom from 100% to 200% while in Mini: the window grows to fit, still square.
+- [ ] Ond: a managed `zoom` in managed.json locks the stepper ("Set in your Nix config") and the keys do nothing.
+- [ ] Linux (our own window buttons): at 150% the buttons and resize edges still work.
+
 ## Linux
 Try at least one GNOME and one KDE Plasma session, Wayland and X11 if you can.
 - [ ] Installs with `./install.sh`; Ond appears in the app grid with its icon, and the running window gets the same icon in the dock/taskbar (app id `dev.solidsilver.ond`).

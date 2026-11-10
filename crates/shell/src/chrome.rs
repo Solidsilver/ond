@@ -9,8 +9,16 @@
 //! presentation mode egui-wgpu keeps on after a resize the user didn't drag
 //! (see `mac::stop_transaction_presents`).
 
-/// How far the content must stay clear of the traffic lights, from the window's left edge.
+/// How far the content must stay clear of the traffic lights, from the
+/// window's left edge, at 100% zoom. The lights don't zoom (AppKit draws
+/// them), so in points the room they take shrinks as the zoom grows: see
+/// [`lights_w`].
 pub const LIGHTS_W: f32 = 84.0;
+
+/// [`LIGHTS_W`] in points at the zoom `ctx` draws at.
+pub fn lights_w(ctx: &egui::Context) -> f32 {
+    LIGHTS_W / ctx.zoom_factor()
+}
 /// The first button's left edge and the distance between buttons.
 #[cfg(target_os = "macos")]
 const LIGHTS_X: f64 = 18.0;
@@ -40,8 +48,9 @@ pub fn sync(ctx: &egui::Context, bar: Bar) {
     if !folded(ctx) {
         return;
     }
+    // AppKit lays the title bar out in its own points, which don't zoom.
     #[cfg(target_os = "macos")]
-    mac::apply(bar);
+    mac::apply(Bar { height: bar.height.map(|h| h * ctx.zoom_factor()) });
     #[cfg(not(target_os = "macos"))]
     let _ = bar;
 }
@@ -62,12 +71,14 @@ pub fn title_double_click(ctx: &egui::Context) {
 #[cfg(feature = "preview")]
 pub fn stand_in_lights(ctx: &egui::Context, bar_h: Option<f32>) {
     let Some(h) = bar_h else { return };
+    // Where AppKit puts them, which is in unzoomed points.
+    let z = ctx.zoom_factor();
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("snapshot-traffic-lights")));
     for (i, c) in [egui::Color32::from_rgb(0xFF, 0x5F, 0x57), egui::Color32::from_rgb(0xFE, 0xBC, 0x2E), egui::Color32::from_rgb(0x28, 0xC8, 0x40)]
         .into_iter()
         .enumerate()
     {
-        painter.circle_filled(egui::pos2(18.0 + 7.0 + 20.0 * i as f32, h / 2.0), 6.0, c);
+        painter.circle_filled(egui::pos2((18.0 + 7.0 + 20.0 * i as f32) / z, h / 2.0), 6.0 / z, c);
     }
 }
 

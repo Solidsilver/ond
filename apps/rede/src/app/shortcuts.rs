@@ -23,6 +23,10 @@ impl RedeApp {
             if i.consume_key(Modifiers::COMMAND, Key::K) | i.consume_key(Modifiers::COMMAND, Key::F) | slash {
                 self.actions.push(Action::OpenPalette);
             }
+            if let Some(step) = shell::zoom::take(i) {
+                let now = self.prefs.get(|s| s.zoom);
+                self.actions.push(Action::Prefs(super::PrefsAction::Zoom(step.from(now))));
+            }
             if i.consume_key(Modifiers::COMMAND, Key::Comma) {
                 self.actions.push(Action::OpenSettings(self.ui.settings));
             }

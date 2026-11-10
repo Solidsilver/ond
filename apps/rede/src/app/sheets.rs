@@ -30,7 +30,16 @@ type Group = (&'static str, &'static [(&'static str, &'static [&'static str])]);
 const SHORTCUTS: [Group; 4] = [
     ("Playback", &[("Play / pause", &["Space"]), ("Skip back", &["←"]), ("Skip forward", &["→"]), ("Slower", &["["]), ("Faster", &["]"])]),
     ("Chapters", &[("Previous chapter", &["⇧←"]), ("Next chapter", &["⇧→"]), ("Show / hide chapters", &["⌥⌘U"]), ("Add bookmark", &["⌘B"])]),
-    ("Window", &[("Player, and back", &["⇧⌘N"]), ("Mini, and back", &["⇧⌘M"]), ("Full, Player, Mini", &["⌥⌘1", "⌥⌘2", "⌥⌘3"])]),
+    (
+        "Window",
+        &[
+            ("Player, and back", &["⇧⌘N"]),
+            ("Mini, and back", &["⇧⌘M"]),
+            ("Full, Player, Mini", &["⌥⌘1", "⌥⌘2", "⌥⌘3"]),
+            ("Zoom in, zoom out", &[shell::zoom::KEYS_IN, shell::zoom::KEYS_OUT]),
+            ("Actual size", &[shell::zoom::KEYS_RESET]),
+        ],
+    ),
     (
         "Navigation",
         &[

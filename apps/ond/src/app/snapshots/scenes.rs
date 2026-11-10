@@ -858,6 +858,47 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() });
     s.shoot(h, "login-busy");
+
+    // Zoomed. Sizes are in points, so a 1440×900 window at 150% is 960×600
+    // of them; the narrowest full window is its minimum, 900×560 points at
+    // any zoom (1350×840 on screen at 150%). At 200% that minimum is more
+    // than a 1440×900 screen holds, so the window stops at 90% of the
+    // screen: 648×405 points.
+    for (scene, percent, size, route) in [
+        ("zoom-150-recent", 150, FULL / 1.5, Route::Recent),
+        ("zoom-150-narrow-albums", 150, vec2(900.0, 560.0), Route::Albums),
+        ("zoom-150-narrow-album", 150, vec2(900.0, 560.0), Route::Album(album_id(0))),
+        ("zoom-175-small-screen", 175, vec2(1470.0, 956.0) * 0.9 / 1.75, Route::Recent),
+        ("zoom-200-small-screen", 200, vec2(1470.0, 956.0) * 0.9 / 2.0, Route::Recent),
+    ] {
+        reset(h, size, route);
+        app_mut(h).apply(Action::Prefs(PrefsAction::Zoom(percent)));
+        if scene != "zoom-150-recent" {
+            // The toast once is enough.
+            app_mut(h).ui.toasts = shell::kit::Toasts::default();
+        }
+        s.shoot(h, scene);
+    }
+    reset(h, FULL / 1.5, Route::Recent);
+    zoom(h, 150);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Appearance));
+    h.run_steps(2);
+    // The pane remembers where an earlier scene left it scrolled: to the top.
+    h.event(egui::Event::PointerMoved(egui::pos2(650.0, 105.0)));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, 5000.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    s.shoot(h, "zoom-150-settings-appearance");
+    // The Player at 150%: its minimum, 320×600 points.
+    reset(h, vec2(320.0, 600.0), Route::Recent);
+    zoom(h, 150);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    s.shoot(h, "zoom-150-player-min");
+    reset(h, FULL, Route::Recent);
 }
 
 /// The appearance settings, each on its own: colors from the album art, the
@@ -1032,4 +1073,11 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).login = Some(super::session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
     s.shoot(h, "managed-sign-in");
     app_mut(h).login = None;
+}
+
+/// Zooms to `percent` as the keys do, without the toast.
+fn zoom(h: &mut Harness<'_, Option<OndApp>>, percent: u16) {
+    let app = app_mut(h);
+    app.apply(Action::Prefs(PrefsAction::Zoom(percent)));
+    app.ui.toasts = shell::kit::Toasts::default();
 }

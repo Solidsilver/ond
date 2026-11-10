@@ -20,3 +20,4 @@ pub mod rich;
 pub mod search;
 pub mod theme;
 pub mod window;
+pub mod zoom;

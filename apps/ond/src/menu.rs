@@ -66,6 +66,9 @@ fn cmd_of(id: &str) -> Option<Cmd> {
         Cmd::NewPlaylist,
         Cmd::ToggleBitPerfect,
         Cmd::ToggleDiagnostics,
+        Cmd::ZoomIn,
+        Cmd::ZoomOut,
+        Cmd::ZoomReset,
         Cmd::Place(0),
         Cmd::Place(1),
         Cmd::Place(2),
@@ -117,6 +120,10 @@ mod imp {
         let key = match key.as_str() {
             "," => "Comma".to_owned(),
             "/" => "Slash".to_owned(),
+            // ⌘= is ⌘+ without Shift: the menu shows it, and either works.
+            "+" => "Equal".to_owned(),
+            "−" => "Minus".to_owned(),
+            "0" => "Digit0".to_owned(),
             "[" => "BracketLeft".to_owned(),
             "]" => "BracketRight".to_owned(),
             k => k.to_owned(),
@@ -237,6 +244,10 @@ mod imp {
                     &item("Player", Cmd::Player),
                     &item("Mini Player", Cmd::Mini),
                     &sep(),
+                    &item("Zoom In", Cmd::ZoomIn),
+                    &item("Zoom Out", Cmd::ZoomOut),
+                    &item("Actual Size", Cmd::ZoomReset),
+                    &sep(),
                     &appearance,
                     &sep(),
                     &PredefinedMenuItem::fullscreen(None),
@@ -294,6 +305,9 @@ mod imp {
             assert!(accel(Cmd::Love).is_some());
             assert!(accel(Cmd::Settings).is_some());
             assert!(accel(Cmd::Back).is_some());
+            for zoom in [Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomReset] {
+                assert!(accel(zoom).is_some(), "{zoom:?}");
+            }
             // The Edit items' own keys parse.
             for key in ["Cmd+Z", "Shift+Cmd+Z", "Cmd+X", "Cmd+C", "Cmd+V", "Cmd+A"] {
                 assert!(key.parse::<Accelerator>().is_ok(), "{key}");

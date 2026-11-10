@@ -46,6 +46,10 @@ pub enum Cmd {
     ToggleDiagnostics,
     /// The full-window visualizer (experimental; does nothing while that's off).
     Visualizer,
+    /// The interface larger, smaller, or back to 100%.
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     /// System / Light / Dark (menu only).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Appearance(crate::theme::ThemePref),
@@ -159,6 +163,10 @@ pub static BINDINGS: &[Binding] = &[
     b("Window", "Switch to Mini player and back", "⇧⌘M", CMD_SHIFT, Key::M, false, Cmd::ToggleMini),
     b("Window", "Diagnostics bar on / off", "⌥⌘I", CMD_ALT, Key::I, false, Cmd::ToggleDiagnostics),
     b("Window", "Visualizer", "⌘T", CMD, Key::T, false, Cmd::Visualizer),
+    b("Window", "Zoom in", "⌘+", CMD, Key::Plus, false, Cmd::ZoomIn),
+    b("Window", "Zoom in", "⌘=", CMD, Key::Equals, false, Cmd::ZoomIn),
+    b("Window", "Zoom out", "⌘−", CMD, Key::Minus, false, Cmd::ZoomOut),
+    b("Window", "Actual size", "⌘0", CMD, Key::Num0, false, Cmd::ZoomReset),
     b("Window", "Settings", "⌘,", CMD, Key::Comma, false, Cmd::Settings),
     b("Window", "Keyboard shortcuts", "⌘/", CMD, Key::Slash, false, Cmd::Shortcuts),
     b("Window", "Keyboard shortcuts", "?", SHIFT, Key::Questionmark, true, Cmd::Shortcuts),
@@ -184,9 +192,14 @@ pub fn take(input: &mut egui::InputState, typing: bool) -> Vec<Cmd> {
         if typing && cfg!(windows) && mods.command && mods.alt {
             continue;
         }
-        // Exact modifiers: ⌘→ must not also fire for ⌥⌘→. `?` needs Shift on
-        // some layouts and not others, so only ⌘ matters for it.
-        let fits = |m: &Modifiers| if key == Key::Questionmark { !m.command } else { m.matches_exact(mods) };
+        // Exact modifiers: ⌘→ must not also fire for ⌥⌘→. `?` and `+` need
+        // Shift on some layouts and not others, so Shift doesn't matter for
+        // them (and `?` is the one without ⌘).
+        let fits = |m: &Modifiers| match key {
+            Key::Questionmark => !m.command,
+            Key::Plus => Modifiers { shift: false, ..*m }.matches_exact(mods),
+            _ => m.matches_exact(mods),
+        };
         let hit = input.events.iter().any(|e| matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key && fits(modifiers)));
         if hit {
             input.events.retain(|e| !matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key && fits(modifiers)));
@@ -273,5 +286,16 @@ mod tests {
         assert!(press(Key::Space, NONE, true).is_empty());
         assert!(press(Key::ArrowRight, CMD, true).is_empty());
         assert_eq!(press(Key::K, CMD, true), [Cmd::Search]);
+    }
+
+    #[test]
+    fn the_zoom_keys_work_with_or_without_shift_and_while_typing() {
+        assert_eq!(press(Key::Plus, CMD_SHIFT, false), [Cmd::ZoomIn], "⌘+ on a layout where + needs Shift");
+        assert_eq!(press(Key::Plus, CMD, false), [Cmd::ZoomIn]);
+        assert_eq!(press(Key::Equals, CMD, false), [Cmd::ZoomIn]);
+        assert_eq!(press(Key::Minus, CMD, true), [Cmd::ZoomOut]);
+        assert_eq!(press(Key::Num0, CMD, false), [Cmd::ZoomReset]);
+        assert!(press(Key::Plus, CMD_ALT, false).is_empty());
+        assert!(press(Key::Num0, NONE, false).is_empty());
     }
 }

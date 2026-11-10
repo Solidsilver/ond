@@ -107,13 +107,17 @@ impl Account {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// The accounts, oldest first. The UI shows the first for now.
     #[serde(default)]
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub theme: shell::theme::ThemePref,
+    /// How large the interface is drawn, in percent (one of
+    /// [`shell::zoom::STEPS`]; any other number reads as the nearest).
+    #[serde(default = "shell::zoom::default_percent", deserialize_with = "shell::zoom::lenient")]
+    pub zoom: u16,
     #[serde(default)]
     pub sort: LibrarySort,
     #[serde(default)]
@@ -128,6 +132,21 @@ pub struct Settings {
     /// shows the places and the account by name.
     #[serde(default)]
     pub sidebar_collapsed: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            accounts: Vec::new(),
+            theme: Default::default(),
+            zoom: shell::zoom::DEFAULT,
+            sort: Default::default(),
+            playback: Default::default(),
+            window: Default::default(),
+            show_panel: false,
+            sidebar_collapsed: false,
+        }
+    }
 }
 
 /// Listening preferences are separate from engine time: skip and rewind are
@@ -348,6 +367,16 @@ mod tests {
         assert_eq!(s.theme, shell::theme::ThemePref::default());
         assert_eq!(s.sort, LibrarySort::default());
         assert!(s.accounts.is_empty());
+    }
+
+    #[test]
+    fn a_zoom_level_off_the_steps_reads_as_the_nearest_and_costs_nothing_else() {
+        assert_eq!(Settings::default().zoom, 100);
+        assert_eq!(Settings::from_json(b"{}").unwrap().zoom, 100, "older files have none");
+        assert_eq!(Settings::from_json(br#"{ "zoom": 175 }"#).unwrap().zoom, 175);
+        assert_eq!(Settings::from_json(br#"{ "zoom": 60, "sort": "author" }"#).unwrap().zoom, 80);
+        let odd = Settings::from_json(br#"{ "zoom": [1], "sort": "author" }"#).unwrap();
+        assert_eq!((odd.zoom, odd.sort), (100, LibrarySort::Author));
     }
 
     #[test]

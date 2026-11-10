@@ -59,6 +59,7 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | Setting | Values | Default |
 |---|---|---|
 | `theme` | `"system"`, `"light"`, `"dark"` | `"system"` |
+| `zoom` | How large the interface is drawn, in percent: `80`, `90`, `100`, `110`, `125`, `150`, `175` or `200` (other numbers round to the nearest) | `100` |
 | `accent` | `"blue"`, `"teal"`, `"green"`, `"amber"`, `"red"`, `"rose"`, `"violet"`, `"graphite"`, or your own color as `{ custom = [ 245 197 24 ]; }` (red, green, blue) | `"blue"` |
 | `adapt_colors` | Colors follow the album art | `false` |
 | `backdrop` | Blurred artwork behind the Player and Mini | `false` |

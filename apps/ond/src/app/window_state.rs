@@ -172,7 +172,7 @@ impl OndApp {
                     // A compositor can still answer with an older size after
                     // ours; ask again now and then.
                     if !g.maximized && s.asked.elapsed() > Settle::REASK {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(s.want.into()));
+                        shell::window::resize(ctx, s.want);
                         s.asked = std::time::Instant::now();
                     }
                     ctx.request_repaint();
@@ -188,7 +188,7 @@ impl OndApp {
                         && !self.ui.window.square_native
                         && let Some(side) = crate::window::square(self.ui.window.seen.map_or(g.size, |s| s.size), g.size)
                     {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(side.into()));
+                        shell::window::resize(ctx, side);
                     }
                     self.ui.window.seen = Some(g);
                 }
@@ -199,7 +199,7 @@ impl OndApp {
     pub(super) fn resize_to(&mut self, plan: crate::window::Plan) {
         plan.apply(&self.ctx);
         // A maximized window takes the screen's size, not the plan's.
-        self.ui.window.settling = (!plan.maximized).then(|| Settle::new(plan.size));
+        self.ui.window.settling = (!plan.maximized).then(|| Settle::new(plan.target(&self.ctx)));
     }
 }
 

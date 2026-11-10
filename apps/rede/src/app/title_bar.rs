@@ -175,7 +175,7 @@ impl RedeApp {
             return;
         }
         let free_left = if shell::chrome::folded(ui.ctx()) {
-            whole.left() + shell::chrome::LIGHTS_W
+            whole.left() + shell::chrome::lights_w(ui.ctx())
         } else {
             (whole.left() + reserved(ui.ctx(), Side::Left)).max(full.left() + TRANSPORT_INSET)
         };

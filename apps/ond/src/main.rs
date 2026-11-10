@@ -47,18 +47,20 @@ fn main() -> eframe::Result {
     init_logging();
 
     // Reopen in the mode (and place) the app was left in.
-    let windows = settings::Paths::resolve()
+    let (windows, zoom) = settings::Paths::resolve()
         .ok()
         .map(|p| {
             let mut s = settings::Settings::read(&p.config_file).unwrap_or_default();
             managed::Managed::lay_over(&p.config_file, &mut s);
-            s.window
+            (s.window, s.zoom)
         })
-        .unwrap_or_default();
+        .unwrap_or((Default::default(), shell::zoom::DEFAULT));
     let options = eframe::NativeOptions {
         // The app id names the window for Wayland and X11 desktops, which match it
         // to `dev.solidsilver.ond.desktop` for the dock and taskbar icon.
-        viewport: windows.plan().builder(egui::ViewportBuilder::default().with_icon(window_icon()).with_app_id("dev.solidsilver.ond")),
+        viewport: windows
+            .plan()
+            .builder(egui::ViewportBuilder::default().with_icon(window_icon()).with_app_id("dev.solidsilver.ond"), shell::zoom::factor(zoom)),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
