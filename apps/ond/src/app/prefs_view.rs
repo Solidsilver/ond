@@ -27,6 +27,8 @@ pub struct PrefsView {
     /// Sidebar and queue column widths, as saved (dragged by their inner edges).
     pub columns: layout::Columns,
     pub theme: ThemePref,
+    /// How large the interface is drawn, in percent.
+    pub zoom: u16,
     /// The accent color the user chose.
     pub accent: Accent,
     /// Whether colors adapt to the album art.
@@ -78,6 +80,7 @@ impl PrefsView {
             show_queue: s.show_queue,
             columns: layout::Columns::restore(s.sidebar_width, s.queue_width),
             theme: s.theme,
+            zoom: s.zoom,
             accent: s.accent,
             adapt_colors: s.adapt_colors,
             backdrop: s.backdrop,
@@ -104,6 +107,8 @@ impl PrefsView {
 /// A change to an appearance or behaviour preference.
 pub enum PrefsAction {
     Theme(ThemePref),
+    /// The interface's size, in percent.
+    Zoom(u16),
     /// The accent color used without (or instead of) the album art's.
     Accent(Accent),
     /// Whether colors adapt to the album art.
@@ -135,6 +140,7 @@ impl OndApp {
         let path = match action {
             Action::Prefs(p) => match p {
                 PrefsAction::Theme(_) => "theme",
+                PrefsAction::Zoom(_) => "zoom",
                 PrefsAction::Accent(_) => "accent",
                 PrefsAction::AdaptColors(_) => "adapt_colors",
                 PrefsAction::Backdrop(_) => "backdrop",
@@ -167,6 +173,17 @@ impl OndApp {
             PrefsAction::Theme(pref) => {
                 crate::theme::set_pref(&self.ctx, pref);
                 self.prefs.edit(|s| s.theme = pref);
+            }
+            PrefsAction::Zoom(percent) => {
+                let percent = shell::zoom::nearest(f64::from(percent));
+                if self.prefs.get(|s| s.zoom) == percent {
+                    return;
+                }
+                self.prefs.edit(|s| s.zoom = percent);
+                shell::zoom::set(&self.ctx, percent);
+                // The window's minimum is the content's, so it follows.
+                self.prefs.get(|s| s.window.plan()).refit(&self.ctx, self.ui.window.seen);
+                shell::zoom::announce(&mut self.ui.toasts, percent);
             }
             PrefsAction::Accent(accent) => self.prefs.edit(|s| s.accent = accent),
             PrefsAction::AdaptColors(on) => self.prefs.edit(|s| s.adapt_colors = on),

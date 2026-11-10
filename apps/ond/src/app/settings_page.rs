@@ -220,6 +220,16 @@ impl OndApp {
     /// How Ond looks: its colors, the artwork behind the Player and Mini, and
     /// the seek bar.
     fn appearance_settings(&mut self, ui: &mut Ui) {
+        group(ui, "Size", |ui| {
+            let mut zoom = self.ui.prefs.zoom;
+            let hint = "⌘+ and ⌘− also zoom; ⌘0 goes back to 100%.";
+            let changed = managed(ui, self.prefs.managed("zoom"), |ui| {
+                setting(ui, "Zoom", hint, |ui| shell::kit::stepper(ui, &mut zoom, &shell::zoom::STEPS, "zoom", shell::zoom::label))
+            });
+            if changed {
+                self.actions.push(Action::Prefs(PrefsAction::Zoom(zoom)));
+            }
+        });
         group(ui, "Colors", |ui| {
             let mut theme = self.ui.prefs.theme;
             if choice_row(ui, self.prefs.managed("theme"), "Theme", "", &ThemePref::ALL, &mut theme, |p| p.label().into()) {

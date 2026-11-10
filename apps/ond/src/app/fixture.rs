@@ -471,6 +471,9 @@ pub(super) fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Rout
     app.sync.albums = false;
     app.sync.tracks = false;
     app.sync.progress = None;
+    // Back to 100%, unless managed.json holds it elsewhere.
+    app.prefs.edit(|s| s.zoom = shell::zoom::DEFAULT);
+    let zoom = app.prefs.get(|s| s.zoom);
     app.ui.toasts = shell::kit::Toasts::default();
     app.session.unreachable = false;
     app.session.connecting = false;
@@ -499,6 +502,7 @@ pub(super) fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Rout
     app.ui.nav.go(route);
     app.on_arrive();
     fill_queue(app);
+    shell::zoom::set(&h.ctx, zoom);
     h.ctx.data_mut(|d| d.remove::<crate::visuals::colors::Tints>(crate::visuals::colors::id()));
     // Settle layout (measured header heights etc.) before anything is hovered.
     h.run_steps(3);

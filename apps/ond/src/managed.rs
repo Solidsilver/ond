@@ -22,6 +22,7 @@ const ALLOWED: &[&str] = &[
     "diagnostics_bar",
     "window.system_title_bar",
     "theme",
+    "zoom",
     "accent",
     "adapt_colors",
     "backdrop",

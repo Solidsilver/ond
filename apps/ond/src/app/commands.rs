@@ -110,6 +110,14 @@ impl Cmd {
             Cmd::ToggleBitPerfect => Action::Output(OutputAction::ToggleBitPerfect),
             Cmd::ToggleDiagnostics => Action::Prefs(PrefsAction::Diagnostics(!app.prefs_now().diagnostics_bar)),
             Cmd::Visualizer => Action::ToggleVisualizer,
+            Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset => {
+                let step = match self {
+                    Cmd::ZoomIn => shell::zoom::Step::In,
+                    Cmd::ZoomOut => shell::zoom::Step::Out,
+                    _ => shell::zoom::Step::Reset,
+                };
+                Action::Prefs(PrefsAction::Zoom(step.from(app.prefs_now().zoom)))
+            }
             Cmd::Appearance(pref) => Action::Prefs(PrefsAction::Theme(pref)),
             Cmd::Edit(e) => Action::Edit(e),
         })
