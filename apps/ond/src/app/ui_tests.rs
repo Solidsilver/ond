@@ -699,6 +699,32 @@ fn managed_settings_cant_be_changed_in_the_app() {
     assert_eq!(file["theme"], "dark");
 }
 
+/// The eye at the end of a device row hides that device from the output
+/// menu, and its name says which way the next click goes.
+#[test]
+fn the_output_eye_hides_a_device_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Output));
+    h.run_steps(2);
+    let shown = "Shown in the output menu. Click to hide.";
+    let hidden = "Hidden from the output menu. Click to show.";
+    let eyes = h.query_all_by_label(shown).count();
+    assert!(eyes > 1, "an eye on each of the devices: {eyes}");
+    // The rows' eyes all read the same, so the topmost is the first device.
+    h.query_all_by_label(shown).min_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).expect("a device row to hide").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.device_hidden.len()), 1, "the device is out of the output menu");
+    assert_eq!(h.query_all_by_label(shown).count(), eyes - 1, "its eye says it is hidden now");
+    assert_eq!(h.query_all_by_label(hidden).count(), 1, "the one hidden device's eye offers to show it");
+    h.query_all_by_label(hidden).next().expect("the hidden device's eye").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).prefs.get(|s| s.device_hidden.is_empty()), "and back in the output menu");
+    assert_eq!(h.query_all_by_label(shown).count(), eyes);
+    *h.state_mut() = None;
+}
+
 /// Every control in every view has a name a screen reader can read out (and
 /// a test can find it by). The harness checks this only after `run`, which
 /// most tests here don't call, so this walks the views and asks each time.

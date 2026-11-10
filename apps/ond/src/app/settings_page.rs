@@ -341,6 +341,8 @@ impl OndApp {
         groups.dedup();
         groups.splice(0..0, [crate::output::DEVICES.to_owned(), crate::output::OTHER.to_owned()]);
         group(ui, "Devices", |ui| {
+            paragraph(ui, "The eye hides a device from the output menu.");
+            ui.add_space(10.0);
             if devices.is_empty() {
                 setting(ui, "No output devices found", "", |_| ());
             }
@@ -427,13 +429,13 @@ impl OndApp {
             ui.painter().rect_filled(eye_rect, 6.0, t.hover);
         }
         let glyph = Rect::from_center_size(eye_rect.center(), vec2(14.0, 14.0));
-        icons::paint(ui.painter(), glyph, if hidden { Icon::EyeClosed } else { Icon::Eye }, if hidden { t.muted.gamma_multiply(0.7) } else { t.muted });
+        icons::paint(ui.painter(), glyph, if hidden { Icon::EyeOff } else { Icon::Eye }, if hidden { t.muted.gamma_multiply(0.7) } else { t.muted });
         let eye_tip = if eye_locked {
             crate::managed::LOCKED.to_owned()
         } else if hidden {
-            "Show in the output menu".into()
+            "Hidden from the output menu. Click to show.".into()
         } else {
-            "Hide from the output menu".into()
+            "Shown in the output menu. Click to hide.".into()
         };
         let eye_label = eye_tip.clone();
         eye.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, !eye_locked, !hidden, &eye_label));
@@ -442,7 +444,8 @@ impl OndApp {
         }
         let label = d.name.clone();
         head.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, &label));
-        if head.clicked() {
+        let head_tip = if open { "Hide this device's settings" } else { "Show this device's settings" };
+        if head.on_hover_text(head_tip).clicked() {
             if open {
                 self.ui.output_open.remove(&d.uid);
             } else {
