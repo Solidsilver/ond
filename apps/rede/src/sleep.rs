@@ -39,6 +39,22 @@ impl Timer {
         matches!(self.target, Target::Chapter(_))
     }
 
+    /// The book time it waits for, when it waits for a chapter's end.
+    pub fn chapter_end(&self) -> Option<f64> {
+        match self.target {
+            Target::Chapter(end) => Some(end),
+            Target::Time(_) => None,
+        }
+    }
+
+    /// Waits for a later chapter's end, `end` in book time, instead. A timer
+    /// on the clock stays as it is.
+    pub fn wait_for_chapter(&mut self, end: f64) {
+        if let Target::Chapter(at) = &mut self.target {
+            *at = end;
+        }
+    }
+
     pub fn extend(&mut self, position: f64, speed: f32, now: Instant) {
         self.target = Target::Time(now + Duration::from_secs_f64(self.remaining(position, speed, now) + 600.0));
     }

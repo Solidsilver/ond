@@ -1,7 +1,8 @@
 //! Controls that set a value: the segmented pill ([`segmented`],
 //! [`segmented_wide`], [`choice`], and [`icon_choice`] for icons), the [`thin_slider`]
 //! (and [`step_slider`], a whole number on one beside its [`readout`]), the [`switch`], the
-//! [`stepper`] and its [`step_button`], and the [`choice_chip`].
+//! [`stepper`] and its [`step_button`], the [`choice_chip`], and the
+//! [`stepper_chip`] (a chip whose value it steps).
 
 use super::focus_ring;
 use super::text::elide;
@@ -271,6 +272,65 @@ pub fn choice_chip(ui: &mut Ui, text: &str, on: bool, width: Option<f32>) -> Res
 /// A [`choice_chip`]'s height.
 pub const CHIP_H: f32 = 28.0;
 
+/// What a [`stepper_chip`] was asked to do this frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StepperChip {
+    /// The chip itself was clicked: choose its value.
+    pub chosen: bool,
+    /// Its − or + moved the value.
+    pub stepped: bool,
+}
+
+/// A [`choice_chip`] whose value is the user's own: `value` as `text`
+/// writes it, with a small − and + inside its ends that step it through
+/// `steps` (ascending) without choosing it, so one cell both sets a length
+/// and starts it. `label` names it for a screen reader: the chip is
+/// "`label`, `text`", the ends "Less `label`" and "More `label`".
+pub fn stepper_chip<T: Copy + PartialOrd>(ui: &mut Ui, value: &mut T, steps: &[T], width: f32, label: &str, text: impl Fn(T) -> String) -> StepperChip {
+    let t = Tokens::of(ui);
+    let mut out = StepperChip::default();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, CHIP_H), Sense::hover());
+    let id = ui.scope_id().with(("stepper-chip", label));
+    let end_w = CHIP_H - 4.0;
+    let less = Rect::from_min_size(rect.min, vec2(end_w, CHIP_H));
+    let more = Rect::from_min_size(egui::pos2(rect.right() - end_w, rect.top()), vec2(end_w, CHIP_H));
+    let middle = Rect::from_min_max(egui::pos2(less.right(), rect.top()), egui::pos2(more.left(), rect.bottom()));
+    let chip = ui.interact(middle, id, Sense::click());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, 6.0, if chip.hovered() { t.selected } else { t.field });
+        focus_ring(ui, &chip, rect, 6.0);
+        ui.painter().text(middle.center(), egui::Align2::CENTER_CENTER, text(*value), FontId::proportional(12.5), t.text);
+    }
+    let shown = text(*value);
+    let enabled = ui.is_enabled();
+    chip.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, format!("{label}, {shown}")));
+    if chip.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        out.chosen = true;
+    }
+    let down = steps.iter().rev().find(|s| **s < *value).copied();
+    let up = steps.iter().find(|s| **s > *value).copied();
+    for (r, icon, name, to, key) in [(less, Icon::Minus, "Less", down, "less"), (more, Icon::Plus, "More", up, "more")] {
+        let resp = ui.interact(r, id.with(key), if to.is_some() { Sense::click() } else { Sense::hover() });
+        if ui.is_rect_visible(r) {
+            if to.is_some() && resp.hovered() {
+                ui.painter().rect_filled(r.shrink(3.0), 5.0, t.hover);
+            }
+            focus_ring(ui, &resp, r.shrink(3.0), 5.0);
+            let ink = if to.is_some() { t.muted } else { t.muted.gamma_multiply(0.4) };
+            crate::icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(8.0, 8.0)), icon, ink);
+        }
+        let (name, on) = (format!("{name} {label}"), to.is_some() && enabled);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, on, &name));
+        if resp.clicked()
+            && let Some(to) = to
+        {
+            *value = to;
+            out.stepped = true;
+        }
+    }
+    out
+}
+
 /// One of `steps` (ascending) with a − and a + either side of its value as
 /// `text` writes it, the value in a fixed width so the buttons stay put. A
 /// value between steps (an old setting) moves to its neighbour. `label`
@@ -389,6 +449,28 @@ mod tests {
         h.get_by_label("Less skip").click();
         h.run();
         assert_eq!(h.state().1, 5);
+    }
+
+    #[test]
+    fn a_stepper_chip_steps_without_choosing_and_chooses_from_its_middle() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = themed((40u32, 0u32), |ui, (minutes, chosen): &mut (u32, u32)| {
+            if stepper_chip(ui, minutes, &[30, 40, 45], 120.0, "custom timer", |m| format!("{m} min")).chosen {
+                *chosen += 1;
+            }
+        });
+        h.run();
+        h.get_by_label("More custom timer").click();
+        h.run();
+        assert_eq!(h.state().1, (45, 0), "a step isn't a choice");
+        h.get_by_label("More custom timer").click();
+        h.run();
+        assert_eq!(h.state().1, (45, 0), "the last step is the most");
+        h.get_by_label("Less custom timer").click();
+        h.run();
+        h.get_by_label("custom timer, 40 min").click();
+        h.run();
+        assert_eq!(h.state().1, (40, 1));
     }
 
     #[test]
