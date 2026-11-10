@@ -50,6 +50,9 @@
 //!   and what's laid over any cover to say how far along it is
 //!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
 //!   badge in its corner), with [`progress_bar`], the same line on its own.
+//! - [`nav`]: [`nav_row`], the row above a page's heading with back,
+//!   forward and the breadcrumb, which says what was clicked as a
+//!   [`NavClick`].
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
 //!   fade, or stay with a button until clicked away (a [`Toasts::note`]
 //!   fades with its button).
@@ -58,6 +61,7 @@ pub mod buttons;
 pub mod controls;
 pub mod covers;
 pub mod menus;
+pub mod nav;
 pub mod palette;
 pub mod rows;
 pub mod settings;
@@ -69,6 +73,7 @@ pub use buttons::*;
 pub use controls::*;
 pub use covers::*;
 pub use menus::*;
+pub use nav::*;
 pub use palette::*;
 pub use rows::*;
 pub use settings::*;
