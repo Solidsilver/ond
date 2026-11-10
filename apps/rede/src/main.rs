@@ -36,7 +36,7 @@ fn main() -> eframe::Result {
     let plan = window();
     let options = eframe::NativeOptions {
         // The app id names the window for Wayland and X11 desktops.
-        viewport: plan.builder(egui::ViewportBuilder::default().with_title("Rede").with_icon(icon()).with_app_id("dev.solidsilver.rede")),
+        viewport: plan.builder(egui::ViewportBuilder::default().with_title("Rede").with_icon(icon()).with_app_id("dev.solidsilver.rede"), 1.0),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

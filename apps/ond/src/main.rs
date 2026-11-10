@@ -58,7 +58,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         // The app id names the window for Wayland and X11 desktops, which match it
         // to `dev.solidsilver.ond.desktop` for the dock and taskbar icon.
-        viewport: windows.plan().builder(egui::ViewportBuilder::default().with_icon(window_icon()).with_app_id("dev.solidsilver.ond")),
+        viewport: windows.plan().builder(egui::ViewportBuilder::default().with_icon(window_icon()).with_app_id("dev.solidsilver.ond"), 1.0),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

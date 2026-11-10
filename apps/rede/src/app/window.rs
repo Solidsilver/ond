@@ -37,7 +37,8 @@ impl RedeApp {
         }
         let Some(g) = Geometry::read(ctx) else { return };
         if let Some((plan, since)) = self.window.pending {
-            let reached = (g.size[0] - plan.size[0]).abs() < 2.0 && (g.size[1] - plan.size[1]).abs() < 2.0;
+            let want = plan.target(ctx);
+            let reached = (g.size[0] - want[0]).abs() < 2.0 && (g.size[1] - want[1]).abs() < 2.0;
             if !reached && since.elapsed() < Duration::from_millis(1500) {
                 if !g.maximized {
                     plan.apply(ctx);
@@ -51,7 +52,7 @@ impl RedeApp {
             && !self.window.native_square
             && let Some(size) = shell::window::square(self.window.seen.map_or(g.size, |g| g.size), g.size)
         {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
+            shell::window::resize(ctx, size);
         }
         self.window.seen = Some(g);
     }

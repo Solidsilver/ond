@@ -18,3 +18,4 @@ pub mod over_art;
 pub mod rich;
 pub mod theme;
 pub mod window;
+pub mod zoom;
