@@ -33,6 +33,10 @@
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
 //!   in), [`sheet_header`] (its title, and a × that closes it), and the
 //!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
+//! - [`palette`](mod@palette): the command [`palette`](fn@palette) over the window (⌘K),
+//!   filled by the app's [`PaletteRows`], with its [`PaletteState`] and
+//!   [`palette_icon_tile`] for a row without a cover; and the sidebar's
+//!   [`search_field`] that opens it.
 //! - [`settings`]: the Settings window over the app ([`settings_window`],
 //!   which says what happened in a [`SettingsWindow`]), its tab list
 //!   ([`settings_nav`], its width [`SETTINGS_NAV_W`]), the pane beside it
@@ -45,6 +49,7 @@
 pub mod buttons;
 pub mod controls;
 pub mod menus;
+pub mod palette;
 pub mod rows;
 pub mod settings;
 pub mod sheets;
@@ -54,6 +59,7 @@ pub mod toasts;
 pub use buttons::*;
 pub use controls::*;
 pub use menus::*;
+pub use palette::*;
 pub use rows::*;
 pub use settings::*;
 pub use sheets::*;

@@ -1,30 +1,30 @@
 //! ⌘K: search the library and act on a result without leaving the keyboard.
 //! ⏎ opens · ⌘⏎ plays · ⌥⏎ plays next · ⇧⏎ adds to the queue.
+//!
+//! The sheet is the kit's (`kit::palette`); this says what the rows are and
+//! what the keys do with them.
 
 use super::OfflineAction;
 use super::view_ctx::ViewCtx;
 use super::{Action, QueueAction};
-use crate::icons::{self, Icon};
+use crate::icons::Icon;
 use crate::nav::Route;
 use crate::search::{Hit, Results, SearchIndex};
-use crate::theme::{Tokens, semibold};
-use crate::widgets::elide;
-use egui::{FontId, Rect, Sense, pos2, vec2};
+use egui::Rect;
+use shell::kit::{self, PaletteRow, PaletteState};
 
 #[derive(Default)]
 pub struct Palette {
-    pub(super) query: String,
+    /// What's typed, and the row selected.
+    pub(super) state: PaletteState,
     results: Results,
-    selected: usize,
-    /// The selection moved by keyboard: scroll it into view once.
-    follow: bool,
 }
 
 impl Palette {
     /// Re-runs the query after the index changed.
     pub fn refresh(&mut self, index: &mut SearchIndex) {
-        self.results = index.search(&self.query);
-        self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        self.results = index.search(&self.state.query);
+        self.state.selected = self.state.selected.min(self.results.len().saturating_sub(1));
     }
 }
 
@@ -38,12 +38,11 @@ enum Verb {
     Download,
 }
 
-const WIDTH: f32 = 640.0;
-const ROW_H: f32 = 44.0;
-const QUERY_H: f32 = 52.0;
-const HINTS_H: f32 = 34.0;
-/// A group's title line.
-const GROUP_H: f32 = 24.0;
+const TEXT: kit::PaletteText = kit::PaletteText {
+    placeholder: "Search artists, albums and songs",
+    footer: "⏎ open    ⌘⏎ play    ⌥⏎ play next    ⇧⏎ add to queue    ⇧⌘D download",
+    no_matches: "No matches",
+};
 
 impl ViewCtx<'_> {
     pub(super) fn palette_ui(&mut self, ctx: &egui::Context) {
@@ -54,68 +53,21 @@ impl ViewCtx<'_> {
             self.ui.palette = None;
             return;
         }
-        let (mut verb, up, down) = palette_keys(ctx);
-        let Some(palette) = self.ui.palette.as_mut() else { return };
-        let n = palette.results.len();
-        if n > 0 {
-            if down {
-                palette.selected = (palette.selected + 1) % n;
-                palette.follow = true;
-            }
-            if up {
-                palette.selected = (palette.selected + n - 1) % n;
-                palette.follow = true;
-            }
+        let mut verb = palette_keys(ctx);
+        let (Some(palette), Some(index)) = (self.ui.palette.as_mut(), self.search.index.as_mut()) else { return };
+        // Borrowed from the library, not from `self`, so rows can paint art.
+        let mut hits = Hits { art: &mut *self.art, data: self.data, index, results: &mut palette.results };
+        let out = kit::palette(ctx, "palette", &TEXT, &mut palette.state, &mut hits);
+        if let Some((_, play)) = out.clicked {
+            verb = Some(if play { Verb::Play } else { Verb::Open });
         }
-
-        // Anchored near the top so the field stays put while results grow and
-        // shrink, as in Spotlight.
-        let screen = ctx.content_rect();
-        let top = (screen.height() * 0.12).clamp(24.0, 120.0);
-        let list_max = (screen.height() * 0.72 - QUERY_H - HINTS_H).max(ROW_H * 3.0);
-        let id = egui::Id::unique("palette");
-        let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, vec2(0.0, top));
-        let modal = egui::Modal::new(id).area(area).frame(egui::Frame::popup(&ctx.global_style()).inner_margin(0).corner_radius(12)).show(ctx, |ui| {
-            let t = Tokens::of(ui);
-            ui.set_width(WIDTH);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let palette = self.ui.palette.as_mut()?;
-            let index = self.search.index.as_mut()?;
-            query_field(ui, &t, palette, index);
-            ui.painter().hline(ui.min_rect().x_range(), ui.min_rect().bottom(), egui::Stroke::new(1.0, t.hairline));
-            let clicked = if palette.results.len() == 0 {
-                if !palette.query.trim().is_empty() {
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(18.0);
-                        ui.label(egui::RichText::new("No matches").color(t.muted));
-                    });
-                    ui.add_space(14.0);
-                }
-                None
-            } else {
-                // Borrowed from the library, not from `self`, so rows can paint art.
-                results_list(ui, &t, &mut Hits { art: &mut *self.art, data: self.data, index }, palette, list_max)
-            };
-            hints_bar(ui, &t);
-            clicked
-        });
-        if let Some(c) = modal.inner {
-            verb = Some(c.1);
-            if let Some(p) = self.ui.palette.as_mut() {
-                // A click acts on what was clicked, not on the keyboard selection.
-                let at = (0..p.results.len()).find(|&k| p.results.hit(k) == Some(c.0));
-                p.selected = at.unwrap_or(p.selected);
-            }
-        }
-        let close = modal.should_close();
         let Some(palette) = self.ui.palette.as_ref() else { return };
-        match (verb, palette.results.hit(palette.selected)) {
+        match (verb, palette.results.hit(palette.state.selected)) {
             (Some(v), Some(hit)) => {
                 self.ui.palette = None;
                 self.run_hit(hit, v);
             }
-            _ if close => self.ui.palette = None,
+            _ if out.close => self.ui.palette = None,
             _ => {}
         }
     }
@@ -172,8 +124,8 @@ impl ViewCtx<'_> {
 }
 
 /// The palette's keys this frame, consumed: what ⏎ (with its modifier) or
-/// ⇧⌘D asks for, and whether ↑ and ↓ were pressed.
-fn palette_keys(ctx: &egui::Context) -> (Option<Verb>, bool, bool) {
+/// ⇧⌘D asks for. ↑ and ↓ are the kit's.
+fn palette_keys(ctx: &egui::Context) -> Option<Verb> {
     use egui::{Key, Modifiers};
     let keys = ctx.input_mut(|i| {
         [
@@ -181,46 +133,18 @@ fn palette_keys(ctx: &egui::Context) -> (Option<Verb>, bool, bool) {
             i.consume_key(Modifiers::ALT, Key::Enter),
             i.consume_key(Modifiers::SHIFT, Key::Enter),
             i.consume_key(Modifiers::NONE, Key::Enter),
-            i.consume_key(Modifiers::NONE, Key::ArrowUp),
-            i.consume_key(Modifiers::NONE, Key::ArrowDown),
             i.consume_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::D)),
         ]
     });
-    let [cmd_enter, alt_enter, shift_enter, enter, up, down, download] = keys;
-    let verb = match (cmd_enter, alt_enter, shift_enter, enter) {
+    let [cmd_enter, alt_enter, shift_enter, enter, download] = keys;
+    match (cmd_enter, alt_enter, shift_enter, enter) {
         (true, ..) => Some(Verb::Play),
         (_, true, ..) => Some(Verb::PlayNext),
         (_, _, true, _) => Some(Verb::Add),
         (.., true) => Some(Verb::Open),
         _ if download => Some(Verb::Download),
         _ => None,
-    };
-    (verb, up, down)
-}
-
-/// The search field, which keeps the keyboard; searches as it changes.
-fn query_field(ui: &mut egui::Ui, t: &Tokens, palette: &mut Palette, index: &mut SearchIndex) {
-    ui.horizontal(|ui| {
-        ui.set_height(QUERY_H);
-        ui.add_space(16.0);
-        let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-        icons::paint(ui.painter(), r, Icon::Search, t.muted);
-        ui.add_space(4.0);
-        let edit = ui.add(
-            egui::TextEdit::singleline(&mut palette.query)
-                .hint_text("Search artists, albums and songs")
-                .font(FontId::proportional(17.0))
-                .frame(egui::Frame::NONE)
-                .desired_width(WIDTH - 90.0),
-        );
-        edit.request_focus();
-        if edit.changed() {
-            palette.results = index.search(&palette.query);
-            palette.selected = 0;
-            palette.follow = true;
-        }
-        ui.label(egui::RichText::new("esc").size(11.0).color(t.muted));
-    });
+    }
 }
 
 /// What the result rows draw from: covers, the library, and the index the
@@ -228,115 +152,47 @@ fn query_field(ui: &mut egui::Ui, t: &Tokens, palette: &mut Palette, index: &mut
 struct Hits<'h> {
     art: &'h mut crate::art::Art,
     data: &'h super::Data,
-    index: &'h SearchIndex,
+    index: &'h mut SearchIndex,
+    results: &'h mut Results,
 }
 
-/// The results, grouped (Top hit, Artists, Albums, Songs), in a scroll area
-/// tall enough for all of them up to `list_max`. Returns a clicked hit and
-/// what the click asks for.
-fn results_list(ui: &mut egui::Ui, t: &Tokens, hits: &mut Hits, palette: &mut Palette, list_max: f32) -> Option<(Hit, Verb)> {
-    let follow = std::mem::take(&mut palette.follow);
-    let (r, selected_row) = (&palette.results, palette.selected);
-    // Each group's title and hits, read from the results in place.
-    let top = r.top.as_slice();
-    let groups: [(&str, usize); 4] = [("Top hit", top.len()), ("Artists", r.artists.len()), ("Albums", r.albums.len()), ("Songs", r.tracks.len())];
-    let hit_at = |group: usize, k: usize| match group {
-        0 => top[k],
-        1 => Hit::Artist(r.artists[k]),
-        2 => Hit::Album(r.albums[k]),
-        _ => Hit::Track(r.tracks[k]),
-    };
-    // Tall enough for everything when it fits, so groups aren't
-    // hidden behind a scroll; scrolls only past ~70% of the window.
-    let shown = groups.iter().filter(|(_, n)| *n > 0);
-    let content_h = 6.0 + shown.map(|(_, n)| GROUP_H + ROW_H * *n as f32 + 6.0).sum::<f32>();
-    let mut clicked = None;
-    egui::ScrollArea::vertical().min_scrolled_height(content_h.min(list_max)).max_height(list_max).show(ui, |ui| {
-        ui.add_space(6.0);
-        let mut row = 0;
-        for (g, (title, n)) in groups.into_iter().enumerate() {
-            if n == 0 {
-                continue;
-            }
-            let (head, _) = ui.allocate_exact_size(vec2(WIDTH, GROUP_H), Sense::hover());
-            ui.painter().text(pos2(head.left() + 18.0, head.bottom() - 4.0), egui::Align2::LEFT_BOTTOM, title, FontId::new(11.0, semibold()), t.muted);
-            for hit in (0..n).map(|k| hit_at(g, k)) {
-                let selected = row == selected_row;
-                let resp = hit_row(ui, t, hits, hit, selected);
-                if selected && follow {
-                    resp.scroll_to_me(None);
-                }
-                if resp.clicked() {
-                    let play = ui.input(|i| i.modifiers.command);
-                    clicked = Some((hit, if play { Verb::Play } else { Verb::Open }));
-                }
-                row += 1;
-            }
-            ui.add_space(6.0);
-        }
-    });
-    clicked
-}
-
-/// One result: a picture (a person, or the cover), its name over what it
-/// is, and the keys while it's selected.
-fn hit_row(ui: &mut egui::Ui, t: &Tokens, hits: &mut Hits, hit: Hit, selected: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(WIDTH, ROW_H), Sense::click());
-    let inner = rect.shrink2(vec2(8.0, 1.0));
-    if selected {
-        ui.painter().rect_filled(inner, 8.0, t.selected);
-    } else if resp.hovered() {
-        ui.painter().rect_filled(inner, 8.0, t.hover);
+impl kit::PaletteRows for Hits<'_> {
+    fn search(&mut self, query: &str) {
+        *self.results = self.index.search(query);
     }
-    let tile = Rect::from_center_size(pos2(inner.left() + 22.0, inner.center().y), vec2(30.0, 30.0));
-    let (index, data) = (hits.index, hits.data);
-    let (main, sub) = match hit {
-        Hit::Artist(i) => {
-            let a = &index.artists[i];
-            ui.painter().circle_filled(tile.center(), 15.0, t.field);
-            icons::paint(ui.painter(), tile.shrink(8.0), Icon::Person, t.muted);
-            (a.name.as_str(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
-        }
-        Hit::Album(i) => {
-            let a = &index.albums[i];
-            hits.art.paint(ui, tile, data.album(&a.id).and_then(|al| al.cover_art.as_deref()), 4.0);
-            let sub = match a.year {
-                Some(y) => format!("{} · {y}", a.artist),
-                None => a.artist.clone(),
-            };
-            (a.title.as_str(), sub)
-        }
-        Hit::Track(i) => {
-            let tr = &index.tracks[i];
-            hits.art.paint(ui, tile, data.album(&tr.album_id).and_then(|al| al.cover_art.as_deref()), 4.0);
-            (tr.title.as_str(), format!("Song · {} · {}", tr.artist, tr.album))
-        }
-    };
-    let x = tile.right() + 12.0;
-    let hint = crate::keys::shown("⏎ open    ⌘⏎ play");
-    let hint_w = if selected { ui.painter().layout_no_wrap(hint.to_string(), FontId::proportional(11.0), t.muted).size().x + 16.0 } else { 0.0 };
-    let w = inner.right() - x - hint_w - 12.0;
-    let g = elide(ui, main, FontId::proportional(13.0), t.text, w);
-    ui.painter().galley(pos2(x, inner.center().y - g.size().y), g, t.text);
-    let g = elide(ui, &sub, FontId::proportional(12.0), t.muted, w);
-    ui.painter().galley(pos2(x, inner.center().y + 1.0), g, t.muted);
-    if selected {
-        ui.painter().text(pos2(inner.right() - 12.0, inner.center().y), egui::Align2::RIGHT_CENTER, hint, FontId::proportional(11.0), t.muted);
-    }
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, main));
-    resp
-}
 
-/// The strip of key hints along the bottom.
-fn hints_bar(ui: &mut egui::Ui, t: &Tokens) {
-    let (bar, _) = ui.allocate_exact_size(vec2(WIDTH, HINTS_H), Sense::hover());
-    ui.painter().rect_filled(bar, egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 }, t.sidebar);
-    ui.painter().hline(bar.x_range(), bar.top(), egui::Stroke::new(1.0, t.hairline));
-    ui.painter().text(
-        pos2(bar.left() + 18.0, bar.center().y),
-        egui::Align2::LEFT_CENTER,
-        crate::keys::shown("⏎ open    ⌘⏎ play    ⌥⏎ play next    ⇧⏎ add to queue    ⇧⌘D download"),
-        FontId::proportional(11.0),
-        t.muted,
-    );
+    /// Top hit, Artists, Albums, Songs.
+    fn groups(&self) -> Vec<(&'static str, usize)> {
+        let r = &*self.results;
+        vec![("Top hit", usize::from(r.top.is_some())), ("Artists", r.artists.len()), ("Albums", r.albums.len()), ("Songs", r.tracks.len())]
+    }
+
+    /// A picture (a person, or the cover), and its name over what it is.
+    fn row(&mut self, ui: &mut egui::Ui, tile: Rect, n: usize) -> PaletteRow {
+        let keys = "⏎ open    ⌘⏎ play";
+        let (index, data) = (&*self.index, self.data);
+        let Some(hit) = self.results.hit(n) else { return PaletteRow { title: String::new(), detail: String::new(), keys } };
+        let (title, detail) = match hit {
+            Hit::Artist(i) => {
+                let a = &index.artists[i];
+                kit::palette_icon_tile(ui, tile, Icon::Person);
+                (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
+            }
+            Hit::Album(i) => {
+                let a = &index.albums[i];
+                self.art.paint(ui, tile, data.album(&a.id).and_then(|al| al.cover_art.as_deref()), 4.0);
+                let sub = match a.year {
+                    Some(y) => format!("{} · {y}", a.artist),
+                    None => a.artist.clone(),
+                };
+                (a.title.clone(), sub)
+            }
+            Hit::Track(i) => {
+                let tr = &index.tracks[i];
+                self.art.paint(ui, tile, data.album(&tr.album_id).and_then(|al| al.cover_art.as_deref()), 4.0);
+                (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album))
+            }
+        };
+        PaletteRow { title, detail, keys }
+    }
 }

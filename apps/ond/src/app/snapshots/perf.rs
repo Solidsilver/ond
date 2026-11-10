@@ -137,7 +137,7 @@ fn perf() {
     {
         let app = app_mut(&mut h);
         if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
-            p.query = "blue part".into();
+            p.state.query = "blue part".into();
             p.refresh(index);
         }
     }

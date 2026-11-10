@@ -275,7 +275,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     {
         let app = app_mut(h);
         if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
-            p.query = "bob".into();
+            p.state.query = "bob".into();
             p.refresh(index);
         }
     }

@@ -32,13 +32,7 @@ impl OndApp {
         ui.spacing_mut().item_spacing.y = 1.0;
 
         // A search field that opens the palette (the palette is the real search).
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-        ui.painter().rect_filled(rect, 6.0, if resp.hovered() { t.selected } else { t.field });
-        icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(11.0, 11.0)), Icon::Search, t.muted);
-        ui.painter().text(pos2(rect.left() + 26.0, rect.center().y), egui::Align2::LEFT_CENTER, "Search", FontId::proportional(13.0), t.muted);
-        ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, crate::keys::shown("⌘K"), FontId::proportional(11.0), t.muted);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::keys::shown("Search (⌘K)")));
-        if resp.clicked() {
+        if shell::kit::search_field(ui, "⌘K").clicked() {
             self.actions.push(Action::OpenPalette);
         }
         ui.add_space(18.0);

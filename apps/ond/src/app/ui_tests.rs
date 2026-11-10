@@ -711,7 +711,7 @@ fn every_view_names_its_controls() {
     {
         let app = app_mut(&mut h);
         if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
-            p.query = "bob".into();
+            p.state.query = "bob".into();
             p.refresh(index);
         }
     }
