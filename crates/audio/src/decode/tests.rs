@@ -1,6 +1,7 @@
 use super::*;
 use crate::PlaybackMode;
 use crate::resample::StreamResampler;
+use testkit::{Deadline, RangeServer, Serve, slack};
 
 const RATE: u32 = 44_100;
 
@@ -118,7 +119,7 @@ impl Device {
 
 /// Waits for the session's first ring; returns it with every other message seen.
 fn wait_ring(s: &Session) -> (RingInput, Vec<DecoderMsg>) {
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     let mut seen = Vec::new();
     loop {
         match s.try_msg() {
@@ -126,7 +127,7 @@ fn wait_ring(s: &Session) -> (RingInput, Vec<DecoderMsg>) {
             Some(DecoderMsg::Error { message, .. }) => panic!("decoder error: {message}"),
             Some(m) => seen.push(m),
             None => {
-                assert!(Instant::now() < deadline, "decoder never produced a ring");
+                assert!(!deadline.passed(), "decoder never produced a ring");
                 thread::sleep(Duration::from_millis(1));
             }
         }
@@ -134,9 +135,9 @@ fn wait_ring(s: &Session) -> (RingInput, Vec<DecoderMsg>) {
 }
 
 fn wait_seeked(s: &Session, dev: &mut Device) -> f64 {
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "no Seeked message");
+        assert!(!deadline.passed(), "no Seeked message");
         dev.tick(64);
         match s.try_msg() {
             Some(DecoderMsg::Seeked { position_secs, .. }) => return position_secs,
@@ -147,9 +148,9 @@ fn wait_seeked(s: &Session, dev: &mut Device) -> f64 {
 }
 
 fn play_to_end(s: &Session, dev: &mut Device) {
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "playback stalled");
+        assert!(!deadline.passed(), "playback stalled");
         let (drained, _) = dev.tick(512);
         if drained && s.finished() {
             return;
@@ -187,9 +188,9 @@ fn gapless_two_tracks_share_one_ring_and_switch_on_the_exact_sample() {
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
 
     let mut boundary_at = None;
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "playback stalled");
+        assert!(!deadline.passed(), "playback stalled");
         let (drained, _) = dev.tick(333);
         if boundary_at.is_none() && status.track_seq.load(Ordering::Relaxed) == 1 {
             // frames_played now counts B's frames in this callback only.
@@ -229,9 +230,9 @@ fn format_change_starts_a_new_ring() {
     s.set_next(0, Some(b));
     let (input, _) = wait_ring(&s);
     let mut dev = Device { input, status, played: Vec::new() };
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     let second = loop {
-        assert!(Instant::now() < deadline, "no second ring");
+        assert!(!deadline.passed(), "no second ring");
         dev.tick(512);
         if let Some(DecoderMsg::Ring { format, first_seq, .. }) = s.try_msg() {
             break (format.sample_rate, first_seq);
@@ -261,17 +262,17 @@ fn a_cut_quiet_tail_at_a_format_change_carries_its_savings_to_the_next_ring() {
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     let held = dev.input.hold_timeline().expect("a timeline");
     // Play the first ring out, freeing every slot, with nothing published.
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     while !dev.tick(512).0 {
-        assert!(Instant::now() < deadline, "the first ring never drained");
+        assert!(!deadline.passed(), "the first ring never drained");
         thread::sleep(Duration::from_micros(200));
     }
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     let input = loop {
         if let Some(DecoderMsg::Ring { input, .. }) = s.try_msg() {
             break input;
         }
-        assert!(Instant::now() < deadline, "no second ring");
+        assert!(!deadline.passed(), "no second ring");
         thread::sleep(Duration::from_millis(1));
     };
     assert_eq!(status.silence_saved_secs(), 0.0, "the old ring's endpoint is still held");
@@ -342,9 +343,9 @@ fn resampled(from: u32, to: u32, samples: &[i16]) -> Vec<f32> {
 fn play_f32(s: &Session, mut input: RingInput, status: &Status, rate: u32) -> (Vec<f32>, Option<u64>) {
     let (mut played, mut frames, mut boundary) = (Vec::new(), 0u64, None);
     let mut buf = vec![0.0f32; 2 * 401];
-    let deadline = Instant::now() + slack(Duration::from_secs(20));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "playback stalled");
+        assert!(!deadline.passed(), "playback stalled");
         let seq = status.track_seq.load(Ordering::Relaxed);
         let drained = input.fill(&mut buf, 2, rate, status);
         let fresh: Vec<f32> = buf.iter().copied().filter(|v| *v != 0.0).collect();
@@ -397,9 +398,9 @@ fn seek_with_resampling_restarts_cleanly_at_the_target() {
     }
     let hold = input.ctl.hold();
     s.seek(0, Duration::from_millis(1_500), hold);
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "no Seeked");
+        assert!(!deadline.passed(), "no Seeked");
         input.fill(&mut buf, 2, 48_000, &status);
         if let Some(DecoderMsg::Seeked { position_secs, .. }) = s.try_msg() {
             assert_eq!(position_secs, 1.5);
@@ -416,65 +417,15 @@ fn seek_with_resampling_restarts_cleanly_at_the_target() {
     assert!(rest == expected[skipped..], "post-seek audio is the resampled tail");
 }
 
-/// Serves `body` over HTTP with Range support, 16 KB every 30 ms.
-pub(crate) fn slow_server(body: Vec<u8>) -> String {
-    slow_server_until(body, None)
+/// A server's pace for a download that is still running when a test looks:
+/// 16 KB every 30 ms, about 3× real time for 44.1 kHz stereo WAV.
+pub(crate) fn slowly() -> Serve {
+    Serve::trickle(Duration::from_millis(30))
 }
 
-/// [`slow_server`], holding the body at `gate.0` bytes until `gate.1` is set,
-/// then sending the rest at once: a download that is provably still running,
-/// without waiting on a trickle.
-pub(crate) fn slow_server_until(body: Vec<u8>, gate: Option<(usize, Arc<AtomicBool>)>) -> String {
-    use std::io::{BufRead, BufReader, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/rest/stream", listener.local_addr().unwrap());
-    let body = Arc::new(body);
-    thread::spawn(move || {
-        for conn in listener.incoming().flatten() {
-            let (body, gate) = (body.clone(), gate.clone());
-            thread::spawn(move || {
-                let mut reader = BufReader::new(conn.try_clone().unwrap());
-                let mut start = 0usize;
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                        break;
-                    }
-                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
-                        start = v.trim().trim_end_matches('-').parse().unwrap_or(0);
-                    }
-                }
-                let len = body.len();
-                let mut out = conn;
-                let head = format!(
-                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{len}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    len - 1,
-                    len - start
-                );
-                if out.write_all(head.as_bytes()).is_err() {
-                    return;
-                }
-                let held = gate.as_ref().map(|(until, _)| (*until).min(len)).unwrap_or(len).max(start);
-                for chunk in body[start..held].chunks(16 * 1024) {
-                    if out.write_all(chunk).is_err() {
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(30));
-                }
-                if let Some((until, open)) = &gate {
-                    if start < *until {
-                        while !open.load(Ordering::Relaxed) {
-                            thread::sleep(Duration::from_millis(1));
-                        }
-                    }
-                }
-                if out.write_all(&body[held..]).is_err() {
-                    return;
-                }
-            });
-        }
-    });
-    url
+/// `body` over HTTP at [`slowly`]'s pace.
+pub(crate) fn slow_server(body: Vec<u8>) -> String {
+    RangeServer::start(body, slowly()).url()
 }
 
 #[test]
@@ -494,22 +445,21 @@ fn seek_beyond_the_download_holds_silence_then_buffers_before_playing() {
     let target = ((crate::output::PREBUFFER_SECS * RATE as f32) as usize * 2).min(capacity / 2);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     // Play a little of the start (it buffers first, like any track start).
-    let deadline = Instant::now() + slack(Duration::from_secs(20));
+    let deadline = Deadline::new();
     while dev.played.len() < 4_000 {
-        assert!(Instant::now() < deadline, "never started");
+        assert!(!deadline.passed(), "never started");
         dev.tick(256);
         thread::sleep(Duration::from_millis(1));
     }
 
-    let t = Instant::now();
     let hold = dev.input.ctl.hold();
     s.seek(0, Duration::from_secs(3), hold);
     let before = dev.played.len();
     // From here on, nothing from before the target may play: the stale ring is cut at once.
     let mut resumed_with = None;
-    let deadline = t + Duration::from_secs(20);
+    let deadline = Deadline::new();
     while !(s.finished() && dev.input.samples.is_empty() && dev.input.input_done.load(Ordering::Acquire)) {
-        assert!(Instant::now() < deadline, "stalled after seek: {:?}", s.try_msg());
+        assert!(!deadline.passed(), "stalled after seek: {:?}", s.try_msg());
         let queued = dev.input.samples.slots();
         let done = dev.input.input_done.load(Ordering::Acquire);
         let (_, wrote) = dev.tick(256);
@@ -559,9 +509,9 @@ fn surround_is_downmixed_to_stereo() {
     assert_eq!(output.channels, 2);
     assert_eq!(*channels, ChannelChange::Downmix { from: 6, to: 2 });
     let mut played = Vec::new();
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     while played.len() < frames * 2 {
-        assert!(Instant::now() < deadline, "playback stalled");
+        assert!(!deadline.passed(), "playback stalled");
         let mut buf = vec![0.0f32; 512];
         input.fill(&mut buf, 2, RATE, &status);
         played.extend(buf.as_chunks::<2>().0.iter().filter(|f| f[0] != 0.0).flatten().copied());
@@ -591,9 +541,9 @@ fn each_track_gets_its_gain_before_its_first_sample() {
     s.set_next(0, Some(b));
     let (input, mut seen) = wait_ring(&s);
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "playback stalled");
+        assert!(!deadline.passed(), "playback stalled");
         seen.extend(std::iter::from_fn(|| s.try_msg()));
         if dev.tick(512).0 && s.finished() {
             break;
@@ -646,17 +596,11 @@ pub(crate) fn published(track_id: &str) {
 /// Waits until track `id` (a `late…` one) has reached a write to `Status`
 /// (`over` false), or is past it (`over` true).
 pub(crate) fn wait_late(id: &str, over: bool) {
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    let deadline = Deadline::new();
     while !LATE.lock().unwrap().iter().any(|(t, o)| t == id && *o == over) {
-        assert!(Instant::now() < deadline, "{id} never got to its write");
+        assert!(!deadline.passed(), "{id} never got to its write");
         thread::sleep(Duration::from_millis(2));
     }
-}
-
-/// Time budgets in these tests are tight on purpose (they guard real
-/// performance), but shared CI runners are slower and noisier: allow 10× there.
-pub(crate) fn slack(d: std::time::Duration) -> std::time::Duration {
-    if std::env::var_os("CI").is_some() { d * 10 } else { d }
 }
 
 #[test]
@@ -700,9 +644,9 @@ fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
     let s = Session::start(srcs[0].clone(), None, config(30.0), status.clone(), None, None, Arc::default());
     // Names the track after `k` once the decoder is on `k`.
     let name_next = |k: usize| {
-        let deadline = Instant::now() + slack(Duration::from_secs(5));
+        let deadline = Deadline::new();
         while !(s.decoding() == k as u64 && s.set_next(k as u64, Some(srcs[k + 1].clone()))) {
-            assert!(Instant::now() < deadline, "the decoder never reached track {k}");
+            assert!(!deadline.passed(), "the decoder never reached track {k}");
             thread::sleep(Duration::from_millis(1));
         }
     };
@@ -712,9 +656,9 @@ fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
     for k in 0..=MARKER_CAP {
         name_next(k);
     }
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     while s.decoding() != MARKER_CAP as u64 + 1 {
-        assert!(Instant::now() < deadline, "never took track {}", MARKER_CAP + 1);
+        assert!(!deadline.passed(), "never took track {}", MARKER_CAP + 1);
         thread::sleep(Duration::from_millis(1));
     }
     thread::sleep(Duration::from_millis(100));
@@ -727,9 +671,9 @@ fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
     // Playing frees the markers; the rest of the queue follows.
     let mut dev = Device { input, status: status.clone(), played: Vec::new() };
     let mut k = MARKER_CAP + 1;
-    let deadline = Instant::now() + slack(Duration::from_secs(20));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "playback stalled");
+        assert!(!deadline.passed(), "playback stalled");
         if k < N - 1 && s.decoding() == k as u64 && s.set_next(k as u64, Some(srcs[k + 1].clone())) {
             k += 1;
         }
@@ -800,9 +744,9 @@ fn join_halves(suffix: &str, frames: usize) {
     let (mut input, _) = wait_ring(&s);
     // Read the ring directly: every sample the decoder queued, silence included.
     let (mut out, mut boundary) = (Vec::new(), None);
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    let deadline = Deadline::new();
     loop {
-        assert!(Instant::now() < deadline, "decoding stalled");
+        assert!(!deadline.passed(), "decoding stalled");
         if let Ok(m) = input.markers.pop() {
             boundary = Some(m.at as usize);
         }

@@ -1,10 +1,11 @@
 //! Engine-level tests with a fake device that runs the real callback on a thread.
 
 use super::*;
-use crate::decode::tests::{file_source, pcm, slack, wait_late};
+use crate::decode::tests::{file_source, pcm, wait_late};
 use crate::dither::Tpdf;
 use std::sync::Mutex;
 use std::time::Instant;
+use testkit::{Deadline, RangeServer, Serve, WAIT, slack, wait_until};
 
 /// Plays rings at roughly 11× real time and records what it played.
 struct FakeBackend {
@@ -229,24 +230,24 @@ fn caps(max_bits: Option<u32>, max_rate: u32) -> DeviceCaps {
 
 /// Waits until the engine's decoder is on track `seq` of its session or past it.
 fn wait_decoding(engine: &EngineHandle, seq: u64) {
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    let deadline = Deadline::new();
     loop {
         let (tx, rx) = crossbeam_channel::bounded(1);
         engine.send(Command::Decoding(tx));
-        let at = rx.recv_timeout(slack(Duration::from_secs(5))).expect("the engine answers");
+        let at = rx.recv_timeout(slack(WAIT)).expect("the engine answers");
         if at.is_some_and(|at| at >= seq) {
             return;
         }
-        assert!(Instant::now() < deadline, "the decoder never reached track {seq} (on {at:?})");
+        assert!(!deadline.passed(), "the decoder never reached track {seq} (on {at:?})");
         thread::sleep(Duration::from_millis(2));
     }
 }
 
 fn events_until(engine: &EngineHandle, mut stop: impl FnMut(&Event) -> bool) -> Vec<Event> {
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
+    let deadline = Deadline::new();
     let mut seen = Vec::new();
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.left();
         let ev = engine.events.recv_timeout(left).unwrap_or_else(|_| panic!("timed out; saw {seen:?}"));
         let done = stop(&ev);
         seen.push(ev);
@@ -304,11 +305,7 @@ fn a_decoder_panic_is_an_error_not_a_hang() {
     let Some(Event::Error { message, .. }) = seen.last() else { unreachable!() };
     assert!(message.contains("a decoder blew up"), "{message}");
     // Stopped, not stuck loading or buffering.
-    let deadline = Instant::now() + slack(Duration::from_secs(2));
-    while engine.status.state() != PlayState::Stopped {
-        assert!(Instant::now() < deadline, "still {:?}", engine.status.state());
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_until("the engine to stop", || engine.status.state() == PlayState::Stopped);
     engine.send(Command::Shutdown);
 }
 
@@ -413,11 +410,7 @@ fn a_bit_perfect_toggle_restarts_the_track_without_letting_go_of_the_device() {
     assert!(reopen_closes.load(Ordering::Relaxed) > before.1, "it closes for the reopen instead");
 
     engine.send(Command::Stop);
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
-    while closes.load(Ordering::Relaxed) == before.0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(closes.load(Ordering::Relaxed) > before.0, "stopping does let go");
+    wait_until("stopping to let go of the device", || closes.load(Ordering::Relaxed) > before.0);
     engine.send(Command::Shutdown);
 }
 
@@ -563,11 +556,7 @@ fn a_lost_device_falls_back_in_normal_mode_and_its_return_is_offered() {
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
     // Well into the track before unplugging (wait on progress, not a fixed
     // time: CI runners are slower than a desk Mac).
-    let deadline = Instant::now() + slack(Duration::from_secs(20));
-    while engine.status.position_secs() < 1.0 {
-        assert!(Instant::now() < deadline, "never got going");
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until("playback to get going", || engine.status.position_secs() >= 1.0);
 
     // Unplugged mid-track: Normal mode on the default, same track, from about where it was.
     devices.lock().unwrap().retain(|d| d.uid != "dac");
@@ -648,11 +637,7 @@ fn playback_follows_the_default_device_when_it_changes_mid_track() {
     let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
     engine.send(Command::Play(file_source(&dir, "a", &a)));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    let deadline = Instant::now() + slack(Duration::from_secs(20));
-    while engine.status.position_secs() < 1.0 {
-        assert!(Instant::now() < deadline, "never got going");
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until("playback to get going", || engine.status.position_secs() >= 1.0);
     // Headphones plugged in: they become the system default.
     devices.lock().unwrap().reverse();
     events.lock().unwrap().push(DeviceEvent::DefaultChanged);
@@ -753,10 +738,7 @@ fn a_seek_after_the_decoder_has_finished_still_lands_and_ends() {
     let engine = spawn(config, Box::new(backend), None);
     engine.send(Command::Play(file_source(&dir, "a", &a)));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
-    while engine.status.state() == PlayState::Loading && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until("the track to load", || engine.status.state() != PlayState::Loading);
     thread::sleep(Duration::from_millis(150));
     engine.send(Command::Seek(Duration::from_secs(12)));
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
@@ -1015,9 +997,9 @@ fn a_seek_storm_settles_on_the_last_target_and_plays_on() {
     engine.send(Command::Seek(Duration::from_secs(20)));
     events_until(&engine, |e| matches!(e, Event::Seeked { position_secs, .. } if (*position_secs - 20.0).abs() < 0.1));
     // Not left holding: playback carries on from there.
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     while engine.status.position_secs() < 20.5 {
-        assert!(Instant::now() < deadline, "stuck at {:.2} s, {:?}", engine.status.position_secs(), engine.status.state());
+        assert!(!deadline.passed(), "stuck at {:.2} s, {:?}", engine.status.position_secs(), engine.status.state());
         thread::sleep(Duration::from_millis(10));
     }
     engine.send(Command::Shutdown);
@@ -1033,18 +1015,14 @@ fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
     let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
     engine.send(Command::Play(src));
     events_until(&engine, |e| matches!(e, Event::TrackStarted { .. }));
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
-    while engine.status.position_secs() < 2.0 {
-        assert!(Instant::now() < deadline, "never got going");
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until("playback to get going", || engine.status.position_secs() >= 2.0);
     // Backwards on a forward-only source.
     engine.send(Command::Seek(Duration::ZERO));
     let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
     assert!(matches!(seen.last(), Some(Event::Error { track_id: Some(id), message }) if id == "a" && message.contains("seek")), "{seen:?}");
-    let deadline = Instant::now() + slack(Duration::from_secs(2));
+    let deadline = Deadline::new();
     while engine.status.state() != PlayState::Stopped {
-        assert!(Instant::now() < deadline, "still {:?}", engine.status.state());
+        assert!(!deadline.passed(), "still {:?}", engine.status.state());
         thread::sleep(Duration::from_millis(10));
     }
     engine.send(Command::Shutdown);
@@ -1401,11 +1379,7 @@ fn a_seek_superseded_while_the_decoder_finishes_the_one_before_is_not_left_holdi
     stalled.store(true, Ordering::Relaxed);
     engine.send(Command::Seek(Duration::from_secs(100)));
     let ctl = ring_ctl.lock().unwrap().clone().expect("a ring is open");
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
-    while !ctl.flush_pending() {
-        assert!(Instant::now() < deadline, "the decoder never took the first seek");
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("the decoder to take the first seek", || ctl.flush_pending());
     engine.send(Command::Seek(Duration::from_secs(1)));
     // Handled in order: once this is answered, the second seek is on hold.
     engine.send(Command::RefreshDevices);
@@ -1472,15 +1446,15 @@ fn net_source(id: &str, rate: u32, samples: &[i16]) -> TrackSource {
 
 /// Waits until the cache has started on `src`, and returns what it has.
 fn wait_fetching(cache: &StreamCache, src: &TrackSource, mut meanwhile: impl FnMut()) -> streamcache::Progress {
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
-    loop {
-        if let Some(p) = cache.progress(&src.cache_key()) {
-            return p;
+    let mut got = None;
+    wait_until(&format!("{} to be fetched", src.id), || {
+        got = cache.progress(&src.cache_key());
+        if got.is_none() {
+            meanwhile();
         }
-        meanwhile();
-        assert!(Instant::now() < deadline, "{} was never fetched", src.id);
-        thread::sleep(Duration::from_millis(5));
-    }
+        got.is_some()
+    });
+    got.unwrap()
 }
 
 #[test]
@@ -1490,39 +1464,26 @@ fn a_long_tracks_next_is_prefetched_once_its_own_download_completes() {
     // only the finished download starts the next one. The server holds its last
     // quarter until the test has seen the download running.
     let samples = pcm(2 * 8_000 * 32, 32);
-    let gate = Arc::new(AtomicBool::new(false));
-    let url = crate::decode::tests::slow_server_until(crate::decode::tests::wav(8_000, 2, &samples), Some((16 * 1024, gate.clone())));
-    let a = TrackSource { id: "a".into(), url, suffix: Some("wav".into()), ..Default::default() };
+    let wav = crate::decode::tests::wav(8_000, 2, &samples);
+    let server = RangeServer::start(wav, Serve { gate_after: Some(16 * 1024), ..crate::decode::tests::slowly() });
+    let a = TrackSource { id: "a".into(), url: server.url(), suffix: Some("wav".into()), ..Default::default() };
     let (b, c) = (net_source("b", 8_000, &pcm(2 * 8_000, 33)), net_source("c", 8_000, &pcm(2 * 8_000, 34)));
     let engine = spawn(EngineConfig { mode: PlaybackMode::BitPerfect, buffer_secs: 0.5 }, Box::new(FakeBackend::new(caps(None, 192_000))), Some(cache.clone()));
     play_paused(&engine, a);
     engine.send(Command::SetNext(Some(b.clone())));
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
-    while !(engine.status.needs_network() && engine.status.downloading() && engine.status.fetched_fraction().is_some_and(|f| f < 1.0)) {
-        assert!(Instant::now() < deadline, "the current track's download was never reported while it ran");
-        thread::sleep(Duration::from_millis(2));
-    }
+    wait_until("the current track's download to be reported while it runs", || {
+        engine.status.needs_network() && engine.status.downloading() && engine.status.fetched_fraction().is_some_and(|f| f < 1.0)
+    });
     assert!(cache.progress(&b.cache_key()).is_none(), "the next track waited for the current one");
-    gate.store(true, Ordering::Relaxed);
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
-    while !wait_fetching(&cache, &b, || {}).complete {
-        assert!(Instant::now() < deadline, "b never finished");
-        thread::sleep(Duration::from_millis(5));
-    }
+    server.open_gate();
+    wait_until("b to finish downloading", || wait_fetching(&cache, &b, || {}).complete);
     assert_eq!(engine.status.fetched_fraction(), Some(1.0), "the current track had finished downloading");
 
     // The next track changes: the new one is fetched in its place.
     engine.send(Command::SetNext(Some(c.clone())));
-    let deadline = Instant::now() + slack(Duration::from_secs(10));
-    while !wait_fetching(&cache, &c, || {}).complete {
-        assert!(Instant::now() < deadline, "c never finished");
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until("c to finish downloading", || wait_fetching(&cache, &c, || {}).complete);
     // A paused engine looks at the network a few times a second, not every tick.
-    while engine.status.needs_network() {
-        assert!(Instant::now() < deadline, "still using the network once everything is down");
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until("the network to go quiet once everything is down", || !engine.status.needs_network());
     engine.send(Command::Shutdown);
 }
 
@@ -1631,9 +1592,9 @@ fn source_time_after_starting_and_seeking_is_independent_of_speed() {
 }
 
 fn wait_source_position(engine: &EngineHandle, at: f64) {
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     while engine.status.source_position_secs() < at {
-        assert!(Instant::now() < deadline, "never played to {at}: {:?}", engine.status);
+        assert!(!deadline.passed(), "never played to {at}: {:?}", engine.status);
         thread::sleep(Duration::from_millis(1));
     }
 }
@@ -1802,20 +1763,16 @@ fn speed_changes_during_a_seek_keep_the_pending_source_target() {
     stalled.store(true, Ordering::Relaxed);
     engine.send(Command::Seek(Duration::from_secs_f64(4.25)));
     let ctl = ring_ctl.lock().unwrap().clone().expect("open ring");
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
-    while !ctl.flush_pending() {
-        assert!(Instant::now() < deadline, "the decoder never took the seek");
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("the decoder to take the seek", || ctl.flush_pending());
     engine.send(Command::SetSpeed(3.0));
     engine.send(Command::RefreshDevices);
     events_until(&engine, |e| matches!(e, Event::Devices { .. }));
     stalled.store(false, Ordering::Relaxed);
     // Both seeks report the same target. Wait for the output-equivalent
     // position to show that the request carrying the new speed also landed.
-    let deadline = Instant::now() + slack(Duration::from_secs(5));
+    let deadline = Deadline::new();
     while (engine.status.position_secs() - 4.25 / 3.0).abs() > 1.0 / 44_100.0 {
-        assert!(Instant::now() < deadline, "the speed change never landed: {:?}", engine.status);
+        assert!(!deadline.passed(), "the speed change never landed: {:?}", engine.status);
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(engine.status.source_position_secs(), 4.25);

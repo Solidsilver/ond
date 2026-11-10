@@ -518,6 +518,7 @@ dependencies = [
  "symphonia",
  "symphonia-adapter-libopus",
  "tempfile",
+ "testkit",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
