@@ -111,7 +111,7 @@ pub fn initials(name: &str) -> String {
     if let Some(c) = letters.next() {
         out.extend(c.to_uppercase());
     }
-    match words.last().and_then(|l| l.chars().find(|c| c.is_alphanumeric())) {
+    match words.next_back().and_then(|l| l.chars().find(|c| c.is_alphanumeric())) {
         Some(c) => out.extend(c.to_uppercase()),
         None => out.extend(letters.next().into_iter().flat_map(char::to_lowercase)),
     }
@@ -168,7 +168,7 @@ pub fn generated_disc(ui: &Ui, rect: Rect, name: &str, seed: &str) {
     let r = rect.width().min(rect.height()) / 2.0;
     ui.painter().circle_filled(rect.center(), r, g.fill);
     if r * 2.0 >= INITIALS_FROM {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, initials(name), FontId::new((r * 0.72).min(52.0).round(), semibold()), g.ink);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, initials(name), FontId::new((r * 0.56).min(40.0).round(), semibold()), g.ink);
     }
 }
 
