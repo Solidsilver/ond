@@ -189,12 +189,14 @@ impl OndApp {
             Route::Artist { id, .. } => id.as_deref(),
             _ => None,
         };
-        // Only artists the server has a photo id for get one (or their initial).
-        let photo = self.ui.prefs.artist_photos.then(|| self.search.index.as_ref()?.artist(id, name)?.cover.clone()).flatten();
+        // Their photo, else their albums' covers or initials, as in Artists.
+        let entry =
+            self.ui.prefs.artist_photos.then(|| self.search.index.as_ref()?.artist(id, name).map(|a| (a.cover.clone(), a.album_covers.clone()))).flatten();
         ui.horizontal(|ui| {
-            if let Some(cover) = &photo {
+            if self.ui.prefs.artist_photos {
+                let (photo, albums) = entry.unwrap_or_default();
                 let (rect, _) = ui.allocate_exact_size(vec2(ARTIST_PHOTO, ARTIST_PHOTO), Sense::hover());
-                super::artists::avatar(&mut self.art, ui, &t, rect, Some(cover), name);
+                super::artists::avatar(&mut self.art, ui, rect, photo.as_deref(), name, &albums);
                 ui.add_space(14.0);
             }
             ui.vertical(|ui| self.artist_header(ui, route, name, sub, !own.is_empty()));
@@ -502,7 +504,7 @@ impl ViewCtx<'_> {
         let pin = self.album_pin(id);
         if ui.is_rect_visible(rect) {
             let art = Rect::from_min_size(rect.min, vec2(tile, tile));
-            self.art.paint(ui, art, album.cover_art.as_deref(), 6.0);
+            self.art.paint_as(ui, art, album.cover_art.as_deref(), 6.0, &crate::art::album_cover(album));
             // Only albums kept offline carry a mark; nothing otherwise.
             let mark = Mark::of_pin(pin);
             let mark_w = if mark.is_some() { 16.0 } else { 0.0 };

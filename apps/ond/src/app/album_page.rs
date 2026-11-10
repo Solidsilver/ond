@@ -215,7 +215,7 @@ impl ViewCtx<'_> {
         let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
         ui.with_layout(layout, |ui| {
             let (art, _) = ui.allocate_exact_size(vec2(art_side, art_side), Sense::hover());
-            self.art.paint(ui, art, page.album.cover_art.as_deref(), 6.0);
+            self.art.paint_as(ui, art, page.album.cover_art.as_deref(), 6.0, &crate::art::album_cover(page.album));
             ui.add_space(if stacked { 16.0 } else { 20.0 });
             // The text block sits on the artwork's bottom edge. Its height
             // (it wraps) is known after drawing, so use last frame's and

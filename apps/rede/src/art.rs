@@ -4,9 +4,11 @@
 //! Shaped like Ond's `art.rs`, at the size Rede needs: the same queue (the most
 //! recently asked for runs first, a scrolled-past download is dropped), the
 //! same disk cache (written whole, then renamed into place) and the same miss
-//! (a neutral tile of the same size, no layout shift, one repaint when the
-//! cover lands). Rede's books are one cover each, so there are no artist
-//! stand-ins and no palettes.
+//! (a neutral tile of the same size while it loads, no layout shift, one
+//! repaint when the cover lands). A book with no cover at all gets a
+//! generated one ([`shell::kit::generated_cover`]) with its title and author.
+//! Rede's books are one cover each, so there are no artist stand-ins and no
+//! palettes.
 //!
 //! Callers ask for art only while drawing something visible, so scrolled-away
 //! rows never cost a request. A cover comes through [`sources::Source::cover`],
@@ -16,7 +18,7 @@
 
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureOptions, Ui};
 use shell::art::{Lane, Lru, Queue, SIZES, bucket};
-use shell::icons::Icon;
+use shell::kit::Generated;
 use sources::Source;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -28,11 +30,6 @@ use std::time::SystemTime;
 const TEXTURE_BUDGET: usize = 96 * 1024 * 1024;
 /// Disk budget for downloaded covers.
 const DISK_BUDGET: u64 = 256 * 1024 * 1024;
-/// The headphones mark on a tile without a cover: its share of the tile's
-/// side, and how much of the muted ink it takes, so it sits back like a
-/// watermark rather than reading as an icon to click.
-const PLACEHOLDER_MARK: f32 = 0.2;
-const PLACEHOLDER_INK: f32 = 0.35;
 /// Textures uploaded per frame at most: a screenful of covers arriving at once
 /// spreads over a few frames instead of stalling one.
 const UPLOADS_PER_FRAME: usize = 8;
@@ -232,37 +229,53 @@ impl Art {
         }
     }
 
-    /// Fits the whole cover on a quiet backdrop. While there's no cover (none
-    /// on the server, or still loading) the tile carries a faint headphones
-    /// mark instead: every cover is drawn beside or above the book's title,
-    /// so the tile doesn't say it a second time. Both use the same square.
-    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>) {
+    /// Fits the whole cover on a quiet backdrop. While it loads the tile is
+    /// only the backdrop; a book with no cover (none on the server, or none
+    /// to be had offline) gets `stand_in`, a generated cover with its title,
+    /// so a shelf of them still tells the books apart. Both use the same
+    /// square, so nothing shifts when the art lands.
+    pub fn paint(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>, stand_in: &Generated) {
         let backdrop = shell::theme::Tokens::of(ui).placeholder;
-        self.paint_on(ui, rect, cover, radius, backdrop);
+        self.draw(ui, rect, cover, radius.into(), backdrop, stand_in, false);
     }
 
     /// The same on a backdrop of the caller's choosing: Mini fills its whole
     /// window with the cover, and a light band beside a tall cover would
-    /// glare there in either theme.
-    pub fn paint_on(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>, backdrop: Color32) {
-        let radius = radius.into();
-        let t = shell::theme::Tokens::of(ui);
+    /// glare there in either theme. A book without a cover fills it with its
+    /// generated ground alone: Mini's controls sit over the cover and its
+    /// band already names the book.
+    pub fn paint_on(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: impl Into<CornerRadius>, backdrop: Color32, stand_in: &Generated) {
+        self.draw(ui, rect, cover, radius.into(), backdrop, stand_in, true);
+    }
+
+    /// `bare`: a book without a cover gets only its generated ground, no
+    /// title.
+    #[allow(clippy::too_many_arguments)]
+    fn draw(&mut self, ui: &Ui, rect: Rect, cover: Option<&str>, radius: CornerRadius, backdrop: Color32, stand_in: &Generated, bare: bool) {
+        let points = rect.width().max(rect.height());
+        let texture = cover.and_then(|c| self.texture(c, points));
         let painter = ui.painter();
-        painter.rect_filled(rect, radius, backdrop);
-        match cover.and_then(|c| self.texture(c, rect.width().max(rect.height()))) {
+        match texture {
             Some(texture) => {
+                painter.rect_filled(rect, radius, backdrop);
                 let size = texture.size_vec2();
                 let scale = (rect.width() / size.x).min(rect.height() / size.y);
                 let fitted = Rect::from_center_size(rect.center(), size * scale);
                 let uv = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
                 painter.add(egui::epaint::RectShape::filled(fitted, radius, Color32::WHITE).with_texture(texture.id(), uv));
             }
-            None => {
-                let side = (rect.width().min(rect.height()) * PLACEHOLDER_MARK).clamp(12.0, 64.0);
-                let mark = Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
-                shell::icons::paint(painter, mark, Icon::Headphones, t.muted.gamma_multiply(PLACEHOLDER_INK));
+            None if cover.is_some_and(|c| !self.is_missing(c, points)) => {
+                painter.rect_filled(rect, radius, backdrop);
             }
+            None if !bare => shell::kit::generated_cover(ui, rect, radius, stand_in),
+            None => shell::kit::generated_ground(ui, rect, radius, stand_in.seed),
         }
+    }
+
+    /// Whether `cover` at `points` wide is known not to be had.
+    fn is_missing(&mut self, cover: &str, points: f32) -> bool {
+        let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
+        self.missing.contains(&key)
     }
 
     /// Fixtures know their missing covers already; disk work would race the
@@ -341,7 +354,7 @@ mod tests {
         let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, 200.0));
         for (size, expected) in [([100, 200], egui::vec2(100.0, 200.0)), ([200, 100], egui::vec2(200.0, 100.0)), ([200, 200], rect.size())] {
             art.preload("book", ColorImage::filled(size, Color32::WHITE));
-            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, Some("book"), 5));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, Some("book"), 5, &STAND_IN));
             out.textures_delta.clear();
             let painted = out
                 .shapes
@@ -357,29 +370,41 @@ mod tests {
         }
     }
 
+    const STAND_IN: Generated = Generated { title: "The Dispossessed", byline: Some("Ursula K. Le Guin"), seed: "book-9" };
+
     #[test]
-    fn a_missing_or_loading_cover_is_a_quiet_tile_that_does_not_repeat_the_title() {
+    fn a_loading_cover_is_a_quiet_tile_and_a_missing_one_a_generated_cover() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut art = Art::new(rt.handle().clone(), ctx.clone(), dir.path().to_owned());
+        art.preload_missing("gone");
+        // The theme's fonts (its semibold) arrive a frame after they're installed.
+        shell::theme::install(&ctx, shell::theme::ThemePref::Light);
+        ctx.run_ui(egui::RawInput::default(), |_| ()).textures_delta.clear();
         let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(176.0, 176.0));
-        for cover in [None, Some("not-loaded")] {
-            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, cover, 6));
-            out.textures_delta.clear();
-            assert!(!out.shapes.iter().any(|s| matches!(s.shape, egui::Shape::Text(_))), "the caption names the book, not the tile");
-            let tile = out.shapes.iter().find_map(|s| match &s.shape {
-                egui::Shape::Rect(r) => Some(r.rect),
+        let texts = |out: &egui::FullOutput| out.shapes.iter().filter(|s| matches!(s.shape, egui::Shape::Text(_))).count();
+        let tile = |out: &egui::FullOutput| {
+            out.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Rect(r) => Some((r.rect, r.fill)),
                 _ => None,
-            });
-            assert_eq!(tile, Some(rect), "the tile keeps the cover's square, so nothing shifts when the art lands");
-            // The mark is drawn inside the tile, well clear of its edges.
-            let inside = out
-                .shapes
-                .iter()
-                .skip(1)
-                .all(|s| s.shape.visual_bounding_rect().is_negative() || rect.shrink(40.0).contains_rect(s.shape.visual_bounding_rect()));
-            assert!(inside, "the mark sits in the middle of the tile");
+            })
+        };
+        // Still loading: the backdrop alone, so the cover doesn't flash a
+        // made-up one first.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, Some("loading"), 6, &STAND_IN));
+        out.textures_delta.clear();
+        assert_eq!(texts(&out), 0);
+        let (loading, _) = tile(&out).unwrap();
+        assert_eq!(loading, rect, "the tile keeps the cover's square, so nothing shifts when the art lands");
+        // None to be had, or no cover at all: the title and author on a ground of the book's own.
+        for cover in [None, Some("gone")] {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| art.paint(ui, rect, cover, 6, &STAND_IN));
+            out.textures_delta.clear();
+            assert_eq!(texts(&out), 2, "the title and the author");
+            let (r, fill) = tile(&out).unwrap();
+            assert_eq!(r, rect);
+            assert_eq!(fill, shell::kit::covers::ground("book-9", ctx.global_style().visuals.dark_mode).fill);
         }
     }
 

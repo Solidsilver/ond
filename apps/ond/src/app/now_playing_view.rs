@@ -135,7 +135,7 @@ impl ViewCtx<'_> {
                 color: Color32::from_black_alpha(if dark { 110 } else { 46 }),
             };
             ui.painter().add(shadow.as_shape(art, 8));
-            this.art.paint(ui, art, cover, if side < 120.0 { 6.0 } else { 8.0 });
+            this.art.paint_as(ui, art, cover, if side < 120.0 { 6.0 } else { 8.0 }, &data.stand_in(track));
             // The live spectrum along the foot of the artwork (experimental).
             if side >= 120.0
                 && this.ui.prefs.experimental.spectrum

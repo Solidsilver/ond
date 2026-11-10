@@ -7,7 +7,6 @@
 use super::OfflineAction;
 use super::view_ctx::ViewCtx;
 use super::{Action, QueueAction};
-use crate::icons::Icon;
 use crate::nav::Route;
 use crate::search::{Hit, Results, SearchIndex};
 use egui::Rect;
@@ -176,12 +175,15 @@ impl kit::PaletteRows for Hits<'_> {
         let (title, detail) = match hit {
             Hit::Artist(i) => {
                 let a = &index.artists[i];
-                kit::palette_icon_tile(ui, tile, Icon::Person);
+                super::artists::avatar(self.art, ui, tile, a.cover.as_deref(), &a.name, &a.album_covers);
                 (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
             }
             Hit::Album(i) => {
                 let a = &index.albums[i];
-                self.art.paint(ui, tile, data.album(&a.id).and_then(|al| al.cover_art.as_deref()), 4.0);
+                match data.album(&a.id) {
+                    Some(al) => self.art.paint_as(ui, tile, al.cover_art.as_deref(), 4.0, &crate::art::album_cover(al)),
+                    None => self.art.paint(ui, tile, None, 4.0),
+                }
                 let sub = match a.year {
                     Some(y) => format!("{} · {y}", a.artist),
                     None => a.artist.clone(),
@@ -190,7 +192,10 @@ impl kit::PaletteRows for Hits<'_> {
             }
             Hit::Track(i) => {
                 let tr = &index.tracks[i];
-                self.art.paint(ui, tile, data.album(&tr.album_id).and_then(|al| al.cover_art.as_deref()), 4.0);
+                match data.album(&tr.album_id) {
+                    Some(al) => self.art.paint_as(ui, tile, al.cover_art.as_deref(), 4.0, &crate::art::album_cover(al)),
+                    None => self.art.paint(ui, tile, None, 4.0),
+                }
                 (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album))
             }
         };

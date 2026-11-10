@@ -293,6 +293,14 @@ pub fn playing(app: &mut RedeApp, paused: bool) {
     app.prefs.edit(|p| p.playback.speed = 1.5);
 }
 
+/// The playing book as one the server has no cover for: what the Player,
+/// Mini, the capsule and the info column draw in its place.
+pub fn without_art(app: &mut RedeApp) {
+    if let Some(book) = app.player.book.as_mut() {
+        book.item.summary.cover = None;
+    }
+}
+
 /// Server discovery and pending-keyring replies for sign-in screenshots and
 /// UI tests. These are wire fixtures, never real browser credentials.
 pub fn signin(ctx: &egui::Context, dir: &Path, both: bool, waiting: bool) -> RedeApp {

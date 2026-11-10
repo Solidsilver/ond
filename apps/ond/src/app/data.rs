@@ -92,6 +92,11 @@ impl Data {
         track.cover_art.as_deref().or_else(|| self.album(&track.album_id).and_then(|a| a.cover_art.as_deref()))
     }
 
+    /// What's drawn for `track` when it has no art (see [`crate::art::track_cover`]).
+    pub fn stand_in<'a>(&'a self, track: &'a Track) -> shell::kit::Generated<'a> {
+        crate::art::track_cover(self.album(&track.album_id), track)
+    }
+
     /// `false` when the row was already exactly this (an album opened again),
     /// so nothing built from the list needs redoing.
     pub(super) fn update_album(&mut self, album: Album) -> bool {

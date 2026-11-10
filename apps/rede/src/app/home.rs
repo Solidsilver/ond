@@ -9,7 +9,7 @@
 //! [`Books::recent`](super::Books::recent)), so a frame only draws.
 
 use super::Action;
-use super::library::{COVER_RADIUS, author_of, authors_line, grid_metrics};
+use super::library::{COVER_RADIUS, author_of, authors_line, grid_metrics, stand_in};
 use super::nav::Route;
 use super::progress::Listened;
 use super::view_ctx::ViewCtx;
@@ -110,7 +110,7 @@ impl ViewCtx<'_> {
             ui.painter().rect_filled(rect, CARD_RADIUS, fill);
             shell::kit::focus_ring(ui, &resp, rect, CARD_RADIUS);
             let cover = Rect::from_min_size(rect.min + vec2(CARD_PAD, CARD_PAD), vec2(CARD_COVER, CARD_COVER));
-            self.art.paint(ui, cover, book.cover.as_deref(), COVER_RADIUS);
+            self.art.paint(ui, cover, book.cover.as_deref(), COVER_RADIUS, &stand_in(&book));
             let x = cover.right() + 14.0;
             let room = (rect.right() - CARD_PAD - x).max(20.0);
             let title = ui.painter().layout_job(two_lines(&book.title, FontId::new(14.0, semibold()), t.text, room));

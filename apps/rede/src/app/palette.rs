@@ -172,7 +172,7 @@ impl kit::PaletteRows for Rows<'_> {
         match self.results.hit(n) {
             Some(Hit::Book(i)) => {
                 let book = &self.books[i];
-                self.art.paint(ui, tile, book.cover.as_deref(), 4.0);
+                self.art.paint(ui, tile, book.cover.as_deref(), 4.0, &library::stand_in(book));
                 let author = library::author_of(book);
                 let author = if author.trim().is_empty() { "Unknown author" } else { author };
                 let detail = match self.progress(book) {

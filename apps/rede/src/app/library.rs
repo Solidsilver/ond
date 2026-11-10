@@ -171,6 +171,12 @@ pub fn author_of(book: &ItemSummary) -> &str {
     book.authors.first().map_or("", String::as_str)
 }
 
+/// The cover a book without art gets: its title and first author, on a
+/// ground of its own.
+pub fn stand_in(book: &ItemSummary) -> shell::kit::Generated<'_> {
+    shell::kit::Generated { title: &book.title, byline: book.authors.first().map(String::as_str), seed: &book.id }
+}
+
 /// Every author, as a book page lists them: "Ursula K. Le Guin and 2 others".
 pub fn authors_line(book: &ItemSummary) -> String {
     match book.authors.as_slice() {
@@ -271,7 +277,7 @@ impl ViewCtx<'_> {
         let listened = self.listened(book);
         if ui.is_rect_visible(rect) {
             let art = Rect::from_min_size(rect.min, vec2(tile, cover_h));
-            self.art.paint(ui, art, book.cover.as_deref(), COVER_RADIUS);
+            self.art.paint(ui, art, book.cover.as_deref(), COVER_RADIUS, &stand_in(book));
             match listened {
                 Listened::InProgress { fraction: Some(f), .. } => shell::kit::cover_progress(ui.painter(), art, COVER_RADIUS, f, &t),
                 Listened::Finished => shell::kit::cover_badge(ui.painter(), art, Icon::Check, &t),

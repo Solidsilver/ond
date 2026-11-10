@@ -27,7 +27,14 @@ pub struct ArtistEntry {
     pub years: Option<(i32, i32)>,
     /// The genre most of their albums have.
     pub genre: Option<String>,
+    /// Their albums' covers, a few, in the library's order: what their disc
+    /// shows without a photo, when those covers are already loaded.
+    pub album_covers: Vec<String>,
 }
+
+/// How many of an artist's album covers [`ArtistEntry::album_covers`] keeps:
+/// more than the disc's four, so it finds some loaded.
+const ALBUM_COVERS: usize = 12;
 
 pub struct AlbumEntry {
     pub id: String,
@@ -106,6 +113,7 @@ impl SearchIndex {
         // name: the albums an artist's page shows (see `Album::has_artist`).
         let mut years: HashMap<&str, (i32, i32)> = HashMap::new();
         let mut genres: HashMap<&str, HashMap<&str, u32>> = HashMap::new();
+        let mut covers: HashMap<&str, Vec<&str>> = HashMap::new();
         for a in albums {
             let ids = a.artist_ref.iter().chain(a.artists.iter().filter_map(|l| l.id.as_ref()));
             let names = a.artist.iter().chain(a.artists.iter().map(|l| &l.name));
@@ -119,11 +127,18 @@ impl SearchIndex {
                 for &g in &album_genres {
                     *genres.entry(key.as_str()).or_default().entry(g).or_default() += 1;
                 }
+                if let Some(cover) = a.cover_art.as_deref() {
+                    let theirs = covers.entry(key.as_str()).or_default();
+                    if theirs.len() < ALBUM_COVERS && !theirs.contains(&cover) {
+                        theirs.push(cover);
+                    }
+                }
             }
         }
         // The most common, the first met among equals.
         let genre =
             |key: &str| genres.get(key).and_then(|counts| counts.iter().max_by_key(|&(g, n)| (*n, std::cmp::Reverse(*g))).map(|(g, _)| (*g).to_owned()));
+        let album_covers = |keys: &[&str]| keys.iter().find_map(|k| covers.get(k)).map(|c| c.iter().map(|s| (*s).to_owned()).collect()).unwrap_or_default();
         let artists: Vec<ArtistEntry> = if artists.is_empty() {
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
             for a in albums {
@@ -141,6 +156,7 @@ impl SearchIndex {
                     cover: None,
                     years: years.get(name).copied(),
                     genre: genre(name),
+                    album_covers: album_covers(&[name]),
                 })
                 .collect()
         } else {
@@ -154,6 +170,7 @@ impl SearchIndex {
                     cover: a.cover_art.clone(),
                     years: years.get(a.id.as_str()).or_else(|| years.get(a.name.as_str())).copied(),
                     genre: genre(&a.id).or_else(|| genre(&a.name)),
+                    album_covers: album_covers(&[&a.id, &a.name]),
                 })
                 .collect()
         };

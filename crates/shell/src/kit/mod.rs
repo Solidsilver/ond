@@ -43,9 +43,13 @@
 //!   ([`settings_nav`], its width [`SETTINGS_NAV_W`]), the pane beside it
 //!   ([`settings_pane`]), and About's [`about_header`] with the
 //!   [`app_icon`].
-//! - [`covers`]: what's laid over a cover to say how far along it is
+//! - [`covers`]: what's drawn for an item without art: a
+//!   [`generated_cover`] (a ground in a colour picked from a seed, the
+//!   title set on it), a [`generated_disc`] (a person's initials) and the
+//!   bare [`generated_ground`];
+//!   and what's laid over any cover to say how far along it is
 //!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
-//!   badge in its corner), and [`progress_bar`], the same line on its own.
+//!   badge in its corner), with [`progress_bar`], the same line on its own.
 //! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
 //!   fade, or stay with a button until clicked away (a [`Toasts::note`]
 //!   fades with its button).

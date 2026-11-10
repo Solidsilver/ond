@@ -73,7 +73,7 @@ impl ViewCtx<'_> {
         let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
         ui.with_layout(layout, |ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-            self.art.paint(ui, rect, book.cover.as_deref(), COVER_RADIUS);
+            self.art.paint(ui, rect, book.cover.as_deref(), COVER_RADIUS, &super::library::stand_in(book));
             ui.add_space(if stacked { 16.0 } else { 24.0 });
             // The text sits on the cover's bottom edge, as on Ond's album
             // page. Its height (it wraps) is known only once drawn, so this

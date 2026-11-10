@@ -310,7 +310,7 @@ impl ViewCtx<'_> {
             row.fill(ui, t, focused, resp.hovered() || selected);
             let art = Rect::from_min_size(pos2(rect.left() + col::ART_INSET, row.cy() - col::ART / 2.0), vec2(col::ART, col::ART));
             let data = self.data;
-            self.art.paint(ui, art, data.cover_for(&item.track), col::ART_RADIUS);
+            self.art.paint_as(ui, art, data.cover_for(&item.track), col::ART_RADIUS, &data.stand_in(&item.track));
             // Offline, songs that aren't downloaded will be skipped: say so on hover, dim them otherwise.
             let available = self.playable(&item.track);
             let right = match (starts, resp.hovered()) {

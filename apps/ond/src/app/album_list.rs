@@ -74,7 +74,7 @@ impl ViewCtx<'_> {
             row.fill(ui, t, false, row.pointer_on());
             let c = columns(row.rect);
             let art = Rect::from_center_size(pos2(c.title.left() + col::INSET + ART / 2.0, row.cy()), vec2(ART, ART));
-            self.art.paint(ui, art, album.cover_art.as_deref(), col::ART_RADIUS);
+            self.art.paint_as(ui, art, album.cover_art.as_deref(), col::ART_RADIUS, &crate::art::album_cover(album));
             let x = art.right() + 10.0;
             // Only albums kept offline carry a mark, at the title's end.
             let mark = Mark::of_pin(pin);
