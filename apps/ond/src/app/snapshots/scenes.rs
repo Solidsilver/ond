@@ -297,7 +297,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     let toolbar = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1440.0, 52.0));
     let _ = toolbar;
     h.run_steps(2);
-    h.get_by_label("Output: UMC22").click();
+    h.get_by(|n| n.label().is_some_and(|l| l.starts_with("Output: UMC22"))).click();
     s.shoot(h, "output-picker");
 
     // Bit-perfect on a DAC with its own volume: the slider sets it, in green, with the level in dB.
@@ -313,7 +313,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Always);
     }
     h.run_steps(2);
-    h.get_by_label("Output: UMC22").click();
+    h.get_by(|n| n.label().is_some_and(|l| l.starts_with("Output: UMC22"))).click();
     s.shoot(h, "output-picker-device-volume");
     app_mut(h).prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Adjusting);
     app_mut(h).output.handle(&audio::Event::DeviceVolume(None));
@@ -1002,7 +1002,7 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     reset(h, FULL, Route::Recent);
     h.run_steps(2);
-    h.get_by_label("Output: UMC22").click();
+    h.get_by(|n| n.label().is_some_and(|l| l.starts_with("Output: UMC22"))).click();
     s.shoot(h, "managed-output-picker");
     egui::Popup::close_all(&h.ctx);
     reset(h, FULL, Route::Recent);

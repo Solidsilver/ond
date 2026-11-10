@@ -503,6 +503,43 @@ pub fn progress_ring(painter: &Painter, center: Pos2, radius: f32, fraction: f32
     painter.add(Shape::line(pts, Stroke::new(width, color)));
 }
 
+/// A state shown by a small mark beside or on something (a format, a
+/// device, a connection). Each has its own shape as well as its colour, so
+/// none is told apart by hue alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// All is as it should be: a check, in the theme's ok colour.
+    Good,
+    /// Less than asked for (a device limit, a conversion): a small
+    /// down-pointing triangle, in the warning colour.
+    Limited,
+    /// Asked for, not yet confirmed: a hollow ring, muted.
+    Pending,
+}
+
+/// Paints `status` centred on `c`, about `r` from its centre to its edge
+/// (the size of a dot that radius). `cutout`: a disc of that colour under
+/// it first, to lift it off an icon it sits on the corner of.
+pub fn status_mark(painter: &Painter, c: Pos2, r: f32, status: Status, cutout: Option<Color32>) {
+    let t = crate::theme::Tokens::of_ctx(painter.ctx());
+    if let Some(bg) = cutout {
+        painter.circle_filled(c, r + 1.8, bg);
+    }
+    let p = |x: f32, y: f32| c + vec2(x * r, y * r);
+    match status {
+        Status::Good => {
+            let stroke = Stroke::new((r * 0.42).max(1.2), t.ok);
+            painter.add(Shape::line(vec![p(-0.95, 0.05), p(-0.3, 0.7), p(1.0, -0.75)], stroke));
+        }
+        Status::Limited => {
+            painter.add(Shape::convex_polygon(vec![p(-1.0, -0.65), p(1.0, -0.65), p(0.0, 0.95)], t.warn, Stroke::NONE));
+        }
+        Status::Pending => {
+            painter.circle_stroke(c, r * 0.85, Stroke::new((r * 0.32).max(1.0), t.muted));
+        }
+    }
+}
+
 /// An icon inline with text, at text height.
 pub fn inline(ui: &mut Ui, icon: Icon, color: Color32) {
     let h = ui.text_style_height(&egui::TextStyle::Body) * 0.7;
