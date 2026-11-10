@@ -6,7 +6,7 @@
 use super::session::Session;
 use super::{Action, Books, Nav, RedeApp, SyncState};
 use crate::art::Art;
-use crate::settings::LibrarySort;
+use crate::settings::{LibraryFilter, LibrarySort};
 
 pub struct ViewCtx<'a> {
     pub books: &'a mut Books,
@@ -16,6 +16,8 @@ pub struct ViewCtx<'a> {
     pub nav: &'a Nav,
     /// The library's order, as this frame's copy of the preferences has it.
     pub sort: LibrarySort,
+    /// Which books the library shows, as that copy has it.
+    pub filter: LibraryFilter,
     pub playback: crate::settings::PlaybackSettings,
     /// The zoom, in percent.
     pub zoom: u16,
@@ -48,6 +50,7 @@ impl RedeApp {
             sync: &self.sync,
             nav: &self.ui.nav,
             sort: self.shown.sort,
+            filter: self.shown.filter,
             playback: self.shown.playback,
             zoom: self.shown.zoom,
             opening: self.opening,

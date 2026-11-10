@@ -13,7 +13,9 @@ use std::path::PathBuf;
 /// The keychain service, the same as the bundle id.
 const KEYRING_SERVICE: &str = "dev.solidsilver.rede";
 
-/// How the library is ordered. Saved, so the shelf opens as it was left.
+/// How the library is ordered. Saved, so the shelf opens as it was left. A
+/// name this build doesn't know (a newer Rede's order) reads as the default
+/// ([`Settings::from_json`] drops just that setting).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LibrarySort {
@@ -21,16 +23,53 @@ pub enum LibrarySort {
     Title,
     Author,
     Added,
+    /// The book heard last first; never-heard books after, by title.
+    Listened,
+    /// The most complete first; unstarted books after, by title.
+    Progress,
 }
 
 impl LibrarySort {
-    pub const ALL: [LibrarySort; 3] = [LibrarySort::Title, LibrarySort::Author, LibrarySort::Added];
+    pub const ALL: [LibrarySort; 5] = [LibrarySort::Title, LibrarySort::Author, LibrarySort::Added, LibrarySort::Listened, LibrarySort::Progress];
 
     pub fn label(self) -> &'static str {
         match self {
             LibrarySort::Title => "Title",
             LibrarySort::Author => "Author",
             LibrarySort::Added => "Recently added",
+            LibrarySort::Listened => "Recently listened",
+            LibrarySort::Progress => "Progress",
+        }
+    }
+
+    /// Whether the order follows where the books are, as well as what they
+    /// are: these are worked out again when a position changes.
+    pub fn by_position(self) -> bool {
+        matches!(self, LibrarySort::Listened | LibrarySort::Progress)
+    }
+}
+
+/// Which books the library shows, by how far along they are. Saved, as the
+/// order is; an unknown name reads as [`All`](LibraryFilter::All).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LibraryFilter {
+    #[default]
+    All,
+    InProgress,
+    NotStarted,
+    Finished,
+}
+
+impl LibraryFilter {
+    pub const ALL: [LibraryFilter; 4] = [LibraryFilter::All, LibraryFilter::InProgress, LibraryFilter::NotStarted, LibraryFilter::Finished];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LibraryFilter::All => "All",
+            LibraryFilter::InProgress => "In progress",
+            LibraryFilter::NotStarted => "Not started",
+            LibraryFilter::Finished => "Finished",
         }
     }
 }
@@ -121,6 +160,8 @@ pub struct Settings {
     #[serde(default)]
     pub sort: LibrarySort,
     #[serde(default)]
+    pub filter: LibraryFilter,
+    #[serde(default)]
     pub playback: PlaybackSettings,
     #[serde(default)]
     pub window: crate::window::Windows,
@@ -141,6 +182,7 @@ impl Default for Settings {
             theme: Default::default(),
             zoom: shell::zoom::DEFAULT,
             sort: Default::default(),
+            filter: Default::default(),
             playback: Default::default(),
             window: Default::default(),
             show_panel: false,
@@ -367,6 +409,21 @@ mod tests {
         assert_eq!(s.theme, shell::theme::ThemePref::default());
         assert_eq!(s.sort, LibrarySort::default());
         assert!(s.accounts.is_empty());
+    }
+
+    #[test]
+    fn the_librarys_order_and_filter_survive_a_save_and_an_unknown_one_reads_as_the_default() {
+        for sort in LibrarySort::ALL {
+            for filter in LibraryFilter::ALL {
+                let s = Settings { sort, filter, ..Default::default() };
+                assert_eq!(Settings::from_json(&serde_json::to_vec(&s).unwrap()).unwrap(), s);
+            }
+        }
+        let s = Settings::from_json(br#"{ "sort": "listened", "filter": "in-progress" }"#).unwrap();
+        assert_eq!((s.sort, s.filter), (LibrarySort::Listened, LibraryFilter::InProgress));
+        let s = Settings::from_json(br#"{ "sort": "by-narrator", "filter": "abandoned", "theme": "dark" }"#).unwrap();
+        assert_eq!((s.sort, s.filter, s.theme), (LibrarySort::Title, LibraryFilter::All, shell::theme::ThemePref::Dark));
+        assert_eq!(Settings::from_json(br#"{ "sort": "author" }"#).unwrap().filter, LibraryFilter::All, "an older file has no filter");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Popovers and what goes in them: [`popover`] (or [`popover_at`]) opens one
 //! in the theme's frame; [`padded`] lines a block up with its rows;
 //! [`popover_title`], [`popover_rule`], [`menu_row`] (a command),
+//! [`check_row`] (one of a set of choices, checked when it's the one),
 //! [`info_row`] (a fact) and [`switch_row`] (a setting that's on or off);
 //! and the [`menu_label`] that opens a menu.
 
@@ -29,6 +30,36 @@ pub fn menu_row(ui: &mut Ui, label: &str) -> bool {
     }
     false
 }
+
+/// One of a set of choices in a popover menu (an order, a mode): a check in
+/// a gutter at its left when it's the current one, so the labels line up
+/// whichever is. True when chosen, and the menu closes.
+pub fn check_row(ui: &mut Ui, label: &str, checked: bool) -> bool {
+    let t = Tokens::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 5.0, t.hover);
+        }
+        focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
+        if checked {
+            let mark = Rect::from_center_size(egui::pos2(rect.left() + POPOVER_PAD + 6.0, rect.center().y), vec2(11.0, 11.0));
+            crate::icons::paint(ui.painter(), mark, crate::icons::Icon::Check, t.text);
+        }
+        let at = egui::pos2(rect.left() + POPOVER_PAD + CHECK_GUTTER, rect.center().y);
+        ui.painter().text(at, egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), t.text);
+    }
+    let label = label.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, true, checked, &label));
+    if resp.clicked() {
+        ui.close();
+        return true;
+    }
+    false
+}
+
+/// The room a [`check_row`] keeps at its left for the check.
+const CHECK_GUTTER: f32 = 20.0;
 
 /// How far a popover's text sits in from its frame's edge, on top of the
 /// frame's own margin: Ond's popovers line their text up 8 in, and their menu
@@ -150,6 +181,24 @@ pub fn menu_label(ui: &mut Ui, text: &str, color: Color32) -> Response {
 mod tests {
     use super::*;
     use crate::kit::themed;
+
+    #[test]
+    fn a_check_row_says_whether_it_is_the_current_choice_and_reports_a_click() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = themed(None, |ui, picked: &mut Option<usize>| {
+            for (i, label) in ["Title", "Author"].into_iter().enumerate() {
+                if check_row(ui, label, i == 1) {
+                    *picked = Some(i);
+                }
+            }
+        });
+        h.run();
+        assert_eq!(h.get_by_label("Author").accesskit_node().is_selected(), Some(true));
+        assert_ne!(h.get_by_label("Title").accesskit_node().is_selected(), Some(true));
+        h.get_by_label("Title").click();
+        h.run();
+        assert_eq!(h.state().1, Some(0));
+    }
 
     #[test]
     fn a_switch_row_flips_from_its_label_as_well_as_its_switch() {

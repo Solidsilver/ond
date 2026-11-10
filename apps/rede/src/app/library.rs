@@ -1,19 +1,23 @@
 //! The books the shelf has, and the page that draws them: a grid of covers,
-//! sorted by title, author or when they were added.
+//! narrowed to those not started, in progress or finished, and sorted by
+//! title, author, when they were added, when they were last heard, or how far
+//! along they are.
 //!
 //! The rows are laid out only while they're on screen ([`VirtualList`]), so a
 //! library of any size draws a screenful and asks for the covers it shows.
-//! Sorting is worked out once per library version and order
-//! ([`crate::memo::Memo`]), so a frame lays out what it can rather than sorting.
+//! The order and the filtered list are worked out once per library version,
+//! order and filter, and per positions version where they depend on where the
+//! books are ([`crate::memo::Memo`]), so a frame lays out what it can rather
+//! than sorting.
 
 use super::Action;
 use super::nav::Route;
 use super::prefs_view::PrefsAction;
-use super::progress::{Listened, Positions};
+use super::progress::{Listened, Positions, Stage};
 use super::view_ctx::ViewCtx;
 use super::virtual_list::{VirtualList, near};
 use crate::memo::Memo;
-use crate::settings::LibrarySort;
+use crate::settings::{LibraryFilter, LibrarySort};
 use crate::widgets::elide;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use shell::icons::Icon;
@@ -34,6 +38,11 @@ pub const COVER_RADIUS: f32 = 6.0;
 const LABEL_H: f32 = 58.0;
 /// The rows just past either end whose covers load ahead.
 const PREFETCH_ROWS: usize = 1;
+/// Between the filter and the order's menu at the right, at the least: what
+/// decides when the heading's row runs out of room.
+const HEADING_GAP: f32 = 24.0;
+/// The sort menu: its longest order and the check's gutter.
+const SORT_MENU_W: f32 = 176.0;
 
 /// The shelf's books, in the order the sync stored them, and what has been
 /// fetched about each one since.
@@ -42,8 +51,13 @@ pub struct Books {
     /// Bumped by every new listing, so derived data can be memoised on it.
     version: u64,
     all: Arc<Vec<ItemSummary>>,
-    /// Indices into `all`, in the order drawn, per library version and sort.
-    order: Memo<(u64, LibrarySort), Vec<usize>>,
+    /// Indices into `all`, in the order drawn, per library version and sort
+    /// (and positions version, for an order that follows them).
+    order: Memo<OrderKey, Vec<usize>>,
+    /// That order narrowed by the filter: per the same, the positions
+    /// version (whatever the order), the filter, and the loaded book's stage
+    /// while the player is ahead of its saved position.
+    shown: Memo<(OrderKey, u64, LibraryFilter, Option<(String, Stage)>), Vec<usize>>,
     /// Home's lists: the books in progress, per library and positions
     /// version, and the newest, per library version.
     in_progress: Memo<(u64, u64), Vec<usize>>,
@@ -98,10 +112,34 @@ impl Books {
     }
 
     /// Indices into [`all`](Self::all), in the order `sort` draws them.
-    pub fn order(&mut self, sort: LibrarySort) -> Arc<Vec<usize>> {
-        let key = (self.version, sort);
+    pub fn order(&mut self, sort: LibrarySort, positions: &Positions) -> Arc<Vec<usize>> {
+        let key = self.order_key(sort, positions);
         let books = &self.all;
-        self.order.get(key, || sorted_ids(books, sort))
+        self.order.get(key, || sorted_ids(books, sort, positions))
+    }
+
+    /// Indices into [`all`](Self::all) of the books `filter` lets through,
+    /// in the order `sort` draws them. `loaded` is the book in the player
+    /// with its stage, when that's ahead of its saved position.
+    pub fn shown(&mut self, sort: LibrarySort, filter: LibraryFilter, positions: &Positions, loaded: Option<(String, Stage)>) -> Arc<Vec<usize>> {
+        let order = self.order(sort, positions);
+        if filter == LibraryFilter::All {
+            return order;
+        }
+        let key = (self.order_key(sort, positions), positions.version(), filter, loaded);
+        let books = &self.all;
+        let loaded = key.3.clone();
+        self.shown.get(key, || {
+            let stage = |i: usize| match &loaded {
+                Some((id, stage)) if *id == books[i].id => *stage,
+                _ => saved(&books[i], positions).stage(),
+            };
+            order.iter().copied().filter(|&i| admits(filter, stage(i))).collect()
+        })
+    }
+
+    fn order_key(&self, sort: LibrarySort, positions: &Positions) -> OrderKey {
+        (self.version, sort, if sort.by_position() { positions.version() } else { 0 })
     }
 
     /// Indices into [`all`](Self::all) of the books in progress, the one
@@ -115,7 +153,7 @@ impl Books {
     /// doesn't undo the library's order.
     pub fn recent(&mut self) -> Arc<Vec<usize>> {
         let books = &self.all;
-        self.recent.get(self.version, || sorted_ids(books, LibrarySort::Added))
+        self.recent.get(self.version, || sorted_ids(books, LibrarySort::Added, &Positions::default()))
     }
 
     /// The palette's haystack for this listing, built once per version: a
@@ -141,9 +179,30 @@ impl Books {
     }
 }
 
+/// The library version, the order, and the positions version when the order
+/// follows them (0 when it doesn't, so a position saved while playing doesn't
+/// sort the shelf by title again).
+type OrderKey = (u64, LibrarySort, u64);
+
+/// A book's listening as last saved: what the orders and the filter go by.
+fn saved(book: &ItemSummary, positions: &Positions) -> Listened {
+    Listened::of(book, positions.get(&book.id), None, 1.0)
+}
+
+/// Whether `filter` shows a book at `stage`.
+pub fn admits(filter: LibraryFilter, stage: Stage) -> bool {
+    match filter {
+        LibraryFilter::All => true,
+        LibraryFilter::InProgress => stage == Stage::InProgress,
+        LibraryFilter::NotStarted => stage == Stage::NotStarted,
+        LibraryFilter::Finished => stage == Stage::Finished,
+    }
+}
+
 /// Indices into `books`, ordered by `sort`. Title and author compare without
 /// case; ties fall back to the title and then the id, so the order is stable.
-pub fn sorted_ids(books: &[ItemSummary], sort: LibrarySort) -> Vec<usize> {
+/// The orders by listening read `positions`; the others ignore it.
+pub fn sorted_ids(books: &[ItemSummary], sort: LibrarySort, positions: &Positions) -> Vec<usize> {
     let mut ids: Vec<usize> = (0..books.len()).collect();
     match sort {
         // A book the server gave no title or author for goes last, where it's
@@ -161,8 +220,39 @@ pub fn sorted_ids(books: &[ItemSummary], sort: LibrarySort) -> Vec<usize> {
             let (x, y) = (books[a].added, books[b].added);
             y.cmp(&x).then_with(|| books[a].title.to_lowercase().cmp(&books[b].title.to_lowercase())).then_with(|| books[a].id.cmp(&books[b].id))
         }),
+        // The book heard last first, whether it was finished or not; a book
+        // never heard, or heard at a time the source didn't say, goes last.
+        LibrarySort::Listened => ids.sort_by_cached_key(|&i| {
+            let b = &books[i];
+            let at = positions.get(&b.id).and_then(|p| p.at);
+            (std::cmp::Reverse(at), b.title.to_lowercase(), b.id.clone())
+        }),
+        // Finished books first, then the rest by how much is behind them,
+        // those whose length isn't known after those it is, and the unstarted
+        // last.
+        LibrarySort::Progress => ids.sort_by_cached_key(|&i| {
+            let b = &books[i];
+            let rank = match saved(b, positions) {
+                Listened::Finished => (0, 0),
+                Listened::InProgress { fraction: Some(f), .. } => (1, u32::MAX - (f.clamp(0.0, 1.0) * 1_000_000.0) as u32),
+                Listened::InProgress { fraction: None, .. } => (2, 0),
+                Listened::NotStarted => (3, 0),
+            };
+            (rank, b.title.to_lowercase(), b.id.clone())
+        }),
     }
     ids
+}
+
+/// What the library says when the filter leaves nothing to show: what
+/// would put books there.
+fn filter_empty(filter: LibraryFilter) -> (&'static str, &'static str) {
+    match filter {
+        LibraryFilter::All => ("No books yet", ""),
+        LibraryFilter::InProgress => ("Nothing in progress", "Books you've started and haven't finished show up here."),
+        LibraryFilter::NotStarted => ("Nothing left to start", "Every book has been started. New ones show up here as they're added."),
+        LibraryFilter::Finished => ("Nothing finished yet", "Books you listen to the end show up here."),
+    }
 }
 
 /// The name a book is filed under: its first author, spelled as the server
@@ -195,32 +285,88 @@ pub fn grid_metrics(width: f32) -> (usize, f32) {
 
 impl ViewCtx<'_> {
     pub(super) fn library_page(&mut self, ui: &mut Ui) {
-        let count = self.books.len();
-        let mut sort = self.sort;
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            let sub = match count {
-                0 => None,
-                1 => Some("1 book".to_owned()),
-                n => Some(format!("{n} books")),
-            };
-            shell::kit::page_heading(ui, "Books", sub);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    changed = crate::widgets::choice(ui, &LibrarySort::ALL, &mut sort, |s| s.label().into());
-                });
-            });
-        });
-        if changed {
-            self.actions.push(Action::Prefs(PrefsAction::Sort(sort)));
-        }
-        ui.add_space(12.0);
-        if count == 0 {
+        if self.books.len() == 0 {
+            shell::kit::page_heading(ui, "Books", None);
+            ui.add_space(12.0);
             self.no_books(ui);
             return;
         }
-        let ids = self.books.order(sort);
-        self.book_grid(ui, &ids, sort);
+        let loaded = if self.filter == LibraryFilter::All { None } else { self.loaded_stage() };
+        let ids = self.books.shown(self.sort, self.filter, self.positions, loaded);
+        self.library_heading(ui, ids.len());
+        if ids.is_empty() {
+            let (title, body) = filter_empty(self.filter);
+            shell::kit::empty_state(ui, Icon::Headphones, title, body);
+            return;
+        }
+        self.book_grid(ui, &ids, (self.sort, self.filter));
+    }
+
+    /// "Books", how many are shown, the filter, and the order's menu at the
+    /// right end. Where they don't all fit on one line the count goes first,
+    /// and then the filter moves to a line of its own under the heading.
+    fn library_heading(&mut self, ui: &mut Ui, count: usize) {
+        let t = Tokens::of(ui);
+        let width = |ui: &Ui, text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_owned(), font, t.text).size().x;
+        let count_text = match count {
+            0 => None,
+            1 => Some("1 book".to_owned()),
+            n => Some(format!("{n} books")),
+        };
+        let sort_text = format!("Sort: {}", self.sort.label());
+        let spacing = ui.spacing().item_spacing.x;
+        let title_w = width(ui, "Books", FontId::new(24.0, shell::theme::semibold()));
+        let count_w = count_text.as_deref().map_or(0.0, |c| spacing + width(ui, c, FontId::proportional(13.0)));
+        // The pill sits a gap past the heading as the old order pill did: the
+        // spacing either side of the space before it.
+        // The sort button and the pill as the kit sizes them: a label and a
+        // chevron, and segments with their comfortable padding.
+        let sort_w = width(ui, &sort_text, FontId::proportional(12.0)) + 26.0;
+        let pill_w = 4.0 + LibraryFilter::ALL.iter().map(|f| width(ui, f.label(), FontId::proportional(12.0)) + 22.0).sum::<f32>();
+        let room = ui.available_width();
+        let one_line = title_w + 3.0 * spacing + pill_w + HEADING_GAP + sort_w;
+        let (wrap, show_count) = if one_line + count_w <= room {
+            (false, true)
+        } else if one_line <= room {
+            (false, false)
+        } else {
+            (true, title_w + count_w + HEADING_GAP + sort_w <= room)
+        };
+        let mut filter = self.filter;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Books").font(FontId::new(24.0, shell::theme::semibold())).color(t.text));
+            if let Some(count) = count_text.filter(|_| show_count) {
+                ui.label(egui::RichText::new(count).size(13.0).color(t.muted));
+            }
+            if !wrap {
+                ui.add_space(spacing);
+                changed = crate::widgets::choice(ui, &LibraryFilter::ALL, &mut filter, |f| f.label().into());
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.sort_button(ui, &sort_text));
+        });
+        if wrap {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| changed = crate::widgets::choice(ui, &LibraryFilter::ALL, &mut filter, |f| f.label().into()));
+        }
+        if changed {
+            self.actions.push(Action::Prefs(PrefsAction::Filter(filter)));
+        }
+        ui.add_space(22.0);
+    }
+
+    /// "Sort: Title" and a chevron, quiet at the heading's right end, opening
+    /// the orders with the current one checked.
+    fn sort_button(&mut self, ui: &mut Ui, text: &str) {
+        let t = Tokens::of(ui);
+        let resp = shell::kit::menu_label(ui, text, t.muted);
+        shell::kit::popover_at(&resp, SORT_MENU_W, egui::RectAlign::BOTTOM_END, |ui| {
+            for sort in LibrarySort::ALL {
+                if shell::kit::check_row(ui, sort.label(), sort == self.sort) && sort != self.sort {
+                    self.actions.push(Action::Prefs(PrefsAction::Sort(sort)));
+                }
+            }
+        });
     }
 
     /// What a page of books says with none: loading, or how they come.
@@ -235,13 +381,13 @@ impl ViewCtx<'_> {
 
     /// The grid: only the rows on screen are laid out, so only their covers are
     /// asked for.
-    fn book_grid(&mut self, ui: &mut Ui, ids: &[usize], sort: LibrarySort) {
+    fn book_grid(&mut self, ui: &mut Ui, ids: &[usize], list: (LibrarySort, LibraryFilter)) {
         let (cols, tile) = grid_metrics(ui.available_width());
         let cover_h = tile;
         let row_h = cover_h + LABEL_H + GAP_Y;
         let rows = ids.len().div_ceil(cols);
         let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
-        VirtualList::grid(("books", sort), row_h, rows).show(ui, |ui, range| {
+        VirtualList::grid(("books", list), row_h, rows).show(ui, |ui, range| {
             for row in range.clone() {
                 self.book_row(ui, row_ids(row), tile, cover_h);
             }
@@ -322,7 +468,37 @@ mod tests {
     }
 
     fn titles(books: &[ItemSummary], sort: LibrarySort) -> Vec<String> {
-        sorted_ids(books, sort).into_iter().map(|i| books[i].title.clone()).collect()
+        titles_with(books, sort, &Positions::default())
+    }
+
+    fn titles_with(books: &[ItemSummary], sort: LibrarySort, positions: &Positions) -> Vec<String> {
+        sorted_ids(books, sort, positions).into_iter().map(|i| books[i].title.clone()).collect()
+    }
+
+    fn named(books: &[ItemSummary], ids: &[usize]) -> Vec<String> {
+        ids.iter().map(|&i| books[i].title.clone()).collect()
+    }
+
+    /// `secs` into a ten-hour book, `hours_ago` (or undated).
+    fn heard(positions: &mut Positions, id: &str, secs: f64, finished: bool, hours_ago: Option<u64>) {
+        let at = hours_ago.map(|h| std::time::SystemTime::now() - std::time::Duration::from_secs(h * 3_600));
+        let item = sources::ItemKey::new(sources::AccountId::from_uuid(uuid::Uuid::nil()), id);
+        positions.insert(id.into(), sources::Progress { item, position: sources::Position::from_secs(secs), finished, at });
+    }
+
+    /// Six ten-hour books: two partway, one finished, one begun at a time
+    /// the source didn't say, and two never begun.
+    fn listened_shelf() -> (Vec<ItemSummary>, Positions) {
+        let books: Vec<ItemSummary> = [("a", "Alpha"), ("b", "Beta"), ("c", "Gamma"), ("d", "Delta"), ("e", "Epsilon"), ("f", "Zeta")]
+            .into_iter()
+            .map(|(id, title)| ItemSummary { duration: Some(36_000.0), ..book(id, title, "", 0) })
+            .collect();
+        let mut positions = Positions::default();
+        heard(&mut positions, "a", 3_600.0, false, Some(30));
+        heard(&mut positions, "b", 27_000.0, false, Some(2));
+        heard(&mut positions, "c", 36_000.0, true, Some(10));
+        heard(&mut positions, "d", 1_800.0, false, None);
+        (books, positions)
     }
 
     fn shelf() -> Vec<ItemSummary> {
@@ -345,6 +521,60 @@ mod tests {
     #[test]
     fn recently_added_is_newest_first_and_unstamped_last() {
         assert_eq!(titles(&shelf(), LibrarySort::Added), ["the Dispossessed", "A Wizard of Earthsea", "Dune", "Untitled"]);
+    }
+
+    #[test]
+    fn recently_listened_is_the_last_heard_first_and_the_undated_and_unheard_last() {
+        let (books, positions) = listened_shelf();
+        // Finished or not, by when; then by title, those with no date and
+        // those never begun alike.
+        assert_eq!(titles_with(&books, LibrarySort::Listened, &positions), ["Beta", "Gamma", "Alpha", "Delta", "Epsilon", "Zeta"]);
+    }
+
+    #[test]
+    fn progress_is_the_most_complete_first_and_the_unstarted_last() {
+        let (mut books, positions) = listened_shelf();
+        assert_eq!(titles_with(&books, LibrarySort::Progress, &positions), ["Gamma", "Beta", "Alpha", "Delta", "Epsilon", "Zeta"]);
+        // A book begun whose length isn't known can't say how far along it
+        // is: after those that can, before those not begun.
+        books[1].duration = None;
+        assert_eq!(titles_with(&books, LibrarySort::Progress, &positions), ["Gamma", "Alpha", "Delta", "Beta", "Epsilon", "Zeta"]);
+    }
+
+    #[test]
+    fn the_filter_keeps_the_order_and_is_worked_out_once_per_change() {
+        let (list, mut positions) = listened_shelf();
+        let mut books = Books::default();
+        books.set(list.clone());
+        let shown = |books: &mut Books, filter, positions: &Positions| books.shown(LibrarySort::Title, filter, positions, None);
+        assert_eq!(named(&list, &shown(&mut books, LibraryFilter::InProgress, &positions)), ["Alpha", "Beta", "Delta"]);
+        assert_eq!(named(&list, &shown(&mut books, LibraryFilter::NotStarted, &positions)), ["Epsilon", "Zeta"]);
+        assert_eq!(named(&list, &shown(&mut books, LibraryFilter::Finished, &positions)), ["Gamma"]);
+        assert_eq!(shown(&mut books, LibraryFilter::All, &positions).len(), list.len());
+        let first = shown(&mut books, LibraryFilter::Finished, &positions);
+        assert!(Arc::ptr_eq(&first, &shown(&mut books, LibraryFilter::Finished, &positions)), "a frame that only redraws doesn't filter again");
+        // A position saved moves a book across.
+        heard(&mut positions, "a", 36_000.0, true, Some(0));
+        assert_eq!(named(&list, &shown(&mut books, LibraryFilter::Finished, &positions)), ["Alpha", "Gamma"]);
+        // The book in the player, started before its first report, counts as
+        // begun.
+        let loaded = Some(("e".to_owned(), Stage::InProgress));
+        assert_eq!(named(&list, &books.shown(LibrarySort::Title, LibraryFilter::NotStarted, &positions, loaded)), ["Zeta"]);
+    }
+
+    #[test]
+    fn an_order_by_title_is_not_sorted_again_when_a_position_changes_but_one_by_listening_is() {
+        let (list, mut positions) = listened_shelf();
+        let mut books = Books::default();
+        books.set(list);
+        let by_title = books.order(LibrarySort::Title, &positions);
+        heard(&mut positions, "e", 60.0, false, Some(1));
+        assert!(Arc::ptr_eq(&by_title, &books.order(LibrarySort::Title, &positions)));
+        let by_listening = books.order(LibrarySort::Listened, &positions);
+        heard(&mut positions, "f", 60.0, false, Some(0));
+        let again = books.order(LibrarySort::Listened, &positions);
+        assert!(!Arc::ptr_eq(&by_listening, &again));
+        assert_eq!(again[0], 5, "the book just heard comes first");
     }
 
     #[test]
