@@ -1,16 +1,12 @@
 //! Quick search over the local library mirror. The haystack is built when the
 //! library changes (load, sync); each keystroke only scores it.
 //!
-//! Ranking is literal-first, fuzzy-second: every query word that starts a word
-//! in the candidate counts most, then words found anywhere, and only then the
-//! fuzzy score. So "bob" ranks Bob Dylan and B.o.B well above Boris Bolles or
-//! Naughty Boy, which only match as scattered letters and are dropped. Pure
-//! fuzzy matches are kept only when nothing in the group matches literally, so
-//! typos ("knd blue") still find something.
+//! The ranking (literal first, fuzzy second) is `shell::search`'s, shared with
+//! Rede; this module says what the groups are: artists, albums and songs,
+//! each capped, and a top hit that's the best literal match of the three.
 
-use library::{Album, Artist, Track, fold};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32String};
+use library::{Album, Artist, Track};
+use shell::search::{Hay, Matcher, Query, Scored, scored};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -46,35 +42,6 @@ pub struct TrackEntry {
     pub title: String,
     pub artist: String,
     pub album: String,
-}
-
-/// One searchable string: the fuzzy matcher's copy, and a folded,
-/// punctuation-free copy for the literal checks.
-struct Hay {
-    fuzzy: Utf32String,
-    plain: String,
-}
-
-impl Hay {
-    fn new(s: &str) -> Self {
-        Self { fuzzy: Utf32String::from(s), plain: plain(s) }
-    }
-}
-
-/// Case-, accent- and punctuation-insensitive: "B.o.B" → "bob",
-/// "Björk — Vespertine" → "bjork vespertine".
-fn plain(s: &str) -> String {
-    let folded = fold(s);
-    let mut out = String::with_capacity(folded.len());
-    for c in folded.chars() {
-        if c.is_alphanumeric() {
-            out.push(c);
-        } else if c.is_whitespace() && !out.ends_with(' ') && !out.is_empty() {
-            out.push(' ');
-        }
-    }
-    out.truncate(out.trim_end().len());
-    out
 }
 
 pub struct SearchIndex {
@@ -130,37 +97,6 @@ impl Results {
         self.tracks.get(n).map(|&i| Hit::Track(i))
     }
 }
-
-/// How literally a candidate matches; compared before the fuzzy score.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Rank {
-    /// 3: every query word starts a word; 2: every query word appears;
-    /// 1: some do; 0: only fuzzy.
-    tier: u8,
-    /// The whole candidate is the query.
-    exact: bool,
-    /// The candidate starts with the query.
-    leading: bool,
-}
-
-fn rank(query: &str, words: &[&str], hay: &str) -> Rank {
-    let prefixes = words.iter().filter(|w| hay.split(' ').any(|h| h.starts_with(**w))).count();
-    let found = words.iter().filter(|w| hay.contains(**w)).count();
-    let tier = if prefixes == words.len() {
-        3
-    } else if found == words.len() {
-        2
-    } else if found > 0 {
-        1
-    } else {
-        0
-    };
-    Rank { tier, exact: hay == query, leading: hay.starts_with(query) }
-}
-
-/// Scored candidate: rank, fuzzy score, then a group-specific tiebreak
-/// (higher is better), then library order.
-type Scored = (Rank, u32, i64, usize);
 
 impl SearchIndex {
     /// `artists` are the server's artist entities; when there are none yet
@@ -239,7 +175,7 @@ impl SearchIndex {
         let album_hay = albums.iter().map(|a| Hay::new(&format!("{} — {}", a.artist, a.title))).collect();
         // Title first: track searches are mostly by title.
         let track_hay = tracks.iter().map(|t| Hay::new(&format!("{} — {} — {}", t.title, t.artist, t.album))).collect();
-        Self { artists: Arc::new(artists), albums, tracks, artist_hay, album_hay, track_hay, matcher: Matcher::new(Config::DEFAULT) }
+        Self { artists: Arc::new(artists), albums, tracks, artist_hay, album_hay, track_hay, matcher: Matcher::default() }
     }
 
     /// The artist an artist page is about: by id when it has one, else by name.
@@ -251,27 +187,22 @@ impl SearchIndex {
     }
 
     pub fn search(&mut self, query: &str) -> Results {
-        let q = plain(query);
-        if q.is_empty() {
-            return Results::default();
-        }
-        let words: Vec<&str> = q.split(' ').collect();
-        let pattern = Pattern::parse(query.trim(), CaseMatching::Ignore, Normalization::Smart);
+        let Some(q) = Query::new(query) else { return Results::default() };
         // Artists with more albums, then shorter (more specific) names win ties.
-        let artists = scored(&q, &words, &pattern, &self.artist_hay, &mut self.matcher, |i| self.artists[i].albums as i64);
-        let albums = scored(&q, &words, &pattern, &self.album_hay, &mut self.matcher, |_| 0);
-        let tracks = scored(&q, &words, &pattern, &self.track_hay, &mut self.matcher, |_| 0);
+        let artists = scored(&q, &self.artist_hay, &mut self.matcher, |i| self.artists[i].albums as i64);
+        let albums = scored(&q, &self.album_hay, &mut self.matcher, |_| 0);
+        let tracks = scored(&q, &self.track_hay, &mut self.matcher, |_| 0);
 
         // The top hit is the best literal match; on equal rank artists come
         // before albums before tracks. Pure fuzzy matches never make it.
-        let best = |v: &[Scored]| v.first().map(|s| s.0).filter(|r| r.tier > 0);
+        let best = |v: &[Scored]| v.first().map(|s| s.rank).filter(|r| r.literal());
         let candidates = [(best(&artists), 0), (best(&albums), 1), (best(&tracks), 2)];
         let top_group = candidates.iter().filter_map(|(r, g)| r.map(|r| (r, *g))).max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1))).map(|(_, g)| g);
-        let take = |v: Vec<Scored>, skip_first: bool, n: usize| v.into_iter().skip(usize::from(skip_first)).take(n).map(|s| s.3).collect::<Vec<_>>();
+        let take = |v: Vec<Scored>, skip_first: bool, n: usize| v.into_iter().skip(usize::from(skip_first)).take(n).map(|s| s.index).collect::<Vec<_>>();
         let top = match top_group {
-            Some(0) => Some(Hit::Artist(artists[0].3)),
-            Some(1) => Some(Hit::Album(albums[0].3)),
-            Some(2) => Some(Hit::Track(tracks[0].3)),
+            Some(0) => Some(Hit::Artist(artists[0].index)),
+            Some(1) => Some(Hit::Album(albums[0].index)),
+            Some(2) => Some(Hit::Track(tracks[0].index)),
             _ => None,
         };
         Results {
@@ -281,26 +212,6 @@ impl SearchIndex {
             tracks: take(tracks, top_group == Some(2), MAX_TRACKS),
         }
     }
-}
-
-fn scored(query: &str, words: &[&str], pattern: &Pattern, hay: &[Hay], matcher: &mut Matcher, tiebreak: impl Fn(usize) -> i64) -> Vec<Scored> {
-    // Cheap literal pass first; the fuzzy matcher only sees what survives.
-    let literal: Vec<(Rank, usize)> = hay.iter().enumerate().map(|(i, h)| (rank(query, words, &h.plain), i)).filter(|(r, _)| r.tier > 0).collect();
-    let pool: Vec<(Rank, usize)> =
-        if literal.is_empty() { (0..hay.len()).map(|i| (Rank { tier: 0, exact: false, leading: false }, i)).collect() } else { literal };
-    let mut out: Vec<Scored> = pool
-        .into_iter()
-        .filter_map(|(r, i)| {
-            let score = pattern.score(hay[i].fuzzy.slice(..), matcher);
-            // Literal matches keep a place even if the fuzzy matcher disagrees.
-            match (r.tier, score) {
-                (0, None) => None,
-                (_, s) => Some((r, s.unwrap_or(0), tiebreak(i) * 1000 - hay[i].plain.len() as i64, i)),
-            }
-        })
-        .collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)));
-    out
 }
 
 #[cfg(test)]
@@ -464,9 +375,9 @@ mod tests {
     }
 
     #[test]
-    fn plain_strips_case_accents_and_punctuation() {
-        assert_eq!(plain("B.o.B"), "bob");
-        assert_eq!(plain("  Björk — Vespertine "), "bjork vespertine");
-        assert_eq!(plain("AC/DC"), "acdc");
+    fn search_folds_names_as_the_library_sorts_them() {
+        for name in ["Björk", "Øystein Sevåg", "Łona", "Straße", "Ænima", "Ðoða", "Þór", "Ħal", "Ŧ", "Işık"] {
+            assert_eq!(shell::search::fold(name), library::fold(name), "{name}");
+        }
     }
 }

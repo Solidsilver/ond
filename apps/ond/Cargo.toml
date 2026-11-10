@@ -22,7 +22,6 @@ egui = "0.37.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 keyring = "4.2.0"
 library = { version = "0.4.4", path = "../../crates/library" }
-nucleo-matcher = "0.3.1"
 realfft = "3.5.0"
 offline = { version = "0.4.4", path = "../../crates/offline" }
 serde = { version = "1.0.229", features = ["derive"] }
