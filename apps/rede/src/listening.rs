@@ -35,7 +35,10 @@ pub enum Request {
         bookmark: sources::Bookmark,
         change: shelf::BookmarkChange,
     },
-    Undo(ProgressUpdate),
+    /// A whole entry the app has already decided on: Undo after a pull, or the
+    /// listener finishing a book, marking it unfinished or starting it over.
+    /// The journal writes it before it is sent, so a failure keeps it.
+    Set(ProgressUpdate),
     Finish(oneshot::Sender<()>),
 }
 
@@ -116,7 +119,7 @@ pub fn spawn(
     rt.spawn(async move {
         while let Some(request) = journal.recv().await {
             let saved = match &request {
-                Request::Report { update, .. } | Request::Undo(update) => stored.append_progress(update).map(Some),
+                Request::Report { update, .. } | Request::Set(update) => stored.append_progress(update).map(Some),
                 Request::Bookmark { bookmark, change } => stored.queue_bookmark(bookmark, *change).map(|_| None),
                 _ => Ok(None),
             };
@@ -177,11 +180,11 @@ pub fn spawn(
                         Request::Bookmark { .. } if current() => {
                             let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
                         }
-                        Request::Undo(update) if current() => {
-                            let id = id.expect("Undo is durable");
+                        Request::Set(update) if current() => {
+                            let id = id.expect("a set entry is durable");
                             received = id;
-                            // Undo may restore an unfinished position over a
-                            // finished row, so it needs the server's current
+                            // The entry may restore an unfinished position over
+                            // a finished row, so it needs the server's current
                             // list to decide whether a reset PATCH comes first.
                             let result = match worker.source.progress().await.map_err(Failure::from) {
                                 Ok(remote) => worker.source.set_progress(std::slice::from_ref(&update), &remote).await.map_err(Failure::from),

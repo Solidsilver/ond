@@ -452,7 +452,7 @@ async fn a_newer_phone_position_moves_a_paused_book_and_undo_corrects_the_server
     assert_eq!(saved.position, remote.position);
     assert_eq!(saved.finished, remote.finished);
     let undo = ProgressUpdate { at: remote.at.unwrap() + Duration::from_millis(1), listened: Duration::ZERO, ..update(&rig.key, 50.0, false) };
-    rig.listening.send(Request::Undo(undo));
+    rig.listening.send(Request::Set(undo));
     rig.event(|e| matches!(e, Event::Positions(p) if p.iter().any(|p| p.position.secs() == 50.0))).await;
     assert!(rig.shelf.pending_progress().unwrap().is_empty());
     assert_eq!(rig.fake.remote.lock().unwrap()[0].position.secs(), 50.0);
