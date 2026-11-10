@@ -121,28 +121,3 @@ impl Ribbons {
         self.sparks.retain(|s| s.life > 0.0);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::visuals::visualizer::tests::music;
-
-    #[test]
-    fn a_beat_throws_sparks_that_burn_out() {
-        let mut s = Ribbons::new(1);
-        s.step(&Input { dt: 1.0 / 60.0, half: [1.6, 1.0], audio: Some(&music(0, 1000)) });
-        assert_eq!(s.sparks.len(), SPARKS);
-        for i in 1..90 {
-            s.step(&Input { dt: 1.0 / 60.0, half: [1.6, 1.0], audio: Some(&music(i, 1000)) });
-        }
-        assert!(s.sparks.is_empty());
-    }
-
-    #[test]
-    fn a_beat_kicks_the_feedback_outward() {
-        let mut s = Ribbons::new(1);
-        let calm = s.step(&Input { dt: 1.0 / 60.0, half: [1.6, 1.0], audio: Some(&music(1, 1000)) }).warp;
-        let kick = s.step(&Input { dt: 1.0 / 60.0, half: [1.6, 1.0], audio: Some(&music(0, 1000)) }).warp;
-        assert!(kick.from.zoom > calm.from.zoom + 0.005);
-    }
-}

@@ -480,10 +480,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         let (prefs, _) = Prefs::open_debounced(&path, Duration::from_millis(10));
         prefs.edit(|s| s.volume = 0.25);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !path.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        testkit::wait_until("the writer to save", || path.exists());
         assert_eq!(read(&path).volume, 0.25, "the writer thread saved it without a flush");
     }
 
@@ -494,7 +491,9 @@ mod tests {
         let (prefs, _) = Prefs::open(&path);
         let volume = prefs.get(|s| s.volume);
         prefs.edit(|s| s.volume = volume);
-        std::thread::sleep(DEBOUNCE * 3);
+        // Dropping flushes: if the no-op edit had marked the file dirty, it
+        // would be written here.
+        drop(prefs);
         assert!(!path.exists(), "no change, no write");
     }
 

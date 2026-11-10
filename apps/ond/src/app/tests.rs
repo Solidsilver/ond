@@ -107,9 +107,12 @@ fn quitting_waits_only_a_moment_for_blocking_work() {
         let _ = stuck.recv_timeout(Duration::from_secs(60));
     });
     started.recv().unwrap();
+    // The wait is a field so the test can hold its own: 50 ms, and the drop
+    // must be back well before the second is up.
+    let app_rt = AppRuntime { rt: Some(rt), wait: Duration::from_millis(50) };
     let t = std::time::Instant::now();
-    drop(AppRuntime(Some(rt)));
-    assert!(t.elapsed() < Duration::from_secs(30), "quitting waited {:?}", t.elapsed());
+    drop(app_rt);
+    assert!(t.elapsed() < Duration::from_secs(1), "quitting waited {:?}", t.elapsed());
     drop(release);
 }
 
@@ -128,9 +131,9 @@ fn an_album_page_takes_its_own_colors_and_everything_else_the_playing_ones() {
     let time = std::cell::Cell::new(0.0);
     let settle = |app: &mut OndApp| {
         // The covers' looks are worked out in the background.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = testkit::Deadline::new();
         while ["al-0", "al-5"].iter().any(|c| app.art.look(c).is_none()) {
-            assert!(std::time::Instant::now() < deadline, "the looks never arrived");
+            assert!(!deadline.passed(), "the looks never arrived");
             std::thread::sleep(Duration::from_millis(5));
             app.art.poll();
         }
@@ -276,11 +279,11 @@ fn palette_opens_searches_and_queues() {
     assert_eq!(app.player.queue.upcoming[0].track.id, "x-1");
 }
 
-/// Handles what the bridge sends until `done` says so (or 3 s pass).
+/// Handles what the bridge sends until `done` says so.
 fn until(app: &mut OndApp, mut done: impl FnMut(&OndApp) -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = testkit::Deadline::new();
     while !done(app) {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting on the bridge");
+        assert!(!deadline.passed(), "timed out waiting on the bridge");
         match app.inbox.recv_timeout(Duration::from_millis(20)) {
             Ok(msg) => app.handle(msg),
             Err(_) => continue,
@@ -333,9 +336,9 @@ fn an_opened_album_is_searchable_before_the_next_sync() {
     // mustn't replace the fixture meanwhile.
     let rebuilt = |app: &mut OndApp| {
         app.after_messages();
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         loop {
-            assert!(std::time::Instant::now() < deadline, "no index arrived");
+            assert!(!deadline.passed(), "no index arrived");
             if let Ok(m @ Msg::Library(LibraryMsg::SearchIndex { .. })) = app.inbox.recv_timeout(Duration::from_millis(20)) {
                 app.handle(m);
                 return;
@@ -425,84 +428,6 @@ fn window_modes_draw_and_switch() {
     frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
     assert_eq!(app.prefs_now().mode, WindowMode::Full);
     assert!(app.ui.palette.is_some());
-}
-
-#[test]
-fn the_visualizer_opens_only_when_its_experiment_is_on_and_esc_leaves() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = egui::Context::default();
-    let mut app = app(&ctx, dir.path());
-    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
-    frame(&ctx, &mut app, vec![key(egui::Key::T, egui::Modifiers::COMMAND)]);
-    assert!(app.ui.visualizer.is_none(), "off: ⌘T does nothing");
-    app.prefs.edit(|s| s.experimental.visualizer = true);
-    frame(&ctx, &mut app, vec![key(egui::Key::T, egui::Modifiers::COMMAND)]);
-    assert!(app.ui.visualizer.is_some());
-    for _ in 0..3 {
-        frame(&ctx, &mut app, Vec::new());
-    }
-    frame(&ctx, &mut app, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
-    assert!(app.ui.visualizer.is_none(), "Esc leaves");
-    // Going somewhere else leaves it too, and so does turning it off.
-    app.toggle_visualizer();
-    app.apply(Action::Go(Route::Albums));
-    assert!(app.ui.visualizer.is_none());
-    app.toggle_visualizer();
-    app.prefs.edit(|s| s.experimental.visualizer = false);
-    frame(&ctx, &mut app, Vec::new());
-    assert!(app.ui.visualizer.is_none());
-}
-
-#[test]
-fn arrows_switch_the_visualizer_and_the_choice_is_kept() {
-    use crate::visuals::visualizer::{Kind, Pick};
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = egui::Context::default();
-    let mut app = app(&ctx, dir.path());
-    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
-    let showing = |app: &OndApp| app.ui.visualizer.as_ref().map(|v| v.kind());
-    app.prefs.edit(|s| {
-        s.experimental.visualizer = true;
-        s.experimental.visualizer_pick = Pick::Particles;
-    });
-    app.toggle_visualizer();
-    frame(&ctx, &mut app, Vec::new());
-    assert_eq!(showing(&app), Some(Kind::Particles), "it opens on the one chosen");
-    frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
-    assert_eq!(showing(&app), Some(Kind::Ribbons));
-    assert_eq!(app.prefs_now().experimental.visualizer_pick, Pick::Ribbons, "and that becomes the choice");
-    frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
-    assert_eq!(showing(&app), Some(Kind::Flow), "round from the last to the first");
-    frame(&ctx, &mut app, vec![key(egui::Key::ArrowLeft, egui::Modifiers::NONE)]);
-    assert_eq!(showing(&app), Some(Kind::Ribbons));
-    // ⌘→ is still the next track, not a switch.
-    frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::COMMAND)]);
-    assert_eq!(showing(&app), Some(Kind::Ribbons));
-    // Kept for next time.
-    app.prefs.flush();
-    let saved = crate::settings::Settings::read(&dir.path().join("settings.json")).unwrap();
-    assert_eq!(saved.experimental.visualizer_pick, Pick::Ribbons);
-    app.close_visualizer();
-    app.toggle_visualizer();
-    assert_eq!(showing(&app), Some(Kind::Ribbons));
-    // Shuffled, the arrows still switch, and it stays shuffled.
-    app.close_visualizer();
-    app.prefs.edit(|s| s.experimental.visualizer_pick = Pick::Shuffle);
-    app.toggle_visualizer();
-    frame(&ctx, &mut app, Vec::new());
-    let first = showing(&app);
-    frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
-    assert_ne!(showing(&app), first);
-    assert_eq!(app.prefs_now().experimental.visualizer_pick, Pick::Shuffle);
-    // And each new track after the first brings another.
-    app.player.queue.play_now(vec![track("t-first", "al-0", 1)], 0, Source::Added);
-    frame(&ctx, &mut app, Vec::new());
-    for n in 0..4 {
-        let before = showing(&app);
-        app.player.queue.play_now(vec![track(&format!("t-{n}"), "al-0", 1)], 0, Source::Added);
-        frame(&ctx, &mut app, Vec::new());
-        assert_ne!(showing(&app), before, "track {n}");
-    }
 }
 
 #[test]
@@ -604,10 +529,10 @@ fn another_account_gets_its_own_library_and_downloads() {
 /// Waits for the offline store opening in the background, handling only
 /// its messages: the rest go back in the inbox, in order, behind them.
 fn store_opened(app: &mut OndApp) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = testkit::Deadline::new();
     let mut others = Vec::new();
     while app.downloads.store.is_none() || app.downloads.opening {
-        assert!(std::time::Instant::now() < deadline, "the offline store never opened");
+        assert!(!deadline.passed(), "the offline store never opened");
         match app.inbox.recv_timeout(Duration::from_millis(20)) {
             Ok(m @ Msg::Offline(OfflineMsg::Store { .. } | OfflineMsg::Moving(_) | OfflineMsg::Moved(_))) => app.handle(m),
             Ok(m) => others.push(m),

@@ -244,7 +244,6 @@ fn stale_track_events_do_not_clear_a_new_seek_or_finish_a_new_book() {
 
 #[tokio::test]
 async fn a_real_fetch_rejection_reaches_the_player_as_a_redacted_401() {
-    use std::io::{BufRead, Write};
     use std::sync::Arc;
     struct NoOutput;
     impl audio::OutputBackend for NoOutput {
@@ -262,32 +261,18 @@ async fn a_real_fetch_rejection_reaches_the_player_as_a_redacted_401() {
         }
         fn close(&mut self) {}
     }
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut reader = std::io::BufReader::new(&stream);
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-        }
-        stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-    });
+    let server = testkit::JsonFake::start(|_| testkit::Answer::new("401 Unauthorized", ""));
     let dir = tempfile::tempdir().unwrap();
     let cache = streamcache::StreamCache::new(streamcache::CacheConfig::new(dir.path()), tokio::runtime::Handle::current()).unwrap();
     let engine = audio::spawn(audio::EngineConfig::default(), Box::new(NoOutput), Some(cache));
     let mut input = opened(true);
-    input.session.tracks[0].url = format!("http://{address}/file?token=PRIVATE");
+    input.session.tracks[0].url = format!("{}file?token=PRIVATE", server.base());
     let mut player = Player::default();
     player.load(input, 1.0, &engine, Instant::now()).unwrap();
     let events = engine.events.clone();
     let event = tokio::task::spawn_blocking(move || {
         loop {
-            let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            let event = events.recv_timeout(testkit::slack(testkit::WAIT)).unwrap();
             if matches!(event, Event::Error { .. }) {
                 return event;
             }
@@ -296,7 +281,7 @@ async fn a_real_fetch_rejection_reaches_the_player_as_a_redacted_401() {
     .await
     .unwrap();
     engine.shutdown(Duration::from_secs(1));
-    server.join().unwrap();
+    assert_eq!(server.count("/file"), 1);
     let Event::Error { message, .. } = &event else { unreachable!() };
     assert!(message.contains("http 401"), "the status survives decoding: {message}");
     assert!(!message.contains("PRIVATE"));

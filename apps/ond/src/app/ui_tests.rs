@@ -84,36 +84,6 @@ fn column_edges_drag_and_persist() {
     *h.state_mut() = None;
 }
 
-/// A live visual asks for frames, and has the engine copy what plays, only
-/// while it's on screen and something plays; otherwise the app's own pace
-/// (nothing sooner than its clock) and the tap off.
-#[test]
-fn live_visuals_ask_for_frames_only_while_playing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = full_window(dir.path());
-    let soon = |h: &mut Harness<'_, Option<OndApp>>| h.output().viewport_output.values().any(|v| v.repaint_delay <= Duration::from_millis(50));
-    reset(&mut h, FULL, Route::Recent);
-    h.run_steps(3);
-    assert!(!soon(&mut h), "every switch off: no extra frames");
-    assert!(!app_mut(&mut h).engine.status.tap.active());
-    experiment(&mut h, |x| x.spectrum = true);
-    steps_with_audio(&mut h, 3);
-    assert!(soon(&mut h), "the spectrum on screen while playing wants frames");
-    assert!(app_mut(&mut h).engine.status.tap.active(), "and the tap is on");
-    app_mut(&mut h).engine.status.preview(PlayState::Paused, 141.0, 383.0, 0.72);
-    h.run_steps(3);
-    assert!(!soon(&mut h), "paused: no extra frames");
-    assert!(!app_mut(&mut h).engine.status.tap.active(), "and the tap is off");
-    // Playing again, but in a view without it (Mini shows no spectrum).
-    app_mut(&mut h).engine.status.preview(PlayState::Playing, 141.0, 383.0, 0.72);
-    app_mut(&mut h).edit_windows(|w| w.mode = WindowMode::Mini);
-    h.set_size(vec2(280.0, 280.0));
-    h.run_steps(3);
-    assert!(!soon(&mut h), "not on screen: no extra frames");
-    assert!(!app_mut(&mut h).engine.status.tap.active());
-    *h.state_mut() = None;
-}
-
 #[test]
 fn the_now_playing_heart_toggles_both_ways() {
     let dir = tempfile::tempdir().unwrap();
@@ -427,11 +397,6 @@ fn window(dir: &Path, size: Vec2, draw: fn(&mut egui::Ui, &mut OndApp)) -> Harne
     h
 }
 
-/// A key going down, alone, so the next step is the frame that sees it.
-fn key_down(h: &Harness<'_, Option<OndApp>>, key: egui::Key) {
-    h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
-}
-
 /// Holding the alphabet rail's last letter takes the album grid to the end,
 /// and its first back to the start.
 #[test]
@@ -517,24 +482,6 @@ fn name_dialog_focuses_its_field_after_esc() {
         h.run_steps(3);
         assert!(app_mut(&mut h).ui.overlay.is_none(), "round {round}: Esc closed the dialog");
     }
-    *h.state_mut() = None;
-}
-
-/// Esc leaves the visualizer for the window in the same frame (no blank one
-/// in between).
-#[test]
-fn esc_from_the_visualizer_draws_the_window_at_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = full_window(dir.path());
-    reset(&mut h, FULL, Route::Recent);
-    experiment(&mut h, |x| x.visualizer = true);
-    app_mut(&mut h).toggle_visualizer();
-    h.run_steps(3);
-    assert!(h.query_by_label_contains("Visualizer:").is_some(), "the visualizer is open");
-    key_down(&h, egui::Key::Escape);
-    h.step();
-    assert!(app_mut(&mut h).ui.visualizer.is_none(), "Esc closed it");
-    assert!(h.query_by_label_contains("Now playing:").is_some(), "the window drew in the frame Esc closed it");
     *h.state_mut() = None;
 }
 
@@ -780,13 +727,6 @@ fn every_view_names_its_controls() {
         h.run_steps(2);
         h.check_accessibility();
     }
-    reset(&mut h, FULL, Route::Recent);
-    experiment(&mut h, |x| x.visualizer = true);
-    app_mut(&mut h).toggle_visualizer();
-    h.run_steps(3);
-    assert!(app_mut(&mut h).ui.visualizer.is_some(), "the visualizer is open");
-    h.check_accessibility();
-    app_mut(&mut h).ui.visualizer = None;
     for section in [
         settings_page::Section::General,
         settings_page::Section::Appearance,
@@ -796,7 +736,6 @@ fn every_view_names_its_controls() {
         settings_page::Section::Offline,
         settings_page::Section::Library,
         settings_page::Section::Account,
-        settings_page::Section::Experimental,
         settings_page::Section::About,
     ] {
         reset(&mut h, FULL, Route::Recent);

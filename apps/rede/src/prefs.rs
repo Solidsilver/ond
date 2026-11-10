@@ -233,10 +233,7 @@ mod tests {
         let (prefs, loaded) = Prefs::open_debounced(&path, Duration::from_millis(10));
         assert_eq!(loaded, Loaded::Missing);
         prefs.edit(|s| s.sort = crate::settings::LibrarySort::Author);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !path.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        testkit::wait_until("the writer to save", || path.exists());
         assert_eq!(read(&path).sort, crate::settings::LibrarySort::Author, "the writer thread saved it without a flush");
     }
 
@@ -247,7 +244,9 @@ mod tests {
         let (prefs, _) = Prefs::open(&path);
         let sort = prefs.get(|s| s.sort);
         prefs.edit(|s| s.sort = sort);
-        std::thread::sleep(DEBOUNCE * 3);
+        // Dropping flushes: if the no-op edit had marked the file dirty, it
+        // would be written here.
+        drop(prefs);
         assert!(!path.exists(), "no change, no write");
     }
 

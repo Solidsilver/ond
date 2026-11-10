@@ -559,20 +559,19 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "settings-playback-on");
 
-    // A library run waiting on playback (the preview status is mid-download).
+    // A library run waiting on playback (the preview status is mid-download),
+    // shot from a stand-in so no worker has to reach that state first.
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        let jobs: Vec<_> =
-            (0..40).map(|i| crate::analyze::Job { track_id: format!("j{i}"), suffix: None, stamp: "s".into(), secs: 240.0, local: None }).collect();
-        app.analysis.runner.enqueue(jobs);
-        // The worker acknowledges playback asynchronously. Capture the intended
-        // waiting state rather than racing its first progress update.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !app.analysis.runner.progress().waiting {
-            assert!(std::time::Instant::now() < deadline, "the analysis worker never yielded to playback");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        app.analysis.runner = crate::analyze::Runner::stand_in(crate::analyze::Progress {
+            done: 3,
+            total: 40,
+            waiting: true,
+            running: true,
+            remaining_secs: 37.0 * 210.0,
+            ..Default::default()
+        });
         app.actions.push(Action::OpenSettings(settings_page::Section::Library));
     }
     s.shoot(h, "settings-analysing");
@@ -719,7 +718,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "empty-queue");
 
-    experimental_scenes(h, s);
+    appearance_scenes(h, s);
 
     // No status bar: the signal path lives in the now-playing display.
     let lcd = egui::Rect::from_min_max(pos2(400.0, 0.0), pos2(1000.0, 52.0));
@@ -811,8 +810,9 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "login-busy");
 }
 
-/// The experimental visuals, each on its own.
-fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+/// The appearance settings, each on its own: colors from the album art, the
+/// blurred artwork behind the Player and Mini, and the waveform seek bar.
+fn appearance_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     let player = vec2(380.0, 880.0);
     // Colors from the album art: the Player, the now-playing display and the
     // accent (links, the selected tab), for a warm cover and a cool one.
@@ -859,9 +859,9 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     {
         let app = app_mut(h);
         app.player.queue.play_now(vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = testkit::Deadline::new();
         while app.art.look(&album_id(0)).is_none() {
-            assert!(std::time::Instant::now() < deadline, "the next cover's look never arrived");
+            assert!(!deadline.passed(), "the next cover's look never arrived");
             std::thread::sleep(Duration::from_millis(10));
             app.art.poll();
         }
@@ -943,92 +943,14 @@ fn experimental_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     fixture_waveform(app_mut(h));
     settle_look(h);
     s.shoot(h, "x-together-player");
-
-    // The live spectrum: along the foot of the Player's artwork, and faint
-    // behind the now-playing display's text.
-    reset(h, player, Route::Recent);
-    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
-    experiment(h, |x| x.spectrum = true);
-    steps_with_audio(h, 4);
-    s.shoot_now(h, "x-spectrum-player");
-    reset(h, FULL, Route::Recent);
-    experiment(h, |x| x.spectrum = true);
-    steps_with_audio(h, 4);
-    s.shoot_now(h, "x-spectrum-full");
-    reset(h, FULL, Route::Recent);
-    looks(h, |s| {
-        s.experimental.spectrum = true;
-        s.waveform = true;
-    });
-    adapt(h);
-    fixture_waveform(app_mut(h));
-    settle_look(h);
-    steps_with_audio(h, 4);
-    s.shoot_now(h, "x-spectrum-colors-full");
-
-    let frames = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
-        for _ in 0..n {
-            // At 60 frames a second, as the app draws it.
-            let t = h.ctx.input(|i| i.time) + 1.0 / 60.0;
-            h.input_mut().time = Some(t);
-            feed_tap(app_mut(h), 4096);
-            h.step();
-            // Each render is one GPU frame: the feedback builds up across them.
-            let _ = h.render();
-        }
-    };
-    visualizer_scenes(h, s);
-    let wide = vec2(1280.0, 800.0);
-    // The spectrogram in the Info tab, full window and Player, after a few
-    // seconds of the fixture chord.
-    for (size, player, name) in [(FULL, false, "x-spectrogram-full"), (player, true, "x-spectrogram-player")] {
-        reset(h, size, Route::Recent);
-        if player {
-            app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
-        }
-        app_mut(h).ui.queue_ui.tab = QueueTab::Info;
-        app_mut(h).ui.spectrogram.clear();
-        experiment(h, |x| x.spectrogram = true);
-        frames(h, 150);
-        s.shoot_now(h, name);
-    }
-    // What a GPU frame costs with the visualizer against the ordinary window,
-    // rendered offscreen and read back (the read-back is in both).
-    let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {
-        frames(h, 5);
-        let t = std::time::Instant::now();
-        frames(h, 30);
-        t.elapsed().as_secs_f64() * 1000.0 / 30.0
-    };
-    reset(h, wide, Route::Recent);
-    let plain = render_ms(h);
-    experiment(h, |x| x.visualizer = true);
-    app_mut(h).toggle_visualizer();
-    let vis = render_ms(h);
-    app_mut(h).close_visualizer();
-    println!("  render + read-back per frame at {}x{} px: window {plain:.2} ms, visualizer {vis:.2} ms", wide.x * 2.0, wide.y * 2.0);
-    // The shortcut list shows the visualizer's key only while it's on.
-    reset(h, FULL, Route::Recent);
-    experiment(h, |x| x.visualizer = true);
-    app_mut(h).ui.overlay = Some(Overlay::Shortcuts);
-    s.shoot(h, "x-visualizer-shortcuts");
+    // Leave them off: what follows is the ordinary window's.
+    looks(h, |_| ());
 }
 
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]
 fn snapshots() {
     shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, scenes);
-}
-
-/// Only the visualizers (they look the same in either theme):
-///
-/// ```sh
-/// cargo test -p ond-player --release visualizer_snapshots -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore = "renders PNGs for review; run with --ignored"]
-fn visualizer_snapshots() {
-    shoot_scenes(&[(egui::Theme::Dark, "dark")], None, visualizer_scenes);
 }
 
 /// Settings with some set in managed.json (as the Home Manager module writes
@@ -1046,7 +968,6 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         settings_page::Section::Playback,
         settings_page::Section::Output,
         settings_page::Section::Offline,
-        settings_page::Section::Experimental,
     ] {
         reset(h, FULL, Route::Recent);
         app_mut(h).actions.push(Action::OpenSettings(section));
@@ -1061,125 +982,4 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).login = Some(super::session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
     s.shoot(h, "managed-sign-in");
     app_mut(h).login = None;
-}
-
-/// The visualizers, each fed the fixture's music in real time at 60 frames a
-/// second from a fixed seed: Flow as it opens (its name, the key hint and the
-/// track's caption showing), each a few seconds in, Flow at other seeds and
-/// later (other fields, shapes and colour maps), Particles in another album's
-/// colors, a switch with →, and the painter versions.
-fn visualizer_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
-    use crate::visuals::visualizer::{Kind, Pick};
-    let frames = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
-        for _ in 0..n {
-            let t = h.ctx.input(|i| i.time) + 1.0 / 60.0;
-            h.input_mut().time = Some(t);
-            feed_tap(app_mut(h), 44_100 / 60);
-            h.step();
-            // Each render is one GPU frame: the feedback builds up across them.
-            let _ = h.render();
-        }
-    };
-    let open = |h: &mut Harness<'_, Option<OndApp>>, kind: Kind, seed: u64, blue: bool| {
-        reset(h, vec2(1280.0, 800.0), Route::Recent);
-        if blue {
-            play_blue(app_mut(h));
-        }
-        experiment(h, |x| {
-            x.visualizer = true;
-            x.visualizer_pick = Pick::of(kind);
-        });
-        settle_look(h);
-        feed_tap(app_mut(h), 4096);
-        app_mut(h).toggle_visualizer();
-        let v = app_mut(h).ui.visualizer.as_mut().expect("open");
-        v.fixed_step = Some(1.0 / 60.0);
-        v.reseed(seed);
-    };
-    // The choice in Settings › Experimental, scrolled down to it.
-    reset(h, FULL, Route::Recent);
-    experiment(h, |x| x.visualizer = true);
-    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Experimental));
-    h.run_steps(2);
-    h.hover_at(pos2(FULL.x / 2.0, FULL.y / 2.0));
-    h.event(egui::Event::MouseWheel {
-        unit: egui::MouseWheelUnit::Point,
-        delta: vec2(0.0, -600.0),
-        phase: egui::TouchPhase::Move,
-        modifiers: egui::Modifiers::NONE,
-        source: egui::MouseWheelSource::Wheel,
-    });
-    h.run_steps(30);
-    s.shoot(h, "x-settings-visualizer");
-    open(h, Kind::Flow, 1, false);
-    frames(h, 75);
-    s.shoot_now(h, "x-visualizer-title");
-    for kind in Kind::ALL {
-        open(h, kind, 1, false);
-        frames(h, 360);
-        s.shoot_now(h, &format!("x-visualizer-{}", kind.label().to_lowercase()));
-    }
-    for (seed, n) in [(2, 900), (3, 1500), (4, 2400)] {
-        open(h, Kind::Flow, seed, false);
-        frames(h, n);
-        s.shoot_now(h, &format!("x-visualizer-flow-{seed}"));
-    }
-    for kind in [Kind::Particles, Kind::Ribbons] {
-        open(h, kind, 5, true);
-        frames(h, 360);
-        s.shoot_now(h, &format!("x-visualizer-{}-alt", kind.label().to_lowercase()));
-    }
-    // The 8-bit pictures used where the adapter has no half-float targets.
-    let gpu = app_mut(h).gpu;
-    app_mut(h).gpu = gpu.map(|g| crate::visuals::gpu::Target::plain(g.format));
-    open(h, Kind::Flow, 2, false);
-    frames(h, 900);
-    s.shoot_now(h, "x-visualizer-flow-8bit");
-    app_mut(h).close_visualizer();
-    app_mut(h).gpu = gpu;
-    // Each of Flow's fields, with each shape and colour map along the way.
-    for field in 0..8 {
-        open(h, Kind::Flow, 6, false);
-        app_mut(h).ui.visualizer.as_mut().and_then(|v| v.scene().flow()).expect("flow").hold(field, field, field);
-        frames(h, 240);
-        s.shoot_now(h, &format!("x-visualizer-flow-field-{field}"));
-    }
-    // → from Flow: Particles, its name fading in, and kept as the choice.
-    open(h, Kind::Flow, 1, false);
-    frames(h, 300);
-    h.key_press(egui::Key::ArrowRight);
-    frames(h, 40);
-    s.shoot_now(h, "x-visualizer-switched");
-    assert_eq!(app_mut(h).prefs_now().experimental.visualizer_pick, Pick::Particles);
-    let held = |h: &mut Harness<'_, Option<OndApp>>| {
-        h.step();
-        let _ = h.render();
-        RENDERER.with_borrow(|r| crate::visuals::gpu::held(&r.as_ref().expect("a wgpu renderer").read().callback_resources))
-    };
-    assert!(held(h), "the open visualizer has its pictures on the GPU");
-    app_mut(h).close_visualizer();
-    assert!(!held(h), "closing it gives them back");
-    // What a GPU frame costs with each, rendered offscreen and read back (the
-    // read-back is in all of them), against the ordinary window.
-    let render_ms = |h: &mut Harness<'_, Option<OndApp>>| {
-        frames(h, 5);
-        let t = std::time::Instant::now();
-        frames(h, 30);
-        t.elapsed().as_secs_f64() * 1000.0 / 30.0
-    };
-    reset(h, vec2(1280.0, 800.0), Route::Recent);
-    println!("  render + read-back per frame at 2560x1600 px: window {:.2} ms", render_ms(h));
-    for kind in Kind::ALL {
-        open(h, kind, 1, false);
-        println!("    {}: {:.2} ms", kind.label(), render_ms(h));
-        app_mut(h).close_visualizer();
-    }
-    let gpu = app_mut(h).gpu.take();
-    for kind in Kind::ALL {
-        open(h, kind, 1, false);
-        frames(h, 300);
-        s.shoot_now(h, &format!("x-visualizer-{}-painter", kind.label().to_lowercase()));
-        app_mut(h).close_visualizer();
-    }
-    app_mut(h).gpu = gpu;
 }

@@ -3,6 +3,8 @@
 What automated tests can't cover: real hardware, the real server, and macOS integration.
 Run with `cargo run -p ond-player --release`. Visual review without a server:
 `cargo test -p ond-player --release snapshots -- --ignored --nocapture` → `target/snapshots/*.png`.
+Frame times on a big library and the search index's keystroke latency:
+`cargo test -p ond-player --release perf -- --ignored --nocapture`.
 
 ## Audio output
 - [ ] UMC22, 16/44.1 file, bit-perfect: green dot; Audio MIDI Setup shows 44.1 kHz; other apps are silent on the UMC22 (hog mode).
@@ -88,7 +90,6 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 - [ ] Settings → Library → Analyze library: progress, pauses while playback buffers; album pages show `DR · LUFS` and, only when suspicious, a "likely upsampled / lossy source" chip.
 
 ## Visualizer (Settings › Experimental)
-Just the visualizers as PNGs: `cargo test -p ond-player --release visualizer_snapshots -- --ignored --nocapture`.
 - [ ] ⌘T opens the chosen one; ← → switch with its name showing briefly; the choice is there after a restart. Shuffle changes it at each new track.
 - [ ] Apple-silicon laptop, full screen (F): smooth at the display's rate (120 Hz on ProMotion); the fans stay quiet.
 - [ ] Surface Pro 6 (Intel iGPU, Linux, Vulkan), full screen: Flow and Particles stay smooth; the log doesn't say the pictures fell back to 8-bit.

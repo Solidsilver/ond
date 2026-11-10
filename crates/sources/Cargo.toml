@@ -24,3 +24,4 @@ tokio = { version = "1.54.1", features = ["rt", "macros"] }
 # cache and the offline store use to name files.
 streamcache = { version = "0.4.4", path = "../streamcache" }
 serde_json = "1.0.154"
+testkit = { path = "../testkit" }

@@ -128,6 +128,9 @@ pub struct Art {
     /// Images given by [`Art::preload`], so looks work without a server.
     #[cfg(test)]
     preloaded: HashMap<String, ColorImage>,
+    /// A size for [`Art::disk_size`] to report as it is (see `pin_disk_size`).
+    #[cfg(test)]
+    pinned_disk: Option<u64>,
 }
 
 impl Art {
@@ -163,6 +166,8 @@ impl Art {
             look_rx,
             #[cfg(test)]
             preloaded: HashMap::new(),
+            #[cfg(test)]
+            pinned_disk: None,
         }
     }
 
@@ -370,6 +375,10 @@ impl Art {
     /// Bytes of art on disk, recounted in the background every few seconds
     /// while asked for; `None` until first counted.
     pub fn disk_size(&mut self) -> Option<u64> {
+        #[cfg(test)]
+        if let Some(bytes) = self.pinned_disk {
+            return Some(bytes);
+        }
         if self.counted.is_none_or(|at| at.elapsed() > RECOUNT) {
             self.counted = Some(Instant::now());
             let (dir, disk, ctx) = (self.dir.clone(), self.disk.clone(), self.ctx.clone());
@@ -379,6 +388,13 @@ impl Art {
             });
         }
         Some(self.disk.load(Ordering::Relaxed)).filter(|&n| n != u64::MAX)
+    }
+
+    /// Reports `bytes` as the art on disk whatever the walk finds: a snapshot
+    /// shows one number, not whichever count finished first.
+    #[cfg(test)]
+    pub fn pin_disk_size(&mut self, bytes: u64) {
+        self.pinned_disk = Some(bytes);
     }
 
     /// Forgets every cover, here and on disk: what's on screen loads again
@@ -526,34 +542,34 @@ mod tests {
         let ctx = egui::Context::default();
         let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned());
         // Never connected: no client at all.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         loop {
             art.poll();
             if art.texture("al-1", 40.0).is_some() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "cached art never loaded offline");
+            assert!(!deadline.passed(), "cached art never loaded offline");
             std::thread::sleep(Duration::from_millis(10));
         }
         // Art that isn't cached can't load without a server, and isn't asked for again.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         while !art.covers.get("al-2").is_some_and(|&cover| art.missing.contains(&Key { cover, size: 64 })) {
             art.poll();
             assert!(art.texture("al-2", 40.0).is_none());
-            assert!(std::time::Instant::now() < deadline);
+            assert!(!deadline.passed());
             std::thread::sleep(Duration::from_millis(10));
         }
         // Clearing forgets the loaded cover and deletes the file, and the size says so.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         while art.disk_size() != Some(png_len) {
-            assert!(std::time::Instant::now() < deadline, "the cache was never counted");
+            assert!(!deadline.passed(), "the cache was never counted");
             std::thread::sleep(Duration::from_millis(10));
         }
         art.clear();
         assert!(art.texture("al-1", 40.0).is_none());
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         while art.disk_size() != Some(0) {
-            assert!(std::time::Instant::now() < deadline, "the cache was never cleared");
+            assert!(!deadline.passed(), "the cache was never cleared");
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!cover_file(dir.path(), "al-1", 64).exists());

@@ -25,3 +25,4 @@ workspace = true
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+testkit = { path = "../testkit" }

@@ -218,6 +218,33 @@ impl Runner {
         self.shared.lock().progress()
     }
 
+    /// A runner with no worker behind it, reporting `progress` as its state:
+    /// for a screenshot of a run that waits on playback, without racing a real
+    /// one's first update.
+    #[cfg(test)]
+    pub fn stand_in(progress: Progress) -> Self {
+        let shared = Arc::new(Shared { state: Mutex::default(), wake: Condvar::new(), quit: AtomicBool::new(false) });
+        {
+            let mut st = shared.lock();
+            st.done = progress.done;
+            st.failed = progress.failed;
+            st.paused = progress.paused;
+            st.waiting = progress.waiting;
+            // The queue holds what's left, so `total` and `remaining_secs` come
+            // out as asked.
+            let left = progress.total.saturating_sub(progress.done);
+            let each = if left > 0 { progress.remaining_secs / left as f64 } else { 0.0 };
+            let job = |id: String| Job { track_id: id, suffix: None, stamp: "stand-in".into(), secs: each, local: None };
+            for i in 0..left.saturating_sub(1) {
+                st.push_back(job(format!("stand-in-{i}")));
+            }
+            if left > 0 {
+                st.current = Some(job("stand-in".into()));
+            }
+        }
+        Self { shared }
+    }
+
     /// How many of `ids` are queued or being analysed.
     pub fn pending<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> usize {
         let st = self.shared.lock();
@@ -505,33 +532,9 @@ mod tests {
 
     #[test]
     fn a_download_of_our_own_gives_way_to_playback() {
-        use std::io::{BufRead, BufReader, Write};
-        // A slow server: 2 MB at 16 KB every 20 ms, about 2.5 s.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/rest/stream?id=t", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(mut conn) = conn else { break };
-                std::thread::spawn(move || {
-                    let mut reader = BufReader::new(conn.try_clone().unwrap());
-                    let mut line = String::new();
-                    while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
-                        line.clear();
-                    }
-                    let body = vec![1u8; 2_000_000];
-                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-                    if conn.write_all(head.as_bytes()).is_err() {
-                        return;
-                    }
-                    for chunk in body.chunks(16 * 1024) {
-                        if conn.write_all(chunk).is_err() {
-                            return;
-                        }
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                });
-            }
-        });
+        // A download that never finishes: the server holds it after 64 KB.
+        let server = testkit::RangeServer::start(vec![1u8; 2_000_000], testkit::Serve { gate_after: Some(64 * 1024), ..testkit::Serve::fast() });
+        let url = server.url();
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let cache = |name: &str| StreamCache::new(streamcache::CacheConfig::new(dir.path().join(name)), rt.handle().clone()).unwrap();
@@ -554,7 +557,7 @@ mod tests {
         let t = Instant::now();
         let out = analyze_job(&j, || Some(url), &cfg, &|| false);
         assert!(matches!(out, Err(analysis::AnalyzeError::Cancelled)), "{out:?}");
-        assert!(t.elapsed() < Duration::from_secs(2), "gave way after {:?}", t.elapsed());
+        assert!(t.elapsed() < testkit::slack(Duration::from_secs(2)), "gave way after {:?}", t.elapsed());
     }
 
     #[test]
@@ -573,11 +576,9 @@ mod tests {
         // The second job has nothing to read: it fails normally, which only
         // happens if the worker survived the first.
         runner.enqueue([job("test-panic", 1.0), job("after", 1.0)]);
-        // The second job's failed fetch takes ~4 s on its own; leave room for a
-        // busy machine running the whole suite.
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = testkit::Deadline::new();
         while runner.progress().done < 2 {
-            assert!(Instant::now() < deadline, "worker stalled: {:?}", runner.progress());
+            assert!(!deadline.passed(), "worker stalled: {:?}", runner.progress());
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(runner.progress().failed, 2);

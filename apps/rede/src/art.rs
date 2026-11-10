@@ -331,7 +331,6 @@ async fn fetch_cached(source: &dyn Source, dir: &Path, cover: &str, size: u32) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn non_square_covers_are_centred_and_fitted_without_cropping() {
@@ -398,23 +397,16 @@ mod tests {
         std::fs::write(shell::art::cover_file(dir.path(), "book-1", 64), png).unwrap();
         let ctx = egui::Context::default();
         let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned());
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
+        testkit::wait_until("cached art to load offline", || {
             art.poll();
-            if art.texture("book-1", 40.0).is_some() {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "cached art never loaded offline");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            art.texture("book-1", 40.0).is_some()
+        });
         // A cover that isn't cached can't load without an account, and isn't
         // asked for again this sign-in: the tile stays a tile.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !art.covers.get("book-2").is_some_and(|&cover| art.missing.contains(&Key { cover, size: 64 })) {
+        testkit::wait_until("the uncached cover to be marked missing", || {
             art.poll();
             assert!(art.texture("book-2", 40.0).is_none());
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            art.covers.get("book-2").is_some_and(|&cover| art.missing.contains(&Key { cover, size: 64 }))
+        });
     }
 }

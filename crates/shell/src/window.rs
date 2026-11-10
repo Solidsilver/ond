@@ -149,7 +149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mini_stays_square() {
+    fn the_mini_window_stays_square_following_the_dragged_edge() {
         assert_eq!(square([280.0, 280.0], [280.0, 280.5]), None);
         // Dragging the right edge: the width wins.
         assert_eq!(square([280.0, 280.0], [340.0, 280.0]), Some([340.0, 340.0]));

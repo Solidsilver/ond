@@ -6,6 +6,8 @@
 //! cargo test -p rede --release snapshots -- --ignored --nocapture
 //! ```
 //!
+//! Set `OND_SNAPSHOT_DIR` to keep independent render runs in separate folders.
+//!
 //! The data is the fixture shelf (`app::fixture`): twelve books, generated
 //! covers in three shapes, missing art, titles, authors and chapters. No server, no keychain;
 //! the settings and caches live in a temp dir.
@@ -530,7 +532,8 @@ fn sleep(app: &mut RedeApp, timer: Sleep) {
 #[test]
 #[ignore = "renders PNGs for review; run with --ignored"]
 fn snapshots() {
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
+    let out =
+        std::env::var_os("OND_SNAPSHOT_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots"));
     std::fs::create_dir_all(&out).unwrap();
     let out = out.canonicalize().unwrap();
     for (theme, name) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {

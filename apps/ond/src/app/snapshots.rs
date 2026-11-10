@@ -81,11 +81,17 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, s
             .build_ui_state(
                 |ui, app: &mut Option<OndApp>| {
                     if let Some(app) = app {
-                        // Storage labels describe the fixture, not the machine
-                        // rendering it or the random folder holding its files.
+                        // Labels describe the fixture, not the machine rendering
+                        // it, the random folder holding its files, or the hour
+                        // it's rendered at.
                         app.downloads.base = PathBuf::from("/Users/demo/Music/Ond/Downloads");
                         if app.downloads.snap.free_bytes != Some(180_000_000_000) {
                             std::sync::Arc::make_mut(&mut app.downloads.snap).free_bytes = Some(180_000_000_000);
+                        }
+                        app.art.pin_disk_size(48_300_000);
+                        let synced = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2024, 1, 1, 9, 41, 0).unwrap();
+                        if app.sync.last != Some(synced) {
+                            app.sync.last = Some(synced);
                         }
                         if app.login.is_some() {
                             app.login_ui(ui);

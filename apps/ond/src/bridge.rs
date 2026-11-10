@@ -1270,13 +1270,13 @@ mod tests {
     /// Runs the bridge's tasks until `done`, collecting what they send.
     fn until(rt: &tokio::runtime::Runtime, rx: &Receiver<Msg>, got: &mut Vec<Msg>, mut done: impl FnMut(&[Msg]) -> bool) {
         rt.block_on(async {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = testkit::Deadline::new();
             loop {
                 got.extend(rx.try_iter());
                 if done(got) {
                     return;
                 }
-                assert!(Instant::now() < deadline, "timed out");
+                assert!(!deadline.passed(), "timed out");
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         });
@@ -1322,7 +1322,7 @@ mod tests {
         // The next sync has nothing to fetch, yet shows what the old one
         // stored. One started before the old one has finished storing has
         // nothing to show, so sync until one does.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = testkit::Deadline::new();
         loop {
             assert!(got.is_empty(), "the replaced sync sent {:?}", names(&got));
             bridge.sync_tracks(fresh.clone());
@@ -1331,7 +1331,7 @@ mod tests {
                 break;
             }
             assert_eq!(names(&got), ["TrackSyncDone"], "nothing to fetch, nothing owed yet");
-            assert!(Instant::now() < deadline, "no sync showed what the replaced one stored");
+            assert!(!deadline.passed(), "no sync showed what the replaced one stored");
             got.clear();
         }
     }
@@ -1496,25 +1496,12 @@ mod tests {
         assert!(connect_error(&url).contains("server address"));
     }
 
-    /// Answers one request on a local port with `status` and an HTML page
-    /// titled `title`. Returns the base URL.
-    fn answer_once(status: &'static str, title: &'static str) -> String {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let (mut req, mut buf) = (Vec::new(), [0u8; 1024]);
-            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
-                match s.read(&mut buf) {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => req.extend_from_slice(&buf[..n]),
-                }
-            }
-            let body = format!("<html><head><title>{title}</title></head><body>proxy</body></html>");
-            let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        });
-        format!("http://{addr}/")
+    /// A local server answering with `status` and an HTML page titled
+    /// `title`, as a reverse proxy does. Returns the base URL.
+    fn proxy_page(status: &'static str, title: &'static str) -> String {
+        let body = format!("<html><head><title>{title}</title></head><body>proxy</body></html>");
+        let fake = testkit::JsonFake::start(move |_| testkit::Answer::new(status, body.clone()).with_header("Content-Type", "text/html"));
+        fake.base().to_owned()
     }
 
     /// Signing in to a server behind a reverse proxy that answers with an
@@ -1532,10 +1519,10 @@ mod tests {
             }
         };
         assert_eq!(
-            sign_in(answer_once("502 Bad Gateway", "Navidrome is restarting, try again in a minute")),
+            sign_in(proxy_page("502 Bad Gateway", "Navidrome is restarting, try again in a minute")),
             "The server answered with an error (502 Bad Gateway): Navidrome is restarting, try again in a minute"
         );
-        assert_eq!(sign_in(answer_once("502 Bad Gateway", "502 Bad Gateway")), "The server answered with an error (502 Bad Gateway).");
-        assert_eq!(sign_in(answer_once("503 Service Unavailable", "Service Unavailable")), "The server answered with an error (503 Service Unavailable).");
+        assert_eq!(sign_in(proxy_page("502 Bad Gateway", "502 Bad Gateway")), "The server answered with an error (502 Bad Gateway).");
+        assert_eq!(sign_in(proxy_page("503 Service Unavailable", "Service Unavailable")), "The server answered with an error (503 Service Unavailable).");
     }
 }

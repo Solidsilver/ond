@@ -717,6 +717,7 @@ mod tests {
     use super::*;
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
+    use testkit::{Answer, Deadline, JsonFake, Seen, WAIT, slack};
 
     fn account() -> Account {
         Account::new("https://books.example.com", "sam")
@@ -735,28 +736,14 @@ mod tests {
 
     #[test]
     fn sign_out_ends_the_server_login_even_when_logout_is_refused() {
-        use std::io::{BufRead, Write};
         for status in ["200 OK", "500 Internal Server Error"] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
             let (requested, request) = channel();
-            let (release, released) = channel();
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-                let mut reader = std::io::BufReader::new(&stream);
-                let mut headers = String::new();
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" || line.is_empty() {
-                        break;
-                    }
-                    headers.push_str(&line);
-                }
-                requested.send(headers).unwrap();
-                released.recv_timeout(Duration::from_secs(3)).unwrap();
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            let (release, released) = channel::<()>();
+            let released = std::sync::Mutex::new(released);
+            let server = JsonFake::start(move |seen| {
+                requested.send(seen.clone()).unwrap();
+                released.lock().unwrap().recv_timeout(slack(WAIT)).unwrap();
+                Answer::new(status, "")
             });
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let (tx, rx) = channel();
@@ -770,7 +757,7 @@ mod tests {
                 keeper.clone(),
                 Arc::new(Paths { config_file: dir.path().join("settings.json"), shelves: dir.path().join("accounts"), art_cache: dir.path().join("art") }),
             );
-            let account = Account::new(format!("http://{address}"), "sam");
+            let account = Account::new(server.base().trim_end_matches('/'), "sam");
             keeper.use_account(account.clone());
             let client = abs::Client::new(&account.server, account.device()).unwrap().with_tokens(abs::Tokens::new("access", "refresh"));
             client.set_auth_hook(keeper.hook());
@@ -778,13 +765,12 @@ mod tests {
             bridge.sign_out(account, Some(source.clone()));
             // The server hasn't even received logout yet: local deletion must
             // not depend on its response or on the async runtime being driven.
-            forgot.recv_timeout(Duration::from_secs(3)).unwrap();
-            let headers = rt.block_on(async { tokio::task::spawn_blocking(move || request.recv_timeout(Duration::from_secs(3)).unwrap()).await.unwrap() });
-            assert!(headers.starts_with("POST /logout HTTP/1.1\r\n"));
-            assert!(headers.to_ascii_lowercase().contains("x-refresh-token: refresh\r\n"));
+            forgot.recv_timeout(slack(WAIT)).unwrap();
+            let seen: Seen = rt.block_on(async { tokio::task::spawn_blocking(move || request.recv_timeout(slack(WAIT)).unwrap()).await.unwrap() });
+            assert_eq!((seen.method.as_str(), seen.path()), ("POST", "/logout"));
+            assert_eq!(seen.header("x-refresh-token"), Some("refresh"));
             assert!(source.client().tokens().is_none());
             release.send(()).unwrap();
-            rt.block_on(async { tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap() });
             assert!(rx.try_iter().next().is_none(), "logout does not deliver errors to the signed-out screen");
         }
     }
@@ -809,9 +795,9 @@ mod tests {
         let client = abs::Client::new(&account.server, account.device()).unwrap().with_tokens(abs::Tokens::new("access", "refresh"));
         let source = Arc::new(AbsSource::new(account.id, client, Vec::new()));
         bridge.sign_out(account, Some(source.clone()));
-        forgot.recv_timeout(Duration::from_secs(3)).unwrap();
+        forgot.recv_timeout(slack(WAIT)).unwrap();
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(slack(WAIT), async {
                 while source.client().tokens().is_some() {
                     tokio::task::yield_now().await;
                 }
@@ -850,13 +836,13 @@ mod tests {
     /// everything sent.
     fn until(rt: &tokio::runtime::Runtime, rx: &Receiver<Msg>, got: &mut Vec<Msg>, mut done: impl FnMut(&[Msg]) -> bool) {
         rt.block_on(async {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let deadline = Deadline::new();
             loop {
                 got.extend(rx.try_iter());
                 if done(got) {
                     return;
                 }
-                assert!(std::time::Instant::now() < deadline, "timed out");
+                assert!(!deadline.passed(), "timed out; got {} messages", got.len());
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         });
@@ -933,52 +919,23 @@ mod tests {
     #[test]
     fn browser_sign_in_uses_the_keyring_transaction_and_the_existing_token_keeper() {
         use crate::openid::Store;
-        use std::io::{BufRead, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let server = format!("http://{}", listener.local_addr().unwrap());
-        let served = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-            for _ in 0..3 {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                let mut reader = std::io::BufReader::new(&stream);
-                let mut request = String::new();
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" || line.is_empty() {
-                        break;
-                    }
-                    request.push_str(&line);
-                }
-                let target = request.split_whitespace().nth(1).unwrap();
-                let (status, headers, body) = if target == "/status" {
-                    ("200 OK", String::new(), r#"{"app":"audiobookshelf","serverVersion":"2.35.0","authMethods":["openid"],"authFormData":{"authOpenIDButtonText":"Sign in with Book Club"}}"#.to_owned())
-                } else if target.starts_with("/auth/openid?") {
-                    let state = target.split("state=").nth(1).unwrap().split('&').next().unwrap();
-                    (
-                        "302 Found",
-                        format!(
-                            "Location: https://id.example/authorize?state={state}\r\nSet-Cookie: connect.sid=session; HttpOnly\r\nSet-Cookie: auth_method=openid-mobile; HttpOnly\r\n"
-                        ),
-                        String::new(),
-                    )
-                } else {
-                    assert!(target.starts_with("/auth/openid/callback?"));
-                    assert!(target.contains("code_verifier="));
-                    assert!(request.to_lowercase().contains("cookie: connect.sid=session; auth_method=openid-mobile"));
-                    (
-                        "200 OK",
-                        String::new(),
-                        r#"{"user":{"id":"user-1","username":"sam","accessToken":"access","refreshToken":"refresh"},"serverSettings":{"version":"2.35.0"}}"#
-                            .to_owned(),
-                    )
-                };
-                write!(stream, "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-                requests.push(request);
+        let fake = JsonFake::start(|seen| {
+            let target = seen.target.as_str();
+            if target == "/status" {
+                Answer::ok(
+                    r#"{"app":"audiobookshelf","serverVersion":"2.35.0","authMethods":["openid"],"authFormData":{"authOpenIDButtonText":"Sign in with Book Club"}}"#,
+                )
+            } else if target.starts_with("/auth/openid?") {
+                let state = target.split("state=").nth(1).unwrap().split('&').next().unwrap();
+                Answer::new("302 Found", "")
+                    .with_header("Location", format!("https://id.example/authorize?state={state}"))
+                    .with_header("Set-Cookie", "connect.sid=session; HttpOnly")
+                    .with_header("Set-Cookie", "auth_method=openid-mobile; HttpOnly")
+            } else {
+                Answer::ok(r#"{"user":{"id":"user-1","username":"sam","accessToken":"access","refreshToken":"refresh"},"serverSettings":{"version":"2.35.0"}}"#)
             }
-            requests
         });
+        let server = fake.base().trim_end_matches('/').to_owned();
         struct Saved(Sender<(Account, abs::Tokens)>);
         impl crate::tokens::TokenStore for Saved {
             fn store(&self, a: &Account, t: &abs::Tokens) {
@@ -1026,11 +983,16 @@ mod tests {
         account.username = login.user.username.unwrap();
         bridge.accept_openid(account, client, login.tokens, warning);
         until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Account(AccountMsg::SignedIn { .. }))));
-        let (account, tokens) = tokens.recv_timeout(Duration::from_secs(3)).unwrap();
+        let (account, tokens) = tokens.recv_timeout(slack(WAIT)).unwrap();
         assert_eq!(account.username, "sam");
         assert_eq!(tokens.refresh(), "refresh");
         assert!(pending_store.load().is_none());
-        assert_eq!(served.join().unwrap().len(), 3);
+        let seen = fake.seen();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        let callback = &seen[2];
+        assert_eq!(callback.path(), "/auth/openid/callback");
+        assert!(callback.target.contains("code_verifier="));
+        assert_eq!(callback.header("cookie"), Some("connect.sid=session; auth_method=openid-mobile"));
     }
 
     #[test]

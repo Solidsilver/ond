@@ -2,6 +2,7 @@ use super::*;
 
 use abs::Tokens;
 use std::sync::Arc;
+use testkit::{Answer, JsonFake};
 
 fn account() -> AccountId {
     AccountId::from_uuid(uuid::Uuid::from_u128(0x1234))
@@ -273,32 +274,10 @@ fn the_source_is_one_trait_object_of_any_kind() {
 
 #[tokio::test]
 async fn an_expired_file_token_is_rotated_and_every_url_is_rebuilt() {
-    use std::io::{BufRead, Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}/books/", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut reader = std::io::BufReader::new(&stream);
-        let mut first = String::new();
-        reader.read_line(&mut first).unwrap();
-        assert!(first.starts_with("POST /books/auth/refresh "));
-        let mut length = 0;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-            if let Some((_, value)) = line.to_ascii_lowercase().split_once("content-length:") {
-                length = value.trim().parse::<usize>().unwrap();
-            }
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
-        let body = r#"{"user":{"id":"user","accessToken":"access-2","refreshToken":"refresh-2"}}"#;
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    let server = JsonFake::start(|_| {
+        Answer::ok(r#"{"user":{"id":"user","accessToken":"access-2","refreshToken":"refresh-2"}}"#).with_header("Content-Type", "application/json")
     });
+    let base = format!("{}books/", server.base());
     let client = abs::Client::new(&base, abs::DeviceInfo::new("device", "1")).unwrap().with_tokens(Tokens::new("access-1", "refresh-1"));
     let source = AbsSource::new(account(), client, vec![]);
     let session = PlaySession {
@@ -315,7 +294,6 @@ async fn an_expired_file_token_is_rotated_and_every_url_is_rebuilt() {
             .collect(),
     };
     let tracks = source.refresh_tracks(&session).await.unwrap();
-    server.join().unwrap();
     for (i, track) in tracks.iter().enumerate() {
         assert_eq!(track.url, format!("{base}api/items/book/file/{}?token=access-2", i + 1));
     }
@@ -323,6 +301,9 @@ async fn an_expired_file_token_is_rotated_and_every_url_is_rebuilt() {
     // that rotation must not spend another login-limiter request.
     let again = source.refresh_tracks(&session).await.unwrap();
     assert_eq!(again, tracks);
+    let seen = server.seen();
+    assert_eq!(seen.len(), 1, "one refresh: {seen:?}");
+    assert_eq!((seen[0].method.as_str(), seen[0].path()), ("POST", "/books/auth/refresh"));
 }
 
 #[test]
@@ -338,36 +319,9 @@ fn bookmarks_map_exact_book_time_and_account_identity() {
 
 #[tokio::test]
 async fn undoing_finished_progress_resets_with_an_earlier_stamp_then_restores_the_position() {
-    use std::io::{BufRead, Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let mut seen = Vec::new();
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut reader = std::io::BufReader::new(&stream);
-            let mut first = String::new();
-            reader.read_line(&mut first).unwrap();
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-                if let Some((_, value)) = line.to_ascii_lowercase().split_once("content-length:") {
-                    length = value.trim().parse::<usize>().unwrap();
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            seen.push((first, body));
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-        }
-        seen
-    });
-    let source = AbsSource::new(account(), abs::Client::new(&base, abs::DeviceInfo::new("d", "1")).unwrap().with_tokens(Tokens::new("a", "r")), vec![]);
+    let server = JsonFake::start(|_| Answer::ok(""));
+    let base = server.base();
+    let source = AbsSource::new(account(), abs::Client::new(base, abs::DeviceInfo::new("d", "1")).unwrap().with_tokens(Tokens::new("a", "r")), vec![]);
     let item = ItemKey::new(account(), "book");
     let remote = [Progress { item: item.clone(), position: Position::from_secs(5_000.0), finished: true, at: Some(Stamp::from_millis(400).system_time()) }];
     source
@@ -383,15 +337,16 @@ async fn undoing_finished_progress_resets_with_an_earlier_stamp_then_restores_th
         )
         .await
         .unwrap();
-    let seen = server.join().unwrap();
-    assert!(seen[0].0.starts_with("PATCH /api/me/progress/book "), "the remote list was passed in, so no GET comes first");
+    let seen = server.seen();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!((seen[0].method.as_str(), seen[0].path()), ("PATCH", "/api/me/progress/book"), "the remote list was passed in, so no GET comes first");
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&seen[0].1).unwrap(),
+        seen[0].json(),
         serde_json::json!({"isFinished": false, "lastUpdate": 499}),
         "a reset stamped before the position leaves a failed follow-up replayable"
     );
-    assert!(seen[1].0.starts_with("PATCH /api/me/progress/batch/update "));
-    let body: serde_json::Value = serde_json::from_slice(&seen[1].1).unwrap();
+    assert_eq!((seen[1].method.as_str(), seen[1].path()), ("PATCH", "/api/me/progress/batch/update"));
+    let body = seen[1].json();
     assert_eq!(body[0]["currentTime"], 1_234.5);
     assert_eq!(body[0]["lastUpdate"], 500);
     assert!(body[0].get("isFinished").is_none());

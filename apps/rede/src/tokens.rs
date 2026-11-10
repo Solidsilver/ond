@@ -108,7 +108,6 @@ impl Keeper {
 mod tests {
     use super::*;
     use std::sync::mpsc::Receiver;
-    use std::time::Duration;
 
     struct Store {
         saved: Arc<Mutex<Option<Tokens>>>,
@@ -139,16 +138,16 @@ mod tests {
         keeper.use_account(account.clone());
         let hook = keeper.hook();
         hook(AuthEvent::Tokens(Tokens::new("access-1", "refresh-1")));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), "storing");
+        assert_eq!(rx.recv_timeout(testkit::slack(testkit::WAIT)).unwrap(), "storing");
         hook(AuthEvent::Tokens(Tokens::new("access-2", "refresh-2")));
         keeper.forget(account);
         hook(AuthEvent::Tokens(Tokens::new("late-access", "late-refresh")));
         resume.send(()).unwrap();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), "storing");
+        assert_eq!(rx.recv_timeout(testkit::slack(testkit::WAIT)).unwrap(), "storing");
         resume.send(()).unwrap();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), "forgotten");
+        assert_eq!(rx.recv_timeout(testkit::slack(testkit::WAIT)).unwrap(), "forgotten");
         drop((hook, keeper));
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(3)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)));
+        assert!(matches!(rx.recv_timeout(testkit::slack(testkit::WAIT)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)));
         assert!(saved.lock().unwrap().is_none());
     }
 
@@ -162,16 +161,16 @@ mod tests {
         keeper.use_account(account.clone());
         let old = keeper.hook();
         keeper.forget(account.clone());
-        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), "forgotten");
+        assert_eq!(rx.recv_timeout(testkit::slack(testkit::WAIT)).unwrap(), "forgotten");
         keeper.use_account(account);
         let new = keeper.hook();
         old(AuthEvent::Tokens(Tokens::new("stale", "stale")));
         old(AuthEvent::SignedOut);
         new(AuthEvent::Tokens(Tokens::new("new-access", "new-refresh")));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), "storing");
+        assert_eq!(rx.recv_timeout(testkit::slack(testkit::WAIT)).unwrap(), "storing");
         resume.send(()).unwrap();
         drop((old, new, keeper));
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(3)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)));
+        assert!(matches!(rx.recv_timeout(testkit::slack(testkit::WAIT)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)));
         assert_eq!(saved.lock().unwrap().as_ref().unwrap().access(), "new-access");
     }
 }

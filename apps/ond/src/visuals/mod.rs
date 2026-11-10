@@ -114,17 +114,4 @@ mod tests {
         let read: Experimental = serde_json::from_str(r#"{"visualizer_pick": "lasers"}"#).unwrap();
         assert_eq!(read.visualizer_pick, visualizer::Pick::default());
     }
-
-    #[test]
-    fn live_frames_only_while_playing_and_only_when_asked() {
-        let mut live = Live::default();
-        assert_eq!(live.next(true), None, "nothing on screen asked");
-        live.want(METER);
-        live.want(EVERY_FRAME);
-        assert_eq!(live.next(true), Some(EVERY_FRAME), "the most demanding visual sets the pace");
-        assert_eq!(live.next(true), None, "a request lasts one frame");
-        live.want(EVERY_FRAME);
-        assert_eq!(live.next(false), None, "paused: no extra frames");
-        assert_eq!(live.next(true), None, "and the request didn't linger");
-    }
 }

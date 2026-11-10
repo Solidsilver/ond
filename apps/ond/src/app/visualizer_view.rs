@@ -75,19 +75,6 @@ impl VisualizerView {
         self.scene.kind()
     }
 
-    /// The scene, to set up a snapshot.
-    #[cfg(test)]
-    pub fn scene(&mut self) -> &mut Scene {
-        &mut self.scene
-    }
-
-    /// Starts again with `seed` (for snapshots): the same scene from the start.
-    #[cfg(test)]
-    pub fn reseed(&mut self, seed: u64) {
-        self.rng = Rng::new(seed);
-        self.show(self.kind(), self.last);
-    }
-
     /// Switches to `kind`, from black.
     fn show(&mut self, kind: Kind, now: f64) {
         self.scene = Scene::new(kind, self.rng.next_u64());

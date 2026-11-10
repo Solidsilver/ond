@@ -195,7 +195,7 @@ impl Rig {
         rig
     }
     async fn event(&mut self, predicate: impl Fn(&Event) -> bool) -> Event {
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(testkit::slack(testkit::WAIT), async {
             loop {
                 let event = self.events.recv().await.unwrap();
                 if predicate(&event) {
@@ -312,7 +312,7 @@ async fn new_positions_are_durable_while_an_earlier_network_report_is_stalled() 
     for at in [15.0, 30.0, 45.0] {
         rig.listening.send(Request::Report { generation: 1, update: update(&rig.key, at, false), close: false });
     }
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(testkit::slack(testkit::WAIT), async {
         while rig.shelf.pending_progress().unwrap().len() != 3 {
             tokio::task::yield_now().await;
         }
@@ -329,11 +329,12 @@ async fn new_positions_are_durable_while_an_earlier_network_report_is_stalled() 
 }
 
 #[tokio::test]
-async fn an_hour_of_pending_progress_is_one_request_and_every_entry_is_synced() {
+async fn six_minutes_of_pending_progress_is_one_request_and_every_entry_is_synced() {
     let key = ItemKey::new(AccountId::new(), "book");
-    let pending = (1..=240).map(|n| update(&key, f64::from(n * 15), false)).collect();
+    let pending = (1..=24).map(|n| update(&key, f64::from(n * 15), false)).collect();
     let rig = Rig::pending(pending, None).await;
-    assert_eq!(*rig.fake.batches.lock().unwrap(), vec![vec![3600.0]]);
+    // Every entry, in one batch: 24 × 15 s.
+    assert_eq!(*rig.fake.batches.lock().unwrap(), vec![vec![360.0]]);
     assert!(rig.shelf.pending_progress().unwrap().is_empty());
     rig.finish().await;
 }

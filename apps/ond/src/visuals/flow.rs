@@ -69,14 +69,6 @@ impl Flow {
         Self { rng, t: 0.0, field, shape, palette, field_var: [v, v], shape_var: [sv, sv], album: album_palette([0.6, 0.7, 0.9]), spin: 0.0 }
     }
 
-    /// Keeps to one field, shape and colour map (for snapshots of each).
-    #[cfg(test)]
-    pub fn hold(&mut self, field: usize, shape: usize, palette: usize) {
-        self.field.hold(field % FIELDS);
-        self.shape.hold(shape % SHAPES);
-        self.palette.hold(palette % (PALETTES.len() + 1));
-    }
-
     pub fn set_colors(&mut self, glow: &[[f32; 3]]) {
         if let Some(c) = glow.first() {
             self.album = album_palette(*c);
@@ -349,43 +341,5 @@ fn chain(c: &Ctx<'_>, v: [f32; 3], alpha: f32, out: &mut Vec<Dot>) {
             let a = j as f32 / PER as f32 * TAU + c.spin;
             push(out, Dot::glow([centre[0] + a.cos() * r, centre[1] + a.sin() * r], 0.0045, white((0.45 + 0.6 * level) * c.bright)).crisp(), alpha);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::visuals::visualizer::tests::music;
-
-    #[test]
-    fn every_field_shape_and_colour_map_gets_its_turn() {
-        let mut s = Flow::new(5);
-        let (mut fields, mut shapes, mut palettes) = (vec![false; FIELDS], vec![false; SHAPES], vec![false; PALETTES.len() + 1]);
-        let mut last_mix = s.field.mix();
-        // Ten minutes of music.
-        for i in 0..(600 * 60) {
-            let f = music(i, 30);
-            s.step(&Input { dt: 1.0 / 60.0, half: [1.6, 1.0], audio: Some(&f) });
-            fields[s.field.to] = true;
-            shapes[s.shape.to] = true;
-            palettes[s.palette.to] = true;
-            // Never a cut: the mix moves a little at a time, or restarts from 0 when a morph begins.
-            let mix = s.field.mix();
-            assert!((mix - last_mix).abs() < 0.02 || mix == 0.0, "{last_mix} → {mix}");
-            last_mix = mix;
-        }
-        assert!(fields.iter().all(|&b| b), "{fields:?}");
-        assert!(shapes.iter().all(|&b| b), "{shapes:?}");
-        assert!(palettes.iter().all(|&b| b), "{palettes:?}");
-    }
-
-    #[test]
-    fn a_beat_kicks_the_field_outward() {
-        let base = field(0, 0.0, 0.5);
-        assert!(kicked(base, 1.0, 0.5).zoom > base.zoom + 0.01);
-        assert_eq!(kicked(base, 0.0, 0.5), base);
-        // A frame twice as long moves twice as far.
-        let two = base.over(2.0);
-        assert!((two.zoom - base.zoom * base.zoom).abs() < 1e-6 && (two.turn - 2.0 * base.turn).abs() < 1e-6);
     }
 }

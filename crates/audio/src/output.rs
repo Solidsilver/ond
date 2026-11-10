@@ -185,6 +185,18 @@ impl RingInput {
         self
     }
 
+    /// Takes the timeline out, so a test can hold a segment's publication to
+    /// `Status` back until it wants it (see the format-change savings test).
+    #[cfg(test)]
+    pub(crate) fn hold_timeline(&mut self) -> Option<Consumer<Segment>> {
+        self.segments.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_timeline(&mut self, segments: Consumer<Segment>) {
+        self.segments = Some(segments);
+    }
+
     /// Describes what's in the ring, for the dither decision: the first
     /// track's bit depth (later tracks bring theirs in their [`Marker`]), and
     /// whether the decoder recomputes the samples (resamples or downmixes).

@@ -1,6 +1,6 @@
 # Working on Ond
 
-Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of ten crates. Rede, an audiobook player that shares Ond's engine and look, is being built alongside it ([its design](docs/rede/design.md)). This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
+Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of thirteen crates. Rede, an audiobook player that shares Ond's engine and look, is being built alongside it ([its design](docs/rede/design.md)). This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
 
 ## Checks that must pass
 
@@ -11,7 +11,7 @@ cargo test --workspace                                     # hardware and PNG te
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, `sources`, `shelf`, `shell`, `ond-player` for Ond and `rede` for Rede). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
+Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, `sources`, `shelf`, `shell`, `testkit`, `ond-player` for Ond and `rede` for Rede). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
 
 Things that need real hardware or a real server are listed in [TESTING.md](TESTING.md). If you change something there, say so in the pull request so a human can run it.
 
@@ -31,6 +31,7 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 | `crates/abs` | Rede: Audiobookshelf API client (tokens, single-flight refresh, play sessions, progress). Its live tests need a server; see its `tests/live.rs` |
 | `crates/sources` | Rede: the `Source` trait and the server-independent models (accounts, libraries, items, tracks, chapters, positions), plus `AbsSource` on the Audiobookshelf client |
 | `crates/shelf` | Rede: one redb database per account (items, tracks, chapters, the progress log, positions, bookmarks, sync state) with frozen versioned rows and migrations |
+| `crates/testkit` | Dev-only, for tests: `wait_until` and `Deadline` on one budget (`WAIT`, stretched by `slack` on CI), `RangeServer` (a Range-capable file server that can trickle, gate, cut or misanswer) and `JsonFake` (a closure-answered API server that keeps what it saw). Depends on no workspace crate |
 
 Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; `src/widgets.rs` re-exports the kit's widgets and holds the few that are Ond's own; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
 
@@ -51,6 +52,7 @@ Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for 
 - **A preference:** a field on `Settings` (with `#[serde(default)]` and a lenient fallback if it's an enum), a `PrefsView` field, a `PrefsAction` variant and its `apply_prefs` arm, a `locked()` arm in `prefs_view.rs` if Home Manager may manage it, a row in `settings_page.rs`, and a line in `docs/home-manager.md`.
 - **A view:** `src/app/<view>.rs` taking `ViewCtx`, a `Route`, an entry in `every_view_draws` in `src/app/tests.rs`, a route in `every_view_names_its_controls` in `src/app/ui_tests.rs` (every painted control needs a `widget_info`), and a scene in `snapshots/scenes.rs`. Reuse what's there (the kit first): `virtual_list` for long lists, `track_list` for tracks, `browse::heading_bar` for a page heading with its picker and sort, `kit::empty_state` for an empty list.
 - **Test data:** `test_tracks::track(id, album, title)` builds a `Track` for any test; `app/fixture.rs` has the UI's fixture library and harness helpers.
+- **Waits and fakes:** take them from `testkit` (a dev-dependency): `wait_until` or a `Deadline` for anything a test can't hurry, `RangeServer` for a download, `JsonFake` for an API. A wait doesn't pick its own timeout (a budget that guards performance is an assertion, not a wait, and goes through `slack`). Give testkit the option a fake lacks before hand-rolling a server; only a scripted sequence, like streamcache's stall and reconnect, earns its own.
 - **A queue or playback behaviour:** `queue.rs` is pure data with its own tests; `player.rs` drives the engine and is tested with fakes. Keep them that way.
 
 ## Invariants the compiler can't see

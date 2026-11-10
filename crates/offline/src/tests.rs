@@ -1,112 +1,17 @@
 use super::*;
 use crate::moving::ADOPTING_FILE;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::AtomicUsize;
 use std::thread;
+use testkit::{RangeServer, Serve, slack, wait_until};
 
-/// A tiny HTTP/1.1 file server. Logs each request's `Range` start; can drop the
-/// first connection after `cut` bytes (a network failure mid-download).
-struct Server {
-    base: String,
-    requests: Arc<Mutex<Vec<Option<u64>>>>,
+/// A server's stream URL for each track id.
+fn urls(server: &RangeServer) -> UrlFn {
+    let base = server.base().to_owned();
+    Arc::new(move |id| format!("{base}/rest/stream?id={id}"))
 }
 
-#[derive(Clone, Copy)]
-struct Opts {
-    ranges: bool,
-    cut: Option<usize>,
-    delay: Duration,
-    /// Answer with a Subsonic XML error envelope (labelled as audio, so only
-    /// sniffing the body catches it).
-    xml_error: bool,
-    /// Answer a ranged request with a 206 from byte 0 regardless (a broken proxy).
-    wrong_start: bool,
-}
-
-const OPTS: Opts = Opts { ranges: true, cut: None, delay: Duration::ZERO, xml_error: false, wrong_start: false };
-
-impl Server {
-    fn start(data: Vec<u8>, opts: Opts) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let (data, log) = (Arc::new(data), requests.clone());
-        let served = Arc::new(AtomicUsize::new(0));
-        thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(conn) = conn else { break };
-                let (data, log) = (data.clone(), log.clone());
-                let first = served.fetch_add(1, Ordering::Relaxed) == 0;
-                thread::spawn(move || serve(conn, &data, opts, first, &log));
-            }
-        });
-        Self { base, requests }
-    }
-
-    fn url(&self) -> UrlFn {
-        let base = self.base.clone();
-        Arc::new(move |id| format!("{base}/rest/stream?id={id}"))
-    }
-
-    fn requests(&self) -> Vec<Option<u64>> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-fn serve(conn: TcpStream, data: &[u8], opts: Opts, first: bool, log: &Mutex<Vec<Option<u64>>>) {
-    let mut reader = BufReader::new(conn.try_clone().unwrap());
-    let mut range = None;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
-            range = v.trim().trim_end_matches('-').parse::<u64>().ok();
-        }
-    }
-    log.lock().unwrap().push(range);
-    let mut out = conn;
-    let len = data.len() as u64;
-    if opts.xml_error {
-        let body = r#"<?xml version="1.0" encoding="UTF-8"?><subsonic-response status="failed"><error code="40" message="Wrong username or password"/></subsonic-response>"#;
-        let _ = write!(out, "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        return;
-    }
-    if opts.wrong_start && range.is_some() {
-        let _ = write!(
-            out,
-            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{len}\r\nContent-Type: audio/flac\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
-            len - 1
-        );
-        let _ = out.write_all(data);
-        return;
-    }
-    let (status, start) = match range {
-        Some(s) if opts.ranges && s >= len => {
-            let _ = write!(out, "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{len}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-            return;
-        }
-        Some(s) if opts.ranges => (format!("206 Partial Content\r\nContent-Range: bytes {s}-{}/{len}", len - 1), s),
-        _ => ("200 OK".to_owned(), 0),
-    };
-    let body = &data[start as usize..];
-    let head = format!("HTTP/1.1 {status}\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-    if out.write_all(head.as_bytes()).is_err() {
-        return;
-    }
-    let send = match opts.cut {
-        Some(n) if first => &body[..n.min(body.len())],
-        _ => body,
-    };
-    for chunk in send.chunks(16 * 1024) {
-        if out.write_all(chunk).is_err() {
-            return;
-        }
-        thread::sleep(opts.delay);
-    }
-    // A cut connection just closes early; the client sees a short body.
+/// Answers as Navidrome does for a FLAC: Range honoured, labelled audio.
+fn flac() -> Serve {
+    Serve { content_type: Some("audio/flac"), ..Serve::fast() }
 }
 
 fn data(len: usize) -> Vec<u8> {
@@ -128,14 +33,6 @@ fn store(dir: &Path, rt: &tokio::runtime::Runtime) -> OfflineStore {
     OfflineStore::open(config(dir, None), rt.handle().clone(), Arc::new(|| {})).unwrap()
 }
 
-fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
-    let start = Instant::now();
-    while !cond() {
-        assert!(start.elapsed() < slack(Duration::from_secs(10)), "timed out waiting for {what}");
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 fn track(id: &str, len: usize) -> TrackRef {
     TrackRef::new(id, Some("flac".into()), Some(len as u64))
 }
@@ -145,11 +42,11 @@ fn downloads_and_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(300_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Album("al".into()), "Album", vec![track("t1", body.len()), track("t2", body.len())]);
-    wait_for("both downloads", || s.snapshot().pin(&Pin::Album("al".into())).is_some_and(PinSummary::complete));
+    wait_until("both downloads", || s.snapshot().pin(&Pin::Album("al".into())).is_some_and(PinSummary::complete));
     let path = s.local_path("t1").unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), body);
     assert_eq!(s.snapshot().used_bytes, 2 * body.len() as u64);
@@ -168,14 +65,14 @@ fn resumes_with_a_range_after_the_connection_drops() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(400_000);
-    let server = Server::start(body.clone(), Opts { cut: Some(150_000), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { cut: Some(150_000), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
     // The first attempt fails short; the retry waits out a backoff, so skip it.
-    wait_for("a failed attempt", || server.requests().len() == 1 && s.snapshot().track("t") == Some(&TrackState::Queued));
+    wait_until("a failed attempt", || server.requests().len() == 1 && s.snapshot().track("t") == Some(&TrackState::Queued));
     s.retry_failed();
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     // The resume asks for the last bit it has again, to check it lines up.
     assert_eq!(server.requests(), [None, Some(150_000 - RESUME_OVERLAP)]);
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
@@ -187,14 +84,14 @@ fn a_partial_file_from_a_replaced_file_of_the_same_size_starts_over() {
     let rt = rt();
     let old = data(300_000);
     let new: Vec<u8> = old.iter().map(|b| b ^ 0x5a).collect();
-    let server = Server::start(new.clone(), OPTS);
+    let server = RangeServer::start(new.clone(), flac());
     let s = store(dir.path(), &rt);
     // Half of the old file, then the server's file was replaced (re-tagged,
     // re-encoded) by one exactly as big.
     std::fs::write(dir.path().join("t.flac.part"), &old[..150_000]).unwrap();
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", new.len())]);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), new, "no mix of the two");
     assert_eq!(server.requests(), [Some(150_000 - RESUME_OVERLAP), None]);
 }
@@ -206,12 +103,12 @@ fn a_resume_whose_total_is_not_the_pinned_size_starts_over() {
     let body = data(300_000);
     // The same bytes so far, but the server's file is longer than the pin
     // says: it changed. Start over, which then fails on the size.
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
     std::fs::write(dir.path().join("t.flac.part"), &body[..100_000]).unwrap();
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", 200_000)]);
-    wait_for("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
+    wait_until("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
     assert_eq!(server.requests(), [Some(100_000 - RESUME_OVERLAP), None]);
     assert!(!dir.path().join("t.flac.part").exists());
 }
@@ -221,12 +118,12 @@ fn a_partial_file_shorter_than_the_overlap_resumes() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(300_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
     std::fs::write(dir.path().join("t.flac.part"), &body[..1000]).unwrap();
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     assert_eq!(server.requests(), [Some(0)]);
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
@@ -236,13 +133,13 @@ fn pause_keeps_the_partial_file_and_a_restart_resumes_it() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 100_000));
+    wait_until("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 100_000));
     s.set_paused(true);
-    wait_for("the pause", || s.snapshot().active == 0);
+    wait_until("the pause", || s.snapshot().active == 0);
     let part = dir.path().join("t.flac.part");
     let kept = std::fs::metadata(&part).unwrap().len();
     assert!(kept > 0);
@@ -250,9 +147,9 @@ fn pause_keeps_the_partial_file_and_a_restart_resumes_it() {
 
     let s = store(dir.path(), &rt);
     assert!(s.snapshot().paused, "pause is remembered");
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.set_paused(false);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     assert!(server.requests()[1].is_some_and(|from| from >= kept - 64 * 1024), "{:?}", server.requests());
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
@@ -264,13 +161,13 @@ fn takes_complete_stream_cache_files_without_downloading() {
     let rt = rt();
     let body = data(50_000);
     std::fs::write(cache.path().join("t.flac"), &body).unwrap();
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
     let cache_dir = cache.path().to_owned();
     s.set_cache_lookup(Arc::new(move |r| Some(cache_dir.join(file_name(r)))));
     // Works while offline too: no URL at all.
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("the promotion", || s.snapshot().is_done("t"));
+    wait_until("the promotion", || s.snapshot().is_done("t"));
     assert!(server.requests().is_empty());
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
     // The cache evicting its copy doesn't touch ours.
@@ -291,7 +188,7 @@ fn a_track_taken_from_the_stream_cache_leaves_no_partial_download_behind() {
     std::fs::write(dir.path().join("t.flac.part"), &body[..1000]).unwrap();
     let cache_dir = cache.path().to_owned();
     s.set_cache_lookup(Arc::new(move |r| Some(cache_dir.join(file_name(r)))));
-    wait_for("the promotion", || s.snapshot().is_done("t"));
+    wait_until("the promotion", || s.snapshot().is_done("t"));
     assert!(!dir.path().join("t.flac.part").exists());
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
@@ -301,18 +198,18 @@ fn unpinning_deletes_only_unshared_files() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(10_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Album("a".into()), "A", vec![track("1", body.len()), track("2", body.len())]);
     s.pin(Pin::Playlist("p".into()), "P", vec![track("2", body.len())]);
-    wait_for("downloads", || s.snapshot().is_done("1") && s.snapshot().is_done("2"));
+    wait_until("downloads", || s.snapshot().is_done("1") && s.snapshot().is_done("2"));
     s.unpin(&Pin::Album("a".into()));
-    wait_for("1.flac to go", || !dir.path().join("1.flac").exists());
+    wait_until("1.flac to go", || !dir.path().join("1.flac").exists());
     assert!(dir.path().join("2.flac").exists());
     assert!(s.local_path("1").is_none());
     s.unpin(&Pin::Playlist("p".into()));
-    wait_for("2.flac to go", || !dir.path().join("2.flac").exists());
+    wait_until("2.flac to go", || !dir.path().join("2.flac").exists());
     assert_eq!(s.snapshot().used_bytes, 0);
 }
 
@@ -341,7 +238,7 @@ fn unpinning_a_big_playlist_returns_at_once_and_cleans_up_behind() {
     std::fs::write(dir.path().join("last.flac"), b"x").unwrap();
     s.inner.delete(vec!["last".into()]);
     let gone = |e: &std::fs::DirEntry| e.file_name() != "keep.flac" && e.file_name().to_string_lossy().ends_with(".flac");
-    wait_for("the files to go", || !std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| gone(&e)));
+    wait_until("the files to go", || !std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| gone(&e)));
     assert!(dir.path().join("keep.flac").exists());
 }
 
@@ -350,18 +247,18 @@ fn a_size_mismatch_fails_and_a_server_ignoring_ranges_starts_over() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(30_000);
-    let server = Server::start(body.clone(), Opts { ranges: false, ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { ranges: false, ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("bad".into()), "Bad", vec![track("bad", body.len() + 1)]);
-    wait_for("the failure", || matches!(s.snapshot().track("bad"), Some(TrackState::Failed { .. })));
+    wait_until("the failure", || matches!(s.snapshot().track("bad"), Some(TrackState::Failed { .. })));
     assert!(s.local_path("bad").is_none());
     assert!(!dir.path().join("bad.flac.part").exists(), "a wrong-size file is discarded");
 
     // A stale partial file with a server that answers 200: rewritten from the start.
     std::fs::write(dir.path().join("ok.flac.part"), vec![0u8; 1000]).unwrap();
     s.pin(Pin::Track("ok".into()), "Ok", vec![track("ok", body.len())]);
-    wait_for("the download", || s.snapshot().is_done("ok"));
+    wait_until("the download", || s.snapshot().is_done("ok"));
     assert_eq!(std::fs::read(s.local_path("ok").unwrap()).unwrap(), body);
 }
 
@@ -370,14 +267,14 @@ fn the_limit_holds_back_downloads() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(10_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = OfflineStore::open(config(dir.path(), Some(15_000)), rt.handle().clone(), Arc::new(|| {})).unwrap();
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Album("a".into()), "A", vec![track("1", body.len()), track("2", body.len())]);
-    wait_for("the first download and the limit", || s.snapshot().is_done("1") && s.snapshot().limit_reached);
+    wait_until("the first download and the limit", || s.snapshot().is_done("1") && s.snapshot().limit_reached);
     assert_eq!(s.snapshot().track("2"), Some(&TrackState::Queued));
     s.set_limit(None);
-    wait_for("the second download", || s.snapshot().is_done("2"));
+    wait_until("the second download", || s.snapshot().is_done("2"));
 }
 
 #[test]
@@ -450,11 +347,11 @@ fn a_moved_store_opens_with_its_downloads() {
     let to = b.path().join("Offline");
     let rt = rt();
     let body = data(20_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(a.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     s.set_source(None);
     drop(s);
     move_store(a.path(), &to).unwrap();
@@ -490,11 +387,11 @@ fn pinning_many_tracks_at_once_returns_at_once_and_is_saved() {
 fn an_xml_error_reply_is_never_kept_as_a_track() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
-    let server = Server::start(data(10_000), Opts { xml_error: true, ..OPTS });
+    let server = RangeServer::start(data(10_000), Serve { xml_error: true, ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", 10_000)]);
-    wait_for("a failed attempt", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
+    wait_until("a failed attempt", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
     assert!(s.local_path("t").is_none());
     assert!(!dir.path().join("t.flac").exists());
     assert!(!dir.path().join("t.flac.part").exists(), "nothing of the error page is written");
@@ -505,17 +402,17 @@ fn a_resume_answered_from_the_wrong_offset_starts_over() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(200_000);
-    let server = Server::start(body.clone(), Opts { wrong_start: true, ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { wrong_start: true, ..flac() });
     let s = store(dir.path(), &rt);
     // Pinned with no source yet, then a partial file from before appears: the
     // resume asks for a byte past 0 and gets byte 0.
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
     std::fs::write(dir.path().join("t.flac.part"), vec![7u8; 100_000]).unwrap();
-    s.set_source(Some(server.url()));
-    wait_for("the refused resume", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
+    s.set_source(Some(urls(&server)));
+    wait_until("the refused resume", || !server.requests().is_empty() && s.snapshot().track("t") == Some(&TrackState::Queued));
     assert!(!dir.path().join("t.flac.part").exists(), "the partial file is dropped, not appended to");
     s.retry_failed();
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     assert_eq!(server.requests(), [Some(100_000 - RESUME_OVERLAP), None]);
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
@@ -525,12 +422,12 @@ fn each_account_keeps_its_own_downloads_and_old_stores_are_adopted() {
     let base = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(20_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     // A store kept straight in the downloads folder, as older versions did.
     let s = store(base.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     s.set_source(None);
     drop(s);
 
@@ -566,11 +463,11 @@ fn an_adoption_cut_short_after_the_state_file_moved_finishes_on_the_next_open() 
     let base = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(20_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(base.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     s.set_source(None);
     drop(s);
 
@@ -626,7 +523,7 @@ fn a_finished_file_whose_done_was_never_saved_is_not_downloaded_again() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(50_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
     s.pin(Pin::Album("al".into()), "Album", vec![track("t", body.len()), track("short", body.len())]);
     drop(s);
@@ -639,8 +536,8 @@ fn a_finished_file_whose_done_was_never_saved_is_not_downloaded_again() {
     let s = store(dir.path(), &rt);
     assert!(s.snapshot().is_done("t"));
     assert!(!s.snapshot().is_done("short"));
-    s.set_source(Some(server.url()));
-    wait_for("the other download", || s.snapshot().is_done("short"));
+    s.set_source(Some(urls(&server)));
+    wait_until("the other download", || s.snapshot().is_done("short"));
     assert_eq!(server.requests(), [None], "only the wrong-sized one is fetched");
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
     assert_eq!(std::fs::read(s.local_path("short").unwrap()).unwrap(), body);
@@ -651,7 +548,7 @@ fn a_finished_file_without_a_size_is_checked_against_the_server_not_fetched_whol
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(200_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
     s.pin(Pin::Track("t".into()), "T", vec![TrackRef::new("t", Some("flac".into()), None)]);
     drop(s);
@@ -660,8 +557,8 @@ fn a_finished_file_without_a_size_is_checked_against_the_server_not_fetched_whol
     let s = store(dir.path(), &rt);
     assert!(!s.snapshot().is_done("t"), "nothing says this file is whole");
     assert!(dir.path().join("t.flac.part").exists(), "it's a partial download again");
-    s.set_source(Some(server.url()));
-    wait_for("the check", || s.snapshot().is_done("t"));
+    s.set_source(Some(urls(&server)));
+    wait_until("the check", || s.snapshot().is_done("t"));
     assert_eq!(server.requests(), [Some(body.len() as u64 - RESUME_OVERLAP)], "only the overlap is asked for");
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
@@ -671,11 +568,11 @@ fn dropping_the_store_waits_for_its_file_writes() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(4_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(2), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(2), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 0));
+    wait_until("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 0));
     let io = s.inner.io.clone();
     drop(s);
     assert_eq!(io.running(), 0, "no write is still going after the drop");
@@ -694,13 +591,7 @@ fn the_snapshot_never_measures_free_space_itself() {
     s.inner.lock().free = Some((Instant::now().checked_sub(FREE_SPACE_EVERY).unwrap_or_else(Instant::now), Some(1)));
     s.retry_failed();
     assert_eq!(s.snapshot().free_bytes, Some(1));
-    wait_for("a new reading", || s.snapshot().free_bytes != Some(1));
-}
-
-/// Time budgets in these tests are tight on purpose (they guard real
-/// performance), but shared CI runners are slower and noisier: allow 10× there.
-fn slack(d: std::time::Duration) -> std::time::Duration {
-    if std::env::var_os("CI").is_some() { d * 10 } else { d }
+    wait_until("a new reading", || s.snapshot().free_bytes != Some(1));
 }
 
 #[test]
@@ -767,30 +658,30 @@ fn dropping_the_store_stops_it_and_it_never_writes_over_one_reopened_there() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
     let progress = |s: &OfflineStore| match s.snapshot().track("t") {
         Some(TrackState::Downloading { done, .. }) => *done,
         _ => 0,
     };
-    wait_for("some progress", || progress(&s) > 0);
+    wait_until("some progress", || progress(&s) > 0);
     // Dropping a copy isn't dropping the store: it keeps going.
     let at = progress(&s);
     drop(s.clone());
-    wait_for("more progress", || progress(&s) > at);
+    wait_until("more progress", || progress(&s) > at);
 
     let old = Arc::downgrade(&s.inner);
     drop(s);
-    wait_for("the dropped store's tasks to end", || old.upgrade().is_none());
+    wait_until("the dropped store's tasks to end", || old.upgrade().is_none());
 
     // Signed back in to the same account: the old store's download can't
     // finish behind this one's back and save its pins over these.
     let s = store(dir.path(), &rt);
     assert!(s.is_pinned(&Pin::Track("t".into())));
     s.unpin(&Pin::Track("t".into()));
-    wait_for("the partial file to go", || !dir.path().join("t.flac.part").exists());
+    wait_until("the partial file to go", || !dir.path().join("t.flac.part").exists());
     drop(s);
     let s = store(dir.path(), &rt);
     assert!(s.snapshot().pins.is_empty());
@@ -802,14 +693,14 @@ fn a_track_repinned_with_another_suffix_while_downloading_is_found_where_it_land
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(1_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("the download to start", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { .. })));
+    wait_until("the download to start", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { .. })));
     // The server now reports another format (transcoding switched on, say).
     s.pin(Pin::Playlist("p".into()), "P", vec![TrackRef::new("t", Some("mp3".into()), Some(10))]);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     let path = s.local_path("t").unwrap();
     assert_eq!(path, dir.path().join("t.flac"));
     assert_eq!(std::fs::read(path).unwrap(), body);
@@ -821,7 +712,7 @@ fn a_track_pinned_again_while_its_files_are_being_deleted_downloads_after() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(10_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
     // The deleter, with an unpinned track's files, past its check that the
     // track isn't pinned again...
@@ -833,11 +724,11 @@ fn a_track_pinned_again_while_its_files_are_being_deleted_downloads_after() {
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
     // Pinned after t, so a worker that gets to it has passed t over.
     s.pin(Pin::Track("u".into()), "U", vec![track("u", body.len())]);
-    s.set_source(Some(server.url()));
-    wait_for("the other download", || s.snapshot().is_done("u"));
+    s.set_source(Some(urls(&server)));
+    wait_until("the other download", || s.snapshot().is_done("u"));
     assert_eq!(server.requests().len(), 1, "no download of t while the delete runs");
     s.inner.deleted(&ids);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
 }
 
@@ -846,14 +737,14 @@ fn unpinning_mid_download_deletes_the_partial_file() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
-    wait_for("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 0));
+    wait_until("some progress", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { done, .. }) if *done > 0));
     s.unpin(&Pin::Track("t".into()));
-    wait_for("the download to stop", || s.snapshot().active == 0);
-    wait_for("the partial file to go", || !dir.path().join("t.flac.part").exists());
+    wait_until("the download to stop", || s.snapshot().active == 0);
+    wait_until("the partial file to go", || !dir.path().join("t.flac.part").exists());
     assert!(!dir.path().join("t.flac").exists());
     assert!(s.snapshot().tracks.is_empty());
 }
@@ -863,17 +754,17 @@ fn a_pin_shrinking_on_the_server_mid_download_drops_the_track_it_lost() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(2_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     let pin = Pin::Playlist("p".into());
     s.pin(pin.clone(), "P", vec![track("a", body.len()), track("b", body.len())]);
     // Two at a time: both are downloading.
-    wait_for("both downloads", || s.snapshot().active == 2);
+    wait_until("both downloads", || s.snapshot().active == 2);
     s.update(&pin, "P", vec![track("a", body.len())]);
-    wait_for("b's partial file to go", || !dir.path().join("b.flac.part").exists() && s.snapshot().active <= 1);
+    wait_until("b's partial file to go", || !dir.path().join("b.flac.part").exists() && s.snapshot().active <= 1);
     assert!(s.snapshot().track("b").is_none());
-    wait_for("a", || s.snapshot().is_done("a"));
+    wait_until("a", || s.snapshot().is_done("a"));
     assert_eq!(s.pin_tracks(&pin).unwrap().1, ["a"]);
     assert!(!dir.path().join("b.flac").exists());
 }
@@ -902,17 +793,17 @@ fn the_limit_lets_unknown_sizes_through_only_until_it_is_reached() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(10_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = OfflineStore::open(config(dir.path(), Some(5_000)), rt.handle().clone(), Arc::new(|| {})).unwrap();
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     let unknown = |id: &str| TrackRef::new(id, Some("flac".into()), None);
     // Nothing tells it this one won't fit.
     s.pin(Pin::Track("1".into()), "1", vec![unknown("1")]);
-    wait_for("the first download", || s.snapshot().is_done("1"));
+    wait_until("the first download", || s.snapshot().is_done("1"));
     assert_eq!(s.snapshot().used_bytes, 10_000);
     // Over the limit now: nothing more starts, whatever its size.
     s.pin(Pin::Track("2".into()), "2", vec![unknown("2")]);
-    wait_for("the limit", || s.snapshot().limit_reached);
+    wait_until("the limit", || s.snapshot().limit_reached);
     assert_eq!(s.snapshot().track("2"), Some(&TrackState::Queued));
     assert_eq!(server.requests().len(), 1);
 }
@@ -966,7 +857,7 @@ fn removing_what_was_set_aside_deletes_only_unknown_files_and_turns_cleanup_back
     std::fs::write(dir.path().join("k.flac.part"), b"kk").unwrap();
     s.remove_set_aside();
     assert!(s.snapshot().set_aside.as_ref().is_none_or(|a| a.removing), "shown as under way at once");
-    wait_for("the removal", || s.snapshot().set_aside.is_none());
+    wait_until("the removal", || s.snapshot().set_aside.is_none());
     assert!(!dir.path().join("t1.flac").exists() && !dir.path().join("t2.flac.part").exists(), "unknown files go");
     assert!(dir.path().join("k.flac.part").exists(), "a pinned track's file stays");
     assert!(dir.path().join(".DS_Store").exists(), "hidden files aren't the store's");
@@ -986,7 +877,7 @@ fn a_track_pinned_while_unknown_files_are_removed_downloads_after() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(10_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
     // The sweep, past working out which files are unknown, with t's among them...
     s.inner.lock().sweeping.insert("t.flac".into());
@@ -994,13 +885,13 @@ fn a_track_pinned_while_unknown_files_are_removed_downloads_after() {
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len())]);
     // Pinned after t, so a worker that gets to it has passed t over.
     s.pin(Pin::Track("u".into()), "U", vec![track("u", body.len())]);
-    s.set_source(Some(server.url()));
-    wait_for("the other download", || s.snapshot().is_done("u"));
+    s.set_source(Some(urls(&server)));
+    wait_until("the other download", || s.snapshot().is_done("u"));
     assert_eq!(server.requests().len(), 1, "no download of t while the sweep runs");
     let mut st = s.inner.lock();
     st.sweeping.clear();
     s.inner.changed(st);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
 }
 
 #[test]
@@ -1008,19 +899,19 @@ fn a_pin_refreshed_with_a_new_size_downloads_with_it() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(30_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     let pin = Pin::Album("a".into());
     // The server's file was replaced: the pinned size is stale, so every attempt would fail.
     s.pin(pin.clone(), "A", vec![track("t", body.len() + 1)]);
-    wait_for("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
+    wait_until("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
     // The album, fetched again: same tracks, same name, the new size.
     s.update(&pin, "A", vec![track("t", body.len())]);
     assert_eq!(s.inner.lock().pins.tracks["t"].r.size, Some(body.len() as u64));
     // Tried again at once, not after the failed attempt's backoff.
     assert!(s.inner.lock().failures.is_empty());
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
     // A finished file keeps the name and size it was downloaded with.
     s.update(&pin, "A", vec![TrackRef::new("t", Some("mp3".into()), Some(5))]);
@@ -1032,14 +923,14 @@ fn a_pin_refreshed_mid_download_leaves_the_download_running() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(1_000_000);
-    let server = Server::start(body.clone(), Opts { delay: Duration::from_millis(5), ..OPTS });
+    let server = RangeServer::start(body.clone(), Serve { delay: Duration::from_millis(5), ..flac() });
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     let pin = Pin::Album("a".into());
     s.pin(pin.clone(), "A", vec![track("t", body.len())]);
-    wait_for("the download to start", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { .. })));
+    wait_until("the download to start", || matches!(s.snapshot().track("t"), Some(TrackState::Downloading { .. })));
     s.update(&pin, "A", vec![TrackRef::new("t", Some("mp3".into()), Some(10))]);
-    wait_for("the download", || s.snapshot().is_done("t"));
+    wait_until("the download", || s.snapshot().is_done("t"));
     assert_eq!(server.requests().len(), 1, "one request, never cancelled");
     assert_eq!(s.local_path("t").unwrap(), dir.path().join("t.flac"));
     assert_eq!(std::fs::read(s.local_path("t").unwrap()).unwrap(), body);
@@ -1050,12 +941,12 @@ fn a_stale_pinned_size_fails_at_once_after_one_request() {
     let dir = tempfile::tempdir().unwrap();
     let rt = rt();
     let body = data(30_000);
-    let server = Server::start(body.clone(), OPTS);
+    let server = RangeServer::start(body.clone(), flac());
     let s = store(dir.path(), &rt);
-    s.set_source(Some(server.url()));
+    s.set_source(Some(urls(&server)));
     s.pin(Pin::Track("t".into()), "T", vec![track("t", body.len() + 1)]);
     // Content-Length already says it's the wrong file: no body, no retries.
-    wait_for("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
+    wait_until("the failure", || matches!(s.snapshot().track("t"), Some(TrackState::Failed { .. })));
     assert_eq!(server.requests(), [None]);
     assert!(!dir.path().join("t.flac.part").exists(), "nothing of it is written");
     assert_eq!(s.snapshot().failed, 1);
@@ -1123,7 +1014,7 @@ fn a_track_with_an_empty_id_is_never_pinned_and_hidden_files_survive_an_unpin() 
     assert!(s.snapshot().track("").is_none());
     std::fs::write(dir.path().join("x.flac"), b"x").unwrap();
     s.unpin(&pin);
-    wait_for("x.flac to go", || !dir.path().join("x.flac").exists());
+    wait_until("x.flac to go", || !dir.path().join("x.flac").exists());
     for name in [".adopting", ".DS_Store", ".x.flac.moving", ".flac"] {
         assert!(dir.path().join(name).exists(), "{name} stays");
     }

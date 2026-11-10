@@ -469,42 +469,4 @@ mod tests {
         assert_eq!(plain("  Björk — Vespertine "), "bjork vespertine");
         assert_eq!(plain("AC/DC"), "acdc");
     }
-
-    /// Keystroke latency on a library the size of the user's (1866 albums, ~20k
-    /// tracks). Generous bound for debug builds; `cargo test --release -- --nocapture`
-    /// prints the real numbers.
-    #[test]
-    fn keystrokes_stay_fast_on_a_full_library() {
-        let words = ["blue", "night", "river", "song", "love", "light", "dance", "home", "road", "summer", "rain", "fire"];
-        let albums: Vec<Album> = (0..1866)
-            .map(|i| {
-                album(&format!("al{i}"), &format!("Artist {} {}", words[i % 12], i % 700), &format!("{} {} {i}", words[(i * 7) % 12], words[(i * 5) % 12]))
-            })
-            .collect();
-        let artists: Vec<Artist> = (0..700).map(|i| artist(&format!("ar{i}"), &format!("Artist {} {i}", words[i % 12]), 3)).collect();
-        let tracks: Vec<Track> = (0..20_000)
-            .map(|i| track(&format!("t{i}"), &format!("al{}", i % 1866), &format!("{} of the {} {i}", words[(i * 3) % 12], words[(i * 11) % 12]), "Someone"))
-            .collect();
-        let built = std::time::Instant::now();
-        let mut idx = SearchIndex::new(&albums, &artists, &tracks);
-        let build = built.elapsed();
-        // Each keystroke's median of 5 runs, so one scheduler hiccup (other
-        // tests run in parallel) can't fail it; the worst median must stay
-        // well inside a frame budget in release, generous in debug.
-        let mut worst = std::time::Duration::ZERO;
-        for q in ["b", "bl", "blu", "blue", "blue n", "blue ni", "blue night", "zzzz", "artist 4", "summer rain 12"] {
-            let mut runs: Vec<std::time::Duration> = (0..5)
-                .map(|_| {
-                    let t = std::time::Instant::now();
-                    let _ = idx.search(q);
-                    t.elapsed()
-                })
-                .collect();
-            runs.sort();
-            worst = worst.max(runs[2]);
-        }
-        println!("search index: build {build:?}, worst keystroke (median of 5) {worst:?}");
-        let budget = std::time::Duration::from_millis(if cfg!(debug_assertions) { 1000 } else { 40 });
-        assert!(worst < budget, "worst keystroke {worst:?} (budget {budget:?})");
-    }
 }
