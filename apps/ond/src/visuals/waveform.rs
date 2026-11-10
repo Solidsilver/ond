@@ -241,13 +241,13 @@ mod tests {
         w.want("t", Some("wav"), || Some(path.clone()));
         // The read is off this thread, at normal priority: generous, and far
         // under the half minute a background-QoS reader could take.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = testkit::Deadline::new();
         let bars = loop {
             w.poll();
             if let Some(b) = w.bars("t", 10) {
                 break b;
             }
-            assert!(Instant::now() < deadline, "the waveform never arrived");
+            assert!(!deadline.passed(), "the waveform never arrived");
             std::thread::sleep(Duration::from_millis(5));
         };
         // A fade-in: quiet at the start, loudest at the end.
@@ -265,10 +265,10 @@ mod tests {
         std::fs::write(&path, b"not audio").unwrap();
         let mut w = Waveforms::for_test(egui::Context::default());
         w.want("bad", Some("flac"), || Some(path.clone()));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = testkit::Deadline::new();
         while !w.gave_up("bad") {
             w.poll();
-            assert!(Instant::now() < deadline, "the waveform never gave up on the file");
+            assert!(!deadline.passed(), "the waveform never gave up on the file");
             std::thread::sleep(Duration::from_millis(5));
         }
         w.want("bad", Some("flac"), || panic!("tried again"));

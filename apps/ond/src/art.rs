@@ -542,34 +542,34 @@ mod tests {
         let ctx = egui::Context::default();
         let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned());
         // Never connected: no client at all.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         loop {
             art.poll();
             if art.texture("al-1", 40.0).is_some() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "cached art never loaded offline");
+            assert!(!deadline.passed(), "cached art never loaded offline");
             std::thread::sleep(Duration::from_millis(10));
         }
         // Art that isn't cached can't load without a server, and isn't asked for again.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         while !art.covers.get("al-2").is_some_and(|&cover| art.missing.contains(&Key { cover, size: 64 })) {
             art.poll();
             assert!(art.texture("al-2", 40.0).is_none());
-            assert!(std::time::Instant::now() < deadline);
+            assert!(!deadline.passed());
             std::thread::sleep(Duration::from_millis(10));
         }
         // Clearing forgets the loaded cover and deletes the file, and the size says so.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         while art.disk_size() != Some(png_len) {
-            assert!(std::time::Instant::now() < deadline, "the cache was never counted");
+            assert!(!deadline.passed(), "the cache was never counted");
             std::thread::sleep(Duration::from_millis(10));
         }
         art.clear();
         assert!(art.texture("al-1", 40.0).is_none());
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = testkit::Deadline::new();
         while art.disk_size() != Some(0) {
-            assert!(std::time::Instant::now() < deadline, "the cache was never cleared");
+            assert!(!deadline.passed(), "the cache was never cleared");
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!cover_file(dir.path(), "al-1", 64).exists());

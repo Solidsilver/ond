@@ -525,7 +525,7 @@ pub(super) fn looks(h: &mut Harness<'_, Option<OndApp>>, on: impl FnOnce(&mut cr
 /// Waits for the playing cover's look and the album page's (worked out in
 /// the background), then lets the colors finish easing in.
 pub(super) fn settle_look(h: &mut Harness<'_, Option<OndApp>>) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = testkit::Deadline::new();
     loop {
         h.step();
         let app = app_mut(h);
@@ -534,7 +534,7 @@ pub(super) fn settle_look(h: &mut Harness<'_, Option<OndApp>>) {
         if [cover, page].into_iter().flatten().all(|c| app.art.look(&c).is_some()) {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "the cover's look never arrived");
+        assert!(!deadline.passed(), "the cover's look never arrived");
         std::thread::sleep(Duration::from_millis(10));
     }
     h.run_steps(6);

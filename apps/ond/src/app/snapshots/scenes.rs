@@ -859,9 +859,9 @@ fn appearance_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     {
         let app = app_mut(h);
         app.player.queue.play_now(vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = testkit::Deadline::new();
         while app.art.look(&album_id(0)).is_none() {
-            assert!(std::time::Instant::now() < deadline, "the next cover's look never arrived");
+            assert!(!deadline.passed(), "the next cover's look never arrived");
             std::thread::sleep(Duration::from_millis(10));
             app.art.poll();
         }
