@@ -152,6 +152,23 @@ pub enum Action {
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
     PlayBook(String),
+    /// The book is finished: a progress entry with a stamp after the server's,
+    /// and the server told. The loaded book is stopped first, so its session
+    /// closes before the finish and cannot write the old position afterwards.
+    ///
+    /// No control asks for the three settling actions yet; the app can apply
+    /// them, and the tests push them.
+    #[allow(dead_code)]
+    MarkFinished(String),
+    /// The book is no longer finished, at the place it was left. ABS drops the
+    /// position in the request that clears a finish, so it is written in a
+    /// second one; a book with no known place starts at the beginning.
+    #[allow(dead_code)]
+    MarkUnfinished(String),
+    /// The book starts again from the beginning, not finished. The loaded book
+    /// moves there and stays as it was: paused or playing.
+    #[allow(dead_code)]
+    StartOver(String),
     AddBookmark {
         item: sources::ItemKey,
         time: f64,
@@ -431,6 +448,9 @@ impl RedeApp {
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
             Action::PlayBook(id) => self.play_book(id, None),
+            Action::MarkFinished(id) => self.mark_finished(id),
+            Action::MarkUnfinished(id) => self.mark_unfinished(id),
+            Action::StartOver(id) => self.start_over(id),
             Action::AddBookmark { item, time, title } => {
                 if self.edit_bookmark(item, time, title.clone(), shelf::BookmarkChange::Create) {
                     self.bookmarked(&title, time);

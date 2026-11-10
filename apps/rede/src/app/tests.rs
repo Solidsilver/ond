@@ -359,6 +359,118 @@ fn queued_playback_results_from_a_signed_out_account_are_dropped() {
     assert!(app.ui.notice.is_none());
 }
 
+/// The app signed in to a server that knows no progress and takes every write,
+/// so a test can follow a progress intent all the way out. What arrived is in
+/// the returned fake.
+fn listening_server(app: &mut RedeApp) -> testkit::JsonFake {
+    let server = testkit::JsonFake::start(|seen| match seen.path() {
+        "/api/me" => testkit::Answer::ok(r#"{"id":"user","mediaProgress":[]}"#),
+        "/api/me/bookmarks" => testkit::Answer::ok(r#"{"bookmarks":[]}"#),
+        _ => testkit::Answer::ok(""),
+    });
+    let client =
+        abs::Client::new(server.base(), abs::DeviceInfo::new("fixture", "1")).expect("the fake's address").with_tokens(abs::Tokens::new("access", "refresh"));
+    app.session.source = Some(std::sync::Arc::new(sources::AbsSource::new(account().id, client, Vec::new())));
+    server
+}
+
+/// What the progress endpoints were sent, in order.
+fn progress_bodies(server: &testkit::JsonFake) -> Vec<serde_json::Value> {
+    server.seen().into_iter().filter(|seen| seen.method == "PATCH" && seen.path().starts_with("/api/me/progress")).map(|seen| seen.json()).collect()
+}
+
+/// A place a pull found, for the tests that start from one.
+fn saved(app: &mut RedeApp, id: &str, secs: f64, finished: bool) {
+    let progress = sources::Progress {
+        item: sources::ItemKey::new(account().id, id),
+        position: sources::Position::from_secs(secs),
+        finished,
+        at: Some(std::time::SystemTime::now() - Duration::from_secs(60)),
+    };
+    app.positions.insert(id.to_owned(), progress);
+}
+
+#[test]
+fn a_book_marked_finished_shows_finished_at_once_and_keeps_the_stamp_it_was_written_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    let server = listening_server(&mut app);
+    let key = sources::ItemKey::new(account().id, "book-0");
+    saved(&mut app, "book-0", 1_200.0, false);
+    let version = app.positions.version();
+    app.apply(Action::MarkFinished("book-0".into()));
+    let shown = app.positions.get("book-0").expect("the book is still shown");
+    assert!(shown.finished, "the finish shows at once");
+    assert_eq!(shown.position.secs(), 1_200.0, "a finished book stays where it got to");
+    let stamp = sources::Stamp::from(shown.at.unwrap()).millis();
+    assert!(app.positions.version() > version, "what's derived from the positions refreshes");
+    testkit::wait_until("the finish to reach the server", || progress_bodies(&server).len() == 1);
+    let bodies = progress_bodies(&server);
+    let body = &bodies[0][0];
+    assert_eq!(body["libraryItemId"], "book-0");
+    assert_eq!(body["currentTime"], 1_200.0);
+    assert_eq!(body["isFinished"], true);
+    assert_eq!(body["lastUpdate"], stamp, "the server keeps the log's stamp, not its own clock");
+    testkit::wait_until("the shelf to keep the finish", || app.session.shelf.as_ref().unwrap().position(&key).unwrap().is_some_and(|p| p.finished));
+}
+
+#[test]
+fn a_book_marked_unfinished_goes_back_to_the_place_it_was_left_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    let server = listening_server(&mut app);
+    // A phone finished the book a third of the way in.
+    saved(&mut app, "book-0", 1_234.5, true);
+    app.apply(Action::MarkUnfinished("book-0".into()));
+    let shown = app.positions.get("book-0").expect("the book is still shown");
+    assert!(!shown.finished);
+    assert_eq!(shown.position.secs(), 1_234.5, "the known place is kept, not the start");
+    testkit::wait_until("the un-finish to reach the server", || progress_bodies(&server).len() == 1);
+    let bodies = progress_bodies(&server);
+    assert_eq!(bodies[0][0]["currentTime"], 1_234.5);
+    assert!(bodies[0][0].get("isFinished").is_none(), "the reset clears the finish; this writes the place");
+}
+
+#[test]
+fn starting_a_book_over_moves_the_loaded_player_to_the_start_and_keeps_it_paused() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    let server = listening_server(&mut app);
+    playing(&mut app, true);
+    app.apply(Action::StartOver("book-0".into()));
+    assert_eq!(app.player.position, 0.0, "the loaded book moves to the start");
+    assert!(app.player.paused, "and stays as it was");
+    let shown = app.positions.get("book-0").expect("the book is still shown");
+    assert_eq!(shown.position.secs(), 0.0);
+    assert!(!shown.finished);
+    testkit::wait_until("the start to reach the server", || progress_bodies(&server).len() == 1);
+    assert_eq!(progress_bodies(&server)[0][0]["currentTime"], 0.0);
+}
+
+#[test]
+fn a_progress_intent_from_a_signed_out_account_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path(), BOOKS.len());
+    let _server = listening_server(&mut app);
+    let session = app.bridge.session();
+    app.apply(Action::MarkFinished("book-0".into()));
+    assert!(app.positions.get("book-0").is_some_and(|p| p.finished));
+    app.apply(Action::SignOut);
+    let late = sources::Progress {
+        item: sources::ItemKey::new(account().id, "book-0"),
+        position: sources::Position::from_secs(1_200.0),
+        finished: true,
+        at: Some(std::time::SystemTime::now()),
+    };
+    app.handle(Msg::Playback { session, event: crate::listening::Event::Positions(vec![late]) });
+    assert!(app.positions.is_empty(), "the signed-out account's positions stay gone");
+    assert!(app.ui.notice.is_none());
+}
+
 #[test]
 fn needing_credentials_returns_a_small_window_to_full_size() {
     let dir = tempfile::tempdir().unwrap();

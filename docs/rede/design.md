@@ -279,6 +279,43 @@ race another worker's blind progress PATCH.
   server timestamps first and discards older local entries. Offline listening
   statistics through timestamped ABS local sessions remain M4 work.
 
+### Finishing, starting over, and un-finishing
+
+Sometimes progress is settled by hand rather than by listening: the book is
+finished, it turns out not to be, or it starts again from the beginning. The
+three are `Action::MarkFinished`, `Action::MarkUnfinished` and
+`Action::StartOver`, each taking the book's id; the listening worker is started
+on first use, so none of them needs the book open. Each is one durable entry in
+the same progress log, stamped after both now and the server's row as Rede last
+saw it, exactly as Undo is: a pull that races the write cannot bring the old
+state back, a write that fails replays in order with the rest, and the app
+shows the new state in `Positions` at once (bumping its version, so anything
+derived from it is worked out again).
+
+What each writes to ABS, given the rules in
+[§12](abs-api.md#12-progress-endpoints-claim-partly-patch-is-a-plain-overwrite-not-last-write-wins):
+
+- **Finished** keeps the place the book got to and sends `isFinished: true` with
+  it, in one write. A finished book opens at the start, so the place costs
+  nothing, and marking it unfinished again can return there.
+- **Unfinished** keeps the last known place, or the start when there is none.
+  ABS drops the position in the request that clears a finish, so this is two
+  writes: the reset (stamped a millisecond earlier, so a failed follow-up is
+  replayed rather than mistaken for synced), then the place.
+- **Start over** is a place of 0 that is not finished, and takes the same two
+  writes when the server had the book finished. The loaded book moves to the
+  start through the player, which reports it through the session, and stays
+  paused or playing as it was.
+
+Marking the loaded book finished stops it first: stopping reports and closes the
+session at the old place, and a session sync after the finish would write that
+place again, which ABS treats as un-finishing the book.
+
+Two server behaviours stay outside Rede's control. ABS finishes a place within
+ten seconds of a book's end again, even on a plain write, so un-finishing a book
+left that close to its end may come back finished on the next pull. And a device
+whose clock is ahead can still hold the newer stamp.
+
 ### Bookmarks
 
 Bookmarks belong to the account's shelf and use `(item, exact book time)` as their

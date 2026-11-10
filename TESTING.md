@@ -277,10 +277,24 @@ Use a release build, a dedicated Audiobookshelf account and a second client
   less often, up to every 10 minutes.
 
 The opt-in `abs::a_real_server_round_trip` test uses one login and one explicit
-refresh, creates/renames/lists/deletes a fractional bookmark, exercises progress,
-and cleans the dedicated account back to zero bookmarks and progress. It refuses
+refresh, creates/renames/lists/deletes a fractional bookmark, exercises progress
+including finishing, un-finishing and starting over, and cleans the dedicated
+account back to zero bookmarks and progress. It refuses
 to run against an account that already has progress or bookmarks, so use a
 throwaway one. Run with `ABS_TEST_URL`, `ABS_TEST_USER` and `ABS_TEST_PASSWORD` in
 the environment: `cargo test -p abs --test live -- --ignored --nocapture`. It
 requires no audio hardware. Never include the environment values in logs or
 reports.
+
+## Rede: finishing a book
+
+The three writes behind marking a book finished, marking it unfinished and
+starting it over have no interface yet, so they are checked by the live test
+above (`settle` in `crates/abs/tests/live.rs`), on a throwaway account and a
+real server. It confirms what the code relies on: a finish is stored with the
+client's `lastUpdate`; clearing a finish resets the position to 0 and drops a
+position sent with it, so the place has to follow in a second write; and a
+place within ABS's ten-second end threshold finishes the book again, which
+limits un-finishing a book left at its very end. Everything else (the log,
+replay after an outage, the optimistic positions, the pull that races the
+write) runs against fakes in `cargo test -p rede`.

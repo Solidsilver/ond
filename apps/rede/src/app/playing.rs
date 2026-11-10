@@ -5,7 +5,7 @@ use super::{Action, RedeApp};
 use crate::failure::Failure;
 use crate::listening::{Event, Request};
 use crate::player::{Control, Live, Note};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// How long a resume waits for the server before playing from the local
 /// position. A lossy connection must not hold the play press.
@@ -36,12 +36,30 @@ impl RedeApp {
             }
             return;
         }
-        let (Some(account), Some(source), Some(shelf)) = (&self.session.account, &self.session.source, &self.session.shelf) else {
+        let Some(account) = self.session.account.clone() else {
             self.show_failure(Failure::Local("Not connected. Sign in to play this book.".into()));
             return;
         };
         let key = sources::ItemKey::new(account.id, id);
+        let Some(listening) = self.start_listening() else {
+            self.show_failure(Failure::Local("Not connected. Sign in to play this book.".into()));
+            return;
+        };
+        self.playback_control(Control::Stop);
+        self.player.book = None;
+        self.playback_generation += 1;
+        self.opening = true;
+        self.resume_pending = false;
+        self.resume_deadline = None;
+        listening.send(Request::Open { generation: self.playback_generation, key, at });
+    }
+
+    /// The worker that keeps the progress log, the pull and the server session.
+    /// Started on first use, so a book can be settled without being opened.
+    /// `None` means nothing is signed in; the caller says so in its own words.
+    fn start_listening(&mut self) -> Option<crate::listening::Listening> {
         if self.listening.is_none() {
+            let (Some(account), Some(source), Some(shelf)) = (&self.session.account, &self.session.source, &self.session.shelf) else { return None };
             self.listening = Some(self.bridge.listening(
                 source.clone(),
                 shelf.clone(),
@@ -53,13 +71,77 @@ impl RedeApp {
                 },
             ));
         }
-        self.playback_control(Control::Stop);
-        self.player.book = None;
-        self.playback_generation += 1;
-        self.opening = true;
-        self.resume_pending = false;
-        self.resume_deadline = None;
-        self.listening.as_ref().unwrap().send(Request::Open { generation: self.playback_generation, key, at });
+        self.listening.clone()
+    }
+
+    pub(super) fn mark_finished(&mut self, id: String) {
+        // Stopping closes the session before the finish is written. A sync
+        // after it would send the old position, and ABS un-finishes a finished
+        // book whose position moves back before its end threshold.
+        if self.player.book.as_ref().is_some_and(|b| b.key.item == id) {
+            self.playback_control(Control::Stop);
+        }
+        // A finished book keeps the place it got to, so marking it unfinished
+        // again can go back there.
+        let at = self.shown_position(&id).unwrap_or(0.0);
+        self.settle(id, at, true);
+    }
+
+    pub(super) fn mark_unfinished(&mut self, id: String) {
+        // ABS throws the position away in the request that clears a finish, so
+        // the known one goes in a second request (`AbsSource::set_progress`
+        // sends the reset first). Without a known place the book is at its
+        // start, and the server may auto-finish it again if that place is
+        // within its end threshold.
+        let at = self.shown_position(&id).unwrap_or(0.0);
+        self.settle(id, at, false);
+    }
+
+    pub(super) fn start_over(&mut self, id: String) {
+        if self.player.book.as_ref().is_some_and(|b| b.key.item == id) {
+            // The listener asked for this, so moving running audio is right.
+            // The seek reports the start through the session and leaves the
+            // book as it was, paused or playing; a book loaded without an
+            // engine only has its place to move, as a pull's move does.
+            if self.player.active && self.engine.is_some() {
+                self.playback_control(Control::Seek(0.0));
+            } else {
+                self.player.position = 0.0;
+            }
+        }
+        self.settle(id, 0.0, false);
+    }
+
+    /// Where the app shows a book: the player's place for the book it has
+    /// loaded and playing (its reports keep it there), else what was saved.
+    fn shown_position(&self, id: &str) -> Option<f64> {
+        if self.player.active && self.player.book.as_ref().is_some_and(|b| b.key.item == id) {
+            return Some(self.player.position);
+        }
+        self.positions.get(id).map(|p| p.position.secs())
+    }
+
+    /// Writes one intent as a progress entry and shows it at once. The entry's
+    /// stamp is after the server's own, as Undo's is, so a pull that races the
+    /// write cannot bring the old state back; a write that fails stays in the
+    /// log and replays in order with everything else pending.
+    fn settle(&mut self, id: String, at: f64, finished: bool) {
+        let (Some(account), Some(listening)) = (self.session.account.clone(), self.start_listening()) else {
+            self.show_failure(Failure::Local("Not connected. Sign in to change this book's progress.".into()));
+            return;
+        };
+        let key = sources::ItemKey::new(account.id, id);
+        let stamp = SystemTime::now().max(
+            self.positions
+                .get(&key.item)
+                .and_then(|p| p.at)
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+                .checked_add(Duration::from_millis(1))
+                .unwrap_or(SystemTime::now()),
+        );
+        let position = sources::Position::from_secs(at);
+        self.positions.insert(key.item.clone(), sources::Progress { item: key.clone(), position, finished, at: Some(stamp) });
+        listening.send(Request::Set(sources::ProgressUpdate { item: key, position, finished, at: stamp, listened: Duration::ZERO }));
     }
 
     pub(super) fn playback_control(&mut self, control: Control) {

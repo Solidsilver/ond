@@ -184,7 +184,7 @@ impl RedeApp {
             self.move_to_reconciled(previous.position.secs());
         }
         self.positions.insert(previous.item.item.clone(), sources::Progress { at: Some(at), ..previous.clone() });
-        listening.send(Request::Undo(ProgressUpdate {
+        listening.send(Request::Set(ProgressUpdate {
             item: previous.item,
             position: previous.position,
             finished: previous.finished,
