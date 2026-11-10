@@ -289,7 +289,7 @@ async fn a_cover_is_fetched_without_a_token() {
 }
 
 #[test]
-fn server_addresses() {
+fn a_server_address_is_trimmed_drops_its_query_and_needs_a_web_scheme() {
     let c = Client::new(" https://example.com/abs/?x=1#y ", device()).unwrap();
     assert_eq!(c.base().as_str(), "https://example.com/abs/");
     for bad in ["example.com", "example.com:13378", "ftp://example.com", "mailto:joe@example.com"] {

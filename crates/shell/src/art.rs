@@ -302,7 +302,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn buckets() {
+    fn a_size_rounds_up_to_a_bucket_and_caps_at_the_largest() {
         assert_eq!(bucket(10.0), 64);
         assert_eq!(bucket(64.0), 64);
         assert_eq!(bucket(65.0), 128);
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn crops_to_fill() {
+    fn a_cover_is_cropped_to_fill_a_square() {
         assert_eq!(crop_uv(1.0), Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
         // Wider than tall: a band across the middle.
         assert_eq!(crop_uv(2.0), Rect::from_min_max(egui::pos2(0.0, 0.25), egui::pos2(1.0, 0.75)));

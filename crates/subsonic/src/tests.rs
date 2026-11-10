@@ -390,7 +390,7 @@ fn a_failed_envelope_without_a_code_is_still_an_api_error() {
 }
 
 #[test]
-fn server_addresses() {
+fn a_server_address_drops_its_query_and_needs_a_web_scheme() {
     let creds = || Credentials::new("joe", "pw");
     // A query string or fragment on the address is dropped, not sent along.
     let c = Client::new("https://music.example.com/nd?theme=dark#x", creds()).unwrap();

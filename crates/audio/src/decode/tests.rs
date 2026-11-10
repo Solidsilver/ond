@@ -688,7 +688,7 @@ fn a_decoder_a_full_marker_ring_ahead_waits_for_the_output() {
 }
 
 #[test]
-fn opus_files_decode() {
+fn an_opus_file_plays_at_48_khz_stereo() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/sine-1s.opus");
     let src = TrackSource { id: "opus".into(), url: format!("file://{}", path.display()), suffix: Some("opus".into()), ..Default::default() };
     let status = bit_perfect_status();
@@ -704,7 +704,7 @@ fn opus_files_decode() {
 
 /// A transcode to Opus arrives as Ogg read front to back: it plays the same.
 #[test]
-fn opus_streams_decode() {
+fn an_opus_stream_read_front_to_back_plays_the_same() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/sine-1s.opus");
     let src = TrackSource { id: "opus".into(), url: format!("test-unseekable://{}", path.display()), suffix: Some("opus".into()), ..Default::default() };
     let status = bit_perfect_status();
