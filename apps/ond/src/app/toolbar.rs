@@ -8,6 +8,7 @@ use super::{Action, OndApp};
 use crate::favorites::StarKind;
 use crate::icons::{self, Icon};
 use crate::nav::Route;
+use crate::queue::EndAction;
 use crate::theme::{Tokens, semibold};
 use crate::widgets::elide;
 use egui::{Align, FontId, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -136,6 +137,22 @@ impl OndApp {
         }
     }
 
+    /// What the queue does at its end, on the queue toggle `button`, when it
+    /// isn't the default (Stop): a small badge at its corner, named in its
+    /// tooltip and its accessible name, so it shows with the queue hidden.
+    fn end_badge(&self, ui: &Ui, t: &Tokens, button: egui::Response, shown: bool) -> egui::Response {
+        let (icon, words) = match self.player.queue.end {
+            EndAction::Stop => return button,
+            EndAction::RepeatQueue => (Icon::Repeat, "Then: Repeat queue"),
+        };
+        let c = button.rect.center() + vec2(8.0, -7.0);
+        ui.painter().circle(c, 6.5, t.accent, egui::Stroke::new(1.5, t.bg));
+        icons::paint(ui.painter(), egui::Rect::from_center_size(c, vec2(9.0, 9.0)), icon, t.on_accent);
+        let name = format!("{} queue (⌥⌘U). {words}", if shown { "Hide" } else { "Show" });
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::keys::shown(&name).into_owned()));
+        button.on_hover_text(words)
+    }
+
     /// Queue toggle · mini player (laid out right to left).
     fn toolbar_right(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
@@ -153,6 +170,7 @@ impl OndApp {
         if shown {
             ui.painter().rect_filled(queue_icon.rect, 6.0, t.accent.gamma_multiply(0.12));
         }
+        let queue_icon = self.end_badge(ui, &t, queue_icon, shown);
         if queue_icon.clicked() {
             self.actions.push(Action::Window(WindowAction::ToggleQueue));
         }

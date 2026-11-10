@@ -153,7 +153,7 @@ impl OndApp {
         });
     }
 
-    /// The server's state in the footer: a dot and the host while connected,
+    /// The server's state in the footer: a check and the host while connected,
     /// a ring and progress while syncing, a cloud while offline. Click for the
     /// details popover (latency, last sync, Sync now, Sign out).
     fn server_status(&mut self, ui: &mut Ui, width: f32) {
@@ -546,14 +546,12 @@ impl ServerState {
         }
     }
 
-    /// The small glyph at `c`: a dot, a progress ring or spinner, or a cloud.
+    /// The small glyph at `c`: a check, a progress ring or spinner, or a cloud.
     fn paint_glyph(&self, ui: &Ui, c: egui::Pos2) {
         let t = Tokens::of(ui);
         let painter = ui.painter();
         match self {
-            ServerState::Connected { .. } => {
-                painter.circle_filled(c, 3.2, t.ok);
-            }
+            ServerState::Connected { .. } => icons::status_mark(painter, c, 3.4, icons::Status::Good, None),
             ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
             ServerState::Syncing { fraction: None, .. } => {
                 icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);

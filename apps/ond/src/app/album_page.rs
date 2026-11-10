@@ -77,8 +77,8 @@ pub(super) struct AlbumFacts {
     summary: analysis::AlbumSummary,
     /// `FLAC 16/44.1` when every track shares it.
     format: Option<String>,
-    /// "6 songs · 41 min · 1961 · Riverside"
-    footer: String,
+    /// "6 songs · 41 min"
+    extent: String,
     credits: Vec<Credit>,
     source: Source,
     /// The tracks the key points at, held so that while this is cached no
@@ -96,17 +96,11 @@ impl AlbumFacts {
         let tracks: &[Track] = slice.map_or(&[], |s| s);
         let found: Vec<&TrackAnalysis> = tracks.iter().filter_map(|t| analysis.of(t)).collect();
         let secs = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>();
-        let mut footer = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
-        if let Some(y) = album.year {
-            footer.push_str(&format!(" · {y}"));
-        }
-        if let Some(l) = album.labels.first() {
-            footer.push_str(&format!(" · {l}"));
-        }
+        let extent = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
         Self {
             summary: analysis::summarize(&found, tracks.len()),
             format: shared_format(tracks),
-            footer,
+            extent,
             credits: credits(tracks),
             source: Source::Album { id: album.id.clone(), name: album.name.clone() },
             _tracks: slice.cloned(),
@@ -162,6 +156,8 @@ const HEADER_STACK_BELOW: f32 = 460.0;
 /// The artwork's side beside the text: 30% of the width, within these.
 const HEADER_ART_MIN: f32 = 150.0;
 const HEADER_ART_MAX: f32 = 220.0;
+/// The technical line's text, a step under the catalogue line's 12.
+const MEASURES_SIZE: f32 = 11.0;
 /// The header text's height before it's first measured.
 const HEADER_TEXT_H_GUESS: f32 = 150.0;
 
@@ -203,9 +199,7 @@ impl ViewCtx<'_> {
                 }
 
                 self.track_list(ui, tracks, &facts.source, ListOpts { numbers: true, artist: false, playlist: None });
-                ui.add_space(14.0);
-                ui.label(egui::RichText::new(&facts.footer).size(12.0).color(t.muted));
-                ui.add_space(10.0);
+                ui.add_space(16.0);
                 self.album_details(ui, tracks, &facts, analysing > 0);
                 ui.add_space(24.0);
             })
@@ -244,7 +238,8 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// The name, the artist, a line of facts and the buttons.
+    /// The name, the artist, the catalogue facts, the measurements under
+    /// them, and the buttons.
     fn album_header_text(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
         let album = page.album;
         ui.add(egui::Label::new(egui::RichText::new(&album.name).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
@@ -255,23 +250,21 @@ impl ViewCtx<'_> {
         }
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| self.album_facts_line(ui, t, page));
+        if Self::has_measures(page) {
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| self.album_measures_line(ui, t, page));
+        }
         ui.add_space(12.0);
         ui.horizontal(|ui| self.album_buttons(ui, t, page));
     }
 
-    /// Genres, year and labels as links, the shared format, then the
-    /// measurements (or how far analysing has got) and any finding.
+    /// The catalogue line: genres, year and labels as links, then how many
+    /// songs and how long.
     fn album_facts_line(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
-        let (album, summary) = (page.album, &page.facts.summary);
+        let album = page.album;
         ui.spacing_mut().item_spacing.x = 0.0;
         let small = FontId::proportional(12.0);
-        let mut first = true;
-        let mut sep = |ui: &mut Ui| {
-            if !first {
-                ui.label(egui::RichText::new("  ·  ").size(12.0).color(t.muted));
-            }
-            first = false;
-        };
+        let mut sep = separator(t, 12.0);
         for g in album.all_genres() {
             sep(ui);
             if link(ui, g, small.clone(), t.muted).clicked() {
@@ -290,27 +283,48 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::Go(Route::Filter { kind: FilterKind::Label, value: l.clone() }));
             }
         }
+        if !page.tracks.is_empty() {
+            sep(ui);
+            ui.label(egui::RichText::new(&page.facts.extent).size(12.0).color(t.muted));
+        }
+    }
+
+    /// The technical line, set smaller: the shared format, then the
+    /// measurements (or how far analysing has got) and any finding.
+    fn album_measures_line(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
+        let summary = &page.facts.summary;
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let size = MEASURES_SIZE;
+        let mut sep = separator(t, size);
         if let Some(f) = &page.facts.format {
             sep(ui);
-            ui.label(egui::RichText::new(f).size(12.0).color(t.muted));
+            ui.label(egui::RichText::new(f).size(size).color(t.muted));
         }
         // Measurements once the whole album is known; a quiet
         // count while it's being worked on.
         if let (true, Some(dr), Some(lufs)) = (summary.complete(), summary.dr, summary.lufs) {
             sep(ui);
-            ui.label(egui::RichText::new(format!("DR{dr}")).size(12.0).color(t.muted)).on_hover_text("Dynamic range (DR meter), averaged across the album");
+            ui.label(egui::RichText::new(format!("DR{dr}")).size(size).color(t.muted)).on_hover_text("Dynamic range (DR meter), averaged across the album");
             sep(ui);
-            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(12.0).color(t.muted))
+            ui.label(egui::RichText::new(crate::fmt::level(lufs, "LUFS")).size(size).color(t.muted))
                 .on_hover_text("Integrated loudness (EBU R128), across the album");
         } else if page.analysing > 0 {
             sep(ui);
-            ui.label(egui::RichText::new(format!("analyzing {}/{}", summary.analyzed, page.tracks.len())).size(12.0).color(t.muted));
+            ui.label(egui::RichText::new(format!("analyzing {}/{}", summary.analyzed, page.tracks.len())).size(size).color(t.muted));
         }
         if let Some((v, n)) = &summary.verdict {
-            ui.add_space(10.0);
+            if page.facts.format.is_some() || summary.complete() || page.analysing > 0 {
+                ui.add_space(10.0);
+            }
             let tracks_note = if *n == summary.analyzed { "every analyzed track".to_owned() } else { format!("{n} of {} analyzed tracks", summary.analyzed) };
             chip(ui, &v.label(), t.warn).on_hover_text(format!("{}\n\nSeen in {tracks_note}.", v.evidence()));
         }
+    }
+
+    /// Whether [`album_measures_line`](Self::album_measures_line) has anything to show.
+    fn has_measures(page: &AlbumHeader) -> bool {
+        let s = &page.facts.summary;
+        page.facts.format.is_some() || (s.complete() && s.dr.is_some() && s.lufs.is_some()) || page.analysing > 0 || s.verdict.is_some()
     }
 
     /// Play and Shuffle, the heart, ⋯ (the album's menu), and how its
@@ -363,7 +377,7 @@ impl ViewCtx<'_> {
         if !open {
             return;
         }
-        let width = ui.available_width().min(720.0);
+        let width = ui.available_width().min(shell::kit::LIST_W);
         ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -397,6 +411,17 @@ impl ViewCtx<'_> {
                 analysis_table(ui, tracks, &found, facts.summary.verdict.as_ref().map(|(v, _)| v));
             }
         });
+    }
+}
+
+/// A " · " before every item but the first, at `size`.
+fn separator(t: &Tokens, size: f32) -> impl FnMut(&mut Ui) {
+    let (mut first, muted) = (true, t.muted);
+    move |ui: &mut Ui| {
+        if !first {
+            ui.label(egui::RichText::new("  ·  ").size(size).color(muted));
+        }
+        first = false;
     }
 }
 

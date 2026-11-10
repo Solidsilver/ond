@@ -141,9 +141,21 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Artist { name: "Bill Evans".into(), id: None });
     s.shoot(h, "artist");
+    // Its ⋯: Play next and Add to queue.
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    s.shoot(h, "artist-more");
 
     reset(h, FULL, Route::Album(album_id(0)));
     s.shoot(h, "album");
+
+    // A very wide window: the track list stops at its width, under the
+    // heading, and the Songs table spreads its columns.
+    let wide = vec2(2400.0, 900.0);
+    reset(h, wide, Route::Album(album_id(0)));
+    s.shoot(h, "album-wide");
+    reset(h, wide, Route::Songs);
+    s.shoot(h, "songs-wide");
 
     reset(h, FULL, Route::Album(album_id(0)));
     let main = egui::Rect::from_min_max(pos2(216.0, 52.0), pos2(1120.0, 876.0));
@@ -285,7 +297,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     let toolbar = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1440.0, 52.0));
     let _ = toolbar;
     h.run_steps(2);
-    h.get_by_label("Output: UMC22").click();
+    h.get_by(|n| n.label().is_some_and(|l| l.starts_with("Output: UMC22"))).click();
     s.shoot(h, "output-picker");
 
     // Bit-perfect on a DAC with its own volume: the slider sets it, in green, with the level in dB.
@@ -301,7 +313,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Always);
     }
     h.run_steps(2);
-    h.get_by_label("Output: UMC22").click();
+    h.get_by(|n| n.label().is_some_and(|l| l.starts_with("Output: UMC22"))).click();
     s.shoot(h, "output-picker-device-volume");
     app_mut(h).prefs.edit(|s| s.device_volume_db = crate::settings::DbReadout::Adjusting);
     app_mut(h).output.handle(&audio::Event::DeviceVolume(None));
@@ -689,6 +701,21 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(760.0, 640.0), Route::Albums);
     s.shoot(h, "narrow-rail");
 
+    // Repeat queue with the queue hidden: a badge on its toggle says so,
+    // wide and narrow, and its tooltip names it.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).player.queue.end = crate::queue::EndAction::RepeatQueue;
+    app_mut(h).prefs.edit(|s| s.show_queue = false);
+    h.run_steps(2);
+    s.shoot(h, "queue-repeat-hidden");
+    h.get_by_label(&crate::keys::shown("Show queue (⌥⌘U). Then: Repeat queue")).hover();
+    h.run_steps(30);
+    s.shoot_now(h, "queue-repeat-hover");
+    reset(h, vec2(760.0, 640.0), Route::Albums);
+    app_mut(h).player.queue.end = crate::queue::EndAction::RepeatQueue;
+    s.shoot(h, "narrow-queue-repeat");
+    app_mut(h).player.queue.end = crate::queue::EndAction::Stop;
+
     reset(h, vec2(900.0, 700.0), Route::Album(album_id(7)));
     s.shoot(h, "narrow-long-album");
 
@@ -975,7 +1002,7 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     reset(h, FULL, Route::Recent);
     h.run_steps(2);
-    h.get_by_label("Output: UMC22").click();
+    h.get_by(|n| n.label().is_some_and(|l| l.starts_with("Output: UMC22"))).click();
     s.shoot(h, "managed-output-picker");
     egui::Popup::close_all(&h.ctx);
     reset(h, FULL, Route::Recent);

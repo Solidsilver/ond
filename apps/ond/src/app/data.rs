@@ -2,9 +2,10 @@
 //! the sync is, the palette's search index, and queue actions waiting for
 //! tracks to load. Library messages from the bridge land here.
 
-use super::OndApp;
 use super::dialogs::Overlay;
+use super::{AlbumSort, OndApp};
 use crate::bridge::{LibraryMsg, ListKey};
+use crate::nav::Route;
 use crate::player::QueueAction;
 use crate::queue::{OnPlay, Source};
 use crate::search::SearchIndex;
@@ -391,16 +392,20 @@ impl OndApp {
         }
     }
 
-    /// Plays (or queues) all of an artist's albums, once their tracks load.
+    /// Plays (or queues) all of an artist's albums, once their tracks load:
+    /// in the order their page lists them (by year), or shuffled.
     pub(super) fn play_artist(&mut self, name: String, action: QueueAction) {
-        let ids: Vec<String> = self.data.albums.iter().filter(|a| a.has_artist(None, &name)).map(|a| a.id.clone()).collect();
+        let route = Route::Artist { name: name.clone(), id: None };
+        let ids: Vec<String> =
+            super::browse::grid_ids(&route, AlbumSort::Year, false, &self.data).into_iter().map(|i| self.data.albums[i].id.clone()).collect();
         let key = ListKey::Artist(name.clone());
         let source = match action {
             QueueAction::PlayNext | QueueAction::Add => Source::Added,
-            _ => Source::ArtistShuffle { name: format!("{name}, shuffled") },
+            QueueAction::Shuffle => Source::Artist { name: format!("{name}, shuffled"), shuffled: true },
+            QueueAction::Play { .. } => Source::Artist { name, shuffled: false },
         };
-        // Playing an artist means all of their albums, shuffled.
-        let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Shuffle } else { action };
+        // Their albums from the first, whatever the start asked for.
+        let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Play { start: 0 } } else { action };
         self.wait_for(Pending { key: key.clone(), source, action, fresh: false });
         self.bridge.fetch_tracks(self.session.client.clone(), key, ids);
     }

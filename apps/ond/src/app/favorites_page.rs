@@ -72,7 +72,7 @@ impl ViewCtx<'_> {
                 }
                 VirtualList::table("favorite-artists", None, ARTIST_ROW_H, v.artists.len()).show(ui, |ui, range| {
                     for (id, name) in &v.artists[range] {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(720.0), ARTIST_ROW_H), Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(shell::kit::LIST_W), ARTIST_ROW_H), Sense::click());
                         if ui.is_rect_visible(rect) {
                             if resp.hovered() {
                                 ui.painter().rect_filled(rect, 6.0, t.hover);

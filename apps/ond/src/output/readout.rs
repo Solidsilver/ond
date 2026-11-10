@@ -1,5 +1,5 @@
 //! The few characters of signal path shown in the now-playing display and
-//! on the panel's card: the formats, a dot for the bit-perfect verdict, and
+//! on the panel's card: the formats, a mark for the bit-perfect verdict, and
 //! the words behind them (the hover, and what's wrong when something is).
 
 use super::Outputs;
@@ -8,7 +8,7 @@ use crate::theme::Tokens;
 use audio::{BitPerfectStatus, PlayState, SignalPath};
 
 /// The few characters of signal path shown in the now-playing display:
-/// `24/96 → 16/48` plus a dot for the bit-perfect verdict.
+/// `24/96 → 16/48` plus a mark for the bit-perfect verdict.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Readout {
     pub from: String,
@@ -26,12 +26,45 @@ pub struct Readout {
 pub enum Verdict {
     /// Normal mode: nothing to report.
     None,
-    /// Bit-perfect and verified: a green dot.
+    /// Bit-perfect and verified: a green check.
     Verified,
     /// Bit-perfect asked for but not confirmed: a hollow ring.
     Requested,
-    /// Bit-perfect impossible (device limit, transcode, downmix): the warning colour.
+    /// Bit-perfect impossible (device limit, transcode, downmix): a
+    /// down-pointing triangle in the warning colour.
     Unavailable,
+}
+
+impl Verdict {
+    /// Its mark, drawn after the formats; none in Normal mode.
+    pub fn status(self) -> Option<icons::Status> {
+        match self {
+            Verdict::None => None,
+            Verdict::Verified => Some(icons::Status::Good),
+            Verdict::Requested => Some(icons::Status::Pending),
+            Verdict::Unavailable => Some(icons::Status::Limited),
+        }
+    }
+
+    /// The verdict in a few words, for a screen reader.
+    pub fn words(self) -> Option<&'static str> {
+        match self {
+            Verdict::None => None,
+            Verdict::Verified => Some("bit-perfect"),
+            Verdict::Requested => Some("bit-perfect, not verified"),
+            Verdict::Unavailable => Some("not bit-perfect"),
+        }
+    }
+}
+
+/// A bit-perfect status as the pill and the output icon show it.
+pub(super) fn verdict_of(s: &BitPerfectStatus) -> Verdict {
+    match s {
+        BitPerfectStatus::Off => Verdict::None,
+        BitPerfectStatus::Verified => Verdict::Verified,
+        BitPerfectStatus::Requested { .. } => Verdict::Requested,
+        BitPerfectStatus::Unavailable { .. } => Verdict::Unavailable,
+    }
 }
 
 impl Outputs {
@@ -59,17 +92,12 @@ pub(super) fn readout_of(p: &SignalPath, detail: String) -> Readout {
             (from, changed.then(|| audio::describe(p.device_bits, p.device_rate)))
         }
     };
-    let verdict = match &p.bit_perfect {
-        BitPerfectStatus::Off => Verdict::None,
-        BitPerfectStatus::Verified => Verdict::Verified,
-        BitPerfectStatus::Requested { .. } => Verdict::Requested,
-        BitPerfectStatus::Unavailable { .. } => Verdict::Unavailable,
-    };
+    let verdict = verdict_of(&p.bit_perfect);
     Readout { from, to, verdict, local: false, detail }
 }
 
 /// The readout in a small pill: a down arrow when playing from this
-/// computer, the format(s) and, after them, the verdict dot.
+/// computer, the format(s) and, after them, the verdict's mark.
 /// Right-aligned at `right` (vertically centred on it). Returns the pill's
 /// rect; with `paint` false it only measures.
 pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, paint: bool) -> egui::Rect {
@@ -116,17 +144,8 @@ pub fn paint_readout(ui: &egui::Ui, right: egui::Pos2, r: &Readout, size: f32, p
         x += to.size().x;
     }
     let c = egui::pos2(x + 4.0 + 2.5, right.y);
-    match r.verdict {
-        Verdict::None => {}
-        Verdict::Verified => {
-            painter.circle_filled(c, 2.6, t.ok);
-        }
-        Verdict::Unavailable => {
-            painter.circle_filled(c, 2.6, t.warn);
-        }
-        Verdict::Requested => {
-            painter.circle_stroke(c, 2.3, egui::Stroke::new(1.0, t.muted));
-        }
+    if let Some(s) = r.verdict.status() {
+        icons::status_mark(painter, c, 2.6, s, None);
     }
     rect
 }

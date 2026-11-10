@@ -194,8 +194,10 @@ pub enum Source {
         id: String,
         name: String,
     },
-    ArtistShuffle {
+    /// All of an artist's albums, in their page's order or `shuffled`.
+    Artist {
         name: String,
+        shuffled: bool,
     },
 }
 
@@ -203,7 +205,7 @@ impl Source {
     pub fn label(&self) -> &str {
         match self {
             Source::Added => "You added",
-            Source::Album { name, .. } | Source::Playlist { name, .. } | Source::ArtistShuffle { name } => name,
+            Source::Album { name, .. } | Source::Playlist { name, .. } | Source::Artist { name, .. } => name,
         }
     }
 
@@ -213,7 +215,7 @@ impl Source {
             Source::Added => "added".into(),
             Source::Album { id, .. } => format!("album:{id}"),
             Source::Playlist { id, .. } => format!("playlist:{id}"),
-            Source::ArtistShuffle { name } => format!("artist:{name}"),
+            Source::Artist { name, .. } => format!("artist:{name}"),
         }
     }
 }

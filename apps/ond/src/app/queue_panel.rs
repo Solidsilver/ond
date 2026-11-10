@@ -53,7 +53,8 @@ fn group_icon(s: &Source) -> Icon {
         Source::Added => Icon::Person,
         Source::Album { .. } => Icon::Disc,
         Source::Playlist { .. } => Icon::List,
-        Source::ArtistShuffle { .. } => Icon::Shuffle,
+        Source::Artist { shuffled: true, .. } => Icon::Shuffle,
+        Source::Artist { shuffled: false, .. } => Icon::Grid,
     }
 }
 

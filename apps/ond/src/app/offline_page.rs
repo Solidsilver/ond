@@ -301,7 +301,7 @@ impl ViewCtx<'_> {
     /// while it's on its way. Click opens it; right-click plays or removes.
     pub(super) fn pin_row(&mut self, ui: &mut Ui, snap: &Snapshot, p: &PinSummary) {
         let t = Tokens::of(ui);
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(760.0), 48.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(shell::kit::LIST_W), 48.0), Sense::click());
         // Off screen: keep the space, skip the rest (thousands of kept songs).
         if !ui.is_rect_visible(rect) {
             return;

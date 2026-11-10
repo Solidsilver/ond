@@ -9,7 +9,7 @@ use super::{ControlOut, Outputs, group_devices, kind_icon};
 use crate::icons::{self, Icon};
 use crate::settings::DbReadout;
 use crate::theme::Tokens;
-use audio::{BitPerfectStatus, DeviceInfo, DeviceVolume, EngineHandle, PlaybackMode};
+use audio::{DeviceInfo, DeviceVolume, EngineHandle, PlaybackMode};
 
 const POPUP_W: f32 = 320.0;
 /// The output control's height (the toolbar's rows are this tall).
@@ -145,7 +145,7 @@ impl Outputs {
     /// stays open whatever moves beside it.
     fn icon_button(&self, ui: &mut egui::Ui, volume: bool) -> egui::Response {
         let t = Tokens::of(ui);
-        let dot = self.dot_color(ui);
+        let status = self.status();
         let speaker_w = if volume { VOLUME_GLYPH_W } else { 0.0 };
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ICON_W + speaker_w, CONTROL_H), egui::Sense::hover());
         let resp = ui.interact(rect, egui::Id::unique("output-control-icon"), egui::Sense::click());
@@ -159,15 +159,16 @@ impl Outputs {
             }
             let glyph = egui::Rect::from_center_size(egui::pos2(rect.left() + speaker_w + 14.0, rect.center().y), egui::vec2(15.0, 15.0));
             icons::paint(ui.painter(), glyph, kind_icon(self.in_use().map(|d| d.kind)), t.text);
-            if let Some(dot) = dot {
-                ui.painter().circle(egui::pos2(glyph.right() + 1.0, glyph.top() + 1.0), 3.5, dot, egui::Stroke::new(1.5, t.bg));
+            if let Some(s) = status {
+                icons::status_mark(ui.painter(), egui::pos2(glyph.right() + 1.0, glyph.top() + 1.0), 3.5, s, Some(t.bg));
             }
             let chevron = egui::Rect::from_center_size(egui::pos2(rect.right() - 8.0, rect.center().y + 1.0), egui::vec2(7.0, 7.0));
             icons::paint(ui.painter(), chevron, Icon::ChevronDown, t.muted);
         }
         let name = self.in_use_name().unwrap_or("System output").to_owned();
         let what = if volume { "Volume and output" } else { "Output" };
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, format!("{what}: {name}")));
+        let state = self.signal.as_ref().and_then(|p| super::readout::verdict_of(&p.bit_perfect).words()).map_or(String::new(), |w| format!(", {w}"));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, format!("{what}: {name}{state}")));
         let hover = match &self.signal {
             Some(p) => format!("{name}\n{}", hover_text(p)),
             None => name,
@@ -375,13 +376,13 @@ impl Outputs {
             ui.painter().galley(egui::pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
             // Set to bit-perfect: a green dot where the card's pill has its own.
             if opens && self.device_mode(d) == PlaybackMode::BitPerfect {
-                ui.painter().circle_filled(egui::pos2(rect.right() - PILL_INSET - PILL_DOT, rect.center().y), 2.6, t.ok);
+                icons::status_mark(ui.painter(), egui::pos2(rect.right() - PILL_INSET - PILL_DOT, rect.center().y), 2.6, icons::Status::Good, None);
             }
         }
         let caps = d.capability_line();
         let caps = if opens && self.device_mode(d) == PlaybackMode::BitPerfect { format!("{caps} · set to bit-perfect") } else { caps };
         let hover = format!("Play through {}\n{caps}", d.name);
-        let label = d.name.clone();
+        let label = if opens && self.device_mode(d) == PlaybackMode::BitPerfect { format!("{}, set to bit-perfect", d.name) } else { d.name.clone() };
         let row = row.on_hover_text(hover);
         row.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, !locked, &label));
         if toggle.is_some_and(|r| r.on_hover_text(if open { "Hide its mode" } else { "Its mode" }).clicked()) {
@@ -488,16 +489,10 @@ impl Outputs {
         });
     }
 
-    /// The status dot's color: bit-perfect verified, unavailable or not yet
-    /// verified. `None` in Normal mode, which has nothing to report.
-    fn dot_color(&self, ui: &egui::Ui) -> Option<egui::Color32> {
-        let v = ui.visuals();
-        match self.signal.as_ref().map(|p| &p.bit_perfect)? {
-            BitPerfectStatus::Verified => Some(crate::theme::Tokens::of(ui).ok),
-            BitPerfectStatus::Unavailable { .. } => Some(v.warn_fg_color),
-            BitPerfectStatus::Requested { .. } => Some(v.text_color()),
-            BitPerfectStatus::Off => None,
-        }
+    /// The mark at the icon's corner: bit-perfect verified, unavailable or
+    /// not yet verified. `None` in Normal mode, which has nothing to report.
+    fn status(&self) -> Option<icons::Status> {
+        super::readout::verdict_of(&self.signal.as_ref()?.bit_perfect).status()
     }
 }
 

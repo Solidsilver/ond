@@ -42,7 +42,7 @@ pub enum Icon {
     Grid,
     /// Songs.
     Note,
-    /// Lyrics: a speech bubble with lines of text.
+    /// Lyrics: lines of words with a note beside them.
     Lyrics,
     /// Offline.
     Download,
@@ -90,6 +90,8 @@ pub enum Icon {
     Sidebar,
     /// A house with a door: the place an app opens on.
     Home,
+    /// Two arrows chasing each other round a loop: repeat.
+    Repeat,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -225,6 +227,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.85), p(0.85, 0.85)), r * 0.2, line, egui::StrokeKind::Middle);
             painter.rect_filled(Rect::from_min_max(p(-0.45, -0.55), p(0.45, 0.2)), r * 0.08, color);
             painter.line_segment([p(-0.45, 0.5), p(0.45, 0.5)], line);
+        }
+        Icon::Repeat => {
+            // Lighter than the usual line: it's often drawn small, in a badge.
+            let thin = Stroke::new((r * 0.17).max(1.0), color);
+            painter.add(Shape::line(vec![p(-0.8, 0.25), p(-0.8, -0.45), p(0.45, -0.45)], thin));
+            painter.add(tri(vec![p(0.4, -0.78), p(0.9, -0.45), p(0.4, -0.12)]));
+            painter.add(Shape::line(vec![p(0.8, -0.25), p(0.8, 0.45), p(-0.45, 0.45)], thin));
+            painter.add(tri(vec![p(-0.4, 0.12), p(-0.9, 0.45), p(-0.4, 0.78)]));
         }
         Icon::Sidebar => {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
@@ -367,12 +377,16 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(tri(vec![p(x - stem, top), p(right, top + 0.22), p(right, top + 0.56), p(x - stem, top + 0.34)]));
         }
         Icon::Lyrics => {
-            painter.add(Shape::line(
-                vec![p(-0.85, -0.7), p(0.85, -0.7), p(0.85, 0.4), p(-0.2, 0.4), p(-0.55, 0.8), p(-0.55, 0.4), p(-0.85, 0.4), p(-0.85, -0.7)],
-                line,
-            ));
-            painter.line_segment([p(-0.5, -0.3), p(0.5, -0.3)], line);
-            painter.line_segment([p(-0.5, 0.05), p(0.2, 0.05)], line);
+            // Lines of words, shortening as a verse does, and a note beside
+            // them. A bubble round the lines read as a chat.
+            for (y, end) in [(-0.62, 0.2), (0.0, 0.0), (0.62, -0.25)] {
+                painter.line_segment([p(-0.9, y), p(end, y)], line);
+            }
+            let (head, x) = (0.24, 0.72);
+            let stem = (r * 0.16).max(1.0) / r;
+            painter.circle_filled(p(x - head, 0.6), r * head, color);
+            painter.rect_filled(Rect::from_min_max(p(x - stem, -0.85), p(x, 0.6)), 0.0, color);
+            painter.add(tri(vec![p(x - stem, -0.85), p(1.0, -0.68), p(1.0, -0.42), p(x - stem, -0.58)]));
         }
         Icon::Download => {
             painter.line_segment([p(0.0, -0.85), p(0.0, 0.3)], line);
@@ -498,6 +512,43 @@ pub fn progress_ring(painter: &Painter, center: Pos2, radius: f32, fraction: f32
         })
         .collect();
     painter.add(Shape::line(pts, Stroke::new(width, color)));
+}
+
+/// A state shown by a small mark beside or on something (a format, a
+/// device, a connection). Each has its own shape as well as its colour, so
+/// none is told apart by hue alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// All is as it should be: a check, in the theme's ok colour.
+    Good,
+    /// Less than asked for (a device limit, a conversion): a small
+    /// down-pointing triangle, in the warning colour.
+    Limited,
+    /// Asked for, not yet confirmed: a hollow ring, muted.
+    Pending,
+}
+
+/// Paints `status` centred on `c`, about `r` from its centre to its edge
+/// (the size of a dot that radius). `cutout`: a disc of that colour under
+/// it first, to lift it off an icon it sits on the corner of.
+pub fn status_mark(painter: &Painter, c: Pos2, r: f32, status: Status, cutout: Option<Color32>) {
+    let t = crate::theme::Tokens::of_ctx(painter.ctx());
+    if let Some(bg) = cutout {
+        painter.circle_filled(c, r + 1.8, bg);
+    }
+    let p = |x: f32, y: f32| c + vec2(x * r, y * r);
+    match status {
+        Status::Good => {
+            let stroke = Stroke::new((r * 0.42).max(1.2), t.ok);
+            painter.add(Shape::line(vec![p(-0.95, 0.05), p(-0.3, 0.7), p(1.0, -0.75)], stroke));
+        }
+        Status::Limited => {
+            painter.add(Shape::convex_polygon(vec![p(-1.0, -0.65), p(1.0, -0.65), p(0.0, 0.95)], t.warn, Stroke::NONE));
+        }
+        Status::Pending => {
+            painter.circle_stroke(c, r * 0.85, Stroke::new((r * 0.32).max(1.0), t.muted));
+        }
+    }
 }
 
 /// An icon inline with text, at text height.

@@ -20,7 +20,8 @@ pub(super) fn readout(output: &Outputs, status: &audio::Status, origin: Option<&
 /// Player's bottom line): it names the path for screen readers, opens the
 /// signal card when clicked, and spells the path out on hover.
 pub(super) fn pill(resp: egui::Response, r: &Readout, origin: Option<&Origin>, track: &Track, output: &Outputs, underruns: u64) {
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}", r.detail.lines().next().unwrap_or_default())));
+    let verdict = r.verdict.words().map_or(String::new(), |w| format!(", {w}"));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Signal path: {}{verdict}", r.detail.lines().next().unwrap_or_default())));
     let path = output.signal();
     popover(&resp, origin, track, path, underruns);
     resp.on_hover_text(hover(origin, path, &r.detail)).on_hover_cursor(egui::CursorIcon::PointingHand);

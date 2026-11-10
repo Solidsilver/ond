@@ -21,6 +21,9 @@ use std::sync::Arc;
 const ROW_H: f32 = 32.0;
 const TIME_W: f32 = 56.0;
 const FORMAT_W: f32 = 96.0;
+/// The widest the table grows. Past it a short title sits a gulf away from
+/// its artist; the table stops, and the rail (when shown) keeps the edge.
+const TABLE_MAX_W: f32 = 1280.0;
 
 /// A Songs column, to sort by. Sorted by artist at first (not by title, the
 /// first column): ties fall back to album order, so the list starts out as
@@ -152,7 +155,8 @@ impl ViewCtx<'_> {
         self.songs_keys(ui, &order);
 
         // Header, over the columns (clear of the alphabet rail).
-        let head_rect = super::table::head_rect(ui, marks.is_some());
+        let mut head_rect = super::table::head_rect(ui, marks.is_some());
+        head_rect.set_width(head_rect.width().min(TABLE_MAX_W));
         let cols = columns(head_rect);
         let head = |label, rect, right, col| Head { label, rect, right, sorts: Some(col) };
         // The title column starts after the playing marker's gutter, so the
@@ -173,6 +177,7 @@ impl ViewCtx<'_> {
         let tracks = &data.tracks.all;
         let current = player.queue.current.as_ref().map(|c| c.track.id.as_str());
         VirtualList::table("songs", marks.as_deref(), ROW_H, order.len()).show(ui, |ui, range| {
+            ui.set_max_width(ui.available_width().min(TABLE_MAX_W));
             // The keys moved the selection: bring its row into view, once. It
             // may be off screen (and not laid out), so place it by its index.
             if std::mem::take(&mut self.ui.songs.scroll_to_selected)
