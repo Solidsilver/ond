@@ -1702,7 +1702,7 @@ fn stretching_and_resampling_keep_tracks_gapless_with_their_own_source_clocks() 
         let (positions, opens, played) = (backend.positions.clone(), backend.opens.clone(), backend.played.clone());
         let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 2.0 }, Box::new(backend), None);
         engine.send(Command::SetSpeed(speed));
-        engine.send(Command::Play(source_at(&dir, "a", 96_000, &voice_for(96_000, 1.0))));
+        engine.send(Command::Play(source_at(&dir, "a", 96_000, &voice_for(96_000, 2.0))));
         engine.send(Command::SetNext(Some(source_at(&dir, "b", 96_000, &voice_for(96_000, 1.5)))));
         let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
         assert_eq!(starts(&seen), [("a".into(), false, false), ("b".into(), true, false)], "{speed}×: {seen:?}");
@@ -1719,7 +1719,7 @@ fn stretching_and_resampling_keep_tracks_gapless_with_their_own_source_clocks() 
             assert!((source - output * speed as f64).abs() < 1e-9, "{speed}×: source {source}, output {output}");
         }
         let seconds = played.lock().unwrap().len() as f64 / (2.0 * 48_000.0);
-        assert!((seconds - 2.5 / speed as f64).abs() < 4.0 / 65.0, "{seconds} seconds");
+        assert!((seconds - 3.5 / speed as f64).abs() < 4.0 / 65.0, "{seconds} seconds");
         engine.shutdown(Duration::from_secs(2));
     }
 }
