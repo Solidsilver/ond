@@ -74,6 +74,12 @@ fn every_view_draws() {
     app.back();
     frame(&ctx, &mut app);
     assert_eq!(app.ui.nav.current(), &book_route(5));
+    // The library again, with books partway and one finished.
+    listened(&mut app);
+    app.go(Route::Library);
+    for _ in 0..2 {
+        frame(&ctx, &mut app);
+    }
     // And the sign-in screen, with and without an error.
     let mut login = signed_out(&ctx, dir.path());
     frame(&ctx, &mut login);

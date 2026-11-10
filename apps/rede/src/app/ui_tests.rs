@@ -38,6 +38,15 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    // The library with books partway and one finished: the tiles say how
+    // far along each book is.
+    listened(app_mut(&mut h));
+    app_mut(&mut h).go(Route::Library);
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("A Wizard of Earthsea by Ursula K. Le Guin, finished");
+    h.get_by_label("Piranesi by Susanna Clarke, 2h 10m left");
+    h.get_by_label("The Dispossessed by Ursula K. Le Guin");
     for tab in super::settings_page::Tab::ALL {
         app_mut(&mut h).apply(Action::OpenSettings(tab));
         h.run_steps(3);

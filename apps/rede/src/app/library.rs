@@ -9,6 +9,7 @@
 use super::Action;
 use super::nav::Route;
 use super::prefs_view::PrefsAction;
+use super::progress::Listened;
 use super::view_ctx::ViewCtx;
 use super::virtual_list::{VirtualList, near};
 use crate::memo::Memo;
@@ -28,8 +29,9 @@ const GAP_X: f32 = 20.0;
 const GAP_Y: f32 = 24.0;
 /// A cover's corners, as Ond rounds an album's.
 pub const COVER_RADIUS: f32 = 6.0;
-/// Title and author under the art.
-const LABEL_H: f32 = 42.0;
+/// Title, author, and the time left or "Finished" under the art. Every tile
+/// keeps room for the third line, so the rows line up whatever is begun.
+const LABEL_H: f32 = 58.0;
 /// The rows just past either end whose covers load ahead.
 const PREFETCH_ROWS: usize = 1;
 
@@ -181,16 +183,21 @@ impl ViewCtx<'_> {
         }
         ui.add_space(12.0);
         if count == 0 {
-            let (title, body) = if self.session.connecting || self.sync.running {
-                ("Loading your library…", "")
-            } else {
-                ("No books yet", "Books show up here as they're added to the server's library.")
-            };
-            shell::kit::empty_state(ui, Icon::Headphones, title, body);
+            self.no_books(ui);
             return;
         }
         let ids = self.books.order(sort);
         self.book_grid(ui, &ids, sort);
+    }
+
+    /// What a page of books says with none: loading, or how they come.
+    pub(super) fn no_books(&self, ui: &mut Ui) {
+        let (title, body) = if self.session.connecting || self.sync.running {
+            ("Loading your library…", "")
+        } else {
+            ("No books yet", "Books show up here as they're added to the server's library.")
+        };
+        shell::kit::empty_state(ui, Icon::Headphones, title, body);
     }
 
     /// The grid: only the rows on screen are laid out, so only their covers are
@@ -227,22 +234,38 @@ impl ViewCtx<'_> {
         ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
     }
 
-    /// Cover, title and author. A click opens the book.
+    /// Cover, title and author, and how far along the book is: a line along
+    /// the cover's foot and the time left, or a check and "Finished". A click
+    /// opens the book.
     fn book_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32, cover_h: f32) {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, cover_h + LABEL_H), Sense::click());
         let book = &self.books.all()[idx];
+        let listened = self.listened(book);
         if ui.is_rect_visible(rect) {
             let art = Rect::from_min_size(rect.min, vec2(tile, cover_h));
             self.art.paint(ui, art, book.cover.as_deref(), COVER_RADIUS);
+            match listened {
+                Listened::InProgress { fraction: Some(f), .. } => shell::kit::cover_progress(ui.painter(), art, COVER_RADIUS, f, &t),
+                Listened::Finished => shell::kit::cover_badge(ui.painter(), art, Icon::Check, &t),
+                _ => {}
+            }
             let title = elide(ui, &book.title, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
             let author = author_of(book);
             let author = if author.is_empty() { "Unknown author" } else { author };
             let line = elide(ui, author, FontId::proportional(12.0), t.muted, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), line, t.muted);
+            if let Some(state) = listened.line() {
+                let line = elide(ui, &state, FontId::proportional(11.5), t.muted, tile);
+                ui.painter().galley(pos2(rect.left(), art.bottom() + 40.0), line, t.muted);
+            }
         }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}", book.title, authors_line(book))));
+        let name = match listened.line() {
+            Some(state) => format!("{} by {}, {}", book.title, authors_line(book), state.to_lowercase()),
+            None => format!("{} by {}", book.title, authors_line(book)),
+        };
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
         if resp.clicked() {
             self.actions.push(Action::Go(Route::Book(book.id.clone())));
         }

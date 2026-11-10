@@ -150,6 +150,13 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
+    // The library with books partway and one finished.
+    scene(h, s, "library-progress", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app.go(Route::Library);
+        app
+    });
     // Nothing playing: the capsule's quiet line, and the column saying so.
     scene(h, s, "nothing-playing", || {
         let app = app(&ctx, dir.path(), BOOKS.len());

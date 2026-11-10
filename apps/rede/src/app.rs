@@ -10,6 +10,7 @@
 //!
 //! - `session`: signing in, resuming, and signing out
 //! - `library`: the books the shelf has, in the order drawn
+//! - `progress`: how a cover says where a book is
 //! - `nav`: where the window is, and how it got there
 //! - `playing`: playback actions, engine events and the listening worker
 //! - `bookmarks`: the bookmarks a book has, the edits that sync them, and the
@@ -62,6 +63,7 @@ mod panel;
 mod player_view;
 mod playing;
 mod prefs_view;
+mod progress;
 mod session;
 mod settings_page;
 mod sheets;
