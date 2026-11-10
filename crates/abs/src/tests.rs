@@ -1,120 +1,13 @@
 use super::*;
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use testkit::{Answer, JsonFake, Seen};
 
-/// One request as the fake server saw it.
-#[derive(Debug, Clone)]
-struct Seen {
-    method: String,
-    /// Path and query.
-    target: String,
-    headers: HashMap<String, String>,
-    body: String,
-}
-
-impl Seen {
-    fn path(&self) -> &str {
-        self.target.split('?').next().unwrap_or_default()
-    }
-
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name).map(String::as_str)
-    }
-
-    fn json(&self) -> serde_json::Value {
-        serde_json::from_str(&self.body).unwrap()
-    }
-}
-
-struct Answer {
-    status: &'static str,
-    headers: Vec<(&'static str, String)>,
-    body: String,
-}
-
-fn answer(status: &'static str, body: impl Into<String>) -> Answer {
-    Answer { status, headers: Vec::new(), body: body.into() }
-}
-
-fn ok(body: impl Into<String>) -> Answer {
-    answer("200 OK", body)
-}
-
-/// A local HTTP server answering every connection on its own thread, one
-/// request per connection, so concurrent requests really are concurrent.
-struct Fake {
-    base: String,
-    seen: Arc<Mutex<Vec<Seen>>>,
-}
-
-impl Fake {
-    fn start(respond: impl Fn(&Seen) -> Answer + Send + Sync + 'static) -> Fake {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}/", listener.local_addr().unwrap());
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let respond = Arc::new(respond);
-        let log = seen.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { return };
-                let (respond, log) = (respond.clone(), log.clone());
-                std::thread::spawn(move || serve(stream, &*respond, &log));
-            }
-        });
-        Fake { base, seen }
-    }
-
-    fn seen(&self) -> Vec<Seen> {
-        self.seen.lock().unwrap().clone()
-    }
-
-    fn count(&self, path: &str) -> usize {
-        self.seen().iter().filter(|s| s.path() == path).count()
-    }
-
-    fn client(&self) -> Client {
-        Client::new(&self.base, device()).unwrap()
-    }
-}
-
-fn serve(mut stream: std::net::TcpStream, respond: &(dyn Fn(&Seen) -> Answer + Send + Sync), log: &Mutex<Vec<Seen>>) {
-    let mut req = Vec::new();
-    let mut buf = [0u8; 4096];
-    let head_end = loop {
-        if let Some(i) = req.windows(4).position(|w| w == b"\r\n\r\n") {
-            break i + 4;
-        }
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => req.extend_from_slice(&buf[..n]),
-        }
-    };
-    let head = String::from_utf8_lossy(&req[..head_end]).into_owned();
-    let mut lines = head.lines();
-    let mut first = lines.next().unwrap_or_default().split_whitespace();
-    let (method, target) = (first.next().unwrap_or_default().to_owned(), first.next().unwrap_or_default().to_owned());
-    let headers: HashMap<String, String> = lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned())).collect();
-    let len: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
-    while req.len() < head_end + len {
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => req.extend_from_slice(&buf[..n]),
-        }
-    }
-    let body = String::from_utf8_lossy(&req[head_end..]).into_owned();
-    let seen = Seen { method, target, headers, body };
-    log.lock().unwrap().push(seen.clone());
-    let a = respond(&seen);
-    let mut out = format!("HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n", a.status, a.body.len());
-    for (k, v) in &a.headers {
-        out.push_str(&format!("{k}: {v}\r\n"));
-    }
-    out.push_str("\r\n");
-    out.push_str(&a.body);
-    let _ = stream.write_all(out.as_bytes());
+/// A client of the fake server.
+fn client_of(fake: &JsonFake) -> Client {
+    Client::new(fake.base(), device()).unwrap()
 }
 
 fn device() -> DeviceInfo {
@@ -152,13 +45,13 @@ fn recorded(client: &Client) -> Arc<Mutex<Vec<AuthEvent>>> {
 
 #[tokio::test]
 async fn login_returns_the_tokens_and_keeps_them() {
-    let fake = Fake::start(|s| match s.path() {
-        "/login" if s.header("x-return-tokens") == Some("true") => ok(login_reply("access-1", "refresh-1")),
-        "/login" => ok(login_reply("access-1", "")),
-        "/api/me" if bearer(s) == Some("access-1") => ok(r#"{"id":"u1","username":"joe"}"#),
-        _ => answer("401 Unauthorized", "Unauthorized"),
+    let fake = JsonFake::start(|s| match s.path() {
+        "/login" if s.header("x-return-tokens") == Some("true") => Answer::ok(login_reply("access-1", "refresh-1")),
+        "/login" => Answer::ok(login_reply("access-1", "")),
+        "/api/me" if bearer(s) == Some("access-1") => Answer::ok(r#"{"id":"u1","username":"joe"}"#),
+        _ => Answer::new("401 Unauthorized", "Unauthorized"),
     });
-    let client = fake.client();
+    let client = client_of(&fake);
     let events = recorded(&client);
     let login = client.login("joe", "sesame").await.unwrap();
     assert_eq!((login.tokens.access(), login.tokens.refresh()), ("access-1", "refresh-1"));
@@ -174,16 +67,16 @@ async fn login_returns_the_tokens_and_keeps_them() {
 
 #[tokio::test]
 async fn sign_in_failures_are_told_apart() {
-    let fake = Fake::start(|s| match s.json()["username"].as_str() {
-        Some("wrong") => answer("401 Unauthorized", "Unauthorized"),
+    let fake = JsonFake::start(|s| match s.json()["username"].as_str() {
+        Some("wrong") => Answer::new("401 Unauthorized", "Unauthorized"),
         Some("busy") => Answer {
             status: "429 Too Many Requests",
             headers: vec![("Retry-After", "60".into())],
             body: r#"{"error":"Too many authentication requests"}"#.into(),
         },
-        _ => answer("500 Internal Server Error", r#"{"error":"Database is locked"}"#),
+        _ => Answer::new("500 Internal Server Error", r#"{"error":"Database is locked"}"#),
     });
-    let client = fake.client();
+    let client = client_of(&fake);
     assert!(matches!(client.login("wrong", "pw").await, Err(Error::Auth(AuthError::BadCredentials))));
     match client.login("busy", "pw").await {
         Err(Error::Auth(AuthError::RateLimited { retry_after })) => assert_eq!(retry_after, Some(Duration::from_secs(60))),
@@ -198,21 +91,21 @@ async fn sign_in_failures_are_told_apart() {
 
 /// A server that rotates: refresh token `refresh-n` buys `access-(n+1)` and
 /// `refresh-(n+1)`, and only the current access token is accepted.
-fn rotating_server(delay: Duration) -> Fake {
+fn rotating_server(delay: Duration) -> JsonFake {
     let current = Arc::new(AtomicUsize::new(1));
-    Fake::start(move |s| {
+    JsonFake::start(move |s| {
         let n = current.load(Ordering::SeqCst);
         match s.path() {
             "/auth/refresh" => {
                 std::thread::sleep(delay);
                 if s.header("x-refresh-token") != Some(&format!("refresh-{n}")) {
-                    return answer("401 Unauthorized", r#"{"error":"Invalid refresh token"}"#);
+                    return Answer::new("401 Unauthorized", r#"{"error":"Invalid refresh token"}"#);
                 }
                 current.store(n + 1, Ordering::SeqCst);
-                ok(login_reply(&format!("access-{}", n + 1), &format!("refresh-{}", n + 1)))
+                Answer::ok(login_reply(&format!("access-{}", n + 1), &format!("refresh-{}", n + 1)))
             }
-            "/api/libraries" if bearer(s) == Some(&format!("access-{n}")) => ok(r#"{"libraries":[{"id":"lib1","name":"Books","mediaType":"book"}]}"#),
-            _ => answer("401 Unauthorized", "Unauthorized"),
+            "/api/libraries" if bearer(s) == Some(&format!("access-{n}")) => Answer::ok(r#"{"libraries":[{"id":"lib1","name":"Books","mediaType":"book"}]}"#),
+            _ => Answer::new("401 Unauthorized", "Unauthorized"),
         }
     })
 }
@@ -220,7 +113,7 @@ fn rotating_server(delay: Duration) -> Fake {
 #[tokio::test]
 async fn refresh_rotates_the_refresh_token_every_time() {
     let fake = rotating_server(Duration::ZERO);
-    let client = fake.client().with_tokens(Tokens::new("access-1", "refresh-1"));
+    let client = client_of(&fake).with_tokens(Tokens::new("access-1", "refresh-1"));
     let events = recorded(&client);
     let first = client.refresh().await.unwrap();
     assert_eq!((first.access(), first.refresh()), ("access-2", "refresh-2"));
@@ -236,7 +129,7 @@ async fn refresh_rotates_the_refresh_token_every_time() {
 async fn a_refused_access_token_refreshes_and_retries_once() {
     let fake = rotating_server(Duration::ZERO);
     // The stored access token is already stale.
-    let client = fake.client().with_tokens(Tokens::new("access-0", "refresh-1"));
+    let client = client_of(&fake).with_tokens(Tokens::new("access-0", "refresh-1"));
     let events = recorded(&client);
     let libs = client.libraries().await.unwrap();
     assert_eq!((libs[0].id.as_str(), libs[0].media_type), ("lib1", Some(MediaType::Book)));
@@ -247,11 +140,11 @@ async fn a_refused_access_token_refreshes_and_retries_once() {
 
 #[tokio::test]
 async fn a_second_401_after_a_refresh_is_not_retried_again() {
-    let fake = Fake::start(|s| match s.path() {
-        "/auth/refresh" => ok(login_reply("access-2", "refresh-2")),
-        _ => answer("401 Unauthorized", "Unauthorized"),
+    let fake = JsonFake::start(|s| match s.path() {
+        "/auth/refresh" => Answer::ok(login_reply("access-2", "refresh-2")),
+        _ => Answer::new("401 Unauthorized", "Unauthorized"),
     });
-    let client = fake.client().with_tokens(Tokens::new("access-1", "refresh-1"));
+    let client = client_of(&fake).with_tokens(Tokens::new("access-1", "refresh-1"));
     assert!(matches!(client.libraries().await, Err(Error::Server { status: 401, .. })));
     assert_eq!((fake.count("/api/libraries"), fake.count("/auth/refresh")), (2, 1));
     // The refreshed tokens are kept: the server took the refresh token.
@@ -262,7 +155,7 @@ async fn a_second_401_after_a_refresh_is_not_retried_again() {
 async fn concurrent_401s_share_one_refresh() {
     // The refresh is slow, so every request is refused while it's in flight.
     let fake = rotating_server(Duration::from_millis(300));
-    let client = fake.client().with_tokens(Tokens::new("access-0", "refresh-1"));
+    let client = client_of(&fake).with_tokens(Tokens::new("access-0", "refresh-1"));
     let events = recorded(&client);
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..8 {
@@ -279,14 +172,14 @@ async fn concurrent_401s_share_one_refresh() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_expired_refresh_token_signs_out_every_waiting_request() {
-    let fake = Fake::start(|s| match s.path() {
+    let fake = JsonFake::start(|s| match s.path() {
         "/auth/refresh" => {
             std::thread::sleep(Duration::from_millis(300));
-            answer("401 Unauthorized", r#"{"error":"Refresh token expired"}"#)
+            Answer::new("401 Unauthorized", r#"{"error":"Refresh token expired"}"#)
         }
-        _ => answer("401 Unauthorized", "Unauthorized"),
+        _ => Answer::new("401 Unauthorized", "Unauthorized"),
     });
-    let client = fake.client().with_tokens(Tokens::new("access-1", "refresh-1"));
+    let client = client_of(&fake).with_tokens(Tokens::new("access-1", "refresh-1"));
     let events = recorded(&client);
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..4 {
@@ -317,8 +210,8 @@ async fn a_refresh_that_cant_reach_the_server_keeps_the_tokens() {
 
 #[tokio::test]
 async fn logout_forgets_the_tokens_and_tells_the_server() {
-    let fake = Fake::start(|_| ok(r#"{"redirect_url":null}"#));
-    let client = fake.client().with_tokens(Tokens::new("access-1", "refresh-1"));
+    let fake = JsonFake::start(|_| Answer::ok(r#"{"redirect_url":null}"#));
+    let client = client_of(&fake).with_tokens(Tokens::new("access-1", "refresh-1"));
     let events = recorded(&client);
     client.logout().await.unwrap();
     assert!(!client.is_signed_in());
@@ -329,8 +222,9 @@ async fn logout_forgets_the_tokens_and_tells_the_server() {
 
 #[tokio::test]
 async fn paging_reads_limit_and_page_sent_back_as_strings() {
-    let fake = Fake::start(|_| {
-        ok(r#"{
+    let fake = JsonFake::start(|_| {
+        Answer::ok(
+            r#"{
           "results": [
             {"id":"li1","ino":"649644248522215260","libraryId":"lib1","mediaType":"book","addedAt":1730000000000,"updatedAt":1730000000001,
              "numFiles":3,"size":1000,
@@ -342,9 +236,10 @@ async fn paging_reads_limit_and_page_sent_back_as_strings() {
           ],
           "total": 2, "limit": "50", "page": "2", "sortBy": "addedAt", "sortDesc": false,
           "mediaType": "book", "minified": false, "collapseseries": false, "include": "", "offset": 100
-        }"#)
+        }"#,
+        )
     });
-    let client = fake.client().with_tokens(Tokens::new("access-1", "refresh-1"));
+    let client = client_of(&fake).with_tokens(Tokens::new("access-1", "refresh-1"));
     let page = client.library_items("lib 1", 2, 50).await.unwrap();
     assert_eq!((page.limit, page.page, page.total, page.offset), (Some(50), Some(2), Some(2), Some(100)));
     assert_eq!(page.results.len(), 2);
@@ -383,12 +278,12 @@ fn file_urls_are_absolute_with_the_token_and_the_path_prefix() {
 
 #[tokio::test]
 async fn a_cover_is_fetched_without_a_token() {
-    let fake = Fake::start(|s| match s.path() {
-        "/api/items/li1/cover" if s.header("authorization").is_none() => ok("PNGDATA"),
-        _ => answer("404 Not Found", ""),
+    let fake = JsonFake::start(|s| match s.path() {
+        "/api/items/li1/cover" if s.header("authorization").is_none() => Answer::ok("PNGDATA"),
+        _ => Answer::new("404 Not Found", ""),
     });
     // Not signed in: a cover needs no token.
-    let client = fake.client();
+    let client = client_of(&fake);
     assert_eq!(client.cover("li1", Some(200)).await.unwrap(), b"PNGDATA");
     assert_eq!(fake.seen()[0].target, "/api/items/li1/cover?width=200");
 }
@@ -405,15 +300,15 @@ fn server_addresses() {
 #[tokio::test]
 async fn credentials_never_show_in_debug_or_errors() {
     let tokens = Tokens::new("SECRET-ACCESS", "SECRET-REFRESH");
-    let fake = Fake::start(|s| match s.path() {
+    let fake = JsonFake::start(|s| match s.path() {
         // A sign-in reply that doesn't decode, quoting the token where a
         // user should be: serde would put it in its message.
-        "/login" => ok(r#"{"user":"SECRET-ACCESS"}"#),
-        "/auth/refresh" => ok(r#"{"user":{"id":7,"accessToken":"SECRET-ACCESS"}}"#),
-        _ => answer("401 Unauthorized", "Unauthorized"),
+        "/login" => Answer::ok(r#"{"user":"SECRET-ACCESS"}"#),
+        "/auth/refresh" => Answer::ok(r#"{"user":{"id":7,"accessToken":"SECRET-ACCESS"}}"#),
+        _ => Answer::new("401 Unauthorized", "Unauthorized"),
     });
-    let client = fake.client().with_tokens(tokens.clone());
-    let flow = Fake::start(openid_authorized).client().begin_openid().await.unwrap();
+    let client = client_of(&fake).with_tokens(tokens.clone());
+    let flow = client_of(&JsonFake::start(openid_authorized)).begin_openid().await.unwrap();
     let mut shown = vec![format!("{tokens:?}"), format!("{client:?}"), format!("{flow:?}")];
     let mismatch = flow.validate_callback("rede://oauth?state=SECRET-STATE&code=SECRET-CODE&error=SECRET").unwrap_err();
     shown.push(format!("{mismatch} / {mismatch:?}"));
@@ -441,13 +336,13 @@ async fn credentials_never_show_in_debug_or_errors() {
 
 #[tokio::test]
 async fn server_errors_keep_what_the_server_said() {
-    let fake = Fake::start(|s| match s.path() {
-        "/api/me/progress/li1" => answer("404 Not Found", "Not Found"),
-        "/api/items/li1" => answer("403 Forbidden", "<html><head><title>Forbidden\n by policy</title></head></html>"),
-        "/api/me" => ok("<!DOCTYPE html><html><head><title>Sign in to Authelia</title></head></html>"),
-        _ => answer("500 Internal Server Error", ""),
+    let fake = JsonFake::start(|s| match s.path() {
+        "/api/me/progress/li1" => Answer::new("404 Not Found", "Not Found"),
+        "/api/items/li1" => Answer::new("403 Forbidden", "<html><head><title>Forbidden\n by policy</title></head></html>"),
+        "/api/me" => Answer::ok("<!DOCTYPE html><html><head><title>Sign in to Authelia</title></head></html>"),
+        _ => Answer::new("500 Internal Server Error", ""),
     });
-    let client = fake.client().with_tokens(Tokens::new("a", "r"));
+    let client = client_of(&fake).with_tokens(Tokens::new("a", "r"));
     assert_eq!(client.item_progress("li1", None).await.unwrap(), None);
     match client.item("li1").await {
         Err(e @ Error::Server { status: 403, .. }) => assert_eq!(e.to_string(), "server error 403: Forbidden by policy"),
@@ -459,8 +354,9 @@ async fn server_errors_keep_what_the_server_said() {
 
 #[tokio::test]
 async fn play_asks_for_direct_play_and_reads_the_session() {
-    let fake = Fake::start(|_| {
-        ok(r#"{
+    let fake = JsonFake::start(|_| {
+        Answer::ok(
+            r#"{
           "id":"ses1","libraryItemId":"li1","mediaType":"book","displayTitle":"Dune","duration":7200.25,"playMethod":0,
           "currentTime":120.5,"startedAt":1730000000000,"updatedAt":1730000000000,
           "chapters":[{"id":0,"start":0,"end":3600.1,"title":"One"},{"id":1,"start":3600.1,"end":7200.25,"title":"Two"}],
@@ -470,9 +366,10 @@ async fn play_asks_for_direct_play_and_reads_the_session() {
             {"index":2,"ino":"222","title":"02.mp3","startOffset":3600.1,"duration":3600.15,"contentUrl":"/api/items/li1/file/222","mimeType":"audio/mpeg"}
           ],
           "deviceInfo":{"clientName":"Rede"}
-        }"#)
+        }"#,
+        )
     });
-    let client = fake.client().with_tokens(Tokens::new("a", "r"));
+    let client = client_of(&fake).with_tokens(Tokens::new("a", "r"));
     let mimes = vec!["audio/mpeg".to_owned(), "audio/mp4".to_owned()];
     let s = client.play("li1", None, &mimes).await.unwrap();
     assert_eq!((s.play_method(), s.current_time, s.chapters.len()), (Some(PlayMethod::DirectPlay), Some(120.5), 2));
@@ -487,14 +384,14 @@ async fn play_asks_for_direct_play_and_reads_the_session() {
 
 #[tokio::test]
 async fn sessions_progress_and_bookmarks_send_what_the_server_reads() {
-    let fake = Fake::start(|s| match s.path() {
-        p if p.ends_with("/bookmark") => ok(format!(r#"{{"libraryItemId":"li1","title":"Here","createdAt":1,"time":{}}}"#, s.json()["time"])),
+    let fake = JsonFake::start(|s| match s.path() {
+        p if p.ends_with("/bookmark") => Answer::ok(format!(r#"{{"libraryItemId":"li1","title":"Here","createdAt":1,"time":{}}}"#, s.json()["time"])),
         "/api/session/local-all" => {
-            ok(r#"{"results":[{"id":"loc1","success":true,"progressSynced":false},{"id":"loc2","success":false,"error":"Media item not found"}]}"#)
+            Answer::ok(r#"{"results":[{"id":"loc1","success":true,"progressSynced":false},{"id":"loc2","success":false,"error":"Media item not found"}]}"#)
         }
-        _ => ok(""),
+        _ => Answer::ok(""),
     });
-    let client = fake.client().with_tokens(Tokens::new("a", "r"));
+    let client = client_of(&fake).with_tokens(Tokens::new("a", "r"));
     client.sync_session("ses1", &SessionSync { current_time: 130.0, time_listened: 9.5, duration: None }).await.unwrap();
     client.close_session("ses1", None).await.unwrap();
     let local = LocalSession {
@@ -554,9 +451,10 @@ async fn sessions_progress_and_bookmarks_send_what_the_server_reads() {
 
 #[tokio::test]
 async fn status_needs_no_sign_in() {
-    let fake =
-        Fake::start(|_| ok(r#"{"app":"audiobookshelf","serverVersion":"2.37.2","isInit":true,"language":"en-us","authMethods":["local"],"authFormData":{}}"#));
-    let status = fake.client().status().await.unwrap();
+    let fake = JsonFake::start(|_| {
+        Answer::ok(r#"{"app":"audiobookshelf","serverVersion":"2.37.2","isInit":true,"language":"en-us","authMethods":["local"],"authFormData":{}}"#)
+    });
+    let status = client_of(&fake).status().await.unwrap();
     assert_eq!(status.version(), Some(Version(2, 37, 2)));
     assert!(status.version().unwrap() >= Version::REFRESH_FIX);
     assert_eq!(fake.seen()[0].header("authorization"), None);
@@ -597,18 +495,21 @@ fn openid_callback(pending: &OpenId, scheme: &str) -> String {
 
 #[tokio::test]
 async fn openid_falls_back_only_for_the_exact_invalid_redirect_response() {
-    let fake = Fake::start(|s| if s.target.contains("rede%3A%2F%2Foauth") { answer("400 Bad Request", "Invalid redirect_uri") } else { openid_authorized(s) });
-    let pending = fake.client().begin_openid().await.unwrap();
+    let fake =
+        JsonFake::start(
+            |s| if s.target.contains("rede%3A%2F%2Foauth") { Answer::new("400 Bad Request", "Invalid redirect_uri") } else { openid_authorized(s) },
+        );
+    let pending = client_of(&fake).begin_openid().await.unwrap();
     assert!(pending.used_fallback());
     assert_eq!(fake.count("/auth/openid"), 2);
-    let other = Fake::start(|_| answer("400 Bad Request", "code_challenge required for mobile flow (PKCE)"));
-    assert!(matches!(other.client().begin_openid().await, Err(Error::OpenId(OpenIdError::Server { status: 400 }))));
+    let other = JsonFake::start(|_| Answer::new("400 Bad Request", "code_challenge required for mobile flow (PKCE)"));
+    assert!(matches!(client_of(&other).begin_openid().await, Err(Error::OpenId(OpenIdError::Server { status: 400 }))));
     assert_eq!(other.count("/auth/openid"), 1);
 }
 
 #[tokio::test]
 async fn openid_exchanges_the_code_with_its_original_session_and_stores_tokens() {
-    let fake = Fake::start(|s| match s.path() {
+    let fake = JsonFake::start(|s| match s.path() {
         "/auth/openid" => openid_authorized(s),
         "/auth/openid/callback" => {
             assert_eq!(s.method, "GET");
@@ -618,11 +519,11 @@ async fn openid_exchanges_the_code_with_its_original_session_and_stores_tokens()
             let params: HashMap<_, _> = url.query_pairs().collect();
             assert_eq!(params["code"], "SECRET-CODE");
             assert_eq!(params["code_verifier"].len(), 43);
-            ok(login_reply("SECRET-ACCESS", "SECRET-REFRESH"))
+            Answer::ok(login_reply("SECRET-ACCESS", "SECRET-REFRESH"))
         }
         _ => panic!("unexpected request"),
     });
-    let client = fake.client();
+    let client = client_of(&fake);
     let saved = Arc::new(Mutex::new(None));
     let stored = saved.clone();
     client.set_auth_hook(move |e| {
@@ -653,8 +554,8 @@ async fn openid_exchanges_the_code_with_its_original_session_and_stores_tokens()
 
 #[tokio::test]
 async fn an_unrelated_redirect_is_ignored_before_an_exchange_or_cancellation() {
-    let fake = Fake::start(openid_authorized);
-    let client = fake.client();
+    let fake = JsonFake::start(openid_authorized);
+    let client = client_of(&fake);
     let pending = client.begin_openid().await.unwrap();
     for callback in ["rede://oauth?state=wrong&code=SECRET", "rede://oauth?state=wrong&error=access_denied", "https://example.org/?state=wrong"] {
         assert!(matches!(pending.validate_callback(callback), Err(Error::OpenId(OpenIdError::StateMismatch))));
@@ -670,10 +571,10 @@ async fn an_unrelated_redirect_is_ignored_before_an_exchange_or_cancellation() {
 
 #[tokio::test]
 async fn openid_secrets_never_appear_in_debug_or_errors() {
-    let fake = Fake::start(|s| {
-        if s.path() == "/auth/openid" { openid_authorized(s) } else { answer("500 Internal Server Error", "SECRET-CODE SECRET-VERIFIER SECRET-STATE") }
+    let fake = JsonFake::start(|s| {
+        if s.path() == "/auth/openid" { openid_authorized(s) } else { Answer::new("500 Internal Server Error", "SECRET-CODE SECRET-VERIFIER SECRET-STATE") }
     });
-    let client = fake.client();
+    let client = client_of(&fake);
     let pending = client.begin_openid().await.unwrap();
     let serialized = serde_json::to_value(&pending).unwrap();
     let callback = openid_callback(&pending, "rede");
@@ -686,14 +587,14 @@ async fn openid_secrets_never_appear_in_debug_or_errors() {
 
 #[tokio::test]
 async fn a_mobile_callback_error_redirect_is_reported_without_following_it() {
-    let fake = Fake::start(|s| match s.path() {
+    let fake = JsonFake::start(|s| match s.path() {
         "/auth/openid" => openid_authorized(s),
         "/auth/openid/callback" => {
             Answer { status: "302 Found", headers: vec![("Location", "/login?error=SECRET-PROVIDER-ERROR".into())], body: String::new() }
         }
         _ => panic!("the callback's failure redirect must not be followed"),
     });
-    let client = fake.client();
+    let client = client_of(&fake);
     let pending = client.begin_openid().await.unwrap();
     let callback = openid_callback(&pending, "rede");
     let error = client.complete_openid(pending, &callback).await.unwrap_err();
@@ -705,12 +606,12 @@ async fn a_mobile_callback_error_redirect_is_reported_without_following_it() {
 #[tokio::test]
 async fn bookmark_listing_falls_back_only_when_the_route_is_missing() {
     for status in ["404 Not Found", "403 Forbidden", "500 Internal Server Error"] {
-        let fake = Fake::start(move |s| match s.path() {
-            "/api/me/bookmarks" => answer(status, r#"{"error":"no route"}"#),
-            "/api/me" => ok(r#"{"id":"u","bookmarks":[{"libraryItemId":"book","time":0.84551240822557006,"title":"Phone","createdAt":10}]}"#),
+        let fake = JsonFake::start(move |s| match s.path() {
+            "/api/me/bookmarks" => Answer::new(status, r#"{"error":"no route"}"#),
+            "/api/me" => Answer::ok(r#"{"id":"u","bookmarks":[{"libraryItemId":"book","time":0.84551240822557006,"title":"Phone","createdAt":10}]}"#),
             _ => panic!("unexpected request"),
         });
-        let result = fake.client().with_tokens(Tokens::new("a", "r")).bookmarks().await;
+        let result = client_of(&fake).with_tokens(Tokens::new("a", "r")).bookmarks().await;
         if status.starts_with("404") {
             let bookmarks = result.unwrap();
             assert_eq!(bookmarks[0].time.to_bits(), 0.845_512_408_225_570_1_f64.to_bits());
@@ -724,16 +625,16 @@ async fn bookmark_listing_falls_back_only_when_the_route_is_missing() {
 
 #[tokio::test]
 async fn deleting_a_listed_bookmark_preserves_every_bit_of_its_time() {
-    let fake = Fake::start(|s| match s.method.as_str() {
-        "GET" => ok(r#"{"bookmarks":[{"libraryItemId":"book","time":1234.0000000000002,"title":"Phone","createdAt":10}]}"#),
+    let fake = JsonFake::start(|s| match s.method.as_str() {
+        "GET" => Answer::ok(r#"{"bookmarks":[{"libraryItemId":"book","time":1234.0000000000002,"title":"Phone","createdAt":10}]}"#),
         "DELETE" => {
             let time: f64 = s.path().rsplit('/').next().unwrap().parse().unwrap();
             assert_eq!(time.to_bits(), 1_234.000_000_000_000_2_f64.to_bits());
-            ok("")
+            Answer::ok("")
         }
-        _ => answer("404 Not Found", r#"{"error":"No bookmark"}"#),
+        _ => Answer::new("404 Not Found", r#"{"error":"No bookmark"}"#),
     });
-    let client = fake.client().with_tokens(Tokens::new("a", "r"));
+    let client = client_of(&fake).with_tokens(Tokens::new("a", "r"));
     let listed = client.bookmarks().await.unwrap().remove(0);
     assert_eq!(fake.count("/api/me/bookmarks"), 1, "the 2.36 route answers, so `/api/me` isn't read");
     client.delete_bookmark(&listed.library_item_id, listed.time).await.unwrap();
@@ -743,8 +644,8 @@ async fn deleting_a_listed_bookmark_preserves_every_bit_of_its_time() {
 #[tokio::test]
 async fn bookmark_writes_keep_server_errors_typed() {
     for (status, code) in [("400 Bad Request", 400), ("403 Forbidden", 403), ("404 Not Found", 404)] {
-        let fake = Fake::start(move |_| answer(status, r#"{"error":"Invalid bookmark"}"#));
-        let client = fake.client().with_tokens(Tokens::new("a", "r"));
+        let fake = JsonFake::start(move |_| Answer::new(status, r#"{"error":"Invalid bookmark"}"#));
+        let client = client_of(&fake).with_tokens(Tokens::new("a", "r"));
         assert_eq!(client.create_bookmark("book", 12.5, "Title").await.unwrap_err().status(), Some(code));
         assert_eq!(client.rename_bookmark("book", 12.5, "Title").await.unwrap_err().status(), Some(code));
         assert_eq!(client.delete_bookmark("book", 12.5).await.unwrap_err().status(), Some(code));

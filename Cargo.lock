@@ -12,6 +12,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "testkit",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
