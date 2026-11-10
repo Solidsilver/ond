@@ -45,10 +45,12 @@ pub(crate) struct Download {
     cancelled: AtomicBool,
     /// Readers plus the prefetch slot. Only changed under the cache index lock.
     pub holders: AtomicUsize,
+    /// The first wait before retrying, from the cache's configuration.
+    retry: Duration,
 }
 
 impl Download {
-    pub fn new(name: String, part_path: PathBuf, final_path: PathBuf) -> Self {
+    pub fn new(name: String, part_path: PathBuf, final_path: PathBuf, retry: Duration) -> Self {
         Self {
             name,
             part_path,
@@ -58,6 +60,7 @@ impl Download {
             wake: Notify::new(),
             cancelled: AtomicBool::new(false),
             holders: AtomicUsize::new(0),
+            retry,
         }
     }
 
@@ -355,7 +358,7 @@ async fn cancelled(dl: &Download) {
 
 async fn backoff(dl: &Download, failures: u32) {
     tokio::select! {
-        _ = tokio::time::sleep(fetch::backoff(failures, Duration::from_millis(250), Duration::from_secs(2))) => {}
+        _ = tokio::time::sleep(fetch::backoff(failures, dl.retry, Duration::from_secs(2))) => {}
         _ = cancelled(dl) => {}
     }
 }

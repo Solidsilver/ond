@@ -53,6 +53,9 @@ use std::time::{Duration, SystemTime};
 
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// The first wait before a download retries, doubling after each failure.
+pub const RETRY: Duration = Duration::from_millis(250);
+
 /// How often a blocked reader re-checks its abort flag.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -64,6 +67,9 @@ pub struct CacheConfig {
     /// How long a download may go without receiving a byte before it counts
     /// as stalled and retries ([`READ_TIMEOUT`] by default).
     pub read_timeout: Duration,
+    /// The first wait before retrying a failed or short response; it doubles
+    /// on each further failure (250 ms by default).
+    pub retry: Duration,
     /// Keeps the server's error replies out of the cache: a download whose
     /// body it flags fails instead of completing, and a small file it flags
     /// is deleted at startup. The default keeps every body.
@@ -72,7 +78,7 @@ pub struct CacheConfig {
 
 impl CacheConfig {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES, read_timeout: READ_TIMEOUT, reply_check: ReplyCheck::default() }
+        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES, read_timeout: READ_TIMEOUT, retry: RETRY, reply_check: ReplyCheck::default() }
     }
 }
 
@@ -495,6 +501,7 @@ impl Inner {
             name.to_owned(),
             self.cfg.dir.join(format!("{name}.{}.part", self.seq.fetch_add(1, Ordering::Relaxed))),
             self.cfg.dir.join(name),
+            self.cfg.retry,
         ));
         dl.holders.store(1, Ordering::Relaxed);
         idx.active.insert(name.to_owned(), dl.clone());
