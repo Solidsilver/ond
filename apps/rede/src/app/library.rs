@@ -57,7 +57,7 @@ pub struct Books {
     /// That order narrowed by the filter: per the same, the positions
     /// version (whatever the order), the filter, and the loaded book's stage
     /// while the player is ahead of its saved position.
-    shown: Memo<(OrderKey, u64, LibraryFilter, Option<(String, Stage)>), Vec<usize>>,
+    shown: Memo<ShownKey, Vec<usize>>,
     /// Home's lists: the books in progress, per library and positions
     /// version, and the newest, per library version.
     in_progress: Memo<(u64, u64), Vec<usize>>,
@@ -183,6 +183,10 @@ impl Books {
 /// follows them (0 when it doesn't, so a position saved while playing doesn't
 /// sort the shelf by title again).
 type OrderKey = (u64, LibrarySort, u64);
+
+/// The order's key, the positions version, the filter, and the loaded book
+/// with its stage while the player is ahead of what was saved for it.
+type ShownKey = (OrderKey, u64, LibraryFilter, Option<(String, Stage)>);
 
 /// A book's listening as last saved: what the orders and the filter go by.
 fn saved(book: &ItemSummary, positions: &Positions) -> Listened {
