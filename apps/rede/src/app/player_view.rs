@@ -3,10 +3,10 @@
 //!
 //! The Player is for reading across the room: the cover as large as the
 //! window allows, the book and chapter under it, the chapter scrubber over
-//! the whole-book hairline with the chapter's times at its ends, the
-//! transport, and a last row with a bookmark button, the sleep timer and the
-//! book's time left at the speed it plays (whose popover has voice boost and
-//! skip silence). Everything under the cover has a fixed height, so
+//! the whole-book hairline with the chapter's times at its ends and the
+//! book's time left at the speed under them, the transport, and a last row
+//! of three pills: a bookmark, the sleep timer and the speed (whose popover
+//! has voice boost and skip silence). Everything under the cover has a fixed height, so
 //! the cover takes what's left and nothing moves as the readouts change.
 //!
 //! Both keep the mode buttons in a corner, with a "…" menu holding the
@@ -40,6 +40,9 @@ const SCRUB_GAP: f32 = 20.0;
 const TIMES_SIZE: f32 = 15.0;
 const TIMES_GAP: f32 = 4.0;
 const TIMES_H: f32 = 20.0;
+/// The book's time left at the speed, a quiet line under the chapter's times.
+const BOOK_LEFT_SIZE: f32 = 13.0;
+const BOOK_LEFT_H: f32 = 18.0;
 const TRANSPORT_GAP: f32 = 16.0;
 const TRANSPORT_H: f32 = 64.0;
 const CONTROLS_GAP: f32 = 18.0;
@@ -110,6 +113,7 @@ impl ViewCtx<'_> {
             + SCRUB_H
             + TIMES_GAP
             + TIMES_H
+            + BOOK_LEFT_H
             + TRANSPORT_GAP
             + TRANSPORT_H
             + CONTROLS_GAP
@@ -148,8 +152,8 @@ impl ViewCtx<'_> {
         controls::book_line(ui, &book.timeline, shown, &t);
         ui.add_space(TIMES_GAP);
 
-        // The chapter's times at the scrubber's ends, in the capsule's words; the
-        // book's time left goes by the speed it depends on, below.
+        // The chapter's times at the scrubber's ends, in the capsule's words;
+        // under them, quieter, the book's time left at the speed it depends on.
         let (chapter_left, book_left) = book.timeline.remaining(shown, self.player.speed);
         let elapsed = crate::fmt::clock((shown - start).max(0.0));
         let left = format!("{} left", crate::fmt::clock(chapter_left));
@@ -158,29 +162,30 @@ impl ViewCtx<'_> {
         let font = FontId::proportional(TIMES_SIZE);
         ui.painter().text(row.left_center(), egui::Align2::LEFT_CENTER, elapsed, font.clone(), t.muted);
         ui.painter().text(row.right_center(), egui::Align2::RIGHT_CENTER, left, font, t.muted);
+        let book_text = book_left_line(book_left, self.player.speed);
+        let (row, resp) = ui.allocate_exact_size(vec2(full.width(), BOOK_LEFT_H), Sense::hover());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &book_text));
+        ui.painter().text(row.center(), egui::Align2::CENTER_CENTER, &book_text, FontId::proportional(BOOK_LEFT_SIZE), t.muted.gamma_multiply(0.85));
 
         ui.add_space(TRANSPORT_GAP);
         self.large_transport(ui, &t);
         ui.add_space(CONTROLS_GAP);
-        self.room_controls(ui, &t, book_left);
+        self.room_controls(ui, &t);
         if notice > 0.0 {
             let within = Rect::from_min_max(full.min, pos2(full.right(), full.bottom() + f32::from(PLAYER_MARGIN_BOTTOM) - 2.0));
             self.sleep_notice(ui, within);
         }
     }
 
-    /// The bookmark and sleep pills, then the book's time left at the speed
-    /// in its pill, centred as one group under the transport.
-    fn room_controls(&mut self, ui: &mut Ui, t: &Tokens, book_left: f64) {
+    /// The bookmark, sleep and speed pills, each a control of its own,
+    /// centred as one group under the transport.
+    fn room_controls(&mut self, ui: &mut Ui, t: &Tokens) {
         let size = Pill::ROOM;
         let speed = self.player.speed;
-        let text = format!("{} at", crate::timeline::span_left(book_left));
-        let font = FontId::proportional(size.font);
-        let text_w = ui.painter().layout_no_wrap(text.clone(), font.clone(), t.muted).size().x;
         let sleep_w = controls::pill_width(ui, size, Some(Icon::Moon), self.sleep_text().as_deref());
         let speed_w = controls::pill_width(ui, size, None, Some(&crate::timeline::speed_label(speed)));
-        let (group_gap, gap) = (14.0, 6.0);
-        let total = size.height + gap + sleep_w + group_gap + text_w + gap + speed_w;
+        let gap = 10.0;
+        let total = size.height + gap + sleep_w + gap + speed_w;
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), size.height), Sense::hover());
         let start = row.left() + ((row.width() - total) / 2.0).max(0.0);
         let mut line = ui.new_child(
@@ -196,8 +201,6 @@ impl ViewCtx<'_> {
             self.actions.push(add);
         }
         self.sleep_control(&mut line, size);
-        line.add_space(group_gap - gap);
-        line.label(egui::RichText::new(text).font(font).color(t.muted));
         let pill = controls::speed_pill(&mut line, t, speed, size);
         self.playback_menu(&pill);
     }
@@ -303,5 +306,20 @@ impl ViewCtx<'_> {
         });
 
         self.sleep_notice(&ui, Rect::from_min_max(full.min, pos2(full.right(), panel.top() + 4.0)));
+    }
+}
+
+/// "4h 57m left in the book at 1.5×": the Player's quiet line under the
+/// chapter's times.
+fn book_left_line(book_left: f64, speed: f32) -> String {
+    format!("{} in the book at {}", crate::timeline::span_left(book_left), crate::timeline::speed_label(speed))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_books_time_left_reads_as_one_sentence() {
+        assert_eq!(super::book_left_line(17_820.0, 1.5), "4h 57m left in the book at 1.5×");
+        assert_eq!(super::book_left_line(59.0, 1.0), "1m left in the book at 1×");
     }
 }
