@@ -1404,7 +1404,9 @@ fn engine_on_a_real_device() {
 
 #[test]
 fn a_device_switch_while_the_track_is_still_loading_plays_that_track_from_where_it_was_asked() {
-    let server = RangeServer::start(crate::decode::tests::wav(44_100, 2, &pcm(2 * 44_100 * 4, 26)), Serve { gate_after: Some(1), ..Serve::fast() });
+    // A probe or pending seek can request bytes past a fixed-offset gate.
+    // Hold every response so neither decoder can start before the switch.
+    let server = RangeServer::start(crate::decode::tests::wav(44_100, 2, &pcm(2 * 44_100 * 4, 26)), Serve { gate_before_body: true, ..Serve::fast() });
     let a = TrackSource { id: "a".into(), url: server.url(), suffix: Some("wav".into()), ..Default::default() };
     let (cache, _rt, _cache_dir) = net_cache();
     let backend = FakeBackend::new(caps(Some(24), 192_000));
@@ -1423,6 +1425,7 @@ fn a_device_switch_while_the_track_is_still_loading_plays_that_track_from_where_
         lists == 2
     });
     assert!(matches!(seen.last(), Some(Event::Devices { current: Some(d), .. }) if d == "dac"), "{seen:?}");
+    assert!(starts(&seen).is_empty(), "the gate must keep the original track from starting: {seen:?}");
     assert_eq!(engine.status.state(), PlayState::Loading, "the track is opened again on the new device, not dropped");
     server.open_gate();
     let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. } | Event::Ended { .. }));

@@ -23,6 +23,9 @@ pub struct Serve {
     /// Hold the answer at this byte until [`RangeServer::open_gate`], then send
     /// the rest at once. A request that starts past it is answered at once.
     pub gate_after: Option<usize>,
+    /// Hold every response body before its first byte until [`RangeServer::open_gate`],
+    /// including requests that seek past a [`Serve::gate_after`] cutoff.
+    pub gate_before_body: bool,
     /// Drop the first connection after this many body bytes: a download that
     /// ends early.
     pub cut: Option<usize>,
@@ -52,6 +55,7 @@ impl Serve {
             chunk: 16 * 1024,
             delay: Duration::ZERO,
             gate_after: None,
+            gate_before_body: false,
             cut: None,
             declared_extra: 0,
             star_total: false,
@@ -114,7 +118,7 @@ impl RangeServer {
         self.requests.lock().unwrap().clone()
     }
 
-    /// Lets a held answer (see [`Serve::gate_after`]) send the rest.
+    /// Lets held answers (see [`Serve::gate_after`] and [`Serve::gate_before_body`]) continue.
     pub fn open_gate(&self) {
         self.gate.store(true, Ordering::Relaxed);
     }
@@ -171,6 +175,11 @@ fn serve(conn: TcpStream, data: &[u8], opts: Serve, first: bool, log: &Mutex<Vec
     if out.write_all(head.as_bytes()).is_err() {
         return;
     }
+    if opts.gate_before_body {
+        while !gate.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
     let send = match opts.cut {
         Some(n) if first => &body[..n.min(body.len())],
         _ => body,
@@ -200,4 +209,44 @@ fn serve(conn: TcpStream, data: &[u8], opts: Serve, first: bool, log: &Mutex<Vec
 
 fn content_type(opts: Serve) -> String {
     opts.content_type.map(|t| format!("Content-Type: {t}\r\n")).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{ErrorKind, Read};
+
+    #[test]
+    fn a_body_gate_holds_whole_and_ranged_responses_until_opened() {
+        let body: Vec<u8> = (0..128).collect();
+        let server = RangeServer::start(body.clone(), Serve { gate_before_body: true, gate_after: Some(1), ..Serve::fast() });
+        let mut readers = Vec::new();
+        for start in [None, Some(64)] {
+            let mut conn = TcpStream::connect(server.base().strip_prefix("http://").unwrap()).unwrap();
+            conn.set_read_timeout(Some(crate::slack(crate::WAIT))).unwrap();
+            let range = start.map_or(String::new(), |at| format!("Range: bytes={at}-\r\n"));
+            write!(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n{range}Connection: close\r\n\r\n").unwrap();
+            let mut reader = BufReader::new(conn);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with(if start.is_some() { "HTTP/1.1 206" } else { "HTTP/1.1 200" }), "{line}");
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.get_mut().set_nonblocking(true).unwrap();
+            assert_eq!(reader.read(&mut [0]).unwrap_err().kind(), ErrorKind::WouldBlock);
+            reader.get_mut().set_nonblocking(false).unwrap();
+            readers.push((start.unwrap_or(0) as usize, reader));
+        }
+        server.open_gate();
+        for (start, mut reader) in readers {
+            let mut got = Vec::new();
+            reader.read_to_end(&mut got).unwrap();
+            assert_eq!(got, body[start..]);
+        }
+    }
 }

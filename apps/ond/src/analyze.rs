@@ -532,8 +532,9 @@ mod tests {
 
     #[test]
     fn a_download_of_our_own_gives_way_to_playback() {
-        // A download that never finishes: the server holds it after 64 KB.
-        let server = testkit::RangeServer::start(vec![1u8; 2_000_000], testkit::Serve { gate_after: Some(64 * 1024), ..testkit::Serve::fast() });
+        // No body bytes reach the probe: invalid fixture bytes must not fail
+        // decoding before playback asks the still-running download to yield.
+        let server = testkit::RangeServer::start(vec![1u8; 2_000_000], testkit::Serve { gate_before_body: true, ..testkit::Serve::fast() });
         let url = server.url();
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -548,16 +549,15 @@ mod tests {
             on_progress: Arc::new(|| {}),
         };
         let j = job("t", 10.0);
-        // Playback starts buffering while our download runs.
-        let flip = status.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            flip.preview(audio::PlayState::Buffering, 0.0, 100.0, 0.0);
+        std::thread::scope(|scope| {
+            let work = scope.spawn(|| analyze_job(&j, || Some(url), &cfg, &|| false));
+            testkit::wait_until("the analysis download to start", || !server.requests().is_empty());
+            let t = Instant::now();
+            status.preview(audio::PlayState::Buffering, 0.0, 100.0, 0.0);
+            let out = work.join().unwrap();
+            assert!(matches!(out, Err(analysis::AnalyzeError::Cancelled)), "{out:?}");
+            assert!(t.elapsed() < testkit::slack(Duration::from_secs(2)), "gave way after {:?}", t.elapsed());
         });
-        let t = Instant::now();
-        let out = analyze_job(&j, || Some(url), &cfg, &|| false);
-        assert!(matches!(out, Err(analysis::AnalyzeError::Cancelled)), "{out:?}");
-        assert!(t.elapsed() < testkit::slack(Duration::from_secs(2)), "gave way after {:?}", t.elapsed());
     }
 
     #[test]
