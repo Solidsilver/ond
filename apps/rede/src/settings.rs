@@ -164,6 +164,8 @@ pub struct Settings {
     #[serde(default)]
     pub playback: PlaybackSettings,
     #[serde(default)]
+    pub downloads: DownloadSettings,
+    #[serde(default)]
     pub window: crate::window::Windows,
     /// The chapters column is shown beside the page. Off until it's asked
     /// for: a first start has nothing playing to put in it.
@@ -184,11 +186,20 @@ impl Default for Settings {
             sort: Default::default(),
             filter: Default::default(),
             playback: Default::default(),
+            downloads: Default::default(),
             window: Default::default(),
             show_panel: false,
             sidebar_collapsed: false,
         }
     }
+}
+
+/// Download policy; an absent limit keeps downloads until explicitly removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DownloadSettings {
+    pub remove_when_finished: bool,
+    pub limit: Option<u64>,
 }
 
 /// Listening preferences are separate from engine time: skip and rewind are
@@ -508,5 +519,19 @@ mod tests {
     fn folders_are_named_after_the_bundle_id() {
         let dirs = directories::ProjectDirs::from("dev", "solidsilver", "rede").unwrap();
         assert!(dirs.config_dir().ends_with("dev.solidsilver.rede"), "{}", dirs.config_dir().display());
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    #[test]
+    fn an_older_settings_file_keeps_downloads_and_has_no_storage_limit() {
+        let settings = Settings::from_json(b"{}").unwrap();
+        assert_eq!(settings.downloads, DownloadSettings { remove_when_finished: false, limit: None });
+        let mut settings = settings;
+        settings.downloads = DownloadSettings { remove_when_finished: true, limit: Some(1024) };
+        assert_eq!(Settings::from_json(&serde_json::to_vec(&settings).unwrap()).unwrap(), settings);
     }
 }

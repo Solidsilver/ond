@@ -45,9 +45,8 @@ pub struct SessionSources;
 impl Sources for SessionSources {
     fn track(&self, key: &ItemKey, item: &Item, track: &SessionTrack, token: u64) -> TrackSource {
         let file = item.tracks.iter().find(|f| f.index == track.index);
-        let id = file.filter(|f| !f.content_id.is_empty()).map_or_else(|| format!("{}/file/{}", key.item, track.index), |f| f.content_id.clone());
         TrackSource {
-            id: ItemKey::new(key.account, id).to_string(),
+            id: crate::downloads::track_id(key, file, track.index),
             url: track.url.clone(),
             suffix: file.and_then(|f| f.suffix.clone()),
             token,
