@@ -1,15 +1,16 @@
 //! How far something is on its way to this computer: the [`DownloadMark`]
 //! the lists, tiles and sidebar paint with [`download_mark`] (a check in a
 //! ring once it's here, a filling ring while it comes, a warning when it
-//! couldn't).
+//! couldn't), and the [`download_button`] a page offers beside Play.
 //!
 //! The kit doesn't know what a download is made of; each app says which mark
-//! its pins and tracks get. Painted only: the row or tile a mark sits on says
-//! the same in its name for a screen reader.
+//! its pins and tracks get. Painted only, apart from the button: the row or
+//! tile a mark sits on says the same in its name for a screen reader.
 
-use crate::icons;
+use super::focus_ring;
+use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
-use egui::{Align2, FontId, Ui, vec2};
+use egui::{Align2, FontId, Rect, Response, Sense, Ui, vec2};
 
 /// How far along something is on its way to this computer, as the lists,
 /// tiles and sidebar mark it.
@@ -66,9 +67,55 @@ pub fn download_mark(ui: &Ui, center: egui::Pos2, size: f32, m: DownloadMark) {
     }
 }
 
+/// A page's download button, shaped as [`secondary`](super::secondary) so it
+/// sits beside Play: the Download arrow and an accent label while there's
+/// nothing here, else the item's [`DownloadMark`] and what it says ("42%",
+/// "Downloaded", "Download failed" in the warning colour). Its menu, if it
+/// opens one, is the caller's.
+pub fn download_button(ui: &mut Ui, mark: Option<DownloadMark>, text: &str) -> Response {
+    let t = Tokens::of(ui);
+    let ink = match mark {
+        None => t.accent,
+        Some(DownloadMark::Failed) => t.warn,
+        Some(_) => t.text,
+    };
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, semibold()), ink);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 18.0 + 28.0, 30.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+        ui.painter().rect_filled(rect, 6.0, if resp.hovered() || open { t.selected } else { t.field });
+        focus_ring(ui, &resp, rect, 6.0);
+        let glyph = egui::pos2(rect.left() + 14.0 + 5.0, rect.center().y);
+        match mark {
+            None => icons::paint(ui.painter(), Rect::from_center_size(glyph, vec2(11.0, 11.0)), Icon::Download, ink),
+            Some(m) => download_mark(ui, glyph, 13.0, m),
+        }
+        ui.painter().galley(egui::pos2(rect.left() + 14.0 + 18.0, rect.center().y - galley.size().y / 2.0), galley, ink);
+    }
+    let (label, enabled) = (text.to_owned(), ui.is_enabled());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &label));
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kit::themed;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn the_download_button_is_named_by_what_it_says() {
+        let mut h = themed(0, |ui, clicks: &mut usize| {
+            if download_button(ui, Some(DownloadMark::Progress(0.4)), "Downloading 40%").clicked() {
+                *clicks += 1;
+            }
+        });
+        h.run();
+        h.get_by_label("Downloading 40%").click();
+        h.run();
+        assert_eq!(h.state().1, 1);
+    }
+
     #[test]
     fn a_mark_says_waiting_until_something_has_arrived() {
         assert_eq!(DownloadMark::Progress(0.0).hint(), "Waiting to download");

@@ -53,7 +53,7 @@
 //!   badge in its corner), with [`progress_bar`], the same line on its own.
 //! - [`download`]: the [`DownloadMark`] painted by [`download_mark`] on
 //!   whatever is downloaded or on its way (a check in a ring, a filling
-//!   ring, a warning).
+//!   ring, a warning), and the [`download_button`] beside a page's Play.
 //! - [`nav`]: [`nav_row`], the row above a page's heading with back,
 //!   forward and the breadcrumb, which says what was clicked as a
 //!   [`NavClick`].
