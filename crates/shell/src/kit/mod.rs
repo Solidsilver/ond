@@ -54,9 +54,10 @@
 //! - [`nav`]: [`nav_row`], the row above a page's heading with back,
 //!   forward and the breadcrumb, which says what was clicked as a
 //!   [`NavClick`].
-//! - [`toasts`]: [`Toasts`], the messages over the foot of the window that
-//!   fade, or stay with a button until clicked away (a [`Toasts::note`]
-//!   fades with its button).
+//! - [`toasts`]: [`Toasts`], the messages over the foot of the window, in
+//!   one column of one width: notices fade, errors (with a Retry, through
+//!   [`Toasts::error`]) and offers stay until clicked away, and a
+//!   [`Toasts::note`] fades with its button (an Undo).
 
 pub mod buttons;
 pub mod controls;

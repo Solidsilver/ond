@@ -276,6 +276,10 @@ impl OndApp {
             match note {
                 Note::Notice(text) => self.show_notice(text),
                 Note::Error(text) => self.show_error(text),
+                Note::Cleared(n) => {
+                    let songs = if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
+                    self.ui.toasts.note(format!("Cleared {songs} from the queue"), "Undo", Action::Queue(QueueEdit::UndoClear));
+                }
                 Note::Probe => self.probe(),
                 Note::Started { track, restart } => {
                     if self.prefs_now().analyze_playing && !restart {

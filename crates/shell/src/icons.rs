@@ -539,6 +539,9 @@ pub enum Status {
     Limited,
     /// Asked for, not yet confirmed: a hollow ring, muted.
     Pending,
+    /// Went wrong (an error's message): a ring around an exclamation
+    /// mark, in the warning colour.
+    Failed,
 }
 
 /// Paints `status` centred on `c`, about `r` from its centre to its edge
@@ -560,6 +563,12 @@ pub fn status_mark(painter: &Painter, c: Pos2, r: f32, status: Status, cutout: O
         }
         Status::Pending => {
             painter.circle_stroke(c, r * 0.85, Stroke::new((r * 0.32).max(1.0), t.muted));
+        }
+        Status::Failed => {
+            let stroke = Stroke::new((r * 0.2).max(1.2), t.warn);
+            painter.circle_stroke(c, r * 0.9, stroke);
+            painter.line_segment([p(0.0, -0.5), p(0.0, 0.12)], stroke);
+            painter.circle_filled(p(0.0, 0.46), (r * 0.13).max(0.8), t.warn);
         }
     }
 }

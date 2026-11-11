@@ -3,7 +3,7 @@
 //! tracks to load. Library messages from the bridge land here.
 
 use super::dialogs::Overlay;
-use super::{AlbumSort, OndApp};
+use super::{Action, AlbumSort, OndApp};
 use crate::bridge::{LibraryMsg, ListKey};
 use crate::nav::Route;
 use crate::player::QueueAction;
@@ -215,7 +215,7 @@ impl OndApp {
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
                     crate::sync::Outcome::Failed(e) => {
-                        self.show_failure(e);
+                        self.show_failure_or_retry(e, Some(Action::SyncNow));
                         format!("{albums} albums · {tracks} tracks")
                     }
                 };
@@ -239,7 +239,7 @@ impl OndApp {
                 // Nothing more follows (no artist or track sync): stop saying "syncing".
                 self.sync.albums = false;
                 self.sync.label = "Sync failed".into();
-                self.show_failure(e);
+                self.show_failure_or_retry(e, Some(Action::SyncNow));
             }
             LibraryMsg::LoadFailed { key, error } => {
                 // One that only waited for a complete listing plays what's stored.
@@ -249,10 +249,18 @@ impl OndApp {
                 }
                 // Whatever else waited for these tracks gives up, so it can't
                 // fire much later when they turn up for some other reason.
+                let gave_up = self.pending.iter().position(|p| p.key == key).map(|at| self.pending.remove(at));
                 self.pending.retain(|p| p.key != key);
                 self.downloads.pending_pins.retain(|(k, _)| *k != key);
                 if let Some(e) = error {
-                    self.show_failure(e);
+                    // Retry does what gave up (it never ran), or loads the list again.
+                    let retry = match (key, gave_up) {
+                        (ListKey::Album(id), Some(p)) => Some(Action::Album(id, p.action)),
+                        (ListKey::Playlist(id), Some(p)) => Some(Action::Playlist(id, p.action)),
+                        (key @ (ListKey::Album(_) | ListKey::Playlist(_)), None) => Some(Action::Reload(key)),
+                        (ListKey::Artist(_), _) => None,
+                    };
+                    self.show_failure_or_retry(e, retry);
                 }
             }
             LibraryMsg::Tracks { album_id, mut tracks, fresh } => {

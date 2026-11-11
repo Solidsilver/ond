@@ -230,6 +230,18 @@ pub struct Item {
     pub next: bool,
 }
 
+/// What a [`Queue::clear`] took, to put back.
+#[derive(Debug, Clone)]
+pub struct Cleared {
+    before: Vec<Item>,
+    /// How many items it took.
+    pub removed: usize,
+    /// The queue as the clear left it (the playing item and what's next), so
+    /// an undo after it moved on is refused rather than guessed at.
+    current: Option<u64>,
+    after: Vec<u64>,
+}
+
 /// What happens when the last upcoming item finishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EndAction {
@@ -363,12 +375,32 @@ impl Queue {
         self.upcoming.len() != before
     }
 
-    /// Clears what's up next, or only what was added by hand ([`ClearWhat`]).
-    pub fn clear(&mut self) {
+    /// Clears what's up next, or only what was added by hand ([`ClearWhat`]),
+    /// and says what it took for [`undo_clear`](Self::undo_clear); `None`
+    /// when there was nothing to clear.
+    pub fn clear(&mut self) -> Option<Cleared> {
+        let before = self.upcoming.clone();
         match self.prefs.clear {
             ClearWhat::Everything => self.upcoming.clear(),
             ClearWhat::Added => self.upcoming.retain(|i| i.source != Source::Added),
         }
+        let removed = before.len() - self.upcoming.len();
+        (removed > 0).then(|| Cleared { before, removed, current: self.current.as_ref().map(|i| i.uid), after: self.uids() })
+    }
+
+    /// Puts back what a [`clear`](Self::clear) took, exactly as it was, if
+    /// the queue hasn't moved on since (another track playing, an edit);
+    /// false when it has and nothing was changed.
+    pub fn undo_clear(&mut self, cleared: Cleared) -> bool {
+        if self.current.as_ref().map(|i| i.uid) != cleared.current || self.uids() != cleared.after {
+            return false;
+        }
+        self.upcoming = cleared.before;
+        true
+    }
+
+    fn uids(&self) -> Vec<u64> {
+        self.upcoming.iter().map(|i| i.uid).collect()
     }
 
     /// Whether Clear would remove anything.
@@ -583,6 +615,26 @@ mod tests {
         assert!(q.can_clear());
         q.clear();
         assert!(q.upcoming.is_empty());
+    }
+
+    #[test]
+    fn a_clear_is_undone_exactly_until_the_queue_moves_on() {
+        let mut q = Queue::default();
+        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(album(&["n1"]));
+        let before: Vec<u64> = q.upcoming.iter().map(|i| i.uid).collect();
+        let cleared = q.clear().expect("something to clear");
+        assert_eq!(cleared.removed, 3);
+        assert!(q.upcoming.is_empty());
+        assert!(q.clear().is_none(), "nothing left to clear");
+        assert!(q.undo_clear(cleared));
+        assert_eq!(q.upcoming.iter().map(|i| i.uid).collect::<Vec<_>>(), before, "the same items, in order, sources and all");
+        assert_eq!(ids(&q.upcoming), ["n1", "a2", "a3"]);
+        // Added to since: the undo is refused and nothing changes.
+        let cleared = q.clear().unwrap();
+        q.add(album(&["z1"]));
+        assert!(!q.undo_clear(cleared));
+        assert_eq!(ids(&q.upcoming), ["z1"]);
     }
 
     #[test]

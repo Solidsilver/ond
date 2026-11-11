@@ -822,13 +822,30 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "narrow-rail-syncing");
 
+    // Toasts: a notice alone, an error with Retry, a Clear's Undo, then a
+    // mixed stack in one column, wide and narrow.
+    let failed = |app: &mut OndApp| {
+        let error = crate::failure::Failure::Server("Couldn't load Sunday at the Village Vanguard: the server didn't answer.".into());
+        app.handle(crate::bridge::LibraryMsg::LoadFailed { key: crate::bridge::ListKey::Album(album_id(0)), error: Some(error) });
+    };
     reset(h, FULL, Route::Album(album_id(0)));
-    app_mut(h).show_error("Couldn't load Sunday at the Village Vanguard: the server didn't answer.");
-    h.run_steps(1);
-    app_mut(h).show_notice("Skipped 1 song that isn't downloaded");
-    h.run_steps(1);
     app_mut(h).show_notice("Added 6 songs to Late night, low volume");
-    s.shoot(h, "toasts");
+    s.shoot(h, "toast-note");
+    reset(h, FULL, Route::Album(album_id(0)));
+    failed(app_mut(h));
+    s.shoot(h, "toast-error-retry");
+    reset(h, FULL, Route::Album(album_id(0)));
+    app_mut(h).apply(Action::Queue(QueueEdit::Clear));
+    s.shoot(h, "toast-undo");
+    for (name, size) in [("toasts", FULL), ("toasts-narrow", vec2(560.0, 720.0))] {
+        reset(h, size, Route::Album(album_id(0)));
+        failed(app_mut(h));
+        h.run_steps(1);
+        app_mut(h).show_notice("Skipped 1 song that isn't downloaded");
+        h.run_steps(1);
+        app_mut(h).apply(Action::Queue(QueueEdit::Clear));
+        s.shoot(h, name);
+    }
 
     // A device that came back: offered, with a button, until clicked away.
     reset(h, FULL, Route::Recent);

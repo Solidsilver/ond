@@ -34,6 +34,14 @@ pub enum PlaylistAction {
         id: String,
         index: usize,
     },
+    /// Put a removed track back at `index` (a Remove's Undo), if the list is
+    /// still as the removal left it (`after`, its song ids).
+    Restore {
+        id: String,
+        index: usize,
+        track: Box<Track>,
+        after: Vec<String>,
+    },
     /// Move the track at `from` to `to` (both indices into the list as it is).
     Move {
         id: String,
@@ -234,7 +242,28 @@ impl OndApp {
                     p.duration = p.duration.saturating_sub(gone.duration_secs.unwrap_or(0));
                 }
                 self.ui.track_sel = self.ui.track_sel.map(|s| s.min(list.len().saturating_sub(1))).filter(|_| !list.is_empty());
+                let after = list.iter().map(|t| t.id.clone()).collect();
+                let name = self.data.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
+                let text = format!("Removed {} from {name}", gone.title);
+                let undo = PlaylistAction::Restore { id: id.clone(), index, track: Box::new(gone), after };
+                self.ui.toasts.note(text, "Undo", Action::PlaylistEdit(undo));
                 self.bridge.edit_playlist(client, id, PlaylistEdit::Remove(vec![index]));
+            }
+            PlaylistAction::Restore { id, index, track, after } => {
+                // The whole list goes back to the server, as a move sends it.
+                let Some(list) = self.data.playlist_tracks.get_mut(&id) else { return };
+                if list.iter().map(|t| t.id.as_str()).ne(after.iter().map(String::as_str)) || index > list.len() {
+                    self.show_notice("The playlist has changed since, so the removal can't be undone");
+                    return;
+                }
+                let secs = track.duration_secs.unwrap_or(0);
+                Arc::make_mut(list).insert(index, *track);
+                let ids = list.iter().map(|t| t.id.clone()).collect();
+                if let Some(p) = self.data.playlists.iter_mut().find(|p| p.id == id) {
+                    p.song_count += 1;
+                    p.duration += secs;
+                }
+                self.bridge.edit_playlist(client, id, PlaylistEdit::Replace(ids));
             }
             PlaylistAction::Move { id, from, to } => {
                 let Some(list) = self.data.playlist_tracks.get_mut(&id) else { return };
