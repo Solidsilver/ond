@@ -79,9 +79,9 @@ impl RedeApp {
         // Another account signed in: what's on screen came from the old one.
         let changed = self.session.account.as_ref().map(|a| a.id) != Some(account.id);
         self.session = Session { account: Some(account.clone()), source: Some(source.clone()), shelf: Some(shelf.clone()), connecting: false };
-        self.downloads.store.clear();
+        self.bridge.close_downloads(self.downloads.store.clone());
         self.downloads = Default::default();
-        self.bridge.open_downloads(account.id, self.shown.downloads.limit, self.stream_dir.clone());
+        self.bridge.open_downloads(account.id, self.shown.downloads.limit, self.stream_dir.clone(), self.downloads.store.clone());
         self.login = None;
         self.openid.pending = None;
         self.openid.exchanging = false;
@@ -324,7 +324,7 @@ impl RedeApp {
         self.reconciliation = None;
         self.ui.palette = None;
         self.session = Session::default();
-        self.downloads.store.clear();
+        self.bridge.close_downloads(self.downloads.store.clone());
         self.downloads = Default::default();
         self.books.clear();
         self.art.set_source(None);
