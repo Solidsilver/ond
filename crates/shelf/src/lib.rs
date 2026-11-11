@@ -129,6 +129,18 @@ pub struct PendingProgress {
     pub local: Option<LocalListening>,
 }
 
+/// One report of listening in the log, as listening stats read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Logged {
+    pub item: String,
+    /// When the report was made: the end of the listening it counts.
+    pub at: SystemTime,
+    pub listened: std::time::Duration,
+    /// Whether a source has been told: told listening is already in the
+    /// source's own history.
+    pub synced: bool,
+}
+
 /// The durable identity and starting place of listening without a server.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalListening {
@@ -443,6 +455,27 @@ impl Shelf {
             }
         }
         Ok(updates)
+    }
+
+    /// Every report in the log that counted listening time, oldest first,
+    /// sent or not. A row that can't be read is left out.
+    pub fn listening_log(&self) -> Result<Vec<Logged>> {
+        let rt = self.db.begin_read()?;
+        let mut out = Vec::new();
+        for row in rt.open_table(PROGRESS)?.iter()? {
+            let (id, bytes) = row?;
+            match decode::<ProgressEntryV2>(bytes.value()) {
+                Ok(ProgressEntryV2 { entry, .. }) if entry.listened_ms > 0 => out.push(Logged {
+                    at: Stamp::from_millis(entry.at_ms).system_time(),
+                    listened: std::time::Duration::from_millis(entry.listened_ms),
+                    synced: entry.synced,
+                    item: entry.item,
+                }),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("shelf: progress {} can't be read: {e}", id.value()),
+            }
+        }
+        Ok(out)
     }
 
     /// Marks entries as sent. The log keeps them; only the flag and the

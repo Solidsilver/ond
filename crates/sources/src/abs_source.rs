@@ -40,6 +40,13 @@ use crate::source::Source;
 /// libraries and still a small reply.
 const PAGE_SIZE: u32 = 200;
 
+/// Listening sessions per page. ABS reads every session of the user's to
+/// answer each page, so fewer, larger pages are kinder to it.
+const HISTORY_PAGE_SIZE: u32 = 500;
+/// Pages read at most: 50,000 sessions is years of daily listening, and the
+/// newest come first, so a history longer than that loses only its oldest.
+const HISTORY_PAGES: u32 = 100;
+
 pub struct AbsSource {
     account: AccountId,
     client: abs::Client,
@@ -220,6 +227,19 @@ impl Source for AbsSource {
         // happened, and closing only writes the last position.
         let sync = abs::SessionSync { current_time: at.secs(), time_listened: 0.0, duration: session.duration };
         Ok(self.client.close_session(&session.id, Some(&sync)).await?)
+    }
+
+    async fn listening_history(&self) -> Result<Vec<crate::Listen>> {
+        let mut out = Vec::new();
+        for page in 0..HISTORY_PAGES {
+            let reply = self.client.listening_sessions(page, HISTORY_PAGE_SIZE).await?;
+            let last = reply.sessions.len() < HISTORY_PAGE_SIZE as usize || reply.num_pages.is_some_and(|n| page + 1 >= n);
+            out.extend(reply.sessions.into_iter().filter_map(listen));
+            if last {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     async fn progress(&self) -> Result<Vec<Progress>> {
@@ -409,6 +429,22 @@ fn session(item: &str, played: abs::PlaybackSession, client: &abs::Client) -> Re
 
 /// The server's progress rows, for books. An episode's row is skipped with the
 /// rest of the podcast side.
+/// A session as listening, or `None` for one that counted no time, has no
+/// book, or was a podcast episode (left out with podcasts).
+fn listen(s: abs::ListeningSession) -> Option<crate::Listen> {
+    if s.episode_id.is_some() || s.media_type == Some(MediaType::Podcast) {
+        return None;
+    }
+    let secs = s.time_listening.filter(|t| t.is_finite() && *t > 0.0)?;
+    Some(crate::Listen {
+        item: s.library_item_id.filter(|id| !id.is_empty())?,
+        title: s.display_title,
+        author: s.display_author,
+        started: Stamp::from_millis(s.started_at.or(s.updated_at)?),
+        listened: Duration::from_secs_f64(secs),
+    })
+}
+
 fn progress(account: &AccountId, row: &abs::MediaProgress) -> Option<Progress> {
     if row.episode_id.is_some() {
         return None;

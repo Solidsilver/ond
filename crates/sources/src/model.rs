@@ -324,3 +324,18 @@ pub struct LocalSession {
     pub started_at: SystemTime,
     pub updated_at: SystemTime,
 }
+
+/// A stretch of listening the source remembers, on any device: what listening
+/// stats are made of.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listen {
+    /// The item's own id.
+    pub item: String,
+    /// What the source called the book then, for an item no longer listed.
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub started: Stamp,
+    /// Time spent listening, at whatever speed: not how much of the book went
+    /// by.
+    pub listened: Duration,
+}
