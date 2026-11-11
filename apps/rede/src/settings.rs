@@ -49,8 +49,9 @@ impl LibrarySort {
     }
 }
 
-/// Which books the library shows, by how far along they are. Saved, as the
-/// order is; an unknown name reads as [`All`](LibraryFilter::All).
+/// Which books the library shows: by how far along they are, or those on
+/// this computer. Saved, as the order is; an unknown name reads as
+/// [`All`](LibraryFilter::All).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LibraryFilter {
@@ -59,10 +60,13 @@ pub enum LibraryFilter {
     InProgress,
     NotStarted,
     Finished,
+    /// Every file of the book is on this computer.
+    Downloaded,
 }
 
 impl LibraryFilter {
-    pub const ALL: [LibraryFilter; 4] = [LibraryFilter::All, LibraryFilter::InProgress, LibraryFilter::NotStarted, LibraryFilter::Finished];
+    pub const ALL: [LibraryFilter; 5] =
+        [LibraryFilter::All, LibraryFilter::InProgress, LibraryFilter::NotStarted, LibraryFilter::Finished, LibraryFilter::Downloaded];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -70,6 +74,7 @@ impl LibraryFilter {
             LibraryFilter::InProgress => "In progress",
             LibraryFilter::NotStarted => "Not started",
             LibraryFilter::Finished => "Finished",
+            LibraryFilter::Downloaded => "Downloaded",
         }
     }
 }
@@ -164,6 +169,8 @@ pub struct Settings {
     #[serde(default)]
     pub playback: PlaybackSettings,
     #[serde(default)]
+    pub downloads: DownloadSettings,
+    #[serde(default)]
     pub window: crate::window::Windows,
     /// The chapters column is shown beside the page. Off until it's asked
     /// for: a first start has nothing playing to put in it.
@@ -184,11 +191,20 @@ impl Default for Settings {
             sort: Default::default(),
             filter: Default::default(),
             playback: Default::default(),
+            downloads: Default::default(),
             window: Default::default(),
             show_panel: false,
             sidebar_collapsed: false,
         }
     }
+}
+
+/// Download policy; an absent limit keeps downloads until explicitly removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DownloadSettings {
+    pub remove_when_finished: bool,
+    pub limit: Option<u64>,
 }
 
 /// Listening preferences are separate from engine time: skip and rewind are
@@ -508,5 +524,19 @@ mod tests {
     fn folders_are_named_after_the_bundle_id() {
         let dirs = directories::ProjectDirs::from("dev", "solidsilver", "rede").unwrap();
         assert!(dirs.config_dir().ends_with("dev.solidsilver.rede"), "{}", dirs.config_dir().display());
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    #[test]
+    fn an_older_settings_file_keeps_downloads_and_has_no_storage_limit() {
+        let settings = Settings::from_json(b"{}").unwrap();
+        assert_eq!(settings.downloads, DownloadSettings { remove_when_finished: false, limit: None });
+        let mut settings = settings;
+        settings.downloads = DownloadSettings { remove_when_finished: true, limit: Some(1024) };
+        assert_eq!(Settings::from_json(&serde_json::to_vec(&settings).unwrap()).unwrap(), settings);
     }
 }

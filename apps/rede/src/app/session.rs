@@ -79,6 +79,9 @@ impl RedeApp {
         // Another account signed in: what's on screen came from the old one.
         let changed = self.session.account.as_ref().map(|a| a.id) != Some(account.id);
         self.session = Session { account: Some(account.clone()), source: Some(source.clone()), shelf: Some(shelf.clone()), connecting: false };
+        self.bridge.close_downloads(self.downloads.store.clone());
+        self.downloads = Default::default();
+        self.bridge.open_downloads(account.id, self.shown.downloads.limit, self.stream_dir.clone(), self.downloads.store.clone());
         self.login = None;
         self.openid.pending = None;
         self.openid.exchanging = false;
@@ -92,6 +95,7 @@ impl RedeApp {
                 client_version: env!("CARGO_PKG_VERSION").into(),
                 ..Default::default()
             },
+            self.downloads.store.clone(),
         ));
         self.prefs.edit(|s| s.put_account(account.clone()));
         if changed {
@@ -320,6 +324,8 @@ impl RedeApp {
         self.reconciliation = None;
         self.ui.palette = None;
         self.session = Session::default();
+        self.bridge.close_downloads(self.downloads.store.clone());
+        self.downloads = Default::default();
         self.books.clear();
         self.art.set_source(None);
         self.sync = super::SyncState::default();
@@ -360,6 +366,9 @@ impl RedeApp {
         self.sync.last = Some(Instant::now());
         match outcome {
             Outcome::Done(report) => {
+                if self.sync.offline {
+                    self.downloads.refreshed = false;
+                }
                 self.sync.offline = false;
                 self.sync.synced = Some(std::time::SystemTime::now());
                 // The libraries are the account's own: the shelf is read back
@@ -390,6 +399,7 @@ impl RedeApp {
                 }
             }
         }
+        self.download_connectivity();
     }
 
     /// Tries again in `wait`, drawing the window once when the time comes

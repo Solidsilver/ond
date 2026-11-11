@@ -70,6 +70,7 @@ impl RedeApp {
                     client_version: env!("CARGO_PKG_VERSION").into(),
                     ..Default::default()
                 },
+                self.downloads.store.clone(),
             ));
         }
         self.listening.clone()
@@ -141,6 +142,7 @@ impl RedeApp {
                 .unwrap_or(SystemTime::now()),
         );
         let position = sources::Position::from_secs(at);
+        self.remove_finished_download(&key, finished);
         self.positions.insert(key.item.clone(), sources::Progress { item: key.clone(), position, finished, at: Some(stamp) });
         listening.send(Request::Set(sources::ProgressUpdate { item: key, position, finished, at: stamp, listened: Duration::ZERO }));
     }
@@ -184,6 +186,9 @@ impl RedeApp {
         self.player.sleep_rewind = f64::from(self.shown.playback.sleep_rewind);
         if let Some(engine) = &self.engine {
             self.player.control(control, f64::from(self.shown.playback.rewind), engine, Instant::now(), &mut notes);
+        } else if control == Control::Stop {
+            self.player.active = false;
+            self.player.paused = true;
         }
         if let Control::Sleep(Some(crate::sleep::Choice::Minutes(minutes))) = control {
             self.prefs.edit(|s| s.playback.sleep_minutes = minutes.clamp(5, 120));
@@ -195,6 +200,7 @@ impl RedeApp {
             self.shown.playback.speed = speed;
         }
         self.playback_notes(notes);
+        self.remove_stopped_downloads();
         self.send_activity();
     }
 
@@ -211,11 +217,12 @@ impl RedeApp {
         for note in notes {
             match note {
                 Note::Report { update, close } => {
+                    self.remove_finished_download(&update.item, update.finished);
+                    self.positions.insert(
+                        update.item.item.clone(),
+                        sources::Progress { item: update.item.clone(), position: update.position, finished: update.finished, at: Some(update.at) },
+                    );
                     if let Some(listening) = &self.listening {
-                        self.positions.insert(
-                            update.item.item.clone(),
-                            sources::Progress { item: update.item.clone(), position: update.position, finished: update.finished, at: Some(update.at) },
-                        );
                         listening.send(Request::Report { generation: self.playback_generation, update, close });
                     }
                 }
@@ -227,6 +234,7 @@ impl RedeApp {
                 Note::Error(message) => self.show_error(message),
             }
         }
+        self.remove_stopped_downloads();
     }
 
     pub(super) fn playback_event(&mut self, event: Event) {
@@ -243,6 +251,7 @@ impl RedeApp {
                         if let Err(error) = result {
                             self.show_error(error);
                         }
+                        self.remove_stopped_downloads();
                         self.send_activity();
                     }
                     Err(error) => self.show_failure(error),
@@ -264,8 +273,9 @@ impl RedeApp {
             Event::Positions(positions) => {
                 let any = !positions.is_empty();
                 for position in positions {
-                    let old = self.positions.remove(&position.item.item);
+                    let old = self.positions.get(&position.item.item).cloned();
                     let latest = crate::listening::newer(old, Some(position)).unwrap();
+                    self.remove_finished_download(&latest.item, latest.finished);
                     // A paused book is moved only for a real change. Comparing
                     // exact f64s made an unchanged position look different on
                     // every pull and re-seeked the engine.
@@ -385,6 +395,47 @@ impl RedeApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finishing_a_loaded_book_keeps_its_files_until_the_player_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = super::super::fixture::app(&egui::Context::default(), dir.path(), 1);
+        let store = offline::OfflineStore::open(
+            offline::OfflineConfig { dir: dir.path().join("downloads"), limit: None, reply_check: Default::default() },
+            app._rt.0.as_ref().unwrap().handle().clone(),
+            std::sync::Arc::new(|| {}),
+        )
+        .unwrap();
+        app.downloads.store.install(store.clone());
+        super::super::fixture::playing(&mut app, false);
+        let key = app.player.book.as_ref().unwrap().key.clone();
+        app.apply(Action::Prefs(super::super::PrefsAction::RemoveDownloadsWhenFinished(true)));
+        let pin = offline::Pin::Book(key.to_string());
+        store.pin(pin.clone(), "Book", vec![offline::TrackRef::new("file", None, None)]);
+        app.playback_notes(vec![crate::player::Note::Report {
+            update: sources::ProgressUpdate {
+                item: key,
+                position: sources::Position::from_secs(100.0),
+                finished: true,
+                at: std::time::SystemTime::now(),
+                listened: std::time::Duration::from_secs(15),
+            },
+            close: false,
+        }]);
+        assert!(store.is_pinned(&pin), "the player still has the file loaded");
+        app.playback_control(crate::player::Control::Stop);
+        assert!(!store.is_pinned(&pin));
+        store.pin(pin.clone(), "Book", vec![]);
+        let update = sources::ProgressUpdate {
+            item: app.player.book.as_ref().unwrap().key.clone(),
+            position: sources::Position::from_secs(100.0),
+            finished: true,
+            at: SystemTime::now(),
+            listened: Duration::ZERO,
+        };
+        app.playback_notes(vec![Note::Report { update, close: true }]);
+        assert!(store.is_pinned(&pin), "a later report cannot undo a new download of the finished book");
+    }
 
     #[test]
     fn a_paused_book_ignores_a_position_change_under_half_a_second() {

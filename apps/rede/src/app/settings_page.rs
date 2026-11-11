@@ -4,6 +4,10 @@
 //!
 //! Appearance has the zoom (⌘+, ⌘−, ⌘0 do the same).
 //!
+//! Downloads has the storage used and its limit, the account's folder,
+//! pausing them, removing a finished book's download, and removing them all
+//! (after asking).
+//!
 //! Playback holds the preferences that used to be a sheet: the skips, the
 //! rewinds, the sleep timer's length, and the two speech switches. The speed
 //! isn't here: the one saved is the one playing, and the Playback popover
@@ -22,17 +26,19 @@ use shell::theme::Tokens;
 pub enum Tab {
     #[default]
     Playback,
+    Downloads,
     Appearance,
     Account,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Playback, Tab::Appearance, Tab::Account, Tab::About];
+    pub const ALL: [Tab; 5] = [Tab::Playback, Tab::Downloads, Tab::Appearance, Tab::Account, Tab::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Playback => "Playback",
+            Tab::Downloads => "Downloads",
             Tab::Appearance => "Appearance",
             Tab::Account => "Account",
             Tab::About => "About",
@@ -45,6 +51,9 @@ impl Tab {
 const SKIPS: [u32; 11] = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300];
 const REWINDS: [u32; 10] = [0, 1, 2, 3, 5, 10, 15, 20, 30, 60];
 const TIMER: [u32; 10] = [5, 10, 15, 20, 30, 45, 60, 75, 90, 120];
+/// The storage limits offered, in GB; past the last, no limit.
+const LIMITS_GB: [u64; 9] = [1, 2, 5, 10, 25, 50, 100, 250, 500];
+const GB: u64 = 1_000_000_000;
 
 /// Where the source lives, and where problems go.
 const REPO: &str = "https://github.com/Solidsilver/ond";
@@ -54,6 +63,7 @@ impl ViewCtx<'_> {
     pub(super) fn settings_tab(&mut self, ui: &mut Ui, tab: Tab) {
         match tab {
             Tab::Playback => self.playback_settings(ui),
+            Tab::Downloads => self.download_settings(ui),
             Tab::Appearance => self.appearance_settings(ui),
             Tab::Account => self.account_settings(ui),
             Tab::About => about(ui),
@@ -94,6 +104,46 @@ impl ViewCtx<'_> {
             if kit::setting(ui, "Skip silence", hint, |ui| kit::switch(ui, &mut on, "Skip silence")).changed() {
                 self.actions.push(Action::Prefs(PrefsAction::SkipSilence(on)));
             }
+        });
+    }
+
+    /// What the downloads take and where, and how they behave.
+    fn download_settings(&mut self, ui: &mut Ui) {
+        let snapshot = self.downloads.snapshot.clone();
+        kit::group(ui, "Storage", |ui| {
+            let used = super::downloads_page::storage_line(&snapshot);
+            // No limit is the step past the largest.
+            let mut steps: Vec<u64> = LIMITS_GB.iter().map(|gb| gb * GB).collect();
+            steps.push(u64::MAX);
+            let mut limit = self.download_settings.limit.unwrap_or(u64::MAX);
+            let text = |bytes: u64| if bytes == u64::MAX { "No limit".to_owned() } else { crate::fmt::bytes(bytes) };
+            let hint = format!("{used}. Books wait to download once the limit is reached.");
+            if kit::setting(ui, "Storage limit", &hint, |ui| kit::stepper(ui, &mut limit, &steps, "storage limit", text)) {
+                self.actions.push(Action::Prefs(PrefsAction::DownloadLimit((limit != u64::MAX).then_some(limit))));
+            }
+            let folder = self.downloads.dir.as_ref().map_or_else(|| "Opens when you sign in".to_owned(), |d| d.display().to_string());
+            kit::row_with(ui, kit::Head { label: "Folder", hint: &folder, path: self.downloads.dir.is_some(), ..Default::default() }, |_| ());
+        });
+        kit::group(ui, "Downloading", |ui| {
+            let mut paused = snapshot.paused;
+            let hint = "Books on their way wait until you resume.";
+            if kit::setting(ui, "Pause downloads", hint, |ui| kit::switch(ui, &mut paused, "Pause downloads")).changed() {
+                self.actions.push(Action::PauseDownloads(paused));
+            }
+            let mut on = self.download_settings.remove_when_finished;
+            let hint = "When you finish a book, its download goes. Your place and bookmarks stay.";
+            if kit::setting(ui, "Remove downloads when finished", hint, |ui| kit::switch(ui, &mut on, "Remove downloads when finished")).changed() {
+                self.actions.push(Action::Prefs(PrefsAction::RemoveDownloadsWhenFinished(on)));
+            }
+        });
+        kit::group(ui, "Remove", |ui| {
+            let hint = "Frees the space. Books stay in your library, and can be downloaded again.";
+            let any = !snapshot.pins.is_empty() || !self.downloads.preparing.is_empty();
+            kit::setting(ui, "Remove all downloads", hint, |ui| {
+                if ui.add_enabled_ui(any, |ui| kit::secondary_danger(ui, "Remove all…")).inner.clicked() {
+                    self.actions.push(Action::AskRemoveDownloads);
+                }
+            });
         });
     }
 

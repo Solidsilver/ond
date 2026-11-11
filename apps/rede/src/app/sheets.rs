@@ -1,7 +1,7 @@
 //! The sheets over the window, one at a time, as Ond's: the keyboard
 //! shortcuts (⌘/), with its title and a × at the top; Settings (⌘,), the
-//! kit's window with Rede's tabs (see `settings_page`); and the question
-//! before signing out. Esc or a click outside closes each.
+//! kit's window with Rede's tabs (see `settings_page`); and the questions
+//! before signing out and before removing every download. Esc or a click outside closes each.
 
 use super::settings_page::Tab;
 use super::view_ctx::ViewCtx;
@@ -19,6 +19,9 @@ pub enum Sheet {
     SignOut {
         from_settings: bool,
     },
+    /// Remove every download? Asked from Settings, where either answer goes
+    /// back.
+    RemoveDownloads,
 }
 
 /// A group of shortcuts: its name, and each row's description and keys.
@@ -76,6 +79,7 @@ impl RedeApp {
                 Sheet::Shortcuts => view.shortcuts_sheet(ui),
                 Sheet::Settings => false,
                 Sheet::SignOut { .. } => view.sign_out_sheet(ui),
+                Sheet::RemoveDownloads => view.remove_downloads_sheet(ui),
             };
             if close {
                 view.actions.push(Action::CloseSheet);
@@ -112,6 +116,21 @@ impl ViewCtx<'_> {
         match kit::confirm(ui, &title, body, "Sign out") {
             Some(true) => {
                 self.actions.push(Action::SignOut);
+                false
+            }
+            Some(false) => true,
+            None => false,
+        }
+    }
+
+    /// Remove every download? Its Cancel closes the sheet, back to Settings.
+    fn remove_downloads_sheet(&mut self, ui: &mut Ui) -> bool {
+        let n = self.downloads.snapshot.pins.len() + self.downloads.preparing.len();
+        let title = if n == 1 { "Remove 1 download?".to_owned() } else { format!("Remove all {n} downloads?") };
+        let body = "Their files are deleted from this computer. The books stay in your library, with your place in each.";
+        match kit::confirm(ui, &title, body, "Remove") {
+            Some(true) => {
+                self.actions.push(Action::RemoveAllDownloads);
                 false
             }
             Some(false) => true,

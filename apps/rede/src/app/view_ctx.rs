@@ -19,6 +19,9 @@ pub struct ViewCtx<'a> {
     /// Which books the library shows, as that copy has it.
     pub filter: LibraryFilter,
     pub playback: crate::settings::PlaybackSettings,
+    /// The store's snapshot, and the books being prepared or that failed.
+    pub downloads: &'a crate::downloads::State,
+    pub download_settings: crate::settings::DownloadSettings,
     /// The zoom, in percent.
     pub zoom: u16,
     pub opening: bool,
@@ -52,6 +55,8 @@ impl RedeApp {
             sort: self.shown.sort,
             filter: self.shown.filter,
             playback: self.shown.playback,
+            downloads: &self.downloads,
+            download_settings: self.shown.downloads,
             zoom: self.shown.zoom,
             opening: self.opening,
             mode: self.mode,

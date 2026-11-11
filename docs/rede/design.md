@@ -276,8 +276,10 @@ race another worker's blind progress PATCH.
   The server can still auto-finish a restored position within its end threshold.
 - Pending entries replay before comparison, oldest log first, coalesced to the
   newest position per item. ABS PATCH is a blind overwrite, so each replay checks
-  server timestamps first and discards older local entries. Offline listening
-  statistics through timestamped ABS local sessions remain M4 work.
+  server timestamps first and discards older local entries. Reports from local
+  play sessions first send timestamped ABS local sessions for statistics and
+  acknowledge those entries before any position PATCH. An accepted session
+  whose progress was skipped never falls through to a blind PATCH.
 
 ### Finishing, starting over, and un-finishing
 
@@ -512,6 +514,34 @@ MPRIS (Linux) and SMTC (Windows) get the same changes when those platforms come.
 - Downloads.
 - The progress log sending offline listening when back online.
 - Starting with the server unreachable.
+
+How M4 is built:
+
+- **The store.** `offline` gains a pin for a whole book, `Pin::Book(String)` holding the account-qualified item key, with one `TrackRef` per audio file, keyed by the same id `SessionSources` gives the stream cache, so a book listened to all the way through is hard-linked rather than fetched again. `offline.json` is JSON and `Pin` is a serde enum, so the new variant needs no migration and Ond's files still read. Each Rede account has its own store (`offline::account_store`). The file URL comes from the source while it is reachable (`/api/items/:id/file/:ino?token=`), and is rebuilt after a token refresh.
+- **Playing a download.** Playing needs the item's tracks and chapters, which the shelf already keeps from the last expanded fetch (`set_details`); a download first makes sure they are there. When every file of a book is downloaded, its tracks play as `file://` sources from the store, online or not. Online, the server session is still opened for statistics and progress; offline, the listening worker opens a local session instead (an id Rede makes, the shelf's item, the saved position) and the reports go to the progress log as they do now.
+- **Offline listening.** Listening done without a server session is grouped by book and local playback session into ABS local sessions (`timeListening`, start and current time, `updatedAt` from the last entry) and sent with `POST /api/session/local-all` when the server is back, before the position replay. The server skips a session older than the progress it holds, so this cannot rewind newer listening from another device. A server too old for local sessions falls back to the progress batch alone. The
+  session's UUID, starting position and start timestamp are saved with each
+  report in frozen `ProgressEntryV2` rows (shelf schema 3, migrated from V1).
+  Unsent reports alone cannot distinguish offline listening from a failed
+  online report. Retries reuse that UUID; subsequent batches include already
+  acknowledged listening in their cumulative totals because ABS upserts the
+  session total. Successful per-session results are acknowledged individually,
+  including sessions whose progress was skipped in favour of newer server
+  progress.
+- **Starting unreachable.** The library, Home and book pages read from the shelf, downloaded books play, and anything that needs the server (books not downloaded, search on the server, sign-in checks) says so plainly. Nothing is cleared or signed out because the server can't be reached.
+- **The interface.** A Download button on the book page and in a book's context menu (with progress, pause and remove); a Downloads place in the sidebar listing what's downloaded and downloading; a Downloaded option in the library's listening filter; a mark on downloaded covers; and, while offline, books that aren't downloaded are dimmed and say "Not downloaded". Settings › Downloads has the storage limit, the folder, and "Remove downloads when finished" (off by default).
+
+The backend exposes `DownloadBook(ItemKey)`, `RemoveDownload(ItemKey)`,
+`PauseDownloads(bool)` and `RetryDownloads`. `ViewCtx.downloads` holds the store's
+snapshot plus preparing/error maps; `book(key)` returns the pin summary (counts,
+bytes, fraction and failure state), and an absent pin means not downloaded.
+`ViewCtx.download_settings` and `PrefsAction::RemoveDownloadsWhenFinished` /
+`DownloadLimit` supply the two download preferences; `RemoveAllDownloads`
+(asked first through `AskRemoveDownloads`) unpins every book. The store sends scoped
+`Msg::Offline` notifications, with no timer while idle. Download folders use the
+full UUID's numeric value through `offline::account_store`; Ond's existing
+32-bit folder names keep their spelling.
+
 
 **M5: local folders.** A second source, which proves the source trait and the account-qualified ids.
 

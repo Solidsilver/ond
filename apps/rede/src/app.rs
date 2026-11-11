@@ -12,6 +12,9 @@
 //! - `library`: the books the shelf has, in the order drawn
 //! - `home`: the books in progress and the newest
 //! - `progress`: where each book is, and how a cover says it
+//! - `downloads`: download intents and the store's results;
+//!   `downloads_page` draws the Downloads place and says how each book's
+//!   download stands, for the covers, the book page and its menus
 //! - `nav`: where the window is, and how it got there
 //! - `playing`: playback actions, engine events and the listening worker
 //! - `bookmarks`: the bookmarks a book has, the edits that sync them, and the
@@ -59,6 +62,8 @@ mod book;
 mod bookmarks;
 mod bookmarks_tab;
 mod controls;
+mod downloads;
+mod downloads_page;
 mod home;
 mod library;
 mod nav;
@@ -155,6 +160,19 @@ pub enum Action {
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
     PlayBook(String),
+    /// Keep the book on this computer: its details are fetched first, then
+    /// the store queues its files.
+    DownloadBook(sources::ItemKey),
+    /// The book's download goes, finished or not.
+    RemoveDownload(sources::ItemKey),
+    /// Every download waits (true) or goes on.
+    PauseDownloads(bool),
+    /// The downloads that gave up are tried again.
+    RetryDownloads,
+    /// Ask before removing every download, over Settings.
+    AskRemoveDownloads,
+    /// Every book's download goes, and the question goes back to Settings.
+    RemoveAllDownloads,
     /// The book is finished: a progress entry with a stamp after the server's,
     /// and the server told. The loaded book is stopped first, so its session
     /// closes before the finish and cannot write the old position afterwards.
@@ -256,6 +274,7 @@ pub struct RedeApp {
     sleep_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
     positions: progress::Positions,
     stream_dir: std::path::PathBuf,
+    downloads: crate::downloads::State,
     pub bookmarks: bookmarks::State,
     pub reconciliation: Option<crate::listening::Reconciled>,
 }
@@ -334,6 +353,7 @@ impl RedeApp {
             bookmarks: bookmarks::State::default(),
             reconciliation: None,
             stream_dir: paths.art_cache.with_file_name("streams"),
+            downloads: Default::default(),
         })
     }
 
@@ -341,6 +361,8 @@ impl RedeApp {
     /// sign-out are dropped: they belong to an account nobody is using.
     fn handle(&mut self, msg: impl Into<Msg>) {
         match msg.into() {
+            Msg::Offline { session, event } if session == self.bridge.session() => self.download_event(event),
+            Msg::Offline { .. } => {}
             Msg::Account(m) => match m {
                 AccountMsg::SignedIn { session, account, source, shelf, warning } => {
                     if session != self.bridge.session() {
@@ -405,6 +427,7 @@ impl RedeApp {
         if e.is_network() {
             let offline = self.sync.offline;
             self.sync.offline = true;
+            self.download_connectivity();
             if self.sync.retry_at.is_none() {
                 let wait = Duration::from_secs(30);
                 self.sync.retry_at = Some(Instant::now() + wait);
@@ -456,6 +479,19 @@ impl RedeApp {
             }
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
+            Action::DownloadBook(key) => self.download_book(key),
+            Action::RemoveDownload(key) => self.remove_download(&key),
+            Action::PauseDownloads(paused) => {
+                if let Some(store) = self.downloads.store.get() {
+                    store.set_paused(paused);
+                }
+            }
+            Action::RetryDownloads => self.retry_downloads(),
+            Action::AskRemoveDownloads => self.sheet = Some(sheets::Sheet::RemoveDownloads),
+            Action::RemoveAllDownloads => {
+                self.sheet = Some(sheets::Sheet::Settings);
+                self.remove_all_downloads();
+            }
             Action::PlayBook(id) => self.play_book(id, None),
             Action::MarkFinished(id) => self.mark_finished(id),
             Action::MarkUnfinished(id) => self.mark_unfinished(id),
@@ -493,7 +529,7 @@ impl RedeApp {
             }
             Action::CloseSheet => {
                 // A No to signing out asked from Settings goes back there.
-                let back = matches!(self.sheet, Some(sheets::Sheet::SignOut { from_settings: true }));
+                let back = matches!(self.sheet, Some(sheets::Sheet::SignOut { from_settings: true } | sheets::Sheet::RemoveDownloads));
                 self.sheet = back.then_some(sheets::Sheet::Settings);
             }
             Action::OpenPalette => {
@@ -522,6 +558,17 @@ impl RedeApp {
     /// A change to a preference, saved once the burst of changes ends.
     fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
+            PrefsAction::RemoveDownloadsWhenFinished(enabled) => {
+                self.prefs.edit(|s| s.downloads.remove_when_finished = enabled);
+                self.shown.downloads.remove_when_finished = enabled;
+            }
+            PrefsAction::DownloadLimit(limit) => {
+                self.prefs.edit(|s| s.downloads.limit = limit);
+                self.shown.downloads.limit = limit;
+                if let Some(store) = self.downloads.store.get() {
+                    store.set_limit(limit);
+                }
+            }
             PrefsAction::Playback(mut playback) => {
                 playback.speed = crate::timeline::normalize_speed(playback.speed);
                 playback.skip_back = playback.skip_back.clamp(1, 300);
@@ -719,6 +766,7 @@ impl RedeApp {
                         match &route {
                             Route::Home => self.view().home_page(ui),
                             Route::Library => self.view().library_page(ui),
+                            Route::Downloads => self.view().downloads_page(ui),
                             Route::Book(id) => {
                                 let id = id.clone();
                                 self.view().book_page(ui, &id);

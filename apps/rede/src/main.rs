@@ -10,6 +10,7 @@ mod address;
 mod app;
 mod art;
 mod bridge;
+mod downloads;
 mod failure;
 mod fmt;
 mod listening;

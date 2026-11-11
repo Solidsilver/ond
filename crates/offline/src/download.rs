@@ -149,9 +149,12 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
             // The server answered the resume from somewhere else: the partial
             // file can't be trusted to line up. Start over.
             remove_file(inner, &job.part).await;
-            return Err(JobError::Failed(e));
+            return Err(JobError::Failed(e.into()));
         }
-        Err(e) => return Err(JobError::Failed(e.to_string())),
+        Err(FetchError::Status(status)) => {
+            return Err(JobError::Failed(crate::DownloadError { message: FetchError::Status(status).to_string(), http_status: Some(status.as_u16()) }));
+        }
+        Err(e) => return Err(JobError::Failed(e.to_string().into())),
     };
     // What the resumed body must start with.
     let mut expect: &[u8] = &[];
@@ -189,7 +192,7 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
         let chunk = match body.chunk().await {
             Ok(Some(c)) => c,
             Ok(None) => break,
-            Err(e) => return Err(JobError::Failed(e.to_string())),
+            Err(e) => return Err(JobError::Failed(e.to_string().into())),
         };
         let mut chunk = chunk;
         if !expect.is_empty() {
@@ -215,7 +218,7 @@ async fn fetch_into_part(inner: &Inner, job: &Job, url: &str, mut have: u64) -> 
     if let Some(t) = total
         && have != t
     {
-        return Err(JobError::Failed(format!("incomplete: {have} of {t} bytes")));
+        return Err(JobError::Failed(format!("incomplete: {have} of {t} bytes").into()));
     }
     if !expect.is_empty() {
         return Err(JobError::Failed("the resume ended before it could be checked".into()));
@@ -239,7 +242,7 @@ async fn finish(inner: &Inner, job: &Job, have: u64) -> Result<u64, JobError> {
         && have != expected
     {
         remove_file(inner, &job.part).await;
-        return Err(JobError::Failed(format!("size mismatch: got {have} bytes, server said {expected}")));
+        return Err(JobError::Failed(format!("size mismatch: got {have} bytes, server said {expected}").into()));
     }
     let (part, dest) = (job.part.clone(), job.dest.clone());
     blocking_tracked(&inner.io, move || std::fs::rename(part, dest)).await?;

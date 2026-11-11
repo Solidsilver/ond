@@ -476,6 +476,7 @@ impl OndApp {
             Pin::Album(id) => self.data.album(id).map(|a| a.name.clone()).unwrap_or_default(),
             Pin::Playlist(id) => self.data.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
             Pin::Track(id) => self.data.track(id).map(|t| t.title.clone()).unwrap_or_default(),
+            Pin::Book(_) => String::new(),
         }
     }
 

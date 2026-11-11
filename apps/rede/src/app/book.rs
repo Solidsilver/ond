@@ -1,11 +1,12 @@
 //! A book's page, in Ond's album-page idiom: the cover with the title,
 //! authors, a line of facts (narrators, series and number, length) and Play
-//! set on its bottom edge; under them the description and the chapters, side
-//! by side in reading-width columns when the window is wide, one above the
-//! other when it isn't. The details are fetched when the page opens.
-//!
+//! with the download's button set on its bottom edge; under them the
+//! description and the chapters, side by side in reading-width columns when
+//! the window is wide, one above the other when it isn't. The details are
+//! fetched when the page opens.
 
-use super::library::{COVER_RADIUS, authors_line};
+use super::downloads_page::{BookDownload, download_text};
+use super::library::{BOOK_MENU_W, COVER_RADIUS, authors_line};
 use super::progress::Listened;
 use super::view_ctx::ViewCtx;
 use super::{Action, Details};
@@ -25,9 +26,8 @@ const COVER_MAX: f32 = 260.0;
 /// How far along the book is: the gap under Play, and the bar's widest.
 const PROGRESS_GAP: f32 = 14.0;
 const PROGRESS_W: f32 = 320.0;
-/// The … beside Play: as tall as the button it sits by, and its menu's width.
+/// The … beside Play: as tall as the button it sits by.
 const MORE_SIDE: f32 = 32.0;
-const MORE_MENU_W: f32 = 190.0;
 /// The header text's height before it's first measured.
 const HEADER_TEXT_H_GUESS: f32 = 140.0;
 /// From this width the description and the chapters sit side by side.
@@ -112,21 +112,20 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Play, Resume or Pause. A row of its own, so the book's other commands
-    /// can sit beside it.
+    /// Play, Resume or Pause, the download's button, and the …. A row of
+    /// its own, so the book's other commands can sit beside Play. Offline, a
+    /// book that isn't all here says "Not downloaded" where Play would be,
+    /// and a download that failed says why under the row.
     fn play_row(&mut self, ui: &mut Ui, book: &ItemSummary) {
-        let position = if self.player.book.as_ref().is_some_and(|b| b.key.item == book.id) {
-            self.player.position
-        } else {
-            self.positions.get(&book.id).filter(|p| !p.finished).map_or(0.0, |p| p.position.secs())
-        };
+        let loaded = self.player.book.as_ref().is_some_and(|b| b.key.item == book.id);
+        let position = if loaded { self.player.position } else { self.positions.get(&book.id).filter(|p| !p.finished).map_or(0.0, |p| p.position.secs()) };
         let left = crate::timeline::left(
             (book.duration.unwrap_or(0.0) - position).max(0.0) / f64::from(crate::timeline::normalize_speed(self.playback.speed)),
             self.playback.speed,
         );
         // While this book is the one sounding, the button pauses it, as the
         // title bar's play/pause would.
-        let sounding = self.player.active && !self.player.paused && self.player.book.as_ref().is_some_and(|b| b.key.item == book.id);
+        let sounding = self.player.active && !self.player.paused && loaded;
         let (icon, label) = if sounding {
             (Icon::Pause, format!("Pause · {left}"))
         } else if position > 0.0 {
@@ -134,41 +133,115 @@ impl ViewCtx<'_> {
         } else {
             (Icon::Play, "Play".into())
         };
+        let unplayable = self.unplayable(&book.id);
         ui.horizontal(|ui| {
             if self.opening {
                 shell::kit::primary_unavailable(ui, None, "Opening…");
+            } else if unplayable {
+                shell::kit::primary_unavailable(ui, Some(Icon::Offline), "Not downloaded")
+                    .on_disabled_hover_text("Can't reach the server. Downloaded books play without it.");
             } else if shell::kit::primary(ui, Some(icon), &label).clicked() {
                 self.actions.push(if sounding { Action::Playback(crate::player::Control::Toggle) } else { Action::PlayBook(book.id.clone()) });
             }
+            self.download_button(ui, &book.id);
             self.more_menu(ui, book);
         });
+        if let Some(BookDownload::Failed { error }) = self.download(&book.id) {
+            let t = Tokens::of(ui);
+            let why = error.map_or_else(|| "Some of its files couldn't be downloaded.".to_owned(), |e| format!("Couldn't download it. {e}"));
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(why).size(12.0).color(t.warn)).wrap());
+        }
     }
 
-    /// The book's other commands, behind a … beside Play: settling where the
-    /// book stands by hand. Only what applies is offered: a finished book
-    /// can't be finished again, and one not begun has nothing to start over.
+    /// The download's button beside Play: Download; while it comes, how far
+    /// along, with pause and remove in its menu; once here, Downloaded, with
+    /// its size and Remove download; after a failure, Retry download.
+    /// Offline, a book not asked for has no button: it can't be fetched.
+    fn download_button(&mut self, ui: &mut Ui, id: &str) {
+        let Some(key) = self.item_key(id) else { return };
+        let download = self.download(id);
+        if download.is_none() && self.sync.offline {
+            return;
+        }
+        let paused = self.downloads.snapshot.paused;
+        let text = match &download {
+            Some(BookDownload::Failed { .. }) => "Retry download".to_owned(),
+            d => download_text(d.as_ref(), paused, self.sync.offline),
+        };
+        let resp = shell::kit::download_button(ui, download.as_ref().map(BookDownload::mark), &text);
+        match &download {
+            None => {
+                if resp.clicked() {
+                    self.actions.push(Action::DownloadBook(key));
+                }
+            }
+            Some(BookDownload::Failed { .. }) => {
+                if resp.clicked() && !self.sync.offline {
+                    self.actions.push(self.retry(key));
+                }
+            }
+            Some(d) => {
+                let t = Tokens::of(ui);
+                let chosen = shell::kit::popover_at(&resp, BOOK_MENU_W, egui::RectAlign::BOTTOM_START, |ui| {
+                    let mut chosen = None;
+                    if let BookDownload::Done { bytes } = d {
+                        shell::kit::info_row(ui, "Size", &fmt::bytes(*bytes), t.text);
+                        shell::kit::popover_rule(ui, 4.0);
+                    } else {
+                        let (label, pause) = if paused { ("Resume downloads", false) } else { ("Pause downloads", true) };
+                        if shell::kit::menu_row(ui, label) {
+                            chosen = Some(Action::PauseDownloads(pause));
+                        }
+                    }
+                    if shell::kit::menu_row(ui, "Remove download") {
+                        chosen = Some(Action::RemoveDownload(key.clone()));
+                    }
+                    chosen
+                });
+                if let Some(action) = chosen.flatten() {
+                    self.actions.push(action);
+                }
+            }
+        }
+    }
+
+    /// The book's other commands, behind a … beside Play.
     fn more_menu(&mut self, ui: &mut Ui, book: &ItemSummary) {
         let t = Tokens::of(ui);
         let more = icons::sized_button(ui, Icon::More, &format!("More for {}", book.title), vec2(MORE_SIDE, MORE_SIDE), 14.0, Some(t.muted));
-        let listened = self.listened(book);
-        let id = &book.id;
-        let chosen = shell::kit::popover(&more, MORE_MENU_W, |ui| {
-            let mut chosen = None;
-            if matches!(listened, Listened::Finished) {
-                if shell::kit::menu_row(ui, "Mark as unfinished") {
-                    chosen = Some(Action::MarkUnfinished(id.clone()));
-                }
-            } else if shell::kit::menu_row(ui, "Mark as finished") {
-                chosen = Some(Action::MarkFinished(id.clone()));
-            }
-            if !matches!(listened, Listened::NotStarted) && shell::kit::menu_row(ui, "Start over") {
-                chosen = Some(Action::StartOver(id.clone()));
-            }
-            chosen
-        });
+        let chosen = shell::kit::popover(&more, BOOK_MENU_W, |ui| self.book_commands(ui, &book.id));
         if let Some(action) = chosen.flatten() {
             self.actions.push(action);
         }
+    }
+
+    /// A book's commands, behind its page's … and on a right-click on its
+    /// cover or card: settling where the book stands by hand, then its
+    /// download. Only what applies is offered: a finished book can't be
+    /// finished again, one not begun has nothing to start over, and offline
+    /// nothing new can be downloaded.
+    pub(super) fn book_commands(&mut self, ui: &mut Ui, id: &str) -> Option<Action> {
+        let book = self.books.by_id(id)?.clone();
+        let listened = self.listened(&book);
+        let mut chosen = None;
+        if matches!(listened, Listened::Finished) {
+            if shell::kit::menu_row(ui, "Mark as unfinished") {
+                chosen = Some(Action::MarkUnfinished(id.to_owned()));
+            }
+        } else if shell::kit::menu_row(ui, "Mark as finished") {
+            chosen = Some(Action::MarkFinished(id.to_owned()));
+        }
+        if !matches!(listened, Listened::NotStarted) && shell::kit::menu_row(ui, "Start over") {
+            chosen = Some(Action::StartOver(id.to_owned()));
+        }
+        if self.item_key(id).is_some() && (!self.sync.offline || self.download(id).is_some()) {
+            shell::kit::popover_rule(ui, 4.0);
+            if let Some(action) = self.download_commands(ui, id) {
+                chosen = Some(action);
+            }
+        }
+        chosen
     }
 
     /// How far along the whole book is, under Play: a bar and "6h 25m of

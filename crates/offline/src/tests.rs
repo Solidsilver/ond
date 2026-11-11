@@ -1019,3 +1019,46 @@ fn a_track_with_an_empty_id_is_never_pinned_and_hidden_files_survive_an_unpin() 
         assert!(dir.path().join(name).exists(), "{name} stays");
     }
 }
+
+#[test]
+fn an_ond_era_state_file_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("offline.json"), br#"{"pins":[{"pin":{"Album":"a"},"label":"Album","tracks":[]},{"pin":{"Playlist":"p"},"label":"Playlist","tracks":[]},{"pin":{"Track":"t"},"label":"Track","tracks":[]}],"tracks":{}}"#).unwrap();
+    let rt = rt();
+    let store = store(dir.path(), &rt);
+    for pin in [Pin::Album("a".into()), Pin::Playlist("p".into()), Pin::Track("t".into())] {
+        assert!(store.is_pinned(&pin));
+    }
+    assert!(store.snapshot().set_aside.is_none());
+}
+
+#[test]
+fn a_book_pin_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let pin = Pin::Book("account/book".into());
+    let s = store(dir.path(), &rt);
+    s.pin(pin.clone(), "Book", vec![track("account/file", 42)]);
+    drop(s);
+    let s = store(dir.path(), &rt);
+    assert!(s.is_pinned(&pin));
+    assert_eq!(s.pin_tracks(&pin).unwrap().1, ["account/file"]);
+}
+
+#[test]
+fn a_rejected_attempt_is_visible_before_retry_exhaustion_without_exposing_its_token() {
+    let server = testkit::JsonFake::start(|_| testkit::Answer::new("401 Unauthorized", ""));
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let store = store(dir.path(), &rt);
+    let url = format!("{}file?token=download-secret", server.base());
+    store.set_source(Some(Arc::new(move |_| url.clone())));
+    store.pin(Pin::Book("account/book".into()), "Book", vec![track("file", 4)]);
+    wait_until("the rejected attempt", || store.snapshot().last_errors.contains_key("file"));
+    store.set_source(None);
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.track("file"), Some(&TrackState::Queued));
+    assert_eq!(snapshot.last_errors["file"].http_status, Some(401));
+    assert!(snapshot.last_errors["file"].message.contains("401"));
+    assert!(!format!("{snapshot:?}").contains("download-secret"));
+}

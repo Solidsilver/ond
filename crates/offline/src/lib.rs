@@ -134,11 +134,40 @@ impl PinSummary {
     }
 }
 
+/// A download attempt's failure, without its URL or credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadError {
+    pub message: String,
+    /// The HTTP rejection, when the server answered with an error status.
+    pub http_status: Option<u16>,
+}
+
+impl From<String> for DownloadError {
+    fn from(message: String) -> Self {
+        Self { message, http_status: None }
+    }
+}
+
+impl From<&str> for DownloadError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
 /// Everything the UI needs, built once per change.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub version: u64,
     pub tracks: HashMap<String, TrackState>,
+    /// The most recent failed attempt, including tracks waiting to retry.
+    /// Callers can repair credentials before the retry budget runs out.
+    pub last_errors: HashMap<String, DownloadError>,
     pub pins: Vec<PinSummary>,
     /// Bytes of finished downloads.
     pub used_bytes: u64,
@@ -303,7 +332,7 @@ struct Active {
 struct Failure {
     attempts: u32,
     retry_at: Instant,
-    error: String,
+    error: DownloadError,
 }
 
 struct Job {
@@ -319,7 +348,7 @@ struct Job {
 enum JobError {
     Cancelled,
     /// Worth trying again after a backoff.
-    Failed(String),
+    Failed(DownloadError),
     /// Would fail the same way every time: no retries until something changes
     /// (a refresh of the pin, a reconnect, a manual retry).
     Stale(String),
@@ -327,7 +356,7 @@ enum JobError {
 
 impl From<io::Error> for JobError {
     fn from(e: io::Error) -> Self {
-        Self::Failed(e.to_string())
+        Self::Failed(e.to_string().into())
     }
 }
 
@@ -774,7 +803,7 @@ impl Inner {
             }
             Err(JobError::Stale(error)) => {
                 tracing::warn!("offline download {}: {error}", job.r.id);
-                st.failures.insert(job.r.id.clone(), Failure { attempts: MAX_ATTEMPTS, retry_at: Instant::now(), error });
+                st.failures.insert(job.r.id.clone(), Failure { attempts: MAX_ATTEMPTS, retry_at: Instant::now(), error: error.into() });
             }
         }
         self.changed(st);
@@ -790,7 +819,7 @@ impl Inner {
                 TrackState::Downloading { done: a.done, total: a.total }
             } else if let Some(f) = st.failures.get(id).filter(|f| f.attempts >= MAX_ATTEMPTS) {
                 failed += 1;
-                TrackState::Failed { error: f.error.clone() }
+                TrackState::Failed { error: f.error.to_string() }
             } else {
                 queued += 1;
                 TrackState::Queued
@@ -845,6 +874,7 @@ impl Inner {
         Snapshot {
             version: st.version,
             tracks,
+            last_errors: st.failures.iter().map(|(id, failure)| (id.clone(), failure.error.clone())).collect(),
             pins,
             used_bytes: st.pins.used(),
             free_bytes: free,

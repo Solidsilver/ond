@@ -83,6 +83,7 @@ impl Source for AbsSource {
             // The server can transcode, though Rede always asks for direct
             // play: a book's files play as they are.
             transcoding: true,
+            local_sessions: true,
         }
     }
 
@@ -164,6 +165,49 @@ impl Source for AbsSource {
             self.client.refresh().await?;
         }
         session.tracks.iter().zip(paths).map(|(track, (path, _))| Ok(SessionTrack { url: self.client.file_url(&path)?.to_string(), ..track.clone() })).collect()
+    }
+
+    fn file_url(&self, item: &str, file: &TrackFile) -> Result<String> {
+        let path = if file.content_id.starts_with("/api/items/") {
+            file.content_id.clone()
+        } else if !file.content_id.is_empty() {
+            format!("/api/items/{item}/file/{}", file.content_id)
+        } else {
+            return Err(Error::NotSupported("This file has no download address".into()));
+        };
+        Ok(self.client.file_url(&path)?.to_string())
+    }
+
+    async fn refresh_downloads(&self) -> Result<()> {
+        self.client.refresh().await?;
+        Ok(())
+    }
+
+    async fn sync_local_sessions(&self, sessions: &[crate::LocalSession]) -> Result<Vec<String>> {
+        let batch: Vec<_> = sessions
+            .iter()
+            .map(|s| abs::LocalSession {
+                id: s.id.clone(),
+                library_item_id: s.item.item.clone(),
+                episode_id: None,
+                library_id: Some(s.library.clone()),
+                display_title: None,
+                display_author: None,
+                duration: s.duration,
+                start_time: s.start.secs(),
+                current_time: s.current.secs(),
+                time_listening: s.listened.as_secs_f64(),
+                started_at: Stamp::from(s.started_at).millis(),
+                updated_at: Stamp::from(s.updated_at).millis(),
+            })
+            .collect();
+        match self.client.sync_local_sessions(&batch).await {
+            Ok(results) => Ok(results.into_iter().filter(|r| r.success).map(|r| r.id).collect()),
+            Err(e) if matches!(&e, abs::Error::Server { status: 404 | 405 | 501, .. }) => {
+                Err(Error::NotSupported("This server cannot sync local sessions".into()))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn report(&self, session: &PlaySession, at: Position, listened: Duration) -> Result<()> {
