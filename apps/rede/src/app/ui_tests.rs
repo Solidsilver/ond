@@ -226,7 +226,7 @@ fn every_view_names_its_controls() {
         h.check_accessibility();
         for label in ["Previous chapter (⇧←)", "Back 15 seconds", "Forward 30 seconds", "Next chapter (⇧→)", "Chapter position", "Playback speed, 1.5×"]
         {
-            h.get_by_label(label);
+            h.get_by_label(&shell::keys::shown(label));
         }
         h.get_by_label(if paused { "Play (Space)" } else { "Pause (Space)" });
         h.get_by_label("Chapter 5, show chapters");
@@ -239,7 +239,7 @@ fn every_view_names_its_controls() {
         app_mut(&mut h).ui.panel.tab = tab;
         h.run_steps(3);
         h.check_accessibility();
-        h.get_by_label("Hide chapters (⌥⌘U)");
+        h.get_by_label(&shell::keys::shown("Hide chapters (⌥⌘U)"));
     }
     bookmarks(app_mut(&mut h));
     app_mut(&mut h).ui.panel.tab = super::panel::Tab::Bookmarks;
@@ -255,7 +255,7 @@ fn every_view_names_its_controls() {
     h.run_steps(3);
     h.check_accessibility();
     for label in ["Show", "Undo"] {
-        h.get_by_label(label);
+        h.get_by_label(&shell::keys::shown(label));
     }
     app_mut(&mut h).reconciliation = None;
     app_mut(&mut h).ui.toasts = shell::kit::Toasts::default();
@@ -276,7 +276,7 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
         for label in ["Back 15 seconds", "Forward 30 seconds", "Play"] {
-            h.get_by_label(label);
+            h.get_by_label(&shell::keys::shown(label));
         }
         if mode == crate::window::Mode::Player {
             h.get_by_label("Chapter position");
@@ -295,9 +295,9 @@ fn every_view_names_its_controls() {
             (app.sync.running, app.session.connecting, app.sync.offline) = (state == 1, state == 2, state == 3);
             h.run_steps(3);
             h.check_accessibility();
-            h.get_by_label("Keyboard shortcuts (⌘/)");
-            h.get_by_label("Settings (⌘,)");
-            h.get_by_label("Search (⌘K)");
+            h.get_by_label(&shell::keys::shown("Keyboard shortcuts (⌘/)"));
+            h.get_by_label(&shell::keys::shown("Settings (⌘,)"));
+            h.get_by_label(&shell::keys::shown("Search (⌘K)"));
             // The sidebar's, and on a book's page the breadcrumb's too.
             assert!(h.query_all_by_label("Library").count() >= 1);
         }
@@ -305,15 +305,15 @@ fn every_view_names_its_controls() {
         h.run_steps(4);
         h.check_accessibility();
         for label in ["Keyboard shortcuts", "Sign out…"] {
-            h.get_by_label(label);
+            h.get_by_label(&shell::keys::shown(label));
         }
         egui::Popup::close_all(&h.ctx);
         h.run_steps(2);
     }
-    h.get_by_label("Expand sidebar (⌥⌘S)");
+    h.get_by_label(&shell::keys::shown("Expand sidebar (⌥⌘S)"));
     app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(false));
     h.run_steps(3);
-    h.get_by_label("Collapse sidebar (⌥⌘S)");
+    h.get_by_label(&shell::keys::shown("Collapse sidebar (⌥⌘S)"));
     // The palette: the books in progress, then what a query finds (books
     // and names).
     in_progress(app_mut(&mut h));
@@ -713,12 +713,12 @@ fn the_player_exposes_speed_and_listening_preferences() {
     app_mut(&mut h).go(book_route(0));
     h.run_steps(3);
     h.get_by_label_contains("Resume ·");
-    h.get_by_label("Previous chapter (⇧←)");
-    h.get_by_label("Next chapter (⇧→)");
+    h.get_by_label(&shell::keys::shown("Previous chapter (⇧←)"));
+    h.get_by_label(&shell::keys::shown("Next chapter (⇧→)"));
     h.get_by_label("Playback speed, 1.5×").click();
     h.run_steps(2);
     for label in ["Speed", "Slower", "Faster", "Settings…"] {
-        h.get_by_label(label);
+        h.get_by_label(&shell::keys::shown(label));
     }
     assert_eq!(h.query_all_by_label("Stop playback").count(), 0, "stopping is a command, not a playback setting");
     // The speed playing shows large over its lit preset.
@@ -747,16 +747,16 @@ fn the_title_bar_holds_the_player_at_every_width_without_overlaps() {
     for width in [crate::MIN_SIZE[0], FULL[0], 1440.0, 1920.0, 2560.0] {
         h.set_size(egui::vec2(width, FULL[1]));
         h.run_steps(3);
-        let toggle = h.get_by_label_contains("chapters (⌥⌘U)").rect();
+        let toggle = h.get_by_label_contains(&shell::keys::shown("chapters (⌥⌘U)")).rect();
         let mut rects = vec![("toggle", toggle)];
         for label in BAR_CONTROLS {
-            rects.push((label, h.get_by_label(label).rect()));
+            rects.push((label, h.get_by_label(&shell::keys::shown(label)).rect()));
         }
         // The cover, the way to the Player, and the chapter buttons stay at
         // every width.
         rects.push(("cover", h.get_by_label("Open the Player").rect()));
-        rects.push(("previous", h.get_by_label("Previous chapter (⇧←)").rect()));
-        rects.push(("next", h.get_by_label("Next chapter (⇧→)").rect()));
+        rects.push(("previous", h.get_by_label(&shell::keys::shown("Previous chapter (⇧←)")).rect()));
+        rects.push(("next", h.get_by_label(&shell::keys::shown("Next chapter (⇧→)")).rect()));
         for (label, rect) in &rects {
             assert!(rect.min.y >= 0.0 && rect.max.y <= super::BAR_H, "{label} at {width}: {rect:?}");
             assert!(rect.min.x >= 0.0 && rect.max.x <= width, "{label} at {width}: {rect:?}");
@@ -796,14 +796,14 @@ fn the_title_bar_buttons_enqueue_their_controls() {
         ("Forward 30 seconds", Control::Skip(30.0)),
         ("Next chapter (⇧→)", Control::NextChapter),
     ] {
-        h.get_by_label(label).click();
+        h.get_by_label(&shell::keys::shown(label)).click();
         h.run_steps(2);
         let actions = std::mem::take(&mut app_mut(&mut h).actions);
         assert!(matches!(actions.as_slice(), [Action::Playback(control)] if *control == expected), "{label}: {} actions", actions.len());
     }
     // The chips open their menus rather than asking for anything.
     for label in ["Playback speed, 1.5×", "Sleep timer"] {
-        h.get_by_label(label).click();
+        h.get_by_label(&shell::keys::shown(label)).click();
         h.run_steps(2);
         assert!(app_mut(&mut h).actions.is_empty(), "{label} only opens its menu");
         egui::Popup::close_all(&h.ctx);
@@ -923,7 +923,7 @@ fn the_column_is_a_sheet_in_a_narrow_window_and_the_preference_stays_put() {
     playing(app_mut(&mut h), true);
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
     h.run_steps(3);
-    h.get_by_label("Show chapters (⌥⌘U)").click();
+    h.get_by_label(&shell::keys::shown("Show chapters (⌥⌘U)")).click();
     h.run_steps(3);
     let app = app_mut(&mut h);
     assert!(app.ui.panel.sheet, "the sheet opens");
@@ -965,8 +965,8 @@ fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
     h.run_steps(3);
     // The full window's bar has no mode buttons: the Player is a key away
     // (and a click on the cover, with a book), and its own bar has the rest.
-    assert_eq!(h.query_all_by_label_contains("window (⌥⌘").count(), 0);
-    assert_eq!(h.query_all_by_label("Mini player (⇧⌘M)").count(), 0);
+    assert_eq!(h.query_all_by_label_contains(&shell::keys::shown("window (⌥⌘")).count(), 0);
+    assert_eq!(h.query_all_by_label(&shell::keys::shown("Mini player (⇧⌘M)")).count(), 0);
     h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N);
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Player);
@@ -979,13 +979,13 @@ fn window_buttons_and_shortcuts_work_without_a_loaded_book() {
     assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Shortcuts));
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
-    h.get_by_label("Mini player (⇧⌘M)").click();
+    h.get_by_label(&shell::keys::shown("Mini player (⇧⌘M)")).click();
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Mini);
-    h.get_by_label("Full window (⌥⌘1)").click();
+    h.get_by_label(&shell::keys::shown("Full window (⌥⌘1)")).click();
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).mode, crate::window::Mode::Full);
-    h.get_by_label("Keyboard shortcuts (⌘/)").click();
+    h.get_by_label(&shell::keys::shown("Keyboard shortcuts (⌘/)")).click();
     h.run_steps(3);
     h.get_by_label("Close (esc)").click();
     h.run_steps(3);
@@ -1002,7 +1002,7 @@ fn sleep_options_and_custom_defaults_are_accessible_from_the_title_bar() {
     h.run_steps(3);
     h.check_accessibility();
     for label in ["5 min", "15 min", "30 min", "45 min", "60 min", "90 min", "End of chapter", "custom timer, 30 min", "Less custom timer"] {
-        h.get_by_label(label);
+        h.get_by_label(&shell::keys::shown(label));
     }
     assert_eq!(h.query_all_by_label("Start").count(), 0, "the custom length is a cell of the grid, not a row with its own Start");
     // The custom length steps, and is saved for next time.
@@ -1067,7 +1067,7 @@ fn a_running_timer_shows_what_is_left_and_how_to_change_it() {
     h.run_steps(3);
     h.check_accessibility();
     for label in ["Add 10 min", "Cancel timer", "Change to"] {
-        h.get_by_label(label);
+        h.get_by_label(&shell::keys::shown(label));
     }
     h.get_by_label_contains("Pauses in ");
     assert_eq!(h.query_all_by_label("One more chapter").count(), 0);
@@ -1122,7 +1122,7 @@ fn the_settings_window_steps_each_playback_setting_and_closes_over_the_page() {
         ("rewind after sleep, 10 s", "More rewind after sleep"),
         ("timer length, 30 min", "More timer length"),
     ] {
-        h.get_by_label(label);
+        h.get_by_label(&shell::keys::shown(label));
         h.get_by_label(more).click();
         h.run_steps(2);
     }
@@ -1135,6 +1135,8 @@ fn the_settings_window_steps_each_playback_setting_and_closes_over_the_page() {
     h.get_by_role_and_label(egui::accesskit::Role::Switch, "Voice boost").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).prefs.get(|s| s.playback.voice_boost && !s.playback.skip_silence));
+    h.get_by_role_and_label(egui::accesskit::Role::Switch, "Skip silence").scroll_to_me();
+    h.run_steps(3);
     h.get_by_role_and_label(egui::accesskit::Role::Switch, "Skip silence").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).prefs.get(|s| s.playback.voice_boost && s.playback.skip_silence));

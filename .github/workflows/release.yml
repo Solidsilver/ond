@@ -130,6 +130,7 @@ jobs:
     env:
       APP: ${{ needs.tag.outputs.app }}
     strategy:
+      fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     # The oldest Ubuntu with libpipewire 0.3.53+, which the PipeWire output
