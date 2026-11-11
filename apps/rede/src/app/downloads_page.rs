@@ -209,12 +209,10 @@ impl ViewCtx<'_> {
         let downloads = self.books.downloads(self.downloads);
         let rows = self.books.download_rows(self.downloads);
         let snapshot = self.downloads.snapshot.clone();
+        // The heading counts what is already here; the rows under it also
+        // show what is still on its way, which says so on each row.
         let done = downloads.values().filter(|d| !d.active()).count();
-        let sub = match done {
-            0 => None,
-            1 => Some("1 book".to_owned()),
-            n => Some(format!("{n} books")),
-        };
+        let sub = (done > 0).then(|| format!("{done} downloaded"));
         let active = downloads.values().filter(|d| matches!(d, BookDownload::Preparing | BookDownload::Downloading { .. })).count();
         let failed = downloads.values().any(|d| matches!(d, BookDownload::Failed { .. }));
         ui.horizontal(|ui| {
