@@ -68,6 +68,23 @@ pub trait Source: Send + Sync {
         Err(crate::Error::NotSupported("This source cannot refresh file URLs".into()))
     }
 
+    /// An original audio file's URL, rebuilt from the current credentials.
+    /// The returned string is secret and must never be logged.
+    fn file_url(&self, _item: &str, _file: &crate::TrackFile) -> Result<String> {
+        Err(crate::Error::NotSupported("This source cannot download files".into()))
+    }
+
+    /// Rotates credentials rejected by the download worker.
+    async fn refresh_downloads(&self) -> Result<()> {
+        Err(crate::Error::NotSupported("This source cannot refresh downloads".into()))
+    }
+
+    /// Returns the ids durably accepted by the server, including sessions
+    /// whose statistics were saved while newer server progress was preserved.
+    async fn sync_local_sessions(&self, _sessions: &[crate::LocalSession]) -> Result<Vec<String>> {
+        Err(crate::Error::NotSupported("This source cannot sync local sessions".into()))
+    }
+
     /// The position now, and the time listened since the last report.
     async fn report(&self, session: &PlaySession, at: Position, listened: Duration) -> Result<()>;
 

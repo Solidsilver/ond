@@ -236,6 +236,8 @@ pub struct Capabilities {
     /// Podcast feeds and podcast libraries.
     pub subscriptions: bool,
     pub transcoding: bool,
+    /// Listening statistics recorded without a server session.
+    pub local_sessions: bool,
 }
 
 /// The device a play session comes from.
@@ -307,4 +309,18 @@ pub struct Bookmark {
     pub position: Position,
     pub title: String,
     pub created: SystemTime,
+}
+
+/// Listening recorded on this device without an open server session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalSession {
+    pub id: String,
+    pub item: ItemKey,
+    pub library: String,
+    pub duration: Option<f64>,
+    pub start: Position,
+    pub current: Position,
+    pub listened: Duration,
+    pub started_at: SystemTime,
+    pub updated_at: SystemTime,
 }
