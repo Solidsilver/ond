@@ -529,14 +529,15 @@ How M4 is built:
   including sessions whose progress was skipped in favour of newer server
   progress.
 - **Starting unreachable.** The library, Home and book pages read from the shelf, downloaded books play, and anything that needs the server (books not downloaded, search on the server, sign-in checks) says so plainly. Nothing is cleared or signed out because the server can't be reached.
-- **The interface (next phase).** A Download button on the book page and in a book's context menu (with progress, pause and remove); a Downloads place in the sidebar listing what's downloaded and downloading; a Downloaded option in the library's listening filter; a mark on downloaded covers; and, while offline, books that aren't downloaded are dimmed and say "Not downloaded". Settings › Downloads has the storage limit, the folder, and "Remove downloads when finished" (off by default).
+- **The interface.** A Download button on the book page and in a book's context menu (with progress, pause and remove); a Downloads place in the sidebar listing what's downloaded and downloading; a Downloaded option in the library's listening filter; a mark on downloaded covers; and, while offline, books that aren't downloaded are dimmed and say "Not downloaded". Settings › Downloads has the storage limit, the folder, and "Remove downloads when finished" (off by default).
 
 The backend exposes `DownloadBook(ItemKey)`, `RemoveDownload(ItemKey)`,
 `PauseDownloads(bool)` and `RetryDownloads`. `ViewCtx.downloads` holds the store's
 snapshot plus preparing/error maps; `book(key)` returns the pin summary (counts,
 bytes, fraction and failure state), and an absent pin means not downloaded.
 `ViewCtx.download_settings` and `PrefsAction::RemoveDownloadsWhenFinished` /
-`DownloadLimit` supply the two download preferences. The store sends scoped
+`DownloadLimit` supply the two download preferences; `RemoveAllDownloads`
+(asked first through `AskRemoveDownloads`) unpins every book. The store sends scoped
 `Msg::Offline` notifications, with no timer while idle. Download folders use the
 full UUID's numeric value through `offline::account_store`; Ond's existing
 32-bit folder names keep their spelling.

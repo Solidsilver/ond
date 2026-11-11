@@ -307,8 +307,9 @@ write) runs against fakes in `cargo test -p rede`.
 
 ## Rede: downloads and offline
 
-The download views are a later phase. Until they land, invoke the backend
-Actions from a development harness. Use a release build whenever audio plays.
+Drive these from the book page's Download button, a cover's right-click
+menu, the Downloads place and Settings › Downloads. Use a release build
+whenever audio plays.
 The automated coverage uses RangeServer for files and JsonFake for ABS, and
 checks the store, file sources, journal migration, timestamped local sessions,
 old-server fallback, limits and removal policy without audio hardware.
@@ -318,6 +319,12 @@ With a throwaway ABS account and a real output device:
 - Download a single-file m4b and a book split across several files. Interrupt a
   download, restart Rede, reconnect and verify its bytes resume and all tracks
   and chapters are available. Pause/resume and retry should preserve the files.
+  The book page's button and the Downloads place's rows should move only as
+  bytes arrive, and stop moving when nothing does.
+- With the server unreachable, the library and Home fade the books that aren't
+  downloaded; their pages say "Not downloaded", a card's resume says "This book
+  isn't downloaded.", and downloaded books play as usual. "Remove all
+  downloads" in Settings asks first and frees the folder Settings names.
 - Play a complete download online. Confirm playback uses disk while ABS still
   records a server play session. Let a streamed book finish caching, then pin
   it and confirm the store hard-links it on the same volume (copies across
