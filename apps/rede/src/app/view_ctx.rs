@@ -33,6 +33,8 @@ pub struct ViewCtx<'a> {
     /// Settings' tab.
     pub settings: super::settings_page::Tab,
     pub positions: &'a super::progress::Positions,
+    /// The listening the Stats place counts.
+    pub stats: &'a mut crate::stats::State,
     /// The loaded book's bookmarks, sorted by time.
     pub bookmarks: std::sync::Arc<Vec<sources::Bookmark>>,
     /// Covers load as they're first drawn.
@@ -64,6 +66,7 @@ impl RedeApp {
             panel: self.ui.panel,
             settings: self.ui.settings,
             positions: &self.positions,
+            stats: &mut self.stats,
             art: &mut self.art,
             palette: &mut self.ui.palette,
             actions: &mut self.actions,

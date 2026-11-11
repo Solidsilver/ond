@@ -352,3 +352,22 @@ With a throwaway ABS account and a real output device:
   enable it through the preference Action and confirm both listening to the end
   and MarkFinished unpin the book. Signing out should keep all other downloads
   and the shelf; another account must never see or change those pins.
+
+## Rede: listening stats
+
+The Stats place reads `GET /api/me/listening-sessions` and this computer's
+progress log. The automated coverage checks paging and decoding against
+JsonFake, the counting with a fixed clock, and that every state draws; these
+need a real server and a real history:
+
+- With an account that has listened in the ABS web player or another app,
+  open Stats. The total, the busiest days and the top books should match the
+  server's own stats page (ABS counts days by the server's time zone, Rede by
+  this computer's, so a day either side of midnight may differ).
+- Listen for a few minutes in Rede, reopen Stats after five minutes, and check
+  the time moved on. Then work offline, listen to a downloaded book, open Stats:
+  it should say only this computer's listening is counted, and the offline
+  minutes should be there. Reconnect and check they aren't counted twice once
+  the local session has synced.
+- An account with thousands of sessions should open the page in a few seconds,
+  without the window stalling.

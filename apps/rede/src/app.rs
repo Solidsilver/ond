@@ -12,6 +12,7 @@
 //! - `library`: the books the shelf has, in the order drawn
 //! - `home`: the books in progress and the newest
 //! - `progress`: where each book is, and how a cover says it
+//! - `stats_page`: the Stats place, drawn from what `crate::stats` counts
 //! - `downloads`: download intents and the store's results;
 //!   `downloads_page` draws the Downloads place and says how each book's
 //!   download stands, for the covers, the book page and its menus
@@ -80,6 +81,7 @@ mod sheets;
 mod shortcuts;
 mod sidebar;
 mod sleep;
+mod stats_page;
 mod title_bar;
 mod ui_state;
 mod view_ctx;
@@ -275,6 +277,8 @@ pub struct RedeApp {
     positions: progress::Positions,
     stream_dir: std::path::PathBuf,
     downloads: crate::downloads::State,
+    /// The listening the Stats place counts, once it's been opened.
+    stats: crate::stats::State,
     pub bookmarks: bookmarks::State,
     pub reconciliation: Option<crate::listening::Reconciled>,
 }
@@ -354,6 +358,7 @@ impl RedeApp {
             reconciliation: None,
             stream_dir: paths.art_cache.with_file_name("streams"),
             downloads: Default::default(),
+            stats: Default::default(),
         })
     }
 
@@ -397,6 +402,16 @@ impl RedeApp {
                 LibraryMsg::Book { key, item } => self.books.loaded(&key.item, *item),
                 LibraryMsg::BookFailed { key, error } => self.books.failed(&key.item, error),
             },
+            Msg::Stats { log, history } => {
+                // No answer means the server's gone, as anywhere else; any
+                // other reason is the page's to say.
+                if let Some(Err(e)) = &history
+                    && e.is_network()
+                {
+                    self.show_failure(e.clone());
+                }
+                self.stats.arrived(log, history);
+            }
             Msg::Bookmarks { session, event } if session == self.bridge.session() => self.bookmark_event(event),
             Msg::Bookmarks { .. } => {}
             Msg::Playback { session, event } if session == self.bridge.session() => self.playback_event(event),
@@ -678,6 +693,9 @@ impl RedeApp {
     /// Loads what the place just arrived at needs. A book's page asks for its
     /// details unless they're here already.
     fn on_arrive(&mut self) {
+        if *self.ui.nav.current() == Route::Stats {
+            self.load_stats();
+        }
         let Route::Book(id) = self.ui.nav.current().clone() else { return };
         if self.books.details.contains_key(&id) {
             return;
@@ -686,6 +704,19 @@ impl RedeApp {
         let Some(shelf) = self.session.shelf.clone() else { return };
         self.books.details.insert(id.clone(), Details::Loading);
         self.bridge.open_book(self.session.source.clone(), shelf, sources::ItemKey::new(account.id, id));
+    }
+
+    /// Asks for the listening the Stats place counts, unless it was asked for
+    /// lately. Offline, the server isn't asked: this computer's log is what
+    /// there is.
+    pub(super) fn load_stats(&mut self) {
+        let Some(shelf) = self.session.shelf.clone() else { return };
+        if !self.stats.due() {
+            return;
+        }
+        self.stats.asking();
+        let source = self.session.source.clone().filter(|_| !self.sync.offline);
+        self.bridge.listening_stats(source, shelf);
     }
 
     fn notice_bar(&mut self, ui: &mut egui::Ui) {
@@ -767,6 +798,7 @@ impl RedeApp {
                             Route::Home => self.view().home_page(ui),
                             Route::Library => self.view().library_page(ui),
                             Route::Downloads => self.view().downloads_page(ui),
+                            Route::Stats => self.view().stats_page(ui),
                             Route::Book(id) => {
                                 let id = id.clone();
                                 self.view().book_page(ui, &id);

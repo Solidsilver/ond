@@ -99,6 +99,7 @@ impl RedeApp {
         ));
         self.prefs.edit(|s| s.put_account(account.clone()));
         if changed {
+            self.stats = Default::default();
             self.books.clear();
             self.ui.nav = super::Nav::default();
             self.ui.landing = true;
@@ -109,6 +110,10 @@ impl RedeApp {
         // What the shelf already has, while the server is asked what changed.
         self.bridge.load_books(shelf, account.libraries.clone());
         self.sync_now();
+        // Opened on Stats before the account was back: ask now.
+        if *self.ui.nav.current() == super::Route::Stats {
+            self.load_stats();
+        }
     }
 
     /// The sign-in failed. From the form: back to it, with the plain reason.
@@ -326,6 +331,7 @@ impl RedeApp {
         self.session = Session::default();
         self.bridge.close_downloads(self.downloads.store.clone());
         self.downloads = Default::default();
+        self.stats = Default::default();
         self.books.clear();
         self.art.set_source(None);
         self.sync = super::SyncState::default();
