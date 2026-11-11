@@ -43,6 +43,7 @@ struct Fake {
     local_sessions: Mutex<Vec<sources::LocalSession>>,
     local_unsupported: AtomicBool,
     lose_local_response: AtomicBool,
+    refused_local_session: Mutex<Option<String>>,
 }
 impl Fake {
     fn calls(&self) -> Vec<Call> {
@@ -83,7 +84,7 @@ impl Source for Fake {
         if self.lose_local_response.swap(false, Ordering::Relaxed) {
             return Err(sources::Error::Network("response lost".into()));
         }
-        Ok(sessions.iter().map(|s| s.id.clone()).collect())
+        Ok(sessions.iter().filter(|s| self.refused_local_session.lock().unwrap().as_ref() != Some(&s.id)).map(|s| s.id.clone()).collect())
     }
     async fn cover(&self, _: &str, _: Option<u32>) -> Result<bytes::Bytes> {
         unreachable!()
@@ -1095,5 +1096,55 @@ async fn local_listening_replays_after_the_worker_restarts() {
     rig.event(|e| matches!(e, Event::Positions(_))).await;
     assert_eq!(rig.fake.local_sessions.lock().unwrap()[0].id, id);
     assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_refused_local_session_falls_back_without_blocking_other_books_or_retrying_forever() {
+    let dir = tempfile::tempdir().unwrap();
+    let shelf = Arc::new(Shelf::open(dir.path().join("shelf.redb")).unwrap());
+    let fake = Arc::new(Fake::default());
+    *fake.refused_local_session.lock().unwrap() = Some("refused".into());
+    let key = ItemKey::new(test_account(), "book");
+    let other = ItemKey::new(key.account, "other");
+    for (key, session, at) in [(&key, "refused", 15.0), (&other, "accepted", 30.0), (&key, "refused", 45.0)] {
+        shelf
+            .append_listening(
+                &update(key, at, false),
+                Some(&shelf::LocalListening { id: session.into(), start: Position::from_secs(0.0), started_at: SystemTime::now() }),
+            )
+            .unwrap();
+    }
+    let (tx, events) = mpsc::unbounded_channel();
+    let listening = spawn(
+        &tokio::runtime::Handle::current(),
+        fake.clone(),
+        shelf.clone(),
+        DeviceInfo::default(),
+        || true,
+        move |event| {
+            let _ = tx.send(event);
+        },
+    );
+    let mut rig = Rig { _dir: dir, shelf, fake, listening, events, key };
+    let mut refusals = 0;
+    loop {
+        match rig.event(|e| matches!(e, Event::Positions(_) | Event::Error(_))).await {
+            Event::Error(Failure::Server(_)) => {
+                refusals += 1;
+                assert_eq!(refusals, 1);
+            }
+            Event::Positions(_) => break,
+            _ => panic!("the replay succeeds"),
+        }
+    }
+    assert_eq!(refusals, 1);
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    assert_eq!(rig.fake.calls(), [Call::Patch(45.0, false)]);
+    assert_eq!(rig.fake.local_sessions.lock().unwrap().len(), 2);
+    rig.listening.send(Request::Reconcile);
+    assert!(matches!(rig.event(|e| matches!(e, Event::Positions(_) | Event::Error(_))).await, Event::Positions(_)));
+    assert_eq!(rig.fake.local_sessions.lock().unwrap().len(), 2);
+    assert_eq!(rig.fake.calls(), [Call::Patch(45.0, false)]);
     rig.finish().await;
 }
