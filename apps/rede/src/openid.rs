@@ -9,6 +9,9 @@ use std::time::{Duration, SystemTime};
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+/// Only macOS currently delivers the browser's redirect to the running app.
+pub const SUPPORTED: bool = cfg!(target_os = "macos");
+
 pub const TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const FALLBACK: &str = "This server uses audiobookshelf://oauth. Your admin can add rede://oauth to the server's allowed OpenID redirect URIs.";
 

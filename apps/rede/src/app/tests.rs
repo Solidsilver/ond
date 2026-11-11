@@ -173,6 +173,22 @@ fn a_book_page_asks_for_its_details_once_and_keeps_them() {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
+fn unsupported_browser_sign_in_leaves_the_password_form_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = signed_out(&ctx, dir.path());
+    let mut status = abs::ServerStatus { auth_methods: vec!["openid".into(), "local".into()], ..Default::default() };
+    status.auth_form_data.auth_open_id_auto_launch = true;
+    app.handle(crate::bridge::AccountMsg::Status { session: app.bridge.session(), status, warning: None, server: "https://books.example.com".into() });
+    assert!(!app.login.as_ref().unwrap().busy, "the password form remains available");
+    assert!(app.openid.pending.is_none());
+    app.apply(Action::OpenId);
+    assert!(app.login.as_ref().unwrap().error.as_deref().unwrap().contains("only available on macOS"));
+    assert!(!app.login.as_ref().unwrap().busy);
+}
+
+#[test]
 fn a_bare_address_becomes_the_full_one_the_server_answered_at() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.solidsilver.rede</id>
+  <name>Rede</name>
+  <summary>Listen to books from an Audiobookshelf server</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="dev.solidsilver">
+    <name>Luke M</name>
+  </developer>
+  <description>
+    <p>
+      Rede is a native audiobook player for Audiobookshelf. Resume a book,
+      browse chapters, change speed without changing pitch, set a sleep timer,
+      and download books to listen offline. This is an early beta.
+    </p>
+  </description>
+  <launchable type="desktop-id">dev.solidsilver.rede.desktop</launchable>
+  <url type="homepage">https://github.com/Solidsilver/ond/blob/main/docs/rede/README.md</url>
+  <url type="bugtracker">https://github.com/Solidsilver/ond/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0-beta.1" date="2026-11-11" type="development">
+      <description><p>First beta for macOS and Linux.</p></description>
+    </release>
+  </releases>
+  <provides><binary>rede</binary></provides>
+</component>

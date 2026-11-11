@@ -21,6 +21,8 @@ jobs:
           rustup default stable
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Release packaging tests
+        run: python3 scripts/test-release.py
 
   check:
     strategy:
@@ -42,7 +44,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang cmake pkg-config
 
       - uses: Swatinem/rust-cache@v2
 

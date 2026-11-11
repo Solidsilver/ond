@@ -93,7 +93,9 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 
 ## Releases and updates
 - [ ] Push an `ond-v` tag whose version isn't the crate's: the release workflow stops at its first job. With the right version, it builds and publishes "Ond X.Y.Z" with the notes from `.github/release-notes/ond/`, and GitHub's changelog starts at Ond's previous tag.
-- [ ] Push a `rede-v` tag: only the first job runs, with a notice that Rede release packaging is not enabled in CI; no release is published.
+- [ ] Run Release manually with `app: rede`: macOS universal and Linux x86_64/ARM64 bundles are uploaded, Windows is skipped, and nothing is published. Repeat with `app: ond` for all three platforms.
+- [ ] Push a mismatched `rede-v` tag: the first job refuses it. A matching `rede-v0.1.0-beta.1` tag publishes Rede's four archives and its own notes as a prerelease, without becoming the repository's latest stable release or using Ond's history as the initial changelog.
+- [ ] Install Rede's CI bundles on macOS and Linux, launch from the app menu, relaunch with saved credentials, then uninstall on Linux. User data and Ond's installation stay untouched. Check the detailed beta gates in [docs/releasing.md](docs/releasing.md).
 - [ ] A GitHub build older than the newest Ond release: Settings › About says the new version is available, shows its notes, and Download opens its page. A Rede release newer than it doesn't change that.
 
 ## Analysis
@@ -155,8 +157,16 @@ and snapshots do not sign in to a server.
 
 Rede's output device picker is deferred: Ond's current panel combines device
 preferences and bit-perfect controls. Rede continues following system output;
-select AirPlay or another output in the system controls for now. ⌘B bookmarks
-and ⌘K search remain for later milestones.
+select AirPlay or another output in the system controls for now. Bookmarks
+(⌘B / Ctrl+B) and search (⌘K / Ctrl+K) are implemented.
+
+## Rede Linux beta
+
+- [ ] Password sign-in works with a running, unlocked Secret Service keyring (GNOME Keyring or KWallet); quit and relaunch without signing in again.
+- [ ] An OpenID-only server says an Audiobookshelf password is needed. A server offering both methods with OpenID auto-launch enabled stays on the password form; no browser flow starts.
+- [ ] PipeWire playback, speed, voice boost and silence removal work; repeat on ALSA where available. Output follows the system device.
+- [ ] On Wayland and X11: app icon/menu entry, dragging and resizing, Full/Player/Mini, keyboard shortcuts and idle CPU. MPRIS/media keys are not supported in this beta.
+- [ ] Download, quit, disconnect, relaunch and listen offline; reconnect and check progress and listening sessions on ABS.
 
 ## Rede OpenID sign-in on macOS
 

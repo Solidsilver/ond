@@ -1,7 +1,8 @@
 # Playing books
 
-The book page's Play button opens an Audiobookshelf session. Resume uses the
-session's position unless the shelf has a newer local position. Finishing a
+The book page's Play button opens an Audiobookshelf session when reachable,
+or a local listening session for a downloaded book while offline. Resume uses
+the session's position unless the shelf has a newer local position. Finishing a
 book starts its next play at the beginning. Equal timestamps favour the server.
 
 The title bar is the player, as Ond's toolbar is: the transport at the left,
@@ -11,7 +12,7 @@ thin line underneath shows progress through the whole book. The capsule grows
 with the window (0.47 of its width, from 330 to 1000 points), so a wide window
 gets a finer scrubber. Clicking the cover opens the Player; clicking the
 chapter's name opens the chapters column at the right (⌥⌘U shows and hides
-it), which lists the chapters, the bookmarks to come, and the book's details.
+it), which lists the chapters, bookmarks and the book's details.
 At the capsule's right end, two small chips show the speed and the sleep
 timer (lit, with what's left, while it runs) and open their menus. The speed
 menu also holds skip intervals, rewind on resume, the sleep settings and
@@ -59,11 +60,12 @@ Failed reports remain pending. Replay runs at startup, before a newer live
 report, and every 30 seconds while the account remains connected. It collapses
 pending entries to the newest timestamp per item and sends one `set_progress`
 batch, marking all covered entries synced only after success. Server progress
-timestamps protect newer listening on
-another device from old replay entries. Replayed entries retain listening time
-locally; counting those intervals in ABS's listening statistics through local
-sessions belongs to M4. Only completion sends `isFinished: true`; no path sends
-`isFinished: false`.
+timestamps protect newer listening on another device from old replay entries.
+Offline listening is also replayed as timestamped ABS local sessions before
+position replay, so it counts towards server listening statistics without
+rewinding newer progress. Automatic completion sends `isFinished: true`;
+explicit Un-finish and Start over actions can clear it. The offline store and
+session replay are described in the [offline design](design.md#milestones).
 
 File ids use `ItemKey`'s account-qualified string form. Rede supplies the default
 `ReplyCheck`: ABS uses real HTTP errors, which streamcache rejects before it
@@ -75,9 +77,9 @@ successful start stops it. No audio-engine changes were needed.
 
 The player uses the existing shell buttons, icons, theme and focus ring. It
 follows Ond's toolbar without sharing its code, so Ond's rendering code is
-unchanged. The cache retains
-streamcache's existing file-based eviction; whole-book eviction and pinned
-downloads remain later work.
+unchanged. The stream cache retains file-based eviction. Pinned books live in
+a separate per-account offline store and play from local files when fully
+downloaded.
 
 ## Speech processing
 

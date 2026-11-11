@@ -1,6 +1,6 @@
 [package]
 name = "rede"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -11,11 +11,11 @@ name = "Rede"
 path = "src/main.rs"
 
 [dependencies]
-offline = { version = "0.4.4", path = "../../crates/offline" }
+offline = { version = "0.5.0", path = "../../crates/offline" }
 url = "2.5.8"
-abs = { version = "0.4.4", path = "../../crates/abs" }
-audio = { version = "0.4.4", path = "../../crates/audio" }
-streamcache = { version = "0.4.4", path = "../../crates/streamcache" }
+abs = { version = "0.5.0", path = "../../crates/abs" }
+audio = { version = "0.5.0", path = "../../crates/audio" }
+streamcache = { version = "0.5.0", path = "../../crates/streamcache" }
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
@@ -25,9 +25,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 keyring = "4.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-shelf = { version = "0.4.4", path = "../../crates/shelf" }
-shell = { version = "0.4.4", path = "../../crates/shell" }
-sources = { version = "0.4.4", path = "../../crates/sources" }
+shelf = { version = "0.5.0", path = "../../crates/shelf" }
+shell = { version = "0.5.0", path = "../../crates/shell" }
+sources = { version = "0.5.0", path = "../../crates/sources" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -42,7 +42,7 @@ bytes = "1.12.1"
 # Offscreen rendering for the snapshot (`app/snapshots.rs`).
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
 # The Linux window controls on any platform, and stand-in traffic lights.
-shell = { version = "0.4.4", path = "../../crates/shell", features = ["preview"] }
+shell = { version = "0.5.0", path = "../../crates/shell", features = ["preview"] }
 tempfile = "3"
 testkit = { path = "../../crates/testkit" }
 

@@ -156,6 +156,10 @@ impl RedeApp {
 
     pub(super) fn begin_openid(&mut self) {
         let Some(form) = self.login.as_mut().filter(|f| !f.busy && f.status.is_some() && f.server.trim() == f.checked_server) else { return };
+        if !crate::openid::SUPPORTED {
+            form.error = Some("Browser sign-in is only available on macOS for now. Use an Audiobookshelf password on Linux.".into());
+            return;
+        }
         form.busy = true;
         form.error = None;
         let account =
@@ -174,7 +178,7 @@ impl RedeApp {
                 // in is shown, and kept, as what it turned out to be.
                 form.server = server.clone();
                 form.checked_server = server;
-                let launch = status.auth_methods.iter().any(|m| m == "openid") && status.auth_form_data.auth_open_id_auto_launch;
+                let launch = crate::openid::SUPPORTED && status.auth_methods.iter().any(|m| m == "openid") && status.auth_form_data.auth_open_id_auto_launch;
                 form.status = Some(status);
                 if launch {
                     self.begin_openid();
@@ -428,7 +432,7 @@ impl RedeApp {
         let mut action = None;
         let status = form.status.as_ref().filter(|_| form.checked_server == form.server.trim());
         let local = status.is_some_and(|s| s.auth_methods.is_empty() || s.auth_methods.iter().any(|m| m == "local"));
-        let oidc = status.is_some_and(|s| s.auth_methods.iter().any(|m| m == "openid"));
+        let oidc = crate::openid::SUPPORTED && status.is_some_and(|s| s.auth_methods.iter().any(|m| m == "openid"));
         let oidc_label = status.and_then(|s| s.auth_form_data.auth_open_id_button_text.as_deref()).unwrap_or("Sign in with OpenID");
         let custom_message = status.and_then(|s| s.auth_form_data.auth_login_custom_message.as_deref()).filter(|m| !m.is_empty());
         // Which spinner turns, if any: each phase gets its own few seconds.
@@ -570,7 +574,11 @@ impl RedeApp {
                                 ui,
                                 &t,
                                 "No way to sign in",
-                                "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID.",
+                                if crate::openid::SUPPORTED {
+                                    "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID."
+                                } else {
+                                    "Browser sign-in is only available on macOS for now. Ask your admin to enable an Audiobookshelf password for this account."
+                                },
                             );
                         }
                         if let Some(error) = &form.error

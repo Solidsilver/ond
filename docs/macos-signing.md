@@ -1,6 +1,6 @@
 # Signing and notarizing the macOS app
 
-The release workflow signs Ond.app and the .dmg with a Developer ID certificate and sends the .dmg to Apple's notary service. A signed, notarized app opens on the first try, without the Open Anyway step. The work happens in `scripts/bundle-macos.sh`. The workflow's job is to get the certificate and the notary key onto the runner from five repository secrets. With no secrets set, the app is signed ad hoc, as before.
+The release workflow signs Ond.app or Rede.app and its .dmg with a Developer ID certificate and sends the .dmg to Apple's notary service. A signed, notarized app opens on the first try, without the Open Anyway step. The work happens in `scripts/bundle-macos.sh` and `scripts/bundle-rede-macos.sh`. Both apps use the same five repository secrets. With no secrets set, the app is signed ad hoc.
 
 You need a paid Apple Developer Program membership. Only the account holder can create a Developer ID certificate.
 
@@ -49,7 +49,9 @@ OND_NOTARY_KEY=~/keys/AuthKey_XXXX.p8 OND_NOTARY_KEY_ID=XXXX OND_NOTARY_ISSUER=x
   scripts/bundle-macos.sh
 ```
 
-Notarization usually takes a few minutes. To check the result:
+For Rede, use `scripts/bundle-rede-macos.sh` with the same variables. Rede also accepts `REDE_SIGN_IDENTITY` and `REDE_NOTARY_KEY` / `REDE_NOTARY_KEY_ID` / `REDE_NOTARY_ISSUER` overrides. Its `--dev` mode always uses an ad-hoc signature and skips notarization.
+
+Notarization usually takes a few minutes. To check the result (replace Ond with Rede for that app):
 
 ```sh
 spctl --assess --type execute --verbose=2 target/bundle/Ond.app   # "source=Notarized Developer ID"

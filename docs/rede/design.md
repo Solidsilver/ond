@@ -4,7 +4,7 @@ Rede is a native audiobook player for [Audiobookshelf](https://www.audiobookshel
 
 The name: in German *Rede* is a speech or a talk, and in old English to *rede* is to tell, or to give counsel. It reads like "read". It fits podcasts too, which come later.
 
-Status: design, being built. Written November 2026. Claims about Ond's code, the Audiobookshelf server (checked against its source at 2.37.2) and the crates named here were verified on 7 November 2026; corrections are folded in below.
+Status: [first beta, for macOS and Linux](README.md). Local folders, several accounts and podcasts below are plans, not beta features. Written November 2026. Claims about Ond's code, the Audiobookshelf server (checked against its source at 2.37.2) and the crates named here were verified on 7 November 2026; corrections are folded in below.
 
 ## Goals
 
@@ -547,7 +547,7 @@ full UUID's numeric value through `offline::account_store`; Ond's existing
 
 **M6: several accounts.** Mixed library with source dots and filters, listener-only accounts, listening with others.
 
-**M7: Linux and Windows.** MPRIS and SMTC changes, packaging, Nix.
+**M7: platform integration.** The first beta includes Linux x86_64/ARM64 bundles with password sign-in. Linux OpenID redirects and MPRIS/media keys, Windows integration and bundles, and Rede's Nix packaging remain to do.
 
 **Later:** podcasts (ABS podcast libraries, then RSS), live updates over socket.io, Chromecast and Sonos, matching the same book across sources, Jellyfin.
 

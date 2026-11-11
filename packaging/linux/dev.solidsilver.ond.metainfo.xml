@@ -21,6 +21,11 @@
   <url type="bugtracker">https://github.com/Solidsilver/ond/issues</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.0" date="2026-11-11">
+      <description>
+        <p>Generated covers, interface zoom, clearer settings and notices with Retry and Undo.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-24">
       <description>
         <p>First release for Linux and Windows.</p>

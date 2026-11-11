@@ -11,9 +11,9 @@ name = "Ond"
 path = "src/main.rs"
 
 [dependencies]
-analysis = { version = "0.4.4", path = "../../crates/analysis" }
+analysis = { version = "0.5.0", path = "../../crates/analysis" }
 anyhow = "1.0.104"
-audio = { version = "0.4.4", path = "../../crates/audio" }
+audio = { version = "0.5.0", path = "../../crates/audio" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
 # `clipboard` gives text fields copy and paste; `links` opens URLs in the browser.
@@ -21,14 +21,14 @@ eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "de
 egui = "0.37.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 keyring = "4.2.0"
-library = { version = "0.4.4", path = "../../crates/library" }
+library = { version = "0.5.0", path = "../../crates/library" }
 realfft = "3.5.0"
-offline = { version = "0.4.4", path = "../../crates/offline" }
+offline = { version = "0.5.0", path = "../../crates/offline" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-shell = { version = "0.4.4", path = "../../crates/shell" }
-streamcache = { version = "0.4.4", path = "../../crates/streamcache" }
-subsonic = { version = "0.4.4", path = "../../crates/subsonic" }
+shell = { version = "0.5.0", path = "../../crates/shell" }
+streamcache = { version = "0.5.0", path = "../../crates/streamcache" }
+subsonic = { version = "0.5.0", path = "../../crates/subsonic" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 # Reads the releases feed for the update check; fontique already builds it on Linux.
 roxmltree = "0.21.2"
@@ -42,10 +42,10 @@ workspace = true
 
 [dev-dependencies]
 # Offscreen rendering for the review snapshots (`app/snapshots.rs`).
-audio = { version = "0.4.4", path = "../../crates/audio", features = ["preview"] }
+audio = { version = "0.5.0", path = "../../crates/audio", features = ["preview"] }
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
 # The Linux window controls on any platform, for the snapshots and UI tests.
-shell = { version = "0.4.4", path = "../../crates/shell", features = ["preview"] }
+shell = { version = "0.5.0", path = "../../crates/shell", features = ["preview"] }
 tempfile = "3"
 testkit = { path = "../../crates/testkit" }
 

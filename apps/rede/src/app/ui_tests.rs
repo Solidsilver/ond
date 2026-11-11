@@ -1385,7 +1385,10 @@ fn discovered_methods_name_only_the_controls_the_server_offers() {
         *h.state_mut() = Some(signin(&h.ctx.clone(), dir.path(), both, false));
         h.run_steps(3);
         h.check_accessibility();
-        h.get_by_label("Sign in with Book Club");
+        assert_eq!(h.query_all_by_label("Sign in with Book Club").next().is_some(), crate::openid::SUPPORTED);
+        if !crate::openid::SUPPORTED && !both {
+            h.get_by_label("No way to sign in");
+        }
         assert_eq!(h.query_all_by_label("Username").next().is_some(), both);
         assert_eq!(h.query_all_by_label("Password").next().is_some(), both);
     }
