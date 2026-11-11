@@ -4,7 +4,7 @@
 //! artist, the length, the download mark, what a screen reader hears) are
 //! drawn here, and where they sit is named in [`col`].
 
-use super::offline_page::Mark;
+use super::offline_page::track_mark;
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::widgets::{elide, row_fill};
@@ -124,7 +124,7 @@ impl TrackRow {
 
     /// The download mark centred at `x`, when the song has one.
     pub fn mark(&self, ui: &Ui, x: f32, state: Option<&offline::TrackState>) {
-        if let Some(m) = Mark::of_track(state) {
+        if let Some(m) = track_mark(state) {
             super::offline_page::mark(ui, pos2(x, self.cy()), col::MARK, m);
         }
     }

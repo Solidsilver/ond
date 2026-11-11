@@ -51,6 +51,9 @@
 //!   and what's laid over any cover to say how far along it is
 //!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
 //!   badge in its corner), with [`progress_bar`], the same line on its own.
+//! - [`download`]: the [`DownloadMark`] painted by [`download_mark`] on
+//!   whatever is downloaded or on its way (a check in a ring, a filling
+//!   ring, a warning).
 //! - [`nav`]: [`nav_row`], the row above a page's heading with back,
 //!   forward and the breadcrumb, which says what was clicked as a
 //!   [`NavClick`].
@@ -62,6 +65,7 @@
 pub mod buttons;
 pub mod controls;
 pub mod covers;
+pub mod download;
 pub mod menus;
 pub mod nav;
 pub mod palette;
@@ -74,6 +78,7 @@ pub mod toasts;
 pub use buttons::*;
 pub use controls::*;
 pub use covers::*;
+pub use download::*;
 pub use menus::*;
 pub use nav::*;
 pub use palette::*;

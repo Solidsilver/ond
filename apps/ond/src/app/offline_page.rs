@@ -10,8 +10,9 @@ use crate::icons::{self, Icon};
 use crate::nav::Route;
 use crate::theme::{Tokens, semibold};
 use crate::widgets::{danger, elide, link, secondary};
-use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
+use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use offline::{Pin, PinSummary, SetAside, Snapshot};
+pub use shell::kit::{DownloadMark as Mark, download_mark as mark};
 
 /// Storage caps offered in the limit menu, in GB.
 const LIMITS: [u64; 6] = [10, 25, 50, 100, 250, 500];
@@ -132,7 +133,7 @@ impl ViewCtx<'_> {
     /// A mark and a few words next to the Play buttons, only when `pin` is kept.
     pub(super) fn pin_status(&self, ui: &mut Ui, pin: &Pin) {
         let Some(s) = self.downloads.snap.pin(pin) else { return };
-        let Some(m) = Mark::of_pin(Some(s)) else { return };
+        let Some(m) = pin_mark(Some(s)) else { return };
         let t = Tokens::of(ui);
         let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
         mark(ui, r.center(), 12.0, m);
@@ -345,7 +346,7 @@ impl ViewCtx<'_> {
             fill.set_width(bar.width() * p.fraction());
             ui.painter().rect_filled(fill, 1.5, if snap.paused { t.muted } else { t.accent });
         }
-        if let Some(m) = Mark::of_pin(Some(p)) {
+        if let Some(m) = pin_mark(Some(p)) {
             mark(ui, pos2(rect.right() - 14.0, rect.center().y), 12.0, m);
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
@@ -375,63 +376,17 @@ impl ViewCtx<'_> {
     }
 }
 
-/// How far along something is on its way to this computer, as the lists,
-/// tiles and sidebar mark it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mark {
-    Done,
-    /// 0..=1; 0 while waiting its turn.
-    Progress(f32),
-    Failed,
+/// The mark a track gets, from its download's state.
+pub fn track_mark(state: Option<&offline::TrackState>) -> Option<Mark> {
+    Some(match state? {
+        offline::TrackState::Done { .. } => Mark::Done,
+        offline::TrackState::Queued => Mark::Progress(0.0),
+        offline::TrackState::Downloading { done, total } => Mark::Progress(total.map_or(0.0, |t| *done as f32 / t.max(1) as f32)),
+        offline::TrackState::Failed { .. } => Mark::Failed,
+    })
 }
 
-impl Mark {
-    pub fn of_track(state: Option<&offline::TrackState>) -> Option<Mark> {
-        Some(match state? {
-            offline::TrackState::Done { .. } => Mark::Done,
-            offline::TrackState::Queued => Mark::Progress(0.0),
-            offline::TrackState::Downloading { done, total } => Mark::Progress(total.map_or(0.0, |t| *done as f32 / t.max(1) as f32)),
-            offline::TrackState::Failed { .. } => Mark::Failed,
-        })
-    }
-
-    pub fn of_pin(sum: Option<&offline::PinSummary>) -> Option<Mark> {
-        let sum = sum?;
-        Some(if sum.complete() {
-            Mark::Done
-        } else if sum.failed > 0 && !sum.downloading && sum.done + sum.failed == sum.total {
-            Mark::Failed
-        } else {
-            Mark::Progress(sum.fraction())
-        })
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Mark::Done => "Downloaded",
-            Mark::Progress(f) if f > 0.0 => "Downloading",
-            Mark::Progress(_) => "Waiting to download",
-            Mark::Failed => "Download failed",
-        }
-    }
-}
-
-/// The small glyph for a [`Mark`], centred at `center`, about `size` across.
-pub fn mark(ui: &Ui, center: egui::Pos2, size: f32, m: Mark) {
-    let t = Tokens::of(ui);
-    let r = size / 2.0;
-    match m {
-        // A check in a ring: "downloaded", where the Download icon's arrow reads as the action.
-        Mark::Done => {
-            let stroke = egui::Stroke::new(1.2, t.muted);
-            ui.painter().circle_stroke(center, r * 0.88, stroke);
-            let p = |x: f32, y: f32| center + vec2(x, y) * r;
-            ui.painter().add(egui::Shape::line(vec![p(-0.4, 0.0), p(-0.1, 0.32), p(0.42, -0.28)], stroke));
-        }
-        Mark::Progress(f) => crate::icons::progress_ring(ui.painter(), center, r * 0.8, f, t.accent, t.hairline),
-        Mark::Failed => {
-            ui.painter().circle_stroke(center, r * 0.8, egui::Stroke::new(1.3, t.warn));
-            ui.painter().text(center, Align2::CENTER_CENTER, "!", FontId::new(size * 0.7, semibold()), t.warn);
-        }
-    }
+/// The mark an album, playlist or song gets, from its pin.
+pub fn pin_mark(sum: Option<&offline::PinSummary>) -> Option<Mark> {
+    sum.map(|s| Mark::of_counts(s.done, s.failed, s.total, s.downloading, s.fraction()))
 }

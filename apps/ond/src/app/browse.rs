@@ -2,7 +2,7 @@
 //! Artists, an artist's page, and albums by genre / year / label.
 
 use super::OfflineAction;
-use super::offline_page::Mark;
+use super::offline_page::pin_mark;
 use super::view_ctx::ViewCtx;
 use super::virtual_list::VirtualList;
 use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
@@ -478,7 +478,7 @@ impl ViewCtx<'_> {
             let art = Rect::from_min_size(rect.min, vec2(tile, tile));
             self.art.paint_as(ui, art, album.cover_art.as_deref(), 6.0, &crate::art::album_cover(album));
             // Only albums kept offline carry a mark; nothing otherwise.
-            let mark = Mark::of_pin(pin);
+            let mark = pin_mark(pin);
             let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
             let title = elide(ui, &album.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
