@@ -1174,7 +1174,7 @@ fn the_sidebar_gear_opens_settings_in_the_column_and_the_rail() {
         app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
         app_mut(&mut h).ui.settings = super::settings_page::Tab::Account;
         h.run_steps(3);
-        h.get_by_label("Settings (⌘,)").click();
+        h.get_by_label(&shell::keys::shown("Settings (⌘,)")).click();
         h.run_steps(3);
         assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
         assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account, "on the tab it was last on");
@@ -1428,13 +1428,13 @@ fn the_sidebar_folds_to_its_rail_and_the_window_remembers() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     h.run_steps(3);
-    h.get_by_label("Collapse sidebar (⌥⌘S)").click();
+    h.get_by_label(&shell::keys::shown("Collapse sidebar (⌥⌘S)")).click();
     h.run_steps(3);
     assert!(app_mut(&mut h).prefs.get(|s| s.sidebar_collapsed), "saved with the preferences");
     // The rail keeps every place and the account.
     h.get_by_label("Library");
     h.get_by_label_contains("sam, ");
-    h.get_by_label("Expand sidebar (⌥⌘S)").click();
+    h.get_by_label(&shell::keys::shown("Expand sidebar (⌥⌘S)")).click();
     h.run_steps(3);
     assert!(!app_mut(&mut h).prefs.get(|s| s.sidebar_collapsed));
     // ⌥⌘S does the same.
@@ -1446,9 +1446,9 @@ fn the_sidebar_folds_to_its_rail_and_the_window_remembers() {
     app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(false));
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
     h.run_steps(3);
-    assert_eq!(h.query_all_by_label_contains("sidebar (⌥⌘S)").count(), 0);
+    assert_eq!(h.query_all_by_label_contains(&shell::keys::shown("sidebar (⌥⌘S)")).count(), 0);
     h.get_by_label("Library");
-    h.get_by_label("Keyboard shortcuts (⌘/)");
+    h.get_by_label(&shell::keys::shown("Keyboard shortcuts (⌘/)"));
 }
 
 #[test]
@@ -1489,7 +1489,7 @@ fn the_sidebar_foot_sits_inside_the_window() {
         h.run_steps(3);
         let window = h.ctx.content_rect();
         for label in ["sam, books.example.com", "Keyboard shortcuts (⌘/)"] {
-            let rect = h.get_by_label(label).rect();
+            let rect = h.get_by_label(&shell::keys::shown(label)).rect();
             let room = window.bottom() - rect.bottom();
             assert!(room >= f32::from(super::sidebar::FOOT_MARGIN) - 0.5, "{label} (collapsed: {collapsed}) has {room} under it: {rect:?}");
         }
@@ -1745,7 +1745,7 @@ fn command_k_command_f_and_slash_open_the_palette_and_esc_closes_it() {
         assert!(app_mut(&mut h).ui.palette.is_none(), "esc closes it");
     }
     // The sidebar's field opens it too.
-    h.get_by_label("Search (⌘K)").click();
+    h.get_by_label(&shell::keys::shown("Search (⌘K)")).click();
     h.run_steps(3);
     assert!(app_mut(&mut h).ui.palette.is_some());
 }
