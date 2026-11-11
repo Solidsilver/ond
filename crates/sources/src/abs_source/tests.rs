@@ -351,3 +351,51 @@ async fn undoing_finished_progress_resets_with_an_earlier_stamp_then_restores_th
     assert_eq!(body[0]["lastUpdate"], 500);
     assert!(body[0].get("isFinished").is_none());
 }
+
+#[tokio::test]
+async fn local_sessions_always_send_the_last_entry_stamp_and_keep_accepted_ids() {
+    let fake = JsonFake::start(|seen| {
+        assert_eq!(seen.path(), "/api/session/local-all");
+        Answer::ok(r#"{"results":[{"id":"stable","success":true,"progressSynced":false},{"id":"refused","success":false}]}"#)
+    });
+    let client = abs::Client::new(fake.base(), abs::DeviceInfo::new("device", "test")).unwrap().with_tokens(Tokens::new("secret", "refresh"));
+    let source = AbsSource::new(account(), client, vec![]);
+    let session = crate::LocalSession {
+        id: "stable".into(),
+        item: ItemKey::new(account(), "book"),
+        library: "books".into(),
+        duration: Some(100.0),
+        start: Position::from_secs(10.0),
+        current: Position::from_secs(25.0),
+        listened: Duration::from_secs(15),
+        started_at: Stamp::from_millis(1000).system_time(),
+        updated_at: Stamp::from_millis(2000).system_time(),
+    };
+    assert_eq!(source.sync_local_sessions(&[session]).await.unwrap(), ["stable"]);
+    let body: serde_json::Value = serde_json::from_str(&fake.seen()[0].body).unwrap();
+    assert_eq!(body["sessions"][0]["updatedAt"], 2000);
+    assert_eq!(body["sessions"][0]["startedAt"], 1000);
+    assert_eq!(body["sessions"][0]["playMethod"], 3);
+    assert_eq!(body["sessions"][0]["timeListening"], 15.0);
+}
+
+#[tokio::test]
+async fn older_servers_can_decline_local_sessions_and_download_urls_follow_rotated_tokens() {
+    let fake = JsonFake::start(|seen| {
+        if seen.path() == "/auth/refresh" {
+            Answer::ok(r#"{"user":{"id":"user","accessToken":"new-access","refreshToken":"new-refresh"}}"#)
+        } else {
+            Answer::new("404 Not Found", "")
+        }
+    });
+    let client = abs::Client::new(fake.base(), abs::DeviceInfo::new("device", "test")).unwrap().with_tokens(Tokens::new("secret", "refresh"));
+    let source = AbsSource::new(account(), client, vec![]);
+    assert!(matches!(source.sync_local_sessions(&[]).await, Err(Error::NotSupported(_))));
+    let file = TrackFile { content_id: "123".into(), ..Default::default() };
+    let old = source.file_url("book", &file).unwrap();
+    assert!(old.contains("/api/items/book/file/123?token=secret"));
+    source.refresh_downloads().await.unwrap();
+    let new = source.file_url("book", &file).unwrap();
+    assert!(new.ends_with("token=new-access"));
+    assert!(!new.contains("secret"));
+}

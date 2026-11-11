@@ -329,3 +329,18 @@ pub(crate) struct BookmarkEditV1 {
     pub value: BookmarkV1,
     pub base: Option<BookmarkV1>,
 }
+
+/// The local session identity is written with each report so a restart or a
+/// lost HTTP response can replay the same session without counting it twice.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct LocalListeningV1 {
+    pub id: String,
+    pub start: f64,
+    pub started_at_ms: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct ProgressEntryV2 {
+    pub entry: ProgressEntryV1,
+    pub local: Option<LocalListeningV1>,
+}

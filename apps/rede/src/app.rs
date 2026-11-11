@@ -59,6 +59,7 @@ mod book;
 mod bookmarks;
 mod bookmarks_tab;
 mod controls;
+mod downloads;
 mod home;
 mod library;
 mod nav;
@@ -155,6 +156,14 @@ pub enum Action {
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
     PlayBook(String),
+    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    DownloadBook(sources::ItemKey),
+    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    RemoveDownload(sources::ItemKey),
+    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    PauseDownloads(bool),
+    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    RetryDownloads,
     /// The book is finished: a progress entry with a stamp after the server's,
     /// and the server told. The loaded book is stopped first, so its session
     /// closes before the finish and cannot write the old position afterwards.
@@ -256,6 +265,7 @@ pub struct RedeApp {
     sleep_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
     positions: progress::Positions,
     stream_dir: std::path::PathBuf,
+    downloads: crate::downloads::State,
     pub bookmarks: bookmarks::State,
     pub reconciliation: Option<crate::listening::Reconciled>,
 }
@@ -334,6 +344,7 @@ impl RedeApp {
             bookmarks: bookmarks::State::default(),
             reconciliation: None,
             stream_dir: paths.art_cache.with_file_name("streams"),
+            downloads: Default::default(),
         })
     }
 
@@ -341,6 +352,8 @@ impl RedeApp {
     /// sign-out are dropped: they belong to an account nobody is using.
     fn handle(&mut self, msg: impl Into<Msg>) {
         match msg.into() {
+            Msg::Offline { session, event } if session == self.bridge.session() => self.download_event(event),
+            Msg::Offline { .. } => {}
             Msg::Account(m) => match m {
                 AccountMsg::SignedIn { session, account, source, shelf, warning } => {
                     if session != self.bridge.session() {
@@ -405,6 +418,7 @@ impl RedeApp {
         if e.is_network() {
             let offline = self.sync.offline;
             self.sync.offline = true;
+            self.download_connectivity();
             if self.sync.retry_at.is_none() {
                 let wait = Duration::from_secs(30);
                 self.sync.retry_at = Some(Instant::now() + wait);
@@ -456,6 +470,20 @@ impl RedeApp {
             }
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),
+            Action::DownloadBook(key) => self.download_book(key),
+            Action::RemoveDownload(key) => self.remove_download(&key),
+            Action::PauseDownloads(paused) => {
+                if let Some(store) = self.downloads.store.get() {
+                    store.set_paused(paused);
+                }
+            }
+            Action::RetryDownloads => {
+                self.downloads.refreshed = false;
+                self.downloads.errors.clear();
+                if let Some(store) = self.downloads.store.get() {
+                    store.retry_failed();
+                }
+            }
             Action::PlayBook(id) => self.play_book(id, None),
             Action::MarkFinished(id) => self.mark_finished(id),
             Action::MarkUnfinished(id) => self.mark_unfinished(id),
@@ -522,6 +550,17 @@ impl RedeApp {
     /// A change to a preference, saved once the burst of changes ends.
     fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
+            PrefsAction::RemoveDownloadsWhenFinished(enabled) => {
+                self.prefs.edit(|s| s.downloads.remove_when_finished = enabled);
+                self.shown.downloads.remove_when_finished = enabled;
+            }
+            PrefsAction::DownloadLimit(limit) => {
+                self.prefs.edit(|s| s.downloads.limit = limit);
+                self.shown.downloads.limit = limit;
+                if let Some(store) = self.downloads.store.get() {
+                    store.set_limit(limit);
+                }
+            }
             PrefsAction::Playback(mut playback) => {
                 playback.speed = crate::timeline::normalize_speed(playback.speed);
                 playback.skip_back = playback.skip_back.clamp(1, 300);

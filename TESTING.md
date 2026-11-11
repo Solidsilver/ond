@@ -304,3 +304,44 @@ place within ABS's ten-second end threshold finishes the book again, which
 limits un-finishing a book left at its very end. Everything else (the log,
 replay after an outage, the optimistic positions, the pull that races the
 write) runs against fakes in `cargo test -p rede`.
+
+## Rede: downloads and offline
+
+The download views are a later phase. Until they land, invoke the backend
+Actions from a development harness. Use a release build whenever audio plays.
+The automated coverage uses RangeServer for files and JsonFake for ABS, and
+checks the store, file sources, journal migration, timestamped local sessions,
+old-server fallback, limits and removal policy without audio hardware.
+
+With a throwaway ABS account and a real output device:
+
+- Download a single-file m4b and a book split across several files. Interrupt a
+  download, restart Rede, reconnect and verify its bytes resume and all tracks
+  and chapters are available. Pause/resume and retry should preserve the files.
+- Play a complete download online. Confirm playback uses disk while ABS still
+  records a server play session. Let a streamed book finish caching, then pin
+  it and confirm the store hard-links it on the same volume (copies across
+  volumes) without another transfer.
+- Quit, make the server unreachable, and start again. Library, Home and saved
+  book pages should remain. Seek and cross a file/chapter boundary in a complete
+  download; a partial or absent download should say "This book isn't
+  downloaded." Verify automatic reconnection without a new sign-in.
+- Listen offline, pause, restart, listen again, then reconnect. Check ABS's
+  listening statistics count each interval once. Interrupt a local-all response
+  and retry; its stable session id must prevent duplicate statistics. Listen
+  more after an acknowledged batch and confirm ABS receives cumulative time.
+- Advance progress on another device after the last offline report. Reconnect
+  with Rede paused: the older local session should contribute statistics without
+  moving the newer server position back. Inspect request timestamps without
+  recording tokens or full download URLs.
+- Reject `/api/session/local-all` with 404/405 (or use an older server). Positions
+  should still replay once through progress updates. Partial local-all results
+  should acknowledge successful sessions and retain failed ones for retry.
+- Expire an access token while files are queued. Confirm a rejected download
+  refreshes credentials and resumes, and subsequent URLs use the new token.
+  Check logs for accidental credentials.
+- Set a small storage limit and verify pending files wait until the limit is
+  raised or downloads are removed. "Remove downloads when finished" starts off;
+  enable it through the preference Action and confirm both listening to the end
+  and MarkFinished unpin the book. Signing out should keep all other downloads
+  and the shelf; another account must never see or change those pins.

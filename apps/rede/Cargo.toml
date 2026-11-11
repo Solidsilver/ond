@@ -11,6 +11,8 @@ name = "Rede"
 path = "src/main.rs"
 
 [dependencies]
+offline = { version = "0.4.4", path = "../../crates/offline" }
+url = "2.5.8"
 abs = { version = "0.4.4", path = "../../crates/abs" }
 audio = { version = "0.4.4", path = "../../crates/audio" }
 streamcache = { version = "0.4.4", path = "../../crates/streamcache" }

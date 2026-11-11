@@ -12,6 +12,7 @@ pub struct PrefsView {
     /// How large the interface is drawn, in percent.
     pub zoom: u16,
     pub playback: crate::settings::PlaybackSettings,
+    pub downloads: crate::settings::DownloadSettings,
     /// The chapters column is docked at the right (when the window has room).
     pub show_panel: bool,
     /// The sidebar is folded to its rail.
@@ -25,6 +26,7 @@ impl PrefsView {
             filter: s.filter,
             zoom: s.zoom,
             playback: s.playback,
+            downloads: s.downloads,
             show_panel: s.show_panel,
             sidebar_collapsed: s.sidebar_collapsed,
         })
@@ -37,6 +39,10 @@ impl PrefsView {
 pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
+    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    RemoveDownloadsWhenFinished(bool),
+    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    DownloadLimit(Option<u64>),
     /// Which books the library shows.
     Filter(LibraryFilter),
     /// The interface's size, in percent.

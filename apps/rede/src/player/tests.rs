@@ -3,8 +3,8 @@ use audio::StreamFormat;
 use sources::{AccountId, Chapter, ItemSummary, TrackFile};
 use std::cell::{Cell, RefCell};
 
-struct Fake {
-    sent: RefCell<Vec<Command>>,
+pub(crate) struct Fake {
+    pub(crate) sent: RefCell<Vec<Command>>,
     state: Cell<PlayState>,
     position: Cell<f64>,
     saved: Cell<f64>,

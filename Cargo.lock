@@ -3967,6 +3967,7 @@ dependencies = [
  "keyring",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
+ "offline",
  "serde",
  "serde_json",
  "shelf",
@@ -3978,6 +3979,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "winresource",
 ]

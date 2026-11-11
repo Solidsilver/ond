@@ -139,3 +139,7 @@ Rede does not yet read managed settings. Its own `settings.json` has
 `playback.skip_back` (15 seconds), `playback.skip_forward` (30 seconds),
 `playback.speed` (1.0), and `playback.rewind` (5 seconds after more than five
 minutes paused; 0 disables it). These are editable in the player's speed menu.
+
+Rede also keeps `downloads.remove_when_finished` (false) and `downloads.limit`
+(null for unlimited, otherwise bytes) in its own settings. The backend applies
+both; the Downloads settings controls are a later UI phase.

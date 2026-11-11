@@ -70,6 +70,7 @@ impl RedeApp {
                     client_version: env!("CARGO_PKG_VERSION").into(),
                     ..Default::default()
                 },
+                self.downloads.store.clone(),
             ));
         }
         self.listening.clone()
@@ -142,6 +143,7 @@ impl RedeApp {
         );
         let position = sources::Position::from_secs(at);
         self.positions.insert(key.item.clone(), sources::Progress { item: key.clone(), position, finished, at: Some(stamp) });
+        self.remove_finished_download(&key, finished);
         listening.send(Request::Set(sources::ProgressUpdate { item: key, position, finished, at: stamp, listened: Duration::ZERO }));
     }
 
@@ -211,6 +213,7 @@ impl RedeApp {
         for note in notes {
             match note {
                 Note::Report { update, close } => {
+                    self.remove_finished_download(&update.item, update.finished);
                     if let Some(listening) = &self.listening {
                         self.positions.insert(
                             update.item.item.clone(),
@@ -266,6 +269,7 @@ impl RedeApp {
                 for position in positions {
                     let old = self.positions.remove(&position.item.item);
                     let latest = crate::listening::newer(old, Some(position)).unwrap();
+                    self.remove_finished_download(&latest.item, latest.finished);
                     // A paused book is moved only for a real change. Comparing
                     // exact f64s made an unchanged position look different on
                     // every pull and re-seeked the engine.

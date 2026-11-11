@@ -41,7 +41,7 @@ mod bookmarks;
 mod model;
 pub use bookmarks::{BookmarkChange, BookmarkSnapshot, PendingBookmark};
 
-use model::{BookmarkV1, ChaptersV1, DetailsV1, ItemV1, LibrarySyncV1, PositionV1, ProgressEntryV1, SummaryV1, TracksV1};
+use model::{BookmarkV1, ChaptersV1, DetailsV1, ItemV1, LibrarySyncV1, LocalListeningV1, PositionV1, ProgressEntryV1, ProgressEntryV2, SummaryV1, TracksV1};
 
 use redb::{Database, ReadableDatabase, ReadableTable, Table, TableDefinition, WriteTransaction};
 use serde::{Serialize, de::DeserializeOwned};
@@ -51,7 +51,7 @@ use std::time::SystemTime;
 
 /// Bump when a stored row or an index layout changes, and handle the step in
 /// `migrate`.
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
 /// Ids that only go up: log entries and bookmarks are ordered by them, so the
@@ -65,7 +65,7 @@ const ITEMS_BY_LIBRARY: TableDefinition<(&str, &str, &str), ()> = TableDefinitio
 const TRACKS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("tracks");
 /// (account, item) → [`ChaptersV1`].
 const CHAPTERS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("chapters");
-/// Log id → [`ProgressEntryV1`], append-only.
+/// Log id → [`ProgressEntryV2`], append-only.
 const PROGRESS: TableDefinition<u64, &[u8]> = TableDefinition::new("progress");
 /// Log id → (): the entries no source has been told about yet, in log order.
 const UNSYNCED: TableDefinition<u64, ()> = TableDefinition::new("progress_unsynced");
@@ -123,6 +123,15 @@ pub type BookmarkId = u64;
 pub struct PendingProgress {
     pub id: ProgressId,
     pub update: ProgressUpdate,
+    pub local: Option<LocalListening>,
+}
+
+/// The durable identity and starting place of listening without a server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalListening {
+    pub id: String,
+    pub start: Position,
+    pub started_at: SystemTime,
 }
 
 /// A saved place in a book.
@@ -330,6 +339,11 @@ impl Shelf {
     /// is sent. For a source that has no share in progress (local folders,
     /// feeds) the log is the progress; nothing sends it.
     pub fn append_progress(&self, update: &ProgressUpdate) -> Result<ProgressId> {
+        self.append_listening(update, None)
+    }
+
+    /// Appends a report and its local-session identity in one transaction.
+    pub fn append_listening(&self, update: &ProgressUpdate, local: Option<&LocalListening>) -> Result<ProgressId> {
         let entry = ProgressEntryV1::new(&update.item, update);
         let position = PositionV1 { position: update.position.secs(), finished: update.finished, at_ms: entry.at_ms };
         let account = update.item.account.to_string();
@@ -337,7 +351,14 @@ impl Shelf {
         let id = {
             let mut counters = wt.open_table(COUNTERS)?;
             let id = next_id(&mut counters, NEXT_PROGRESS)?;
-            wt.open_table(PROGRESS)?.insert(id, encode(&entry)?.as_slice())?;
+            wt.open_table(PROGRESS)?.insert(
+                id,
+                encode(&ProgressEntryV2 {
+                    entry,
+                    local: local.map(|l| LocalListeningV1 { id: l.id.clone(), start: l.start.secs(), started_at_ms: Stamp::from(l.started_at).millis() }),
+                })?
+                .as_slice(),
+            )?;
             wt.open_table(UNSYNCED)?.insert(id, ())?;
             wt.open_table(POSITIONS)?.insert((account.as_str(), update.item.item.as_str()), encode(&position)?.as_slice())?;
             id
@@ -358,15 +379,41 @@ impl Shelf {
                 tracing::warn!("shelf: progress {id} is marked unsent but has no entry");
                 continue;
             };
-            match decode::<ProgressEntryV1>(held.value()) {
-                Ok(row) => match row.update() {
-                    Some(update) => out.push(PendingProgress { id, update }),
+            match decode::<ProgressEntryV2>(held.value()) {
+                Ok(row) => match row.entry.update() {
+                    Some(update) => out.push(PendingProgress {
+                        id,
+                        update,
+                        local: row.local.map(|l| LocalListening {
+                            id: l.id,
+                            start: Position::from_secs(l.start),
+                            started_at: Stamp::from_millis(l.started_at_ms).system_time(),
+                        }),
+                    }),
                     None => tracing::warn!("shelf: progress {id} names an account that isn't one; not sending it"),
                 },
                 Err(e) => tracing::warn!("shelf: progress {id} can't be read: {e}"),
             }
         }
         Ok(out)
+    }
+
+    /// All listening for one local session through a durable log id, including
+    /// already acknowledged reports. ABS upserts totals, so a later batch must
+    /// carry the cumulative time rather than just its new reports.
+    pub fn local_session_progress(&self, session: &str, through: ProgressId) -> Result<Vec<ProgressUpdate>> {
+        let rt = self.db.begin_read()?;
+        let mut updates = Vec::new();
+        for row in rt.open_table(PROGRESS)?.range(..=through)? {
+            let (_, bytes) = row?;
+            let row: ProgressEntryV2 = decode(bytes.value())?;
+            if row.local.as_ref().is_some_and(|l| l.id == session)
+                && let Some(update) = row.entry.update()
+            {
+                updates.push(update);
+            }
+        }
+        Ok(updates)
     }
 
     /// Marks entries as sent. The log keeps them; only the flag and the
@@ -381,7 +428,7 @@ impl Shelf {
             let mut unsynced = wt.open_table(UNSYNCED)?;
             for &id in ids {
                 let row = match log.get(id)? {
-                    Some(held) => match decode::<ProgressEntryV1>(held.value()) {
+                    Some(held) => match decode::<ProgressEntryV2>(held.value()) {
                         Ok(row) => Some(row),
                         Err(e) => {
                             tracing::warn!("shelf: progress {id} can't be read: {e}");
@@ -391,9 +438,9 @@ impl Shelf {
                     None => None,
                 };
                 if let Some(row) = row
-                    && !row.synced
+                    && !row.entry.synced
                 {
-                    log.insert(id, encode(&ProgressEntryV1 { synced: true, ..row })?.as_slice())?;
+                    log.insert(id, encode(&ProgressEntryV2 { entry: ProgressEntryV1 { synced: true, ..row.entry }, ..row })?.as_slice())?;
                 }
                 unsynced.remove(id)?;
             }
@@ -536,6 +583,20 @@ fn migrate(wt: &WriteTransaction, from: u32, to: u32) -> Result<()> {
             // Existing bookmark bytes stay frozen. Only the journal is new.
             1 => {
                 bookmarks::migrate_v1(wt)?;
+            }
+            2 => {
+                let mut log = wt.open_table(PROGRESS)?;
+                let entries: Vec<_> = log
+                    .iter()?
+                    .map(|row| {
+                        let (id, bytes) = row?;
+                        let entry = decode::<ProgressEntryV1>(bytes.value())?;
+                        Ok((id.value(), encode(&ProgressEntryV2 { entry, local: None })?))
+                    })
+                    .collect::<Result<_>>()?;
+                for (id, bytes) in entries {
+                    log.insert(id, bytes.as_slice())?;
+                }
             }
             _ => return Err(Error::NoMigration { from: version }),
         }

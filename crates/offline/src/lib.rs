@@ -139,6 +139,9 @@ impl PinSummary {
 pub struct Snapshot {
     pub version: u64,
     pub tracks: HashMap<String, TrackState>,
+    /// The most recent failed attempt, including tracks waiting to retry.
+    /// Callers can repair credentials before the retry budget runs out.
+    pub last_errors: HashMap<String, String>,
     pub pins: Vec<PinSummary>,
     /// Bytes of finished downloads.
     pub used_bytes: u64,
@@ -845,6 +848,7 @@ impl Inner {
         Snapshot {
             version: st.version,
             tracks,
+            last_errors: st.failures.iter().map(|(id, failure)| (id.clone(), failure.error.clone())).collect(),
             pins,
             used_bytes: st.pins.used(),
             free_bytes: free,

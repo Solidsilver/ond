@@ -38,6 +38,11 @@ struct Fake {
     progress_fails: AtomicBool,
     progress_calls: AtomicUsize,
     release: tokio::sync::Notify,
+    download_item: Mutex<Option<Item>>,
+    download_url: Mutex<Option<String>>,
+    local_sessions: Mutex<Vec<sources::LocalSession>>,
+    local_unsupported: AtomicBool,
+    lose_local_response: AtomicBool,
 }
 impl Fake {
     fn calls(&self) -> Vec<Call> {
@@ -47,7 +52,7 @@ impl Fake {
 #[async_trait]
 impl Source for Fake {
     fn capabilities(&self) -> Capabilities {
-        Capabilities { bookmarks: true, ..Default::default() }
+        Capabilities { bookmarks: true, local_sessions: true, ..Default::default() }
     }
     async fn libraries(&self) -> Result<Vec<Library>> {
         Ok(vec![])
@@ -56,7 +61,29 @@ impl Source for Fake {
         unreachable!()
     }
     async fn item(&self, id: &str) -> Result<Item> {
+        if self.progress_fails.load(Ordering::Relaxed) {
+            return Err(sources::Error::Network("offline".into()));
+        }
+        if let Some(item) = self.download_item.lock().unwrap().clone() {
+            return Ok(item);
+        }
         Ok(Item { summary: ItemSummary { id: id.into(), ..Default::default() }, ..Default::default() })
+    }
+    fn file_url(&self, _: &str, _: &sources::TrackFile) -> Result<String> {
+        self.download_url.lock().unwrap().clone().ok_or_else(|| sources::Error::NotSupported("No file".into()))
+    }
+    async fn sync_local_sessions(&self, sessions: &[sources::LocalSession]) -> Result<Vec<String>> {
+        if self.local_unsupported.load(Ordering::Relaxed) {
+            return Err(sources::Error::NotSupported("Old server".into()));
+        }
+        if self.progress_fails.load(Ordering::Relaxed) {
+            return Err(sources::Error::Network("offline".into()));
+        }
+        self.local_sessions.lock().unwrap().extend_from_slice(sessions);
+        if self.lose_local_response.swap(false, Ordering::Relaxed) {
+            return Err(sources::Error::Network("response lost".into()));
+        }
+        Ok(sessions.iter().map(|s| s.id.clone()).collect())
     }
     async fn cover(&self, _: &str, _: Option<u32>) -> Result<bytes::Bytes> {
         unreachable!()
@@ -863,4 +890,210 @@ fn a_failed_retry_backs_off_and_a_success_resets_it() {
     assert_eq!(next_retry_delay(doubled, true), RETRY_DELAY * 4);
     assert_eq!(next_retry_delay(MAX_RETRY_DELAY, true), MAX_RETRY_DELAY);
     assert_eq!(next_retry_delay(doubled, false), RETRY_DELAY);
+}
+
+async fn downloaded_rig(partial: bool) -> (Rig, crate::downloads::Store, testkit::RangeServer) {
+    let dir = tempfile::tempdir().unwrap();
+    let shelf = Arc::new(Shelf::open(dir.path().join("shelf.redb")).unwrap());
+    let key = ItemKey::new(test_account(), "book");
+    let body = vec![42; 4096];
+    let server = testkit::RangeServer::start(body.clone(), testkit::Serve::fast());
+    let item = Item {
+        summary: ItemSummary { id: "book".into(), library: "books".into(), title: "Book".into(), duration: Some(200.0), ..Default::default() },
+        tracks: vec![sources::TrackFile {
+            index: 1,
+            duration: Some(100.0),
+            suffix: Some("m4b".into()),
+            content_id: "ino".into(),
+            size: Some(body.len() as u64),
+            ..Default::default()
+        }],
+        chapters: vec![sources::Chapter { start: 0.0, end: 200.0, title: "Chapter".into() }],
+        ..Default::default()
+    };
+    let fake = Arc::new(Fake::default());
+    *fake.download_item.lock().unwrap() = Some(item.clone());
+    *fake.download_url.lock().unwrap() = Some(format!("{}/audio", server.base()));
+    // Exercise the same prepare ordering as a download: details are durable
+    // before the pin makes any files available for playback.
+    let fetched = fake.item(&key.item).await.unwrap();
+    shelf.set_details(&key, &fetched).unwrap();
+    let store = offline::OfflineStore::open(
+        offline::OfflineConfig { dir: dir.path().join("downloads"), limit: None, reply_check: Default::default() },
+        tokio::runtime::Handle::current(),
+        Arc::new(|| {}),
+    )
+    .unwrap();
+    let url = fake.file_url(&key.item, &item.tracks[0]).unwrap();
+    store.set_source(Some(Arc::new(move |_| url.clone())));
+    store.pin(offline::Pin::Book(key.to_string()), "Book", crate::downloads::tracks(&key, &item));
+    let completed = store.clone();
+    let id = crate::downloads::track_id(&key, item.tracks.first(), 1);
+    tokio::task::spawn_blocking(move || testkit::wait_until("the downloaded file", || completed.snapshot().is_done(&id))).await.unwrap();
+    if partial {
+        store.set_paused(true);
+        let mut item = item;
+        item.tracks.push(sources::TrackFile { index: 2, start_offset: 100.0, content_id: "second".into(), ..item.tracks[0].clone() });
+        shelf.set_details(&key, &item).unwrap();
+        store.pin(offline::Pin::Book(key.to_string()), "Book", crate::downloads::tracks(&key, &item));
+    }
+    store.set_source(None);
+    let downloads = crate::downloads::Store::default();
+    downloads.install(store);
+    fake.progress_fails.store(true, Ordering::Relaxed);
+    let (tx, events) = mpsc::unbounded_channel();
+    let listening = spawn_with_downloads(
+        &tokio::runtime::Handle::current(),
+        fake.clone(),
+        shelf.clone(),
+        DeviceInfo::default(),
+        downloads.clone(),
+        || true,
+        move |event| {
+            let _ = tx.send(event);
+        },
+    );
+    let mut rig = Rig { _dir: dir, shelf, fake, listening, events, key };
+    rig.event(|e| matches!(e, Event::Error(Failure::Network(_)))).await;
+    (rig, downloads, server)
+}
+
+#[tokio::test]
+async fn a_download_plays_after_an_unreachable_start_and_sends_local_listening_once() {
+    let (mut rig, downloads, server) = downloaded_rig(false).await;
+    drop(server);
+    let saved = ProgressUpdate { listened: Duration::ZERO, ..update(&rig.key, 8.0, false) };
+    let id = rig.shelf.append_progress(&saved).unwrap();
+    rig.shelf.mark_synced(&[id]).unwrap();
+    rig.listening.send(Request::Open { generation: 1, key: rig.key.clone(), at: None });
+    let Event::Opened { result: Ok(opened), .. } = rig.event(|e| matches!(e, Event::Opened { .. })).await else {
+        panic!("a downloaded book opens");
+    };
+    assert_eq!(opened.position, 8.0);
+    assert_eq!(opened.item.chapters.len(), 1);
+    let expected = downloads.get().unwrap().local_path(&crate::downloads::track_id(&rig.key, opened.item.tracks.first(), 1)).unwrap();
+    assert_eq!(url::Url::parse(&opened.session.tracks[0].url).unwrap().to_file_path().unwrap(), expected);
+    let mut player = crate::player::Player::default();
+    let engine = crate::player::tests::Fake::default();
+    player.load(*opened, 1.0, &engine, std::time::Instant::now()).unwrap();
+    assert!(engine.sent.borrow().iter().any(|cmd| matches!(cmd, audio::Command::PlayFrom(track, _) if track.url.starts_with("file://"))));
+    rig.report(23.0, false, false).await;
+    rig.report(38.0, false, true).await;
+    assert!(rig.fake.calls().is_empty(), "local playback never opens, syncs or closes a server session");
+    let pending = rig.shelf.pending_progress().unwrap();
+    assert_eq!(pending.len(), 2);
+    let last = pending.last().unwrap().update.at;
+    let local_id = pending[0].local.as_ref().unwrap().id.clone();
+    rig.fake.remote.lock().unwrap().push(Progress {
+        item: rig.key.clone(),
+        position: Position::from_secs(150.0),
+        finished: false,
+        at: Some(last + Duration::from_secs(60)),
+    });
+    rig.fake.progress_fails.store(false, Ordering::Relaxed);
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Positions(_))).await;
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    let sessions = rig.fake.local_sessions.lock().unwrap().clone();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!((sessions[0].id.as_str(), sessions[0].start.secs(), sessions[0].current.secs()), (local_id.as_str(), 8.0, 38.0));
+    assert_eq!(sessions[0].listened, Duration::from_secs(30));
+    assert_eq!(sessions[0].updated_at, last, "the server compares this stamp to newer phone progress");
+    assert!(!rig.fake.calls().iter().any(|c| matches!(c, Call::Patch(..))), "an accepted local session is never blindly PATCHed over newer server progress");
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Positions(_))).await;
+    assert_eq!(rig.fake.local_sessions.lock().unwrap().len(), 1);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_partial_download_refuses_to_open_offline_with_a_local_failure() {
+    let (mut rig, _, server) = downloaded_rig(true).await;
+    drop(server);
+    rig.listening.send(Request::Open { generation: 1, key: rig.key.clone(), at: None });
+    let Event::Opened { result: Err(failure), .. } = rig.event(|e| matches!(e, Event::Opened { .. })).await else {
+        panic!("a partial book refuses to open");
+    };
+    assert_eq!(failure, Failure::Local("This book isn't downloaded.".into()));
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_lost_local_session_response_reuses_the_id_and_later_reports_send_cumulative_time() {
+    let (mut rig, _, _server) = downloaded_rig(false).await;
+    rig.open(1, rig.key.clone()).await;
+    rig.report(15.0, false, false).await;
+    rig.fake.progress_fails.store(false, Ordering::Relaxed);
+    rig.fake.lose_local_response.store(true, Ordering::Relaxed);
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Error(Failure::Network(_)))).await;
+    rig.report(30.0, false, false).await;
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Positions(_))).await;
+    rig.report(45.0, false, false).await;
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Positions(_))).await;
+    let sent = rig.fake.local_sessions.lock().unwrap().clone();
+    assert_eq!(sent.iter().map(|s| s.listened.as_secs()).collect::<Vec<_>>(), [15, 30, 45]);
+    assert!(sent.iter().all(|s| s.id == sent[0].id));
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn an_old_server_replays_local_listening_as_progress_and_acknowledges_it() {
+    let (mut rig, _, _server) = downloaded_rig(false).await;
+    rig.open(1, rig.key.clone()).await;
+    rig.report(15.0, false, true).await;
+    rig.fake.progress_fails.store(false, Ordering::Relaxed);
+    rig.fake.local_unsupported.store(true, Ordering::Relaxed);
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Positions(_))).await;
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    assert!(rig.fake.calls().contains(&Call::Patch(15.0, false)));
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_download_still_opens_and_reports_a_server_session_while_online() {
+    let (mut rig, _, _server) = downloaded_rig(false).await;
+    rig.fake.progress_fails.store(false, Ordering::Relaxed);
+    rig.listening.send(Request::Reconcile);
+    rig.event(|e| matches!(e, Event::Positions(_))).await;
+    rig.listening.send(Request::Open { generation: 1, key: rig.key.clone(), at: None });
+    let Event::Opened { result: Ok(opened), .. } = rig.event(|e| matches!(e, Event::Opened { .. })).await else {
+        panic!("a downloaded book opens online");
+    };
+    assert_eq!(opened.session.id, "session-book");
+    assert!(opened.session.tracks.iter().all(|t| t.url.starts_with("file://")));
+    rig.report(15.0, false, true).await;
+    assert_eq!(rig.fake.calls(), [Call::Open("book".into()), Call::Report(15.0, Duration::from_secs(15)), Call::Close(15.0)]);
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn local_listening_replays_after_the_worker_restarts() {
+    let (mut rig, downloads, _server) = downloaded_rig(false).await;
+    rig.open(1, rig.key.clone()).await;
+    rig.report(15.0, false, true).await;
+    let id = rig.shelf.pending_progress().unwrap()[0].local.as_ref().unwrap().id.clone();
+    rig.listening.clone().finish().await.unwrap();
+    rig.fake.progress_fails.store(false, Ordering::Relaxed);
+    let (tx, events) = mpsc::unbounded_channel();
+    rig.events = events;
+    rig.listening = spawn_with_downloads(
+        &tokio::runtime::Handle::current(),
+        rig.fake.clone(),
+        rig.shelf.clone(),
+        DeviceInfo::default(),
+        downloads,
+        || true,
+        move |e| {
+            let _ = tx.send(e);
+        },
+    );
+    rig.event(|e| matches!(e, Event::Positions(_))).await;
+    assert_eq!(rig.fake.local_sessions.lock().unwrap()[0].id, id);
+    assert!(rig.shelf.pending_progress().unwrap().is_empty());
+    rig.finish().await;
 }

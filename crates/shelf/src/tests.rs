@@ -416,7 +416,7 @@ fn upgrading_v1_preserves_frozen_bookmarks_and_queues_them_for_sync() {
         wt.commit().unwrap();
     }
     let shelf = Shelf::open(&path).unwrap();
-    assert_eq!(shelf.schema_version().unwrap(), 2);
+    assert_eq!(shelf.schema_version().unwrap(), 3);
     let saved = shelf.bookmarks(&key("book")).unwrap();
     assert_eq!(saved[0].note, original.note);
     assert_eq!(shelf.pending_bookmarks().unwrap()[0].change, BookmarkChange::Create);
@@ -450,4 +450,52 @@ fn accepting_a_phone_position_does_not_create_listening_or_overwrite_a_newer_loc
     remote.position = Position::from_secs(700.0);
     assert!(!shelf.accept_position(&remote).unwrap());
     assert_eq!(shelf.position(&remote.item).unwrap().unwrap().position.secs(), 600.0);
+}
+
+#[test]
+fn progress_entry_v2_keeps_its_wire_format() {
+    let row = ProgressEntryV2 {
+        entry: ProgressEntryV1 { account: "a".into(), item: "b".into(), position: 1.5, finished: false, at_ms: 1, listened_ms: 2, synced: false },
+        local: Some(LocalListeningV1 { id: "s".into(), start: 2.0, started_at_ms: 2 }),
+    };
+    const BYTES: &[u8] = &[1, 97, 1, 98, 0, 0, 0, 0, 0, 0, 248, 63, 0, 2, 2, 0, 1, 1, 115, 0, 0, 0, 0, 0, 0, 0, 64, 4];
+    assert_eq!(encode(&row).unwrap(), BYTES, "{SHAPE_CHANGED}");
+    assert_eq!(decode::<ProgressEntryV2>(BYTES).unwrap(), row);
+}
+
+#[test]
+fn upgrading_v2_preserves_pending_online_progress_without_inventing_local_listening() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shelf.redb");
+    let update = update(42.0, false, 1000, 15);
+    {
+        let db = Database::create(&path).unwrap();
+        let wt = db.begin_write().unwrap();
+        wt.open_table(META).unwrap().insert(SCHEMA_KEY, 2).unwrap();
+        wt.open_table(PROGRESS).unwrap().insert(7, encode(&ProgressEntryV1::new(&update.item, &update)).unwrap().as_slice()).unwrap();
+        wt.open_table(UNSYNCED).unwrap().insert(7, ()).unwrap();
+        wt.commit().unwrap();
+    }
+    let shelf = Shelf::open(path).unwrap();
+    let pending = shelf.pending_progress().unwrap();
+    assert_eq!(pending[0], PendingProgress { id: 7, update, local: None });
+    shelf.mark_synced(&[7]).unwrap();
+    assert!(shelf.pending_progress().unwrap().is_empty());
+}
+
+#[test]
+fn local_listening_keeps_its_identity_and_cumulative_time_across_acknowledgements_and_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shelf.redb");
+    let local = LocalListening { id: "session".into(), start: Position::from_secs(8.0), started_at: Stamp::from_millis(1).system_time() };
+    {
+        let shelf = Shelf::open(&path).unwrap();
+        let id = shelf.append_listening(&update(20.0, false, 10, 12), Some(&local)).unwrap();
+        shelf.mark_synced(&[id]).unwrap();
+    }
+    let shelf = Shelf::open(path).unwrap();
+    let last = shelf.append_listening(&update(30.0, false, 20, 10), Some(&local)).unwrap();
+    assert_eq!(shelf.pending_progress().unwrap()[0].local, Some(local));
+    let cumulative = shelf.local_session_progress("session", last).unwrap();
+    assert_eq!(cumulative.iter().map(|u| u.listened).sum::<Duration>(), Duration::from_secs(22));
 }

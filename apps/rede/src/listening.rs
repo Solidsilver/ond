@@ -24,6 +24,7 @@ pub enum Request {
         generation: u64,
     },
     Reconcile,
+    Reachable(bool),
     Resume {
         generation: u64,
     },
@@ -101,8 +102,19 @@ struct Worker {
     device: DeviceInfo,
     session: Option<Session>,
     active: Option<ItemKey>,
+    downloads: crate::downloads::Store,
+    local: Arc<std::sync::Mutex<Option<LocalOpen>>>,
+    reachable: bool,
 }
 
+#[derive(Clone)]
+struct LocalOpen {
+    generation: u64,
+    key: ItemKey,
+    listening: shelf::LocalListening,
+}
+
+#[cfg(test)]
 pub fn spawn(
     rt: &tokio::runtime::Handle,
     source: Arc<dyn Source>,
@@ -111,6 +123,20 @@ pub fn spawn(
     current: impl Fn() -> bool + Send + 'static,
     notify: impl Fn(Event) + Send + Sync + 'static,
 ) -> Listening {
+    spawn_with_downloads(rt, source, shelf, device, Default::default(), current, notify)
+}
+
+pub fn spawn_with_downloads(
+    rt: &tokio::runtime::Handle,
+    source: Arc<dyn Source>,
+    shelf: Arc<Shelf>,
+    device: DeviceInfo,
+    downloads: crate::downloads::Store,
+    current: impl Fn() -> bool + Send + 'static,
+    notify: impl Fn(Event) + Send + Sync + 'static,
+) -> Listening {
+    let local: Arc<std::sync::Mutex<Option<LocalOpen>>> = Arc::default();
+    let journal_local = local.clone();
     let (tx, mut journal) = mpsc::unbounded_channel();
     let (ready, mut rx) = mpsc::unbounded_channel();
     let notify = Arc::new(notify);
@@ -119,7 +145,11 @@ pub fn spawn(
     rt.spawn(async move {
         while let Some(request) = journal.recv().await {
             let saved = match &request {
-                Request::Report { update, .. } | Request::Set(update) => stored.append_progress(update).map(Some),
+                Request::Report { generation, update, .. } => {
+                    let local = journal_local.lock().unwrap().clone().filter(|l| l.generation == *generation && l.key == update.item);
+                    stored.append_listening(update, local.as_ref().map(|l| &l.listening)).map(Some)
+                }
+                Request::Set(update) => stored.append_progress(update).map(Some),
                 Request::Bookmark { bookmark, change } => stored.queue_bookmark(bookmark, *change).map(|_| None),
                 _ => Ok(None),
             };
@@ -139,7 +169,7 @@ pub fn spawn(
         }
     });
     rt.spawn(async move {
-        let mut worker = Worker { source, shelf, device, session: None, active: None };
+        let mut worker = Worker { source, shelf, device, session: None, active: None, downloads, local, reachable: true };
         notify(Event::Bookmarks(worker.shelf.bookmark_snapshot().map_err(local_error)));
         let mut received = worker.shelf.pending_progress().ok().and_then(|p| p.last().map(|p| p.id)).unwrap_or(0);
         if current() { worker.pull(None, &*notify).await; }
@@ -154,7 +184,7 @@ pub fn spawn(
                         Request::Open { generation, key, at } if current() => {
                             // Opening must not wait for bookmark sync: the book
                             // starts playing as soon as its position is known.
-                            let failed = worker.pull_positions(Some(received.saturating_add(1)), &*notify).await;
+                            let failed = if worker.reachable { worker.pull_positions(Some(received.saturating_add(1)), &*notify).await } else { true };
                             let result = worker.open(generation, key, at).await.map(Box::new);
                             notify(Event::Opened { generation, result });
                             if !failed {
@@ -201,12 +231,13 @@ pub fn spawn(
                             // ResumeReady comes straight after the positions:
                             // the app waits on it, and bookmark sync must not
                             // hold playback up.
-                            let failed = worker.pull_positions(Some(received.saturating_add(1)), &*notify).await;
+                            let failed = if worker.reachable { worker.pull_positions(Some(received.saturating_add(1)), &*notify).await } else { true };
                             notify(Event::ResumeReady { generation });
                             if !failed {
                                 let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
                             }
                         }
+                        Request::Reachable(reachable) if current() => { worker.reachable = reachable; }
                         Request::Reconcile if current() => {
                             worker.pull(Some(received.saturating_add(1)), &*notify).await;
                         }
@@ -301,6 +332,7 @@ impl Worker {
                 notify(Event::Error(e));
             }
         }
+        self.reachable = !network_failed;
         network_failed
     }
 
@@ -364,11 +396,57 @@ impl Worker {
         // A previous book is always closed before another play opens on the
         // same device. A network failure cannot discard its durable report.
         let _ = self.close().await;
-        let item = self.source.item(&key.item).await.map_err(Failure::from)?;
-        self.shelf.set_details(&key, &item).map_err(local_error)?;
+        let stored = self.shelf.item(&key).map_err(local_error)?;
+        let local_tracks = stored.as_ref().and_then(|i| self.downloads.local_tracks(&key, i));
+        let mut item = stored;
+        let mut server_session = None;
+        if self.reachable {
+            if local_tracks.is_none() {
+                match self.source.item(&key.item).await {
+                    Ok(fresh) => {
+                        self.shelf.set_details(&key, &fresh).map_err(local_error)?;
+                        item = Some(fresh);
+                    }
+                    Err(e) if e.is_network() => self.reachable = false,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if self.reachable {
+                match self.source.open(&key.item, &self.device).await {
+                    Ok(session) => server_session = Some(session),
+                    Err(e) if e.is_network() => self.reachable = false,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        let item = item.ok_or_else(|| Failure::Local("This book isn't downloaded.".into()))?;
         let local = self.shelf.position(&key).map_err(local_error)?;
-        let session = self.source.open(&key.item, &self.device).await.map_err(Failure::from)?;
+        let fallback = local.as_ref().map_or(0.0, |p| if p.finished { 0.0 } else { p.position.secs() });
+        let mut session = match server_session {
+            Some(session) => session,
+            None => {
+                let tracks = local_tracks.clone().ok_or_else(|| Failure::Local("This book isn't downloaded.".into()))?;
+                PlaySession {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    item: key.item.clone(),
+                    start: Position::from_secs(fallback),
+                    duration: item.summary.duration,
+                    tracks,
+                }
+            }
+        };
         let position = at.unwrap_or_else(|| local.map_or(session.start.secs(), |p| if p.finished { 0.0 } else { p.position.secs() }));
+        if !self.reachable {
+            *self.local.lock().unwrap() = Some(LocalOpen {
+                generation,
+                key: key.clone(),
+                listening: shelf::LocalListening { id: session.id.clone(), start: Position::from_secs(position), started_at: std::time::SystemTime::now() },
+            });
+        }
+        if let Some(tracks) = local_tracks {
+            session.tracks = tracks;
+            session.duration = item.summary.duration;
+        }
         self.session = Some(Session { generation, key: key.clone(), session: session.clone(), position: Position::from_secs(position) });
         Ok(Opened { key, item, session, position })
     }
@@ -377,7 +455,60 @@ impl Worker {
     /// each item may follow the timestamp comparison onto the server.
     async fn replay(&self, before: Option<shelf::ProgressId>) -> Result<(), Failure> {
         let pending = self.shelf.pending_progress().map_err(local_error)?;
-        let pending: Vec<_> = pending.into_iter().take_while(|p| before.is_none_or(|id| p.id < id)).collect();
+        let mut pending: Vec<_> = pending.into_iter().take_while(|p| before.is_none_or(|id| p.id < id)).collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if self.source.capabilities().local_sessions {
+            let mut groups: HashMap<String, (sources::LocalSession, Vec<shelf::ProgressId>)> = HashMap::new();
+            for entry in &pending {
+                let Some(local) = &entry.local else { continue };
+                let group = match groups.entry(local.id.clone()) {
+                    std::collections::hash_map::Entry::Occupied(group) => group.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(group) => {
+                        let item = self.shelf.item(&entry.update.item).map_err(local_error)?;
+                        group.insert((
+                            sources::LocalSession {
+                                id: local.id.clone(),
+                                item: entry.update.item.clone(),
+                                library: item.as_ref().map(|i| i.summary.library.clone()).unwrap_or_default(),
+                                duration: item.and_then(|i| i.summary.duration),
+                                start: local.start,
+                                current: entry.update.position,
+                                listened: std::time::Duration::ZERO,
+                                started_at: local.started_at,
+                                updated_at: entry.update.at,
+                            },
+                            Vec::new(),
+                        ))
+                    }
+                };
+                group.0.listened += entry.update.listened;
+                group.0.current = entry.update.position;
+                group.0.updated_at = entry.update.at;
+                group.1.push(entry.id);
+            }
+            if !groups.is_empty() {
+                for (session, ids) in groups.values_mut() {
+                    let updates = self.shelf.local_session_progress(&session.id, *ids.last().unwrap()).map_err(local_error)?;
+                    session.listened = updates.iter().map(|u| u.listened).sum();
+                }
+                let mut sessions: Vec<_> = groups.values().map(|(session, _)| session.clone()).collect();
+                sessions.sort_by_key(|s| s.updated_at);
+                match self.source.sync_local_sessions(&sessions).await {
+                    Ok(accepted) => {
+                        let ids: Vec<_> = accepted.iter().filter_map(|id| groups.get(id)).flat_map(|(_, ids)| ids.iter().copied()).collect();
+                        self.shelf.mark_synced(&ids).map_err(local_error)?;
+                        pending.retain(|e| !ids.contains(&e.id));
+                        if pending.iter().any(|e| e.local.is_some()) {
+                            return Err(Failure::Server("Couldn't sync offline listening. Try again.".into()));
+                        }
+                    }
+                    Err(sources::Error::NotSupported(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
         if pending.is_empty() {
             return Ok(());
         }
@@ -394,8 +525,6 @@ impl Worker {
             .filter(|entry| !remote.iter().any(|p| p.item == entry.update.item && p.at.is_some_and(|at| at > entry.update.at)))
             .map(|entry| entry.update.clone())
             .collect();
-        // M4 will send offline listening as ABS local sessions for statistics;
-        // progress PATCH carries only the latest position, not listening time.
         if !updates.is_empty() {
             self.source.set_progress(&updates, &remote).await.map_err(Failure::from)?;
         }
@@ -403,6 +532,16 @@ impl Worker {
     }
 
     async fn report(&mut self, id: shelf::ProgressId, generation: u64, update: ProgressUpdate, close: bool) -> Result<(), Failure> {
+        let is_local = self.local.lock().unwrap().as_ref().is_some_and(|l| l.generation == generation && l.key == update.item);
+        if is_local {
+            if let Some(session) = &mut self.session {
+                session.position = update.position;
+            }
+            if close {
+                let _ = self.close().await;
+            }
+            return Ok(());
+        }
         let sent = async {
             self.replay(Some(id)).await?;
             if let Some(session) = &mut self.session
@@ -449,6 +588,10 @@ impl Worker {
 
     async fn close(&mut self) -> Result<(), Failure> {
         let Some(session) = self.session.take() else { return Ok(()) };
+        let local = self.local.lock().unwrap().take();
+        if local.is_some_and(|l| l.generation == session.generation) {
+            return Ok(());
+        }
         match self.source.close(&session.session, session.position).await {
             Err(e) if e.status() == Some(404) => Ok(()),
             result => result.map_err(Failure::from),

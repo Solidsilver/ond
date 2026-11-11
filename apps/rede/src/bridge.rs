@@ -24,6 +24,10 @@ use std::sync::mpsc::Sender;
 /// unhandled.
 pub enum Msg {
     Account(AccountMsg),
+    Offline {
+        session: u64,
+        event: OfflineMsg,
+    },
     Library(LibraryMsg),
     Bookmarks {
         session: u64,
@@ -52,6 +56,14 @@ pub enum Msg {
     },
     /// Something the user asked for failed.
     Error(Failure),
+}
+
+/// Download work belongs to the same sign-in generation as the shelf.
+pub enum OfflineMsg {
+    Opened(Result<offline::OfflineStore, Failure>),
+    Changed,
+    Prepared { key: ItemKey, request: u64, result: Result<Box<Item>, Failure> },
+    Refreshed(Result<(), Failure>),
 }
 
 /// Signing in, and the connection it made.
@@ -162,6 +174,7 @@ pub struct Bridge {
     /// Bumped by each sync: an older pass still running (from before a
     /// sign-in, say) stops storing once a newer one starts.
     pass: Arc<AtomicU64>,
+    download_pass: Arc<std::sync::Mutex<u64>>,
     /// Set on a copy made by [`scoped`](Self::scoped): the session its work
     /// belongs to. Once that session ends, the copy's messages are dropped.
     scope: Option<u64>,
@@ -185,6 +198,7 @@ impl Bridge {
             paths,
             session: Arc::default(),
             pass: Arc::default(),
+            download_pass: Arc::default(),
             scope: None,
         }
     }
@@ -207,10 +221,114 @@ impl Bridge {
         }
     }
 
-    pub fn listening(&self, source: Arc<dyn Source>, shelf: Arc<Shelf>, device: sources::DeviceInfo) -> crate::listening::Listening {
+    pub fn listening(
+        &self,
+        source: Arc<dyn Source>,
+        shelf: Arc<Shelf>,
+        device: sources::DeviceInfo,
+        downloads: crate::downloads::Store,
+    ) -> crate::listening::Listening {
         let this = self.scoped();
         let live = this.clone();
-        crate::listening::spawn(&self.rt, source, shelf, device, move || live.current(), move |event| this.playback(event))
+        crate::listening::spawn_with_downloads(&self.rt, source, shelf, device, downloads, move || live.current(), move |event| this.playback(event))
+    }
+
+    fn offline(&self, event: OfflineMsg) {
+        self.send(Msg::Offline { session: self.scope.unwrap_or_else(|| self.session()), event });
+    }
+
+    pub fn open_downloads(&self, account: sources::AccountId, limit: Option<u64>, stream_dir: std::path::PathBuf) {
+        let this = self.scoped();
+        let base = self.paths.shelves.with_file_name("downloads");
+        let rt = self.rt.clone();
+        self.rt.spawn_blocking(move || {
+            if !this.current() {
+                return;
+            }
+            let changed = this.clone();
+            let result = offline::account_store(&base, account.as_uuid().as_u128())
+                .and_then(|dir| {
+                    offline::OfflineStore::open(
+                        offline::OfflineConfig { dir, limit, reply_check: Default::default() },
+                        rt,
+                        Arc::new(move || changed.offline(OfflineMsg::Changed)),
+                    )
+                })
+                .map_err(|e| Failure::Local(format!("Couldn't open downloads: {e}")));
+            if let Ok(store) = &result {
+                store.set_cache_lookup(Arc::new(move |track| {
+                    let path = stream_dir.join(streamcache::file_name(&track.id, track.suffix.as_deref()));
+                    path.is_file().then_some(path)
+                }));
+            }
+            this.offline(OfflineMsg::Opened(result));
+        });
+    }
+
+    pub fn prepare_download(&self, source: Arc<dyn Source>, shelf: Arc<Shelf>, key: ItemKey, request: u64) {
+        let this = self.scoped();
+        self.rt.spawn(async move {
+            let result = async {
+                let item = match shelf.item(&key).map_err(|e| Failure::Local(format!("Couldn't read the book: {e}")))? {
+                    Some(item) if !item.tracks.is_empty() => item,
+                    _ => source.item(&key.item).await.map_err(Failure::from)?,
+                };
+                if item.tracks.is_empty() {
+                    return Err(Failure::Local("This book has no audio files.".into()));
+                }
+                for file in &item.tracks {
+                    source.file_url(&key.item, file).map_err(Failure::from)?;
+                }
+                if !this.current() {
+                    return Err(Failure::Local("Not connected.".into()));
+                }
+                shelf.set_details(&key, &item).map_err(|e| Failure::Local(format!("Couldn't save the book: {e}")))?;
+                Ok(Box::new(item))
+            }
+            .await;
+            this.offline(OfflineMsg::Prepared { key, request, result });
+        });
+    }
+
+    /// Each invocation reads current credentials, so token rotation cannot
+    /// leave a saved token in a queued download's URL builder.
+    pub fn download_source(&self, source: Arc<dyn Source>, shelf: Arc<Shelf>, store: offline::OfflineStore) {
+        let this = self.scoped();
+        let pass = {
+            let mut pass = self.download_pass.lock().unwrap();
+            *pass += 1;
+            *pass
+        };
+        self.rt.spawn_blocking(move || {
+            let mut files = std::collections::HashMap::new();
+            for pin in &store.snapshot().pins {
+                if let offline::Pin::Book(id) = &pin.pin
+                    && let Ok(key) = ItemKey::parse(id)
+                    && let Ok(Some(item)) = shelf.item(&key)
+                {
+                    for file in item.tracks {
+                        files.insert(crate::downloads::track_id(&key, Some(&file), file.index), (key.item.clone(), file));
+                    }
+                }
+            }
+            let current_pass = this.download_pass.lock().unwrap();
+            if this.current() && *current_pass == pass {
+                store.set_source(Some(Arc::new(move |id| files.get(id).and_then(|(item, file)| source.file_url(item, file).ok()).unwrap_or_default())));
+            }
+        });
+    }
+
+    pub fn stop_downloads(&self, store: &offline::OfflineStore) {
+        let mut pass = self.download_pass.lock().unwrap();
+        *pass += 1;
+        store.set_source(None);
+    }
+
+    pub fn refresh_downloads(&self, source: Arc<dyn Source>) {
+        let this = self.scoped();
+        self.rt.spawn(async move {
+            this.offline(OfflineMsg::Refreshed(source.refresh_downloads().await.map_err(Failure::from)));
+        });
     }
 
     #[cfg(target_os = "macos")]
