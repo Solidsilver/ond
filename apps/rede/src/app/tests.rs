@@ -23,7 +23,7 @@ fn every_view_draws() {
         frame(&ctx, &mut app);
     }
     app.apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::All));
-    let mut routes = vec![Route::Home, Route::Library, book_route(0), book_route(5), Route::Book("book-gone".into())];
+    let mut routes = vec![Route::Home, Route::Library, Route::Downloads, book_route(0), book_route(5), Route::Book("book-gone".into())];
     for route in routes.drain(..) {
         app.go(route);
         for _ in 0..2 {
@@ -99,6 +99,20 @@ fn every_view_draws() {
             frame(&ctx, &mut app);
         }
     }
+    // Downloads in every state: the place, each book's page, the library
+    // narrowed to what's here, and all of it offline.
+    downloaded(&mut app);
+    for offline in [false, true] {
+        app.sync.offline = offline;
+        for route in [Route::Downloads, book_route(0), book_route(2), book_route(7), book_route(8), book_route(9), book_route(1), Route::Home, Route::Library] {
+            app.go(route);
+            frame(&ctx, &mut app);
+        }
+    }
+    app.sync.offline = false;
+    app.apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::Downloaded));
+    frame(&ctx, &mut app);
+    app.apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::All));
     // And the sign-in screen, with and without an error.
     let mut login = signed_out(&ctx, dir.path());
     frame(&ctx, &mut login);
@@ -275,6 +289,12 @@ fn an_idle_window_asks_for_no_frames() {
     idle(&mut h, "the sidebar's rail");
     app_mut(&mut h).sync.offline = true;
     idle(&mut h, "an account offline");
+    // Downloads on their way move only when the store says so.
+    downloaded(app_mut(&mut h));
+    app_mut(&mut h).go(Route::Downloads);
+    idle(&mut h, "the Downloads place with a book on its way");
+    app_mut(&mut h).go(book_route(2));
+    idle(&mut h, "a book page downloading");
     // A running sync is something moving: its spinner turns (for at most
     // half a minute, which is more frames than this test steps).
     app_mut(&mut h).sync.running = true;

@@ -19,9 +19,8 @@ pub struct ViewCtx<'a> {
     /// Which books the library shows, as that copy has it.
     pub filter: LibraryFilter,
     pub playback: crate::settings::PlaybackSettings,
-    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    /// The store's snapshot, and the books being prepared or that failed.
     pub downloads: &'a crate::downloads::State,
-    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
     pub download_settings: crate::settings::DownloadSettings,
     /// The zoom, in percent.
     pub zoom: u16,

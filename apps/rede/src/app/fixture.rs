@@ -445,3 +445,34 @@ pub fn in_progress(app: &mut RedeApp) {
         app.positions.insert(id, progress);
     }
 }
+
+/// The fixture's downloads, as the store's snapshot would have them: The
+/// Left Hand of Darkness and Kindred here, Piranesi on its way, Wolf Hall
+/// given up on, Station Eleven being prepared, and The Fifth Season couldn't
+/// be prepared. No store is open, so nothing moves.
+pub fn downloaded(app: &mut RedeApp) {
+    let key = |n: usize| ItemKey::new(account().id, format!("book-{n}")).to_string();
+    let pin = |n: usize, done: usize, failed: usize, bytes_done: u64, downloading: bool| offline::PinSummary {
+        pin: offline::Pin::Book(key(n)),
+        label: BOOKS[n].title.into(),
+        total: 2,
+        done,
+        failed,
+        bytes_done,
+        bytes_total: 2 * 180_000_000,
+        downloading,
+    };
+    app.downloads.snapshot = std::sync::Arc::new(offline::Snapshot {
+        pins: vec![pin(0, 2, 0, 312_400_000, false), pin(5, 2, 0, 298_000_000, false), pin(2, 1, 0, 151_000_000, true), pin(7, 1, 1, 180_000_000, false)],
+        used_bytes: 790_000_000,
+        free_bytes: Some(182_000_000_000),
+        limit: Some(10_000_000_000),
+        active: 1,
+        failed: 1,
+        ..Default::default()
+    });
+    app.downloads.preparing.insert(ItemKey::new(account().id, "book-8"), 1);
+    app.downloads.errors.insert(ItemKey::new(account().id, "book-9"), "Can't reach the server.".into());
+    app.downloads.dir = Some(std::path::PathBuf::from("/Users/sam/Library/Application Support/Rede/downloads/0000002a"));
+    app.downloads.version += 1;
+}

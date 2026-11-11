@@ -86,9 +86,11 @@ impl ViewCtx<'_> {
         }
     }
 
-    /// One book in progress: its cover, title and author, the bar and the
-    /// time left at the speed, and a button that resumes it (or pauses it
-    /// while it's the one playing). A click elsewhere opens the book.
+    /// One book in progress: its cover, title and author (with the
+    /// download's mark), the bar and the time left at the speed, and a
+    /// button that resumes it (or pauses it while it's the one playing).
+    /// Offline, a book that isn't all here is faded. A click elsewhere opens
+    /// the book; a right-click has its commands.
     fn continue_card(&mut self, ui: &mut Ui, idx: usize, w: f32) {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(w, CARD_H), Sense::click());
@@ -99,6 +101,12 @@ impl ViewCtx<'_> {
             _ => listened.line().unwrap_or_default(),
         };
         let sounding = self.player.active && !self.player.paused && self.player.book.as_ref().is_some_and(|b| b.key.item == book.id);
+        let download = self.download(&book.id);
+        let dim = self.unplayable(&book.id);
+        let opacity = ui.opacity();
+        if dim {
+            ui.multiply_opacity(super::downloads_page::DIMMED);
+        }
         if ui.is_rect_visible(rect) {
             let fill = if resp.is_pointer_button_down_on() {
                 t.selected
@@ -118,8 +126,14 @@ impl ViewCtx<'_> {
             ui.painter().galley(pos2(x, cover.top() + 2.0), title, t.text);
             let author = author_of(&book);
             let author = if author.is_empty() { "Unknown author" } else { author };
-            let author = elide(ui, author, FontId::proportional(12.0), t.muted, room);
-            ui.painter().galley(pos2(x, cover.top() + 2.0 + title_h + 3.0), author, t.muted);
+            let mark_room = if download.is_some() { 18.0 } else { 0.0 };
+            let author = elide(ui, author, FontId::proportional(12.0), t.muted, room - mark_room);
+            let author_y = cover.top() + 2.0 + title_h + 3.0;
+            let author_h = author.size().y;
+            ui.painter().galley(pos2(x, author_y), author, t.muted);
+            if let Some(d) = &download {
+                shell::kit::download_mark(ui, pos2(rect.right() - CARD_PAD - 6.0, author_y + author_h / 2.0), 11.0, d.mark());
+            }
             // The foot: the bar over the time left, beside the button.
             let bar_room = (room - PLAY - 12.0).max(20.0);
             let text = elide(ui, &left, FontId::proportional(11.5), t.muted, bar_room);
@@ -130,12 +144,29 @@ impl ViewCtx<'_> {
             }
             ui.painter().galley(pos2(x, text_y), text, t.muted);
         }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} by {}, {left}", book.title, authors_line(&book))));
+        let mut name = format!("{} by {}, {left}", book.title, authors_line(&book));
+        if dim {
+            name.push_str(", not downloaded");
+        } else if let Some(d) = &download {
+            name.push_str(&format!(", {}", d.mark().hint().to_lowercase()));
+        }
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
         let play = Rect::from_center_size(pos2(rect.right() - CARD_PAD - PLAY / 2.0, rect.bottom() - CARD_PAD - PLAY / 2.0 + 4.0), vec2(PLAY, PLAY));
         let (icon, label) = if sounding { (Icon::Pause, format!("Pause {}", book.title)) } else { (Icon::Play, format!("Resume {}", book.title)) };
         // Always shown: it's what the card is for, and a hover-only button
         // can't be found with the keyboard.
-        if !self.opening && shell::kit::tile_button(ui, &t, play, ui.scope_id().with(("resume", &book.id)), true, icon, &label) {
+        // Offline, a book that isn't here still takes the press, and says
+        // why it can't play.
+        let resume = !self.opening && shell::kit::tile_button(ui, &t, play, ui.scope_id().with(("resume", &book.id)), true, icon, &label);
+        ui.set_opacity(opacity);
+        let mut chosen = None;
+        resp.context_menu(|ui| {
+            ui.set_width(super::library::BOOK_MENU_W);
+            chosen = self.book_commands(ui, &book.id);
+        });
+        if let Some(action) = chosen {
+            self.actions.push(action);
+        } else if resume {
             self.actions.push(if sounding { Action::Playback(crate::player::Control::Toggle) } else { Action::PlayBook(book.id.clone()) });
         } else if resp.clicked() {
             self.actions.push(Action::Go(Route::Book(book.id.clone())));
