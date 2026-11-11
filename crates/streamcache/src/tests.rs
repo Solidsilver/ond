@@ -273,7 +273,10 @@ fn a_cache_without_a_check_keeps_every_reply() {
     let url = server.url();
     let key = CacheKey::new("kept", Some("flac".into()));
     let mut got = Vec::new();
-    cache.open(&key, &url, never()).unwrap().read_to_end(&mut got).unwrap();
+    // Reading the last byte can precede the download's disk sync and rename.
+    // Dropping its only reader then is allowed to cancel the uncommitted file.
+    let mut source = cache.open(&key, &url, never()).unwrap();
+    source.read_to_end(&mut got).unwrap();
     assert_eq!(got, body);
     wait_until("kept complete", || cache.progress(&key).is_some_and(|p| p.complete));
 }
