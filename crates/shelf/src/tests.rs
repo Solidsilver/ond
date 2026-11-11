@@ -518,3 +518,17 @@ fn later_local_session_totals_do_not_reread_unrelated_history() {
     assert_eq!(cumulative.iter().map(|u| u.listened).sum::<Duration>(), Duration::from_secs(22));
     assert_eq!(shelf.local_session_progress("session", first).unwrap().len(), 1, "an older replay boundary still excludes later entries");
 }
+
+#[test]
+fn the_listening_log_lists_reports_that_counted_time_and_says_which_were_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let shelf = shelf(&dir);
+    let sent = shelf.append_progress(&update(60.0, false, 1_000, 60)).unwrap();
+    shelf.append_progress(&update(60.0, false, 2_000, 0)).unwrap();
+    shelf.append_progress(&update(90.0, false, 3_000, 30)).unwrap();
+    shelf.mark_synced(&[sent]).unwrap();
+    let log = shelf.listening_log().unwrap();
+    let seen: Vec<(i64, u64, bool)> = log.iter().map(|l| (Stamp::from(l.at).millis(), l.listened.as_secs(), l.synced)).collect();
+    assert_eq!(seen, [(1_000, 60, true), (3_000, 30, false)], "a seek or a finish counts no time and isn't listening");
+    assert_eq!(log[0].item, "li-1");
+}

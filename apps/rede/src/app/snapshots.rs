@@ -231,6 +231,31 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.prefs.edit(|p| p.sidebar_collapsed = true);
         app
     });
+    // Stats: a year of listening with books partway and finished (and in
+    // a narrow window, further down), this computer's listening alone while offline, and
+    // none at all.
+    scene(h, s, "stats", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        listening_history(&mut app);
+        app.go(Route::Stats);
+        app
+    });
+    scene(h, s, "stats-offline", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listening_history(&mut app);
+        app.stats.history = None;
+        app.stats.arrived(Vec::new(), None);
+        app.sync.offline = true;
+        app.go(Route::Stats);
+        app
+    });
+    scene(h, s, "stats-empty", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        app.stats.arrived(Vec::new(), Some(Ok(Vec::new())));
+        app.go(Route::Stats);
+        app
+    });
     // Downloads: the place empty, then with books here, on their way, being
     // prepared and given up on; the library narrowed to what's here; and
     // each with the marks on the covers.
@@ -618,6 +643,36 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.run_steps(30);
     h.event(egui::Event::PointerGone);
     s.shoot(h, "book-html");
+    // Stats scrolled past the calendar: the charts by weekday and hour, and
+    // the books, authors and narrators listened to most.
+    *h.state_mut() = None;
+    *h.state_mut() = Some({
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listening_history(&mut app);
+        app.go(Route::Stats);
+        app
+    });
+    h.run_steps(2);
+    h.hover_at(egui::pos2(FULL[0] / 2.0, FULL[1] / 2.0));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -575.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run_steps(30);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "stats-charts");
+    // Stats in a wide, tall window: the cards stop growing, the facts go two
+    // across and the books sit beside the authors and narrators.
+    h.set_size(egui::vec2(1700.0, 1400.0));
+    scene(h, s, "stats-wide", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listening_history(&mut app);
+        app.go(Route::Stats);
+        app
+    });
     // The same page at the smallest window Rede opens: the cover goes
     // above the text and the columns stack.
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
@@ -638,6 +693,13 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app
     });
     scene(h, s, "palette-narrow", || palette(&ctx, dir.path(), "earthsea"));
+    scene(h, s, "stats-narrow", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        listening_history(&mut app);
+        app.go(Route::Stats);
+        app
+    });
     scene(h, s, "library-playing-narrow", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
         playing(&mut app, true);

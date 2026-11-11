@@ -51,6 +51,11 @@
 //!   and what's laid over any cover to say how far along it is
 //!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
 //!   badge in its corner), with [`progress_bar`], the same line on its own.
+//! - [`charts`]: figures as pictures, each part on a [`card`] under its
+//!   [`card_heading`]: a [`stat_tile`] (and
+//!   [`tile_columns`] to lay a row of them out), a [`bar_chart`], a
+//!   [`level_grid`] of shaded cells (a calendar of days) with its
+//!   [`level_legend`], and a [`share_bar`].
 //! - [`download`]: the [`DownloadMark`] painted by [`download_mark`] on
 //!   whatever is downloaded or on its way (a check in a ring, a filling
 //!   ring, a warning), and the [`download_button`] beside a page's Play.
@@ -63,6 +68,7 @@
 //!   [`Toasts::note`] fades with its button (an Undo).
 
 pub mod buttons;
+pub mod charts;
 pub mod controls;
 pub mod covers;
 pub mod download;
@@ -76,6 +82,7 @@ pub mod text;
 pub mod toasts;
 
 pub use buttons::*;
+pub use charts::*;
 pub use controls::*;
 pub use covers::*;
 pub use download::*;

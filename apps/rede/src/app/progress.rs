@@ -43,6 +43,10 @@ impl Positions {
         self.version
     }
 
+    pub fn all(&self) -> impl Iterator<Item = &Progress> {
+        self.by_book.values()
+    }
+
     /// Whether any book is started and not finished: what decides whether the
     /// app opens on Home.
     pub fn any_in_progress(&self) -> bool {

@@ -150,11 +150,17 @@ fn settings_change_the_download_preferences_and_remove_everything_after_asking()
 fn every_view_names_its_controls() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
-    for route in [Route::Home, Route::Library, Route::Downloads, book_route(0), Route::Book("book-gone".into())] {
+    for route in [Route::Home, Route::Library, Route::Downloads, Route::Stats, book_route(0), Route::Book("book-gone".into())] {
         app_mut(&mut h).go(route);
         h.run_steps(3);
         h.check_accessibility();
     }
+    // Stats with a year of listening: the tiles, the charts and the
+    // rankings, the books among them opening their pages.
+    listening_history(app_mut(&mut h));
+    app_mut(&mut h).go(Route::Stats);
+    h.run_steps(3);
+    h.check_accessibility();
     // Downloads in each state: the place, the pages, offline too.
     downloaded(app_mut(&mut h));
     for offline in [false, true] {

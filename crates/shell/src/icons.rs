@@ -94,6 +94,11 @@ pub enum Icon {
     Home,
     /// Two arrows chasing each other round a loop: repeat.
     Repeat,
+    /// Three bars of different heights on a baseline: stats.
+    Chart,
+    /// A flame, pointed at the top and round at its foot, a smaller one
+    /// inside: a streak kept going.
+    Flame,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -241,6 +246,33 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Sidebar => {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
             painter.line_segment([p(-0.3, -0.7), p(-0.3, 0.7)], line);
+        }
+        Icon::Chart => {
+            painter.line_segment([p(-0.85, 0.8), p(0.85, 0.8)], line);
+            let bar = |x: f32, top: f32| Rect::from_min_max(p(x - 0.17, top), p(x + 0.17, 0.62));
+            for (x, top) in [(-0.5, 0.05), (0.0, -0.75), (0.5, -0.35)] {
+                painter.rect_filled(bar(x, top), r * 0.06, color);
+            }
+        }
+        Icon::Flame => {
+            // A teardrop, its point up (sin(t/2) pinches the top to a point
+            // while the foot stays round), the tip swept to the right and the
+            // left side pulled in under it: a flame's flicker rather than a
+            // drop. A small solid ember sits in its foot.
+            let outline: Vec<Pos2> = (0..36)
+                .map(|k| {
+                    let a = std::f32::consts::TAU * k as f32 / 36.0;
+                    let y = -a.cos();
+                    let up = (1.0 - y) / 2.0;
+                    let mut x = 0.74 * a.sin() * (a / 2.0).sin().powf(1.2) + 0.26 * up.powi(3);
+                    if x < 0.0 {
+                        x += 0.2 * (-((y + 0.2) / 0.28).powi(2)).exp();
+                    }
+                    p(x, 0.08 + 0.84 * y)
+                })
+                .collect();
+            painter.add(Shape::closed_line(outline, line));
+            painter.circle_filled(p(0.03, 0.5), r * 0.22, color);
         }
         Icon::Home => {
             painter.add(Shape::line(vec![p(-0.9, -0.02), p(0.0, -0.82), p(0.9, -0.02)], line));

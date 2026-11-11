@@ -399,3 +399,32 @@ async fn older_servers_can_decline_local_sessions_and_download_urls_follow_rotat
     assert!(new.ends_with("token=new-access"));
     assert!(!new.contains("secret"));
 }
+
+#[tokio::test]
+async fn listening_history_pages_until_the_server_runs_out_and_keeps_only_books_that_counted_time() {
+    let fake = JsonFake::start(|seen| {
+        assert_eq!(seen.path(), "/api/me/listening-sessions");
+        if seen.target.contains("page=0") {
+            let sessions: Vec<String> = (0..HISTORY_PAGE_SIZE)
+                .map(|i| format!(r#"{{"id":"s{i}","libraryItemId":"book","displayTitle":"Dune","timeListening":"60","startedAt":{}}}"#, 1_000 + i))
+                .collect();
+            Answer::ok(format!(r#"{{"total":{},"numPages":2,"sessions":[{}]}}"#, HISTORY_PAGE_SIZE + 3, sessions.join(",")))
+        } else {
+            Answer::ok(
+                r#"{"total":503,"numPages":2,"sessions":[
+                {"id":"silent","libraryItemId":"book","timeListening":0,"startedAt":5},
+                {"id":"episode","libraryItemId":"pod","episodeId":"ep","timeListening":30,"startedAt":5},
+                {"id":"last","libraryItemId":"other","displayAuthor":"Le Guin","timeListening":90.5,"updatedAt":7}
+            ]}"#,
+            )
+        }
+    });
+    let client = abs::Client::new(fake.base(), abs::DeviceInfo::new("device", "test")).unwrap().with_tokens(Tokens::new("secret", "refresh"));
+    let history = AbsSource::new(account(), client, vec![]).listening_history().await.unwrap();
+    assert_eq!(fake.count("/api/me/listening-sessions"), 2, "the second page is short, so it's the last");
+    assert_eq!(history.len(), HISTORY_PAGE_SIZE as usize + 1);
+    assert_eq!(history[0].listened, Duration::from_secs(60), "a numeric string reads as seconds");
+    let last = history.last().unwrap();
+    assert_eq!((last.item.as_str(), last.author.as_deref()), ("other", Some("Le Guin")));
+    assert_eq!(last.started, Stamp::from_millis(7), "a session with no start goes by its last update");
+}

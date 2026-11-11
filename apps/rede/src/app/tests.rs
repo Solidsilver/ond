@@ -23,13 +23,21 @@ fn every_view_draws() {
         frame(&ctx, &mut app);
     }
     app.apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::All));
-    let mut routes = vec![Route::Home, Route::Library, Route::Downloads, book_route(0), book_route(5), Route::Book("book-gone".into())];
+    let mut routes = vec![Route::Home, Route::Library, Route::Downloads, Route::Stats, book_route(0), book_route(5), Route::Book("book-gone".into())];
     for route in routes.drain(..) {
         app.go(route);
         for _ in 0..2 {
             frame(&ctx, &mut app);
         }
     }
+    // Stats with a year of listening, then with this computer's alone.
+    listening_history(&mut app);
+    app.go(Route::Stats);
+    frame(&ctx, &mut app);
+    app.stats.history = None;
+    app.stats.arrived(Vec::new(), Some(Err(crate::failure::Failure::Server("The server answered with an error (500).".into()))));
+    frame(&ctx, &mut app);
+    app.back();
     // Settings on each tab.
     for tab in super::settings_page::Tab::ALL {
         app.apply(Action::OpenSettings(tab));

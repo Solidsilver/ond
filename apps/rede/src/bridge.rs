@@ -29,6 +29,13 @@ pub enum Msg {
         event: OfflineMsg,
     },
     Library(LibraryMsg),
+    /// The listening the Stats page counts: this computer's log, and the
+    /// server's history or why it couldn't be had (`None`: not asked, with no
+    /// server to ask).
+    Stats {
+        log: Vec<shelf::Logged>,
+        history: Option<Result<Vec<sources::Listen>, Failure>>,
+    },
     Bookmarks {
         session: u64,
         event: BookmarkMsg,
@@ -724,6 +731,31 @@ impl Bridge {
                 }
             }
             this.playback(crate::listening::Event::Positions(positions));
+        });
+    }
+
+    /// Reads this computer's listening log, then asks the source for its
+    /// history, for the Stats page. A log that can't be read counts as empty:
+    /// the server's history is the better half anyway.
+    pub fn listening_stats(&self, source: Option<Arc<dyn Source>>, shelf: Arc<Shelf>) {
+        let this = self.scoped();
+        self.rt.spawn(async move {
+            let log = match tokio::task::spawn_blocking(move || shelf.listening_log()).await {
+                Ok(Ok(log)) => log,
+                Ok(Err(e)) => {
+                    tracing::warn!("reading the listening log: {e}");
+                    Vec::new()
+                }
+                Err(e) => {
+                    tracing::warn!("reading the listening log: {e}");
+                    Vec::new()
+                }
+            };
+            let history = match source {
+                Some(source) => Some(source.listening_history().await.map_err(Failure::from)),
+                None => None,
+            };
+            this.send(Msg::Stats { log, history });
         });
     }
 

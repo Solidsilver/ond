@@ -10,6 +10,8 @@ pub enum Route {
     Library,
     /// What's downloaded, and what's on its way.
     Downloads,
+    /// The listening, counted: how much, when, and what.
+    Stats,
     /// One book, by its own id.
     Book(String),
 }
@@ -17,7 +19,7 @@ pub enum Route {
 impl Route {
     /// The places the sidebar links to; going to one starts a fresh trail.
     pub fn is_root(&self) -> bool {
-        matches!(self, Route::Home | Route::Library | Route::Downloads)
+        matches!(self, Route::Home | Route::Library | Route::Downloads | Route::Stats)
     }
 }
 
@@ -143,6 +145,7 @@ impl super::view_ctx::ViewCtx<'_> {
             Route::Home => "Home".into(),
             Route::Library => "Library".into(),
             Route::Downloads => "Downloads".into(),
+            Route::Stats => "Stats".into(),
             Route::Book(id) => self.books.by_id(id).map_or_else(|| "Book".into(), |b| b.title.clone()),
         }
     }

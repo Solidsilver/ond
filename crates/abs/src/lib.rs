@@ -491,6 +491,15 @@ impl Client {
         }
     }
 
+    /// `GET /api/me/listening-sessions`: one page of the user's past
+    /// listening sessions on every device, most recently updated first.
+    /// `page` counts from 0.
+    pub async fn listening_sessions(&self, page: u32, per_page: u32) -> Result<ListeningSessionsPage> {
+        let mut url = self.url("api/me/listening-sessions", &[]);
+        url.query_pairs_mut().append_pair("itemsPerPage", &per_page.to_string()).append_pair("page", &page.to_string());
+        self.get(url).await
+    }
+
     /// `GET /api/me/items-in-progress`: items started and not finished, most
     /// recent first, across all libraries.
     pub async fn items_in_progress(&self, limit: u32) -> Result<Vec<LibraryItem>> {

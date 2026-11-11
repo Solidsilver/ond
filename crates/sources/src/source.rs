@@ -85,6 +85,12 @@ pub trait Source: Send + Sync {
         Err(crate::Error::NotSupported("This source cannot sync local sessions".into()))
     }
 
+    /// Every stretch of listening the source remembers for this account, on
+    /// any device, newest first.
+    async fn listening_history(&self) -> Result<Vec<crate::Listen>> {
+        Err(crate::Error::NotSupported("This source keeps no listening history".into()))
+    }
+
     /// The position now, and the time listened since the last report.
     async fn report(&self, session: &PlaySession, at: Position, listened: Duration) -> Result<()>;
 

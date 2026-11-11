@@ -645,3 +645,40 @@ pub(crate) struct ItemsInProgressReply {
     #[serde(default, deserialize_with = "lenient::list")]
     pub library_items: Vec<LibraryItem>,
 }
+
+/// One past listening session, as `GET /api/me/listening-sessions` lists it.
+/// Only what listening stats need is read; the server also sends the book's
+/// metadata and chapters with every session, which are skipped.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListeningSession {
+    pub id: String,
+    pub library_item_id: Option<String>,
+    pub episode_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient::opt")]
+    pub media_type: Option<MediaType>,
+    #[serde(default, deserialize_with = "lenient::opt_text")]
+    pub display_title: Option<String>,
+    #[serde(default, deserialize_with = "lenient::opt_text")]
+    pub display_author: Option<String>,
+    /// Seconds of listening the session counted. Some servers send it as a
+    /// string.
+    #[serde(default, deserialize_with = "lenient::opt_float")]
+    pub time_listening: Option<f64>,
+    #[serde(default, deserialize_with = "lenient::opt_int")]
+    pub started_at: Option<i64>,
+    #[serde(default, deserialize_with = "lenient::opt_int")]
+    pub updated_at: Option<i64>,
+}
+
+/// A page of [`ListeningSession`]s, newest first.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListeningSessionsPage {
+    #[serde(default, deserialize_with = "lenient::opt_int")]
+    pub total: Option<u64>,
+    #[serde(default, deserialize_with = "lenient::opt_int")]
+    pub num_pages: Option<u32>,
+    #[serde(default, deserialize_with = "lenient::list")]
+    pub sessions: Vec<ListeningSession>,
+}

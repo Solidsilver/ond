@@ -476,3 +476,49 @@ pub fn downloaded(app: &mut RedeApp) {
     app.downloads.dir = Some(std::path::PathBuf::from("/Users/sam/Library/Application Support/Rede/downloads/0000002a"));
     app.downloads.version += 1;
 }
+
+/// A year of listening as the server would remember it, up to the fixture's
+/// wall clock (in UTC): most evenings and some mornings, the odd week off, a
+/// run of nine days ending today, and a book the library no longer has.
+/// Arrives as the bridge would bring it, with nothing waiting on this computer.
+pub fn listening_history(app: &mut RedeApp) {
+    use chrono::TimeZone;
+    let today = chrono::Utc.from_utc_datetime(&wall_clock()).date_naive();
+    // A small fixed sequence, so every run draws the same year.
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let mut history = Vec::new();
+    for back in 0..340u64 {
+        let day = today - chrono::Days::new(back);
+        let streak = back < 9;
+        if !streak && (back == 9 || (back / 7) % 9 == 4 || next(10) < 3) {
+            continue;
+        }
+        let weekend = matches!(chrono::Datelike::weekday(&day), chrono::Weekday::Sat | chrono::Weekday::Sun);
+        for _ in 0..1 + next(if weekend { 4 } else { 2 }) {
+            let hour = [7, 8, 12, 19, 20, 21, 22, 22, 23][next(9) as usize];
+            let start = day.and_hms_opt(hour, next(60) as u32, 0).unwrap().and_utc().timestamp_millis();
+            let book = [1, 1, 2, 2, 2, 4, 5, 7, 0, 3][next(10) as usize];
+            let (item, title, author) = if back > 250 && next(3) == 0 {
+                ("gone".to_owned(), Some("The Dispossessed".to_owned()), Some("Ursula K. Le Guin".to_owned()))
+            } else {
+                (format!("book-{book}"), None, None)
+            };
+            let minutes = 10 + next(if weekend { 150 } else { 70 });
+            history.push(sources::Listen {
+                item,
+                title,
+                author,
+                started: sources::Stamp::from_millis(start),
+                listened: std::time::Duration::from_secs(minutes * 60),
+            });
+        }
+    }
+    history.reverse();
+    app.stats.arrived(Vec::new(), Some(Ok(history)));
+}

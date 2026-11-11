@@ -113,6 +113,11 @@ impl Books {
         &self.all
     }
 
+    /// Bumped by every new listing.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     pub fn len(&self) -> usize {
         self.all.len()
     }
