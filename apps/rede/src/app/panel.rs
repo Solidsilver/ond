@@ -295,12 +295,14 @@ impl ViewCtx<'_> {
             if !summary.narrators.is_empty() {
                 kv_text(ui, "Read by", &summary.narrators.join(", "));
             }
+            // A series opens its page, as it does from the book's.
             for series in &summary.series {
-                let value = match &series.sequence {
-                    Some(n) => format!("{} #{n}", series.name),
-                    None => series.name.clone(),
-                };
-                kv_text(ui, "Series", &value);
+                let label = super::book::series_label(series);
+                shell::kit::kv_row(ui, "Series", |ui| {
+                    if shell::kit::link(ui, &label, FontId::proportional(KV_VALUE), t.text).on_hover_text("Show the series").clicked() {
+                        self.actions.push(Action::Go(super::nav::Route::Series(series.name.clone())));
+                    }
+                });
             }
             kv_text(ui, "Length", &crate::fmt::span(book.timeline.duration));
             if !book.timeline.chapters.is_empty() {

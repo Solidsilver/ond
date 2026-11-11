@@ -3,8 +3,8 @@
 //! this says what the rows are (`search` finds them) and what the keys do.
 //!
 //! ⏎ opens a book's page and ⌘⏎ plays or resumes it, as its page's button
-//! would. An author, narrator or series has no page yet, so choosing one
-//! puts its name in the field, which lists its books.
+//! would. ⏎ on a series opens its page; an author or narrator has no page
+//! yet, so choosing one puts its name in the field, which lists its books.
 
 use super::nav::Route;
 use super::search::{BookIndex, Hit, Results};
@@ -56,10 +56,11 @@ enum Verb {
 
 const BOOK_KEYS: &str = "⏎ open    ⌘⏎ play";
 const NAME_KEYS: &str = "⏎ show books";
+const SERIES_KEYS: &str = "⏎ open";
 
 const TEXT: kit::PaletteText = kit::PaletteText {
     placeholder: "Search books, authors, narrators and series",
-    footer: "⏎ open    ⌘⏎ play or resume    ⏎ on a name lists its books",
+    footer: "⏎ open    ⌘⏎ play or resume    ⏎ on a person lists their books",
     no_matches: "No books match",
 };
 
@@ -99,6 +100,12 @@ impl ViewCtx<'_> {
                 let id = books[i].id.clone();
                 self.actions.push(Action::ClosePalette);
                 self.actions.push(if verb == Verb::Play { Action::PlayBook(id) } else { Action::Go(Route::Book(id)) });
+            }
+            (Some(_), Some(Hit::Name(super::search::Kind::Series, i))) => {
+                if let Some(name) = index.name(super::search::Kind::Series, i) {
+                    self.actions.push(Action::ClosePalette);
+                    self.actions.push(Action::Go(Route::Series(name.name.clone())));
+                }
             }
             (Some(_), Some(Hit::Name(kind, i))) => {
                 if let Some(name) = index.name(kind, i) {
@@ -182,11 +189,12 @@ impl kit::PaletteRows for Rows<'_> {
                 PaletteRow { title: book.title.clone(), detail, keys: BOOK_KEYS }
             }
             Some(Hit::Name(kind, i)) => {
-                let icon = if kind == super::search::Kind::Series { Icon::List } else { Icon::Person };
-                kit::palette_icon_tile(ui, tile, icon);
-                let Some(name) = self.index.name(kind, i) else { return PaletteRow { title: String::new(), detail: String::new(), keys: NAME_KEYS } };
+                let series = kind == super::search::Kind::Series;
+                kit::palette_icon_tile(ui, tile, if series { Icon::List } else { Icon::Person });
+                let keys = if series { SERIES_KEYS } else { NAME_KEYS };
+                let Some(name) = self.index.name(kind, i) else { return PaletteRow { title: String::new(), detail: String::new(), keys } };
                 let books = if name.books == 1 { "1 book".to_owned() } else { format!("{} books", name.books) };
-                PaletteRow { title: name.name.clone(), detail: format!("{} · {books}", kind.label()), keys: NAME_KEYS }
+                PaletteRow { title: name.name.clone(), detail: format!("{} · {books}", kind.label()), keys }
             }
             None => PaletteRow { title: String::new(), detail: String::new(), keys: BOOK_KEYS },
         }

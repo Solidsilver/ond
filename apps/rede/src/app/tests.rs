@@ -23,7 +23,18 @@ fn every_view_draws() {
         frame(&ctx, &mut app);
     }
     app.apply_prefs(PrefsAction::Filter(crate::settings::LibraryFilter::All));
-    let mut routes = vec![Route::Home, Route::Library, Route::Downloads, Route::Stats, book_route(0), book_route(5), Route::Book("book-gone".into())];
+    let mut routes = vec![
+        Route::Home,
+        Route::Library,
+        Route::Downloads,
+        Route::Stats,
+        Route::AllSeries,
+        Route::Series("Hainish".into()),
+        Route::Series("A series gone".into()),
+        book_route(0),
+        book_route(5),
+        Route::Book("book-gone".into()),
+    ];
     for route in routes.drain(..) {
         app.go(route);
         for _ in 0..2 {

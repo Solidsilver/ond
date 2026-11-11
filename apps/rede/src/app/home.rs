@@ -64,7 +64,7 @@ impl ViewCtx<'_> {
             let recent = self.books.recent();
             let (cols, tile) = grid_metrics(ui.available_width());
             for row in recent.chunks(cols).take(RECENT_ROWS) {
-                self.book_row(ui, row, tile, tile);
+                self.book_row(ui, row, tile, tile, None);
             }
         });
     }

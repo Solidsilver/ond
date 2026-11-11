@@ -1,5 +1,6 @@
 //! A book's page, in Ond's album-page idiom: the cover with the title,
-//! authors, a line of facts (narrators, series and number, length) and Play
+//! authors, a line of facts (narrators, series and number, length; a series
+//! links to its page) and Play
 //! with the download's button set on its bottom edge; under them the
 //! description and the chapters, side by side in reading-width columns when
 //! the window is wide, one above the other when it isn't. The details are
@@ -99,7 +100,7 @@ impl ViewCtx<'_> {
                     ui.add_space((row_h - last_h).max(0.0));
                 }
                 let top = ui.cursor().top();
-                header_text(ui, t, book);
+                header_text(ui, t, book, self.actions);
                 self.play_row(ui, book);
                 self.book_progress(ui, t, book);
                 ui.min_rect().bottom() - top
@@ -288,18 +289,36 @@ impl ViewCtx<'_> {
     }
 }
 
-/// The title, any subtitle, the authors, the facts and Play.
-fn header_text(ui: &mut Ui, t: &Tokens, book: &ItemSummary) {
+/// The title, any subtitle, the authors and the facts, whose series open
+/// their pages.
+fn header_text(ui: &mut Ui, t: &Tokens, book: &ItemSummary, actions: &mut Vec<Action>) {
     ui.add(egui::Label::new(RichText::new(&book.title).font(FontId::new(26.0, semibold())).color(t.text)).wrap());
     if let Some(subtitle) = book.subtitle.as_deref().filter(|s| !s.is_empty()) {
         ui.add(egui::Label::new(RichText::new(subtitle).size(15.0).color(t.muted)).wrap());
     }
     ui.add_space(2.0);
     ui.add(egui::Label::new(RichText::new(authors_line(book)).size(17.0).color(t.text)).wrap());
-    let facts = facts_line(book);
+    let facts = facts(book);
     if !facts.is_empty() {
         ui.add_space(2.0);
-        ui.add(egui::Label::new(RichText::new(facts).size(12.0).color(t.muted)).wrap());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (n, fact) in facts.iter().enumerate() {
+                if n > 0 {
+                    ui.label(RichText::new(" · ").size(12.0).color(t.muted));
+                }
+                match fact {
+                    Fact::Text(text) => {
+                        ui.label(RichText::new(text).size(12.0).color(t.muted));
+                    }
+                    Fact::Series { name, label } => {
+                        if shell::kit::link(ui, label, FontId::proportional(12.0), t.muted).on_hover_text("Show the series").clicked() {
+                            actions.push(Action::Go(super::nav::Route::Series(name.clone())));
+                        }
+                    }
+                }
+            }
+        });
     }
     ui.add_space(12.0);
 }
@@ -352,23 +371,54 @@ fn about(ui: &mut Ui, t: &Tokens, description: Option<&[shell::rich::Block]>) {
     shell::rich::draw(ui, description, &shell::rich::Style::reading(ui));
 }
 
-/// The line under the authors: narrators, series and number, and how long the
-/// book is, each only when the server said.
-pub fn facts_line(book: &ItemSummary) -> String {
-    let mut parts: Vec<String> = Vec::new();
+/// One of the facts under the authors.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fact {
+    Text(String),
+    /// A series the book is in, with its number: a link to the series.
+    Series {
+        name: String,
+        label: String,
+    },
+}
+
+#[cfg(test)]
+impl Fact {
+    fn text(&self) -> &str {
+        match self {
+            Fact::Text(text) | Fact::Series { label: text, .. } => text,
+        }
+    }
+}
+
+/// The facts under the authors: narrators, series and number, and how long
+/// the book is, each only when the server said.
+pub fn facts(book: &ItemSummary) -> Vec<Fact> {
+    let mut facts = Vec::new();
     if !book.narrators.is_empty() {
-        parts.push(format!("Read by {}", book.narrators.join(", ")));
+        facts.push(Fact::Text(format!("Read by {}", book.narrators.join(", "))));
     }
     for series in &book.series {
-        parts.push(match &series.sequence {
-            Some(n) => format!("{} #{n}", series.name),
-            None => series.name.clone(),
-        });
+        facts.push(Fact::Series { name: series.name.clone(), label: series_label(series) });
     }
     if let Some(duration) = book.duration {
-        parts.push(fmt::span(duration));
+        facts.push(Fact::Text(fmt::span(duration)));
     }
-    parts.join(" · ")
+    facts
+}
+
+/// The facts as one line, as the page reads them.
+#[cfg(test)]
+fn facts_line(book: &ItemSummary) -> String {
+    facts(book).iter().map(Fact::text).collect::<Vec<_>>().join(" · ")
+}
+
+/// A series and the book's number in it: "Hainish #2", or the name alone.
+pub fn series_label(series: &sources::Series) -> String {
+    match &series.sequence {
+        Some(n) => format!("{} #{n}", series.name),
+        None => series.name.clone(),
+    }
 }
 
 /// The chapter list: each chapter's number, title, where it starts in the
@@ -462,6 +512,7 @@ mod tests {
         assert_eq!(facts_line(&b), "Read by George Guidall · 11 hr 24 min");
         b.series = vec![Series { name: "Hainish".into(), sequence: Some("2".into()) }];
         assert_eq!(facts_line(&b), "Read by George Guidall · Hainish #2 · 11 hr 24 min");
+        assert_eq!(facts(&b)[1], Fact::Series { name: "Hainish".into(), label: "Hainish #2".into() }, "and the series links to its page");
         b.series[0].sequence = None;
         assert!(facts_line(&b).contains("Hainish ·"), "a book with no number in its series says so plainly");
     }
