@@ -58,7 +58,7 @@ const SHORTCUTS: [Group; 4] = [
             ("Collapse / expand sidebar", &["⌥⌘S"]),
             ("Settings", &["⌘,"]),
             ("Keyboard shortcuts", &["⌘/"]),
-            ("Back, or close a sheet or menu", &["esc"]),
+            ("Close a sheet or menu", &["esc"]),
         ],
     ),
 ];
