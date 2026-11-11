@@ -141,5 +141,5 @@ Rede does not yet read managed settings. Its own `settings.json` has
 minutes paused; 0 disables it). These are editable in the player's speed menu.
 
 Rede also keeps `downloads.remove_when_finished` (false) and `downloads.limit`
-(null for unlimited, otherwise bytes) in its own settings. The backend applies
-both; the Downloads settings controls are a later UI phase.
+(null for unlimited, otherwise bytes) in its own settings. Settings › Downloads
+changes both.

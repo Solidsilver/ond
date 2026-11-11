@@ -3,8 +3,9 @@
 //! library's name, and the account at the foot, with its state (connected,
 //! syncing, offline) and its menu, and the keyboard shortcuts beside it.
 //!
-//! The places are a list so Series, Authors, Collections and Downloads join
-//! Home and Library as rows when they come. The account's libraries are listed
+//! The places are a list so Series, Authors and Collections join Home,
+//! Library and Downloads as rows when they come. Downloads carries a ring
+//! while books are on their way, as Ond's Offline place does. The account's libraries are listed
 //! together on one shelf, so the heading names them rather than switching
 //! between them; a switcher comes with per-library browsing.
 //!
@@ -42,7 +43,10 @@ const ACCOUNT_MENU_W: f32 = 250.0;
 
 /// The places to browse, in order: what they're called, where they lead, and
 /// the rail's icon for them.
-const PLACES: [(&str, Route, Icon); 2] = [("Home", Route::Home, Icon::Home), ("Library", Route::Library, Icon::Grid)];
+const PLACES: [(&str, Route, Icon); 3] =
+    [("Home", Route::Home, Icon::Home), ("Library", Route::Library, Icon::Grid), ("Downloads", Route::Downloads, Icon::Download)];
+/// Room a place's download ring takes at its right end.
+const MARK_ROOM: f32 = 16.0;
 
 /// How wide the column draws in a window `width` wide: the full column, or
 /// `None` for the rail (collapsed, or no room).
@@ -201,8 +205,20 @@ impl ViewCtx<'_> {
         });
         ui.add_space(4.0);
         let active = self.active_place();
+        let coming = self.downloads_coming();
         for (i, (label, route, _)) in PLACES.into_iter().enumerate() {
-            if shell::kit::sidebar_row(ui, label, active == Some(i), 0.0, label).clicked() {
+            let mark = coming.filter(|_| route == Route::Downloads);
+            let (room, name) = match mark {
+                Some(m) => (MARK_ROOM, format!("{label}, {}", m.hint().to_lowercase())),
+                None => (0.0, label.to_owned()),
+            };
+            let resp = shell::kit::sidebar_row(ui, label, active == Some(i), room, &name);
+            if let Some(m) = mark
+                && ui.is_rect_visible(resp.rect)
+            {
+                kit::download_mark(ui, pos2(resp.rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, resp.rect.center().y), 11.0, m);
+            }
+            if resp.clicked() {
                 self.actions.push(Action::Go(route));
             }
         }
@@ -260,6 +276,23 @@ impl ViewCtx<'_> {
             self.help_button(ui, FOOTER_BUTTON);
             self.rail_account(ui);
         });
+    }
+
+    /// How far along the books on their way are, together, while any are:
+    /// what the Downloads place's ring shows.
+    fn downloads_coming(&self) -> Option<kit::DownloadMark> {
+        let snapshot = &self.downloads.snapshot;
+        let coming: Vec<&offline::PinSummary> = snapshot.pins.iter().filter(|p| matches!(p.pin, offline::Pin::Book(_)) && !p.complete()).collect();
+        if coming.is_empty() && self.downloads.preparing.is_empty() {
+            return None;
+        }
+        if !self.downloads.preparing.is_empty() || coming.iter().any(|p| p.downloading) || snapshot.queued > 0 {
+            let (done, total) = coming.iter().fold((0u64, 0u64), |(d, t), p| (d + p.bytes_done, t + p.bytes_total));
+            let fraction = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+            return Some(kit::DownloadMark::Progress(fraction));
+        }
+        // Nothing moving and something left: it gave up.
+        coming.iter().any(|p| p.failed > 0).then_some(kit::DownloadMark::Failed)
     }
 
     /// Which place the page belongs to: for a book, the one it was opened

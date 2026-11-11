@@ -231,6 +231,99 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.prefs.edit(|p| p.sidebar_collapsed = true);
         app
     });
+    // Downloads: the place empty, then with books here, on their way, being
+    // prepared and given up on; the library narrowed to what's here; and
+    // each with the marks on the covers.
+    scene(h, s, "downloads-empty", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        app.go(Route::Downloads);
+        app
+    });
+    scene(h, s, "downloads", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        downloaded(&mut app);
+        app.go(Route::Downloads);
+        app
+    });
+    scene(h, s, "downloads-paused", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        downloaded(&mut app);
+        let mut snapshot = (*app.downloads.snapshot).clone();
+        snapshot.paused = true;
+        app.downloads.snapshot = std::sync::Arc::new(snapshot);
+        app.go(Route::Downloads);
+        app
+    });
+    scene(h, s, "library-downloaded", || {
+        let mut app = library(LibraryFilter::Downloaded, LibrarySort::Title, true);
+        downloaded(&mut app);
+        app
+    });
+    scene(h, s, "library-download-marks", || {
+        let mut app = library(LibraryFilter::All, LibrarySort::Title, true);
+        downloaded(&mut app);
+        app
+    });
+    // A book's page in each download state: not asked for, being prepared,
+    // on its way (and its menu), here, given up on, and couldn't be
+    // prepared.
+    for (n, name) in [
+        (1, "book-download"),
+        (8, "book-download-preparing"),
+        (2, "book-downloading"),
+        (0, "book-downloaded"),
+        (7, "book-download-failed"),
+        (9, "book-download-unprepared"),
+    ] {
+        scene(h, s, name, || {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            downloaded(&mut app);
+            app.go(book_route(n));
+            app
+        });
+    }
+    for (label, name) in [("Downloading 41%", "book-downloading-menu"), ("Downloaded", "book-downloaded-menu")] {
+        *h.state_mut() = None;
+        *h.state_mut() = Some({
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            downloaded(&mut app);
+            app.go(book_route(if name.starts_with("book-downloading") { 2 } else { 0 }));
+            app
+        });
+        h.run_steps(2);
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        h.event(egui::Event::PointerGone);
+        s.shoot(h, name);
+        egui::Popup::close_all(&ctx);
+    }
+    // Offline: the books not downloaded are faded on the covers and cards,
+    // and a page says "Not downloaded" where Play would be; a downloaded
+    // book's page looks as it always does.
+    let offline = |route: Route, begun: bool| {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        if begun {
+            listened(&mut app);
+        }
+        downloaded(&mut app);
+        app.sync.offline = true;
+        app.go(route);
+        app
+    };
+    scene(h, s, "library-offline", || offline(Route::Library, true));
+    scene(h, s, "home-offline", || offline(Route::Home, true));
+    scene(h, s, "downloads-offline", || offline(Route::Downloads, false));
+    scene(h, s, "book-not-downloaded-offline", || offline(book_route(1), false));
+    scene(h, s, "book-downloaded-offline", || offline(book_route(0), false));
+    // A cover's right-click menu, with Download.
+    *h.state_mut() = None;
+    *h.state_mut() = Some(app(&ctx, dir.path(), BOOKS.len()));
+    h.run_steps(2);
+    h.get_by_label("Kindred by Octavia E. Butler").click_secondary();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "library-book-menu");
+    egui::Popup::close_all(&ctx);
     // Nothing playing: the capsule's quiet line, and the column saying so.
     scene(h, s, "nothing-playing", || {
         let app = app(&ctx, dir.path(), BOOKS.len());
@@ -436,6 +529,25 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         }
     }
     h.set_size(egui::vec2(FULL[0], FULL[1]));
+    // Settings › Downloads with the fixture's downloads, and the question
+    // before removing them all.
+    scene(h, s, "settings-downloads-filled", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        downloaded(&mut app);
+        app.prefs.edit(|p| p.downloads.limit = Some(10_000_000_000));
+        app.apply(Action::OpenSettings(super::settings_page::Tab::Downloads));
+        app
+    });
+    scene(h, s, "sheet-remove-downloads", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        downloaded(&mut app);
+        app.apply(Action::OpenSettings(super::settings_page::Tab::Downloads));
+        app.apply(Action::AskRemoveDownloads);
+        app
+    });
+    if let Some(app) = h.state_mut().as_mut() {
+        app.prefs.edit(|p| p.downloads.limit = None);
+    }
     // The capsule's cover under the pointer: the way to the Player.
     *h.state_mut() = None;
     *h.state_mut() = Some({

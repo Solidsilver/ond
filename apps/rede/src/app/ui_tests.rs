@@ -27,17 +27,146 @@ fn app_mut<'a>(h: &'a mut Harness<'static, Option<RedeApp>>) -> &'a mut RedeApp 
     h.state_mut().as_mut().expect("the fixture app")
 }
 
+/// A store the test drives by hand: its changes are read with `refresh`,
+/// as a change notice would.
+fn open_store(app: &mut RedeApp, dir: &Path) -> offline::OfflineStore {
+    let config = offline::OfflineConfig { dir: dir.join("downloads"), limit: None, reply_check: Default::default() };
+    let store = offline::OfflineStore::open(config, app._rt.0.as_ref().unwrap().handle().clone(), std::sync::Arc::new(|| {})).unwrap();
+    app.downloads.store.install(store.clone());
+    app.downloads.refresh();
+    store
+}
+
+#[test]
+fn a_books_download_button_offers_what_its_state_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).go(book_route(1));
+    h.run_steps(3);
+    h.get_by_label("Download");
+    let store = open_store(app_mut(&mut h), dir.path());
+    let pin = offline::Pin::Book(sources::ItemKey::new(account().id, "book-1").to_string());
+    store.pin(pin.clone(), "Dune", vec![offline::TrackRef::new("dune-1", Some("m4b".into()), Some(100))]);
+    app_mut(&mut h).downloads.refresh();
+    h.run_steps(3);
+    h.check_accessibility();
+    // On its way: how far, with pause and remove behind it.
+    h.get_by_label("Downloading 0%").click();
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label("Pause downloads").click();
+    h.run_steps(2);
+    assert!(store.snapshot().paused);
+    app_mut(&mut h).downloads.refresh();
+    h.run_steps(3);
+    h.get_by_label("Paused · 0%").click();
+    h.run_steps(2);
+    h.get_by_label("Remove download").click();
+    h.run_steps(2);
+    assert!(!store.is_pinned(&pin));
+    h.run_steps(2);
+    h.get_by_label("Download");
+    // Offline, a book that isn't here can't play or be fetched.
+    app_mut(&mut h).sync.offline = true;
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Not downloaded");
+    assert!(h.query_by_label("Download").is_none(), "nothing can be fetched offline");
+    // The cover in the library says so too, and its menu offers no download.
+    app_mut(&mut h).go(Route::Library);
+    h.run_steps(3);
+    h.get_by_label("Dune by Frank Herbert, not downloaded").click_secondary();
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label("Mark as finished");
+    assert!(h.query_by_label("Download").is_none());
+}
+
+#[test]
+fn a_covers_menu_downloads_the_book_and_the_place_lists_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).go(Route::Downloads);
+    h.run_steps(3);
+    h.get_by_label("Nothing downloaded");
+    app_mut(&mut h).go(Route::Library);
+    h.run_steps(3);
+    h.get_by_label("Kindred by Octavia E. Butler").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Download").click();
+    h.run_steps(2);
+    // No store is open in the fixture, so it says why it can't.
+    assert_eq!(app_mut(&mut h).ui.notice.as_ref().map(|n| n.text.as_str()), Some("Downloads aren't ready. Try again."));
+    downloaded(app_mut(&mut h));
+    h.run_steps(3);
+    h.get_by_label("Kindred by Octavia E. Butler, downloaded");
+    h.get_by_label("Piranesi by Susanna Clarke, downloading");
+    app_mut(&mut h).go(Route::Downloads);
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label_contains("Kindred by Octavia E. Butler, 298 MB");
+    h.get_by_label_contains("Piranesi by Susanna Clarke, Downloading 41%");
+    h.get_by_label_contains("The Fifth Season by N. K. Jemisin, Download failed · Can't reach the server.");
+    h.get_by_label("Pause all");
+    h.get_by_label("Retry failed");
+    h.get_by_label("More for Wolf Hall").click();
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label("Retry download");
+    h.get_by_label("Remove download").click();
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Wolf Hall by").is_none());
+    h.get_by_label_contains("Station Eleven by Emily St. John Mandel, Preparing…");
+}
+
+#[test]
+fn settings_change_the_download_preferences_and_remove_everything_after_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    downloaded(app_mut(&mut h));
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::Downloads));
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("storage limit, No limit");
+    h.get_by_label("Less storage limit").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.downloads.limit), Some(500_000_000_000));
+    h.get_by_role_and_label(egui::accesskit::Role::Switch, "Remove downloads when finished").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).prefs.get(|s| s.downloads.remove_when_finished));
+    h.get_by_label("Remove all…").click();
+    h.run_steps(3);
+    h.check_accessibility();
+    h.get_by_label("Remove all 5 downloads?");
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings), "back to Settings");
+    assert!(app_mut(&mut h).downloads.preparing.is_empty() && app_mut(&mut h).downloads.errors.is_empty());
+}
+
 /// Every control a route paints is named for the accessibility tree, which is
 /// also how a test (or a screen reader) finds it.
 #[test]
 fn every_view_names_its_controls() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
-    for route in [Route::Home, Route::Library, book_route(0), Route::Book("book-gone".into())] {
+    for route in [Route::Home, Route::Library, Route::Downloads, book_route(0), Route::Book("book-gone".into())] {
         app_mut(&mut h).go(route);
         h.run_steps(3);
         h.check_accessibility();
     }
+    // Downloads in each state: the place, the pages, offline too.
+    downloaded(app_mut(&mut h));
+    for offline in [false, true] {
+        app_mut(&mut h).sync.offline = offline;
+        for route in [Route::Downloads, book_route(0), book_route(2), book_route(7), book_route(9), book_route(1), Route::Library] {
+            app_mut(&mut h).go(route);
+            h.run_steps(3);
+            h.check_accessibility();
+        }
+    }
+    app_mut(&mut h).sync.offline = false;
+    app_mut(&mut h).downloads = Default::default();
     // Home and the library with books partway and one finished: the cards,
     // their resume buttons, and the tiles say how far along each book is.
     listened(app_mut(&mut h));

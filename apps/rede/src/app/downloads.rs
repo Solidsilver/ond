@@ -22,6 +22,7 @@ impl RedeApp {
         self.downloads.preparing.insert(key.clone(), request);
         self.downloads.errors.remove(&key);
         self.bridge.prepare_download(source, shelf, key, request);
+        self.downloads.refresh();
     }
 
     pub(super) fn remove_download(&mut self, key: &ItemKey) {
@@ -30,6 +31,27 @@ impl RedeApp {
         self.downloads.errors.remove(key);
         if let Some(store) = self.downloads.store.get() {
             store.unpin(&Pin::Book(key.to_string()));
+        }
+        self.downloads.refresh();
+    }
+
+    /// Every book's download goes, those still on their way too. Settings
+    /// asks first.
+    pub(super) fn remove_all_downloads(&mut self) {
+        self.downloads.preparing.clear();
+        self.downloads.errors.clear();
+        if let Some(store) = self.downloads.store.get() {
+            let pins: Vec<Pin> = self.downloads.snapshot.pins.iter().filter(|p| matches!(p.pin, Pin::Book(_))).map(|p| p.pin.clone()).collect();
+            store.unpin_many(&pins);
+        }
+        self.downloads.refresh();
+    }
+
+    pub(super) fn retry_downloads(&mut self) {
+        self.downloads.refreshed = false;
+        self.downloads.errors.clear();
+        if let Some(store) = self.downloads.store.get() {
+            store.retry_failed();
         }
         self.downloads.refresh();
     }
@@ -76,6 +98,7 @@ impl RedeApp {
                 Ok(()) => {
                     if let Some(store) = self.downloads.store.get() {
                         store.set_limit(self.shown.downloads.limit);
+                        self.downloads.dir = Some(store.dir().to_path_buf());
                     }
                     self.downloads.refresh();
                     self.download_connectivity();

@@ -11,6 +11,7 @@
 //! than sorting.
 
 use super::Action;
+use super::downloads_page::BookDownload;
 use super::nav::Route;
 use super::prefs_view::PrefsAction;
 use super::progress::{Listened, Positions, Stage};
@@ -43,6 +44,11 @@ const PREFETCH_ROWS: usize = 1;
 const HEADING_GAP: f32 = 24.0;
 /// The sort menu: its longest order and the check's gutter.
 const SORT_MENU_W: f32 = 176.0;
+/// A book's menu, on a right-click or behind its page's …: its longest
+/// command.
+pub const BOOK_MENU_W: f32 = 190.0;
+/// Room the download's mark takes at the end of a tile's author line.
+const MARK_ROOM: f32 = 16.0;
 
 /// The shelf's books, in the order the sync stored them, and what has been
 /// fetched about each one since.
@@ -70,6 +76,10 @@ pub struct Books {
     descriptions: Memo<(String, String), Vec<shell::rich::Block>>,
     /// What the palette searches, per library version.
     index: Memo<u64, super::search::BookIndex>,
+    /// Each book's download, and the Downloads page's rows, per library
+    /// version and downloads version.
+    downloads: Memo<(u64, u64), HashMap<String, BookDownload>>,
+    download_rows: Memo<(u64, u64), Vec<super::downloads_page::DownloadRow>>,
 }
 
 /// What a book page knows about a book beyond its listing.
@@ -121,21 +131,50 @@ impl Books {
     /// Indices into [`all`](Self::all) of the books `filter` lets through,
     /// in the order `sort` draws them. `loaded` is the book in the player
     /// with its stage, when that's ahead of its saved position.
-    pub fn shown(&mut self, sort: LibrarySort, filter: LibraryFilter, positions: &Positions, loaded: Option<(String, Stage)>) -> Arc<Vec<usize>> {
+    /// Downloaded keeps the books whose every file is here, by `downloads`.
+    pub fn shown(
+        &mut self,
+        sort: LibrarySort,
+        filter: LibraryFilter,
+        positions: &Positions,
+        loaded: Option<(String, Stage)>,
+        downloads: &crate::downloads::State,
+    ) -> Arc<Vec<usize>> {
         let order = self.order(sort, positions);
         if filter == LibraryFilter::All {
             return order;
         }
-        let key = (self.order_key(sort, positions), positions.version(), filter, loaded);
+        // The downloads matter only to their own filter, so a download's
+        // progress doesn't filter the shelf again by stage.
+        let downloads_version = if filter == LibraryFilter::Downloaded { downloads.version } else { 0 };
+        let here = (filter == LibraryFilter::Downloaded).then(|| self.downloads(downloads));
+        let key = (self.order_key(sort, positions), positions.version(), filter, loaded, downloads_version);
         let books = &self.all;
         let loaded = key.3.clone();
         self.shown.get(key, || {
+            if let Some(here) = here {
+                return order.iter().copied().filter(|&i| matches!(here.get(&books[i].id), Some(BookDownload::Done { .. }))).collect();
+            }
             let stage = |i: usize| match &loaded {
                 Some((id, stage)) if *id == books[i].id => *stage,
                 _ => saved(&books[i], positions).stage(),
             };
             order.iter().copied().filter(|&i| admits(filter, stage(i))).collect()
         })
+    }
+
+    /// Each book's download, by its own id, worked out once per change to
+    /// the downloads.
+    pub fn downloads(&mut self, state: &crate::downloads::State) -> Arc<HashMap<String, BookDownload>> {
+        self.downloads.get((self.version, state.version), || super::downloads_page::book_downloads(state))
+    }
+
+    /// The Downloads page's rows, worked out once per change to the library
+    /// or the downloads.
+    pub fn download_rows(&mut self, state: &crate::downloads::State) -> Arc<Vec<super::downloads_page::DownloadRow>> {
+        let downloads = self.downloads(state);
+        let books = &self.all;
+        self.download_rows.get((self.version, state.version), || super::downloads_page::download_rows(books, state, &downloads))
     }
 
     fn order_key(&self, sort: LibrarySort, positions: &Positions) -> OrderKey {
@@ -184,9 +223,10 @@ impl Books {
 /// sort the shelf by title again).
 type OrderKey = (u64, LibrarySort, u64);
 
-/// The order's key, the positions version, the filter, and the loaded book
-/// with its stage while the player is ahead of what was saved for it.
-type ShownKey = (OrderKey, u64, LibraryFilter, Option<(String, Stage)>);
+/// The order's key, the positions version, the filter, the loaded book
+/// with its stage while the player is ahead of what was saved for it, and
+/// the downloads version when the filter is Downloaded (0 otherwise).
+type ShownKey = (OrderKey, u64, LibraryFilter, Option<(String, Stage)>, u64);
 
 /// A book's listening as last saved: what the orders and the filter go by.
 fn saved(book: &ItemSummary, positions: &Positions) -> Listened {
@@ -200,6 +240,8 @@ pub fn admits(filter: LibraryFilter, stage: Stage) -> bool {
         LibraryFilter::InProgress => stage == Stage::InProgress,
         LibraryFilter::NotStarted => stage == Stage::NotStarted,
         LibraryFilter::Finished => stage == Stage::Finished,
+        // Not a stage: `Books::shown` asks the downloads instead.
+        LibraryFilter::Downloaded => true,
     }
 }
 
@@ -256,6 +298,7 @@ fn filter_empty(filter: LibraryFilter) -> (&'static str, &'static str) {
         LibraryFilter::InProgress => ("Nothing in progress", "Books you've started and haven't finished show up here."),
         LibraryFilter::NotStarted => ("Nothing left to start", "Every book has been started. New ones show up here as they're added."),
         LibraryFilter::Finished => ("Nothing finished yet", "Books you listen to the end show up here."),
+        LibraryFilter::Downloaded => ("Nothing downloaded", "Books you download show up here, and play without a connection."),
     }
 }
 
@@ -296,7 +339,7 @@ impl ViewCtx<'_> {
             return;
         }
         let loaded = if self.filter == LibraryFilter::All { None } else { self.loaded_stage() };
-        let ids = self.books.shown(self.sort, self.filter, self.positions, loaded);
+        let ids = self.books.shown(self.sort, self.filter, self.positions, loaded, self.downloads);
         self.library_heading(ui, ids.len());
         if ids.is_empty() {
             let (title, body) = filter_empty(self.filter);
@@ -418,14 +461,23 @@ impl ViewCtx<'_> {
     }
 
     /// Cover, title and author, and how far along the book is: a line along
-    /// the cover's foot and the time left, or a check and "Finished". A click
-    /// opens the book.
+    /// the cover's foot and the time left, or a check and "Finished"; the
+    /// download's mark at the author line's end. Offline, a book that isn't
+    /// all here is faded: it can't play. A click opens the book; a
+    /// right-click has its commands.
     fn book_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32, cover_h: f32) {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, cover_h + LABEL_H), Sense::click());
+        let id = self.books.all()[idx].id.clone();
+        let download = self.download(&id);
+        let dim = self.sync.offline && !matches!(download, Some(BookDownload::Done { .. }));
         let book = &self.books.all()[idx];
         let listened = self.listened(book);
         if ui.is_rect_visible(rect) {
+            let opacity = ui.opacity();
+            if dim {
+                ui.multiply_opacity(super::downloads_page::DIMMED);
+            }
             let art = Rect::from_min_size(rect.min, vec2(tile, cover_h));
             self.art.paint(ui, art, book.cover.as_deref(), COVER_RADIUS, &stand_in(book));
             match listened {
@@ -437,20 +489,39 @@ impl ViewCtx<'_> {
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
             let author = author_of(book);
             let author = if author.is_empty() { "Unknown author" } else { author };
-            let line = elide(ui, author, FontId::proportional(12.0), t.muted, tile);
-            ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), line, t.muted);
+            let mark_room = if download.is_some() { MARK_ROOM } else { 0.0 };
+            let line = elide(ui, author, FontId::proportional(12.0), t.muted, tile - mark_room);
+            let line_y = art.bottom() + 24.0;
+            let line_h = line.size().y;
+            ui.painter().galley(pos2(rect.left(), line_y), line, t.muted);
+            if let Some(d) = &download {
+                shell::kit::download_mark(ui, pos2(rect.right() - 6.0, line_y + line_h / 2.0), 11.0, d.mark());
+            }
             if let Some(state) = listened.line() {
                 let line = elide(ui, &state, FontId::proportional(11.5), t.muted, tile);
                 ui.painter().galley(pos2(rect.left(), art.bottom() + 40.0), line, t.muted);
             }
+            ui.set_opacity(opacity);
         }
-        let name = match listened.line() {
+        let mut name = match listened.line() {
             Some(state) => format!("{} by {}, {}", book.title, authors_line(book), state.to_lowercase()),
             None => format!("{} by {}", book.title, authors_line(book)),
         };
+        if dim {
+            name.push_str(", not downloaded");
+        } else if let Some(d) = &download {
+            name.push_str(&format!(", {}", d.mark().hint().to_lowercase()));
+        }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
-        if resp.clicked() {
-            self.actions.push(Action::Go(Route::Book(book.id.clone())));
+        let mut chosen = None;
+        resp.context_menu(|ui| {
+            ui.set_width(BOOK_MENU_W);
+            chosen = self.book_commands(ui, &id);
+        });
+        if let Some(action) = chosen {
+            self.actions.push(action);
+        } else if resp.clicked() {
+            self.actions.push(Action::Go(Route::Book(id)));
         }
     }
 }
@@ -550,7 +621,8 @@ mod tests {
         let (list, mut positions) = listened_shelf();
         let mut books = Books::default();
         books.set(list.clone());
-        let shown = |books: &mut Books, filter, positions: &Positions| books.shown(LibrarySort::Title, filter, positions, None);
+        let none = crate::downloads::State::default();
+        let shown = |books: &mut Books, filter, positions: &Positions| books.shown(LibrarySort::Title, filter, positions, None, &none);
         assert_eq!(named(&list, &shown(&mut books, LibraryFilter::InProgress, &positions)), ["Alpha", "Beta", "Delta"]);
         assert_eq!(named(&list, &shown(&mut books, LibraryFilter::NotStarted, &positions)), ["Epsilon", "Zeta"]);
         assert_eq!(named(&list, &shown(&mut books, LibraryFilter::Finished, &positions)), ["Gamma"]);
@@ -563,7 +635,38 @@ mod tests {
         // The book in the player, started before its first report, counts as
         // begun.
         let loaded = Some(("e".to_owned(), Stage::InProgress));
-        assert_eq!(named(&list, &books.shown(LibrarySort::Title, LibraryFilter::NotStarted, &positions, loaded)), ["Zeta"]);
+        assert_eq!(named(&list, &books.shown(LibrarySort::Title, LibraryFilter::NotStarted, &positions, loaded, &none)), ["Zeta"]);
+    }
+
+    #[test]
+    fn downloaded_keeps_the_books_all_here_and_follows_the_downloads_version() {
+        let (list, positions) = listened_shelf();
+        let mut books = Books::default();
+        books.set(list.clone());
+        let account = sources::AccountId::from_uuid(uuid::Uuid::nil());
+        let summary = |id: &str, done: usize| offline::PinSummary {
+            pin: offline::Pin::Book(sources::ItemKey::new(account, id).to_string()),
+            label: id.into(),
+            total: 2,
+            done,
+            failed: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            downloading: done < 2,
+        };
+        let mut downloads = crate::downloads::State {
+            snapshot: Arc::new(offline::Snapshot { pins: vec![summary("b", 2), summary("e", 1)], ..Default::default() }),
+            version: 1,
+            ..Default::default()
+        };
+        let shown =
+            |books: &mut Books, downloads: &crate::downloads::State| books.shown(LibrarySort::Title, LibraryFilter::Downloaded, &positions, None, downloads);
+        assert_eq!(named(&list, &shown(&mut books, &downloads)), ["Beta"], "a book still on its way isn't downloaded yet");
+        let first = shown(&mut books, &downloads);
+        assert!(Arc::ptr_eq(&first, &shown(&mut books, &downloads)));
+        downloads.snapshot = Arc::new(offline::Snapshot { pins: vec![summary("b", 2), summary("e", 2)], ..Default::default() });
+        downloads.version = 2;
+        assert_eq!(named(&list, &shown(&mut books, &downloads)), ["Beta", "Epsilon"]);
     }
 
     #[test]

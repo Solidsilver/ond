@@ -39,9 +39,9 @@ impl PrefsView {
 pub enum PrefsAction {
     /// The library's order.
     Sort(LibrarySort),
-    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    /// A book marked finished, or heard to the end, loses its download.
     RemoveDownloadsWhenFinished(bool),
-    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
+    /// The most the downloads may take, in bytes; `None` for no limit.
     DownloadLimit(Option<u64>),
     /// Which books the library shows.
     Filter(LibraryFilter),

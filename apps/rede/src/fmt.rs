@@ -40,9 +40,34 @@ pub fn ago(at: std::time::SystemTime) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
+/// A size on disk, in decimal units as the system's file manager counts
+/// them: "512 bytes", "4.2 MB", "312 MB".
+pub fn bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1000.0 && u < UNITS.len() - 1 {
+        v /= 1000.0;
+        u += 1;
+    }
+    match u {
+        0 => format!("{n} bytes"),
+        _ if v < 10.0 => format!("{v:.1} {}", UNITS[u]),
+        _ => format!("{v:.0} {}", UNITS[u]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_read_in_decimal_units() {
+        assert_eq!(bytes(512), "512 bytes");
+        assert_eq!(bytes(4_200_000), "4.2 MB");
+        assert_eq!(bytes(312_000_000), "312 MB");
+        assert_eq!(bytes(25_000_000_000), "25 GB");
+    }
 
     #[test]
     fn how_far_reads_in_hours_and_minutes() {

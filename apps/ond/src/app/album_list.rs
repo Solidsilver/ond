@@ -4,7 +4,7 @@
 //! header sorts by it, as the sort pill does; the other pages keep their
 //! own order.
 
-use super::offline_page::Mark;
+use super::offline_page::pin_mark;
 use super::table::{Head, Width};
 use super::track_row::{TrackRow, col};
 use super::view_ctx::ViewCtx;
@@ -77,7 +77,7 @@ impl ViewCtx<'_> {
             self.art.paint_as(ui, art, album.cover_art.as_deref(), col::ART_RADIUS, &crate::art::album_cover(album));
             let x = art.right() + 10.0;
             // Only albums kept offline carry a mark, at the title's end.
-            let mark = Mark::of_pin(pin);
+            let mark = pin_mark(pin);
             let mark_w = if mark.is_some() { 18.0 } else { 0.0 };
             let w = row.line(ui, x, c.title.right() - col::INSET - x - mark_w, &album.name, FontId::proportional(13.0), t.text);
             if let Some(m) = mark {

@@ -49,8 +49,9 @@ impl LibrarySort {
     }
 }
 
-/// Which books the library shows, by how far along they are. Saved, as the
-/// order is; an unknown name reads as [`All`](LibraryFilter::All).
+/// Which books the library shows: by how far along they are, or those on
+/// this computer. Saved, as the order is; an unknown name reads as
+/// [`All`](LibraryFilter::All).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LibraryFilter {
@@ -59,10 +60,13 @@ pub enum LibraryFilter {
     InProgress,
     NotStarted,
     Finished,
+    /// Every file of the book is on this computer.
+    Downloaded,
 }
 
 impl LibraryFilter {
-    pub const ALL: [LibraryFilter; 4] = [LibraryFilter::All, LibraryFilter::InProgress, LibraryFilter::NotStarted, LibraryFilter::Finished];
+    pub const ALL: [LibraryFilter; 5] =
+        [LibraryFilter::All, LibraryFilter::InProgress, LibraryFilter::NotStarted, LibraryFilter::Finished, LibraryFilter::Downloaded];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -70,6 +74,7 @@ impl LibraryFilter {
             LibraryFilter::InProgress => "In progress",
             LibraryFilter::NotStarted => "Not started",
             LibraryFilter::Finished => "Finished",
+            LibraryFilter::Downloaded => "Downloaded",
         }
     }
 }

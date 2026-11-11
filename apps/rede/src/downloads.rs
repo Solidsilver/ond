@@ -64,10 +64,14 @@ pub struct State {
     pub refreshed: bool,
     pub serial: u64,
     pub remove_after_stop: HashSet<ItemKey>,
+    /// Bumped by every refresh, so what the views derive from the snapshot,
+    /// the preparing and the errors is worked out once per change.
+    pub version: u64,
+    /// The account's downloads folder, once its store is open.
+    pub dir: Option<std::path::PathBuf>,
 }
 
 impl State {
-    #[allow(dead_code, reason = "The download views are implemented in the next phase")]
     pub fn book(&self, key: &ItemKey) -> Option<&offline::PinSummary> {
         self.snapshot.pin(&Pin::Book(key.to_string()))
     }
@@ -77,5 +81,6 @@ impl State {
             self.refreshed = false;
         }
         self.snapshot = snapshot;
+        self.version += 1;
     }
 }
