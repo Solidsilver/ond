@@ -1044,3 +1044,20 @@ fn a_book_pin_survives_a_restart() {
     assert!(s.is_pinned(&pin));
     assert_eq!(s.pin_tracks(&pin).unwrap().1, ["account/file"]);
 }
+
+#[test]
+fn a_rejected_attempt_is_visible_before_retry_exhaustion_without_exposing_its_token() {
+    let server = testkit::JsonFake::start(|_| testkit::Answer::new("401 Unauthorized", ""));
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let store = store(dir.path(), &rt);
+    let url = format!("{}file?token=download-secret", server.base());
+    store.set_source(Some(Arc::new(move |_| url.clone())));
+    store.pin(Pin::Book("account/book".into()), "Book", vec![track("file", 4)]);
+    wait_until("the rejected attempt", || store.snapshot().last_errors.contains_key("file"));
+    store.set_source(None);
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.track("file"), Some(&TrackState::Queued));
+    assert!(snapshot.last_errors["file"].contains("401"));
+    assert!(!format!("{snapshot:?}").contains("download-secret"));
+}
