@@ -307,6 +307,7 @@ impl ViewCtx<'_> {
             return;
         }
         let (cover, name, open) = match &p.pin {
+            Pin::Book(_) => return,
             Pin::Album(id) => {
                 let a = self.data.album(id);
                 (a.and_then(|a| a.cover_art.clone()), a.map_or_else(|| p.label.clone(), |a| a.name.clone()), Some(Route::Album(id.clone())))
@@ -356,6 +357,7 @@ impl ViewCtx<'_> {
         resp.context_menu(|ui| {
             if ui.button("Play").clicked() {
                 match &p.pin {
+                    Pin::Book(_) => {}
                     Pin::Album(id) => self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 })),
                     Pin::Playlist(id) => self.actions.push(Action::Playlist(id.clone(), QueueAction::Play { start: 0 })),
                     Pin::Track(id) => {

@@ -13,6 +13,7 @@ pub enum Pin {
     Album(String),
     Playlist(String),
     Track(String),
+    Book(String),
 }
 
 /// A track to download: the server's id, file suffix and size (when known, for

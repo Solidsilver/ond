@@ -165,7 +165,7 @@ fn tree_size(dir: &Path) -> u64 {
 /// otherwise take them). A second `offline.json` in `base` while this account
 /// has its own is another store, and it stays put rather than mixing two sets
 /// of pins.
-pub fn account_store(base: &Path, account: u32) -> io::Result<PathBuf> {
+pub fn account_store(base: &Path, account: impl std::fmt::LowerHex) -> io::Result<PathBuf> {
     let dir = base.join(format!("{account:08x}"));
     let marker = dir.join(ADOPTING_FILE);
     let (theirs, mine) = (base.join(STATE_FILE).is_file(), dir.join(STATE_FILE).exists());
