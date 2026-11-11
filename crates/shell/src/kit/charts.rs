@@ -1,4 +1,5 @@
-//! Figures drawn as pictures, for a page that counts things: a [`stat_tile`]
+//! Figures drawn as pictures, for a page that counts things: a [`card`] to
+//! set each part apart (with its [`card_heading`]), a [`stat_tile`]
 //! (a figure in large type, with what it is above and a quiet line under),
 //! a [`bar_chart`] (one bar per bucket, the busiest in the accent at full
 //! strength), a [`level_grid`] (cells shaded by how much each holds, as a
@@ -10,13 +11,67 @@
 //! hears for the whole. Painted only, with nothing kept between frames;
 //! hovering shows a tooltip and asks for no repaints of its own.
 
+use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
-use egui::{Color32, FontId, Rect, Response, Sense, Ui, pos2, vec2};
+use egui::{Color32, FontId, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
 
 /// A tile's height.
-pub const STAT_TILE_H: f32 = 92.0;
-const TILE_RADIUS: f32 = 10.0;
-const TILE_PAD: f32 = 14.0;
+pub const STAT_TILE_H: f32 = 96.0;
+const TILE_PAD: f32 = 16.0;
+/// The corners of a card and a tile.
+pub const CARD_RADIUS: f32 = 12.0;
+/// Room inside a card's edge.
+pub const CARD_PAD: f32 = 20.0;
+
+/// What a card and a tile are filled with: a step off the page towards a
+/// field, so what's drawn on a card in the field's colour (an empty cell, a
+/// bar's track) still shows.
+fn card_fill(t: &Tokens) -> Color32 {
+    t.bg.lerp_to_gamma(t.field, 0.4)
+}
+
+/// A panel `width` wide that sets one part of a page apart from the next,
+/// at least `min_height` tall (so cards side by side come out level).
+/// `body` gets the width inside.
+pub fn card<R>(ui: &mut Ui, width: f32, min_height: f32, body: impl FnOnce(&mut Ui, f32) -> R) -> R {
+    let t = Tokens::of(ui);
+    let inner = (width - 2.0 * (CARD_PAD + 1.0)).max(0.0);
+    egui::Frame::new()
+        .fill(card_fill(&t))
+        .stroke(Stroke::new(1.0, t.hairline))
+        .corner_radius(CARD_RADIUS)
+        .inner_margin(CARD_PAD)
+        .show(ui, |ui| {
+            ui.set_width(inner);
+            ui.set_min_height((min_height - 2.0 * (CARD_PAD + 1.0)).max(0.0));
+            body(ui, inner)
+        })
+        .inner
+}
+
+/// The height a [`card`] adds around what's in it.
+pub const CARD_CHROME: f32 = 2.0 * (CARD_PAD + 1.0);
+
+/// A card's title, with a quiet line at its right (what the card comes to:
+/// "Most on Tuesdays") when there's room for both.
+pub fn card_heading(ui: &mut Ui, title: &str, note: Option<&str>) {
+    let t = Tokens::of(ui);
+    let width = ui.available_width();
+    let title = ui.painter().layout_no_wrap(title.to_owned(), FontId::new(15.0, semibold()), t.text);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, CARD_HEADING_H), Sense::hover());
+    let title_w = title.size().x;
+    ui.painter().galley(pos2(rect.left(), rect.top()), title, t.text);
+    if let Some(note) = note {
+        let room = width - title_w - 16.0;
+        if room > 40.0 {
+            let note = super::elide(ui, note, FontId::proportional(12.5), t.muted, room);
+            ui.painter().galley(pos2(rect.right() - note.size().x, rect.top() + 2.0), note, t.muted);
+        }
+    }
+}
+
+/// The room a [`card_heading`] takes, the space under it included.
+pub const CARD_HEADING_H: f32 = 32.0;
 
 /// What a [`stat_tile`] says.
 pub struct Stat<'a> {
@@ -26,6 +81,8 @@ pub struct Stat<'a> {
     pub value: &'a str,
     /// A quiet line under it.
     pub note: Option<&'a str>,
+    /// A small mark in the accent at the tile's corner.
+    pub icon: Option<Icon>,
 }
 
 /// A figure on a tile `width` wide: what it is, the figure, a note under.
@@ -34,13 +91,19 @@ pub fn stat_tile(ui: &mut Ui, width: f32, stat: &Stat) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, STAT_TILE_H), Sense::hover());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        p.rect_filled(rect, TILE_RADIUS, t.field.gamma_multiply(0.6));
+        p.rect(rect, CARD_RADIUS, card_fill(&t), Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
         let room = rect.width() - 2.0 * TILE_PAD;
         let x = rect.left() + TILE_PAD;
-        let label = super::elide(ui, stat.label, FontId::new(11.5, semibold()), t.muted, room);
-        let value = super::elide(ui, stat.value, FontId::new(24.0, semibold()), t.text, room);
+        const ICON: f32 = 14.0;
+        let label_room = if stat.icon.is_some() { room - ICON - 8.0 } else { room };
+        let label = super::elide(ui, stat.label, FontId::new(12.0, semibold()), t.muted, label_room);
+        let value = super::elide(ui, stat.value, FontId::new(26.0, semibold()), t.text, room);
         p.galley(pos2(x, rect.top() + TILE_PAD), label, t.muted);
-        p.galley(pos2(x, rect.top() + TILE_PAD + 17.0), value, t.text);
+        if let Some(icon) = stat.icon {
+            let at = Rect::from_min_size(pos2(rect.right() - TILE_PAD - ICON, rect.top() + TILE_PAD), vec2(ICON, ICON));
+            icons::paint(p, at, icon, t.accent);
+        }
+        p.galley(pos2(x, rect.top() + TILE_PAD + 18.0), value, t.text);
         if let Some(note) = stat.note {
             let note = super::elide(ui, note, FontId::proportional(12.0), t.muted, room);
             p.galley(pos2(x, rect.bottom() - TILE_PAD - note.size().y), note, t.muted);
@@ -189,18 +252,26 @@ pub fn level_grid(ui: &mut Ui, cell: f32, gap: f32, grid: &Grid) -> Response {
     }
 }
 
-/// "Less ▢▢▢▢▢ More": what a [`level_grid`]'s shades mean.
-pub fn level_legend(ui: &mut Ui, cell: f32) {
+/// "Less ▢▢▢▢▢ More": what a [`level_grid`]'s shades mean, at the right of
+/// a row `width` wide (under the grid's right edge).
+pub fn level_legend(ui: &mut Ui, cell: f32, width: f32) {
     let t = Tokens::of(ui);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
-        ui.label(egui::RichText::new("Less").size(10.5).color(t.muted));
-        for level in 0..LEVELS {
-            let (r, _) = ui.allocate_exact_size(vec2(cell, cell), Sense::hover());
-            ui.painter().rect_filled(r, cell * 0.22, shade(&t, level));
-        }
-        ui.label(egui::RichText::new("More").size(10.5).color(t.muted));
-    });
+    let font = FontId::proportional(10.5);
+    let less = ui.painter().layout_no_wrap("Less".into(), font.clone(), t.muted);
+    let more = ui.painter().layout_no_wrap("More".into(), font, t.muted);
+    let (gap, step) = (5.0, cell + 3.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, cell.max(less.size().y)), Sense::hover());
+    let p = ui.painter();
+    let mut x = rect.right() - more.size().x;
+    let y = rect.center().y;
+    p.galley(pos2(x, y - more.size().y / 2.0), more, t.muted);
+    x -= gap + f32::from(LEVELS) * step - 3.0;
+    for level in 0..LEVELS {
+        let r = Rect::from_min_size(pos2(x + f32::from(level) * step, y - cell / 2.0), vec2(cell, cell));
+        p.rect_filled(r, cell * 0.22, shade(&t, level));
+    }
+    x -= gap + less.size().x;
+    p.galley(pos2(x, y - less.size().y / 2.0), less, t.muted);
 }
 
 fn shade(t: &Tokens, level: u8) -> Color32 {

@@ -51,7 +51,8 @@
 //!   and what's laid over any cover to say how far along it is
 //!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
 //!   badge in its corner), with [`progress_bar`], the same line on its own.
-//! - [`charts`]: figures as pictures: a [`stat_tile`] (and
+//! - [`charts`]: figures as pictures, each part on a [`card`] under its
+//!   [`card_heading`]: a [`stat_tile`] (and
 //!   [`tile_columns`] to lay a row of them out), a [`bar_chart`], a
 //!   [`level_grid`] of shaded cells (a calendar of days) with its
 //!   [`level_legend`], and a [`share_bar`].
