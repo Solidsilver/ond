@@ -46,7 +46,10 @@ use model::{BookmarkV1, ChaptersV1, DetailsV1, ItemV1, LibrarySyncV1, LocalListe
 use redb::{Database, ReadableDatabase, ReadableTable, Table, TableDefinition, WriteTransaction};
 use serde::{Serialize, de::DeserializeOwned};
 use sources::{Changes, Item, ItemKey, ItemSummary, Library, Position, Progress, ProgressUpdate, Stamp};
+use std::collections::HashMap;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 /// Bump when a stored row or an index layout changes, and handle the step in
@@ -155,6 +158,15 @@ pub struct SyncState {
 /// One account's database.
 pub struct Shelf {
     db: Database,
+    local_sessions: Mutex<LocalSessions>,
+}
+
+/// Rebuilt lazily from the append-only log, then advanced only over new rows.
+/// Keeping this in memory leaves the frozen progress rows unchanged.
+#[derive(Default)]
+struct LocalSessions {
+    through: Option<ProgressId>,
+    first: HashMap<String, ProgressId>,
 }
 
 impl Shelf {
@@ -193,7 +205,7 @@ impl Shelf {
             wt.open_table(SYNC)?;
         }
         wt.commit()?;
-        Ok(Self { db })
+        Ok(Self { db, local_sessions: Mutex::default() })
     }
 
     #[cfg(test)]
@@ -403,8 +415,25 @@ impl Shelf {
     /// carry the cumulative time rather than just its new reports.
     pub fn local_session_progress(&self, session: &str, through: ProgressId) -> Result<Vec<ProgressUpdate>> {
         let rt = self.db.begin_read()?;
+        let log = rt.open_table(PROGRESS)?;
+        let first = {
+            let mut index = self.local_sessions.lock().unwrap();
+            if index.through.is_none_or(|id| id < through) {
+                let start = index.through.map_or(Unbounded, Excluded);
+                for row in log.range((start, Included(through)))? {
+                    let (id, bytes) = row?;
+                    let row: ProgressEntryV2 = decode(bytes.value())?;
+                    if let Some(local) = row.local {
+                        index.first.entry(local.id).or_insert(id.value());
+                    }
+                }
+                index.through = Some(through);
+            }
+            index.first.get(session).copied()
+        };
+        let Some(first) = first.filter(|first| *first <= through) else { return Ok(Vec::new()) };
         let mut updates = Vec::new();
-        for row in rt.open_table(PROGRESS)?.range(..=through)? {
+        for row in log.range(first..=through)? {
             let (_, bytes) = row?;
             let row: ProgressEntryV2 = decode(bytes.value())?;
             if row.local.as_ref().is_some_and(|l| l.id == session)

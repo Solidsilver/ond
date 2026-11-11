@@ -15,6 +15,7 @@ impl RedeApp {
             self.show_failure(Failure::Local("Downloads aren't ready. Try again.".into()));
             return;
         };
+        self.downloads.remove_after_stop.remove(&key);
         self.downloads.refreshed = false;
         self.downloads.serial += 1;
         let request = self.downloads.serial;
@@ -24,6 +25,7 @@ impl RedeApp {
     }
 
     pub(super) fn remove_download(&mut self, key: &ItemKey) {
+        self.downloads.remove_after_stop.remove(key);
         self.downloads.preparing.remove(key);
         self.downloads.errors.remove(key);
         if let Some(store) = self.downloads.store.get() {
@@ -33,8 +35,25 @@ impl RedeApp {
     }
 
     pub(super) fn remove_finished_download(&mut self, key: &ItemKey, finished: bool) {
-        if finished && self.shown.downloads.remove_when_finished {
-            self.remove_download(key);
+        let was_finished = self.positions.get(&key.item).is_some_and(|p| p.finished);
+        if finished && !was_finished && self.shown.downloads.remove_when_finished {
+            self.downloads.remove_after_stop.insert(key.clone());
+            self.remove_stopped_downloads();
+        } else if !finished {
+            self.downloads.remove_after_stop.remove(key);
+        }
+    }
+
+    pub(super) fn remove_stopped_downloads(&mut self) {
+        let ready: Vec<_> = self
+            .downloads
+            .remove_after_stop
+            .iter()
+            .filter(|key| !self.player.active || self.player.book.as_ref().is_none_or(|book| book.key != **key))
+            .cloned()
+            .collect();
+        for key in ready {
+            self.remove_download(&key);
         }
     }
 
@@ -54,9 +73,10 @@ impl RedeApp {
     pub(super) fn download_event(&mut self, event: OfflineMsg) {
         match event {
             OfflineMsg::Opened(result) => match result {
-                Ok(store) => {
-                    store.set_limit(self.shown.downloads.limit);
-                    self.downloads.store.install(store);
+                Ok(()) => {
+                    if let Some(store) = self.downloads.store.get() {
+                        store.set_limit(self.shown.downloads.limit);
+                    }
                     self.downloads.refresh();
                     self.download_connectivity();
                 }
@@ -64,7 +84,7 @@ impl RedeApp {
             },
             OfflineMsg::Changed => {
                 self.downloads.refresh();
-                let rejected = self.downloads.snapshot.last_errors.values().any(|error| error.contains("http 401"));
+                let rejected = self.downloads.snapshot.last_errors.values().any(|error| error.http_status == Some(401));
                 if rejected
                     && !self.sync.offline
                     && !self.downloads.refreshing
@@ -172,6 +192,42 @@ mod tests {
         assert!(!store.is_pinned(&pin));
     }
 
+    fn enable_removal(app: &mut RedeApp, store: &offline::OfflineStore, key: &ItemKey) -> Pin {
+        app.session.source = Some(Arc::new(Unreachable(Default::default())));
+        app.apply(Action::Prefs(PrefsAction::RemoveDownloadsWhenFinished(true)));
+        let pin = Pin::Book(key.to_string());
+        store.pin(pin.clone(), "Book", vec![offline::TrackRef::new("file", None, None)]);
+        pin
+    }
+
+    #[test]
+    fn pulling_an_already_finished_book_keeps_its_new_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = fixture::app(&egui::Context::default(), dir.path(), 1);
+        let store = install(&mut app, dir.path());
+        let key = ItemKey::new(fixture::account().id, "book-0");
+        let progress =
+            sources::Progress { item: key.clone(), position: sources::Position::from_secs(100.0), finished: true, at: Some(std::time::SystemTime::now()) };
+        app.positions.insert(key.item.clone(), progress.clone());
+        let pin = enable_removal(&mut app, &store, &key);
+        app.playback_event(crate::listening::Event::Positions(vec![progress]));
+        assert!(store.is_pinned(&pin));
+    }
+
+    #[test]
+    fn marking_a_book_finished_removes_its_download_only_on_the_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = fixture::app(&egui::Context::default(), dir.path(), 1);
+        let store = install(&mut app, dir.path());
+        let key = ItemKey::new(fixture::account().id, "book-0");
+        let pin = enable_removal(&mut app, &store, &key);
+        app.apply(Action::MarkFinished(key.item.clone()));
+        assert!(!store.is_pinned(&pin));
+        store.pin(pin.clone(), "Book", vec![]);
+        app.apply(Action::MarkFinished(key.item));
+        assert!(store.is_pinned(&pin));
+    }
+
     #[test]
     fn a_cancelled_prepare_and_an_older_accounts_result_cannot_pin_a_book() {
         let dir = tempfile::tempdir().unwrap();
@@ -203,7 +259,7 @@ mod tests {
         });
         let client = abs::Client::new(api.base(), account.device()).unwrap().with_tokens(abs::Tokens::new("secret", "refresh"));
         app.session.source = Some(Arc::new(sources::AbsSource::new(account.id, client, vec![])));
-        app.bridge.open_downloads(account.id, None, app.stream_dir.clone());
+        app.bridge.open_downloads(account.id, None, app.stream_dir.clone(), app.downloads.store.clone());
         let deadline = Deadline::new();
         while app.downloads.store.get().is_none() {
             assert!(!deadline.passed());
@@ -323,6 +379,7 @@ mod tests {
         app.apply(Action::MarkFinished("book-0".into()));
         assert!(store.is_pinned(&pin));
         app.apply(Action::Prefs(PrefsAction::RemoveDownloadsWhenFinished(true)));
+        app.apply(Action::MarkUnfinished("book-0".into()));
         app.apply(Action::MarkFinished("book-0".into()));
         assert!(!store.is_pinned(&pin));
     }
@@ -356,7 +413,7 @@ mod tests {
         });
         let client = abs::Client::new(api.base(), account.device()).unwrap().with_tokens(abs::Tokens::new("expired", "refresh-0"));
         app.session.source = Some(Arc::new(sources::AbsSource::new(account.id, client, vec![])));
-        app.bridge.open_downloads(account.id, None, app.stream_dir.clone());
+        app.bridge.open_downloads(account.id, None, app.stream_dir.clone(), app.downloads.store.clone());
         let deadline = Deadline::new();
         while app.downloads.store.get().is_none() {
             assert!(!deadline.passed());
@@ -364,14 +421,83 @@ mod tests {
             app.handle(msg);
         }
         for n in 1..=2 {
+            let mut saw_rejection = false;
             let key = ItemKey::new(account.id, format!("book-{n}"));
             app.apply(Action::DownloadBook(key.clone()));
             while !app.downloads.book(&key).is_some_and(offline::PinSummary::complete) {
                 assert!(!deadline.passed());
                 let msg = app.inbox.recv_timeout(testkit::slack(testkit::WAIT)).unwrap();
                 app.handle(msg);
+                saw_rejection |= app.downloads.snapshot.last_errors.values().any(|error| error.http_status == Some(401));
             }
+            assert!(saw_rejection, "each book exposes the typed rejection before credentials are refreshed");
         }
         assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn signing_out_does_not_wait_for_download_shutdown_and_reopening_keeps_the_partial_file() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::{Duration, Instant};
+        use testkit::{RangeServer, Serve, slack, wait_until};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = fixture::app(&egui::Context::default(), dir.path(), 1);
+        let account = fixture::account();
+        let shelf = app.session.shelf.clone().unwrap();
+        app.bridge.open_downloads(account.id, None, app.stream_dir.clone(), app.downloads.store.clone());
+        let deadline = Deadline::new();
+        while app.downloads.store.get().is_none() {
+            assert!(!deadline.passed());
+            app.handle(app.inbox.recv_timeout(slack(testkit::WAIT)).unwrap());
+        }
+        let body = vec![7; 256 * 1024];
+        let server = RangeServer::start(body, Serve { gate_after: Some(64 * 1024), ..Serve::fast() });
+        let store = app.downloads.store.get().unwrap();
+        let url = server.url();
+        store.set_source(Some(Arc::new(move |_| url.clone())));
+        let key = ItemKey::new(account.id, "book-0");
+        let pin = Pin::Book(key.to_string());
+        store.pin(pin.clone(), "Book", vec![offline::TrackRef::new("file", None, Some(256 * 1024))]);
+        let folder = offline::account_store(&dir.path().join("downloads"), account.id.as_uuid().as_u128()).unwrap();
+        let part = folder.join("file.part");
+        wait_until("the gated partial download", || std::fs::metadata(&part).is_ok_and(|m| m.len() >= 64 * 1024));
+        let saved = std::fs::read(&part).unwrap();
+
+        // Hold a worker inside the store so shutdown cannot finish until the
+        // test releases it, independently of the machine's disk speed.
+        let (entered, waiting) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let held = Mutex::new(held);
+        store.set_cache_lookup(Arc::new(move |track| {
+            if track.id == "blocker" {
+                entered.send(()).unwrap();
+                held.lock().unwrap().recv_timeout(slack(testkit::WAIT)).unwrap();
+            }
+            None
+        }));
+        store.pin(Pin::Track("blocker".into()), "Blocker", vec![offline::TrackRef::new("blocker", None, None)]);
+        waiting.recv_timeout(slack(testkit::WAIT)).unwrap();
+        drop(store);
+        let (returned, observe) = mpsc::channel();
+        let unblock = std::thread::spawn(move || {
+            let _ = observe.recv_timeout(slack(Duration::from_millis(500)));
+            release.send(()).unwrap();
+        });
+        let started = Instant::now();
+        app.sign_out();
+        let elapsed = started.elapsed();
+        app.signed_in(account, Arc::new(Unreachable(Default::default())), shelf, None);
+        let opened_before_shutdown = app.downloads.store.get().is_some();
+        let _ = returned.send(());
+        unblock.join().unwrap();
+        assert!(elapsed < slack(Duration::from_millis(100)), "sign-out waited {elapsed:?} for the store");
+        assert!(!opened_before_shutdown, "the same folder must wait for the old store to shut down");
+        while app.downloads.snapshot.pin(&pin).is_none() {
+            assert!(!deadline.passed());
+            app.handle(app.inbox.recv_timeout(slack(testkit::WAIT)).unwrap());
+        }
+        assert_eq!(std::fs::read(part).unwrap(), saved);
+        assert!(app.downloads.store.get().unwrap().is_pinned(&pin));
     }
 }

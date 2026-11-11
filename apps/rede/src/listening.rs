@@ -5,7 +5,7 @@
 use crate::failure::Failure;
 use shelf::Shelf;
 use sources::{DeviceInfo, ItemKey, PlaySession, Position, Progress, ProgressUpdate, Source};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -105,6 +105,8 @@ struct Worker {
     downloads: crate::downloads::Store,
     local: Arc<std::sync::Mutex<Option<LocalOpen>>>,
     reachable: bool,
+    refused_sessions: HashSet<String>,
+    notify: Arc<dyn Fn(Event) + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -169,7 +171,7 @@ pub fn spawn_with_downloads(
         }
     });
     rt.spawn(async move {
-        let mut worker = Worker { source, shelf, device, session: None, active: None, downloads, local, reachable: true };
+        let mut worker = Worker { source, shelf, device, session: None, active: None, downloads, local, reachable: true, refused_sessions: HashSet::new(), notify: notify.clone() };
         notify(Event::Bookmarks(worker.shelf.bookmark_snapshot().map_err(local_error)));
         let mut received = worker.shelf.pending_progress().ok().and_then(|p| p.last().map(|p| p.id)).unwrap_or(0);
         if current() { worker.pull(None, &*notify).await; }
@@ -453,7 +455,7 @@ impl Worker {
 
     /// ABS blindly overwrites progress, so only the newest local position for
     /// each item may follow the timestamp comparison onto the server.
-    async fn replay(&self, before: Option<shelf::ProgressId>) -> Result<(), Failure> {
+    async fn replay(&mut self, before: Option<shelf::ProgressId>) -> Result<(), Failure> {
         let pending = self.shelf.pending_progress().map_err(local_error)?;
         let mut pending: Vec<_> = pending.into_iter().take_while(|p| before.is_none_or(|id| p.id < id)).collect();
         if pending.is_empty() {
@@ -463,6 +465,9 @@ impl Worker {
             let mut groups: HashMap<String, (sources::LocalSession, Vec<shelf::ProgressId>)> = HashMap::new();
             for entry in &pending {
                 let Some(local) = &entry.local else { continue };
+                if self.refused_sessions.contains(&local.id) {
+                    continue;
+                }
                 let group = match groups.entry(local.id.clone()) {
                     std::collections::hash_map::Entry::Occupied(group) => group.into_mut(),
                     std::collections::hash_map::Entry::Vacant(group) => {
@@ -500,8 +505,14 @@ impl Worker {
                         let ids: Vec<_> = accepted.iter().filter_map(|id| groups.get(id)).flat_map(|(_, ids)| ids.iter().copied()).collect();
                         self.shelf.mark_synced(&ids).map_err(local_error)?;
                         pending.retain(|e| !ids.contains(&e.id));
-                        if pending.iter().any(|e| e.local.is_some()) {
-                            return Err(Failure::Server("Couldn't sync offline listening. Try again.".into()));
+                        let mut refused = false;
+                        for id in groups.keys().filter(|id| !accepted.contains(id)) {
+                            refused |= self.refused_sessions.insert(id.clone());
+                        }
+                        if refused {
+                            (self.notify)(Event::Error(Failure::Server(
+                                "The server refused offline listening statistics. Sending book positions instead.".into(),
+                            )));
                         }
                     }
                     Err(sources::Error::NotSupported(_)) => {}

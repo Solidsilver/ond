@@ -499,3 +499,22 @@ fn local_listening_keeps_its_identity_and_cumulative_time_across_acknowledgement
     let cumulative = shelf.local_session_progress("session", last).unwrap();
     assert_eq!(cumulative.iter().map(|u| u.listened).sum::<Duration>(), Duration::from_secs(22));
 }
+
+#[test]
+fn later_local_session_totals_do_not_reread_unrelated_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let shelf = Shelf::open(dir.path().join("shelf.redb")).unwrap();
+    let old = shelf.append_progress(&update(1.0, false, 1, 1)).unwrap();
+    let local = LocalListening { id: "session".into(), start: Position::from_secs(8.0), started_at: Stamp::from_millis(1).system_time() };
+    let first = shelf.append_listening(&update(20.0, false, 10, 12), Some(&local)).unwrap();
+    shelf.mark_synced(&[first]).unwrap();
+    assert_eq!(shelf.local_session_progress("session", first).unwrap().len(), 1);
+    // Old damage outside this session must not poison every subsequent replay.
+    let wt = shelf.db.begin_write().unwrap();
+    wt.open_table(PROGRESS).unwrap().insert(old, &[255][..]).unwrap();
+    wt.commit().unwrap();
+    let last = shelf.append_listening(&update(30.0, false, 20, 10), Some(&local)).unwrap();
+    let cumulative = shelf.local_session_progress("session", last).unwrap();
+    assert_eq!(cumulative.iter().map(|u| u.listened).sum::<Duration>(), Duration::from_secs(22));
+    assert_eq!(shelf.local_session_progress("session", first).unwrap().len(), 1, "an older replay boundary still excludes later entries");
+}

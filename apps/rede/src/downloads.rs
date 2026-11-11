@@ -4,7 +4,7 @@
 
 use offline::{OfflineStore, Pin, Snapshot, TrackRef};
 use sources::{Item, ItemKey, SessionTrack, TrackFile};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// The persistent identity of an original audio file in both caches.
@@ -17,7 +17,7 @@ pub fn tracks(key: &ItemKey, item: &Item) -> Vec<TrackRef> {
     item.tracks.iter().map(|f| TrackRef::new(track_id(key, Some(f), f.index), f.suffix.clone(), f.size)).collect()
 }
 
-/// Shared with the listening worker, installed only after a scoped open lands.
+/// Shared with the listening worker, installed by a successful scoped open.
 #[derive(Clone, Default)]
 pub struct Store(Arc<Mutex<Option<OfflineStore>>>);
 impl Store {
@@ -28,6 +28,7 @@ impl Store {
         *self.0.lock().unwrap() = Some(store);
     }
 
+    /// Called on the bridge's download queue before a folder is reopened.
     pub fn clear(&self) {
         let store = self.0.lock().unwrap().take();
         drop(store);
@@ -36,7 +37,8 @@ impl Store {
     /// A book plays from disk only as a whole, so a missing second file never
     /// surprises the listener hours after an offline play press.
     pub fn local_tracks(&self, key: &ItemKey, item: &Item) -> Option<Vec<SessionTrack>> {
-        let store = self.get()?;
+        let held = self.0.lock().unwrap();
+        let store = held.as_ref()?;
         if item.tracks.is_empty() || !store.snapshot().pin(&Pin::Book(key.to_string()))?.complete() {
             return None;
         }
@@ -61,6 +63,7 @@ pub struct State {
     pub refreshing: bool,
     pub refreshed: bool,
     pub serial: u64,
+    pub remove_after_stop: HashSet<ItemKey>,
 }
 
 impl State {

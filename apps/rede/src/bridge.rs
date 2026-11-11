@@ -60,7 +60,7 @@ pub enum Msg {
 
 /// Download work belongs to the same sign-in generation as the shelf.
 pub enum OfflineMsg {
-    Opened(Result<offline::OfflineStore, Failure>),
+    Opened(Result<(), Failure>),
     Changed,
     Prepared { key: ItemKey, request: u64, result: Result<Box<Item>, Failure> },
     Refreshed(Result<(), Failure>),
@@ -175,6 +175,9 @@ pub struct Bridge {
     /// sign-in, say) stops storing once a newer one starts.
     pass: Arc<AtomicU64>,
     download_pass: Arc<std::sync::Mutex<u64>>,
+    /// Opens, source jobs and shutdowns share one queue, including accounts
+    /// revisited before their old store has finished writing.
+    download_jobs: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Set on a copy made by [`scoped`](Self::scoped): the session its work
     /// belongs to. Once that session ends, the copy's messages are dropped.
     scope: Option<u64>,
@@ -199,6 +202,7 @@ impl Bridge {
             session: Arc::default(),
             pass: Arc::default(),
             download_pass: Arc::default(),
+            download_jobs: Arc::default(),
             scope: None,
         }
     }
@@ -237,11 +241,27 @@ impl Bridge {
         self.send(Msg::Offline { session: self.scope.unwrap_or_else(|| self.session()), event });
     }
 
-    pub fn open_downloads(&self, account: sources::AccountId, limit: Option<u64>, stream_dir: std::path::PathBuf) {
+    fn download_job(&self, job: impl FnOnce() + Send + 'static) {
+        let mut pending = self.download_jobs.lock().unwrap();
+        let previous = pending.take();
+        let rt = self.rt.clone();
+        *pending = Some(self.rt.spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            let _ = rt.spawn_blocking(job).await;
+        }));
+    }
+
+    pub fn close_downloads(&self, store: crate::downloads::Store) {
+        self.download_job(move || store.clear());
+    }
+
+    pub fn open_downloads(&self, account: sources::AccountId, limit: Option<u64>, stream_dir: std::path::PathBuf, target: crate::downloads::Store) {
         let this = self.scoped();
         let base = self.paths.shelves.with_file_name("downloads");
         let rt = self.rt.clone();
-        self.rt.spawn_blocking(move || {
+        self.download_job(move || {
             if !this.current() {
                 return;
             }
@@ -261,6 +281,11 @@ impl Bridge {
                     path.is_file().then_some(path)
                 }));
             }
+            let result = result.map(|store| {
+                if this.current() {
+                    target.install(store);
+                }
+            });
             this.offline(OfflineMsg::Opened(result));
         });
     }
@@ -299,7 +324,7 @@ impl Bridge {
             *pass += 1;
             *pass
         };
-        self.rt.spawn_blocking(move || {
+        self.download_job(move || {
             let mut files = std::collections::HashMap::new();
             for pin in &store.snapshot().pins {
                 if let offline::Pin::Book(id) = &pin.pin

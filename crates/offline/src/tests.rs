@@ -1058,6 +1058,7 @@ fn a_rejected_attempt_is_visible_before_retry_exhaustion_without_exposing_its_to
     store.set_source(None);
     let snapshot = store.snapshot();
     assert_eq!(snapshot.track("file"), Some(&TrackState::Queued));
-    assert!(snapshot.last_errors["file"].contains("401"));
+    assert_eq!(snapshot.last_errors["file"].http_status, Some(401));
+    assert!(snapshot.last_errors["file"].message.contains("401"));
     assert!(!format!("{snapshot:?}").contains("download-secret"));
 }

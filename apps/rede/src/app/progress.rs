@@ -29,11 +29,6 @@ impl Positions {
         self.by_book.insert(id, progress);
     }
 
-    pub fn remove(&mut self, id: &str) -> Option<Progress> {
-        self.version += 1;
-        self.by_book.remove(id)
-    }
-
     pub fn clear(&mut self) {
         self.version += 1;
         self.by_book.clear();
