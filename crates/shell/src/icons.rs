@@ -94,6 +94,8 @@ pub enum Icon {
     Home,
     /// Two arrows chasing each other round a loop: repeat.
     Repeat,
+    /// Three bars of different heights on a baseline: stats.
+    Chart,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -241,6 +243,13 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Sidebar => {
             painter.rect_stroke(Rect::from_min_max(p(-0.85, -0.7), p(0.85, 0.7)), r * 0.15, line, egui::StrokeKind::Middle);
             painter.line_segment([p(-0.3, -0.7), p(-0.3, 0.7)], line);
+        }
+        Icon::Chart => {
+            painter.line_segment([p(-0.85, 0.8), p(0.85, 0.8)], line);
+            let bar = |x: f32, top: f32| Rect::from_min_max(p(x - 0.17, top), p(x + 0.17, 0.62));
+            for (x, top) in [(-0.5, 0.05), (0.0, -0.75), (0.5, -0.35)] {
+                painter.rect_filled(bar(x, top), r * 0.06, color);
+            }
         }
         Icon::Home => {
             painter.add(Shape::line(vec![p(-0.9, -0.02), p(0.0, -0.82), p(0.9, -0.02)], line));
