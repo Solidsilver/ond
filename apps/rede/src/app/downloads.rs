@@ -413,6 +413,12 @@ mod tests {
         let account = fixture::account();
         let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = refreshes.clone();
+        // Each fixture book has two files. Both use the old token, but the
+        // second rejection arrives only after the first file succeeds with
+        // refreshed credentials: it must not invalidate those credentials.
+        let stale_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release, held) = std::sync::mpsc::channel();
+        let held = std::sync::Mutex::new(held);
         let api = JsonFake::start(move |seen| {
             if seen.path() == "/auth/refresh" {
                 let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -422,6 +428,14 @@ mod tests {
                 if seen.target.ends_with(&format!("token=access-{required}")) {
                     Answer::new("200 OK", "data").with_header("Content-Type", "audio/mp4")
                 } else {
+                    if seen.target.ends_with("token=expired") {
+                        if seen.path().ends_with("/file/1-2") {
+                            stale_started.store(true, std::sync::atomic::Ordering::Relaxed);
+                            held.lock().unwrap().recv_timeout(testkit::slack(testkit::WAIT)).expect("the first file to finish before the stale rejection");
+                        } else {
+                            testkit::wait_until("both old-token requests to be in flight", || stale_started.load(std::sync::atomic::Ordering::Relaxed));
+                        }
+                    }
                     Answer::new("401 Unauthorized", "")
                 }
             } else {
@@ -443,14 +457,21 @@ mod tests {
             let msg = app.inbox.recv_timeout(testkit::slack(testkit::WAIT)).unwrap();
             app.handle(msg);
         }
+        let mut released = false;
         for n in 1..=2 {
             let mut saw_rejection = false;
             let key = ItemKey::new(account.id, format!("book-{n}"));
             app.apply(Action::DownloadBook(key.clone()));
             while !app.downloads.book(&key).is_some_and(offline::PinSummary::complete) {
-                assert!(!deadline.passed());
-                let msg = app.inbox.recv_timeout(testkit::slack(testkit::WAIT)).unwrap();
+                assert!(!deadline.passed(), "download {n}: {:?}", app.downloads.snapshot);
+                let msg = app.inbox.recv_timeout(deadline.left()).unwrap_or_else(|e| {
+                    panic!("download {n}: {e}; {} refreshes; {:?}", refreshes.load(std::sync::atomic::Ordering::Relaxed), app.downloads.snapshot)
+                });
                 app.handle(msg);
+                if !released && app.downloads.snapshot.tracks.values().any(|state| matches!(state, offline::TrackState::Done { .. })) {
+                    released = true;
+                    release.send(()).unwrap();
+                }
                 saw_rejection |= app.downloads.snapshot.last_errors.values().any(|error| error.http_status == Some(401));
             }
             assert!(saw_rejection, "each book exposes the typed rejection before credentials are refreshed");

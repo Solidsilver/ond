@@ -285,6 +285,9 @@ struct Inner {
 struct State {
     pins: Pins,
     url: Option<UrlFn>,
+    /// An error from credentials replaced while a request was in flight must
+    /// not reject the new source or spend its retry budget.
+    source_version: u64,
     cache: Option<CacheLookup>,
     limit: Option<u64>,
     active: HashMap<String, Active>,
@@ -338,6 +341,7 @@ struct Failure {
 struct Job {
     r: TrackRef,
     url: Option<String>,
+    source_version: u64,
     from_cache: Option<PathBuf>,
     part: PathBuf,
     dest: PathBuf,
@@ -404,6 +408,7 @@ impl OfflineStore {
             state: Mutex::new(State {
                 pins,
                 url: None,
+                source_version: 0,
                 cache: None,
                 limit: cfg.limit,
                 active: HashMap::new(),
@@ -452,6 +457,7 @@ impl OfflineStore {
             st.failures.clear();
         }
         st.url = url;
+        st.source_version += 1;
         self.inner.changed(st);
     }
 
@@ -751,7 +757,7 @@ impl Inner {
         st.active.insert(r.id.clone(), Active { cancel: cancel.clone(), done: 0, total: r.size });
         st.version += 1;
         let name = file_name(&r);
-        let job = Job { part: self.dir.join(format!("{name}.part")), dest: self.dir.join(name), r, url, from_cache, cancel };
+        let job = Job { part: self.dir.join(format!("{name}.part")), dest: self.dir.join(name), r, url, source_version: st.source_version, from_cache, cancel };
         drop(st);
         (self.on_change)();
         Next::Job(job)
@@ -795,6 +801,7 @@ impl Inner {
                 return self.commit(st, Vec::new());
             }
             Err(JobError::Cancelled) => {}
+            Err(_) if job.source_version != st.source_version => {}
             Err(JobError::Failed(error)) => {
                 tracing::warn!("offline download {}: {error}", job.r.id);
                 let attempts = st.failures.get(&job.r.id).map_or(0, |f| f.attempts) + 1;
