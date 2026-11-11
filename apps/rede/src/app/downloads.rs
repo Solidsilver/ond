@@ -83,7 +83,7 @@ impl RedeApp {
             },
             OfflineMsg::Changed => {
                 self.downloads.refresh();
-                let rejected = self.downloads.snapshot.last_errors.values().any(|error| error.contains("http 401"));
+                let rejected = self.downloads.snapshot.last_errors.values().any(|error| error.http_status == Some(401));
                 if rejected
                     && !self.sync.offline
                     && !self.downloads.refreshing
@@ -420,13 +420,16 @@ mod tests {
             app.handle(msg);
         }
         for n in 1..=2 {
+            let mut saw_rejection = false;
             let key = ItemKey::new(account.id, format!("book-{n}"));
             app.apply(Action::DownloadBook(key.clone()));
             while !app.downloads.book(&key).is_some_and(offline::PinSummary::complete) {
                 assert!(!deadline.passed());
                 let msg = app.inbox.recv_timeout(testkit::slack(testkit::WAIT)).unwrap();
                 app.handle(msg);
+                saw_rejection |= app.downloads.snapshot.last_errors.values().any(|error| error.http_status == Some(401));
             }
+            assert!(saw_rejection, "each book exposes the typed rejection before credentials are refreshed");
         }
         assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
