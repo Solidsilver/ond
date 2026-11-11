@@ -1,11 +1,19 @@
 //! The Stats place: the listening, counted.
 //!
 //! Four figures first (time listened, the streak, books finished, this
-//! week), then a few things worth a smile (what kind of listener the hours
-//! make, the words that went by, the biggest day and the longest sitting),
-//! a calendar of the last year shaded by how much each day held, when in the
-//! week and the day the listening happens, and the books, authors and
-//! narrators that took the most of it.
+//! week), then a card of things worth a smile (what kind of listener the
+//! hours make, the words that went by, the biggest day and the longest
+//! sitting), a calendar of the last year shaded by how much each day held,
+//! when in the week and the day the listening happens, and the books,
+//! authors and narrators that took the most of it.
+//!
+//! Each part is a card, and the page lays them out by its width: up to
+//! [`MAX_W`] across (wider, and lines and bars stretch past reading), the
+//! tiles four across or two by two, the calendar's cells grown to fill its
+//! card or its weeks cut to fit, the charts and the rankings side by side
+//! when each gets [`HALF_MIN`], and the books beside the authors and
+//! narrators once there's room for all three ([`THREE_UP`]). Cards side by
+//! side come out level.
 //!
 //! What's counted is `crate::stats`'s, worked out once per arrival, library,
 //! positions and day; a frame only draws. The page asks for the listening
@@ -19,24 +27,37 @@ use super::view_ctx::ViewCtx;
 use crate::stats::{Coverage, NOVEL_WORDS, Ranked, Stats, amount, grouped, hour_name};
 use crate::widgets::elide;
 use chrono::{Datelike, Days, NaiveDate};
-use egui::{FontId, Rect, RichText, Sense, Ui, pos2, vec2};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Align, FontId, Layout, Rect, RichText, Sense, Ui, pos2, vec2};
 use shell::icons::{self, Icon};
 use shell::kit;
 use shell::theme::{Tokens, semibold};
 
-const GAP: f32 = 12.0;
-const TILE_MIN: f32 = 150.0;
-/// The calendar's cells, and how many weeks it shows at most.
-const CELL: f32 = 11.0;
+/// The widest the page's cards grow.
+const MAX_W: f32 = 1320.0;
+/// Between cards, and between tiles.
+const GAP: f32 = 16.0;
+const TILE_MIN: f32 = 170.0;
+/// The calendar's cells: grown up to the largest to fill the card, and at
+/// the smallest, weeks are dropped instead (down to [`MIN_WEEKS`]).
+const CELL_MIN: f32 = 9.0;
+const CELL_MAX: f32 = 17.0;
 const CELL_GAP: f32 = 3.0;
 const WEEKS: usize = 53;
-const CHART_H: f32 = 96.0;
-/// Two columns (the charts, the authors beside the narrators) once each
-/// gets this much.
-const HALF_MIN: f32 = 300.0;
+const MIN_WEEKS: usize = 4;
+const CHART_H: f32 = 120.0;
+/// Two cards side by side once each gets this much.
+const HALF_MIN: f32 = 320.0;
+/// The top books beside the top authors and narrators from this width.
+const THREE_UP: f32 = 1060.0;
+/// Facts in two columns once the fun-facts card is this wide inside.
+const FACT_COLUMNS_MIN: f32 = 640.0;
+const FACT_ICON: f32 = 28.0;
+/// A book's row, and an author's or narrator's when it stands alone (beside
+/// the books, theirs take the books' height so the rows line up).
 const ROW_H: f32 = 52.0;
+const RANK_H: f32 = 38.0;
 const ROW_COVER: f32 = 40.0;
-const SECTION_GAP: f32 = 28.0;
 /// The weekday names, Monday first, as the stats count them.
 const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -65,23 +86,16 @@ impl ViewCtx<'_> {
             return;
         }
         egui::ScrollArea::vertical().id_salt("stats").auto_shrink(false).show(ui, |ui| {
-            let width = ui.available_width();
+            let width = ui.available_width().min(MAX_W);
             tiles(ui, &stats, width);
-            ui.add_space(SECTION_GAP);
-            fun_facts(ui, &stats);
-            ui.add_space(SECTION_GAP);
+            gap(ui);
+            fun_facts(ui, &stats, width);
+            gap(ui);
             calendar(ui, &stats, width);
-            ui.add_space(SECTION_GAP);
-            halves(ui, width, |ui, w| week_chart(ui, &stats, w), |ui, w| hour_chart(ui, &stats, w));
-            ui.add_space(SECTION_GAP);
-            self.top_books(ui, &stats.books, width.min(kit::LIST_W));
-            ui.add_space(SECTION_GAP);
-            halves(
-                ui,
-                width.min(kit::LIST_W * 1.4),
-                |ui, w| ranking(ui, "Top authors", &stats.authors, w),
-                |ui, w| ranking(ui, "Top narrators", &stats.narrators, w),
-            );
+            gap(ui);
+            pair(ui, width, &mut |ui, w| week_chart(ui, &stats, w), &mut |ui, w| hour_chart(ui, &stats, w));
+            gap(ui);
+            self.rankings(ui, &stats, width);
             ui.add_space(24.0);
         });
     }
@@ -104,10 +118,38 @@ impl ViewCtx<'_> {
         ui.add_space(10.0);
     }
 
+    /// The books, authors and narrators listened to most: all three across
+    /// when there's room, else the books over the other two.
+    fn rankings(&mut self, ui: &mut Ui, s: &Stats, width: f32) {
+        let tallest = |row_h: f32| {
+            let rows = s.books.len().max(s.authors.len()).max(s.narrators.len()).max(1);
+            kit::CARD_CHROME + kit::CARD_HEADING_H + rows as f32 * row_h
+        };
+        if width >= THREE_UP {
+            let h = tallest(ROW_H);
+            columns(
+                ui,
+                width,
+                &mut [
+                    (2.0, &mut |ui: &mut Ui, w| kit::card(ui, w, h, |ui, w| self.top_books(ui, &s.books, w))),
+                    (1.0, &mut |ui: &mut Ui, w| ranking(ui, "Top authors", &s.authors, w, ROW_H, h)),
+                    (1.0, &mut |ui: &mut Ui, w| ranking(ui, "Top narrators", &s.narrators, w, ROW_H, h)),
+                ],
+            );
+        } else {
+            kit::card(ui, width, 0.0, |ui, w| self.top_books(ui, &s.books, w));
+            gap(ui);
+            let h = tallest(RANK_H);
+            pair(ui, width, &mut |ui, w| ranking(ui, "Top authors", &s.authors, w, RANK_H, h), &mut |ui, w| {
+                ranking(ui, "Top narrators", &s.narrators, w, RANK_H, h)
+            });
+        }
+    }
+
     /// The books that took the most listening, each opening its page when
     /// the library still has it.
     fn top_books(&mut self, ui: &mut Ui, books: &[Ranked], width: f32) {
-        section_heading(ui, "Top books");
+        kit::card_heading(ui, "Top books", None);
         let most = books.first().map_or(1.0, |b| b.secs).max(1.0);
         let t = Tokens::of(ui);
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -117,19 +159,18 @@ impl ViewCtx<'_> {
             let book = ranked.book.as_deref().and_then(|id| self.books.by_id(id)).cloned();
             if ui.is_rect_visible(rect) {
                 if ranked.book.is_some() {
-                    ui.painter().rect_filled(rect, 6.0, kit::row_fill(&t, false, resp.hovered()));
-                    kit::focus_ring(ui, &resp, rect, 6.0);
+                    ui.painter().rect_filled(rect.expand2(vec2(8.0, 0.0)), 8.0, kit::row_fill(&t, false, resp.hovered()));
+                    kit::focus_ring(ui, &resp, rect.expand2(vec2(8.0, 0.0)), 8.0);
                 }
-                let rank = ui.painter().layout_no_wrap(format!("{}", i + 1), FontId::new(13.0, semibold()), t.muted);
-                ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - rank.size().y / 2.0), rank, t.muted);
-                let cover = Rect::from_min_size(pos2(rect.left() + 28.0, rect.center().y - ROW_COVER / 2.0), vec2(ROW_COVER, ROW_COVER));
+                rank_number(ui, i, rect.left(), rect.center().y, &t);
+                let cover = Rect::from_min_size(pos2(rect.left() + 24.0, rect.center().y - ROW_COVER / 2.0), vec2(ROW_COVER, ROW_COVER));
                 match &book {
                     Some(b) => self.art.paint(ui, cover, b.cover.as_deref(), COVER_RADIUS / 2.0, &stand_in(b)),
                     None => kit::generated_cover(ui, cover, COVER_RADIUS / 2.0, &kit::Generated { title: &ranked.name, byline: None, seed: &ranked.name }),
                 }
                 let x = cover.right() + 12.0;
-                let figure = ui.painter().layout_no_wrap(amount(ranked.secs), FontId::proportional(12.5), t.muted);
-                let right = rect.right() - 10.0;
+                let figure = ui.painter().layout_no_wrap(amount(ranked.secs), FontId::new(12.5, semibold()), t.text);
+                let right = rect.right();
                 let room = (right - figure.size().x - 16.0 - x).max(20.0);
                 let title = elide(ui, &ranked.name, FontId::proportional(13.0), t.text, room);
                 let byline = elide(ui, ranked.detail.as_deref().unwrap_or("Unknown author"), FontId::proportional(12.0), t.muted, room);
@@ -137,9 +178,9 @@ impl ViewCtx<'_> {
                 let title_h = title.size().y;
                 ui.painter().galley(pos2(x, top), title, t.text);
                 ui.painter().galley(pos2(x, top + title_h + 2.0), byline, t.muted);
-                let bar = Rect::from_min_size(pos2(x, rect.center().y + (title_h + 11.0) / 2.0 + 4.0), vec2(room, 3.0));
+                let bar = Rect::from_min_size(pos2(x, rect.center().y + (title_h + 11.0) / 2.0 + 4.0), vec2(right - x, 3.0));
                 kit::share_bar(ui, bar, (ranked.secs / most) as f32);
-                ui.painter().galley(pos2(right - figure.size().x, rect.center().y - figure.size().y / 2.0), figure, t.muted);
+                ui.painter().galley(pos2(right - figure.size().x, top + 1.0), figure, t.text);
             }
             let name = format!("{}. {}, {}", i + 1, ranked.name, amount(ranked.secs));
             let role = if ranked.book.is_some() { egui::Role::Button } else { egui::Role::Label };
@@ -162,161 +203,306 @@ fn tiles(ui: &mut Ui, s: &Stats, width: f32) {
         format!("{} book{}", s.books_listened, if s.books_listened == 1 { "" } else { "s" })
     };
     let streak = days(s.streak);
-    let longest = format!("Longest: {}", days(s.longest_streak));
+    let best = if s.streak > 0 && s.streak >= s.longest_streak { "Your best yet".to_owned() } else { format!("Best: {}", days(s.longest_streak)) };
     let finished = grouped(s.finished as u64);
     let this_year = format!("{} this year", s.finished_this_year);
     let week = amount(s.week);
-    let today = format!("Today: {}", amount(s.today));
+    let today = if s.today > 0.0 { format!("{} today", amount(s.today)) } else { "None yet today".to_owned() };
     let stats = [
-        kit::Stat { label: "Listened", value: &amount(s.total), note: Some(&listened_note) },
-        kit::Stat { label: "Streak", value: &streak, note: Some(&longest) },
-        kit::Stat { label: "Finished", value: &finished, note: Some(&this_year) },
-        kit::Stat { label: "Last 7 days", value: &week, note: Some(&today) },
+        kit::Stat { label: "Listened", value: &amount(s.total), note: Some(&listened_note), icon: Some(Icon::Headphones) },
+        kit::Stat { label: "Streak", value: &streak, note: Some(&best), icon: Some(Icon::Flame) },
+        kit::Stat { label: "Finished", value: &finished, note: Some(&this_year), icon: Some(Icon::Check) },
+        kit::Stat { label: "Last 7 days", value: &week, note: Some(&today), icon: Some(Icon::Clock) },
     ];
     let (cols, w) = kit::tile_columns(width, TILE_MIN, GAP, stats.len());
-    for row in stats.chunks(cols) {
+    for (i, row) in stats.chunks(cols).enumerate() {
+        if i > 0 {
+            gap(ui);
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             for stat in row {
                 kit::stat_tile(ui, w, stat);
             }
         });
-        ui.add_space(GAP - ui.spacing().item_spacing.y);
     }
 }
 
-/// A few lines worth a smile, each only when there's something to say.
-fn fun_facts(ui: &mut Ui, s: &Stats) {
-    section_heading(ui, "Fun facts");
+/// A fact: its mark, and its words, the figures in them set apart.
+struct Fact {
+    icon: Icon,
+    parts: Vec<(String, bool)>,
+}
+
+fn fact(icon: Icon, parts: &[(&str, bool)]) -> Fact {
+    Fact { icon, parts: parts.iter().map(|(p, strong)| ((*p).to_owned(), *strong)).collect() }
+}
+
+/// A few lines worth a smile, each only when there's something to say: what
+/// kind of listener the hours make on top, the rest in one or two columns.
+fn fun_facts(ui: &mut Ui, s: &Stats, width: f32) {
     let t = Tokens::of(ui);
-    let mut facts: Vec<(Option<&str>, String)> = Vec::new();
-    if let Some((name, why)) = s.persona() {
-        facts.push((Some(name), why));
-    }
+    let mut facts = Vec::new();
     let words = s.words();
     let novels = (words / NOVEL_WORDS).floor() as u64;
-    let words_text = format!("about {} words", grouped(((words / 1_000.0).round() * 1_000.0) as u64));
-    facts.push((
-        None,
-        match novels {
-            0 => format!("That's {words_text} read to you."),
-            1 => format!("That's {words_text} read to you: about a novel's worth."),
-            n => format!("That's {words_text} read to you: some {} novels' worth.", grouped(n)),
-        },
-    ));
+    let words_text = format!("{} words", grouped(((words / 1_000.0).round() * 1_000.0) as u64));
+    let novels_text = format!("{} novels", grouped(novels));
+    facts.push(match novels {
+        0 => fact(Icon::Lyrics, &[("About ", false), (&words_text, true), (" read to you.", false)]),
+        1 => fact(Icon::Lyrics, &[("About ", false), (&words_text, true), (" read to you: about a novel's worth.", false)]),
+        _ => fact(Icon::Lyrics, &[("About ", false), (&words_text, true), (" read to you: some ", false), (&novels_text, true), ("' worth.", false)]),
+    });
     if let Some((day, secs)) = s.best_day {
-        facts.push((None, format!("Your biggest day was {}, with {}.", long_date(day, s.today_date), amount(secs))));
+        facts.push(fact(
+            Icon::Star,
+            &[("Your biggest day was ", false), (&long_date(day, s.today_date), true), (", with ", false), (&amount(secs), true), (".", false)],
+        ));
     }
     if let Some(sitting) = &s.longest_sitting {
-        facts.push((None, format!("Your longest sitting: {} of {}, {}.", amount(sitting.secs), sitting.title, on_date(sitting.day, s.today_date))));
+        let when = on_date(sitting.day, s.today_date);
+        facts.push(fact(
+            Icon::Headphones,
+            &[("Your longest sitting: ", false), (&amount(sitting.secs), true), (" of ", false), (&sitting.title, true), (&format!(", {when}."), false)],
+        ));
     }
     if let Some(book) = &s.longest_finished {
-        facts.push((None, format!("The longest book you've finished is {}, at {}.", book.name, amount(book.secs))));
+        facts.push(fact(
+            Icon::Check,
+            &[("The longest book you've finished is ", false), (&book.name, true), (", at ", false), (&amount(book.secs), true), (".", false)],
+        ));
     }
     if s.active_days > 1 {
-        let average = s.total / s.active_days as f64;
-        facts.push((None, format!("{} days with listening, {} on an average one.", grouped(s.active_days as u64), amount(average))));
+        let average = amount(s.total / s.active_days as f64);
+        let active = format!("{} days", grouped(s.active_days as u64));
+        facts.push(fact(Icon::Clock, &[(&active, true), (" with listening, ", false), (&average, true), (" on an average one.", false)]));
     }
-    ui.scope(|ui| {
-        ui.set_max_width(kit::LIST_W);
-        ui.spacing_mut().item_spacing.y = 6.0;
-        for (lead, text) in facts {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if let Some(lead) = lead {
-                    ui.label(RichText::new(lead).font(FontId::new(13.5, semibold())).color(t.accent));
+    kit::card(ui, width, 0.0, |ui, w| {
+        kit::card_heading(ui, "Fun facts", None);
+        if let Some((name, why)) = s.persona() {
+            persona(ui, name, &why, &t);
+            ui.add_space(16.0);
+        }
+        let cols = if w >= FACT_COLUMNS_MIN { 2 } else { 1 };
+        let col_gap = 28.0;
+        let col_w = (w - col_gap * (cols - 1) as f32) / cols as f32;
+        for (i, row) in facts.chunks(cols).enumerate() {
+            if i > 0 {
+                ui.add_space(12.0 - ui.spacing().item_spacing.y);
+            }
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = col_gap;
+                for f in row {
+                    ui.allocate_ui_with_layout(vec2(col_w, 0.0), Layout::left_to_right(Align::Min), |ui| {
+                        ui.set_width(col_w);
+                        fact_line(ui, f, col_w, &t);
+                    });
                 }
-                ui.label(RichText::new(text).size(13.5).color(t.text));
             });
         }
     });
 }
 
-/// The last year's days, a column a week (Monday at the top), shaded by how
-/// much each held: as many weeks as the width has room for.
-fn calendar(ui: &mut Ui, s: &Stats, width: f32) {
-    section_heading(ui, "Listening by day");
-    let mut weeks = WEEKS;
-    while weeks > 4 && kit::level_grid_width(weeks, CELL, CELL_GAP) > width {
-        weeks -= 1;
+/// The kind of listener the hours make, in a tinted pill, and why.
+fn persona(ui: &mut Ui, name: &str, why: &str, t: &Tokens) {
+    let icon = match name {
+        "Night owl" => Icon::Moon,
+        "Early bird" => Icon::Star,
+        "Weekend binger" => Icon::Headphones,
+        _ => Icon::Clock,
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let label = ui.painter().layout_no_wrap(name.to_owned(), FontId::new(14.0, semibold()), t.accent);
+        let (icon_w, pad) = (14.0, vec2(12.0, 6.0));
+        let size = vec2(pad.x * 2.0 + icon_w + 6.0 + label.size().x, label.size().y + pad.y * 2.0);
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, rect.height() / 2.0, t.accent.gamma_multiply(0.16));
+        let icon_rect = Rect::from_center_size(pos2(rect.left() + pad.x + icon_w / 2.0, rect.center().y), vec2(icon_w, icon_w));
+        icons::paint(p, icon_rect, icon, t.accent);
+        p.galley(pos2(icon_rect.right() + 6.0, rect.center().y - label.size().y / 2.0), label, t.accent);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, name));
+        ui.label(RichText::new(why).size(13.5).color(t.text));
+    });
+}
+
+/// A fact's mark in a tinted disc, its words wrapped beside it.
+fn fact_line(ui: &mut Ui, f: &Fact, width: f32, t: &Tokens) {
+    let (disc, _) = ui.allocate_exact_size(vec2(FACT_ICON, FACT_ICON), Sense::hover());
+    ui.painter().circle_filled(disc.center(), FACT_ICON / 2.0, t.accent.gamma_multiply(0.12));
+    icons::paint(ui.painter(), Rect::from_center_size(disc.center(), vec2(13.0, 13.0)), f.icon, t.accent);
+    ui.add_space(12.0 - ui.spacing().item_spacing.x);
+    let mut job = LayoutJob::default();
+    for (text, strong) in &f.parts {
+        let format = if *strong {
+            TextFormat { font_id: FontId::new(13.5, semibold()), color: t.text, ..Default::default() }
+        } else {
+            TextFormat { font_id: FontId::proportional(13.5), color: t.muted, ..Default::default() }
+        };
+        job.append(text, 0.0, format);
     }
-    let today = s.today_date;
-    let monday = today.checked_sub_days(Days::new(u64::from(today.weekday().num_days_from_monday()))).unwrap_or(today);
-    let start = monday.checked_sub_days(Days::new(7 * (weeks as u64 - 1))).unwrap_or(monday);
-    let day = |c: usize, r: usize| start.checked_add_days(Days::new((c * 7 + r) as u64));
-    let level = |c: usize, r: usize| {
-        let d = day(c, r).filter(|d| *d <= today)?;
-        let secs = s.days.get(&d).copied().unwrap_or(0.0);
-        Some(match secs {
-            x if x <= 0.0 => 0,
-            x if x < 15.0 * 60.0 => 1,
-            x if x < 45.0 * 60.0 => 2,
-            x if x < 90.0 * 60.0 => 3,
-            _ => 4,
-        })
-    };
-    let tip = |c: usize, r: usize| match day(c, r) {
-        Some(d) => format!("{}: {}", long_date(d, today), amount(s.days.get(&d).copied().unwrap_or(0.0))),
-        None => String::new(),
-    };
-    // A month is named over the week its first day falls in.
-    let column_label = |c: usize| (0..7).filter_map(|r| day(c, r)).find(|d| d.day() == 1).map(|d| d.format("%b").to_string());
-    let row_label = |r: usize| [0, 2, 4].contains(&r).then(|| WEEKDAYS[r][..3].to_owned());
-    let active = s.days.range(start..=today).filter(|(_, v)| **v > 0.0).count();
-    let name = format!("Listening by day over the last {weeks} weeks: {active} days with listening");
-    kit::level_grid(
-        ui,
-        CELL,
-        CELL_GAP,
-        &kit::Grid { columns: weeks, rows: 7, level: &level, tip: &tip, column_label: &column_label, row_label: &row_label, name: &name },
-    );
-    ui.add_space(6.0);
-    kit::level_legend(ui, CELL - 1.0);
+    job.wrap.max_width = width - FACT_ICON - 12.0;
+    ui.vertical(|ui| {
+        ui.add_space(5.0);
+        ui.add(egui::Label::new(job).wrap());
+    });
+}
+
+/// The last year's days, a column a week (Monday at the top), shaded by how
+/// much each held: the cells grown to fill the card, or as many weeks as fit.
+fn calendar(ui: &mut Ui, s: &Stats, width: f32) {
+    kit::card(ui, width, 0.0, |ui, w| {
+        let spare = w - kit::level_grid_width(WEEKS, 0.0, CELL_GAP);
+        let cell = (spare / WEEKS as f32).floor().clamp(CELL_MIN, CELL_MAX);
+        let mut weeks = WEEKS;
+        while weeks > MIN_WEEKS && kit::level_grid_width(weeks, cell, CELL_GAP) > w {
+            weeks -= 1;
+        }
+        let today = s.today_date;
+        let monday = today.checked_sub_days(Days::new(u64::from(today.weekday().num_days_from_monday()))).unwrap_or(today);
+        let start = monday.checked_sub_days(Days::new(7 * (weeks as u64 - 1))).unwrap_or(monday);
+        let active = s.days.range(start..=today).filter(|(_, v)| **v > 0.0).count();
+        let span = if weeks == WEEKS { "the last year".to_owned() } else { format!("the last {weeks} weeks") };
+        let note = format!("{} {} in {span}", grouped(active as u64), if active == 1 { "day" } else { "days" });
+        kit::card_heading(ui, "Listening by day", Some(&note));
+        let day = |c: usize, r: usize| start.checked_add_days(Days::new((c * 7 + r) as u64));
+        let level = |c: usize, r: usize| {
+            let d = day(c, r).filter(|d| *d <= today)?;
+            let secs = s.days.get(&d).copied().unwrap_or(0.0);
+            Some(match secs {
+                x if x <= 0.0 => 0,
+                x if x < 15.0 * 60.0 => 1,
+                x if x < 45.0 * 60.0 => 2,
+                x if x < 90.0 * 60.0 => 3,
+                _ => 4,
+            })
+        };
+        let tip = |c: usize, r: usize| match day(c, r) {
+            Some(d) => format!("{}: {}", long_date(d, today), amount(s.days.get(&d).copied().unwrap_or(0.0))),
+            None => String::new(),
+        };
+        // A month is named over the week its first day falls in.
+        let column_label = |c: usize| (0..7).filter_map(|r| day(c, r)).find(|d| d.day() == 1).map(|d| d.format("%b").to_string());
+        let row_label = |r: usize| [0, 2, 4].contains(&r).then(|| WEEKDAYS[r][..3].to_owned());
+        let name = format!("Listening by day over {span}: {note}");
+        let grid_w = kit::level_grid_width(weeks, cell, CELL_GAP);
+        // Centred in the card when the cells have grown as far as they go.
+        let indent = ((w - grid_w) / 2.0).floor().max(0.0);
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            kit::level_grid(
+                ui,
+                cell,
+                CELL_GAP,
+                &kit::Grid { columns: weeks, rows: 7, level: &level, tip: &tip, column_label: &column_label, row_label: &row_label, name: &name },
+            );
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            kit::level_legend(ui, (cell - 1.0).min(11.0), grid_w);
+        });
+    });
 }
 
 fn week_chart(ui: &mut Ui, s: &Stats, width: f32) {
-    section_heading(ui, "By day of the week");
-    let label = |i: usize| Some(WEEKDAYS[i][..3].to_owned());
-    let tip = |i: usize| format!("{}s: {}", WEEKDAYS[i], amount(s.weekdays[i]));
     let busiest = (0..7).max_by(|a, b| s.weekdays[*a].total_cmp(&s.weekdays[*b]).then(b.cmp(a))).unwrap_or(0);
-    let name = format!("Listening by day of the week; most on {}s", WEEKDAYS[busiest]);
-    kit::bar_chart(ui, width, CHART_H, &kit::Bars { values: &s.weekdays, label: &label, tip: &tip, name: &name });
+    let note = format!("Most on {}s", WEEKDAYS[busiest]);
+    kit::card(ui, width, 0.0, |ui, w| {
+        kit::card_heading(ui, "By day of the week", Some(&note));
+        let label = |i: usize| Some(WEEKDAYS[i][..3].to_owned());
+        let tip = |i: usize| format!("{}s: {}", WEEKDAYS[i], amount(s.weekdays[i]));
+        let name = format!("Listening by day of the week; most on {}s", WEEKDAYS[busiest]);
+        kit::bar_chart(ui, w, CHART_H, &kit::Bars { values: &s.weekdays, label: &label, tip: &tip, name: &name });
+    });
 }
 
 fn hour_chart(ui: &mut Ui, s: &Stats, width: f32) {
-    section_heading(ui, "By hour of the day");
-    let label = |i: usize| i.is_multiple_of(6).then(|| short_hour(i));
-    let tip = |i: usize| format!("{} to {}: {}", hour_name(i), hour_name((i + 1) % 24), amount(s.hours[i]));
     let peak = (0..24).max_by(|a, b| s.hours[*a].total_cmp(&s.hours[*b]).then(b.cmp(a))).unwrap_or(0);
-    let name = format!("Listening by hour of the day; most around {}", hour_name(peak));
-    kit::bar_chart(ui, width, CHART_H, &kit::Bars { values: &s.hours, label: &label, tip: &tip, name: &name });
+    let note = format!("Peak around {}", hour_name(peak));
+    kit::card(ui, width, 0.0, |ui, w| {
+        kit::card_heading(ui, "By hour of the day", Some(&note));
+        let label = |i: usize| i.is_multiple_of(6).then(|| short_hour(i));
+        let tip = |i: usize| format!("{} to {}: {}", hour_name(i), hour_name((i + 1) % 24), amount(s.hours[i]));
+        let name = format!("Listening by hour of the day; most around {}", hour_name(peak));
+        kit::bar_chart(ui, w, CHART_H, &kit::Bars { values: &s.hours, label: &label, tip: &tip, name: &name });
+    });
 }
 
-/// Authors or narrators, the most listened first, each with its share of the
-/// first's time.
-fn ranking(ui: &mut Ui, title: &str, list: &[Ranked], width: f32) {
-    section_heading(ui, title);
+/// Authors or narrators on a card at least `min_height` tall, the most
+/// listened first, each with its share of the first's time, `row_h` a row.
+fn ranking(ui: &mut Ui, title: &str, list: &[Ranked], width: f32, row_h: f32, min_height: f32) {
     let t = Tokens::of(ui);
-    if list.is_empty() {
-        ui.label(RichText::new("Nothing to rank yet.").size(12.5).color(t.muted));
-        return;
-    }
-    let most = list[0].secs.max(1.0);
-    for (i, ranked) in list.iter().enumerate() {
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-        if ui.is_rect_visible(rect) {
-            let figure = ui.painter().layout_no_wrap(amount(ranked.secs), FontId::proportional(12.0), t.muted);
-            let room = (rect.width() - figure.size().x - 30.0).max(20.0);
-            let name = elide(ui, &ranked.name, FontId::proportional(13.0), t.text, room);
-            ui.painter().text(pos2(rect.left(), rect.top() + 2.0), egui::Align2::LEFT_TOP, format!("{}", i + 1), FontId::new(12.0, semibold()), t.muted);
-            ui.painter().galley(pos2(rect.left() + 18.0, rect.top() + 1.0), name, t.text);
-            ui.painter().galley(pos2(rect.right() - figure.size().x, rect.top() + 2.0), figure, t.muted);
-            let bar = Rect::from_min_size(pos2(rect.left() + 18.0, rect.top() + 22.0), vec2(rect.width() - 18.0, 3.0));
-            kit::share_bar(ui, bar, (ranked.secs / most) as f32);
+    kit::card(ui, width, min_height, |ui, w| {
+        kit::card_heading(ui, title, None);
+        if list.is_empty() {
+            ui.label(RichText::new("Nothing to rank yet.").size(12.5).color(t.muted));
+            return;
         }
-        let name = format!("{}. {}, {}", i + 1, ranked.name, amount(ranked.secs));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &name));
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let most = list[0].secs.max(1.0);
+        for (i, ranked) in list.iter().enumerate() {
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
+            if ui.is_rect_visible(rect) {
+                let top = rect.center().y - 13.0;
+                let figure = ui.painter().layout_no_wrap(amount(ranked.secs), FontId::new(12.0, semibold()), t.text);
+                let x = rect.left() + 24.0;
+                let room = (rect.right() - figure.size().x - 12.0 - x).max(20.0);
+                let name = elide(ui, &ranked.name, FontId::proportional(13.0), t.text, room);
+                rank_number(ui, i, rect.left(), top + name.size().y / 2.0, &t);
+                ui.painter().galley(pos2(x, top), name, t.text);
+                ui.painter().galley(pos2(rect.right() - figure.size().x, top + 1.0), figure, t.text);
+                let bar = Rect::from_min_size(pos2(x, top + 22.0), vec2(rect.right() - x, 3.0));
+                kit::share_bar(ui, bar, (ranked.secs / most) as f32);
+            }
+            let name = format!("{}. {}, {}", i + 1, ranked.name, amount(ranked.secs));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &name));
+        }
+    });
+}
+
+/// A list's place, at `x`, centred on `y`: the first in the accent.
+fn rank_number(ui: &Ui, i: usize, x: f32, y: f32, t: &Tokens) {
+    let color = if i == 0 { t.accent } else { t.muted };
+    let rank = ui.painter().layout_no_wrap(format!("{}", i + 1), FontId::new(13.0, semibold()), color);
+    ui.painter().galley(pos2(x + 2.0, y - rank.size().y / 2.0), rank, color);
+}
+
+/// The room between cards.
+fn gap(ui: &mut Ui) {
+    ui.add_space((GAP - ui.spacing().item_spacing.y).max(0.0));
+}
+
+/// Two cards side by side when each gets [`HALF_MIN`], else one over the
+/// other.
+fn pair(ui: &mut Ui, width: f32, left: &mut dyn FnMut(&mut Ui, f32), right: &mut dyn FnMut(&mut Ui, f32)) {
+    if width >= 2.0 * HALF_MIN + GAP {
+        columns(ui, width, &mut [(1.0, left), (1.0, right)]);
+    } else {
+        left(ui, width);
+        gap(ui);
+        right(ui, width);
     }
+}
+
+/// A card drawn at the width it's given.
+type Part<'a> = dyn FnMut(&mut Ui, f32) + 'a;
+
+/// Cards across `width`, [`GAP`] apart, each as wide as its share of the
+/// weights.
+fn columns(ui: &mut Ui, width: f32, parts: &mut [(f32, &mut Part)]) {
+    let total: f32 = parts.iter().map(|(weight, _)| weight).sum();
+    let room = width - GAP * (parts.len().saturating_sub(1)) as f32;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
+        for (weight, part) in parts.iter_mut() {
+            let w = (room * *weight / total).floor();
+            ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(w);
+                part(ui, w);
+            });
+        }
+    });
 }
 
 #[cfg(not(test))]
@@ -328,30 +514,6 @@ fn now() -> chrono::DateTime<chrono::Local> {
 #[cfg(test)]
 fn now() -> chrono::DateTime<chrono::Utc> {
     chrono::TimeZone::from_utc_datetime(&chrono::Utc, &super::fixture::wall_clock())
-}
-
-/// Two things side by side when each gets [`HALF_MIN`], else one over the
-/// other.
-fn halves(ui: &mut Ui, width: f32, left: impl FnOnce(&mut Ui, f32), right: impl FnOnce(&mut Ui, f32)) {
-    let gap = 32.0;
-    if width >= 2.0 * HALF_MIN + gap {
-        let w = (width - gap) / 2.0;
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| left(ui, w));
-            ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| right(ui, w));
-        });
-    } else {
-        left(ui, width);
-        ui.add_space(SECTION_GAP);
-        right(ui, width);
-    }
-}
-
-fn section_heading(ui: &mut Ui, title: &str) {
-    let t = Tokens::of(ui);
-    ui.label(RichText::new(title).font(FontId::new(17.0, semibold())).color(t.text));
-    ui.add_space(10.0);
 }
 
 /// "1 day", "12 days".

@@ -656,7 +656,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.hover_at(egui::pos2(FULL[0] / 2.0, FULL[1] / 2.0));
     h.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
-        delta: egui::vec2(0.0, -620.0),
+        delta: egui::vec2(0.0, -575.0),
         phase: egui::TouchPhase::Move,
         modifiers: egui::Modifiers::NONE,
         source: egui::MouseWheelSource::Wheel,
@@ -664,6 +664,15 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     h.run_steps(30);
     h.event(egui::Event::PointerGone);
     s.shoot(h, "stats-charts");
+    // Stats in a wide, tall window: the cards stop growing, the facts go two
+    // across and the books sit beside the authors and narrators.
+    h.set_size(egui::vec2(1700.0, 1400.0));
+    scene(h, s, "stats-wide", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listening_history(&mut app);
+        app.go(Route::Stats);
+        app
+    });
     // The same page at the smallest window Rede opens: the cover goes
     // above the text and the columns stack.
     h.set_size(egui::vec2(crate::MIN_SIZE[0], 560.0));
