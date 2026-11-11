@@ -491,6 +491,20 @@ fn every_startup_notice_is_shown() {
     assert!(shown.iter().any(|t| t.starts_with("Your settings couldn't be read")), "{shown:?}");
 }
 
+/// Settings opens on the first tab. The one it opened on before is gone: its
+/// two rows live on Playback and About now.
+#[test]
+fn settings_opens_on_its_first_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert_eq!(settings_page::Section::default(), settings_page::Section::ALL[0], "the tab with no choice yet is the first one listed");
+    app.apply(Action::OpenSettings(app.ui.settings_section));
+    frame(&ctx, &mut app, Vec::new());
+    assert_eq!(app.ui.settings_section, settings_page::Section::Appearance, "Settings opens on Appearance");
+    assert!(matches!(app.ui.overlay, Some(Overlay::Settings)), "and the window is open");
+}
+
 #[test]
 fn another_account_gets_its_own_library_and_downloads() {
     let dir = tempfile::tempdir().unwrap();

@@ -45,15 +45,6 @@ Names and values are the same as in Ond's own `settings.json`. Ond logs a warnin
 
 These fill in the sign-in form and lock those two fields. The password isn't a setting: Ond asks for it once and keeps it in the system keyring. If you change the server or username, Ond asks you to sign in again.
 
-### General
-
-| Setting | Values | Default |
-|---|---|---|
-| `scrobble` | Report plays to the server | `true` |
-| `diagnostics_bar` | The diagnostics bar along the bottom | `false` |
-| `window.system_title_bar` | Linux: the desktop's title bar instead of Ond's own buttons | `false` |
-| `updates` | `"notify"`: look once a day for a newer release and say when there is one; `"off"`. Only copies from the GitHub releases look: one Nix installed never does | `"notify"` |
-
 ### Appearance
 
 | Setting | Values | Default |
@@ -69,11 +60,13 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | `waveform_bars.gap` | Space between bars in half points, 1 to 6 | `2` |
 | `alpha_rail` | The alphabet rail beside lists sorted by name | `false` |
 | `artist_photos` | Artists' photos from the server | `true` |
+| `window.system_title_bar` | Linux: the desktop's title bar instead of Ond's own buttons | `false` |
 
 ### Playback
 
 | Setting | Values | Default |
 |---|---|---|
+| `scrobble` | Report plays to the server | `true` |
 | `playback.replay_gain` | `"off"`, `"track"`, `"album"`, `"auto"` | `"off"` |
 | `playback.preamp_db` | Pre-amp in dB, −12 to 12 | `0.0` |
 | `playback.untagged_db` | Gain for tracks without ReplayGain tags, in dB, −12 to 0 | `-6.0` |
@@ -130,6 +123,13 @@ Like a folder picked in Settings, `offline_dir` gets a folder of Ond's own insid
 | `experimental.visualizer_pick` | `"flow"`, `"particles"`, `"ribbons"`, `"shuffle"` | `"flow"` |
 
 Experimental settings may change or go away between versions.
+
+### About
+
+| Setting | Values | Default |
+|---|---|---|
+| `updates` | `"notify"`: look once a day for a newer release and say when there is one; `"off"`. Only copies from the GitHub releases look: one Nix installed never does | `"notify"` |
+| `diagnostics_bar` | The diagnostics bar along the bottom | `false` |
 
 The rest of `settings.json` is state the app keeps for itself (window positions, volume, column widths, whether the queue is open, grid or list views), and Ond ignores it in `managed.json`.
 

@@ -765,6 +765,7 @@ pub(super) const MANAGED: &str = r#"{
   "server": "https://music.example.com",
   "username": "demo",
   "scrobble": false,
+  "diagnostics_bar": false,
   "accent": "teal",
   "alpha_rail": true,
   "waveform": true,
