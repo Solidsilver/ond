@@ -513,6 +513,14 @@ MPRIS (Linux) and SMTC (Windows) get the same changes when those platforms come.
 - The progress log sending offline listening when back online.
 - Starting with the server unreachable.
 
+How M4 is built:
+
+- **The store.** `offline` gains a pin for a whole book, `Pin::Book(String)` holding the account-qualified item key, with one `TrackRef` per audio file, keyed by the same id `SessionSources` gives the stream cache, so a book listened to all the way through is hard-linked rather than fetched again. `offline.json` is JSON and `Pin` is a serde enum, so the new variant needs no migration and Ond's files still read. Each Rede account has its own store (`offline::account_store`). The file URL comes from the source while it is reachable (`/api/items/:id/file/:ino?token=`), and is rebuilt after a token refresh.
+- **Playing a download.** Playing needs the item's tracks and chapters, which the shelf already keeps from the last expanded fetch (`set_details`); a download first makes sure they are there. When every file of a book is downloaded, its tracks play as `file://` sources from the store, online or not. Online, the server session is still opened for statistics and progress; offline, the listening worker opens a local session instead (an id Rede makes, the shelf's item, the saved position) and the reports go to the progress log as they do now.
+- **Offline listening.** Listening done without a server session is grouped by book into ABS local sessions (`timeListening`, start and current time, `updatedAt` from the last entry) and sent with `POST /api/session/local-all` when the server is back, before the position replay. The server skips a session older than the progress it holds, so this cannot rewind newer listening from another device. A server too old for local sessions falls back to the progress batch alone.
+- **Starting unreachable.** The library, Home and book pages read from the shelf, downloaded books play, and anything that needs the server (books not downloaded, search on the server, sign-in checks) says so plainly. Nothing is cleared or signed out because the server can't be reached.
+- **The interface.** A Download button on the book page and in a book's context menu (with progress, pause and remove); a Downloads place in the sidebar listing what's downloaded and downloading; a Downloaded option in the library's listening filter; a mark on downloaded covers; and, while offline, books that aren't downloaded are dimmed and say "Not downloaded". Settings › Downloads has the storage limit, the folder, and "Remove downloads when finished" (off by default).
+
 **M5: local folders.** A second source, which proves the source trait and the account-qualified ids.
 
 **M6: several accounts.** Mixed library with source dots and filters, listener-only accounts, listening with others.
