@@ -37,6 +37,14 @@ impl RedeApp {
                     self.actions.push(Action::Forward);
                 }
             }
+            // The volume, as Ond's ⌘↑ and ⌘↓: five points a press, and not
+            // while a field has the keys. Moving it unmutes.
+            let louder = !typing && i.consume_key(Modifiers::COMMAND, Key::ArrowUp);
+            let softer = !typing && i.consume_key(Modifiers::COMMAND, Key::ArrowDown);
+            if louder || softer {
+                let now = self.prefs.get(|s| s.playback.volume);
+                self.actions.push(Action::Prefs(super::PrefsAction::Volume(if louder { now + 0.05 } else { now - 0.05 })));
+            }
             if i.consume_key(Modifiers::COMMAND, Key::Comma) {
                 self.actions.push(Action::OpenSettings(self.ui.settings));
             }

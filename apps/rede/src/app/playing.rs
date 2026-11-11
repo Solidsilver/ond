@@ -23,6 +23,7 @@ impl RedeApp {
                 streamcache::StreamCache::new(config, rt.handle().clone()).map_err(|e| Failure::Local(format!("Couldn't open the stream cache: {e}")))?;
             let engine = audio::spawn(audio::EngineConfig::default(), audio::default_backend(), Some(cache));
             crate::player::apply_speech(self.shown.playback, &engine);
+            self.player.set_volume(self.shown.playback.level(), &engine);
             self.bridge.engine_events(&engine, self.ctx.clone(), self.sleep_wake.clone());
             self.engine = Some(engine);
         }

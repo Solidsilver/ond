@@ -140,6 +140,24 @@ fn a_book_page_asks_for_its_details_once_and_keeps_them() {
 }
 
 #[test]
+fn a_bare_address_becomes_the_full_one_the_server_answered_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = signed_out(&ctx, dir.path());
+    app.login.as_mut().unwrap().server = "nas.local:13378".into();
+    app.handle(crate::bridge::AccountMsg::Status {
+        session: app.bridge.session(),
+        status: abs::ServerStatus { auth_methods: vec!["local".into()], ..Default::default() },
+        warning: None,
+        server: "http://nas.local:13378".into(),
+    });
+    let form = app.login.as_ref().unwrap();
+    assert_eq!(form.server, "http://nas.local:13378", "the field shows the address that worked");
+    assert_eq!(form.checked_server, form.server, "and signing in uses it as it stands");
+    assert!(form.status.is_some());
+}
+
+#[test]
 fn signing_in_with_an_empty_form_says_what_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
@@ -147,7 +165,7 @@ fn signing_in_with_an_empty_form_says_what_is_missing() {
     // No server, no username, no password: the first empty field is named, and
     // nothing is sent.
     app.sign_in();
-    assert_eq!(app.login.as_ref().unwrap().error.as_deref(), Some("Enter the server's address, for example https://books.example.com."));
+    assert_eq!(app.login.as_ref().unwrap().error.as_deref(), Some("Enter the server's address, for example books.example.com."));
     let form = app.login.as_mut().unwrap();
     form.server = "https://books.example.com".into();
     form.checked_server = form.server.clone();

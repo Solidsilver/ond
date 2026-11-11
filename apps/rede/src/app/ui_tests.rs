@@ -1067,6 +1067,39 @@ fn opening_settings_from_the_player_returns_to_the_full_window() {
 }
 
 #[test]
+fn the_volume_keys_step_five_points_and_leave_a_typed_field_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    playing(app_mut(&mut h), false);
+    h.run_steps(2);
+    let cmd = egui::Modifiers::COMMAND;
+    h.key_press_modifiers(cmd, egui::Key::ArrowDown);
+    h.run_steps(2);
+    let level = app_mut(&mut h).prefs.get(|s| s.playback.volume);
+    assert!((level - 0.95).abs() < 0.001, "five points a press: {level}");
+    h.key_press_modifiers(cmd, egui::Key::ArrowUp);
+    h.run_steps(2);
+    assert!((app_mut(&mut h).prefs.get(|s| s.playback.volume) - 1.0).abs() < 0.001, "and no higher than full");
+    // Muted, a press is the way back to hearing it.
+    app_mut(&mut h).apply_prefs(PrefsAction::Muted(true));
+    h.run_steps(2);
+    h.key_press_modifiers(cmd, egui::Key::ArrowDown);
+    h.run_steps(2);
+    let playback = app_mut(&mut h).prefs.get(|s| s.playback);
+    assert!(!playback.muted, "moving the level unmutes");
+    assert!((playback.volume - 0.95).abs() < 0.001);
+    // A field with the keys keeps its arrows.
+    *h.state_mut() = Some(signin_with(&h.ctx.clone(), dir.path(), &["local"], None));
+    h.run_steps(3);
+    let before = app_mut(&mut h).prefs.get(|s| s.playback.volume);
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Username").click();
+    h.run_steps(2);
+    h.key_press_modifiers(cmd, egui::Key::ArrowUp);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.playback.volume), before, "typing is not listening");
+}
+
+#[test]
 fn the_shortcuts_sheet_lists_each_group_with_its_keys() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
@@ -1435,6 +1468,19 @@ fn the_playback_popover_has_the_speech_switches_and_what_skipping_saved() {
     h.run_steps(2);
     h.check_accessibility();
     assert!(h.query_by_label_contains("Saved ").is_none(), "skip silence is off");
+    // The volume: the speaker mutes with the level kept, and the slider sets
+    // the level (a click in its middle is about half).
+    h.get_by_label("Volume");
+    h.get_by_label("Mute").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).prefs.get(|s| s.playback.muted));
+    h.get_by_label("Unmute").click();
+    h.run_steps(2);
+    assert!(!app_mut(&mut h).prefs.get(|s| s.playback.muted));
+    h.get_by_label("Volume").click();
+    h.run_steps(2);
+    let level = app_mut(&mut h).prefs.get(|s| s.playback.volume);
+    assert!((level - 0.5).abs() < 0.08, "the slider's middle is about half: {level}");
     h.get_by_label("Voice boost").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).prefs.get(|s| s.playback.voice_boost));

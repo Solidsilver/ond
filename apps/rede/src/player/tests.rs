@@ -480,6 +480,39 @@ fn sleeping(single: bool, speed: f32, at: f64) -> (Player, Fake, Instant, Vec<No
 }
 
 #[test]
+fn a_fade_scales_from_the_listeners_level_and_returns_to_it() {
+    let (mut player, engine, now, mut notes) = sleeping(true, 1.0, 20.0);
+    player.set_volume(0.5, &engine);
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(0.5))), "the level reaches the engine on its own");
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Minutes(5))), 0.0, &engine, now, &mut notes);
+    let mut clock = ReportClock::new(now);
+    for tenth in 0..=3000 {
+        let at = now + Duration::from_millis(tenth * 100);
+        engine.position.set(20.0 + tenth as f64 / 100.0);
+        if let Some(report) = clock.poll_for(engine.state(), at, player.sleep.is_some()) {
+            player.tick(&engine, at, report, &mut notes);
+        }
+        // Five seconds left: half of the fade, on half the level.
+        if tenth == 2950 {
+            assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(gain)) if (*gain - 0.25).abs() < 0.001));
+        }
+    }
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(gain)) if (*gain - 0.5).abs() < 0.001), "the fade ends back at the level");
+}
+
+#[test]
+fn cancelling_a_fade_returns_to_the_listeners_level() {
+    let (mut player, engine, now, mut notes) = sleeping(true, 1.5, 32.5);
+    player.set_volume(0.8, &engine);
+    player.control(Control::Sleep(Some(crate::sleep::Choice::Chapter)), 0.0, &engine, now, &mut notes);
+    player.tick(&engine, now, false, &mut notes);
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(gain)) if (*gain - 0.4).abs() < 0.001));
+    player.control(Control::Sleep(None), 0.0, &engine, now, &mut notes);
+    assert!(player.sleep.is_none());
+    assert!(matches!(engine.sent.borrow().last(), Some(Command::SetVolume(gain)) if (*gain - 0.8).abs() < 0.001));
+}
+
+#[test]
 fn a_hidden_timer_fades_for_ten_seconds_and_saves_before_the_half_heard_tail() {
     let (mut player, engine, now, mut notes) = sleeping(true, 1.0, 20.0);
     player.control(Control::Sleep(Some(crate::sleep::Choice::Minutes(5))), 0.0, &engine, now, &mut notes);

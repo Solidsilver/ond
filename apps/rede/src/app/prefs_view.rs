@@ -47,6 +47,11 @@ pub enum PrefsAction {
     /// them.
     VoiceBoost(bool),
     SkipSilence(bool),
+    /// The listening level, 0..=1. Moving it while muted unmutes: the level
+    /// is what the listener just asked to hear.
+    Volume(f32),
+    /// Silent, with the level kept to come back to.
+    Muted(bool),
     /// The chapters column shown or hidden.
     ShowPanel(bool),
     /// The sidebar folded to its rail, or opened out again.
@@ -70,5 +75,23 @@ mod tests {
         assert!(!app.shown.playback.voice_boost && app.shown.playback.skip_silence);
         app.apply_prefs(PrefsAction::SkipSilence(false));
         assert!(!app.prefs.get(|s| s.playback.voice_boost || s.playback.skip_silence));
+    }
+
+    #[test]
+    fn the_volume_is_saved_and_a_level_change_unmutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = crate::app::fixture::app(&ctx, dir.path(), 0);
+        app.apply_prefs(PrefsAction::Volume(0.3));
+        assert_eq!(app.prefs.get(|s| (s.playback.volume, s.playback.muted)), (0.3, false));
+        app.apply_prefs(PrefsAction::Muted(true));
+        assert_eq!(app.shown.playback.level(), 0.0, "muted is silent with the level kept");
+        app.apply_prefs(PrefsAction::Muted(false));
+        assert_eq!(app.shown.playback.level(), 0.3);
+        app.apply_prefs(PrefsAction::Muted(true));
+        app.apply_prefs(PrefsAction::Volume(0.4));
+        assert_eq!(app.prefs.get(|s| (s.playback.volume, s.playback.muted)), (0.4, false), "moving the level unmutes");
+        app.apply_prefs(PrefsAction::Volume(1.7));
+        assert_eq!(app.prefs.get(|s| s.playback.volume), 1.0, "the level stops at full");
     }
 }
