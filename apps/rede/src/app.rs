@@ -1,6 +1,6 @@
 //! The main window: the title bar that is also the player, the sidebar with
 //! the places and the account, the message bar, and the page the trail leads
-//! to (the library, a book). Views are in submodules; they
+//! to (the library, a book, a series). Views are in submodules; they
 //! don't change state directly but push [`Action`]s, which are applied once the
 //! frame is drawn.
 //!
@@ -12,6 +12,8 @@
 //! - `library`: the books the shelf has, in the order drawn
 //! - `home`: the books in progress and the newest
 //! - `progress`: where each book is, and how a cover says it
+//! - `series`: the Series place, and a series' page with its books in their
+//!   order, reached from there, a book's facts or the palette
 //! - `stats_page`: the Stats place, drawn from what `crate::stats` counts
 //! - `downloads`: download intents and the store's results;
 //!   `downloads_page` draws the Downloads place and says how each book's
@@ -75,6 +77,7 @@ mod playing;
 mod prefs_view;
 mod progress;
 mod search;
+mod series;
 mod session;
 mod settings_page;
 mod sheets;
@@ -222,8 +225,9 @@ pub enum Action {
     /// The search palette, over the full window.
     OpenPalette,
     ClosePalette,
-    /// An author, narrator or series chosen in the palette: its name goes in
-    /// the field, which lists its books (they have no pages yet).
+    /// An author or narrator chosen in the palette: its name goes in the
+    /// field, which lists its books (they have no pages yet). A series has a
+    /// page, and goes there instead.
     PaletteName(String),
     ToggleMini,
     /// The chapters column: shown, hidden, or on another tab.
@@ -798,10 +802,15 @@ impl RedeApp {
                             Route::Home => self.view().home_page(ui),
                             Route::Library => self.view().library_page(ui),
                             Route::Downloads => self.view().downloads_page(ui),
+                            Route::AllSeries => self.view().all_series_page(ui),
                             Route::Stats => self.view().stats_page(ui),
                             Route::Book(id) => {
                                 let id = id.clone();
                                 self.view().book_page(ui, &id);
+                            }
+                            Route::Series(name) => {
+                                let name = name.clone();
+                                self.view().series_page(ui, &name);
                             }
                         }
                         // Floats over the foot of the page.

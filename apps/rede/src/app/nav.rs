@@ -14,12 +14,17 @@ pub enum Route {
     Stats,
     /// One book, by its own id.
     Book(String),
+    /// Every series the shelf's books are in.
+    AllSeries,
+    /// The books in a series, by its name: Audiobookshelf's listing names a
+    /// book's series without an id, so the name is what ties them.
+    Series(String),
 }
 
 impl Route {
     /// The places the sidebar links to; going to one starts a fresh trail.
     pub fn is_root(&self) -> bool {
-        matches!(self, Route::Home | Route::Library | Route::Downloads | Route::Stats)
+        matches!(self, Route::Home | Route::Library | Route::AllSeries | Route::Downloads | Route::Stats)
     }
 }
 
@@ -138,15 +143,17 @@ impl super::view_ctx::ViewCtx<'_> {
         self.actions.push(action);
     }
 
-    /// A place's short name, for the breadcrumb: the sidebar's words, or the
-    /// book's title.
+    /// A place's short name, for the breadcrumb: the sidebar's words, the
+    /// book's title, or the series' name.
     fn route_label(&self, route: &Route) -> String {
         match route {
             Route::Home => "Home".into(),
             Route::Library => "Library".into(),
             Route::Downloads => "Downloads".into(),
+            Route::AllSeries => "Series".into(),
             Route::Stats => "Stats".into(),
             Route::Book(id) => self.books.by_id(id).map_or_else(|| "Book".into(), |b| b.title.clone()),
+            Route::Series(name) => name.clone(),
         }
     }
 }

@@ -164,6 +164,30 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app.go(book_route(4));
         app
     });
+    // The Series place, with one series finished and one begun.
+    scene(h, s, "all-series", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        listened(&mut app);
+        app.go(Route::AllSeries);
+        app
+    });
+    // The same with the pointer on a series: its stack spread out.
+    let tile = h.get_by_label_contains("Hainish, ").rect().center();
+    h.hover_at(tile);
+    h.run_steps(30);
+    s.shoot(h, "all-series-hover");
+    h.event(egui::Event::PointerGone);
+    // A series reached from one of its books, the first finished, so the
+    // button goes on with the next.
+    scene(h, s, "series", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        let item = sources::ItemKey::new(account().id, "book-0");
+        let done = sources::Progress { item, position: sources::Position::from_secs(40_920.0), finished: true, at: Some(std::time::SystemTime::now()) };
+        app.positions.insert("book-0".into(), done);
+        app.go(book_route(3));
+        app.go(Route::Series("Hainish".into()));
+        app
+    });
     // The … beside Play, on a book partway: finish it, or start it over.
     scene(h, s, "book-more-menu", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());

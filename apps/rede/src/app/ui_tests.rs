@@ -150,7 +150,17 @@ fn settings_change_the_download_preferences_and_remove_everything_after_asking()
 fn every_view_names_its_controls() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
-    for route in [Route::Home, Route::Library, Route::Downloads, Route::Stats, book_route(0), Route::Book("book-gone".into())] {
+    for route in [
+        Route::Home,
+        Route::Library,
+        Route::Downloads,
+        Route::Stats,
+        book_route(0),
+        Route::Book("book-gone".into()),
+        Route::AllSeries,
+        Route::Series("Hainish".into()),
+        Route::Series("A series gone".into()),
+    ] {
         app_mut(&mut h).go(route);
         h.run_steps(3);
         h.check_accessibility();
@@ -569,6 +579,68 @@ fn a_book_page_lists_its_chapters_with_their_lengths() {
     assert_eq!(h.query_all_by_label_contains("56:40").count(), 12, "each chapter shows its length");
     assert_eq!(h.query_all_by_label_contains("Read by George Guidall").count(), 1, "the narrator is on the page");
     assert_eq!(h.query_all_by_label_contains("Hainish #1").count(), 1, "and the series and number");
+}
+
+#[test]
+fn a_books_series_links_to_its_page_with_the_series_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    // The Dispossessed is the sixth Hainish book; the fixture has the first too.
+    app_mut(&mut h).go(book_route(3));
+    h.run_steps(3);
+    h.get_by_label("Hainish #6").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Series("Hainish".into()));
+    h.get_by_label_contains("By Ursula K. Le Guin");
+    let first = h.get_by_label("The Left Hand of Darkness by Ursula K. Le Guin, book 1").rect().min;
+    let sixth = h.get_by_label("The Dispossessed by Ursula K. Le Guin, book 6").rect().min;
+    assert!(first.x < sixth.x, "in the series' order, not the library's");
+    assert!(h.query_by_label_contains("Piranesi").is_none(), "only the series' books");
+    // With the first finished, the button goes on with the next.
+    let item = sources::ItemKey::new(account().id, "book-0");
+    let done = sources::Progress { item, position: sources::Position::from_secs(40_920.0), finished: true, at: Some(std::time::SystemTime::now()) };
+    app_mut(&mut h).positions.insert("book-0".into(), done);
+    h.run_steps(3);
+    h.get_by_label_contains("1 of 2 finished");
+    h.get_by_label("Play · The Dispossessed").click();
+    h.run_steps(3);
+    let notice = app_mut(&mut h).ui.notice.clone().map(|n| n.text).unwrap_or_default();
+    assert!(notice.contains("Sign in to play"), "it plays that book: {notice}");
+}
+
+#[test]
+fn the_series_place_lists_every_series_and_opens_each_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    h.get_by_label("Series").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::AllSeries);
+    h.get_by_label("5 series");
+    // By name, so Dune comes before Hainish whatever the library's order.
+    let dune = h.get_by_label("Dune, 1 book by Frank Herbert, not started").rect().min;
+    let hainish = h.get_by_label("Hainish, 2 books by Ursula K. Le Guin, not started").rect().min;
+    assert!((dune.y, dune.x) < (hainish.y, hainish.x));
+    h.get_by_label("Hainish, 2 books by Ursula K. Le Guin, not started").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Series("Hainish".into()));
+    // The page belongs to the place it was opened from.
+    assert_eq!(app_mut(&mut h).ui.nav.place(), &Route::AllSeries);
+    h.get_by_label("The Left Hand of Darkness by Ursula K. Le Guin, book 1");
+}
+
+#[test]
+fn choosing_a_series_in_the_palette_opens_its_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    app_mut(&mut h).apply(Action::OpenPalette);
+    h.run_steps(3);
+    type_in_palette(&mut h, "hainish");
+    h.get_by_label("Hainish").click();
+    h.run_steps(3);
+    assert!(app_mut(&mut h).ui.palette.is_none());
+    assert_eq!(app_mut(&mut h).ui.nav.current(), &Route::Series("Hainish".into()));
 }
 
 #[test]

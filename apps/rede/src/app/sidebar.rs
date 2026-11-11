@@ -3,8 +3,8 @@
 //! library's name, and the account at the foot, with its state (connected,
 //! syncing, offline) and its menu, and the keyboard shortcuts beside it.
 //!
-//! The places are a list so Series, Authors and Collections join Home,
-//! Library, Downloads and Stats as rows when they come. Downloads carries a ring
+//! The places are a list so Authors and Collections join Home, Library,
+//! Series, Downloads and Stats as rows when they come. Downloads carries a ring
 //! while books are on their way, as Ond's Offline place does. The account's libraries are listed
 //! together on one shelf, so the heading names them rather than switching
 //! between them; a switcher comes with per-library browsing.
@@ -43,9 +43,10 @@ const ACCOUNT_MENU_W: f32 = 250.0;
 
 /// The places to browse, in order: what they're called, where they lead, and
 /// the rail's icon for them.
-const PLACES: [(&str, Route, Icon); 4] = [
+const PLACES: [(&str, Route, Icon); 5] = [
     ("Home", Route::Home, Icon::Home),
     ("Library", Route::Library, Icon::Grid),
+    ("Series", Route::AllSeries, Icon::List),
     ("Downloads", Route::Downloads, Icon::Download),
     ("Stats", Route::Stats, Icon::Chart),
 ];

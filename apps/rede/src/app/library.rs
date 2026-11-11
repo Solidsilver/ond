@@ -68,6 +68,10 @@ pub struct Books {
     /// version, and the newest, per library version.
     in_progress: Memo<(u64, u64), Vec<usize>>,
     recent: Memo<u64, Vec<usize>>,
+    /// The series page's books, per library version and series name.
+    series: Memo<(u64, String), Vec<usize>>,
+    /// Every series and its books, for the Series place, per library version.
+    all_series: Memo<u64, Vec<SeriesEntry>>,
     /// A book's details once its page asked for them. By the book's own id:
     /// one account is shown for now.
     pub details: HashMap<String, Details>,
@@ -200,6 +204,20 @@ impl Books {
         self.recent.get(self.version, || sorted_ids(books, LibrarySort::Added, &Positions::default()))
     }
 
+    /// Indices into [`all`](Self::all) of the books in the series called
+    /// `name`, in its order (see [`series_ids`]).
+    pub fn series(&mut self, name: &str) -> Arc<Vec<usize>> {
+        let books = &self.all;
+        self.series.get((self.version, name.to_owned()), || series_ids(books, name))
+    }
+
+    /// Every series the shelf's books are in, by name, each with its books
+    /// in its order.
+    pub fn all_series(&mut self) -> Arc<Vec<SeriesEntry>> {
+        let books = &self.all;
+        self.all_series.get(self.version, || all_series(books))
+    }
+
     /// The palette's haystack for this listing, built once per version: a
     /// keystroke only scores it.
     pub fn index(&mut self) -> Arc<super::search::BookIndex> {
@@ -293,6 +311,67 @@ pub fn sorted_ids(books: &[ItemSummary], sort: LibrarySort, positions: &Position
         }),
     }
     ids
+}
+
+/// Indices into `books` of those in the series `name`, by their number in
+/// it. Audiobookshelf keeps the number as text, so "2.5" (a novella between
+/// two books) and "10" sort as numbers; a book with no number, or one that
+/// isn't, goes after the numbered ones, and ties fall back to the title.
+pub fn series_ids(books: &[ItemSummary], name: &str) -> Vec<usize> {
+    let mut ids: Vec<usize> = (0..books.len()).filter(|&i| books[i].series.iter().any(|s| s.name == name)).collect();
+    sort_series(books, name, &mut ids);
+    ids
+}
+
+/// Puts `ids`, books in the series `name`, in its order.
+fn sort_series(books: &[ItemSummary], name: &str, ids: &mut [usize]) {
+    let number = |i: usize| series_number(&books[i], name).and_then(|n| n.parse::<f64>().ok()).filter(|n| n.is_finite());
+    ids.sort_by(|&a, &b| {
+        let (x, y) = (number(a), number(b));
+        x.is_none()
+            .cmp(&y.is_none())
+            .then_with(|| x.unwrap_or(0.0).total_cmp(&y.unwrap_or(0.0)))
+            .then_with(|| books[a].title.to_lowercase().cmp(&books[b].title.to_lowercase()))
+            .then_with(|| books[a].id.cmp(&books[b].id))
+    });
+}
+
+/// One series on the Series place: its name, and indices into the listing of
+/// its books, in its order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeriesEntry {
+    pub name: String,
+    pub books: Vec<usize>,
+}
+
+/// Every series in `books`, by name without case, each with its books in its
+/// order. One pass over the listing, however many series there are.
+pub fn all_series(books: &[ItemSummary]) -> Vec<SeriesEntry> {
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, book) in books.iter().enumerate() {
+        for series in &book.series {
+            let ids = by_name.entry(series.name.as_str()).or_default();
+            // A book that names one series twice is in it once.
+            if ids.last() != Some(&i) {
+                ids.push(i);
+            }
+        }
+    }
+    let mut entries: Vec<SeriesEntry> = by_name
+        .into_iter()
+        .filter(|(name, _)| !name.trim().is_empty())
+        .map(|(name, mut ids)| {
+            sort_series(books, name, &mut ids);
+            SeriesEntry { name: name.to_owned(), books: ids }
+        })
+        .collect();
+    entries.sort_by_cached_key(|e| (e.name.to_lowercase(), e.name.clone()));
+    entries
+}
+
+/// A book's number in the series `name`, as the server wrote it.
+pub fn series_number<'b>(book: &'b ItemSummary, name: &str) -> Option<&'b str> {
+    book.series.iter().find(|s| s.name == name)?.sequence.as_deref().map(str::trim).filter(|n| !n.is_empty())
 }
 
 /// What the library says when the filter leaves nothing to show: what
@@ -441,7 +520,7 @@ impl ViewCtx<'_> {
         let row_ids = |row: usize| &ids[row * cols..((row + 1) * cols).min(ids.len())];
         VirtualList::grid(("books", list), row_h, rows).show(ui, |ui, range| {
             for row in range.clone() {
-                self.book_row(ui, row_ids(row), tile, cover_h);
+                self.book_row(ui, row_ids(row), tile, cover_h, None);
             }
             // The rows just above and below load next, after what's on screen.
             for row in near(&range, PREFETCH_ROWS, rows) {
@@ -454,12 +533,13 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// One grid row of covers, followed by the row gap.
-    pub(super) fn book_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32, cover_h: f32) {
+    /// One grid row of covers, followed by the row gap. In a series' page,
+    /// `series` names it, and each tile says its book's number.
+    pub(super) fn book_row(&mut self, ui: &mut Ui, ids: &[usize], tile: f32, cover_h: f32, series: Option<&str>) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = GAP_X;
             for &i in ids {
-                self.book_tile(ui, i, tile, cover_h);
+                self.book_tile(ui, i, tile, cover_h, series);
             }
         });
         ui.add_space(GAP_Y - ui.spacing().item_spacing.y);
@@ -468,9 +548,10 @@ impl ViewCtx<'_> {
     /// Cover, title and author, and how far along the book is: a line along
     /// the cover's foot and the time left, or a check and "Finished"; the
     /// download's mark at the author line's end. Offline, a book that isn't
-    /// all here is faded: it can't play. A click opens the book; a
+    /// all here is faded: it can't play. In a series' page the author line
+    /// starts with the book's number in it. A click opens the book; a
     /// right-click has its commands.
-    fn book_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32, cover_h: f32) {
+    fn book_tile(&mut self, ui: &mut Ui, idx: usize, tile: f32, cover_h: f32, series: Option<&str>) {
         let t = Tokens::of(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(tile, cover_h + LABEL_H), Sense::click());
         let id = self.books.all()[idx].id.clone();
@@ -478,6 +559,7 @@ impl ViewCtx<'_> {
         let dim = self.sync.offline && !matches!(download, Some(BookDownload::Done { .. }));
         let book = &self.books.all()[idx];
         let listened = self.listened(book);
+        let number = series.and_then(|name| series_number(book, name));
         if ui.is_rect_visible(rect) {
             let opacity = ui.opacity();
             if dim {
@@ -494,8 +576,12 @@ impl ViewCtx<'_> {
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
             let author = author_of(book);
             let author = if author.is_empty() { "Unknown author" } else { author };
+            let byline = match number {
+                Some(n) => format!("Book {n} · {author}"),
+                None => author.to_owned(),
+            };
             let mark_room = if download.is_some() { MARK_ROOM } else { 0.0 };
-            let line = elide(ui, author, FontId::proportional(12.0), t.muted, tile - mark_room);
+            let line = elide(ui, &byline, FontId::proportional(12.0), t.muted, tile - mark_room);
             let line_y = art.bottom() + 24.0;
             let line_h = line.size().y;
             ui.painter().galley(pos2(rect.left(), line_y), line, t.muted);
@@ -512,6 +598,9 @@ impl ViewCtx<'_> {
             Some(state) => format!("{} by {}, {}", book.title, authors_line(book), state.to_lowercase()),
             None => format!("{} by {}", book.title, authors_line(book)),
         };
+        if let Some(n) = number {
+            name.push_str(&format!(", book {n}"));
+        }
         if dim {
             name.push_str(", not downloaded");
         } else if let Some(d) = &download {
