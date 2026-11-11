@@ -4,7 +4,7 @@
 
 use offline::{OfflineStore, Pin, Snapshot, TrackRef};
 use sources::{Item, ItemKey, SessionTrack, TrackFile};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// The persistent identity of an original audio file in both caches.
@@ -61,6 +61,7 @@ pub struct State {
     pub refreshing: bool,
     pub refreshed: bool,
     pub serial: u64,
+    pub remove_after_stop: HashSet<ItemKey>,
 }
 
 impl State {

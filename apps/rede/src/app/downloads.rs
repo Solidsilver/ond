@@ -15,6 +15,7 @@ impl RedeApp {
             self.show_failure(Failure::Local("Downloads aren't ready. Try again.".into()));
             return;
         };
+        self.downloads.remove_after_stop.remove(&key);
         self.downloads.refreshed = false;
         self.downloads.serial += 1;
         let request = self.downloads.serial;
@@ -24,6 +25,7 @@ impl RedeApp {
     }
 
     pub(super) fn remove_download(&mut self, key: &ItemKey) {
+        self.downloads.remove_after_stop.remove(key);
         self.downloads.preparing.remove(key);
         self.downloads.errors.remove(key);
         if let Some(store) = self.downloads.store.get() {
@@ -33,8 +35,25 @@ impl RedeApp {
     }
 
     pub(super) fn remove_finished_download(&mut self, key: &ItemKey, finished: bool) {
-        if finished && self.shown.downloads.remove_when_finished {
-            self.remove_download(key);
+        let was_finished = self.positions.get(&key.item).is_some_and(|p| p.finished);
+        if finished && !was_finished && self.shown.downloads.remove_when_finished {
+            self.downloads.remove_after_stop.insert(key.clone());
+            self.remove_stopped_downloads();
+        } else if !finished {
+            self.downloads.remove_after_stop.remove(key);
+        }
+    }
+
+    pub(super) fn remove_stopped_downloads(&mut self) {
+        let ready: Vec<_> = self
+            .downloads
+            .remove_after_stop
+            .iter()
+            .filter(|key| !self.player.active || self.player.book.as_ref().is_none_or(|book| book.key != **key))
+            .cloned()
+            .collect();
+        for key in ready {
+            self.remove_download(&key);
         }
     }
 
@@ -170,6 +189,42 @@ mod tests {
         store.pin(pin.clone(), "Book", vec![]);
         app.apply(Action::RemoveDownload(key));
         assert!(!store.is_pinned(&pin));
+    }
+
+    fn enable_removal(app: &mut RedeApp, store: &offline::OfflineStore, key: &ItemKey) -> Pin {
+        app.session.source = Some(Arc::new(Unreachable(Default::default())));
+        app.apply(Action::Prefs(PrefsAction::RemoveDownloadsWhenFinished(true)));
+        let pin = Pin::Book(key.to_string());
+        store.pin(pin.clone(), "Book", vec![offline::TrackRef::new("file", None, None)]);
+        pin
+    }
+
+    #[test]
+    fn pulling_an_already_finished_book_keeps_its_new_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = fixture::app(&egui::Context::default(), dir.path(), 1);
+        let store = install(&mut app, dir.path());
+        let key = ItemKey::new(fixture::account().id, "book-0");
+        let progress =
+            sources::Progress { item: key.clone(), position: sources::Position::from_secs(100.0), finished: true, at: Some(std::time::SystemTime::now()) };
+        app.positions.insert(key.item.clone(), progress.clone());
+        let pin = enable_removal(&mut app, &store, &key);
+        app.playback_event(crate::listening::Event::Positions(vec![progress]));
+        assert!(store.is_pinned(&pin));
+    }
+
+    #[test]
+    fn marking_a_book_finished_removes_its_download_only_on_the_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = fixture::app(&egui::Context::default(), dir.path(), 1);
+        let store = install(&mut app, dir.path());
+        let key = ItemKey::new(fixture::account().id, "book-0");
+        let pin = enable_removal(&mut app, &store, &key);
+        app.apply(Action::MarkFinished(key.item.clone()));
+        assert!(!store.is_pinned(&pin));
+        store.pin(pin.clone(), "Book", vec![]);
+        app.apply(Action::MarkFinished(key.item));
+        assert!(store.is_pinned(&pin));
     }
 
     #[test]
@@ -323,6 +378,7 @@ mod tests {
         app.apply(Action::MarkFinished("book-0".into()));
         assert!(store.is_pinned(&pin));
         app.apply(Action::Prefs(PrefsAction::RemoveDownloadsWhenFinished(true)));
+        app.apply(Action::MarkUnfinished("book-0".into()));
         app.apply(Action::MarkFinished("book-0".into()));
         assert!(!store.is_pinned(&pin));
     }
