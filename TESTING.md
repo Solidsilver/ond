@@ -237,6 +237,8 @@ silence has saved in the book.
   file/tail. Playback advances without stalling; chapters, scrubber, source
   position and progress jump by the removed time. The saved-time readout moves
   only when that cut reaches output, and stays correct after changing speed.
+  At 3×, include a quiet middle file shortened below 100 ms of output: the
+  following file must still start, including under CPU load.
 - [ ] Toggle each switch while playing and paused; seek into and out of a long
   pause, change speed, and cross a file boundary. No old buffered speech leaks
   through a seek, pause remains paused, and settings survive a relaunch.
@@ -356,6 +358,9 @@ With a throwaway ABS account and a real output device:
   should acknowledge successful sessions and retain failed ones for retry.
 - Expire an access token while files are queued. Confirm a rejected download
   refreshes credentials and resumes, and subsequent URLs use the new token.
+  Include parallel files whose old-token rejections arrive after another file
+  succeeds with the refreshed token: there must be no second refresh from the
+  stale rejection, and a later book must still be able to refresh when needed.
   Check logs for accidental credentials.
 - Set a small storage limit and verify pending files wait until the limit is
   raised or downloads are removed. "Remove downloads when finished" starts off;
