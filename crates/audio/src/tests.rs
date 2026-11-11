@@ -1404,19 +1404,27 @@ fn engine_on_a_real_device() {
 
 #[test]
 fn a_device_switch_while_the_track_is_still_loading_plays_that_track_from_where_it_was_asked() {
-    let dir = tempfile::tempdir().unwrap();
-    let a = file_source(&dir, "a", &pcm(2 * 44_100 * 4, 26));
-    // A slow server: the track takes half a second to open, so it's still loading below.
-    let a = TrackSource { url: a.url.replacen("file://", "test-slow://", 1), ..a };
+    let server = RangeServer::start(crate::decode::tests::wav(44_100, 2, &pcm(2 * 44_100 * 4, 26)), Serve { gate_after: Some(1), ..Serve::fast() });
+    let a = TrackSource { id: "a".into(), url: server.url(), suffix: Some("wav".into()), ..Default::default() };
+    let (cache, _rt, _cache_dir) = net_cache();
     let backend = FakeBackend::new(caps(Some(24), 192_000));
     *backend.devices.lock().unwrap() = vec![device("spk", "Speakers", DeviceKind::BuiltInSpeakers), device("dac", "DAC", DeviceKind::Usb)];
-    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), None);
+    let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.1 }, Box::new(backend), Some(cache));
     engine.send(Command::Play(a));
+    wait_until("the gated file to start opening", || !server.requests().is_empty());
     engine.send(Command::Seek(Duration::from_secs(2)));
     engine.send(Command::SelectDevice(Some("dac".into())));
-    let seen = events_until(&engine, |e| matches!(e, Event::Devices { .. }));
+    // Device selection reports its list before restarting playback. A second
+    // request fences that restart, while the server keeps it in Loading.
+    engine.send(Command::RefreshDevices);
+    let mut lists = 0;
+    let seen = events_until(&engine, |e| {
+        lists += usize::from(matches!(e, Event::Devices { .. }));
+        lists == 2
+    });
     assert!(matches!(seen.last(), Some(Event::Devices { current: Some(d), .. }) if d == "dac"), "{seen:?}");
     assert_eq!(engine.status.state(), PlayState::Loading, "the track is opened again on the new device, not dropped");
+    server.open_gate();
     let seen = events_until(&engine, |e| matches!(e, Event::TrackStarted { .. } | Event::Ended { .. }));
     // Its first start as far as the UI knows: not flagged as a restart.
     assert_eq!(starts(&seen), [("a".to_owned(), false, false)], "{seen:?}");
@@ -2060,7 +2068,9 @@ fn a_file_shrunk_below_the_linger_floor_still_hands_over_to_the_next() {
     let (a, quiet, c) = (voice(44_100, 1), vec![32; 44_100 * 2 * 2], voice(44_100, 1));
     let mut backend = FakeBackend::new(caps(None, 192_000));
     backend.own_rate = Some(48_000);
-    backend.period = UI_PACE;
+    // A slowly serviced device keeps A's tail ahead of B longer than the
+    // grace for choosing C: that tail must not consume B's own grace.
+    backend.period = (Duration::from_millis(50), 441);
     let (played, opens) = (backend.played.clone(), backend.opens.clone());
     let engine = spawn(EngineConfig { mode: PlaybackMode::Normal, buffer_secs: 0.5 }, Box::new(backend), None);
     engine.send(Command::SetSpeed(3.0));

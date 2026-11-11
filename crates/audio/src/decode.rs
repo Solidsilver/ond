@@ -917,8 +917,8 @@ impl Ctx {
         // a file that far, and a first file can fit entirely in the lookahead.
         // Give both the same bounded chance to be followed.
         let lookahead = o.pushed.saturating_sub(o.file_start) < floor as u64;
-        // Counted from the moment the queue is down to the floor, which is the
-        // decision this grace postpones.
+        // Counted once the short file reaches the output: the preceding file's
+        // tail must not spend the grace before the UI can name what follows.
         let mut deadline = None;
         loop {
             if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) {
@@ -930,6 +930,16 @@ impl Ctx {
             let queued = o.samples.buffer().capacity() - o.samples.slots();
             if queued <= floor || o.samples.is_abandoned() {
                 if lookahead && !o.samples.is_abandoned() {
+                    if self.status.track_seq.load(Ordering::Acquire) < seq && o.output_seq >= seq {
+                        // Its marker is queued, but still behind the preceding
+                        // file. Buffering must still let the pipeline flush its
+                        // lookahead, or the output could wait on us forever.
+                        if self.status.buffering.load(Ordering::Relaxed) && !o.ctl.holding() {
+                            return false;
+                        }
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
                     let deadline = *deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
                     if Instant::now() < deadline {
                         thread::sleep(Duration::from_millis(2));
