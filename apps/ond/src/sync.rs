@@ -13,6 +13,7 @@
 //! Progress is saved as it goes (the bulk offset in the db's meta table, stamps
 //! per album), so a sync cut short by quitting picks up where it stopped.
 
+use crate::convert;
 use crate::failure::Failure;
 use library::{Album, Library};
 use std::collections::HashMap;
@@ -179,7 +180,7 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() ->
         let before = seen.len();
         seen.extend(page.iter().map(|a| a.id.clone()));
         let n = page.len() as u32;
-        write(lib, live, move |l| l.upsert_albums(page)).await.map_err(|e| e.context("Couldn't save the album list"))?;
+        write(lib, live, move |l| l.upsert_albums(page.into_iter().map(convert::album))).await.map_err(|e| e.context("Couldn't save the album list"))?;
         // An empty page ends the list, not a short one: a server may cap pages
         // below what was asked for, and stopping early would prune everything
         // after it. A page with nothing new ends it too: a server that ignores
@@ -203,7 +204,7 @@ pub async fn albums<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() ->
 /// Replaces the stored artists with the server's; returns them as stored.
 pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -> bool) -> Result<Vec<library::Artist>, Failure> {
     let artists = fetch.artists().await.map_err(|e| e.context("Couldn't load artists"))?;
-    write(lib, live, move |l| l.replace_artists(artists).and_then(|_| l.artists())).await
+    write(lib, live, move |l| l.replace_artists(artists.into_iter().map(convert::artist)).and_then(|_| l.artists())).await
 }
 
 /// Runs a full sync pass. `progress` is called after every page or album.
@@ -308,7 +309,7 @@ async fn bulk_pass<F: Fetch>(
         let n = page.len() as u32;
         let next = offset + n;
         write(lib, live, move |l| {
-            l.store_songs(page)?;
+            l.store_tracks(convert::bulk_tracks(page))?;
             l.set_meta(BULK_OFFSET, Some(next))
         })
         .await?;
@@ -350,7 +351,7 @@ async fn per_album<F: Fetch>(
         match joined.map_err(|e| Failure::Local(e.to_string())).and_then(|r| r) {
             Ok(album) => {
                 failures = 0;
-                batch.push(album);
+                batch.push(convert::album_tracks(album));
             }
             Err(e) => {
                 failures += 1;
@@ -534,7 +535,7 @@ pub(crate) mod tests {
 
     fn library(albums: &[subsonic::Album]) -> Arc<Library> {
         let lib = Library::in_memory().unwrap();
-        lib.upsert_albums(albums.to_vec()).unwrap();
+        lib.upsert_albums(albums.iter().cloned().map(convert::album)).unwrap();
         Arc::new(lib)
     }
 
@@ -548,7 +549,7 @@ pub(crate) mod tests {
 
     #[test]
     fn plan_picks_bulk_for_a_fresh_big_library_and_resumes_it() {
-        let albums: Vec<Album> = many(300, 10).into_iter().map(Album::from).collect();
+        let albums: Vec<Album> = many(300, 10).into_iter().map(convert::album).collect();
         let none = HashMap::new();
         assert_eq!(plan(&albums, &none, false, None), Plan::Bulk { from: 0 });
         assert_eq!(plan(&albums, &none, false, Some(1500)), Plan::Bulk { from: 1500 });
@@ -584,7 +585,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bulk_stamps_only_complete_albums() {
-        let albums: Vec<Album> = vec![album("a", 2), album("b", 3), album("c", 0)].into_iter().map(Album::from).collect();
+        let albums: Vec<Album> = vec![album("a", 2), album("b", 3), album("c", 0)].into_iter().map(convert::album).collect();
         let counts: HashMap<String, u32> = [("a".into(), 2), ("b".into(), 2)].into_iter().collect();
         let ids: Vec<String> = bulk_stamps(&albums, &counts).into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, ["a", "c"]);
@@ -616,7 +617,7 @@ pub(crate) mod tests {
         let mut changed = albums[5].clone();
         changed.song_count = 4;
         fake.albums.lock().unwrap()[5] = changed.clone();
-        lib.upsert_albums([changed]).unwrap();
+        lib.upsert_albums([convert::album(changed)]).unwrap();
         let out = rt().block_on(run(lib.clone(), fake.clone(), Arc::default(), || true, |_| {}));
         assert_eq!(out, Outcome::Done { fetched: 1, bulk: false });
         assert_eq!(*fake.album_calls.lock().unwrap(), ["a005"]);

@@ -1,56 +1,49 @@
 use super::*;
 
-fn album(id: &str, name: &str, artist: &str, year: i32) -> subsonic::Album {
-    subsonic::Album {
+fn album(id: &str, name: &str, artist: &str, year: i32) -> Album {
+    Album {
         id: id.into(),
         name: name.into(),
         artist: Some(artist.into()),
-        artist_id: Some(format!("ar-{artist}")),
+        artist_ref: Some(format!("ar-{artist}")),
         cover_art: None,
         song_count: 0,
-        duration: 0,
+        duration_secs: 0,
         year: Some(year),
         genre: None,
         created: None,
-        starred: None,
-        play_count: None,
-        user_rating: None,
-        sort_name: None,
-        record_labels: Vec::new(),
+        sort: None,
+        labels: Vec::new(),
         genres: Vec::new(),
         artists: Vec::new(),
     }
 }
 
-fn song(id: &str, album_id: &str, disc: u32, track: u32) -> subsonic::Song {
-    subsonic::Song {
+fn song(id: &str, album_id: &str, disc: u32, track: u32) -> Track {
+    Track {
         id: id.into(),
         title: format!("t{track}"),
-        album: None,
-        album_id: Some(album_id.into()),
+        album_id: album_id.into(),
         artist: None,
-        artist_id: None,
+        artist_ref: None,
         track: Some(track),
-        disc_number: Some(disc),
-        year: None,
-        genre: None,
+        disc: Some(disc),
         cover_art: None,
         size: None,
         content_type: None,
         suffix: Some("flac".into()),
-        duration: Some(100),
-        bit_rate: None,
+        duration_secs: Some(100),
+        bit_rate_kbps: None,
         bit_depth: Some(24),
-        sampling_rate: Some(88_200),
-        channel_count: Some(2),
-        replay_gain: None,
-        display_composer: None,
+        sample_rate: Some(88_200),
+        channels: Some(2),
+        track_gain: None,
+        album_gain: None,
+        track_peak: None,
+        album_peak: None,
+        composer: None,
         contributors: Vec::new(),
         artists: Vec::new(),
-        starred: None,
-        user_rating: None,
-        play_count: None,
-        played: None,
     }
 }
 
@@ -77,10 +70,10 @@ fn an_album_upserted_again_replaces_the_first_copy() {
 #[test]
 fn album_tracks_in_disc_track_order_and_replaced_on_resync() {
     let lib = Library::in_memory().unwrap();
-    let with_songs = |songs| subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: songs };
+    let with_songs = |songs| AlbumTracks { album: album("al", "A", "X", 2000), tracks: songs };
     lib.upsert_album_tracks(with_songs(vec![song("c", "al", 2, 1), song("b", "al", 1, 10), song("a", "al", 1, 2), song("gone", "al", 1, 3)])).unwrap();
     // An album id that is a prefix of another must not leak tracks across.
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al2", "B", "X", 2001), song: vec![song("z", "al2", 1, 1)] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("al2", "B", "X", 2001), tracks: vec![song("z", "al2", 1, 1)] }).unwrap();
 
     let ids: Vec<_> = lib.album_tracks("al").unwrap().into_iter().map(|t| t.id).collect();
     assert_eq!(ids, ["a", "gone", "b", "c"]);
@@ -131,8 +124,8 @@ fn album_update_moves_index_entry() {
 #[test]
 fn remove_album_drops_tracks_and_index_entries() {
     let lib = Library::in_memory().unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: vec![song("a", "al", 1, 1), song("b", "al", 1, 2)] }).unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al2", "B", "X", 2001), song: vec![song("c", "al2", 1, 1)] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("al", "A", "X", 2000), tracks: vec![song("a", "al", 1, 1), song("b", "al", 1, 2)] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("al2", "B", "X", 2001), tracks: vec![song("c", "al2", 1, 1)] }).unwrap();
 
     assert!(lib.remove_album("al").unwrap());
     assert!(!lib.remove_album("al").unwrap());
@@ -146,7 +139,7 @@ fn remove_album_drops_tracks_and_index_entries() {
 #[test]
 fn track_moved_between_albums_leaves_no_stale_entry() {
     let lib = Library::in_memory().unwrap();
-    let with = |id: &str, songs| subsonic::AlbumWithSongs { album: album(id, id, "X", 2000), song: songs };
+    let with = |id: &str, songs| AlbumTracks { album: album(id, id, "X", 2000), tracks: songs };
     lib.upsert_album_tracks(with("one", vec![song("t", "one", 1, 1)])).unwrap();
     lib.upsert_album_tracks(with("two", vec![song("t", "two", 1, 5)])).unwrap();
     assert!(lib.album_tracks("one").unwrap().is_empty());
@@ -157,7 +150,7 @@ fn track_moved_between_albums_leaves_no_stale_entry() {
 #[test]
 fn resync_keeps_indexes_consistent() {
     let lib = Library::in_memory().unwrap();
-    let with = |songs| subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: songs };
+    let with = |songs| AlbumTracks { album: album("al", "A", "X", 2000), tracks: songs };
     lib.upsert_album_tracks(with(vec![song("a", "al", 1, 1), song("b", "al", 1, 2)])).unwrap();
     // Same ids, renumbered: old (disc, track) keys must be gone.
     lib.upsert_album_tracks(with(vec![song("a", "al", 1, 2), song("b", "al", 1, 1)])).unwrap();
@@ -169,7 +162,7 @@ fn resync_keeps_indexes_consistent() {
 #[test]
 fn artists_sorted_by_folded_name() {
     let lib = Library::in_memory().unwrap();
-    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    let artist = |id: &str, name: &str| Artist { id: id.into(), name: name.into(), sort: None, album_count: 1, cover_art: None };
     lib.upsert_artists([artist("1", "Émile"), artist("2", "eagles"), artist("3", "Zappa")]).unwrap();
     lib.upsert_artists([artist("2", "Eagles")]).unwrap();
     let names: Vec<_> = lib.artists().unwrap().into_iter().map(|a| a.name).collect();
@@ -315,15 +308,11 @@ fn a_v1_database_migrates_to_the_current_schema() {
 fn credits_are_stored_and_findable() {
     let lib = Library::in_memory().unwrap();
     let mut s = song("s-1", "al-1", 1, 1);
-    s.display_composer = Some("Scott LaFaro".into());
-    s.contributors = vec![subsonic::Contributor {
-        role: "performer".into(),
-        sub_role: Some("piano".into()),
-        artist: subsonic::ArtistRef { id: Some("ar-1".into()), name: "Bill Evans".into() },
-    }];
+    s.composer = Some("Scott LaFaro".into());
+    s.contributors = vec![Contributor { role: "performer".into(), sub_role: Some("piano".into()), artist_id: Some("ar-1".into()), name: "Bill Evans".into() }];
     let mut a = album("al-1", "Sunday at the Village Vanguard", "Bill Evans Trio", 1961);
-    a.record_labels = vec![subsonic::Named { name: "Riverside".into() }];
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a, song: vec![s] }).unwrap();
+    a.labels = vec!["Riverside".into()];
+    lib.upsert_album_tracks(AlbumTracks { album: a, tracks: vec![s] }).unwrap();
     let t = &lib.album_tracks("al-1").unwrap()[0];
     assert_eq!(t.composer.as_deref(), Some("Scott LaFaro"));
     assert_eq!(t.contributors[0].sub_role.as_deref(), Some("piano"));
@@ -336,8 +325,8 @@ fn credits_are_stored_and_findable() {
     assert_consistent(&lib);
 }
 
-fn artist_ref(id: &str, name: &str) -> subsonic::ArtistRef {
-    subsonic::ArtistRef { id: Some(id.into()), name: name.into() }
+fn artist_ref(id: &str, name: &str) -> ArtistLink {
+    ArtistLink { id: Some(id.into()), name: name.into() }
 }
 
 #[test]
@@ -348,7 +337,7 @@ fn split_artists_are_kept_as_entities_and_credited() {
     let mut s = song("s-1", "al-1", 1, 1);
     s.artist = a.artist.clone();
     s.artists = a.artists.clone();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a, song: vec![s] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: a, tracks: vec![s] }).unwrap();
 
     let row = lib.album("al-1").unwrap().unwrap();
     assert_eq!(row.artists.len(), 3);
@@ -364,16 +353,16 @@ fn split_artists_are_kept_as_entities_and_credited() {
 #[test]
 fn credits_follow_track_updates_and_removal() {
     let lib = Library::in_memory().unwrap();
-    let with = |id: &str, songs| subsonic::AlbumWithSongs { album: album(id, id, "X", 2000), song: songs };
+    let with = |id: &str, songs| AlbumTracks { album: album(id, id, "X", 2000), tracks: songs };
     let mut a = song("a", "one", 1, 1);
-    a.display_composer = Some("Cole Porter".into());
+    a.composer = Some("Cole Porter".into());
     let mut b = song("b", "one", 1, 2);
-    b.display_composer = Some("Cole Porter".into());
+    b.composer = Some("Cole Porter".into());
     lib.upsert_album_tracks(with("one", vec![a.clone(), b])).unwrap();
     assert_eq!(lib.albums_crediting("Cole Porter").unwrap(), ["one"]);
 
     // Re-credited on resync: the old name goes, the album stays for the new one.
-    a.display_composer = Some("Gershwin".into());
+    a.composer = Some("Gershwin".into());
     lib.upsert_album_tracks(with("one", vec![a])).unwrap();
     assert!(lib.albums_crediting("Cole Porter").unwrap().is_empty());
     assert_eq!(lib.albums_crediting("Gershwin").unwrap(), ["one"]);
@@ -390,18 +379,18 @@ fn stamps_written_with_tracks_and_dropped_with_album() {
     let mut a = album("al", "A", "X", 2000);
     a.song_count = 1;
     a.cover_art = Some("al-al_65a1b2c3".into());
-    let expected = Album::from(a.clone()).sync_stamp();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a.clone(), song: vec![song("s", "al", 1, 1)] }).unwrap();
+    let expected = a.sync_stamp();
+    lib.upsert_album_tracks(AlbumTracks { album: a.clone(), tracks: vec![song("s", "al", 1, 1)] }).unwrap();
     assert_eq!(lib.album_stamps().unwrap().get("al"), Some(&expected));
 
     // Any change the album list reports changes the stamp: Navidrome bumps the
     // cover art id when an album is updated.
     let mut edited = a.clone();
     edited.cover_art = Some("al-al_65a1b2ff".into());
-    assert_ne!(Album::from(edited).sync_stamp(), expected);
+    assert_ne!(edited.sync_stamp(), expected);
     let mut more = a;
     more.song_count = 2;
-    assert_ne!(Album::from(more).sync_stamp(), expected);
+    assert_ne!(more.sync_stamp(), expected);
 
     lib.remove_album("al").unwrap();
     assert!(lib.album_stamps().unwrap().is_empty());
@@ -412,22 +401,17 @@ fn bulk_songs_store_without_stamping_and_counts_add_up() {
     let lib = Library::in_memory().unwrap();
     lib.upsert_albums([album("one", "One", "X", 2000), album("two", "Two", "X", 2001)]).unwrap();
     // A page boundary splits album "two" across two pages.
-    lib.store_songs(vec![song("a", "one", 1, 1), song("b", "one", 1, 2), song("c", "two", 1, 1)]).unwrap();
-    lib.store_songs(vec![song("d", "two", 1, 2), {
-        let mut s = song("x", "", 1, 1);
-        s.album_id = None;
-        s
-    }])
-    .unwrap();
+    lib.store_tracks(vec![song("a", "one", 1, 1), song("b", "one", 1, 2), song("c", "two", 1, 1)]).unwrap();
+    lib.store_tracks(vec![song("d", "two", 1, 2)]).unwrap();
     assert!(lib.album_stamps().unwrap().is_empty());
     let counts = lib.track_counts().unwrap();
     assert_eq!(counts.get("one"), Some(&2));
     assert_eq!(counts.get("two"), Some(&2));
-    assert_eq!(lib.track_count().unwrap(), 4, "songs without an album are skipped");
+    assert_eq!(lib.track_count().unwrap(), 4);
     let all: Vec<_> = lib.all_tracks().unwrap().into_iter().map(|t| t.id).collect();
     assert_eq!(all, ["a", "b", "c", "d"]);
     // Re-storing the same page is harmless.
-    lib.store_songs(vec![song("a", "one", 1, 1)]).unwrap();
+    lib.store_tracks(vec![song("a", "one", 1, 1)]).unwrap();
     assert_eq!(lib.track_count().unwrap(), 4);
     assert_consistent(&lib);
 }
@@ -436,7 +420,7 @@ fn bulk_songs_store_without_stamping_and_counts_add_up() {
 fn retain_albums_drops_what_the_server_no_longer_has() {
     let lib = Library::in_memory().unwrap();
     for id in ["a", "b", "c"] {
-        lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album(id, id, "X", 2000), song: vec![song(&format!("{id}-1"), id, 1, 1)] }).unwrap();
+        lib.upsert_album_tracks(AlbumTracks { album: album(id, id, "X", 2000), tracks: vec![song(&format!("{id}-1"), id, 1, 1)] }).unwrap();
     }
     let keep = ["a".to_owned(), "c".to_owned()].into_iter().collect();
     assert_eq!(lib.retain_albums(&keep).unwrap(), 1);
@@ -449,7 +433,7 @@ fn retain_albums_drops_what_the_server_no_longer_has() {
 #[test]
 fn replace_artists_drops_stale_ones() {
     let lib = Library::in_memory().unwrap();
-    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    let artist = |id: &str, name: &str| Artist { id: id.into(), name: name.into(), sort: None, album_count: 1, cover_art: None };
     lib.replace_artists([artist("1", "Old Name"), artist("2", "Kept")]).unwrap();
     lib.replace_artists([artist("2", "Kept"), artist("3", "New")]).unwrap();
     let names: Vec<_> = lib.artists().unwrap().into_iter().map(|a| a.name).collect();
@@ -532,7 +516,7 @@ fn v2_rows_migrate_to_v3_with_credits_index() {
 #[test]
 fn check_indexes_notices_a_missing_artist_entry() {
     let lib = Library::in_memory().unwrap();
-    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    let artist = |id: &str, name: &str| Artist { id: id.into(), name: name.into(), sort: None, album_count: 1, cover_art: None };
     lib.upsert_artists([artist("1", "Eagles"), artist("2", "Zappa")]).unwrap();
     assert!(lib.check_indexes().unwrap().is_empty());
     let wt = lib.db.begin_write().unwrap();
@@ -611,7 +595,7 @@ fn analysis_survives_a_library_rebuild_and_old_records_move_over() {
 fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
     let lib = Library::in_memory().unwrap();
     // A database from before accounts were recorded belongs to whoever claims it first.
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al", "A", "X", 2000), song: vec![song("a", "al", 1, 1)] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("al", "A", "X", 2000), tracks: vec![song("a", "al", 1, 1)] }).unwrap();
     lib.set_meta("bulk_done", Some(1)).unwrap();
     assert!(!lib.claim_account(7).unwrap());
     lib.save("newest", &vec!["al".to_owned()]).unwrap();
@@ -634,10 +618,10 @@ fn another_account_clears_the_mirror_but_the_same_one_keeps_it() {
 #[test]
 fn retaining_albums_also_drops_tracks_whose_album_is_not_stored() {
     let lib = Library::in_memory().unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("keep", "K", "X", 2000), song: vec![song("k1", "keep", 1, 1)] }).unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("gone", "G", "X", 2001), song: vec![song("g1", "gone", 1, 1)] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("keep", "K", "X", 2000), tracks: vec![song("k1", "keep", 1, 1)] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("gone", "G", "X", 2001), tracks: vec![song("g1", "gone", 1, 1)] }).unwrap();
     // A bulk sync stored songs of an album the album list never had.
-    lib.store_songs(vec![song("o1", "orphan", 1, 1), song("o2", "orphan", 1, 2)]).unwrap();
+    lib.store_tracks(vec![song("o1", "orphan", 1, 1), song("o2", "orphan", 1, 2)]).unwrap();
     assert_eq!(lib.track_count().unwrap(), 4);
 
     let keep: HashSet<String> = ["keep".to_owned()].into();
@@ -687,9 +671,9 @@ fn v3_indexes_are_rebuilt_with_the_new_folding() {
         let mut a = album("al-1", "Link", "Øystein Sevåg", 1989);
         a.song_count = 1;
         let mut s = song("s-1", "al-1", 1, 1);
-        s.display_composer = Some("Øystein Sevåg".into());
-        lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: a.clone(), song: vec![s] }).unwrap();
-        lib.upsert_artists([subsonic::Artist { id: "ar-1".into(), name: "Øystein Sevåg".into(), album_count: 1, cover_art: None, sort_name: None }]).unwrap();
+        s.composer = Some("Øystein Sevåg".into());
+        lib.upsert_album_tracks(AlbumTracks { album: a.clone(), tracks: vec![s] }).unwrap();
+        lib.upsert_artists([Artist { id: "ar-1".into(), name: "Øystein Sevåg".into(), album_count: 1, cover_art: None, sort: None }]).unwrap();
         let wt = lib.db.begin_write().unwrap();
         {
             wt.open_table(META).unwrap().insert(SCHEMA_KEY, 3).unwrap();
@@ -722,13 +706,10 @@ fn v3_indexes_are_rebuilt_with_the_new_folding() {
 #[test]
 fn a_row_that_cannot_be_read_is_left_out_of_lists() {
     let lib = Library::in_memory().unwrap();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs {
-        album: album("al-1", "Good", "X", 2000),
-        song: vec![song("s-1", "al-1", 1, 1), song("s-2", "al-1", 1, 2)],
-    })
-    .unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("al-1", "Good", "X", 2000), tracks: vec![song("s-1", "al-1", 1, 1), song("s-2", "al-1", 1, 2)] })
+        .unwrap();
     lib.upsert_albums([album("al-2", "Bad", "Y", 2001)]).unwrap();
-    lib.upsert_artists([subsonic::Artist { id: "ar-1".into(), name: "X".into(), album_count: 1, cover_art: None, sort_name: None }]).unwrap();
+    lib.upsert_artists([Artist { id: "ar-1".into(), name: "X".into(), album_count: 1, cover_art: None, sort: None }]).unwrap();
     let wt = lib.db.begin_write().unwrap();
     {
         wt.open_table(ALBUMS).unwrap().insert("al-2", [0xffu8; 3].as_slice()).unwrap();
@@ -1080,7 +1061,7 @@ fn saved_values_keep_their_tag() {
 #[test]
 fn an_unchanged_artist_list_writes_nothing() {
     let lib = Library::in_memory().unwrap();
-    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    let artist = |id: &str, name: &str| Artist { id: id.into(), name: name.into(), sort: None, album_count: 1, cover_art: None };
     assert!(lib.replace_artists([artist("1", "Bill Evans"), artist("2", "Øystein Sevåg")]).unwrap());
     assert!(!lib.replace_artists([artist("2", "Øystein Sevåg"), artist("1", "Bill Evans")]).unwrap(), "same artists, another order");
     assert_eq!(lib.artists().unwrap().len(), 2);
@@ -1108,8 +1089,8 @@ fn lists_come_out_in_index_order() {
         album("d2", "Anything", "Air", 1998),
     ])
     .unwrap();
-    lib.store_songs(vec![song("t3", "d", 2, 1), song("t1", "d", 1, 9), song("t2", "d2", 1, 1), song("t0", "d", 1, 9), song("t4", "a", 1, 1)]).unwrap();
-    let artist = |id: &str, name: &str| subsonic::Artist { id: id.into(), name: name.into(), sort_name: None, album_count: 1, cover_art: None };
+    lib.store_tracks(vec![song("t3", "d", 2, 1), song("t1", "d", 1, 9), song("t2", "d2", 1, 1), song("t0", "d", 1, 9), song("t4", "a", 1, 1)]).unwrap();
+    let artist = |id: &str, name: &str| Artist { id: id.into(), name: name.into(), sort: None, album_count: 1, cover_art: None };
     lib.replace_artists([artist("2", "eagles"), artist("1", "Eagles"), artist("3", "Émile"), artist("4", "Øystein")]).unwrap();
 
     let rt = lib.db.begin_read().unwrap();
@@ -1128,10 +1109,10 @@ fn lists_come_out_in_index_order() {
 fn library_with_unreadable_rows() -> Library {
     let lib = Library::in_memory().unwrap();
     let mut a = song("s-1", "al-1", 1, 1);
-    a.display_composer = Some("Cole Porter".into());
+    a.composer = Some("Cole Porter".into());
     let mut b = song("s-2", "al-1", 1, 2);
-    b.display_composer = Some("Gershwin".into());
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al-1", "A", "X", 2000), song: vec![a, b] }).unwrap();
+    b.composer = Some("Gershwin".into());
+    lib.upsert_album_tracks(AlbumTracks { album: album("al-1", "A", "X", 2000), tracks: vec![a, b] }).unwrap();
     let wt = lib.db.begin_write().unwrap();
     {
         wt.open_table(ALBUMS).unwrap().insert("al-1", [0xffu8; 3].as_slice()).unwrap();
@@ -1148,8 +1129,8 @@ fn a_write_over_an_undecodable_row_succeeds_and_leaves_indexes_consistent() {
     // track's: the old entries can only be found by id.
     lib.upsert_albums([album("al-1", "A", "X", 2001)]).unwrap();
     let mut moved = song("s-1", "al-1", 2, 7);
-    moved.display_composer = Some("Ellington".into());
-    lib.store_songs(vec![moved]).unwrap();
+    moved.composer = Some("Ellington".into());
+    lib.store_tracks(vec![moved]).unwrap();
     assert_consistent(&lib);
     assert_eq!(lib.albums().unwrap()[0].year, Some(2001));
     assert_eq!(lib.album_tracks("al-1").unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(), ["s-2", "s-1"]);
@@ -1158,7 +1139,7 @@ fn a_write_over_an_undecodable_row_succeeds_and_leaves_indexes_consistent() {
 
     // A whole-album resync goes through the same rows.
     let lib = library_with_unreadable_rows();
-    lib.upsert_album_tracks(subsonic::AlbumWithSongs { album: album("al-1", "A", "X", 1999), song: vec![song("s-1", "al-1", 1, 1)] }).unwrap();
+    lib.upsert_album_tracks(AlbumTracks { album: album("al-1", "A", "X", 1999), tracks: vec![song("s-1", "al-1", 1, 1)] }).unwrap();
     assert_consistent(&lib);
     assert_eq!(lib.album_tracks("al-1").unwrap().len(), 1);
 }

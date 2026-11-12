@@ -1,6 +1,7 @@
 //! Background work for the UI. Every function here returns immediately; results
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
+use crate::convert;
 use crate::failure::Failure;
 use crate::favorites::{SavedStarred, StarKind, Starred, UserMeta};
 use crate::settings::Settings;
@@ -894,7 +895,7 @@ impl Bridge {
             let id = album_id.clone();
             let stored = this
                 .db(move |l| {
-                    l.upsert_album_tracks(album)?;
+                    l.upsert_album_tracks(convert::album_tracks(album))?;
                     Ok((l.album(&id)?, l.album_tracks(&id)?))
                 })
                 .await;
@@ -921,7 +922,7 @@ impl Bridge {
                     // Newest albums may predate the last full sync; announced
                     // only once they're stored, or they'd show as missing.
                     let saved = Vec::clone(&ids);
-                    match this.db(move |l| l.upsert_albums(albums).and_then(|()| l.save(SAVED_NEWEST, &saved))).await {
+                    match this.db(move |l| l.upsert_albums(albums.into_iter().map(convert::album)).and_then(|()| l.save(SAVED_NEWEST, &saved))).await {
                         Ok(()) => this.send(LibraryMsg::Newest(ids)),
                         Err(e) => this.send(Msg::Error(Failure::Local(format!("Couldn't save Recently added: {e}")))),
                     }
@@ -1157,7 +1158,7 @@ impl Bridge {
     /// One album's tracks from the server, stored, as the library has them.
     async fn fetch_album<F: sync::Fetch>(&self, client: &F, id: String) -> Result<Vec<Track>, Failure> {
         let album = client.album(id.clone()).await?;
-        self.db(move |l| l.upsert_album_tracks(album).and_then(|_| l.album_tracks(&id))).await.map_err(Failure::Local)
+        self.db(move |l| l.upsert_album_tracks(convert::album_tracks(album)).and_then(|_| l.album_tracks(&id))).await.map_err(Failure::Local)
     }
 }
 
@@ -1183,7 +1184,7 @@ async fn ping(client: &Client) -> Result<String, PingError> {
 
 fn song_track(s: subsonic::Song) -> Track {
     let album = s.album_id.clone().unwrap_or_default();
-    Track::from_song(s, &album)
+    convert::track(s, &album)
 }
 
 #[cfg(test)]
@@ -1262,7 +1263,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let lib = Library::in_memory().unwrap();
-        lib.upsert_albums(albums.to_vec()).unwrap();
+        lib.upsert_albums(albums.iter().cloned().map(convert::album)).unwrap();
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib));
         (rt, bridge, rx)
     }
@@ -1381,7 +1382,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let lib = Library::in_memory().unwrap();
-        lib.upsert_albums(vec![album("old", 1)]).unwrap();
+        lib.upsert_albums(vec![convert::album(album("old", 1))]).unwrap();
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib));
         let mut got = Vec::new();
         // Unhindered, the read sends the stored library.
@@ -1413,7 +1414,7 @@ mod tests {
         // One is stored already; the other three come from the server.
         let stored = Server { albums: albums.clone(), ..Default::default() };
         let one = rt.block_on(sync::Fetch::album(&stored, "a2".into())).unwrap();
-        bridge.library.upsert_album_tracks(one).unwrap();
+        bridge.library.upsert_album_tracks(convert::album_tracks(one)).unwrap();
         let gate = Arc::new(Semaphore::new(0));
         // The first album answers last.
         let server = Server { albums, gate: Some(gate.clone()), slow: Some("a0".into()), ..Default::default() };

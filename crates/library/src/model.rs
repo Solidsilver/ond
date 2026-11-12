@@ -75,12 +75,6 @@ impl ArtistV1 {
     }
 }
 
-impl From<subsonic::Artist> for ArtistV1 {
-    fn from(a: subsonic::Artist) -> Self {
-        Self { id: a.id, name: a.name, sort: a.sort_name, album_count: a.album_count, cover_art: a.cover_art }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct AlbumV1 {
     pub id: String,
@@ -120,12 +114,6 @@ pub(crate) struct AlbumV2 {
 pub struct ArtistLinkV1 {
     pub id: Option<String>,
     pub name: String,
-}
-
-impl From<subsonic::ArtistRef> for ArtistLinkV1 {
-    fn from(a: subsonic::ArtistRef) -> Self {
-        Self { id: a.id, name: a.name }
-    }
 }
 
 /// Schema v3: adds the album artists as entities.
@@ -252,27 +240,6 @@ impl From<AlbumV2> for AlbumV3 {
             labels: a.labels,
             genres: a.genres,
             artists: Vec::new(),
-        }
-    }
-}
-
-impl From<subsonic::Album> for AlbumV3 {
-    fn from(a: subsonic::Album) -> Self {
-        Self {
-            id: a.id,
-            name: a.name,
-            sort: a.sort_name,
-            artist: a.artist,
-            artist_ref: a.artist_id,
-            year: a.year,
-            genre: a.genre,
-            song_count: a.song_count,
-            duration_secs: a.duration,
-            cover_art: a.cover_art,
-            created: a.created,
-            labels: a.record_labels.into_iter().map(|l| l.name).collect(),
-            genres: a.genres.into_iter().map(|g| g.name).collect(),
-            artists: a.artists.into_iter().map(ArtistLinkV1::from).collect(),
         }
     }
 }
@@ -445,38 +412,5 @@ impl TrackV3 {
     /// Index key parts after the album id: disc, track. Missing disc sorts as 1.
     pub(crate) fn order_parts(&self) -> (u32, u32) {
         (self.disc.unwrap_or(1), self.track.unwrap_or(0))
-    }
-
-    pub fn from_song(s: subsonic::Song, album_id: &str) -> Self {
-        let rg = s.replay_gain.unwrap_or_default();
-        Self {
-            id: s.id,
-            album_id: s.album_id.unwrap_or_else(|| album_id.to_owned()),
-            title: s.title,
-            artist: s.artist,
-            artist_ref: s.artist_id,
-            track: s.track,
-            disc: s.disc_number,
-            duration_secs: s.duration,
-            suffix: s.suffix,
-            content_type: s.content_type,
-            size: s.size,
-            bit_rate_kbps: s.bit_rate,
-            bit_depth: s.bit_depth,
-            sample_rate: s.sampling_rate,
-            channels: s.channel_count,
-            track_gain: rg.track_gain,
-            album_gain: rg.album_gain,
-            track_peak: rg.track_peak,
-            album_peak: rg.album_peak,
-            composer: s.display_composer.filter(|c| !c.is_empty()),
-            contributors: s
-                .contributors
-                .into_iter()
-                .map(|c| ContributorV1 { role: c.role, sub_role: c.sub_role, name: c.artist.name, artist_id: c.artist.id })
-                .collect(),
-            cover_art: s.cover_art,
-            artists: s.artists.into_iter().map(ArtistLinkV1::from).collect(),
-        }
     }
 }

@@ -10,6 +10,7 @@ mod analyze;
 mod app;
 mod art;
 mod bridge;
+mod convert;
 mod failure;
 mod favorites;
 mod fmt;
