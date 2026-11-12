@@ -1,6 +1,6 @@
 # Sources: several libraries in one player
 
-Status: design, nothing built. Written 11 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
+Status: milestone 1 is built on `feat/sources`; milestones 2–5 are design. Written 11 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
 
 Ond plays from one Navidrome server. This design makes the server one **source** among several: a Navidrome (or other OpenSubsonic) server, a local folder of music, and later Jellyfin and Plex. Setup starts with one or more of them, and the library shows one source at a time or all of them together.
 
@@ -44,7 +44,7 @@ pub struct TrackKey { pub account: AccountId, pub id: Arc<str> }   // likewise A
 ```
 
 - An account's id is made when the source is added and never changes. A server's address and a folder's path are properties of the account and can change without orphaning favourites, downloads or the queue.
-- Until the Sources rows can edit an account's address (milestone 2), Ond's sign-in form decides as its library mirror always has: signing in to the same server and user as before, even after signing out, reuses the account and keeps its folder and downloads; any other sign-in makes a new account. Ond keeps one account at a time until then, so the previous account's folder is removed when another takes over, as its mirror used to be cleared.
+- Until the Sources rows can edit an account's address (milestone 2), Ond's sign-in form decides as its library mirror always has: signing in to the same server and user as before, even after signing out, reuses the account and keeps its folder and downloads; any other sign-in makes a new account. Ond keeps one account at a time until then, so the previous account's folder and cached art are removed when another takes over, as its mirror used to be cleared.
 - Inside one source's database, ids stay bare: the database *is* the account, so qualifying every row would only make the stored format bigger and force a migration of every struct. Ids are qualified when they leave the database: in the queue, the merged views, the saved blobs that span sources, the stream cache and the offline store.
 - On disk, names follow Rede: `<account>/<id>` passed through `streamcache::escape_id`, one flat file name per key.
 - The `library` crate stops depending on `subsonic`. The `From<subsonic::…>` conversions in `model.rs` and the `upsert_*` methods that take Subsonic types move to the Subsonic source, which hands the library `Track`, `Album` and `Artist` built its own way. This is the same move `streamcache` already made with `ReplyCheck`.
@@ -227,7 +227,7 @@ The `sources` list in `settings.json` arrives with the second kind of source (mi
 
 ## Milestones
 
-1. **Accounts, with Navidrome as the only source.** `AccountId`, the per-source folder, `TrackKey` through the queue, player, offline store and stream cache; `library` freed of `subsonic`; `MusicSource` with the Subsonic implementation; the migration above. Done when Ond's snapshots come out the same as before and an existing install opens with everything intact.
+1. **Accounts, with Navidrome as the only source.** `AccountId`, the per-source folder, `TrackKey` through the queue, player, offline store and stream cache, and per-account cover art; `library` freed of `subsonic`; `MusicSource` with the Subsonic implementation; the migration above. Done when Ond's snapshots come out the same as before and an existing install opens with everything intact.
 2. **The shared kit.** `kit::form`, onboarding, the switcher, dots, chips and Sources rows, in both apps. Rede gets several accounts in its UI here, which its settings file already allows. Done when both apps sign in through `kit::onboarding` and both sidebars draw `kit::source_switcher`.
 3. **Local folders.** The `scan` crate and the local source, Ond's own favourites and playlists. Done when a first run can choose a folder instead of a server and play from it with no network.
 4. **All sources.** The merged views, merged artists, filter chips, scope-aware search, Ond playlists that mix sources. Done when a Navidrome source and a local one show as one library, and switching scope keeps your place.
