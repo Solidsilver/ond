@@ -96,6 +96,29 @@ pub fn lenient_accent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Accent, 
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
+/// The eight source dot and chip colours, `(light, dark)`, sitting beside
+/// [`Accent`]'s quiet palette and holding at least 4.5:1 contrast against every
+/// surface in [`Tokens`] (including `selected`). Ordered so the first few
+/// sources sit far apart on the hue wheel: blue, amber, green, rose, violet,
+/// teal, red, plum (replacing [`Accent::Graphite`], which reads as muted or
+/// offline).
+pub const SOURCE_COLORS: [(Color32, Color32); accounts::SourceColor::COUNT as usize] = [
+    (hex(0x2F5D86), hex(0x8DB4E2)), // Blue
+    (hex(0x8A5300), hex(0xE2B05E)), // Amber
+    (hex(0x2E6E3E), hex(0x84C990)), // Green
+    (hex(0x9C3A62), hex(0xE79AB9)), // Rose
+    (hex(0x5E4A9E), hex(0xB3A2EC)), // Violet
+    (hex(0x1E6E68), hex(0x6CC4BA)), // Teal
+    (hex(0xA8352C), hex(0xEE9A8E)), // Red
+    (hex(0x853A8E), hex(0xD696DF)), // Plum
+];
+
+/// The theme colour for `color`, in light or `dark` mode.
+pub fn source_color(color: accounts::SourceColor, dark: bool) -> Color32 {
+    let (light, dark_c) = SOURCE_COLORS[color.as_usize() % SOURCE_COLORS.len()];
+    if dark { dark_c } else { light }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Tokens {
     pub bg: Color32,

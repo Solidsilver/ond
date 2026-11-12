@@ -4519,6 +4519,7 @@ dependencies = [
 name = "shell"
 version = "0.5.0"
 dependencies = [
+ "accounts",
  "block2 0.6.2",
  "chrono",
  "dispatch2",

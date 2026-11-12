@@ -472,6 +472,21 @@ mod tests {
     }
 
     #[test]
+    fn every_source_color_reads_in_both_themes_and_is_distinct() {
+        for (t, dark) in [(Tokens::LIGHT, false), (Tokens::DARK, true)] {
+            let mut seen = Vec::new();
+            for sc in accounts::SourceColor::ALL {
+                let c = crate::theme::source_color(sc, dark);
+                for bg in [t.bg, t.sidebar, t.panel, t.field, t.selected] {
+                    assert!(contrast(c, bg) >= AA, "{sc:?} ({c:?}) on {bg:?} (dark {dark})");
+                }
+                assert!(!seen.contains(&c), "duplicate source color {c:?} (dark {dark})");
+                seen.push(c);
+            }
+        }
+    }
+
+    #[test]
     fn a_cover_with_no_color_shows_the_chosen_accent() {
         let mut cache = TintCache::default();
         let teal = cache.base(Accent::Teal);
