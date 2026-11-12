@@ -64,12 +64,12 @@ Removing a source deletes its folder, its downloads and its cached art, after as
 
 ## The shared crate
 
-`AccountId` and `ItemKey` live in the small `accounts` crate, shared by both apps and independent of books or music. The crate will also hold the shared source state and UI models as those features are built:
+`AccountId`, `ItemKey` and the shared source models live in the small `accounts` crate, shared by both apps and independent of books or music:
 
-- `AccountId`.
-- `SourceState`: online, connecting, syncing (with progress), scanning, offline (unreachable, or offline by choice), signed out, folder missing.
-- `Scope`: what a view is showing, `All` or `Only(AccountId)`, plus the set of sources the filter chips have narrowed to. Ond and Rede both store it in their prefs and show it the same way.
-- The source colours: a fixed palette of eight, handed out in order as sources are added, and kept when one is removed. The colour is the account's, saved with it.
+- `AccountId` and `ItemKey`.
+- `SourceState`: `Online`, `Connecting`, `Syncing(Option<f32>)` (an optional `0.0..=1.0` completion fraction, `None` when the total isn't known), `Scanning`, `Offline(OfflineReason)` (`Unreachable` or `ByChoice`), `SignedOut` and `FolderMissing`.
+- `Scope`: what a view is showing, stored as `{ "all": bool, "only": [ids] }` (`all: true` with an empty `only` shows every source, `all: true` with non-empty `only` is narrowed by filter chips, and `all: false` with one id is `Only(id)`). Ond and Rede both store it in their prefs and show it the same way.
+- `SourceColor(u8)`: an index into a fixed palette of eight (whose light and dark RGB values live in `shell::theme`), handed out by `next_color` (the lowest unused index, or the least-used once all eight are taken) and kept when another source is removed. The colour is the account's, saved with it.
 
 Folder scanning is the other shared piece, since Rede's design also has local folders: a crate, `scan`, that walks folders, keeps each file's size and modification time, watches for changes (the `notify` crate), finds a folder's cover image, and reads tags (the `lofty` crate). What a file *means* (a track of an album, a part of a book) stays in each app's source.
 
