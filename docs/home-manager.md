@@ -45,20 +45,12 @@ Names and values are the same as in Ond's own `settings.json`. Ond logs a warnin
 
 These fill in the sign-in form and lock those two fields. The password isn't a setting: Ond asks for it once and keeps it in the system keyring. If you change the server or username, Ond asks you to sign in again.
 
-### General
-
-| Setting | Values | Default |
-|---|---|---|
-| `scrobble` | Report plays to the server | `true` |
-| `diagnostics_bar` | The diagnostics bar along the bottom | `false` |
-| `window.system_title_bar` | Linux: the desktop's title bar instead of Ond's own buttons | `false` |
-| `updates` | `"notify"`: look once a day for a newer release and say when there is one; `"off"`. Only copies from the GitHub releases look: one Nix installed never does | `"notify"` |
-
 ### Appearance
 
 | Setting | Values | Default |
 |---|---|---|
 | `theme` | `"system"`, `"light"`, `"dark"` | `"system"` |
+| `zoom` | How large the interface is drawn, in percent: `80`, `90`, `100`, `110`, `125`, `150`, `175` or `200` (other numbers round to the nearest) | `100` |
 | `accent` | `"blue"`, `"teal"`, `"green"`, `"amber"`, `"red"`, `"rose"`, `"violet"`, `"graphite"`, or your own color as `{ custom = [ 245 197 24 ]; }` (red, green, blue) | `"blue"` |
 | `adapt_colors` | Colors follow the album art | `false` |
 | `backdrop` | Blurred artwork behind the Player and Mini | `false` |
@@ -68,11 +60,13 @@ These fill in the sign-in form and lock those two fields. The password isn't a s
 | `waveform_bars.gap` | Space between bars in half points, 1 to 6 | `2` |
 | `alpha_rail` | The alphabet rail beside lists sorted by name | `false` |
 | `artist_photos` | Artists' photos from the server | `true` |
+| `window.system_title_bar` | Linux: the desktop's title bar instead of Ond's own buttons | `false` |
 
 ### Playback
 
 | Setting | Values | Default |
 |---|---|---|
+| `scrobble` | Report plays to the server | `true` |
 | `playback.replay_gain` | `"off"`, `"track"`, `"album"`, `"auto"` | `"off"` |
 | `playback.preamp_db` | Pre-amp in dB, −12 to 12 | `0.0` |
 | `playback.untagged_db` | Gain for tracks without ReplayGain tags, in dB, −12 to 0 | `-6.0` |
@@ -130,4 +124,22 @@ Like a folder picked in Settings, `offline_dir` gets a folder of Ond's own insid
 
 Experimental settings may change or go away between versions.
 
+### About
+
+| Setting | Values | Default |
+|---|---|---|
+| `updates` | `"notify"`: look once a day for a newer release and say when there is one; `"off"`. Only copies from the GitHub releases look: one Nix installed never does | `"notify"` |
+| `diagnostics_bar` | The diagnostics bar along the bottom | `false` |
+
 The rest of `settings.json` is state the app keeps for itself (window positions, volume, column widths, whether the queue is open, grid or list views), and Ond ignores it in `managed.json`.
+
+## Rede
+
+Rede does not yet read managed settings. Its own `settings.json` has
+`playback.skip_back` (15 seconds), `playback.skip_forward` (30 seconds),
+`playback.speed` (1.0), and `playback.rewind` (5 seconds after more than five
+minutes paused; 0 disables it). These are editable in the player's speed menu.
+
+Rede also keeps `downloads.remove_when_finished` (false) and `downloads.limit`
+(null for unlimited, otherwise bytes) in its own settings. Settings › Downloads
+changes both.

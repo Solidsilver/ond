@@ -6,17 +6,19 @@
 # 1024 canvas, with no shadow of its own. macOS 26 and later shrink any other
 # shape onto a grey tile, so the icon looks smaller than its neighbours.
 #
-#   scripts/make-icns.sh path/to/icon.png
+#   scripts/make-icns.sh path/to/icon.png [App] [out-dir]
 #
-# Writes packaging/macos/Ond.icns (the bundle icon) plus icon-1024.png and
-# icon-256.png (the 256 is the window icon for `cargo run`). The Linux and
+# Writes <out-dir>/<App>.icns (the bundle icon) plus icon-1024.png and
+# icon-256.png (the 256 is the window icon for `cargo run`). App defaults to
+# Ond and out-dir to packaging/macos; Rede's are Rede and packaging/rede/macos. The Linux and
 # Windows icons are separate artwork: packaging/linux/hicolor and
 # packaging/windows/ond.ico.
 set -euo pipefail
 
-src=${1:?usage: scripts/make-icns.sh icon.png}
-out=packaging/macos
-set_dir=$(mktemp -d)/Ond.iconset
+src=${1:?usage: scripts/make-icns.sh icon.png [App] [out-dir]}
+app=${2:-Ond}
+out=${3:-packaging/macos}
+set_dir=$(mktemp -d)/$app.iconset
 mkdir -p "$set_dir"
 
 for size in 16 32 128 256 512; do
@@ -25,8 +27,8 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" "$src" --out "$set_dir/icon_${size}x${size}@2x.png" >/dev/null
 done
 
-iconutil -c icns "$set_dir" -o "$out/Ond.icns"
+iconutil -c icns "$set_dir" -o "$out/$app.icns"
 sips -z 1024 1024 "$src" --out "$out/icon-1024.png" >/dev/null
 sips -z 256 256 "$src" --out "$out/icon-256.png" >/dev/null
 rm -rf "$(dirname "$set_dir")"
-echo "wrote $out/Ond.icns, icon-1024.png, icon-256.png"
+echo "wrote $out/$app.icns, icon-1024.png, icon-256.png"

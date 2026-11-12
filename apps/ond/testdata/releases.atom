@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en-US">
+  <id>tag:github.com,2008:https://github.com/Solidsilver/ond/releases</id>
+  <link type="text/html" rel="alternate" href="https://github.com/Solidsilver/ond/releases"/>
+  <link type="application/atom+xml" rel="self" href="https://github.com/Solidsilver/ond/releases.atom"/>
+  <title>Release notes from ond</title>
+  <updated>2027-03-02T10:00:00Z</updated>
+  <entry>
+    <id>tag:github.com,2008:Repository/1431640221/rede-v1.0.0</id>
+    <updated>2027-03-02T10:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Solidsilver/ond/releases/tag/rede-v1.0.0"/>
+    <title>Rede 1.0.0</title>
+    <content type="html">&lt;p&gt;Rede plays books from Audiobookshelf. See the &lt;a href=&quot;https://github.com/Solidsilver/ond/releases/tag/rede-v1.0.0&quot;&gt;release&lt;/a&gt;.&lt;/p&gt;
+&lt;h3&gt;Downloads&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;An item with &#39;quotes&#39; and a › sign.&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1431640221/ond-v0.5.9</id>
+    <updated>2027-02-20T18:12:44Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Solidsilver/ond/releases/tag/ond-v0.5.9"/>
+    <title>Ond 0.5.9</title>
+    <content type="html">&lt;p&gt;Fixes for the queue.&lt;/p&gt;
+&lt;h3&gt;Downloads&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;An item with &#39;quotes&#39; and a › sign.&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1431640221/ond-v0.6.0-beta.1</id>
+    <updated>2027-02-18T09:30:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Solidsilver/ond/releases/tag/ond-v0.6.0-beta.1"/>
+    <title>Ond 0.6.0 beta 1</title>
+    <content type="html">&lt;p&gt;A preview of 0.6.&lt;/p&gt;
+&lt;h3&gt;Downloads&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;An item with &#39;quotes&#39; and a › sign.&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1431640221/rede-v0.9.0</id>
+    <updated>2027-02-10T21:01:13Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Solidsilver/ond/releases/tag/rede-v0.9.0"/>
+    <title>Rede 0.9.0</title>
+    <content type="html">&lt;p&gt;Bookmarks and sleep timer.&lt;/p&gt;
+&lt;h3&gt;Downloads&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;An item with &#39;quotes&#39; and a › sign.&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1431640221/ond-v0.5.10</id>
+    <updated>2027-02-01T12:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Solidsilver/ond/releases/tag/ond-v0.5.10"/>
+    <title>Ond 0.5.10</title>
+    <content type="html">&lt;p&gt;Listed below 0.5.9 because its release was edited after.&lt;/p&gt;
+&lt;h3&gt;Downloads&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;An item with &#39;quotes&#39; and a › sign.&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1431640221/v0.4.4</id>
+    <updated>2026-11-05T05:49:08Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Solidsilver/ond/releases/tag/v0.4.4"/>
+    <title>v0.4.4</title>
+    <content type="html">&lt;p&gt;A polish release: the queue, sign-in and Offline pages behave better, lists play from their menus, and a long list of fixes under the hood.&lt;/p&gt;
+&lt;h3&gt;Downloads&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;An item with &#39;quotes&#39; and a › sign.&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1431640221/v0.4.3</id>
+    <updated>2026-11-03T22:59:15Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Solidsilver/ond/releases/tag/v0.4.3"/>
+    <title>v0.4.3</title>
+    <content type="html">&lt;p&gt;The macOS app is signed and notarized, Settings has an About page, and Ond can stream as Opus.&lt;/p&gt;
+&lt;h3&gt;Downloads&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;An item with &#39;quotes&#39; and a › sign.&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+</feed>

@@ -1,6 +1,6 @@
 # Working on Ond
 
-Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of seven crates. This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
+Ond is a native music player for Navidrome and other OpenSubsonic servers: Rust, egui with wgpu, a Cargo workspace of thirteen crates. Rede, an audiobook player that shares Ond's engine and look, is being built alongside it ([its design](docs/rede/design.md)). This file is for coding agents and anyone else who wants the conventions without reading the whole tree. [CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing process; [README.md](README.md) has the build and install instructions.
 
 ## Checks that must pass
 
@@ -11,7 +11,7 @@ cargo test --workspace                                     # hardware and PNG te
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, and `ond-player` for the app). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
+Run a crate alone with `cargo test -p audio` (package names: `audio`, `analysis`, `library`, `offline`, `streamcache`, `subsonic`, `abs`, `sources`, `shelf`, `shell`, `testkit`, `ond-player` for Ond and `rede` for Rede). The UI renders every screen to PNG without a server: `cargo test -p ond-player --release snapshots -- --ignored --nocapture` writes `target/snapshots/*.png`. Use `--release` whenever audio plays; debug builds drop out.
 
 Things that need real hardware or a real server are listed in [TESTING.md](TESTING.md). If you change something there, say so in the pull request so a human can run it.
 
@@ -19,15 +19,23 @@ Things that need real hardware or a real server are listed in [TESTING.md](TESTI
 
 | Crate | Job |
 |---|---|
-| `crates/app` (package `ond-player`, binary `Ond`) | UI, queue, sync, settings, each platform's integration |
+| `apps/ond` (package `ond-player`, binary `Ond`) | UI, queue, sync, settings, each platform's integration |
+| `apps/rede` (package `rede`, binary `Rede`) | Audiobook player: Audiobookshelf sign-in, library sync, cover grid and book pages |
+| `crates/shell` | What the apps share on screen: theme, colors, icons, the window, its title bar (`chrome`, `csd`), the widget kit (`kit`: text, buttons, controls, rows, menus, sheets, toasts), and the machinery under the cover-art cache (`art`: the size buckets, the load queue, the LRU set, the disk cache, the decode) |
 | `crates/subsonic` | OpenSubsonic API client |
 | `crates/library` | Local mirror in redb with hand-written indexes and migrations |
 | `crates/streamcache` | Download cache playback can read and seek while it fills |
 | `crates/offline` | Pinned downloads |
 | `crates/audio` | Decoding, the playback engine, resampling, dither, CoreAudio, ALSA and cpal output |
 | `crates/analysis` | Loudness, dynamic range and fake hi-res detection |
+| `crates/abs` | Rede: Audiobookshelf API client (tokens, single-flight refresh, play sessions, progress). Its live tests need a server; see its `tests/live.rs` |
+| `crates/sources` | Rede: the `Source` trait and the server-independent models (accounts, libraries, items, tracks, chapters, positions), plus `AbsSource` on the Audiobookshelf client |
+| `crates/shelf` | Rede: one redb database per account (items, tracks, chapters, the progress log, positions, bookmarks, sync state) with frozen versioned rows and migrations |
+| `crates/testkit` | Dev-only, for tests: `wait_until` and `Deadline` on one budget (`WAIT`, stretched by `slack` on CI), `RangeServer` (a Range-capable file server that can trickle, gate, cut or misanswer) and `JsonFake` (a closure-answered API server that keeps what it saw). Depends on no workspace crate |
 
-Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; shared widgets in `src/widgets.rs`; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
+Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for messages, `apply` for actions, and the frame. Its module header lists which submodule owns what. Views live in `src/app/<view>.rs`; `src/widgets.rs` re-exports the kit's widgets and holds the few that are Ond's own; background work in `src/bridge.rs`; the audio engine is driven from `src/player.rs`.
+
+`crates/shell` holds what Ond and Rede both draw, and nothing in it may know which app it serves. Shared look and feel lives in `shell::kit`: a widget either app could use goes there first, even while only one app uses it, so the two keep drawing alike. Behaviour that belongs to one app stays in that app as a thin wrapper over the kit's widget (Ond's settings rows add the managed.json tag; its view picker maps its view modes onto `kit::icon_choice`). The kit's module header says what's where. Ond imports `theme`, `chrome`, `csd` and `icons` at its crate root (and `visuals` re-exports `colors` and `over_art`), so `crate::theme::Tokens` and the like still work. A move is its own commit, and Ond's snapshots must come out the same before and after. Rede's window renders with `cargo test -p rede --release snapshots -- --ignored --nocapture`.
 
 ## How the app is wired
 
@@ -42,8 +50,9 @@ Inside the app crate, `src/app.rs` is the root: the `Action` enum, `handle` for 
 
 - **A server call:** a method on `Bridge` (scoped), a `Msg` variant in the right group, a handler in the matching `src/app/*.rs`. Errors cross the bridge typed as network, server or local; only network failures trigger a reachability probe.
 - **A preference:** a field on `Settings` (with `#[serde(default)]` and a lenient fallback if it's an enum), a `PrefsView` field, a `PrefsAction` variant and its `apply_prefs` arm, a `locked()` arm in `prefs_view.rs` if Home Manager may manage it, a row in `settings_page.rs`, and a line in `docs/home-manager.md`.
-- **A view:** `src/app/<view>.rs` taking `ViewCtx`, a `Route`, an entry in `every_view_draws` in `src/app/tests.rs`, a route in `every_view_names_its_controls` in `src/app/ui_tests.rs` (every painted control needs a `widget_info`), and a scene in `snapshots/scenes.rs`. Reuse what's there: `virtual_list` for long lists, `track_list` for tracks, `browse::heading_bar` for a page heading with its picker and sort, `widgets::empty_state` for an empty list.
+- **A view:** `src/app/<view>.rs` taking `ViewCtx`, a `Route`, an entry in `every_view_draws` in `src/app/tests.rs`, a route in `every_view_names_its_controls` in `src/app/ui_tests.rs` (every painted control needs a `widget_info`), and a scene in `snapshots/scenes.rs`. Reuse what's there (the kit first): `virtual_list` for long lists, `track_list` for tracks, `browse::heading_bar` for a page heading with its picker and sort, `kit::empty_state` for an empty list.
 - **Test data:** `test_tracks::track(id, album, title)` builds a `Track` for any test; `app/fixture.rs` has the UI's fixture library and harness helpers.
+- **Waits and fakes:** take them from `testkit` (a dev-dependency): `wait_until` or a `Deadline` for anything a test can't hurry, `RangeServer` for a download, `JsonFake` for an API. A wait doesn't pick its own timeout (a budget that guards performance is an assertion, not a wait, and goes through `slack`). Give testkit the option a fake lacks before hand-rolling a server; only a scripted sequence, like streamcache's stall and reconnect, earns its own.
 - **A queue or playback behaviour:** `queue.rs` is pure data with its own tests; `player.rs` drives the engine and is tested with fakes. Keep them that way.
 
 ## Invariants the compiler can't see
@@ -70,7 +79,7 @@ These are the things a careful reader would still get wrong. Each has a test whe
 
 - `dev` is where work happens; `main` holds the latest release. Branch from `dev` (`fix/...`, `feat/...`) and merge back into `dev`.
 - Commit subjects are at most 72 characters; put the why in the body after a blank line. Commit in logical units; a module move is its own commit so blame survives.
-- No AI attribution in commits, pull requests or release notes. AI use is disclosed once, in the README.
+- No AI attribution in commits, pull requests or release notes. AI use is disclosed once, in the README, with the 0rwx AI:X label.
 - Don't commit `docs/tickets/`, `target/`, `result` or editor files; `.gitignore` already covers them.
 
 ## Done well; don't "fix"

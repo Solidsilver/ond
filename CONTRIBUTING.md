@@ -37,7 +37,18 @@ Fine, and most of Ond was written that way. The result is held to the same bar a
 
 ## Releases
 
-The maintainer merges `dev` into `main`, bumps the workspace version, writes `.github/release-notes/vX.Y.Z.md`, and pushes a `vX.Y.Z` tag. The release workflow builds and signs the bundles and publishes them.
+The maintainer prepares the version bump and notes on `dev`, runs the [release checklist](docs/releasing.md), then merges into `main` and tags the tested commit. The release workflow builds and signs the bundles and publishes them under the app's own name.
+
+Each app in the repository has its own tags and notes, because Ond and Rede release separately from the same repository:
+
+- Ond: `ond-v0.5.0`, notes in `.github/release-notes/ond/`. Releases before 0.5 were tagged `v0.4.4`, and a `v*` tag still means Ond.
+- Rede: `rede-v0.1.0-beta.1`, notes in `.github/release-notes/rede/`. Builds macOS universal and Linux x86_64/ARM64 bundles. Versions with a prerelease suffix are published as GitHub prereleases and never replace Ond as the repository's latest stable release.
+
+Ond and the shared crates use the workspace version; Rede has its own version in `apps/rede/Cargo.toml`. When bumping the workspace, update the version requirements on all internal path dependencies and regenerate `Cargo.lock` without upgrading unrelated dependencies.
+
+The workflow builds only the app a tag names, and stops if the tag's version isn't that app's crate version. A manual Release workflow run lets you choose either app and uploads bundles without publishing. macOS builds share the repository's existing signing and notarization secrets.
+
+Ond's update check reads the repository's releases feed and considers only stable Ond tags, so Rede never appears as its update. The feed lists the latest ten or so releases, so a long run of Rede releases can hide Ond's newest until its next one. Rede does not check for updates yet.
 
 ## License
 

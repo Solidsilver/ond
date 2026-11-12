@@ -1,0 +1,28 @@
+[package]
+name = "abs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.23.1"
+getrandom = "0.4.3"
+sha2 = "0.11.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2"] }
+serde = { version = "1.0.229", features = ["derive"] }
+# A bookmark's identity is its exact `time`, which is deleted by the number the
+# server sent: parsing and printing must round-trip every f64 bit.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["sync"] }
+tracing = "0.1.44"
+url = "2.5.8"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+testkit = { path = "../testkit" }

@@ -4,7 +4,14 @@ Ond is a native music player for [Navidrome](https://www.navidrome.org) and othe
 
 I wanted a client that treats playback quality as the main feature and stays out of the way otherwise. Ond plays your original files, tells you exactly what happens to the signal on its way to the speakers, and keeps the interface quiet unless you ask for more.
 
+This repository also contains **[Rede](docs/rede/README.md)**, a native Audiobookshelf player. Its first beta is available for macOS and Linux; Ond and Rede install and keep their data separately.
+
 Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
+
+<a href="https://0rwx.com"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/0rwx-ai-x-dark.svg">
+  <img alt="AI:X — AI made (0rwx)" src="docs/images/0rwx-ai-x-light.svg" height="32">
+</picture></a>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/library-dark.png">
@@ -24,7 +31,7 @@ The covers in the screenshot are made up.
 
 ## Install
 
-Downloads are on the [Releases](../../releases) page.
+Ond downloads are on the [Ond 0.5.0 release](../../releases/tag/ond-v0.5.0) page. For the audiobook player, see [Rede's beta instructions](docs/rede/README.md).
 
 ### macOS
 
@@ -49,7 +56,7 @@ Ond needs PipeWire's library (`libpipewire-0.3`), which every current desktop di
 
 ### Nix and NixOS
 
-The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/v0.4.4`.
+The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/ond-v0.5.0`.
 
 With Home Manager, the flake's module installs Ond and can set any of its settings. Settings set there are locked in the app, and the rest stay editable. It works on macOS too, for the app bundle. [docs/home-manager.md](docs/home-manager.md) has the setup and every setting.
 
@@ -68,7 +75,7 @@ With Nix, `nix develop` gives you a shell with Rust, rust-analyzer and every sys
 Without Nix, you need a recent stable Rust toolchain (`rustup`), plus:
 
 - macOS: the Xcode command line tools.
-- Linux: ALSA and PipeWire headers, clang and pkg-config. On Debian and Ubuntu that's `sudo apt install libasound2-dev libpipewire-0.3-dev clang pkg-config`; on Fedora, `sudo dnf install alsa-lib-devel pipewire-devel clang pkgconf`.
+- Linux: ALSA and PipeWire headers, clang and pkg-config. On Debian and Ubuntu that's `sudo apt install libasound2-dev libpipewire-0.3-dev clang cmake pkg-config`; on Fedora, `sudo dnf install alsa-lib-devel pipewire-devel clang cmake pkgconf`.
 - Windows: Visual Studio's C++ build tools.
 
 ```sh
@@ -102,17 +109,23 @@ The library database is a copy of what's on your server. If it ever breaks, Ond 
 
 ## Development
 
-The workspace has seven crates:
+The workspace has thirteen crates:
 
 | Crate | Job |
 |---|---|
-| `app` | The `ond-player` package, which builds the `Ond` binary: UI, queue, sync, settings, and each system's integration |
+| `apps/ond` (`ond-player`) | Ond's UI, queue, sync, settings and platform integration; builds `Ond` |
+| `apps/rede` (`rede`) | Rede's audiobook library, listening, downloads and UI; builds `Rede` |
+| `shell` | Shared theme, window chrome, widget toolkit and artwork-cache machinery |
 | `subsonic` | OpenSubsonic API client |
-| `library` | Local library mirror in redb, with hand-written indexes and migrations |
+| `library` | Ond's local library mirror in redb, with hand-written indexes and migrations |
+| `abs` | Audiobookshelf API client |
+| `sources` | Rede's source-independent models and Audiobookshelf adapter |
+| `shelf` | Rede's per-account library, progress, sessions and bookmarks in redb |
 | `streamcache` | Download cache that playback can read and seek while it fills |
-| `offline` | Pinned downloads |
-| `audio` | Decoding, the playback engine, resampling, dither, CoreAudio, ALSA and cpal (PipeWire, ALSA, WASAPI) output |
+| `offline` | Pinned downloads for both apps |
+| `audio` | Decoding, playback, speech processing, resampling, dither and platform output |
 | `analysis` | Loudness, dynamic range and fake hi-res detection |
+| `testkit` | Dev-only waits and HTTP fakes |
 
 None of the crates are published to crates.io.
 
@@ -134,11 +147,13 @@ The screenshot in this README comes from the `readme_snapshots` test, resized to
 
 Some things need real hardware or a real server. [TESTING.md](TESTING.md) lists them.
 
-`dev` is where work happens; `main` holds the latest release. Branch from `dev` and open pull requests against it. Pushing a `v*` tag builds the app and publishes a GitHub release. [CONTRIBUTING.md](CONTRIBUTING.md) has the process, and [AGENTS.md](AGENTS.md) is the short guide to how the code is organised, for coding agents and people alike.
+`dev` is where work happens; `main` holds the latest release. Branch from `dev` and open pull requests against it. Pushing an `ond-v*` or `rede-v*` tag builds that app and publishes a separate GitHub release. [docs/releasing.md](docs/releasing.md) has the release checklist. [CONTRIBUTING.md](CONTRIBUTING.md) has the process, and [AGENTS.md](AGENTS.md) is the short guide to how the code is organised, for coding agents and people alike.
 
 ## AI Disclosure
 
 I built Ond with Claude Opus 5.5 in Claude Code. I came up with the initial idea, did research on the UI design, made all of the design decisions, and tested on my own library and hardware. Claude wrote most of the code. 
+
+Ond is labelled [AI:X](https://0rwx.com) on the 0rwx scale, meaning AI made: agents write and review most of the code while I direct the work, decide the design and test it. Rede, the audiobook player in this repository, is built the same way.
 
 ## License
 

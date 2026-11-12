@@ -1,0 +1,400 @@
+//! Quick search over the local library mirror. The haystack is built when the
+//! library changes (load, sync); each keystroke only scores it.
+//!
+//! The ranking (literal first, fuzzy second) is `shell::search`'s, shared with
+//! Rede; this module says what the groups are: artists, albums and songs,
+//! each capped, and a top hit that's the best literal match of the three.
+
+use library::{Album, Artist, Track};
+use shell::search::{Hay, Matcher, Query, Scored, scored};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+/// Results shown per group.
+pub const MAX_ARTISTS: usize = 4;
+pub const MAX_ALBUMS: usize = 5;
+pub const MAX_TRACKS: usize = 5;
+
+pub struct ArtistEntry {
+    pub id: Option<String>,
+    pub name: String,
+    /// What the list is sorted by: the server's sort name, else the name.
+    pub sort: String,
+    pub albums: usize,
+    /// The server's photo of them, if it has an id for one.
+    pub cover: Option<String>,
+    /// The first and last years of their albums in the library.
+    pub years: Option<(i32, i32)>,
+    /// The genre most of their albums have.
+    pub genre: Option<String>,
+    /// Their albums' covers, a few, in the library's order: what their disc
+    /// shows without a photo, when those covers are already loaded.
+    pub album_covers: Vec<String>,
+}
+
+/// How many of an artist's album covers [`ArtistEntry::album_covers`] keeps:
+/// more than the disc's four, so it finds some loaded.
+const ALBUM_COVERS: usize = 12;
+
+pub struct AlbumEntry {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub year: Option<i32>,
+}
+
+pub struct TrackEntry {
+    pub id: String,
+    pub album_id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+}
+
+pub struct SearchIndex {
+    /// Shared, so the Artists view lists them without a copy per frame.
+    pub artists: Arc<Vec<ArtistEntry>>,
+    pub albums: Vec<AlbumEntry>,
+    pub tracks: Vec<TrackEntry>,
+    artist_hay: Vec<Hay>,
+    album_hay: Vec<Hay>,
+    track_hay: Vec<Hay>,
+    matcher: Matcher,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    Artist(usize),
+    Album(usize),
+    Track(usize),
+}
+
+/// Indices into the index's lists, best first. `top` is the best hit overall
+/// and isn't repeated in its group.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Results {
+    pub top: Option<Hit>,
+    pub artists: Vec<usize>,
+    pub albums: Vec<usize>,
+    pub tracks: Vec<usize>,
+}
+
+impl Results {
+    pub fn len(&self) -> usize {
+        usize::from(self.top.is_some()) + self.artists.len() + self.albums.len() + self.tracks.len()
+    }
+
+    /// The `n`th row in display order: top hit, artists, albums, tracks.
+    pub fn hit(&self, n: usize) -> Option<Hit> {
+        let mut n = n;
+        if let Some(top) = self.top {
+            if n == 0 {
+                return Some(top);
+            }
+            n -= 1;
+        }
+        if let Some(&i) = self.artists.get(n) {
+            return Some(Hit::Artist(i));
+        }
+        n -= self.artists.len();
+        if let Some(&i) = self.albums.get(n) {
+            return Some(Hit::Album(i));
+        }
+        n -= self.albums.len();
+        self.tracks.get(n).map(|&i| Hit::Track(i))
+    }
+}
+
+impl SearchIndex {
+    /// `artists` are the server's artist entities; when there are none yet
+    /// (older server, not synced), artists are derived from album artists.
+    pub fn new<'a>(albums: &[Album], artists: &[Artist], tracks: impl IntoIterator<Item = &'a Track>) -> Self {
+        // Each artist's span of years and their albums' genres, by id and by
+        // name: the albums an artist's page shows (see `Album::has_artist`).
+        let mut years: HashMap<&str, (i32, i32)> = HashMap::new();
+        let mut genres: HashMap<&str, HashMap<&str, u32>> = HashMap::new();
+        let mut covers: HashMap<&str, Vec<&str>> = HashMap::new();
+        for a in albums {
+            let ids = a.artist_ref.iter().chain(a.artists.iter().filter_map(|l| l.id.as_ref()));
+            let names = a.artist.iter().chain(a.artists.iter().map(|l| &l.name));
+            let year = a.year.filter(|&y| y > 0);
+            let album_genres = a.all_genres();
+            for key in ids.chain(names) {
+                if let Some(year) = year {
+                    let span = years.entry(key.as_str()).or_insert((year, year));
+                    *span = (span.0.min(year), span.1.max(year));
+                }
+                for &g in &album_genres {
+                    *genres.entry(key.as_str()).or_default().entry(g).or_default() += 1;
+                }
+                if let Some(cover) = a.cover_art.as_deref() {
+                    let theirs = covers.entry(key.as_str()).or_default();
+                    if theirs.len() < ALBUM_COVERS && !theirs.contains(&cover) {
+                        theirs.push(cover);
+                    }
+                }
+            }
+        }
+        // The most common, the first met among equals.
+        let genre =
+            |key: &str| genres.get(key).and_then(|counts| counts.iter().max_by_key(|&(g, n)| (*n, std::cmp::Reverse(*g))).map(|(g, _)| (*g).to_owned()));
+        let album_covers = |keys: &[&str]| keys.iter().find_map(|k| covers.get(k)).map(|c| c.iter().map(|s| (*s).to_owned()).collect()).unwrap_or_default();
+        let artists: Vec<ArtistEntry> = if artists.is_empty() {
+            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for a in albums {
+                if let Some(artist) = a.artist.as_deref().filter(|s| !s.is_empty()) {
+                    *counts.entry(artist).or_default() += 1;
+                }
+            }
+            counts
+                .into_iter()
+                .map(|(name, albums)| ArtistEntry {
+                    id: None,
+                    name: name.to_owned(),
+                    sort: name.to_owned(),
+                    albums,
+                    cover: None,
+                    years: years.get(name).copied(),
+                    genre: genre(name),
+                    album_covers: album_covers(&[name]),
+                })
+                .collect()
+        } else {
+            artists
+                .iter()
+                .map(|a| ArtistEntry {
+                    id: Some(a.id.clone()),
+                    name: a.name.clone(),
+                    sort: a.sort.clone().unwrap_or_else(|| a.name.clone()),
+                    albums: a.album_count as usize,
+                    cover: a.cover_art.clone(),
+                    years: years.get(a.id.as_str()).or_else(|| years.get(a.name.as_str())).copied(),
+                    genre: genre(&a.id).or_else(|| genre(&a.name)),
+                    album_covers: album_covers(&[&a.id, &a.name]),
+                })
+                .collect()
+        };
+        let album_names: HashMap<&str, &str> = albums.iter().map(|a| (a.id.as_str(), a.name.as_str())).collect();
+        let albums: Vec<AlbumEntry> =
+            albums.iter().map(|a| AlbumEntry { id: a.id.clone(), title: a.name.clone(), artist: a.artist.clone().unwrap_or_default(), year: a.year }).collect();
+        let tracks: Vec<TrackEntry> = tracks
+            .into_iter()
+            .map(|t| TrackEntry {
+                id: t.id.clone(),
+                album_id: t.album_id.clone(),
+                title: t.title.clone(),
+                artist: t.artist.clone().unwrap_or_default(),
+                album: album_names.get(t.album_id.as_str()).map(|s| (*s).to_owned()).unwrap_or_default(),
+            })
+            .collect();
+        let artist_hay = artists.iter().map(|a| Hay::new(&a.name)).collect();
+        // Artist first so "evans sunday" and "sunday evans" both land.
+        let album_hay = albums.iter().map(|a| Hay::new(&format!("{} — {}", a.artist, a.title))).collect();
+        // Title first: track searches are mostly by title.
+        let track_hay = tracks.iter().map(|t| Hay::new(&format!("{} — {} — {}", t.title, t.artist, t.album))).collect();
+        Self { artists: Arc::new(artists), albums, tracks, artist_hay, album_hay, track_hay, matcher: Matcher::default() }
+    }
+
+    /// The artist an artist page is about: by id when it has one, else by name.
+    pub fn artist(&self, id: Option<&str>, name: &str) -> Option<&ArtistEntry> {
+        match id {
+            Some(id) => self.artists.iter().find(|a| a.id.as_deref() == Some(id)),
+            None => self.artists.iter().find(|a| a.name == name),
+        }
+    }
+
+    pub fn search(&mut self, query: &str) -> Results {
+        let Some(q) = Query::new(query) else { return Results::default() };
+        // Artists with more albums, then shorter (more specific) names win ties.
+        let artists = scored(&q, &self.artist_hay, &mut self.matcher, |i| self.artists[i].albums as i64);
+        let albums = scored(&q, &self.album_hay, &mut self.matcher, |_| 0);
+        let tracks = scored(&q, &self.track_hay, &mut self.matcher, |_| 0);
+
+        // The top hit is the best literal match; on equal rank artists come
+        // before albums before tracks. Pure fuzzy matches never make it.
+        let best = |v: &[Scored]| v.first().map(|s| s.rank).filter(|r| r.literal());
+        let candidates = [(best(&artists), 0), (best(&albums), 1), (best(&tracks), 2)];
+        let top_group = candidates.iter().filter_map(|(r, g)| r.map(|r| (r, *g))).max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1))).map(|(_, g)| g);
+        let take = |v: Vec<Scored>, skip_first: bool, n: usize| v.into_iter().skip(usize::from(skip_first)).take(n).map(|s| s.index).collect::<Vec<_>>();
+        let top = match top_group {
+            Some(0) => Some(Hit::Artist(artists[0].index)),
+            Some(1) => Some(Hit::Album(albums[0].index)),
+            Some(2) => Some(Hit::Track(tracks[0].index)),
+            _ => None,
+        };
+        Results {
+            top,
+            artists: take(artists, top_group == Some(0), MAX_ARTISTS),
+            albums: take(albums, top_group == Some(1), MAX_ALBUMS),
+            tracks: take(tracks, top_group == Some(2), MAX_TRACKS),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album(id: &str, artist: &str, name: &str) -> Album {
+        Album {
+            id: id.into(),
+            name: name.into(),
+            sort: None,
+            artist: Some(artist.into()),
+            artist_ref: None,
+            year: None,
+            genre: None,
+            song_count: 0,
+            duration_secs: 0,
+            cover_art: None,
+            created: None,
+            labels: Vec::new(),
+            genres: Vec::new(),
+            artists: Vec::new(),
+        }
+    }
+
+    fn artist(id: &str, name: &str, albums: u32) -> Artist {
+        Artist { id: id.into(), name: name.into(), sort: None, album_count: albums, cover_art: None }
+    }
+
+    fn track(id: &str, album_id: &str, title: &str, artist: &str) -> Track {
+        Track { artist: Some(artist.into()), ..crate::test_tracks::track(id, album_id, title) }
+    }
+
+    fn index() -> SearchIndex {
+        SearchIndex::new(
+            &[
+                album("1", "Andrew Bird", "Fingerlings"),
+                album("2", "Andrew Bird", "Noble Beast"),
+                album("3", "Bill Evans Trio", "Sunday at the Village Vanguard"),
+                album("4", "Miles Davis", "Kind of Blue"),
+                album("5", "Björk", "Vespertine"),
+            ],
+            &[],
+            &[track("t1", "4", "So What", "Miles Davis"), track("t2", "3", "Gloria's Step", "Bill Evans Trio")],
+        )
+    }
+
+    fn names(idx: &SearchIndex, r: &Results) -> Vec<String> {
+        (0..r.len())
+            .map(|n| match r.hit(n).unwrap() {
+                Hit::Artist(i) => idx.artists[i].name.clone(),
+                Hit::Album(i) => idx.albums[i].title.clone(),
+                Hit::Track(i) => idx.tracks[i].title.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn artists_derived_from_albums_until_real_ones_arrive() {
+        let idx = index();
+        let bird = idx.artists.iter().find(|a| a.name == "Andrew Bird").unwrap();
+        assert_eq!(bird.albums, 2);
+        assert_eq!(idx.artists.len(), 4);
+        let real = SearchIndex::new(&[], &[artist("ar-1", "Johannes Motschmann", 3), artist("ar-2", "David Panzl", 1)], &[]);
+        assert_eq!(real.artists.len(), 2);
+        assert_eq!(real.artists[0].id.as_deref(), Some("ar-1"));
+    }
+
+    #[test]
+    fn artists_carry_their_photo_and_the_years_of_their_albums() {
+        let dated = |id: &str, artist_id: &str, year: i32| Album { year: Some(year), artist_ref: Some(artist_id.into()), ..album(id, "Someone", "Record") };
+        let mut photo = artist("ar-1", "Andrew Bird", 3);
+        photo.cover_art = Some("ar-1".into());
+        let idx = SearchIndex::new(&[dated("1", "ar-1", 2005), dated("2", "ar-1", 2002), dated("3", "ar-2", 1999)], &[photo, artist("ar-3", "Nobody", 0)], &[]);
+        assert_eq!(idx.artists[0].cover.as_deref(), Some("ar-1"));
+        assert_eq!(idx.artists[0].years, Some((2002, 2005)), "by id, whatever the albums' display artist");
+        assert_eq!(idx.artists[1].years, None);
+        // Without the server's artists, by name.
+        let named = SearchIndex::new(&[Album { year: Some(1971), ..album("1", "Can", "Tago Mago") }], &[], &[]);
+        assert_eq!(named.artists[0].years, Some((1971, 1971)));
+    }
+
+    #[test]
+    fn bob_prefers_word_starts_and_drops_scattered_letters() {
+        let artists = [
+            artist("1", "Johannes Motschmann, David Panzl, Boris Bolles", 1),
+            artist("2", "Naughty Boy feat. Beyoncé & Arrow Benjamin", 1),
+            artist("3", "Boney M. by Doug Laurent", 1),
+            artist("4", "Bob Seger & the Silver Bullet Band", 1),
+            artist("5", "Bob Marley & The Wailers", 1),
+            artist("6", "Bob Dylan", 2),
+            artist("7", "B.o.B", 2),
+        ];
+        let albums = [album("a1", "B.o.B", "B.o.B Presents: The Adventures of Bobby Ray"), album("a2", "Bob Dylan", "Blonde on Blonde")];
+        let mut idx = SearchIndex::new(&albums, &artists, &[]);
+        let r = idx.search("bob");
+        let got = names(&idx, &r);
+        // B.o.B is the query exactly once punctuation goes; then the Bobs, most albums first.
+        assert_eq!(got[..4], ["B.o.B", "Bob Dylan", "Bob Marley & The Wailers", "Bob Seger & the Silver Bullet Band"]);
+        for weak in ["Boris Bolles", "Naughty Boy", "Boney M."] {
+            assert!(!got.iter().any(|g| g.contains(weak)), "{weak} should not match \"bob\": {got:?}");
+        }
+        // Albums still get their group even with plenty of artist hits.
+        assert_eq!(r.albums.len(), 2);
+    }
+
+    #[test]
+    fn groups_are_capped_and_balanced() {
+        let artists: Vec<Artist> = (0..20).map(|i| artist(&i.to_string(), &format!("Record Artist {i}"), 1)).collect();
+        let albums: Vec<Album> = (0..20).map(|i| album(&i.to_string(), "Someone", &format!("Record {i}"))).collect();
+        let tracks: Vec<Track> = (0..20).map(|i| track(&i.to_string(), "0", &format!("Record Track {i}"), "Someone")).collect();
+        let mut idx = SearchIndex::new(&albums, &artists, &tracks);
+        let r = idx.search("record");
+        assert!(r.top.is_some());
+        assert!(r.artists.len() <= MAX_ARTISTS && r.albums.len() <= MAX_ALBUMS && r.tracks.len() <= MAX_TRACKS);
+        // The top hit is the best artist; four more artists follow it.
+        assert_eq!(r.len(), 1 + 4 + 5 + 5);
+        // Display order: top hit, then each group.
+        assert_eq!(r.hit(0), r.top);
+        assert!(matches!(r.hit(1), Some(Hit::Artist(_))));
+        assert!(matches!(r.hit(r.len() - 1), Some(Hit::Track(_))));
+        assert_eq!(r.hit(r.len()), None);
+    }
+
+    #[test]
+    fn tracks_are_searchable_and_can_be_the_top_hit() {
+        let mut idx = index();
+        let r = idx.search("so what");
+        assert_eq!(r.top, Some(Hit::Track(0)));
+        let r = idx.search("gloria");
+        assert_eq!(names(&idx, &r)[0], "Gloria's Step");
+    }
+
+    #[test]
+    fn matches_across_artist_and_title() {
+        let mut idx = index();
+        let r = idx.search("evans vanguard");
+        assert_eq!(r.top, Some(Hit::Album(2)));
+        // The artist matches one of the words: shown, but below the album.
+        assert_eq!(r.artists.iter().map(|&i| idx.artists[i].name.as_str()).collect::<Vec<_>>(), ["Bill Evans Trio"]);
+    }
+
+    #[test]
+    fn fuzzy_typos_and_accents_still_match() {
+        let mut idx = index();
+        let r = idx.search("knd blue");
+        assert_eq!(names(&idx, &r)[0], "Kind of Blue");
+        let r = idx.search("bjork");
+        assert!(names(&idx, &r).contains(&"Vespertine".to_owned()));
+        // Nothing literal at all: fall back to fuzzy, but no top hit.
+        let r = idx.search("fngrlngs");
+        assert_eq!(r.top, None);
+        assert_eq!(idx.albums[r.albums[0]].title, "Fingerlings");
+    }
+
+    #[test]
+    fn empty_query() {
+        let mut idx = index();
+        assert_eq!(idx.search("  "), Results::default());
+        assert_eq!(idx.search("..."), Results::default());
+    }
+
+    #[test]
+    fn search_folds_names_as_the_library_sorts_them() {
+        for name in ["Björk", "Øystein Sevåg", "Łona", "Straße", "Ænima", "Ðoða", "Þór", "Ħal", "Ŧ", "Işık"] {
+            assert_eq!(shell::search::fold(name), library::fold(name), "{name}");
+        }
+    }
+}

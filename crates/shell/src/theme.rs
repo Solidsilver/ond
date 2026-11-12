@@ -1,0 +1,422 @@
+//! Colors and spacing as named tokens (from the "Quiet" design), for light and
+//! dark. Follows the system appearance unless the user picks one.
+//!
+//! Styling here is deliberately light-touch: egui's widgets with quieter
+//! fills, hairline separators and the design's palette.
+
+use egui::{Color32, Context, FontFamily, Theme};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePref {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePref {
+    pub const ALL: [ThemePref; 3] = [ThemePref::System, ThemePref::Light, ThemePref::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePref::System => "System",
+            ThemePref::Light => "Light",
+            ThemePref::Dark => "Dark",
+        }
+    }
+}
+
+/// The accent color (Settings › Appearance): one of a few presets, chosen for
+/// each theme, or the user's own, held to the theme's contrast.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Accent {
+    /// The design's own blue.
+    #[default]
+    Blue,
+    Teal,
+    Green,
+    Amber,
+    Red,
+    Rose,
+    Violet,
+    Graphite,
+    /// Any color, as picked (sRGB).
+    Custom([u8; 3]),
+}
+
+impl Accent {
+    pub const PRESETS: [Accent; 8] = [Accent::Blue, Accent::Teal, Accent::Green, Accent::Amber, Accent::Red, Accent::Rose, Accent::Violet, Accent::Graphite];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Accent::Blue => "Blue",
+            Accent::Teal => "Teal",
+            Accent::Green => "Green",
+            Accent::Amber => "Amber",
+            Accent::Red => "Red",
+            Accent::Rose => "Rose",
+            Accent::Violet => "Violet",
+            Accent::Graphite => "Graphite",
+            Accent::Custom(_) => "Custom",
+        }
+    }
+
+    /// The accent and the text on it, in the light or `dark` theme. Each
+    /// preset has a color per theme, all at 5:1 or more on every surface;
+    /// the user's own is kept if it reads at 4.5:1 on all of them, else
+    /// darkened (light) or lightened (dark) just until it does.
+    pub fn colors(self, dark: bool) -> (Color32, Color32) {
+        let t = if dark { Tokens::DARK } else { Tokens::LIGHT };
+        let pair = |light: u32, dark_: u32| hex(if dark { dark_ } else { light });
+        let accent = match self {
+            Accent::Blue => return (t.accent, t.on_accent),
+            Accent::Teal => pair(0x1E6E68, 0x6CC4BA),
+            Accent::Green => pair(0x2E6E3E, 0x84C990),
+            Accent::Amber => pair(0x8A5300, 0xE2B05E),
+            Accent::Red => pair(0xA8352C, 0xEE9A8E),
+            Accent::Rose => pair(0x9C3A62, 0xE79AB9),
+            Accent::Violet => pair(0x5E4A9E, 0xB3A2EC),
+            Accent::Graphite => pair(0x4E4F55, 0xB9BAC2),
+            Accent::Custom([r, g, b]) => match crate::colors::held_accent(Color32::from_rgb(r, g, b), &[t.bg, t.sidebar, t.panel, t.field], dark) {
+                Some(c) => c,
+                None => return (t.accent, t.on_accent),
+            },
+        };
+        (accent, crate::colors::on_accent(accent, &t).unwrap_or(t.on_accent))
+    }
+}
+
+/// Reads a saved accent; one this build doesn't know (a newer preset, say)
+/// reads as the default rather than making the whole settings file unreadable.
+pub fn lenient_accent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Accent, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Tokens {
+    pub bg: Color32,
+    pub sidebar: Color32,
+    /// The queue column and other secondary surfaces.
+    pub panel: Color32,
+    /// Fields and the now-playing display.
+    pub field: Color32,
+    pub hairline: Color32,
+    pub text: Color32,
+    pub muted: Color32,
+    pub accent: Color32,
+    pub on_accent: Color32,
+    pub hover: Color32,
+    pub selected: Color32,
+    pub placeholder: Color32,
+    pub warn: Color32,
+    /// Errors (failed login): a softer red than egui's default.
+    pub danger: Color32,
+    pub ok: Color32,
+}
+
+const fn hex(rgb: u32) -> Color32 {
+    Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+impl Tokens {
+    pub const LIGHT: Tokens = Tokens {
+        bg: hex(0xFFFFFF),
+        sidebar: hex(0xF4F4F5),
+        panel: hex(0xFBFBFC),
+        field: hex(0xEDEDF0),
+        hairline: hex(0xE6E6E8),
+        text: hex(0x1C1C1E),
+        // 5.3:1 on white, 4.9:1 on the sidebar.
+        muted: hex(0x6B6B70),
+        accent: hex(0x2F5D86),
+        on_accent: hex(0xFFFFFF),
+        hover: hex(0xEFEFF2),
+        selected: hex(0xE2E2E6),
+        placeholder: hex(0xE4E4E7),
+        warn: hex(0xB25E09),
+        danger: hex(0xC0392B),
+        ok: hex(0x2E7D5B),
+    };
+
+    pub const DARK: Tokens = Tokens {
+        bg: hex(0x1B1B1D),
+        sidebar: hex(0x232326),
+        panel: hex(0x202023),
+        field: hex(0x2C2C30),
+        hairline: hex(0x323236),
+        text: hex(0xE9E9EC),
+        // 6.4:1 on bg, 5.8:1 on the sidebar.
+        muted: hex(0x9D9DA4),
+        accent: hex(0x8DB4E2),
+        on_accent: hex(0x10213A),
+        hover: hex(0x2A2A2E),
+        selected: hex(0x36363B),
+        placeholder: hex(0x2E2E32),
+        warn: hex(0xE8A54B),
+        danger: hex(0xF0857A),
+        ok: hex(0x6FCF97),
+    };
+
+    pub fn of(ui: &egui::Ui) -> Tokens {
+        Self::themed(ui.ctx(), ui.visuals().dark_mode)
+    }
+
+    /// For code that has a context but no `Ui` (overlays).
+    pub fn of_ctx(ctx: &Context) -> Tokens {
+        Self::themed(ctx, ctx.global_style().visuals.dark_mode)
+    }
+
+    /// The theme's tokens, with the accent in use: the user's, or the album
+    /// art's when colors adapt to it (see [`crate::colors`]).
+    fn themed(ctx: &Context, dark: bool) -> Tokens {
+        let base = if dark { Self::DARK } else { Self::LIGHT };
+        match tint(ctx, dark) {
+            Some(t) => t.apply(base),
+            None => base,
+        }
+    }
+}
+
+/// The tint in use (the chosen accent, or the album art's colors); `None`
+/// before the app's first frame, which means the theme's own.
+pub fn tint(ctx: &Context, dark: bool) -> Option<crate::colors::Tint> {
+    ctx.data(|d| d.get_temp::<crate::colors::Tints>(crate::colors::id())).map(|t| t.of(dark))
+}
+
+/// [`tint`] for the theme `ui` is drawn in.
+pub fn tint_of(ui: &egui::Ui) -> Option<crate::colors::Tint> {
+    tint(ui.ctx(), ui.visuals().dark_mode)
+}
+
+/// Sets the tint [`Tokens::of`] finds from here on.
+pub fn set_tints(ctx: &Context, tints: crate::colors::Tints) {
+    ctx.data_mut(|d| d.insert_temp(crate::colors::id(), tints));
+}
+
+/// Runs `draw` with `tints` in use, then puts back what was there: an album
+/// page in its own album's colors, inside a window in the playing one's.
+pub fn with_tints<R>(ctx: &Context, tints: Option<crate::colors::Tints>, draw: impl FnOnce() -> R) -> R {
+    let Some(tints) = tints else { return draw() };
+    let id = crate::colors::id();
+    let outer = ctx.data(|d| d.get_temp::<crate::colors::Tints>(id));
+    set_tints(ctx, tints);
+    let r = draw();
+    match outer {
+        Some(t) => set_tints(ctx, t),
+        None => ctx.data_mut(|d| d.remove::<crate::colors::Tints>(id)),
+    }
+    r
+}
+
+/// egui's own accent-colored bits (links, text selection) in the chosen
+/// accent. The album art's colors don't reach these; they ease too often.
+pub fn set_accent(ctx: &Context, accent: Accent) {
+    for (theme, dark) in [(Theme::Light, false), (Theme::Dark, true)] {
+        let (a, _) = accent.colors(dark);
+        ctx.style_mut_of(theme, |s| accent_visuals(&mut s.visuals, a, dark));
+    }
+}
+
+fn accent_visuals(v: &mut egui::Visuals, accent: Color32, dark: bool) {
+    v.hyperlink_color = accent;
+    v.selection.bg_fill = accent.gamma_multiply(if dark { 0.45 } else { 0.22 });
+    v.selection.stroke = egui::Stroke::new(1.0, accent);
+}
+
+/// Semibold text in the UI font (the system font's weight axis when loaded).
+pub fn semibold() -> FontFamily {
+    FontFamily::Name("semibold".into())
+}
+
+pub fn install(ctx: &Context, pref: ThemePref) {
+    install_fonts(ctx);
+    for (theme, t) in [(Theme::Light, Tokens::LIGHT), (Theme::Dark, Tokens::DARK)] {
+        ctx.set_visuals_of(theme, visuals(theme, &t));
+        ctx.style_mut_of(theme, |s| {
+            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            s.spacing.button_padding = egui::vec2(8.0, 4.0);
+            s.spacing.interact_size.y = 24.0;
+            s.spacing.menu_margin = egui::Margin::same(6);
+            use egui::{FontId, TextStyle};
+            s.text_styles.insert(TextStyle::Body, FontId::proportional(13.0));
+            s.text_styles.insert(TextStyle::Button, FontId::proportional(13.0));
+            s.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
+            s.text_styles.insert(TextStyle::Heading, FontId::new(22.0, semibold()));
+            s.text_styles.insert(TextStyle::Monospace, FontId::monospace(12.0));
+            // Overlay scroll bars, invisible until scrolling (see `scroll_bars`).
+            s.spacing.scroll = egui::style::ScrollStyle {
+                active_handle_opacity: 0.0,
+                active_background_opacity: 0.0,
+                interact_background_opacity: 0.0,
+                ..egui::style::ScrollStyle::floating()
+            };
+        });
+    }
+    set_pref(ctx, pref);
+}
+
+/// macOS-style scroll bars: shown while a scroll is in progress, hidden
+/// otherwise. Hovering the bar itself still shows it, so it can be dragged.
+pub fn scroll_bars(ctx: &Context, visible: bool) {
+    for theme in [Theme::Light, Theme::Dark] {
+        ctx.style_mut_of(theme, |s| s.spacing.scroll.active_handle_opacity = if visible { 0.6 } else { 0.0 });
+    }
+}
+
+pub fn set_pref(ctx: &Context, pref: ThemePref) {
+    ctx.set_theme(match pref {
+        ThemePref::System => egui::ThemePreference::System,
+        ThemePref::Light => egui::ThemePreference::Light,
+        ThemePref::Dark => egui::ThemePreference::Dark,
+    });
+}
+
+fn visuals(theme: Theme, t: &Tokens) -> egui::Visuals {
+    let mut v = match theme {
+        Theme::Light => egui::Visuals::light(),
+        Theme::Dark => egui::Visuals::dark(),
+    };
+    v.panel_fill = t.bg;
+    v.window_fill = t.bg;
+    v.extreme_bg_color = t.field;
+    v.faint_bg_color = t.panel;
+    v.warn_fg_color = t.warn;
+    v.error_fg_color = t.danger;
+    accent_visuals(&mut v, t.accent, theme == Theme::Dark);
+    v.window_stroke = egui::Stroke::new(1.0, t.hairline);
+    v.window_corner_radius = egui::CornerRadius::same(10);
+    v.menu_corner_radius = egui::CornerRadius::same(8);
+    let radius = egui::CornerRadius::same(6);
+    let w = &mut v.widgets;
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, t.hairline);
+    w.noninteractive.fg_stroke.color = t.text;
+    w.noninteractive.corner_radius = radius;
+    for (state, fill) in [(&mut w.inactive, Color32::TRANSPARENT), (&mut w.hovered, t.hover), (&mut w.active, t.selected), (&mut w.open, t.hover)] {
+        state.weak_bg_fill = fill;
+        state.bg_stroke = egui::Stroke::NONE;
+        state.corner_radius = radius;
+        state.fg_stroke.color = t.text;
+        state.expansion = 0.0;
+    }
+    // Sliders, checkboxes and scrollbars draw with `bg_fill`.
+    w.inactive.bg_fill = t.field;
+    w.hovered.bg_fill = t.selected;
+    w.active.bg_fill = t.muted;
+    v
+}
+
+/// Uses the system UI font (SF, Segoe UI, or whatever fontconfig calls
+/// sans-serif) and a CJK fallback when they're there, ahead of egui's bundled
+/// fonts. Characters none of them has (emoji in a playlist's name) are found
+/// among the system's fonts by eframe (its `system_fonts` feature).
+fn install_fonts(ctx: &Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let mut semibold_family = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let system = system_fonts();
+    // The UI font first, then CJK, then egui's bundled fallbacks.
+    for (name, faces) in [("cjk", system.cjk), ("ui", system.ui)] {
+        let Some(Faces { regular, semibold }) = faces else { continue };
+        fonts.font_data.insert(name.into(), regular.into());
+        let semi_name = match semibold {
+            Some(face) => {
+                let n = format!("{name}-semibold");
+                fonts.font_data.insert(n.clone(), face.into());
+                n
+            }
+            None => name.to_owned(),
+        };
+        if let Some(p) = fonts.families.get_mut(&FontFamily::Proportional) {
+            p.insert(0, name.into());
+        }
+        semibold_family.insert(0, semi_name);
+    }
+    fonts.families.insert(semibold(), semibold_family);
+    ctx.set_fonts(fonts);
+}
+
+/// The UI font and a CJK font.
+#[derive(Default)]
+struct SystemFonts {
+    ui: Option<Faces>,
+    cjk: Option<Faces>,
+}
+
+/// A regular face and, when there's a separate one, a semibold.
+struct Faces {
+    regular: egui::FontData,
+    /// `None`: semibold text uses the regular face too.
+    semibold: Option<egui::FontData>,
+}
+
+/// One file per weight. Without a separate semibold file (or one that won't
+/// read) semibold text uses the regular face.
+fn pair(regular: &std::path::Path, semibold: &std::path::Path) -> Option<Faces> {
+    let face = |p: &std::path::Path| std::fs::read(p).ok().map(egui::FontData::from_owned);
+    let semibold = if semibold == regular { None } else { face(semibold) };
+    Some(Faces { regular: face(regular)?, semibold })
+}
+
+/// A variable font: one file gives both weights through its weight axis.
+#[cfg_attr(windows, allow(dead_code))]
+fn variable(bytes: Vec<u8>, semibold_weight: f32) -> Faces {
+    use egui::epaint::text::VariationCoords;
+    let weight = |w: f32| egui::FontTweak { coords: VariationCoords::new([(b"wght", w)]), ..Default::default() };
+    Faces {
+        regular: egui::FontData::from_owned(bytes.clone()).tweak(weight(400.0)),
+        semibold: Some(egui::FontData::from_owned(bytes).tweak(weight(semibold_weight))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn system_fonts() -> SystemFonts {
+    // SF is a variable font; its semibold sits at 590 on the weight axis.
+    let ui = std::fs::read("/System/Library/Fonts/SFNS.ttf").ok().map(|bytes| variable(bytes, 590.0));
+    // SF has no CJK. Hiragino Sans covers kanji, kana and most common hanzi in
+    // ~8 MB a weight; the Chinese and Korean system fonts are 20–55 MB each,
+    // too much to hold in memory for the odd title. Emoji (and any other
+    // script these miss) come from eframe's system font fallback, which loads
+    // a font only once some text needs it.
+    let dir = std::path::Path::new("/System/Library/Fonts");
+    let cjk = pair(&dir.join("ヒラギノ角ゴシック W3.ttc"), &dir.join("ヒラギノ角ゴシック W6.ttc"));
+    SystemFonts { ui, cjk }
+}
+
+#[cfg(target_os = "windows")]
+fn system_fonts() -> SystemFonts {
+    let dir = std::env::var_os("WINDIR").map_or_else(|| "C:\\Windows".into(), std::path::PathBuf::from).join("Fonts");
+    // Yu Gothic plays Hiragino's part: Japanese plus the common hanzi.
+    SystemFonts { ui: pair(&dir.join("segoeui.ttf"), &dir.join("seguisb.ttf")), cjk: pair(&dir.join("YuGothR.ttc"), &dir.join("YuGothB.ttc")) }
+}
+
+/// Asks fontconfig, which knows the desktop's chosen sans-serif.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn system_fonts() -> SystemFonts {
+    let find = |pattern: &str| -> Option<std::path::PathBuf> {
+        let out = std::process::Command::new("fc-match").args(["--format=%{file}", pattern]).output().ok()?;
+        let path = String::from_utf8(out.stdout).ok()?;
+        // Only TrueType/OpenType: egui can't read Type 1 or bitmap fonts.
+        let ok = out.status.success() && [".ttf", ".otf", ".ttc"].iter().any(|e| path.to_ascii_lowercase().ends_with(e));
+        ok.then(|| path.into())
+    };
+    let weights = |family: &str| {
+        let regular = find(&format!("{family}:weight=regular"))?;
+        let semi = find(&format!("{family}:weight=semibold")).unwrap_or_else(|| regular.clone());
+        Some((regular, semi))
+    };
+    // GNOME's UI fonts (Adwaita Sans, Cantarell) are variable: one file for
+    // every weight, set through the weight axis.
+    let ui_paths = weights("sans-serif");
+    let ui = ui_paths
+        .as_ref()
+        .and_then(|(regular, semi)| if regular == semi { std::fs::read(regular).ok().map(|b| variable(b, 600.0)) } else { pair(regular, semi) });
+    // A CJK font is big (Noto Sans CJK is ~20 MB): one face, used for both
+    // weights, and none at all when fontconfig only has the UI font to offer.
+    let cjk = weights("sans-serif:lang=ja")
+        .filter(|(regular, _)| ui_paths.as_ref().is_none_or(|(ui, _)| ui != regular))
+        .and_then(|(regular, _)| pair(&regular, &regular));
+    SystemFonts { ui, cjk }
+}

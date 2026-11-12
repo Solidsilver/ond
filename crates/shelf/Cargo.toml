@@ -1,0 +1,21 @@
+[package]
+name = "shelf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+postcard = { version = "1.1.3", features = ["use-std"] }
+redb = "4.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+sources = { version = "0.5.0", path = "../sources" }
+thiserror = "2.0.21"
+tracing = "0.1.44"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

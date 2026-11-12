@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 bytes = "1.12.1"
-subsonic = { version = "0.4.3", path = "../subsonic" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 tokio = { version = "1.54.1", features = ["rt", "sync", "macros", "time"] }
 tracing = "0.1.44"
@@ -18,4 +17,5 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+testkit = { path = "../testkit" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread"] }

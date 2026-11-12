@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Rede
+GenericName=Audiobook Player
+Comment=Listen to books from an Audiobookshelf server
+Exec=rede
+Icon=dev.solidsilver.rede
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=audiobook;audiobookshelf;books;player;
+StartupWMClass=dev.solidsilver.rede
+SingleMainWindow=true

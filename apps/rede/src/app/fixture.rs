@@ -1,0 +1,524 @@
+//! The fixture the tests and the review snapshots share: a shelf of books in a
+//! temp folder, and an app showing it.
+//!
+//! No server, no keychain, no audio device: the shelf is written directly, the
+//! same way a sync would, and the app reads it back. A book's details are
+//! stored the way `open_book` stores them, so the page draws the chapters it
+//! would draw for real.
+
+use super::*;
+use crate::settings::{Account, Paths};
+use sources::{Changes, Chapter, Item, ItemKey, ItemSummary, Library, LibraryKind, Series, Stamp, TrackFile};
+use std::path::Path;
+
+/// The account the fixture is signed in to. Nothing talks to it.
+pub const SERVER: &str = "https://books.example.com";
+pub const LIBRARY: &str = "lib-books";
+/// The first of January 2026, in milliseconds: the day the fixture's oldest
+/// book was added.
+const ADDED: i64 = 1_767_225_600_000;
+
+/// The wall clock the views read in tests and snapshots: a Tuesday evening
+/// (3 November 2026, 10:30 PM), so a book's end lands after midnight.
+pub fn wall_clock() -> chrono::NaiveDateTime {
+    chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap().and_hms_opt(22, 30, 0).unwrap()
+}
+
+pub fn account() -> Account {
+    let mut account = Account::new(SERVER, "sam");
+    account.id = sources::AccountId::from_uuid(uuid::Uuid::from_u128(42));
+    account.device_id = "fixture".into();
+    account.libraries = vec![crate::settings::KnownLibrary { id: LIBRARY.into(), name: "Books".into() }];
+    account.sign_in = Some(crate::settings::SignInMethod::Password);
+    account
+}
+
+/// One of the fixture's books, as a listing would describe it.
+pub struct FixtureBook {
+    pub title: &'static str,
+    pub author: &'static str,
+    pub narrator: &'static str,
+    /// The series, and the book's number in it.
+    pub series: Option<(&'static str, &'static str)>,
+    /// Seconds.
+    pub duration: f64,
+    /// Days after the oldest book that it was added.
+    pub days: i64,
+}
+
+const fn fixture(
+    title: &'static str,
+    author: &'static str,
+    narrator: &'static str,
+    series: Option<(&'static str, &'static str)>,
+    duration: f64,
+    days: i64,
+) -> FixtureBook {
+    FixtureBook { title, author, narrator, series, duration, days }
+}
+
+/// Twelve books, enough to fill a grid and to have two of each author.
+pub const BOOKS: [FixtureBook; 12] = [
+    fixture("The Left Hand of Darkness", "Ursula K. Le Guin", "George Guidall", Some(("Hainish", "1")), 40_920.0, 11),
+    fixture("Dune", "Frank Herbert", "Scott Brick, Simon Vance", Some(("Dune", "1")), 75_720.0, 10),
+    fixture("Piranesi", "Susanna Clarke", "Chiwetel Ejiofor", None, 25_800.0, 9),
+    fixture("The Dispossessed", "Ursula K. Le Guin", "Don Leslie", Some(("Hainish", "6")), 48_480.0, 8),
+    fixture("A Wizard of Earthsea", "Ursula K. Le Guin", "Rob Inglis", Some(("Earthsea", "1")), 25_500.0, 7),
+    fixture("Kindred", "Octavia E. Butler", "Kim Staunton", None, 39_300.0, 6),
+    fixture("The Remains of the Day", "Kazuo Ishiguro", "Simon Prebble", None, 32_280.0, 5),
+    fixture("Wolf Hall", "Hilary Mantel", "Simon Slater", Some(("Thomas Cromwell", "1")), 87_120.0, 4),
+    fixture("Station Eleven", "Emily St. John Mandel", "Kirsten Potter", None, 38_460.0, 3),
+    fixture("The Fifth Season", "N. K. Jemisin", "Robin Miles", Some(("The Broken Earth", "1")), 55_440.0, 2),
+    fixture("Jane Eyre", "Charlotte Brontë", "Thandiwe Newton", None, 69_120.0, 1),
+    fixture("The Ocean at the End of the Lane", "Neil Gaiman", "Neil Gaiman", None, 20_820.0, 0),
+];
+
+/// The fixture's books as a listing has them.
+pub fn summaries() -> Vec<ItemSummary> {
+    BOOKS
+        .iter()
+        .enumerate()
+        .map(|(n, fixture)| {
+            let mut book = summary(n);
+            book.title = fixture.title.into();
+            book.authors = vec![fixture.author.into()];
+            book.narrators = vec![fixture.narrator.into()];
+            book.series = fixture.series.map(|(name, number)| vec![Series { name: name.into(), sequence: Some(number.into()) }]).unwrap_or_default();
+            book.duration = Some(fixture.duration);
+            book.added = Some(Stamp::from_millis(ADDED + fixture.days * 86_400_000));
+            book
+        })
+        .collect()
+}
+
+/// The `n`th fixture book as the listing has it, before the fixture's own
+/// titles are put on it.
+fn summary(n: usize) -> ItemSummary {
+    ItemSummary {
+        id: format!("book-{n}"),
+        library: LIBRARY.into(),
+        title: format!("Book {n}"),
+        authors: vec!["Ursula K. Le Guin".into()],
+        cover: Some(format!("book-{n}")),
+        updated: Some(Stamp::from_millis(ADDED)),
+        added: Some(Stamp::from_millis(ADDED)),
+        duration: Some(40_000.0),
+        ..ItemSummary::default()
+    }
+}
+
+/// A book's details: a description and a chapter list, as `Source::item` would
+/// bring them.
+pub fn details(n: usize) -> Item {
+    let title = BOOKS[n].title;
+    // The details carry what the listing does (narrators, series, length).
+    let mut item = Item { summary: summaries().swap_remove(n), ..Item::default() };
+    item.description = Some(if n == 1 {
+        // Audiobookshelf keeps a description as HTML. One of the fixture's
+        // books has the markup a real one does, so the page shows how it reads.
+        html_description(title)
+    } else {
+        format!(
+            "{title} is one of the fixture's books, here to show what a book's page looks like. \
+             The description runs to a few lines of prose, which is all the page needs to lay out: \
+             a paragraph that wraps in its column, a little longer than the metadata above it."
+        )
+    });
+    item.genres = vec!["Science Fiction".into()];
+    item.published_year = Some("1969".into());
+    item.publisher = Some("Ace Books".into());
+    item.tracks = vec![
+        TrackFile { index: 1, start_offset: 0.0, duration: Some(20_000.0), suffix: Some("m4b".into()), content_id: format!("{n}-1"), ..TrackFile::default() },
+        TrackFile {
+            index: 2,
+            start_offset: 20_000.0,
+            duration: Some(20_460.0),
+            suffix: Some("m4b".into()),
+            content_id: format!("{n}-2"),
+            ..TrackFile::default()
+        },
+    ];
+    // Twelve chapters, a little over 56 minutes each: enough rows to see the
+    // list as a list.
+    item.chapters = (0..12)
+        .map(|c| {
+            let start = f64::from(c) * 3_400.0;
+            let title = if c == 0 { "Prologue".to_owned() } else { format!("Chapter {}", c + 1) };
+            Chapter { start, end: start + 3_400.0, title }
+        })
+        .collect();
+    item
+}
+
+/// A book's description as the server stores it: paragraphs with bold and
+/// italic runs, entities, a list, a quote and a link.
+fn html_description(title: &str) -> String {
+    format!(
+        "<p><b>“{title} is a landmark.”</b> — <i>The Saturday Review</i><br />\
+         <b>Winner</b> of the Hugo Award &amp; the Nebula Award, and the first of a series that \
+         changed what science fiction could do.</p>\
+         <p>On the desert planet Arrakis, young Paul Atreides&nbsp;&mdash; heir to a noble house \
+         &mdash; is caught between two empires and a spice only his world makes.</p>\
+         <h3>What the critics said</h3>\
+         <ul><li>“A wonderful, lifelike tapestry.”</li><li>“Its power and vision are extraordinary.”</li></ul>\
+         <blockquote>A beginning is the most important part of the work.</blockquote>\
+         <p>The reading group guide is on <a href=\"https://example.com/guide\">the publisher's site</a>.</p>"
+    )
+}
+
+/// A shelf holding the fixture's books, with the first book's details stored.
+pub fn shelf(dir: &Path) -> std::sync::Arc<shelf::Shelf> {
+    let shelf = shelf::Shelf::open(dir.join("books.redb")).expect("a fresh shelf opens");
+    let library = Library { id: LIBRARY.into(), name: "Books".into(), kind: LibraryKind::Books };
+    let mut changes = Changes::new(account().id);
+    changes.items = summaries();
+    changes.stamp = Some(Stamp::from_millis(ADDED));
+    shelf.apply_changes(&library, &changes).expect("the fixture writes");
+    for n in 0..BOOKS.len() {
+        shelf.set_details(&ItemKey::new(account().id, format!("book-{n}")), &details(n)).expect("the fixture writes");
+    }
+    std::sync::Arc::new(shelf)
+}
+
+/// The app's files in `dir`, as a start would find them.
+pub fn paths(dir: &Path) -> Paths {
+    Paths { config_file: dir.join("settings.json"), shelves: dir.join("accounts"), art_cache: dir.join("art") }
+}
+
+/// An app signed in to the fixture shelf, showing its books. `books` is how
+/// many of the fixture's books it has (all of them unless a test says
+/// otherwise), so an empty library is the same app with none.
+pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
+    let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
+    app.bridge.use_openid_store(crate::openid::TestStore::default());
+    app.login = None;
+    let shelf = shelf(dir);
+    let all = summaries();
+    let listed: Vec<ItemSummary> = all.iter().take(books).cloned().collect();
+    let signed_in = account();
+    // The settings file is shared by every app a test builds in `dir`; the
+    // column starts hidden, the sidebar open and the library unfiltered
+    // whatever the last one left.
+    app.prefs.edit(|s| {
+        s.put_account(signed_in.clone());
+        s.show_panel = false;
+        s.sidebar_collapsed = false;
+        s.filter = Default::default();
+    });
+    app.shown = PrefsView::read(&app.prefs);
+    app.session = Session { account: Some(signed_in), source: None, shelf: Some(shelf.clone()), connecting: false };
+    app.handle(crate::bridge::LibraryMsg::Books(listed));
+    for (n, book) in all.iter().enumerate().take(books) {
+        app.handle(crate::bridge::LibraryMsg::Book { key: ItemKey::new(account().id, book.id.clone()), item: Box::new(details(n)) });
+    }
+    // Square, portrait and landscape art exercise the fit; the remaining
+    // books keep their title placeholders, including a cover still loading.
+    for (n, size, color) in [
+        (0, [128, 192], egui::Color32::from_rgb(123, 146, 155)),
+        (1, [192, 192], egui::Color32::from_rgb(190, 157, 101)),
+        (2, [192, 128], egui::Color32::from_rgb(126, 149, 123)),
+    ] {
+        let mut image = egui::ColorImage::filled(size, color);
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                if x < 4 || y < 4 || x >= size[0] - 4 || y >= size[1] - 4 {
+                    image.pixels[y * size[0] + x] = egui::Color32::from_rgb(225, 218, 198);
+                }
+            }
+        }
+        app.art.preload(&format!("book-{n}"), image);
+    }
+    for book in &all {
+        app.art.preload_missing(&book.id);
+    }
+    app
+}
+
+/// An app at its sign-in screen, with nothing saved.
+pub fn signed_out(ctx: &egui::Context, dir: &Path) -> RedeApp {
+    let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
+    app.bridge.use_openid_store(crate::openid::TestStore::default());
+    app.login = Some(LoginForm::default());
+    app.session = Session::default();
+    app
+}
+
+/// The `n`th fixture book's page.
+pub fn book_route(n: usize) -> Route {
+    Route::Book(format!("book-{n}"))
+}
+
+/// Draws a frame of the app, as the harness does: nothing is rendered, only
+/// laid out.
+pub fn frame(ctx: &egui::Context, app: &mut RedeApp) {
+    let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(FULL[0], FULL[1]))), ..Default::default() };
+    let mut out = ctx.run_ui(input, |ui| {
+        if app.login.is_some() {
+            app.login_ui(ui);
+        } else {
+            app.main_ui(ui);
+        }
+    });
+    // No renderer here to upload textures to.
+    out.textures_delta.clear();
+}
+
+/// The window the snapshots and the frames are drawn at.
+pub const FULL: [f32; 2] = [1100.0, 720.0];
+
+/// Places the real player policy in a stable mid-book scene without opening
+/// an audio device. The same scene is used by accessibility and PNG tests.
+pub fn playing(app: &mut RedeApp, paused: bool) {
+    struct Preview;
+    impl crate::player::Transport for Preview {
+        fn send(&self, _: audio::Command) {}
+        fn state(&self) -> audio::PlayState {
+            audio::PlayState::Paused
+        }
+        fn position(&self) -> f64 {
+            0.0
+        }
+        fn silence_saved(&self) -> f64 {
+            0.0
+        }
+    }
+    let item = details(0);
+    let session = sources::PlaySession {
+        id: "fixture".into(),
+        item: "book-0".into(),
+        start: sources::Position::from_secs(14_200.0),
+        duration: Some(40_920.0),
+        tracks: item
+            .tracks
+            .iter()
+            .map(|t| sources::SessionTrack { index: t.index, start_offset: t.start_offset, duration: t.duration, ..Default::default() })
+            .collect(),
+    };
+    app.player
+        .load(crate::player::Opened { key: ItemKey::new(account().id, "book-0"), item, session, position: 14_200.0 }, 1.5, &Preview, std::time::Instant::now())
+        .unwrap();
+    app.player.paused = paused;
+    app.prefs.edit(|p| p.playback.speed = 1.5);
+}
+
+/// The playing book as one the server has no cover for: what the Player,
+/// Mini, the capsule and the info column draw in its place.
+pub fn without_art(app: &mut RedeApp) {
+    if let Some(book) = app.player.book.as_mut() {
+        book.item.summary.cover = None;
+    }
+}
+
+/// Server discovery and pending-keyring replies for sign-in screenshots and
+/// UI tests. These are wire fixtures, never real browser credentials.
+pub fn signin(ctx: &egui::Context, dir: &Path, both: bool, waiting: bool) -> RedeApp {
+    let methods: &[&str] = if both { &["local", "openid"] } else { &["openid"] };
+    signin_with(ctx, dir, methods, waiting.then(pending_openid))
+}
+
+/// The sign-in screen after the server said which `methods` it offers, and
+/// waiting for the browser when there's a `waiting` sign-in. `server` is the
+/// address that answered; the fixture's own unless a test says otherwise.
+pub fn signin_with(ctx: &egui::Context, dir: &Path, methods: &[&str], waiting: Option<crate::openid::Pending>) -> RedeApp {
+    signin_at(ctx, dir, SERVER, methods, waiting)
+}
+
+/// [`signin_with`] for a server at `server`: what a bare address typed in
+/// shows once it has answered.
+pub fn signin_at(ctx: &egui::Context, dir: &Path, server: &str, methods: &[&str], waiting: Option<crate::openid::Pending>) -> RedeApp {
+    let mut app = signed_out(ctx, dir);
+    {
+        let form = app.login.as_mut().unwrap();
+        form.server = server.into();
+        form.checked_server = form.server.clone();
+    }
+    app.handle(crate::bridge::AccountMsg::Status {
+        session: app.bridge.session(),
+        status: abs::ServerStatus {
+            auth_methods: methods.iter().map(|m| (*m).to_owned()).collect(),
+            auth_form_data: abs::AuthFormData { auth_open_id_button_text: Some("Sign in with Book Club".into()), ..Default::default() },
+            ..Default::default()
+        },
+        warning: None,
+        server: server.into(),
+    });
+    if let Some(pending) = waiting {
+        app.handle(crate::bridge::AccountMsg::OpenIdRestored { session: 0, pending: Some(Box::new(pending)) });
+    } else {
+        app.openid.restored = true;
+    }
+    app
+}
+
+/// A browser sign-in on a server that hasn't allowed Rede's own redirect, so
+/// it went through Audiobookshelf's.
+pub fn pending_openid_fallback() -> crate::openid::Pending {
+    let mut value = serde_json::to_value(pending_openid()).unwrap();
+    value["flow"]["redirect"] = "audiobookshelf://oauth".into();
+    serde_json::from_value(value).unwrap()
+}
+
+pub fn pending_openid() -> crate::openid::Pending {
+    crate::openid::test_pending()
+}
+
+/// Draws `body` over the whole window, edge to edge as the app does, rather
+/// than inside the margin the test harness leaves around its ui: what sits at
+/// the window's edges (the sidebar's foot) is then where it would be.
+pub fn whole_window(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    let rect = ui.ctx().content_rect();
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.set_clip_rect(rect);
+        body(ui);
+    });
+}
+
+/// The bookmarks the playing book (see [`playing`]) has: one in the
+/// prologue, a few around where it's paused (the third is the one just
+/// behind it), one renamed, and one far ahead.
+pub fn bookmarks(app: &mut RedeApp) {
+    let item = ItemKey::new(account().id, "book-0");
+    let rows = [
+        (312.5, "Prologue"),
+        (7_020.0, "Genly meets the king"),
+        (13_955.25, "Chapter 5"),
+        (14_480.0, "Estraven's warning, the whole speech"),
+        (30_100.0, "Chapter 9"),
+    ];
+    let bookmarks = rows
+        .iter()
+        .map(|(time, title)| sources::Bookmark {
+            item: item.clone(),
+            position: sources::Position::from_secs(*time),
+            title: (*title).into(),
+            created: std::time::SystemTime::UNIX_EPOCH,
+        })
+        .collect();
+    app.handle(crate::bridge::Msg::Bookmarks {
+        session: app.bridge.session(),
+        event: crate::bridge::BookmarkMsg::Updated(shelf::BookmarkSnapshot { revision: 1, bookmarks }),
+    });
+}
+
+/// The playing book picked up from another device: it was at 2:30:00 here,
+/// and the phone left it where it is now.
+pub fn reconciled(app: &mut RedeApp) {
+    let item = ItemKey::new(account().id, "book-0");
+    let at = |secs: f64, ago: u64| sources::Progress {
+        item: item.clone(),
+        position: sources::Position::from_secs(secs),
+        finished: false,
+        at: Some(std::time::SystemTime::now() - std::time::Duration::from_secs(ago)),
+    };
+    app.reconciliation = Some(crate::listening::Reconciled { previous: at(9_000.0, 3_600), current: at(app.player.position, 60) });
+}
+
+/// Where the fixture's listening is: four books partway, at different
+/// points and last heard at different times (Piranesi most recently, then
+/// Dune, Kindred and Wolf Hall), and A Wizard of Earthsea finished. Arrives
+/// as the shelf's positions would, so an app still where it opened goes
+/// Home.
+pub fn listened(app: &mut RedeApp) {
+    let now = std::time::SystemTime::now();
+    let at = |n: usize, secs: f64, finished: bool, hours_ago: u64| sources::Progress {
+        item: ItemKey::new(account().id, format!("book-{n}")),
+        position: sources::Position::from_secs(secs),
+        finished,
+        at: Some(now - std::time::Duration::from_secs(hours_ago * 3_600)),
+    };
+    app.playback_event(crate::listening::Event::Positions(vec![
+        at(2, 18_000.0, false, 2),
+        at(1, 20_000.0, false, 26),
+        at(5, 3_000.0, false, 72),
+        at(7, 60_000.0, false, 216),
+        at(4, 25_500.0, true, 400),
+    ]));
+}
+
+/// Piranesi half listened to, and Dune finished.
+pub fn in_progress(app: &mut RedeApp) {
+    let at = |id: &str, secs: f64, finished: bool| {
+        let item = sources::ItemKey::new(account().id, id);
+        (id.to_owned(), sources::Progress { item, position: sources::Position::from_secs(secs), finished, at: Some(std::time::SystemTime::now()) })
+    };
+    for (id, progress) in [at("book-2", 7_980.0, false), at("book-1", 75_720.0, true)] {
+        app.positions.insert(id, progress);
+    }
+}
+
+/// The fixture's downloads, as the store's snapshot would have them: The
+/// Left Hand of Darkness and Kindred here, Piranesi on its way, Wolf Hall
+/// given up on, Station Eleven being prepared, and The Fifth Season couldn't
+/// be prepared. No store is open, so nothing moves.
+pub fn downloaded(app: &mut RedeApp) {
+    let key = |n: usize| ItemKey::new(account().id, format!("book-{n}")).to_string();
+    let pin = |n: usize, done: usize, failed: usize, bytes_done: u64, downloading: bool| offline::PinSummary {
+        pin: offline::Pin::Book(key(n)),
+        label: BOOKS[n].title.into(),
+        total: 2,
+        done,
+        failed,
+        bytes_done,
+        bytes_total: 2 * 180_000_000,
+        downloading,
+    };
+    app.downloads.snapshot = std::sync::Arc::new(offline::Snapshot {
+        pins: vec![pin(0, 2, 0, 312_400_000, false), pin(5, 2, 0, 298_000_000, false), pin(2, 1, 0, 151_000_000, true), pin(7, 1, 1, 180_000_000, false)],
+        used_bytes: 790_000_000,
+        free_bytes: Some(182_000_000_000),
+        limit: Some(10_000_000_000),
+        active: 1,
+        failed: 1,
+        ..Default::default()
+    });
+    app.downloads.preparing.insert(ItemKey::new(account().id, "book-8"), 1);
+    app.downloads.errors.insert(ItemKey::new(account().id, "book-9"), "Can't reach the server.".into());
+    app.downloads.dir = Some(std::path::PathBuf::from("/Users/sam/Library/Application Support/Rede/downloads/0000002a"));
+    app.downloads.version += 1;
+}
+
+/// A year of listening as the server would remember it, up to the fixture's
+/// wall clock (in UTC): most evenings and some mornings, the odd week off, a
+/// run of nine days ending today, and a book the library no longer has.
+/// Arrives as the bridge would bring it, with nothing waiting on this computer.
+pub fn listening_history(app: &mut RedeApp) {
+    use chrono::TimeZone;
+    let today = chrono::Utc.from_utc_datetime(&wall_clock()).date_naive();
+    // A small fixed sequence, so every run draws the same year.
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let mut history = Vec::new();
+    for back in 0..340u64 {
+        let day = today - chrono::Days::new(back);
+        let streak = back < 9;
+        if !streak && (back == 9 || (back / 7) % 9 == 4 || next(10) < 3) {
+            continue;
+        }
+        let weekend = matches!(chrono::Datelike::weekday(&day), chrono::Weekday::Sat | chrono::Weekday::Sun);
+        for _ in 0..1 + next(if weekend { 4 } else { 2 }) {
+            let hour = [7, 8, 12, 19, 20, 21, 22, 22, 23][next(9) as usize];
+            let start = day.and_hms_opt(hour, next(60) as u32, 0).unwrap().and_utc().timestamp_millis();
+            let book = [1, 1, 2, 2, 2, 4, 5, 7, 0, 3][next(10) as usize];
+            let (item, title, author) = if back > 250 && next(3) == 0 {
+                ("gone".to_owned(), Some("The Dispossessed".to_owned()), Some("Ursula K. Le Guin".to_owned()))
+            } else {
+                (format!("book-{book}"), None, None)
+            };
+            let minutes = 10 + next(if weekend { 150 } else { 70 });
+            history.push(sources::Listen {
+                item,
+                title,
+                author,
+                started: sources::Stamp::from_millis(start),
+                listened: std::time::Duration::from_secs(minutes * 60),
+            });
+        }
+    }
+    history.reverse();
+    app.stats.arrived(Vec::new(), Some(Ok(history)));
+}

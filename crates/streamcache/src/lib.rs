@@ -40,7 +40,7 @@ mod download;
 pub mod fetch;
 mod ranges;
 
-pub use fetch::{CONNECT_TIMEOUT, READ_TIMEOUT};
+pub use fetch::{CONNECT_TIMEOUT, READ_TIMEOUT, ReplyCheck};
 
 use download::Download;
 use std::collections::HashMap;
@@ -53,6 +53,9 @@ use std::time::{Duration, SystemTime};
 
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// The first wait before a download retries, doubling after each failure.
+pub const RETRY: Duration = Duration::from_millis(250);
+
 /// How often a blocked reader re-checks its abort flag.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -64,11 +67,18 @@ pub struct CacheConfig {
     /// How long a download may go without receiving a byte before it counts
     /// as stalled and retries ([`READ_TIMEOUT`] by default).
     pub read_timeout: Duration,
+    /// The first wait before retrying a failed or short response; it doubles
+    /// on each further failure (250 ms by default).
+    pub retry: Duration,
+    /// Keeps the server's error replies out of the cache: a download whose
+    /// body it flags fails instead of completing, and a small file it flags
+    /// is deleted at startup. The default keeps every body.
+    pub reply_check: ReplyCheck,
 }
 
 impl CacheConfig {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES, read_timeout: READ_TIMEOUT }
+        Self { dir: dir.into(), max_bytes: DEFAULT_MAX_BYTES, read_timeout: READ_TIMEOUT, retry: RETRY, reply_check: ReplyCheck::default() }
     }
 }
 
@@ -299,7 +309,7 @@ impl StreamCache {
             }
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
             // An error reply cached as audio by an earlier version: it would fail every play.
-            if meta.len() < 64 * 1024 && is_error_reply(&path) {
+            if meta.len() < 64 * 1024 && is_error_reply(&cfg.reply_check, &path) {
                 let _ = std::fs::remove_file(&path);
                 continue;
             }
@@ -379,6 +389,14 @@ impl StreamCache {
         drop(idx);
         let st = dl.lock();
         Some(Progress { downloaded: st.ranges.total(), len: st.len, complete: st.complete })
+    }
+
+    /// The offset a blocked reader of `key`'s download has asked for, if any:
+    /// tests wait on it to know a seek landed before they let the server go.
+    #[cfg(test)]
+    pub(crate) fn wanted(&self, key: &CacheKey) -> Option<u64> {
+        let dl = self.inner.lock_index().active.get(&key.file_name())?.clone();
+        dl.lock().wanted
     }
 
     /// Cancels every download and the prefetch. Completed files stay.
@@ -491,6 +509,7 @@ impl Inner {
             name.to_owned(),
             self.cfg.dir.join(format!("{name}.{}.part", self.seq.fetch_add(1, Ordering::Relaxed))),
             self.cfg.dir.join(name),
+            self.cfg.retry,
         ));
         dl.holders.store(1, Ordering::Relaxed);
         idx.active.insert(name.to_owned(), dl.clone());
@@ -498,7 +517,7 @@ impl Inner {
 
         let (inner, task_dl, url) = (self.clone(), dl.clone(), url.to_owned());
         self.rt.spawn(async move {
-            let result = download::run(&task_dl, &inner.client, &url).await;
+            let result = download::run(&task_dl, &inner.client, &inner.cfg.reply_check, &url).await;
             // Renaming and evicting touch the disk: keep them off the async workers.
             let _ = tokio::task::spawn_blocking(move || inner.finish(&task_dl, result)).await;
         });
@@ -711,9 +730,9 @@ impl Seek for StreamReader {
     }
 }
 
-/// A Subsonic error reply (JSON or XML) rather than audio.
-fn is_error_reply(path: &Path) -> bool {
-    std::fs::read(path).is_ok_and(|bytes| subsonic::is_error_reply(None, &bytes))
+/// A file on disk that `check` calls an error reply rather than audio.
+fn is_error_reply(check: &ReplyCheck, path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| check.is_error(None, &bytes))
 }
 
 #[cfg(test)]

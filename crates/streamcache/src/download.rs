@@ -1,7 +1,7 @@
 //! One file being fetched: shared state plus the async task that fills it.
 
 use crate::disk::PartFile;
-use crate::fetch::{self, FetchError, redact};
+use crate::fetch::{self, FetchError, ReplyCheck, redact};
 use crate::ranges::RangeSet;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
@@ -45,10 +45,12 @@ pub(crate) struct Download {
     cancelled: AtomicBool,
     /// Readers plus the prefetch slot. Only changed under the cache index lock.
     pub holders: AtomicUsize,
+    /// The first wait before retrying, from the cache's configuration.
+    retry: Duration,
 }
 
 impl Download {
-    pub fn new(name: String, part_path: PathBuf, final_path: PathBuf) -> Self {
+    pub fn new(name: String, part_path: PathBuf, final_path: PathBuf, retry: Duration) -> Self {
         Self {
             name,
             part_path,
@@ -58,6 +60,7 @@ impl Download {
             wake: Notify::new(),
             cancelled: AtomicBool::new(false),
             holders: AtomicUsize::new(0),
+            retry,
         }
     }
 
@@ -108,11 +111,11 @@ impl Download {
 /// preallocated, so if the rename that follows reached the disk before the
 /// data did, a power loss could leave a right-sized file of zeros. The next
 /// startup scan would index it as complete.
-pub(crate) async fn run(dl: &Download, client: &reqwest::Client, url: &str) -> Result<u64, String> {
+pub(crate) async fn run(dl: &Download, client: &reqwest::Client, check: &ReplyCheck, url: &str) -> Result<u64, String> {
     let mut options = OpenOptions::new();
     options.create(true).write(true).truncate(true);
     let file = PartFile::open(options, dl.part_path.clone()).await.map_err(io)?;
-    let len = fill(dl, client, url, &file).await?;
+    let len = fill(dl, client, check, url, &file).await?;
     file.sync_all().await.map_err(io)?;
     Ok(len)
 }
@@ -122,7 +125,7 @@ fn io(e: std::io::Error) -> String {
 }
 
 /// [`run`]'s download loop, writing into `file`.
-async fn fill(dl: &Download, client: &reqwest::Client, url: &str, file: &PartFile) -> Result<u64, String> {
+async fn fill(dl: &Download, client: &reqwest::Client, check: &ReplyCheck, url: &str, file: &PartFile) -> Result<u64, String> {
     let mut ranged: Option<bool> = None;
     let mut sized = false;
     let mut start = 0u64;
@@ -137,7 +140,7 @@ async fn fill(dl: &Download, client: &reqwest::Client, url: &str, file: &PartFil
         }
 
         let sent = tokio::select! {
-            r = fetch::get_from(client, url, (ranged != Some(false)).then_some(start)) => r,
+            r = fetch::get_from(client, check, url, (ranged != Some(false)).then_some(start)) => r,
             _ = cancelled(dl) => return Err("cancelled".into()),
         };
         let mut body = match sent {
@@ -170,8 +173,9 @@ async fn fill(dl: &Download, client: &reqwest::Client, url: &str, file: &PartFil
                 start = 0;
                 continue;
             }
-            // Subsonic reports errors (bad auth, failed transcode) as a JSON or
-            // XML body with status 200. That's not audio and must never be cached.
+            // Some servers report errors (bad auth, failed transcode) as a body
+            // with status 200. Where the reply check caught one, it's not audio
+            // and must never be cached.
             Err(e) => {
                 failures += 1;
                 if failures > MAX_FAILURES || !e.retryable() {
@@ -354,7 +358,7 @@ async fn cancelled(dl: &Download) {
 
 async fn backoff(dl: &Download, failures: u32) {
     tokio::select! {
-        _ = tokio::time::sleep(fetch::backoff(failures, Duration::from_millis(250), Duration::from_secs(2))) => {}
+        _ = tokio::time::sleep(fetch::backoff(failures, dl.retry, Duration::from_secs(2))) => {}
         _ = cancelled(dl) => {}
     }
 }

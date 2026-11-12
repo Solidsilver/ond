@@ -1,0 +1,1347 @@
+//! Headless frames of the main window with a populated library, queue and
+//! palette: catches layout panics and checks the views wire up to actions.
+use super::*;
+use crate::nav::FilterKind;
+
+struct NullOutput;
+
+impl audio::OutputBackend for NullOutput {
+    fn name(&self) -> &str {
+        "null"
+    }
+    fn device_caps(&mut self) -> Option<audio::DeviceCaps> {
+        None
+    }
+    fn open(&mut self, _: audio::StreamFormat, _: audio::RingInput, _: Arc<audio::Status>) -> Result<(), audio::OutputError> {
+        Ok(())
+    }
+    fn drained(&self) -> bool {
+        true
+    }
+    fn close(&mut self) {}
+}
+
+fn track(id: &str, album: &str, n: u32) -> Track {
+    Track {
+        artist: Some("Bill Evans Trio".into()),
+        track: Some(n),
+        disc: Some(1 + n / 8),
+        duration_secs: Some(240 + n),
+        suffix: Some("flac".into()),
+        bit_depth: Some(16),
+        sample_rate: Some(44_100),
+        channels: Some(2),
+        composer: Some("Scott LaFaro".into()),
+        contributors: vec![
+            library::Contributor { role: "performer".into(), sub_role: Some("piano".into()), name: "Bill Evans".into(), artist_id: None },
+            library::Contributor { role: "composer".into(), sub_role: None, name: "Scott LaFaro".into(), artist_id: None },
+        ],
+        ..crate::test_tracks::track(id, album, &format!("Track {n} with a fairly long title that has to be cut"))
+    }
+}
+
+fn app(ctx: &egui::Context, dir: &std::path::Path) -> OndApp {
+    let paths = Paths {
+        config_file: dir.join("settings.json"),
+        library_db: dir.join("library.redb"),
+        stream_cache: dir.join("streams"),
+        art_cache: dir.join("art"),
+        offline: dir.join("offline"),
+    };
+    let mut app = OndApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
+    app.login = None;
+    let albums: Vec<Album> = (0..60)
+        .map(|i| Album {
+            id: format!("al-{i}"),
+            name: format!("Album {i}"),
+            sort: None,
+            artist: Some(if i % 3 == 0 { "Bill Evans Trio".into() } else { format!("Artist {}", i % 7) }),
+            artist_ref: None,
+            year: Some(1955 + i),
+            genre: Some("Jazz".into()),
+            song_count: 20,
+            duration_secs: 3000,
+            cover_art: Some(format!("al-{i}")),
+            created: Some(format!("2024-01-{:02}", 1 + i % 28)),
+            labels: vec!["Riverside".into()],
+            genres: vec!["Jazz".into(), "Cool Jazz".into()],
+            artists: Vec::new(),
+        })
+        .collect();
+    app.data.set_albums(albums);
+    let tracks: Vec<Track> = (1..=20).map(|n| track(&format!("t-{n}"), "al-0", n)).collect();
+    app.data.set_all_tracks(tracks.clone());
+    app.rebuild_search();
+    app.data.playlists = vec![subsonic::Playlist { id: "pl-1".into(), name: "Late night".into(), song_count: 3, duration: 900, cover_art: None, owner: None }];
+    app.data.playlist_tracks.insert("pl-1".into(), Arc::new(tracks[..3].to_vec()));
+    app.data.credited.insert("Scott LaFaro".into(), vec!["al-1".into(), "al-0".into()]);
+    app.player.queue.play_now(tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
+    app.player.queue.play_next(tracks[..2].to_vec());
+    app.player.queue.add(tracks[5..15].to_vec());
+    app
+}
+
+fn frame(ctx: &egui::Context, app: &mut OndApp, events: Vec<egui::Event>) {
+    let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), events, ..Default::default() };
+    let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
+    // No renderer here to upload textures to.
+    out.textures_delta.clear();
+}
+
+/// A frame at `time` seconds, so colors can be seen easing.
+fn frame_at(ctx: &egui::Context, app: &mut OndApp, time: f64) {
+    let input =
+        egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), time: Some(time), ..Default::default() };
+    let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
+    out.textures_delta.clear();
+}
+
+#[test]
+fn quitting_waits_only_a_moment_for_blocking_work() {
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).build().unwrap();
+    let (started_tx, started) = channel();
+    let (release, stuck) = channel::<()>();
+    // A disk or keychain call that doesn't come back.
+    rt.spawn_blocking(move || {
+        let _ = started_tx.send(());
+        let _ = stuck.recv_timeout(Duration::from_secs(60));
+    });
+    started.recv().unwrap();
+    // The wait is a field so the test can hold its own: 50 ms, and the drop
+    // must be back well before the second is up.
+    let app_rt = AppRuntime { rt: Some(rt), wait: Duration::from_millis(50) };
+    let t = std::time::Instant::now();
+    drop(app_rt);
+    assert!(t.elapsed() < Duration::from_secs(1), "quitting waited {:?}", t.elapsed());
+    drop(release);
+}
+
+#[test]
+fn an_album_page_takes_its_own_colors_and_everything_else_the_playing_ones() {
+    use crate::visuals::colors::Tints;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let solid = |c: egui::Color32| egui::ColorImage::new([32, 32], vec![c; 32 * 32]);
+    app.art.preload("al-0", solid(egui::Color32::from_rgb(170, 30, 40)));
+    app.art.preload("al-5", solid(egui::Color32::from_rgb(30, 60, 170)));
+    let playing: Vec<Track> = (1..=3).map(|n| track(&format!("t-{n}"), "al-0", n)).collect();
+    app.player.queue.play_now(playing, 0, Source::Added);
+    app.ui.nav.go(Route::Album("al-5".into()));
+    let time = std::cell::Cell::new(0.0);
+    let settle = |app: &mut OndApp| {
+        // The covers' looks are worked out in the background.
+        let deadline = testkit::Deadline::new();
+        while ["al-0", "al-5"].iter().any(|c| app.art.look(c).is_none()) {
+            assert!(!deadline.passed(), "the looks never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+            app.art.poll();
+        }
+        for _ in 0..4 {
+            time.set(time.get() + 0.5);
+            frame_at(&ctx, app, time.get());
+        }
+    };
+    let tints_of = |app: &mut OndApp, cover: &str| {
+        let look = app.art.look(cover).unwrap();
+        app.ui.tint_cache.cover(cover, look.palette.as_ref())
+    };
+    let shown = |ctx: &egui::Context| ctx.data(|d| d.get_temp::<Tints>(crate::visuals::colors::id())).unwrap();
+    let dark = ctx.global_style().visuals.dark_mode;
+
+    // Not adapting: the chosen accent everywhere, album page or not.
+    app.prefs.edit(|s| s.accent = theme::Accent::Teal);
+    settle(&mut app);
+    let teal = Tints::base(theme::Accent::Teal);
+    assert_eq!((shown(&ctx), app.ui.page_tints), (teal, Some(teal)));
+    assert_eq!(Tokens::of_ctx(&ctx).accent, teal.of(dark).accent);
+
+    // Adapting: the window in the playing album's colors, the page in its own.
+    app.prefs.edit(|s| s.adapt_colors = true);
+    settle(&mut app);
+    let (red, blue) = (tints_of(&mut app, "al-0"), tints_of(&mut app, "al-5"));
+    assert_ne!(red, blue);
+    assert_ne!(red.of(dark).accent, teal.of(dark).accent);
+    assert_eq!(shown(&ctx), red, "the now-playing display and the rest follow the playing track");
+    assert_eq!(app.ui.page_tints, Some(blue), "the album page follows its album");
+    // Drawing the page swaps its colors in, and puts the playing ones back after.
+    let inside = theme::with_tints(&ctx, app.ui.page_tints, || Tokens::of_ctx(&ctx).accent);
+    assert_eq!(inside, blue.of(dark).accent);
+    assert_eq!(Tokens::of_ctx(&ctx).accent, red.of(dark).accent);
+
+    // Leaving the page: its colors ease back to the playing album's.
+    app.ui.nav.go(Route::Recent);
+    for _ in 0..2 {
+        time.set(time.get() + 0.3);
+        frame_at(&ctx, &mut app, time.get());
+    }
+    let easing = app.ui.page_tints.unwrap();
+    assert!(easing != blue && easing != red, "on the way back");
+    settle(&mut app);
+    assert_eq!(app.ui.page_tints, Some(red));
+
+    // Back to the album: no wait, its colors are already known.
+    app.ui.nav.go(Route::Album("al-5".into()));
+    frame_at(&ctx, &mut app, time.get() + 0.01);
+    assert_eq!(app.ui.page_tint.target(), Some(blue), "heading for the album's colors at once");
+}
+
+#[test]
+fn repeat_queue_with_nothing_playable_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.session.online = false;
+    app.player.queue.end = crate::queue::EndAction::RepeatQueue;
+    let pass = app.player.queue.pass_len();
+    app.start_current();
+    assert!(app.player.queue.history.len() <= 2 * pass, "history grew to {}", app.player.queue.history.len());
+    assert_eq!(app.ui.toasts.texts().last().copied(), Some("Nothing in the queue is downloaded"));
+}
+
+#[test]
+fn every_view_draws() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    // Something loved of each kind, so Favorites' tabs have lists to draw.
+    let loved = crate::favorites::Starred {
+        songs: app.data.tracks.all[..4].to_vec(),
+        albums: vec!["al-0".into(), "al-3".into()],
+        artists: vec![("ar-1".into(), "Bill Evans Trio".into())],
+    };
+    app.favorites.load(loved, Vec::new());
+    let routes = [
+        Route::Recent,
+        Route::Albums,
+        Route::Artists,
+        Route::Artist { name: "Scott LaFaro".into(), id: None },
+        Route::Artist { name: "Bill Evans Trio".into(), id: None },
+        Route::Album("al-0".into()),
+        Route::Album("al-missing".into()),
+        Route::Playlist { id: "pl-1".into(), name: "Late night".into() },
+        Route::Filter { kind: FilterKind::Genre, value: "Cool Jazz".into() },
+        Route::Filter { kind: FilterKind::Label, value: "Nobody".into() },
+        Route::Favorites,
+        Route::Favorites,
+        Route::Favorites,
+        Route::Offline,
+        Route::Songs,
+    ];
+    let mut tabs = [favorites_page::FavTab::Songs, favorites_page::FavTab::Albums, favorites_page::FavTab::Artists].into_iter();
+    for (k, r) in routes.into_iter().enumerate() {
+        if r == Route::Favorites {
+            app.ui.fav_tab = tabs.next().expect("a tab for each visit");
+        }
+        app.ui.nav.go(r);
+        // Hover somewhere different each time so hover-only details draw too.
+        let at = egui::pos2(300.0 + 37.0 * k as f32, 180.0 + 41.0 * k as f32);
+        for _ in 0..2 {
+            frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        }
+    }
+    app.ui.queue_ui.tab = QueueTab::History;
+    app.player.queue.advance();
+    frame(&ctx, &mut app, Vec::new());
+    app.prefs.edit(|s| s.show_queue = false);
+    frame(&ctx, &mut app, Vec::new());
+    app.ui.nav.go(Route::Album("al-0".into()));
+    frame(&ctx, &mut app, Vec::new());
+    assert_eq!(app.ui.nav.trail(), [&Route::Songs, &Route::Album("al-0".into())]);
+}
+
+#[test]
+fn palette_opens_searches_and_queues() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let cmd_k = egui::Event::Key { key: egui::Key::K, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+    frame(&ctx, &mut app, vec![cmd_k]);
+    assert!(app.ui.palette.is_some());
+    // The field takes focus on the palette's first frame; type after that.
+    frame(&ctx, &mut app, Vec::new());
+    frame(&ctx, &mut app, vec![egui::Event::Text("album 12".into())]);
+    frame(&ctx, &mut app, Vec::new());
+    assert_eq!(app.ui.palette.as_ref().map(|p| p.state.query.as_str()), Some("album 12"));
+    let before = app.player.queue.upcoming.len();
+    let alt_enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
+    frame(&ctx, &mut app, vec![alt_enter]);
+    assert!(app.ui.palette.is_none());
+    // Album 12's tracks aren't loaded, so the action waits for them...
+    assert_eq!(app.player.queue.upcoming.len(), before);
+    assert_eq!(app.pending.len(), 1);
+    // ...and runs when they arrive.
+    let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
+    app.handle(LibraryMsg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
+    assert_eq!(app.player.queue.upcoming.len(), before + 3);
+    assert!(app.pending.is_empty());
+    // Played next: at the top of the queue.
+    assert_eq!(app.player.queue.upcoming[0].track.id, "x-1");
+}
+
+/// Handles what the bridge sends until `done` says so.
+fn until(app: &mut OndApp, mut done: impl FnMut(&OndApp) -> bool) {
+    let deadline = testkit::Deadline::new();
+    while !done(app) {
+        assert!(!deadline.passed(), "timed out waiting on the bridge");
+        match app.inbox.recv_timeout(Duration::from_millis(20)) {
+            Ok(msg) => app.handle(msg),
+            Err(_) => continue,
+        }
+    }
+}
+
+#[test]
+fn the_search_index_is_built_off_the_ui_thread_and_stale_builds_are_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let album = |id: &str, name: &str| Album {
+        id: id.into(),
+        name: name.into(),
+        sort: None,
+        artist: Some("Bill Evans".into()),
+        artist_ref: None,
+        year: None,
+        genre: None,
+        song_count: 0,
+        duration_secs: 0,
+        cover_art: None,
+        created: None,
+        labels: Vec::new(),
+        genres: Vec::new(),
+        artists: Vec::new(),
+    };
+    app.handle(LibraryMsg::Albums(vec![album("a1", "Portrait in Jazz")]));
+    app.after_messages();
+    assert!(!app.search.stale, "the rebuild was handed off");
+    let first = app.search.generation;
+    // Before the first build lands, the library changes again.
+    app.handle(LibraryMsg::Albums(vec![album("a1", "Portrait in Jazz"), album("a2", "Explorations")]));
+    app.after_messages();
+    assert_eq!(app.search.generation, first + 1);
+    until(&mut app, |a| a.search.index.as_ref().is_some_and(|s| s.albums.len() == 2));
+    // The older build, if it lands now, doesn't replace the newer index.
+    let stale = SearchIndex::new(&[album("x", "Old")], &[], &[]);
+    app.handle(LibraryMsg::SearchIndex { generation: first, index: Box::new(stale) });
+    assert_eq!(app.search.index.as_ref().map(|s| s.albums.len()), Some(2));
+}
+
+#[test]
+fn an_opened_album_is_searchable_before_the_next_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    // Only the index builds: the start-up read of the (empty) library
+    // mustn't replace the fixture meanwhile.
+    let rebuilt = |app: &mut OndApp| {
+        app.after_messages();
+        let deadline = testkit::Deadline::new();
+        loop {
+            assert!(!deadline.passed(), "no index arrived");
+            if let Ok(m @ Msg::Library(LibraryMsg::SearchIndex { .. })) = app.inbox.recv_timeout(Duration::from_millis(20)) {
+                app.handle(m);
+                return;
+            }
+        }
+    };
+    let mut fresh = track("new-1", "al-7", 1);
+    fresh.title = "Peri's Scope".into();
+    // Opening the album brought a song the last sync didn't have.
+    app.handle(LibraryMsg::Tracks { album_id: "al-7".into(), tracks: vec![fresh], fresh: true });
+    rebuilt(&mut app);
+    assert!(app.search.index.as_ref().is_some_and(|s| s.tracks.iter().any(|t| t.id == "new-1")));
+    // A refreshed album row is picked up too.
+    let mut row = app.data.album("al-7").unwrap().clone();
+    row.name = "Explorations".into();
+    app.handle(LibraryMsg::AlbumUpdated(Box::new(row)));
+    rebuilt(&mut app);
+    assert!(app.search.index.as_ref().is_some_and(|s| s.albums.iter().any(|al| al.title == "Explorations")));
+}
+
+#[test]
+fn a_load_that_fails_drops_what_waited_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert!(app.session.client.is_none(), "offline: nothing can be fetched");
+    let before = app.player.queue.upcoming.len();
+    // Album 12 isn't stored either: the play and the pin both wait, once each.
+    app.apply(Action::Album("al-12".into(), QueueAction::Add));
+    app.apply(Action::Album("al-12".into(), QueueAction::PlayNext));
+    app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-12".into()), true)));
+    app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-12".into()), true)));
+    assert_eq!(app.pending.len(), 1, "the newer action replaced the older");
+    assert_eq!(app.downloads.pending_pins.len(), 1);
+    // The load fails: both give up.
+    until(&mut app, |a| a.pending.is_empty() && a.downloads.pending_pins.is_empty());
+    // The tracks turn up later anyway (browsing, a sync): nothing plays or pins.
+    let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("x-{n}"), "al-12", n)).collect();
+    app.handle(LibraryMsg::Tracks { album_id: "al-12".into(), tracks, fresh: true });
+    assert_eq!(app.player.queue.upcoming.len(), before, "a stale action played");
+    assert!(!app.downloads.store().is_pinned(&Pin::Album("al-12".into())), "a stale pin was made");
+}
+
+#[test]
+fn a_failed_album_sync_stops_saying_syncing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.session.online = true;
+    app.sync.albums = true;
+    app.handle(LibraryMsg::AlbumSyncDone(Err(Failure::Network("sync: timed out".into()))));
+    assert!(!app.sync.albums && !app.sync.tracks);
+    assert!(app.ui.toasts.texts().contains(&"sync: timed out"));
+    // While an album sync runs, Sync now doesn't start a second one.
+    app.sync.albums = true;
+    app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+    app.sync.label = "syncing… 500".into();
+    app.apply(Action::SyncNow);
+    assert_eq!(app.sync.label, "syncing… 500", "a second album sync started");
+}
+
+#[test]
+fn window_modes_draw_and_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    frame(&ctx, &mut app, vec![key(egui::Key::M, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    assert_eq!(app.prefs_now().mode, WindowMode::Mini);
+    // Hovered (overlay drawn) and not.
+    for at in [egui::pos2(100.0, 100.0), egui::pos2(-10.0, -10.0)] {
+        for _ in 0..3 {
+            frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        }
+    }
+    frame(&ctx, &mut app, vec![key(egui::Key::Num2, egui::Modifiers::COMMAND | egui::Modifiers::ALT)]);
+    assert_eq!(app.prefs_now().mode, WindowMode::Player);
+    for _ in 0..2 {
+        frame(&ctx, &mut app, vec![egui::Event::PointerMoved(egui::pos2(120.0, 60.0))]);
+    }
+    // Browsing goes back to the full window.
+    app.actions.push(Action::Go(Route::Album("al-0".into())));
+    frame(&ctx, &mut app, Vec::new());
+    assert_eq!(app.prefs_now().mode, WindowMode::Full);
+    // ⌘K from a small mode does too.
+    app.edit_windows(|w| w.mode = WindowMode::Player);
+    frame(&ctx, &mut app, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    assert_eq!(app.prefs_now().mode, WindowMode::Full);
+    assert!(app.ui.palette.is_some());
+}
+
+#[test]
+fn lyrics_go_to_the_sidebar_or_the_players_drawer() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    frame(&ctx, &mut app, Vec::new());
+    // Full window: the sidebar switches to its Lyrics tab, and back.
+    app.apply(Action::Lyrics);
+    assert_eq!(app.ui.queue_ui.tab, QueueTab::Lyrics);
+    app.apply(Action::Lyrics);
+    assert_eq!(app.ui.queue_ui.tab, QueueTab::UpNext);
+    // The artwork toggles to the Player (nothing used yet), where ⌥⌘L opens the drawer.
+    app.apply(Action::Window(WindowAction::TogglePlayer));
+    assert_eq!(app.prefs_now().mode, WindowMode::Player);
+    app.apply(Action::Lyrics);
+    frame(&ctx, &mut app, Vec::new());
+    assert!(app.prefs_now().lyrics_open);
+    // Mini, then back to full: the artwork now toggles to Mini.
+    app.apply(Action::Window(WindowAction::ToggleMini));
+    app.apply(Action::Window(WindowAction::SetMode(WindowMode::Full)));
+    app.apply(Action::Window(WindowAction::TogglePlayer));
+    assert_eq!(app.prefs_now().mode, WindowMode::Mini);
+    // Lyrics from Mini open the Player with its drawer.
+    app.edit_windows(|w| w.lyrics_open = false);
+    app.apply(Action::Lyrics);
+    assert_eq!(app.prefs_now().mode, WindowMode::Player);
+    assert!(app.prefs_now().lyrics_open);
+    for _ in 0..2 {
+        frame(&ctx, &mut app, Vec::new());
+    }
+}
+
+/// Makes track `id` downloaded, the way a finished stream would: via a file
+/// the stream cache "has", which the store links in.
+fn download(app: &mut OndApp, dir: &std::path::Path, id: &str) {
+    let file = dir.join(format!("cached-{id}.flac"));
+    std::fs::write(&file, b"fLaC").unwrap();
+    let want = id.to_owned();
+    app.downloads.store().set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
+    let t = app.data.tracks.all.iter().find(|t| t.id == id).unwrap().clone();
+    app.apply(Action::Offline(OfflineAction::Keep(Keep::Tracks(vec![t]), true)));
+    let start = std::time::Instant::now();
+    while !app.downloads.store().snapshot().is_done(id) {
+        assert!(start.elapsed() < Duration::from_secs(5), "download of {id}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.downloads.snap = app.downloads.store().snapshot();
+}
+
+#[test]
+fn every_startup_notice_is_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("library.redb"), b"not a database").unwrap();
+    std::fs::write(dir.path().join("settings.json"), b"{ not json").unwrap();
+    let ctx = egui::Context::default();
+    let app = app(&ctx, dir.path());
+    let shown = app.ui.toasts.texts();
+    assert!(shown.iter().any(|t| t.starts_with("Your library database couldn't be read")), "{shown:?}");
+    assert!(shown.iter().any(|t| t.starts_with("Your settings couldn't be read")), "{shown:?}");
+}
+
+/// Settings opens on the first tab. The one it opened on before is gone: its
+/// two rows live on Playback and About now.
+#[test]
+fn settings_opens_on_its_first_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert_eq!(settings_page::Section::default(), settings_page::Section::ALL[0], "the tab with no choice yet is the first one listed");
+    app.apply(Action::OpenSettings(app.ui.settings_section));
+    frame(&ctx, &mut app, Vec::new());
+    assert_eq!(app.ui.settings_section, settings_page::Section::Appearance, "Settings opens on Appearance");
+    assert!(matches!(app.ui.overlay, Some(Overlay::Settings)), "and the window is open");
+}
+
+#[test]
+fn another_account_gets_its_own_library_and_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
+    let connect = |app: &mut OndApp, user: &str, new_account: bool| {
+        let session = app.bridge.session();
+        app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account, password_saved: true });
+    };
+    connect(&mut app, "luke", false);
+    store_opened(&mut app);
+    download(&mut app, dir.path(), "t-2");
+    assert!(app.downloads.snap.is_done("t-2"));
+
+    // Someone else signs in: the shown library goes, and so do the queue
+    // and the old account's downloads (not deleted, just not theirs).
+    app.player.queue = crate::queue::Queue::default();
+    let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..2].to_vec();
+    app.queue_tracks(tracks, Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
+    connect(&mut app, "sam", true);
+    assert!(app.data.albums.is_empty() && app.data.tracks.all.is_empty());
+    assert!(app.player.queue.current.is_none());
+    assert!(app.downloads.snap.pins.is_empty(), "nothing shows as downloaded while sam's store opens");
+    store_opened(&mut app);
+    assert!(app.downloads.snap.pins.is_empty(), "sam's store starts empty");
+    assert!(!app.downloads.store().snapshot().is_done("t-2"));
+
+    // Back to the first account: its downloads are where they were.
+    connect(&mut app, "luke", true);
+    store_opened(&mut app);
+    assert!(app.downloads.store().snapshot().is_done("t-2"));
+}
+
+/// Waits for the offline store opening in the background, handling only
+/// its messages: the rest go back in the inbox, in order, behind them.
+fn store_opened(app: &mut OndApp) {
+    let deadline = testkit::Deadline::new();
+    let mut others = Vec::new();
+    while app.downloads.store.is_none() || app.downloads.opening {
+        assert!(!deadline.passed(), "the offline store never opened");
+        match app.inbox.recv_timeout(Duration::from_millis(20)) {
+            Ok(m @ Msg::Offline(OfflineMsg::Store { .. } | OfflineMsg::Moving(_) | OfflineMsg::Moved(_))) => app.handle(m),
+            Ok(m) => others.push(m),
+            Err(_) => {}
+        }
+    }
+    for m in others {
+        app.bridge.post(m);
+    }
+}
+
+#[test]
+fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
+    let connect = |app: &mut OndApp, user: &str| {
+        let session = app.bridge.session();
+        app.handle(Msg::Connected { session, client: client(), settings: login(user), server: "test".into(), new_account: false, password_saved: true });
+    };
+    connect(&mut app, "luke");
+    // Signed in as someone else before luke's store came: it's dropped unused.
+    connect(&mut app, "sam");
+    assert!(app.downloads.store.is_none(), "opened on the UI thread");
+    // Asked for while it opens: done once it's open.
+    let t = app.data.tracks.all.iter().find(|t| t.id == "t-3").unwrap().clone();
+    app.apply(Action::Offline(OfflineAction::Keep(Keep::Tracks(vec![t]), true)));
+    app.apply(Action::Offline(OfflineAction::Pause(true)));
+    store_opened(&mut app);
+    let sam = login("sam").account_id().unwrap();
+    assert!(app.downloads.store().dir().ends_with(format!("{sam:08x}")), "{}", app.downloads.store().dir().display());
+    for a in std::mem::take(&mut app.actions) {
+        app.apply(a);
+    }
+    assert!(app.downloads.store().is_pinned(&Pin::Track("t-3".into())));
+    assert!(app.downloads.store().snapshot().paused);
+}
+
+#[test]
+fn a_downloads_folder_set_in_managed_json_moves_the_downloads_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, chosen) = (dir.path().join("old"), dir.path().join("music"));
+    let account = Settings { server: "http://music.local".into(), username: "luke".into(), signed_out: true, ..Default::default() };
+    let store = old.join(format!("{:08x}", account.account_id().unwrap()));
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("t-2.flac"), b"fLaC").unwrap();
+    let saved = Settings { offline_dir: Some(old.clone()), ..account };
+    std::fs::write(dir.path().join("settings.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
+    std::fs::write(dir.path().join("managed.json"), serde_json::json!({ "offline_dir": chosen }).to_string()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    store_opened(&mut app);
+    // A folder of Ond's own inside the one set, as when picked in Settings.
+    let new = chosen.join("Ond Offline").join(store.file_name().unwrap());
+    assert_eq!(app.downloads.store().dir(), new);
+    assert!(new.join("t-2.flac").exists());
+    assert!(!old.exists());
+}
+
+#[test]
+fn downloads_moved_to_another_folder_move_in_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+    let account = Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() };
+    let store = old.join(format!("{:08x}", account.account_id().unwrap()));
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("t-2.flac"), b"fLaC").unwrap();
+    let mut saved = Settings { offline_dir: Some(new.clone()), offline_move_from: Some(old.clone()), ..account };
+    saved.signed_out = true;
+    std::fs::write(dir.path().join("settings.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert!(app.downloads.store.is_none(), "the move doesn't hold up the first frame");
+    assert!(app.ui.toasts.texts().iter().any(|t| t.starts_with("Moving downloads to")), "{:?}", app.ui.toasts.texts());
+    store_opened(&mut app);
+    assert_eq!(app.downloads.store().dir(), new.join(store.file_name().unwrap()));
+    assert!(new.join(store.file_name().unwrap()).join("t-2.flac").exists());
+    assert!(!old.exists());
+    assert_eq!(app.prefs.snapshot().offline_move_from, None, "done, so not moved again");
+    let shown = app.ui.toasts.texts();
+    assert!(shown.iter().any(|t| t.starts_with("Downloads moved to")), "{shown:?}");
+    assert!(!shown.iter().any(|t| t.starts_with("Moving downloads")), "the progress notice gives way: {shown:?}");
+}
+
+#[test]
+fn offline_the_queue_plays_only_what_is_downloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    download(&mut app, dir.path(), "t-2");
+    assert!(!app.session.online);
+    let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..4].to_vec();
+    assert!(app.source(0, None, &tracks[0], None).is_none(), "offline and not downloaded: nothing to play");
+    let local = app.source(0, None, &tracks[1], None).unwrap();
+    assert!(local.url.starts_with("file://") && local.url.ends_with("t-2.flac"), "{}", local.url);
+
+    // Playing from the top skips to the downloaded song and says so.
+    app.player.queue = crate::queue::Queue::default();
+    app.queue_tracks(tracks.clone(), Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
+    assert_eq!(app.player.queue.current.as_ref().unwrap().track.id, "t-2");
+    assert_eq!(app.ui.toasts.texts().last().copied(), Some("Skipped 1 song that isn't downloaded"));
+    // Nothing after it can play, so the engine isn't told about a next track.
+    assert_eq!(app.player.sent_next(), None);
+    // When it ends, the rest is skipped and playback stops cleanly.
+    let token = app.player.queue.current.as_ref().unwrap().uid;
+    app.handle_engine(audio::Event::Ended { track_id: "t-2".into(), token });
+    assert!(app.player.queue.current.is_none());
+
+    // Back online: everything plays again, downloaded songs still from disk.
+    let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    assert!(app.session.online);
+    assert!(app.source(0, None, &tracks[0], None).unwrap().url.contains("/rest/stream"));
+    assert!(app.source(0, None, &tracks[1], None).unwrap().url.starts_with("file://"));
+}
+
+#[test]
+fn errors_in_one_batch_are_all_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.session.online = true;
+    // Two failures handled before the next frame: both get a toast.
+    app.handle(Msg::Error(Failure::Network("playlists: timed out".into())));
+    app.handle(Msg::Error(Failure::Network("favorites: timed out".into())));
+    let shown = app.ui.toasts.texts();
+    assert!(shown.contains(&"playlists: timed out") && shown.contains(&"favorites: timed out"), "{shown:?}");
+}
+
+#[test]
+fn offline_a_network_failure_is_quiet_and_a_local_one_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert!(!app.session.online);
+    // The offline pill says it already.
+    app.handle(Msg::Error(Failure::Network("Couldn't load playlists: timed out".into())));
+    // Nothing to do with the server, so worth saying either way.
+    app.handle(Msg::Error(Failure::Local("Couldn't read the library: disk I/O".into())));
+    assert_eq!(app.ui.toasts.texts(), ["Couldn't read the library: disk I/O"]);
+}
+
+#[test]
+fn a_library_analysis_resumes_once_the_server_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    // Held, so what's queued stays queued.
+    app.analysis.runner.set_paused(true);
+    app.prefs.edit(|s| s.analysis_resume = true);
+    // Startup: the library and the stored results load well before the
+    // server answers (or offline, never). Nothing has run, so nothing finished.
+    app.handle(AnalysisMsg::Loaded(Vec::new()));
+    app.handle(LibraryMsg::AllTracks(Box::new(TrackSet::new(app.data.tracks.all.to_vec()))));
+    for _ in 0..3 {
+        app.check_library_analysis();
+    }
+    assert!(app.prefs_now().analysis_resume, "the run is still due");
+    assert!(!app.analysis.runner.progress().active());
+
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    assert_eq!(app.analysis.runner.progress().total, 20, "the whole library is queued");
+    app.check_library_analysis();
+    assert!(app.prefs_now().analysis_resume);
+
+    // Signing out drops the old account's queue, but the run is still due for the next.
+    app.sign_out();
+    assert!(!app.analysis.runner.progress().active());
+    app.check_library_analysis();
+    assert!(app.prefs_now().analysis_resume);
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    assert_eq!(app.analysis.runner.progress().total, 20);
+
+    // The queue runs dry: done, and not resumed at the next launch.
+    app.analysis.runner.clear();
+    app.check_library_analysis();
+    assert!(!app.prefs_now().analysis_resume);
+}
+
+#[test]
+fn signing_out_forgets_lyrics_and_song_stats() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    let t = app.data.tracks.all[0].clone();
+    // Asked for, still on their way when the user signs out.
+    app.apply(Action::NeedLyrics(Box::new(t.clone())));
+    app.apply(Action::NeedSongStats(t.id.clone()));
+    assert!(matches!(app.lyrics.get(&t.id), Some(crate::lyrics::Fetch::Loading)));
+    assert!(app.song_stats.contains_key(&t.id));
+    app.sign_out();
+    assert!(app.lyrics.is_empty() && app.song_stats.is_empty(), "nothing left loading for good, nor for the next account");
+    // Signed in again: asked for afresh.
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    app.apply(Action::NeedLyrics(Box::new(t.clone())));
+    assert!(matches!(app.lyrics.get(&t.id), Some(crate::lyrics::Fetch::Loading)));
+    // Another account: what was fetched for the last one goes too.
+    app.handle(Msg::Lyrics { track_id: t.id.clone(), lyrics: None });
+    app.handle(Msg::SongStats { track_id: t.id.clone(), stats: None });
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: true,
+        password_saved: true,
+    });
+    assert!(app.lyrics.is_empty() && app.song_stats.is_empty());
+}
+
+#[test]
+fn working_offline_forgets_lyrics_and_song_stats_still_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    let (a, b) = (app.data.tracks.all[0].clone(), app.data.tracks.all[1].clone());
+    app.apply(Action::NeedLyrics(Box::new(a.clone())));
+    app.apply(Action::NeedSongStats(a.id.clone()));
+    // One song's came back already.
+    app.apply(Action::NeedLyrics(Box::new(b.clone())));
+    app.apply(Action::NeedSongStats(b.id.clone()));
+    app.handle(Msg::Lyrics { track_id: b.id.clone(), lyrics: None });
+    app.handle(Msg::SongStats { track_id: b.id.clone(), stats: Some(SongStats { plays: Some(3), last_played: None }) });
+    // Working offline ends the session, so `a`'s fetches deliver nothing.
+    app.set_work_offline(true);
+    assert!(!app.lyrics.contains_key(&a.id) && !app.song_stats.contains_key(&a.id), "nothing stays loading for good");
+    assert_eq!(app.lyrics.get(&b.id), Some(&crate::lyrics::Fetch::Done(None)), "what arrived stays");
+    assert!(matches!(app.song_stats.get(&b.id), Some(Some(_))));
+}
+
+#[test]
+fn another_account_ends_the_old_accounts_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    // The same account: the library read at start-up still counts.
+    let first = app.bridge.session();
+    app.handle(Msg::Connected { session: first, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    assert_eq!(app.bridge.session(), first);
+    // Signed in again as someone else, without signing out first: the old
+    // account's work in flight (its library read, its sync) is now stale.
+    app.handle(Msg::Connected { session: first, client: client(), settings: Box::default(), server: "test".into(), new_account: true, password_saved: true });
+    assert_ne!(app.bridge.session(), first);
+    assert!(app.session.online && app.data.albums.is_empty());
+}
+
+#[test]
+fn a_password_the_keychain_refused_is_mentioned() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: false,
+    });
+    assert!(app.ui.toasts.texts().iter().any(|t| t.contains("keychain")), "{:?}", app.ui.toasts.texts());
+}
+
+#[test]
+fn playing_an_album_stored_only_in_part_waits_for_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let all: Vec<Track> = (1..=20).map(|n| track(&format!("p-{n}"), "al-3", n)).collect();
+    // A sync cut short stored 5 of its 20 songs.
+    app.data.tracks.set_album("al-3", all[..5].to_vec());
+    app.player.queue = crate::queue::Queue::default();
+    // Queued (offline nothing here is downloaded, so it's all skipped into history).
+    let queued = |app: &OndApp| app.player.queue.history.len() + app.player.queue.pass_len();
+
+    // Offline: what's stored is all there is.
+    app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
+    assert_eq!(queued(&app), 5);
+
+    // Online: the server's listing, not the stored part.
+    app.player.queue = crate::queue::Queue::default();
+    app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+    app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
+    assert_eq!(queued(&app), 0, "waits");
+    // The stored copy arrives first: still waiting.
+    app.handle(LibraryMsg::Tracks { album_id: "al-3".into(), tracks: all[..5].to_vec(), fresh: false });
+    assert_eq!(queued(&app), 0);
+    app.handle(LibraryMsg::Tracks { album_id: "al-3".into(), tracks: all.clone(), fresh: true });
+    assert_eq!(queued(&app), 20);
+    assert!(app.pending.is_empty());
+
+    // The server can't be reached: play what's stored rather than nothing.
+    app.player.queue = crate::queue::Queue::default();
+    app.data.tracks.set_album("al-3", all[..5].to_vec());
+    app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
+    app.handle(LibraryMsg::LoadFailed { key: ListKey::Album("al-3".into()), error: Some(Failure::Network("timed out".into())) });
+    assert_eq!(queued(&app), 5);
+    assert!(app.pending.is_empty());
+
+    // A complete album plays at once.
+    app.player.queue = crate::queue::Queue::default();
+    app.apply(Action::Album("al-0".into(), QueueAction::Play { start: 0 }));
+    assert_eq!(queued(&app), 20);
+}
+
+#[test]
+fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    // Signed in, then the server went away: a reconnect loop is running.
+    let before = app.bridge.session();
+    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    assert!(app.session.online && app.session.client.is_some());
+    app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
+    assert!(app.session.unreachable);
+
+    app.sign_out();
+    assert!(app.login.is_some());
+    assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
+    assert_ne!(app.bridge.session(), before, "sign-out ends the session");
+
+    // The old loop reaches the server after all: stale, ignored.
+    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
+    assert!(app.login.is_some(), "still on the login screen");
+    assert!(app.session.client.is_none() && !app.session.online && !app.session.unreachable);
+
+    // A fresh sign-in in the new session works.
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    assert!(app.login.is_none() && app.session.online);
+}
+
+#[test]
+fn cancelling_a_sign_in_drops_what_the_connect_answers_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.login = Some(session::LoginForm { server: "http://127.0.0.1:9".into(), username: "u".into(), password: "p".into(), ..Default::default() });
+    let before = app.bridge.session();
+    app.apply(Action::SignIn);
+    assert!(app.login.as_ref().is_some_and(|f| f.busy));
+
+    app.apply(Action::CancelSignIn);
+    let form = app.login.as_ref().expect("still on the login screen");
+    assert!(!form.busy && form.error.is_none());
+    assert_eq!(form.password, "p", "kept, to try again as typed");
+    assert_ne!(app.bridge.session(), before, "the connect's session is over");
+
+    // The server answers at last, either way: stale, ignored.
+    app.handle(Msg::ConnectFailed { session: before, error: "The server didn't answer".into() });
+    app.handle(Msg::Connected { session: before, client: client(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    let form = app.login.as_ref().expect("still on the login screen");
+    assert!(!form.busy && form.error.is_none());
+    assert!(!app.session.online && app.session.client.is_none());
+}
+
+#[test]
+fn a_failed_connect_from_before_a_sign_out_leaves_the_next_sign_in_online() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = || subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    // A connect waits on a keychain prompt; meanwhile the user signs out and in again.
+    let before = app.bridge.session();
+    app.sign_out();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: client(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    assert!(app.login.is_none() && app.session.online);
+    // The prompt is answered "deny" at last: stale, ignored.
+    app.handle(Msg::ConnectFailed { session: before, error: "No saved password. Sign in again.".into() });
+    assert!(app.session.online && app.session.client.is_some(), "still online");
+    assert!(app.login.is_none() && app.session.sign_in.is_none());
+}
+
+#[test]
+fn a_play_or_pin_waiting_for_tracks_is_dropped_on_sign_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    // Album 5's tracks aren't loaded: the play and the pin wait for them.
+    app.apply(Action::Album("al-5".into(), QueueAction::Play { start: 0 }));
+    app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-5".into()), true)));
+    assert!(!app.pending.is_empty() && !app.downloads.pending_pins.is_empty());
+
+    app.sign_out();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client: subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    // Back in, the user opens the album page: its tracks load.
+    let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks, fresh: true });
+    assert!(app.player.queue.current.is_none() && app.player.queue.upcoming.is_empty(), "nothing plays");
+    assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())), "nor is it downloaded");
+}
+
+#[test]
+fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    // Album 5's tracks aren't loaded: the pin waits for them.
+    app.apply(Action::Offline(OfflineAction::Keep(Keep::Album("al-5".into()), true)));
+    assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
+    let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
+    assert!(app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
+    assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+    // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
+    app.downloads.snap = app.downloads.store().snapshot();
+    // Tiles find it by id, before and after the index catches up.
+    assert!(app.downloads.album_pin("al-5").is_some());
+    app.downloads.index_album_pins();
+    assert!(app.downloads.album_pin("al-5").is_some() && app.downloads.album_pin("al-0").is_none());
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks[..1].to_vec(), fresh: false });
+    // (The stored album now lists only y-1; a library-wide refresh sees that.)
+    let all = app.data.tracks.all.to_vec();
+    app.handle(LibraryMsg::AllTracks(Box::new(TrackSet::new(all))));
+    assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+    // The album changed on the server: the pin follows.
+    app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
+    assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
+    download(&mut app, dir.path(), "t-3");
+
+    for route in [Route::Offline, Route::Album("al-5".into()), Route::Album("al-0".into()), Route::Recent, Route::Songs] {
+        app.ui.nav.go(route);
+        for _ in 0..2 {
+            frame(&ctx, &mut app, vec![egui::Event::PointerMoved(egui::pos2(500.0, 300.0))]);
+        }
+    }
+    // ⇧⌘D on the album page toggles it.
+    app.ui.nav.go(Route::Album("al-5".into()));
+    let key =
+        egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT };
+    frame(&ctx, &mut app, vec![key]);
+    assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
+    assert!(app.downloads.store().is_pinned(&Pin::Track("t-3".into())));
+}
+
+#[test]
+fn gapless_start_advances_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let next = app.player.queue.peek_next().unwrap().clone();
+    let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+    let started = |i: &crate::queue::Item| audio::Event::TrackStarted { track_id: i.track.id.clone(), token: i.uid, format, gapless: true, restart: false };
+    app.handle_engine(started(&next));
+    assert_eq!(app.player.queue.current.as_ref().unwrap().uid, next.uid);
+    // A repeat of the same event (or the current track) changes nothing.
+    let upcoming = app.player.queue.upcoming.len();
+    app.handle_engine(started(&next));
+    assert_eq!(app.player.queue.upcoming.len(), upcoming);
+}
+
+#[test]
+fn the_playing_song_queued_next_still_advances_gaplessly() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+    let started = |i: &crate::queue::Item| audio::Event::TrackStarted { track_id: i.track.id.clone(), token: i.uid, format, gapless: true, restart: false };
+    // "Play next" on the song that's playing: the same track, a new queue item.
+    let playing = app.player.queue.current.clone().unwrap();
+    app.player.queue.clear();
+    app.player.queue.play_next(vec![playing.track.clone()]);
+    let copy = app.player.queue.peek_next().unwrap().clone();
+    assert_eq!(copy.track.id, playing.track.id);
+    assert_ne!(copy.uid, playing.uid);
+    app.handle_engine(started(&copy));
+    assert_eq!(app.player.queue.current.as_ref().unwrap().uid, copy.uid, "the queue moved to the copy");
+
+    // Repeat queue over a single item: each gapless start is the next pass.
+    app.player.queue = crate::queue::Queue::default();
+    app.player.queue.end = crate::queue::EndAction::RepeatQueue;
+    app.player.queue.play_now(vec![playing.track.clone()], 0, Source::Added);
+    let first = app.player.queue.current.clone().unwrap();
+    app.handle_engine(started(&first));
+    let second = app.player.queue.current.clone().unwrap();
+    assert_ne!(second.uid, first.uid, "a new pass began");
+    assert_eq!(app.player.queue.history.len(), 1);
+}
+
+#[test]
+fn a_lost_device_is_a_notice_and_its_return_an_offer_until_playing_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let dev = |uid: &str, name: &str| audio::DeviceInfo {
+        uid: uid.into(),
+        name: name.into(),
+        kind: audio::DeviceKind::Usb,
+        caps: Default::default(),
+        is_default: false,
+    };
+    let list = || vec![dev("spk", "Speakers"), dev("dac", "DAC")];
+    app.handle_engine(audio::Event::DeviceLost { name: "DAC".into() });
+    assert!(app.ui.toasts.texts().iter().any(|t| t.starts_with("DAC disconnected")), "{:?}", app.ui.toasts.texts());
+    app.handle_engine(audio::Event::DeviceReturned { uid: "dac".into(), name: "DAC".into() });
+    assert!(app.ui.toasts.texts().contains(&"DAC is back"));
+    // Something else playing changes nothing; playing through the DAC again ends the offer.
+    app.handle_engine(audio::Event::Devices { devices: list(), current: Some("spk".into()) });
+    assert!(app.ui.toasts.texts().contains(&"DAC is back"));
+    app.handle_engine(audio::Event::Devices { devices: list(), current: Some("dac".into()) });
+    assert!(!app.ui.toasts.texts().contains(&"DAC is back"));
+}
+
+#[test]
+fn choose_a_device_goes_back_to_the_device_last_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    assert!(app.output.following_system());
+    app.output.choose(Some("dac".into()), &app.engine);
+    assert!(!app.output.following_system());
+    app.output.choose(None, &app.engine);
+    assert!(app.output.following_system());
+    assert_eq!(app.prefs.get(|s| s.last_device.clone()).as_deref(), Some("dac"), "System output keeps the choice for later");
+    app.output.choose_a_device(&app.engine);
+    assert_eq!(app.prefs.get(|s| s.output_device.clone()).as_deref(), Some("dac"));
+}
+
+#[test]
+fn device_volume_reports_from_before_our_change_do_not_move_the_slider() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let v = |db: f32| audio::DeviceVolume { db, min_db: -60.0, max_db: 0.0, muted: Some(false) };
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-30.0))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-30.0));
+    app.output.set_device_volume(-20.0, &app.engine);
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-20.0), "shown at once");
+    // An earlier level still arriving: ours stays.
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-30.0))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-20.0));
+    // The device reports ours (near enough): settled, and later reports count again.
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-20.1))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-20.1));
+    app.output.handle(&audio::Event::DeviceVolume(Some(v(-25.0))));
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(-25.0), "the device's own knob moved it");
+    // Past the range: clamped before it's sent or shown.
+    app.output.set_device_volume(4.0, &app.engine);
+    assert_eq!(app.output.device_volume().map(|v| v.db), Some(0.0));
+    app.output.handle(&audio::Event::DeviceVolume(None));
+    assert_eq!(app.output.device_volume(), None, "the device was let go");
+}
+
+#[test]
+fn playing_something_new_can_ask_about_what_you_added() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.player.queue.prefs.on_play = crate::queue::OnPlay::Ask;
+    let added = app.player.queue.added_count();
+    assert!(added > 0, "the fixture queue has tracks the user added");
+    let current = app.player.queue.current.as_ref().map(|c| c.uid);
+    let new: Vec<Track> = (1..=3).map(|n| track(&format!("new-{n}"), "al-9", n)).collect();
+    let source = Source::Album { id: "al-9".into(), name: "Album 9".into() };
+
+    // Asks first; nothing plays yet.
+    app.queue_tracks(new.clone(), source.clone(), QueueAction::Play { start: 0 });
+    assert!(matches!(app.ui.overlay, Some(Overlay::KeepAdded { added: n, .. }) if n == added));
+    assert_eq!(app.player.queue.current.as_ref().map(|c| c.uid), current);
+
+    // Keep: the new album plays, what was added waits after it. (Offline,
+    // nothing here is downloaded, so everything is skipped through to
+    // history, in the order it would have played.)
+    let added_ids: Vec<String> = app.player.queue.upcoming.iter().filter(|i| i.source == Source::Added).map(|i| i.track.id.clone()).collect();
+    let played = |app: &OndApp, n: usize| -> Vec<String> { app.player.queue.history.iter().rev().take(n).rev().map(|i| i.track.id.clone()).collect() };
+    app.ui.overlay = None;
+    app.apply(Action::TracksAnswered { tracks: new.clone(), source: source.clone(), action: QueueAction::Play { start: 0 }, keep: true });
+    let mut expect: Vec<String> = vec!["new-1".into(), "new-2".into(), "new-3".into()];
+    expect.extend(added_ids);
+    assert_eq!(played(&app, expect.len()), expect);
+    assert_eq!(app.player.queue.prefs.on_play, crate::queue::OnPlay::Ask, "the answer is for this time only");
+
+    // Clear: only the new album plays.
+    app.player.queue.add(vec![track("z", "al-0", 1)]);
+    app.apply(Action::TracksAnswered { tracks: new, source, action: QueueAction::Play { start: 0 }, keep: false });
+    assert_eq!(played(&app, 4)[1..], ["new-1", "new-2", "new-3"]);
+    assert_eq!(app.player.queue.added_count(), 0);
+}
+
+#[test]
+fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.session.settings = Some(Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
+    app.session.connecting = true;
+    let t = app.data.tracks.all[0].clone();
+    let playable = |app: &OndApp| super::playable(&app.session, &app.downloads, &app.cache, app.output.transcode().as_ref(), &t);
+    assert!(playable(&app), "connecting counts as online");
+
+    app.handle(Msg::ConnectFailed { session: app.bridge.session(), error: "Wrong username or password.".into() });
+    assert!(app.login.is_none(), "the library stays up");
+    assert_eq!(app.session.sign_in.as_deref(), Some("Wrong username or password."));
+    assert!(!app.session.connecting && !playable(&app));
+    frame(&ctx, &mut app, Vec::new());
+
+    app.apply(Action::SignInAgain);
+    let form = app.login.as_ref().unwrap();
+    assert!(form.closable && form.username == "luke");
+    assert_eq!(form.error.as_deref(), Some("Wrong username or password."));
+    // A sign-in from the form that fails stays on it.
+    app.handle(Msg::ConnectFailed { session: app.bridge.session(), error: "Couldn't reach the server.".into() });
+    assert_eq!(app.login.as_ref().and_then(|f| f.error.as_deref()), Some("Couldn't reach the server."));
+
+    let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    app.handle(Msg::Connected {
+        session: app.bridge.session(),
+        client,
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    assert!(app.login.is_none() && app.session.sign_in.is_none() && app.session.online);
+}
+
+#[test]
+fn a_play_while_connecting_waits_then_skips_if_the_server_is_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.player.queue = crate::queue::Queue::default();
+    app.session.connecting = true;
+    let tracks: Vec<Track> = app.data.tracks.by_album["al-0"][..3].to_vec();
+    app.queue_tracks(tracks, Source::Album { id: "al-0".into(), name: "Album 0".into() }, QueueAction::Play { start: 0 });
+    assert!(app.player.held, "waits for the server");
+    assert!(app.ui.toasts.texts().is_empty(), "{:?}", app.ui.toasts.texts());
+
+    app.handle(Msg::Unreachable { session: app.bridge.session(), username: "u".into(), error: "gone".into() });
+    assert!(!app.player.held);
+    assert!(app.ui.toasts.texts().contains(&"Skipped 3 songs that aren't downloaded"), "{:?}", app.ui.toasts.texts());
+}
+
+#[test]
+fn saved_lists_fill_in_only_what_the_server_hasnt_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let pl = |id: &str| subsonic::Playlist { id: id.into(), name: id.into(), song_count: 0, duration: 0, cover_art: None, owner: None };
+    app.handle(LibraryMsg::Playlists(vec![pl("fresh")]));
+    app.handle(LibraryMsg::Saved(Box::new(crate::bridge::Saved { newest: Some(vec!["al-1".into()]), playlists: Some(vec![pl("saved")]), starred: None })));
+    assert_eq!(app.data.playlists.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["fresh"]);
+    assert_eq!(app.data.newest, ["al-1"]);
+}
+
+#[test]
+fn working_offline_stops_connecting_and_hides_what_cant_play() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let client = subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap();
+    let settings = Box::new(Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
+    app.handle(Msg::Connected { session: app.bridge.session(), client, settings, server: "test".into(), new_account: false, password_saved: true });
+    store_opened(&mut app);
+    download(&mut app, dir.path(), "t-2");
+
+    let before = app.bridge.session();
+    app.apply(Action::Offline(OfflineAction::WorkOffline(true)));
+    assert!(app.session.work_offline && app.prefs.snapshot().work_offline);
+    assert!(!app.session.online && app.session.client.is_none() && !app.session.connecting);
+    assert_ne!(app.bridge.session(), before, "connects in flight are dropped");
+    // An album opened now shows only what plays.
+    let tracks = app.data.tracks.by_album["al-0"].to_vec();
+    app.handle(LibraryMsg::Tracks { album_id: "al-0".into(), tracks, fresh: false });
+    assert_eq!(app.data.tracks.by_album["al-0"].iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-2"]);
+    frame(&ctx, &mut app, Vec::new());
+
+    app.apply(Action::Offline(OfflineAction::WorkOffline(false)));
+    assert!(!app.session.work_offline && app.session.connecting);
+}
+
+#[test]
+fn a_newer_release_shows_until_skipped_or_checking_is_off() {
+    use crate::settings::UpdateCheck;
+    use crate::updates::Version;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let v = Version::parse("99.0.0").unwrap();
+    app.handle(Msg::UpdateChecked(Ok(v)));
+    assert_eq!(app.update, Some(v));
+    frame(&ctx, &mut app, Vec::new());
+
+    app.apply(Action::Update(super::UpdateAction::Skip(v)));
+    assert_eq!(app.update, None);
+    assert_eq!(app.prefs.get(|s| s.skipped_update.clone()).as_deref(), Some("99.0.0"));
+    app.handle(Msg::UpdateChecked(Ok(v)));
+    assert_eq!(app.update, None, "a skipped version stays quiet");
+    assert_eq!(app.updates.latest, Some(v), "Settings › About still knows it");
+    let next = Version::parse("99.0.1").unwrap();
+    app.handle(Msg::UpdateChecked(Ok(next)));
+    assert_eq!(app.update, Some(next), "the next one shows");
+
+    app.update_check.store(true, std::sync::atomic::Ordering::Relaxed);
+    app.apply(Action::Update(super::UpdateAction::Check(UpdateCheck::Off)));
+    assert!(app.update.is_none() && !app.update_check.load(std::sync::atomic::Ordering::Relaxed));
+    app.apply(Action::Update(super::UpdateAction::Check(UpdateCheck::Notify)));
+    assert!(app.update_check.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
+fn check_now_reports_how_it_went() {
+    use crate::updates::Version;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.apply(Action::Update(super::UpdateAction::CheckNow));
+    assert!(app.updates.checking);
+    app.handle(Msg::UpdateChecked(Err("offline".into())));
+    assert!(!app.updates.checking);
+    assert_eq!(app.updates.error.as_deref(), Some("offline"));
+
+    app.handle(Msg::UpdateChecked(Ok(Version::current())));
+    assert!(app.updates.error.is_none() && app.updates.checked.is_some());
+    assert_eq!(app.update, None, "this version isn't an update");
+
+    // Notes for the version asked for land; late ones for another don't.
+    let v = Version::parse("99.0.0").unwrap();
+    app.updates.notes = Some((v, None));
+    app.handle(Msg::ReleaseNotes(Version::parse("98.0.0").unwrap(), Ok(Vec::new())));
+    assert!(app.updates.notes.as_ref().unwrap().1.is_none());
+    app.handle(Msg::ReleaseNotes(v, Ok(vec![crate::updates::Block::Heading("Opus".into())])));
+    assert!(matches!(&app.updates.notes, Some((_, Some(Ok(b)))) if b.len() == 1));
+}

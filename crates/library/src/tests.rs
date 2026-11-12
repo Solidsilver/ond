@@ -55,7 +55,7 @@ fn song(id: &str, album_id: &str, disc: u32, track: u32) -> subsonic::Song {
 }
 
 #[test]
-fn albums_sorted_by_artist_then_year() {
+fn albums_are_listed_by_artist_then_year() {
     let lib = Library::in_memory().unwrap();
     lib.upsert_albums([album("3", "Discovery", "Daft Punk", 2001), album("1", "Kind of Blue", "Miles Davis", 1959), album("2", "Homework", "Daft Punk", 1997)])
         .unwrap();
@@ -65,7 +65,7 @@ fn albums_sorted_by_artist_then_year() {
 }
 
 #[test]
-fn upsert_is_idempotent() {
+fn an_album_upserted_again_replaces_the_first_copy() {
     let lib = Library::in_memory().unwrap();
     lib.upsert_albums([album("1", "A", "X", 2000)]).unwrap();
     lib.upsert_albums([album("1", "A (Remaster)", "X", 2000)]).unwrap();
@@ -92,7 +92,7 @@ fn album_tracks_in_disc_track_order_and_replaced_on_resync() {
 }
 
 #[test]
-fn persists_to_disk() {
+fn a_library_reopened_from_its_file_keeps_what_was_written() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lib.redb");
     Library::open(&path).unwrap().upsert_albums([album("1", "A", "X", 2000)]).unwrap();
@@ -250,7 +250,7 @@ fn newer_schema_is_refused_not_destroyed() {
 }
 
 #[test]
-fn v1_rows_migrate_to_current() {
+fn a_v1_database_migrates_to_the_current_schema() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lib.redb");
     // Hand-build a v1 database: v1 rows and index entries, schema 1.
@@ -457,7 +457,7 @@ fn replace_artists_drops_stale_ones() {
 }
 
 #[test]
-fn meta_values_round_trip() {
+fn a_meta_value_reads_back_as_written_and_clears() {
     let lib = Library::in_memory().unwrap();
     assert_eq!(lib.meta("bulk_offset").unwrap(), None);
     lib.set_meta("bulk_offset", Some(1500)).unwrap();

@@ -1,12 +1,16 @@
 //! HTTP helpers shared by everything that downloads files from the server: the
 //! stream cache, offline downloads, and anything else fetching a whole track.
 //!
-//! One place for the client's timeouts, `Range` handling, the Subsonic
-//! error-body check and retry delays, so the downloaders can't drift apart.
+//! One place for the client's timeouts, `Range` handling, the error-body
+//! check and retry delays, so the downloaders can't drift apart.
+//!
+//! What counts as an error body depends on the server, so the check is a
+//! [`ReplyCheck`] the app passes in: this crate knows HTTP, not Subsonic.
 
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub use bytes::Bytes;
@@ -33,7 +37,8 @@ pub enum FetchError {
     Status(StatusCode),
     /// Asked to start past the end of the file (`416`).
     RangeNotSatisfiable,
-    /// A Subsonic error envelope (bad auth, failed transcode) instead of the file.
+    /// An error reply (bad auth, failed transcode, a proxy's login page)
+    /// instead of the file, as the [`ReplyCheck`] judged it, with its message.
     Server(String),
     /// A `206` the download can't use: no `Content-Range`, or a different start.
     BadRange(String),
@@ -63,6 +68,55 @@ impl fmt::Display for FetchError {
 }
 
 impl std::error::Error for FetchError {}
+
+/// Tells a server's error reply from the file it was asked for, when both
+/// come back `200`. A server that wraps its errors in a body (Subsonic's
+/// envelope, a proxy's sign-in page) would otherwise have them saved as audio.
+///
+/// The default accepts every body: a server with honest status codes needs
+/// no check.
+#[derive(Clone)]
+pub struct ReplyCheck {
+    is_error: Arc<IsError>,
+    message: Arc<Message>,
+}
+
+/// [`ReplyCheck::new`]'s `is_error`: content type and head to verdict.
+type IsError = dyn Fn(Option<&str>, &[u8]) -> bool + Send + Sync;
+/// [`ReplyCheck::new`]'s `message`: error body to text.
+type Message = dyn Fn(&[u8]) -> String + Send + Sync;
+
+impl ReplyCheck {
+    /// `is_error` gets the `Content-Type`, if any, and the start of the body:
+    /// the first chunk of a response, or a whole small file already on disk
+    /// (with no content type). `message` turns an error body, up to a few
+    /// KiB of it, into [`FetchError::Server`]'s text.
+    pub fn new(is_error: impl Fn(Option<&str>, &[u8]) -> bool + Send + Sync + 'static, message: impl Fn(&[u8]) -> String + Send + Sync + 'static) -> Self {
+        Self { is_error: Arc::new(is_error), message: Arc::new(message) }
+    }
+
+    /// Whether a body starting with `head` is an error reply, not the file.
+    pub fn is_error(&self, content_type: Option<&str>, head: &[u8]) -> bool {
+        (self.is_error)(content_type, head)
+    }
+
+    /// A readable message for an error reply's `body`.
+    pub fn message(&self, body: &[u8]) -> String {
+        (self.message)(body)
+    }
+}
+
+impl Default for ReplyCheck {
+    fn default() -> Self {
+        Self::new(|_, _| false, |body| String::from_utf8_lossy(body).trim().to_owned())
+    }
+}
+
+impl fmt::Debug for ReplyCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplyCheck").finish_non_exhaustive()
+    }
+}
 
 fn network(e: reqwest::Error) -> FetchError {
     FetchError::Network(e.without_url().to_string())
@@ -99,9 +153,9 @@ impl Opened {
 /// - `200`: the whole file from byte 0 (the server ignored `Range`); `total`
 ///   is the `Content-Length`.
 /// - `416` and other error statuses become errors.
-/// - A Subsonic error envelope (by content type, or sniffed from the first
-///   chunk) is [`FetchError::Server`], never a body to keep.
-pub async fn get_from(client: &reqwest::Client, url: &str, from: Option<u64>) -> Result<Opened, FetchError> {
+/// - A body `check` calls an error reply (by content type, or sniffed from
+///   the first chunk) is [`FetchError::Server`], never a body to keep.
+pub async fn get_from(client: &reqwest::Client, check: &ReplyCheck, url: &str, from: Option<u64>) -> Result<Opened, FetchError> {
     let mut req = client.get(url);
     if let Some(from) = from {
         req = req.header(RANGE, format!("bytes={from}-"));
@@ -129,7 +183,7 @@ pub async fn get_from(client: &reqwest::Client, url: &str, from: Option<u64>) ->
     let kind = resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let first = resp.chunk().await.map_err(network)?;
     let head = first.as_deref().unwrap_or_default();
-    if subsonic::is_error_reply(kind.as_deref(), head) {
+    if check.is_error(kind.as_deref(), head) {
         // The envelope is small; read the rest so the message is whole.
         let mut body = head.to_vec();
         while body.len() < 4096
@@ -137,7 +191,7 @@ pub async fn get_from(client: &reqwest::Client, url: &str, from: Option<u64>) ->
         {
             body.extend_from_slice(&more);
         }
-        return Err(FetchError::Server(subsonic::error_text(&body)));
+        return Err(FetchError::Server(check.message(&body)));
     }
     Ok(Opened { resp, first, start, total, ranged })
 }

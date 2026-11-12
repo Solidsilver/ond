@@ -8,12 +8,22 @@
 //! [`choose_rate`]: the file's own rate when the device can do it, else a
 //! resampler converts on this thread. Gapless needs the same source rate *and*
 //! the same device format, so one resampler carries across the boundary.
+//!
+//! Source time travels in a separate bounded SPSC segment queue beside the
+//! samples. Unlike track markers, segments can change time without advancing
+//! the track or its gain (seeks, speed changes and silence cuts). Each is published
+//! before its samples; the callback splits at both queues and uses arithmetic
+//! alone to publish source time. A flush clears both queues before the decoder
+//! publishes a replacement origin. Resampler delay is trimmed, so segments use
+//! its input-to-output position rather than the amount already pushed.
 
 use crate::channels::{ChannelChange, ChannelMap, output_channels};
-use crate::output::{MARKER_CAP, Marker, RingCtl, RingInput, StreamFormat};
+use crate::output::{MARKER_CAP, Marker, RingCtl, RingInput, Segment, StreamFormat};
 use crate::replaygain::{GainConfig, ReplayGain, applied_gain, parse_tag_value};
 use crate::resample::StreamResampler;
 use crate::signal::{DeviceCaps, choose_rate};
+use crate::speech::{Origin, Silence, Voice};
+use crate::stretch::{self, Stretch};
 use crate::{EngineConfig, Status, TrackSource};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rtrb::{Producer, RingBuffer};
@@ -80,6 +90,7 @@ pub(crate) struct Session {
     next: NextSlot,
     /// The track the decode thread is opening or decoding.
     at_seq: Arc<AtomicU64>,
+    status: Arc<Status>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +99,9 @@ struct SeekReq {
     to: Duration,
     /// Output hold generation this seek releases once it lands.
     hold: u64,
+    speed: f32,
+    voice_boost: bool,
+    skip_silence: bool,
 }
 
 impl Session {
@@ -117,12 +131,17 @@ impl Session {
             seek_pending: seek_pending.clone(),
             next: next.clone(),
             at_seq: at_seq.clone(),
+            status: status.clone(),
         };
         if let Some(to) = start_at {
             // Applied right after probing, before any audio is queued.
             session.seek(0, to, 0);
         }
         let mut ctx = Ctx {
+            speed: status.speed(),
+            voice_boost: status.voice_boost(),
+            skip_silence: status.skip_silence(),
+            stretched: Vec::new(),
             config,
             status,
             cache,
@@ -180,7 +199,14 @@ impl Session {
         // finds the request. The other way round, a decoder running between the
         // two would clear the flag, find nothing, and strand the request (and
         // the output's hold) until the next seek.
-        let _ = self.seeks.send(SeekReq { seq, to, hold });
+        let _ = self.seeks.send(SeekReq {
+            seq,
+            to,
+            hold,
+            speed: self.status.speed(),
+            voice_boost: self.status.voice_boost(),
+            skip_silence: self.status.skip_silence(),
+        });
         self.seek_pending.store(true, Ordering::Release);
     }
 
@@ -214,6 +240,10 @@ impl Session {
 
 pub(crate) struct Ctx {
     config: EngineConfig,
+    speed: f32,
+    voice_boost: bool,
+    skip_silence: bool,
+    stretched: Vec<f32>,
     status: Arc<Status>,
     cache: Option<StreamCache>,
     msgs: Sender<DecoderMsg>,
@@ -266,12 +296,17 @@ struct Track {
     out_rate: u32,
     /// ReplayGain from the file's tags.
     tag_gain: ReplayGain,
+    source_start: u64,
 }
 
 impl Track {
     /// Source frames → output frames.
-    fn to_output(&self, frames: u64) -> u64 {
+    fn to_output(&self, frames: u64, speed: f32) -> u64 {
         let (from, to) = (self.clock.rate as u128, self.out_rate as u128);
+        if speed != 1.0 {
+            let rate_ratio = if from == 0 || to == 0 { 1.0 } else { to as f64 / from as f64 };
+            return (frames as f64 * rate_ratio / speed as f64).round() as u64;
+        }
         if from == 0 || to == 0 || from == to {
             return frames;
         }
@@ -288,6 +323,7 @@ struct Out {
     src_rate: u32,
     samples: Producer<f32>,
     markers: Producer<Marker>,
+    segments: Producer<Segment>,
     done: Arc<AtomicBool>,
     ctl: Arc<RingCtl>,
     pushed: u64,
@@ -295,6 +331,16 @@ struct Out {
     /// ring, since a downmix changes whether the samples need dither.
     src_channels: u16,
     resampler: Option<StreamResampler>,
+    stretch: Option<Box<dyn Stretch>>,
+    silence: Option<Silence>,
+    voice: Option<Voice>,
+    input_origin: Origin,
+    output_seq: u64,
+    cut: bool,
+    saved: f64,
+    /// `pushed` when the current file started: the output this file has made
+    /// so far is `pushed - file_start`.
+    file_start: u64,
     /// `pushed` when the resampler last started from zero: its output frame `n`
     /// is ring sample `rs_base + n * channels`.
     rs_base: u64,
@@ -414,7 +460,14 @@ impl Ctx {
         };
         if let Some(o) = out.as_mut() {
             if !self.cancel.load(Ordering::Relaxed) {
+                if o.silence.is_some() {
+                    self.silence_finish(o, true);
+                    self.finish_stretch(o);
+                }
                 self.flush_resampler(o);
+                if o.silence.is_some() {
+                    self.segment(o, o.pushed, o.input_origin.frame);
+                }
             }
             o.done.store(true, Ordering::Release);
         }
@@ -446,6 +499,9 @@ impl Ctx {
         let Some(r) = o.resampler.as_mut() else { return };
         self.resampled.clear();
         r.flush(&mut self.resampled);
+        if o.voice.is_some() {
+            self.resampled.iter_mut().for_each(|sample| *sample = sample.clamp(-1.0, 1.0));
+        }
         o.rs_base = o.pushed + self.resampled.len() as u64;
         let frame = o.format.channels as usize;
         let _ = push_all(&mut o.samples, &self.resampled, frame, &mut o.pushed, &self.cancel, &self.seek_pending);
@@ -490,6 +546,7 @@ impl Ctx {
             // first packet's own format confirms or corrects it.
             out_rate: self.device_rate(params.sample_rate.unwrap_or(0), params.channels.as_ref().map_or(2, |c| c.count() as u16)),
             tag_gain,
+            source_start: 0,
         })
     }
 
@@ -517,6 +574,13 @@ impl Ctx {
                 }
             }
             let (Some(map), Some(o)) = (map.as_ref(), out.as_mut()) else { unreachable!("attach always leaves a ring") };
+            // Silence lookahead can span many tiny files or discard a long
+            // all-quiet packet. Open the callback before it needs queue space.
+            if self.skip_silence
+                && let Some(input) = fresh.take()
+            {
+                self.msgs.send(DecoderMsg::Ring { format: o.format, input, first_seq: seq }).map_err(|_| "engine gone")?;
+            }
             if let Push::Cancelled = self.queue(&packets.scratch, map, o) {
                 return Ok(TrackEnd::Cancelled);
             }
@@ -524,6 +588,13 @@ impl Ctx {
             // doesn't open onto an empty buffer.
             if let Some(input) = fresh {
                 self.msgs.send(DecoderMsg::Ring { format: o.format, input, first_seq: seq }).map_err(|_| "engine gone")?;
+            }
+        }
+        if let Some(o) = out.as_mut().filter(|_| map.is_some()) {
+            if o.silence.is_some() {
+                self.silence_finish(o, false);
+            } else {
+                self.finish_stretch(o);
             }
         }
         Ok(if map.is_some() { TrackEnd::Eof } else { TrackEnd::Empty })
@@ -636,9 +707,9 @@ impl Ctx {
         let linear = applied_gain(&cfg, &replay_gain, src.album_context).map_or(1.0, |g| g.linear);
         self.publish(|s| s.gains.set(seq, linear));
         let feed = Feed { rate: spec.rate, channels: spec.channels, downmixed: matches!(change, ChannelChange::Downmix { .. }) };
-        let attached = self.attach(output, feed, out)?;
+        let attached = self.attach(output, feed, Origin { seq, frame: t.source_start, bits: t.bits }, out)?;
         if !matches!(attached, Attached::Cancelled) {
-            let total_frames = t.total_frames.map(|f| t.to_output(f));
+            let total_frames = t.total_frames.map(|f| t.to_output(f, 1.0));
             let _ = self.msgs.send(DecoderMsg::Track { seq, src: src.clone(), format, output, total_frames, replay_gain, channels: change });
         }
         Ok((map, attached))
@@ -649,31 +720,180 @@ impl Ctx {
         choose_rate(rate, output_channels(channels, self.caps.as_ref()), self.caps.as_ref())
     }
 
-    /// Maps, resamples and pushes one packet's audio into the ring.
+    /// Maps channels before the speech stages; the default path borrows the
+    /// original packet and never constructs either optional processor.
     fn queue(&mut self, samples: &[f32], map: &ChannelMap, o: &mut Out) -> Push {
-        let mapped = if map.is_identity() {
+        let mut mapped = std::mem::take(&mut self.mapped);
+        let samples = if map.is_identity() {
             samples
         } else {
-            map.apply(samples, &mut self.mapped);
-            &self.mapped
+            map.apply(samples, &mut mapped);
+            &mapped
         };
+        let result = if let Some(mut silence) = o.silence.take() {
+            let origin = o.input_origin;
+            let mut result = Push::Done;
+            silence.process(samples, origin, |audio, origin, saved| {
+                if matches!(result, Push::Done) {
+                    result = self.speech_piece(audio, origin, saved, o);
+                }
+            });
+            o.input_origin.frame += (samples.len() / o.format.channels as usize) as u64;
+            o.silence = Some(silence);
+            result
+        } else {
+            self.stretch_queue(samples, o)
+        };
+        self.mapped = mapped;
+        result
+    }
+
+    fn silence_finish(&mut self, o: &mut Out, final_track: bool) {
+        let Some(mut silence) = o.silence.take() else { return };
+        let mut result = Push::Done;
+        let emit = |audio: &[f32], origin, saved| {
+            if matches!(result, Push::Done) {
+                result = self.speech_piece(audio, origin, saved, o);
+            }
+        };
+        if final_track {
+            silence.finish(emit);
+        } else {
+            silence.boundary(emit);
+        }
+        o.silence = Some(silence);
+    }
+
+    /// A piece of speech-processed audio, with the source-time anchor it needs.
+    /// Anything interrupted leaves a cut behind: a seek can still resolve to
+    /// nothing, and the piece that was dropped carried the origin the output
+    /// was following, so the next kept frames have to publish their own.
+    /// Sonic's buffered tail belongs to the dropped piece too: it is thrown
+    /// away with a fresh stretcher, or it would play after the new anchor.
+    fn speech_piece(&mut self, samples: &[f32], origin: Origin, saved: f64, o: &mut Out) -> Push {
+        let result = self.speech_piece_at(samples, origin, saved, o);
+        if matches!(result, Push::Interrupted) {
+            o.cut = true;
+            if o.stretch.is_some()
+                && let Ok(stretch) = stretch::speech(o.src_rate, o.format.channels, self.speed)
+            {
+                o.stretch = stretch;
+            }
+        }
+        result
+    }
+
+    /// A removed range is a discontinuity, never input to Sonic. Drain its
+    /// old tail first so overlap cannot leak across the source-time jump.
+    fn speech_piece_at(&mut self, samples: &[f32], origin: Origin, saved: f64, o: &mut Out) -> Push {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Push::Cancelled;
+        }
+        if self.seek_pending.load(Ordering::Acquire) {
+            return Push::Interrupted;
+        }
+        let boundary = origin.seq != o.output_seq;
+        if boundary || (samples.is_empty() && !o.cut) {
+            self.finish_stretch(o);
+            if samples.is_empty() {
+                // An arbitrarily long cut must not strand endpoint segments
+                // behind the resampler's unplayed filter tail.
+                self.flush_resampler(o);
+            }
+            o.cut = true;
+        }
+        let at = match &o.resampler {
+            Some(r) => o.rs_base + r.out_pos(r.in_frames()) * o.format.channels as u64,
+            None => o.pushed,
+        };
+        if boundary {
+            let marker = Marker { at, source_bits: origin.bits };
+            while o.markers.push(marker).is_err() {
+                if self.cancel.load(Ordering::Relaxed) {
+                    return Push::Cancelled;
+                }
+                if self.seek_pending.load(Ordering::Acquire) {
+                    return Push::Interrupted;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            o.output_seq = origin.seq;
+        }
+        o.saved = saved;
+        // Coalesce a run of removed windows at the next retained frame (or
+        // EOF). Filling the segment queue with zero-length pieces could block
+        // the decoder before its short quiet tail reaches the prebuffer target.
+        if samples.is_empty() {
+            return Push::Done;
+        }
+        if (boundary || o.cut) && !self.segment(o, at, origin.frame) {
+            return Push::Interrupted;
+        }
+        // Sonic's finish drains and clears its input. Reuse that storage at
+        // cuts rather than allocating another stretcher for every pause.
+        o.cut = false;
+        self.stretch_queue(samples, o)
+    }
+
+    fn stretch_queue(&mut self, samples: &[f32], o: &mut Out) -> Push {
+        if let Some(stretch) = o.stretch.as_mut() {
+            let mut stretched = std::mem::take(&mut self.stretched);
+            stretched.clear();
+            stretch.process(samples, &mut stretched);
+            let result = self.voice_queue(&stretched, o);
+            self.stretched = stretched;
+            result
+        } else {
+            self.voice_queue(samples, o)
+        }
+    }
+
+    fn voice_queue(&mut self, samples: &[f32], o: &mut Out) -> Push {
+        if o.voice.is_none() {
+            return self.resample_queue(samples, o);
+        }
+        let mut buffer = [0.0f32; 4096];
+        let block = buffer.len() / o.format.channels as usize * o.format.channels as usize;
+        for samples in samples.chunks(block) {
+            let audio = &mut buffer[..samples.len()];
+            audio.copy_from_slice(samples);
+            o.voice.as_mut().expect("voice enabled").process(audio);
+            let result = self.resample_queue(audio, o);
+            if !matches!(result, Push::Done) {
+                return result;
+            }
+        }
+        Push::Done
+    }
+
+    fn resample_queue(&mut self, samples: &[f32], o: &mut Out) -> Push {
         let data = match o.resampler.as_mut() {
             Some(r) => {
                 self.resampled.clear();
-                r.process(mapped, &mut self.resampled);
+                r.process(samples, &mut self.resampled);
+                if o.voice.is_some() {
+                    self.resampled.iter_mut().for_each(|sample| *sample = sample.clamp(-1.0, 1.0));
+                }
                 &self.resampled
             }
-            None => mapped,
+            None => samples,
         };
-        let frame = o.format.channels as usize;
-        match push_all(&mut o.samples, data, frame, &mut o.pushed, &self.cancel, &self.seek_pending) {
-            // Interrupted: the rest of the packet is dropped. The seek that
-            // interrupted normally flushes the ring; when it turns out to be
-            // nothing to do (stale flag) the output skips that bit of audio,
-            // but stays on whole frames.
-            Push::Done | Push::Interrupted => Push::Done,
-            Push::Cancelled => Push::Cancelled,
+        push_all(&mut o.samples, data, o.format.channels as usize, &mut o.pushed, &self.cancel, &self.seek_pending)
+    }
+
+    /// Drain before a file boundary or silence cut. Resampling still carries
+    /// across both, preserving its filter and its input-to-output clock.
+    fn finish_stretch(&mut self, o: &mut Out) {
+        if o.cut {
+            return;
         }
+        let Some(mut stretch) = o.stretch.take() else { return };
+        let mut stretched = std::mem::take(&mut self.stretched);
+        stretched.clear();
+        stretch.finish(&mut stretched);
+        let _ = self.voice_queue(&stretched, o);
+        self.stretched = stretched;
+        o.stretch = Some(stretch);
     }
 
     /// At the end of track `seq` with nothing lined up after it, waits while the
@@ -692,6 +912,14 @@ impl Ctx {
     fn linger(&self, seq: u64, out: Option<&Out>) -> bool {
         let Some(o) = out else { return false };
         let floor = (o.format.sample_rate as f32 * o.format.channels as f32 * LINGER_FLOOR_SECS) as usize;
+        // A file that made less output than the floor never leaves the queued
+        // window the engine names its next file in: silence removal can shrink
+        // a file that far, and a first file can fit entirely in the lookahead.
+        // Give both the same bounded chance to be followed.
+        let lookahead = o.pushed.saturating_sub(o.file_start) < floor as u64;
+        // Counted once the short file reaches the output: the preceding file's
+        // tail must not spend the grace before the UI can name what follows.
+        let mut deadline = None;
         loop {
             if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) {
                 return true;
@@ -701,6 +929,23 @@ impl Ctx {
             }
             let queued = o.samples.buffer().capacity() - o.samples.slots();
             if queued <= floor || o.samples.is_abandoned() {
+                if lookahead && !o.samples.is_abandoned() {
+                    if self.status.track_seq.load(Ordering::Acquire) < seq && o.output_seq >= seq {
+                        // Its marker is queued, but still behind the preceding
+                        // file. Buffering must still let the pipeline flush its
+                        // lookahead, or the output could wait on us forever.
+                        if self.status.buffering.load(Ordering::Relaxed) && !o.ctl.holding() {
+                            return false;
+                        }
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    let deadline = *deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
+                    if Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                }
                 return false;
             }
             if self.status.buffering.load(Ordering::Relaxed) && !o.ctl.holding() {
@@ -718,10 +963,18 @@ impl Ctx {
     /// bit depth: each track's depth travels with its [`Marker`], so a 16-bit
     /// track followed by a 24-bit one (or a lossy one by a lossless one) at
     /// the same rate stays gapless.
-    fn attach(&mut self, output: StreamFormat, feed: Feed, out: &mut Option<Out>) -> Result<Attached, String> {
+    fn attach(&mut self, output: StreamFormat, feed: Feed, origin: Origin, out: &mut Option<Out>) -> Result<Attached, String> {
         let format = StreamFormat { bits_per_sample: None, ..output };
+        let mut saved = self.status.silence_saved_secs();
         if let Some(o) = out.as_mut() {
             if o.format == format && o.src_rate == feed.rate && o.src_channels == feed.channels {
+                o.input_origin = origin;
+                o.file_start = o.pushed;
+                if o.silence.is_some() {
+                    return Ok(Attached::Continued);
+                }
+                o.output_seq = origin.seq;
+                o.stretch = stretch::speech(feed.rate, format.channels, self.speed).map_err(|e| format!("stretch: {e}"))?;
                 // With a resampler carrying on, the next track starts where its first
                 // input frame lands in the output, which may still be inside the filter.
                 let at = match &o.resampler {
@@ -736,10 +989,25 @@ impl Ctx {
                     }
                     thread::sleep(Duration::from_millis(2));
                 }
+                if !self.segment(o, at, origin.frame) {
+                    return Ok(Attached::Cancelled);
+                }
                 return Ok(Attached::Continued);
             }
+            // Different format cannot share detector state or buffered origins.
+            if o.silence.is_some() {
+                self.silence_finish(o, true);
+                self.finish_stretch(o);
+            }
+            // The last callback can still be publishing its endpoint after
+            // freeing the ring's final slots. Carry the decoder's complete
+            // total rather than racing that status publication on a new ring.
+            saved = o.saved;
             // Different format: the device has to be reopened. Play the old ring out first.
             self.flush_resampler(o);
+            if o.silence.is_some() {
+                self.segment(o, o.pushed, o.input_origin.frame);
+            }
             o.done.store(true, Ordering::Release);
             while o.samples.slots() < o.samples.buffer().capacity() {
                 if self.cancel.load(Ordering::Relaxed) || o.samples.is_abandoned() {
@@ -757,19 +1025,64 @@ impl Ctx {
         let cap = (format.sample_rate as f32 * format.channels as f32 * self.config.buffer_secs) as usize;
         let (samples, consumer) = RingBuffer::new(cap.max(8192));
         let (markers, marker_consumer) = RingBuffer::new(MARKER_CAP);
+        // The first track has a segment too, but no boundary marker.
+        let (segments, segment_consumer) = RingBuffer::new(MARKER_CAP + 1);
         let done = Arc::new(AtomicBool::new(false));
         let ctl = Arc::new(RingCtl::default());
-        let input =
-            RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone()).with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
+        let input = RingInput::new(consumer, marker_consumer, done.clone(), ctl.clone())
+            .with_timeline(segment_consumer)
+            .with_source(output.bits_per_sample, resampler.is_some() || feed.downmixed);
         let (src_rate, src_channels) = (feed.rate, feed.channels);
-        *out = Some(Out { format, src_rate, samples, markers, done, ctl, pushed: 0, src_channels, resampler, rs_base: 0 });
+        *out = Some(Out {
+            format,
+            src_rate,
+            samples,
+            markers,
+            segments,
+            done,
+            ctl,
+            pushed: 0,
+            src_channels,
+            resampler,
+            stretch: stretch::speech(feed.rate, format.channels, self.speed).map_err(|e| format!("stretch: {e}"))?,
+            silence: self.skip_silence.then(|| Silence::new(feed.rate, format.channels, saved)),
+            voice: self.voice_boost.then(|| Voice::new(feed.rate, format.channels)),
+            input_origin: origin,
+            output_seq: origin.seq,
+            cut: false,
+            saved,
+            file_start: 0,
+            rs_base: 0,
+        });
+        if !self.segment(out.as_mut().expect("new ring"), 0, origin.frame) {
+            return Ok(Attached::Cancelled);
+        }
         Ok(Attached::NewRing(input))
+    }
+
+    fn segment(&self, o: &mut Out, at: u64, source_frame: u64) -> bool {
+        let segment = Segment {
+            at,
+            source_frame: source_frame as f64,
+            source_rate: o.src_rate,
+            ratio: self.speed as f64 * o.src_rate as f64 / o.format.sample_rate as f64,
+            processed: self.speed != 1.0 || self.voice_boost || self.skip_silence,
+            skip_silence: self.skip_silence,
+            silence_saved: o.saved,
+        };
+        while o.segments.push(segment).is_err() {
+            if self.cancel.load(Ordering::Relaxed) || self.seek_pending.load(Ordering::Acquire) {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        true
     }
 
     /// Applies the newest pending seek: reposition the reader, reset the decoder,
     /// flush stale audio out of the ring (releasing the output's hold), then
     /// publish the new position.
-    fn seek(&mut self, seq: u64, t: &mut Track, out: Option<&mut Out>) -> Seeked {
+    fn seek(&mut self, seq: u64, t: &mut Track, mut out: Option<&mut Out>) -> Seeked {
         // Clear before draining: a request racing in after this is seen on the next pass.
         self.seek_pending.store(false, Ordering::Release);
         let Some(req) = self.seek_rx.try_iter().last() else { return Seeked::Nothing };
@@ -779,6 +1092,9 @@ impl Ctx {
             return Seeked::Nothing;
         }
 
+        self.speed = req.speed;
+        self.voice_boost = req.voice_boost;
+        self.skip_silence = req.skip_silence;
         let time = Time::from_nanos_u64(req.to.as_nanos().min(u64::MAX as u128) as u64);
         let result = t.reader.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(t.track_id) });
         if self.cancel.load(Ordering::Relaxed) {
@@ -799,7 +1115,7 @@ impl Ctx {
         };
         // Whatever happened, the output must stop holding: flush, then let it buffer.
         let started = out.is_some();
-        if let Some(o) = out {
+        if let Some(o) = out.as_deref_mut() {
             let generation = o.ctl.request_flush(req.hold);
             // The callback empties the ring. It runs whenever the device is open
             // (paused too), and the engine opens the device as soon as it hears
@@ -820,8 +1136,37 @@ impl Ctx {
             }
             o.pushed = 0;
             o.rs_base = 0;
+            o.saved = self.status.silence_saved_secs();
+            // The lookahead is a fixed 410 ms buffer: reseating the detector keeps
+            // it instead of allocating another one on every seek.
+            if self.skip_silence {
+                match &mut o.silence {
+                    Some(silence) => silence.reset(o.src_rate, o.format.channels, o.saved),
+                    None => o.silence = Some(Silence::new(o.src_rate, o.format.channels, o.saved)),
+                }
+            } else {
+                o.silence = None;
+            }
+            if self.voice_boost {
+                match &mut o.voice {
+                    Some(voice) => voice.reset(o.src_rate, o.format.channels),
+                    None => o.voice = Some(Voice::new(o.src_rate, o.format.channels)),
+                }
+            } else {
+                o.voice = None;
+            }
+            o.cut = false;
+            o.file_start = 0;
+            o.output_seq = seq;
             if let Some(r) = o.resampler.as_mut() {
                 r.reset();
+            }
+            match stretch::speech(o.src_rate, o.format.channels, self.speed) {
+                Ok(stretch) => o.stretch = stretch,
+                Err(e) => {
+                    let _ = self.msgs.send(DecoderMsg::Error { seq, track_id: self.track_id.clone(), message: format!("stretch: {e}") });
+                    return Seeked::Nothing;
+                }
             }
         }
         // Every seek that moved the track is reported: the engine forgets the
@@ -832,11 +1177,20 @@ impl Ctx {
             Seeked::Nothing => None,
         };
         if let Some(frames) = frames {
+            t.source_start = frames;
+            if let Some(o) = out {
+                o.input_origin = Origin { seq, frame: frames, bits: t.bits };
+                self.segment(o, 0, frames);
+            }
             // The callback counts frames at the output rate. (Past the end of a
             // track that hasn't started, the next one starts its own count.)
             if started || matches!(outcome, Seeked::To(_)) {
-                let played = t.to_output(frames);
-                self.publish(|s| s.frames_played.store(played, Ordering::Relaxed));
+                let played = t.to_output(frames, self.speed);
+                let source_secs = frames as f64 / t.clock.rate.max(1) as f64;
+                self.publish(|s| {
+                    s.frames_played.store(played, Ordering::Relaxed);
+                    s.source_position_bits.store(source_secs.to_bits(), Ordering::Relaxed);
+                });
             }
             let position_secs = if t.clock.rate == 0 { 0.0 } else { frames as f64 / t.clock.rate as f64 };
             let _ = self.msgs.send(DecoderMsg::Seeked { seq, position_secs, hold: req.hold });

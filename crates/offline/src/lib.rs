@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use streamcache::ReplyCheck;
 use streamcache::disk::InFlight;
 use streamcache::fetch;
 use tokio::sync::Notify;
@@ -82,6 +83,9 @@ pub struct OfflineConfig {
     pub dir: PathBuf,
     /// Cap on finished downloads; `None` is unlimited.
     pub limit: Option<u64>,
+    /// Tells the server's error replies from tracks, so one is never kept
+    /// as a download. The default keeps every body.
+    pub reply_check: ReplyCheck,
 }
 
 /// One track's download, as the UI shows it.
@@ -130,11 +134,40 @@ impl PinSummary {
     }
 }
 
+/// A download attempt's failure, without its URL or credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadError {
+    pub message: String,
+    /// The HTTP rejection, when the server answered with an error status.
+    pub http_status: Option<u16>,
+}
+
+impl From<String> for DownloadError {
+    fn from(message: String) -> Self {
+        Self { message, http_status: None }
+    }
+}
+
+impl From<&str> for DownloadError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
 /// Everything the UI needs, built once per change.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub version: u64,
     pub tracks: HashMap<String, TrackState>,
+    /// The most recent failed attempt, including tracks waiting to retry.
+    /// Callers can repair credentials before the retry budget runs out.
+    pub last_errors: HashMap<String, DownloadError>,
     pub pins: Vec<PinSummary>,
     /// Bytes of finished downloads.
     pub used_bytes: u64,
@@ -234,6 +267,7 @@ impl std::fmt::Debug for OfflineStore {
 struct Inner {
     dir: PathBuf,
     http: reqwest::Client,
+    reply_check: ReplyCheck,
     state: Mutex<State>,
     wake: Notify,
     on_change: OnChange,
@@ -251,6 +285,9 @@ struct Inner {
 struct State {
     pins: Pins,
     url: Option<UrlFn>,
+    /// An error from credentials replaced while a request was in flight must
+    /// not reject the new source or spend its retry budget.
+    source_version: u64,
     cache: Option<CacheLookup>,
     limit: Option<u64>,
     active: HashMap<String, Active>,
@@ -298,12 +335,13 @@ struct Active {
 struct Failure {
     attempts: u32,
     retry_at: Instant,
-    error: String,
+    error: DownloadError,
 }
 
 struct Job {
     r: TrackRef,
     url: Option<String>,
+    source_version: u64,
     from_cache: Option<PathBuf>,
     part: PathBuf,
     dest: PathBuf,
@@ -314,7 +352,7 @@ struct Job {
 enum JobError {
     Cancelled,
     /// Worth trying again after a backoff.
-    Failed(String),
+    Failed(DownloadError),
     /// Would fail the same way every time: no retries until something changes
     /// (a refresh of the pin, a reconnect, a manual retry).
     Stale(String),
@@ -322,7 +360,7 @@ enum JobError {
 
 impl From<io::Error> for JobError {
     fn from(e: io::Error) -> Self {
-        Self::Failed(e.to_string())
+        Self::Failed(e.to_string().into())
     }
 }
 
@@ -364,11 +402,13 @@ impl OfflineStore {
             // Offline downloads aren't waited on by playback: a slow server gets longer.
             http: fetch::client(Duration::from_secs(60)).map_err(io::Error::other)?,
             dir: cfg.dir,
+            reply_check: cfg.reply_check,
             wake: Notify::new(),
             on_change,
             state: Mutex::new(State {
                 pins,
                 url: None,
+                source_version: 0,
                 cache: None,
                 limit: cfg.limit,
                 active: HashMap::new(),
@@ -417,6 +457,7 @@ impl OfflineStore {
             st.failures.clear();
         }
         st.url = url;
+        st.source_version += 1;
         self.inner.changed(st);
     }
 
@@ -716,7 +757,7 @@ impl Inner {
         st.active.insert(r.id.clone(), Active { cancel: cancel.clone(), done: 0, total: r.size });
         st.version += 1;
         let name = file_name(&r);
-        let job = Job { part: self.dir.join(format!("{name}.part")), dest: self.dir.join(name), r, url, from_cache, cancel };
+        let job = Job { part: self.dir.join(format!("{name}.part")), dest: self.dir.join(name), r, url, source_version: st.source_version, from_cache, cancel };
         drop(st);
         (self.on_change)();
         Next::Job(job)
@@ -760,6 +801,7 @@ impl Inner {
                 return self.commit(st, Vec::new());
             }
             Err(JobError::Cancelled) => {}
+            Err(_) if job.source_version != st.source_version => {}
             Err(JobError::Failed(error)) => {
                 tracing::warn!("offline download {}: {error}", job.r.id);
                 let attempts = st.failures.get(&job.r.id).map_or(0, |f| f.attempts) + 1;
@@ -768,7 +810,7 @@ impl Inner {
             }
             Err(JobError::Stale(error)) => {
                 tracing::warn!("offline download {}: {error}", job.r.id);
-                st.failures.insert(job.r.id.clone(), Failure { attempts: MAX_ATTEMPTS, retry_at: Instant::now(), error });
+                st.failures.insert(job.r.id.clone(), Failure { attempts: MAX_ATTEMPTS, retry_at: Instant::now(), error: error.into() });
             }
         }
         self.changed(st);
@@ -784,7 +826,7 @@ impl Inner {
                 TrackState::Downloading { done: a.done, total: a.total }
             } else if let Some(f) = st.failures.get(id).filter(|f| f.attempts >= MAX_ATTEMPTS) {
                 failed += 1;
-                TrackState::Failed { error: f.error.clone() }
+                TrackState::Failed { error: f.error.to_string() }
             } else {
                 queued += 1;
                 TrackState::Queued
@@ -839,6 +881,7 @@ impl Inner {
         Snapshot {
             version: st.version,
             tracks,
+            last_errors: st.failures.iter().map(|(id, failure)| (id.clone(), failure.error.clone())).collect(),
             pins,
             used_bytes: st.pins.used(),
             free_bytes: free,

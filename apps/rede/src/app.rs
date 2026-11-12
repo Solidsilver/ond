@@ -1,0 +1,910 @@
+//! The main window: the title bar that is also the player, the sidebar with
+//! the places and the account, the message bar, and the page the trail leads
+//! to (the library, a book, a series). Views are in submodules; they
+//! don't change state directly but push [`Action`]s, which are applied once the
+//! frame is drawn.
+//!
+//! This file holds [`RedeApp`]: building it, the dispatch of bridge messages
+//! and actions, and the frame (`main_ui`, `ui`). The app's parts and the
+//! actions and messages each one handles are in their own modules:
+//!
+//! - `session`: signing in, resuming, and signing out
+//! - `library`: the books the shelf has, in the order drawn
+//! - `home`: the books in progress and the newest
+//! - `progress`: where each book is, and how a cover says it
+//! - `series`: the Series place, and a series' page with its books in their
+//!   order, reached from there, a book's facts or the palette
+//! - `stats_page`: the Stats place, drawn from what `crate::stats` counts
+//! - `downloads`: download intents and the store's results;
+//!   `downloads_page` draws the Downloads place and says how each book's
+//!   download stands, for the covers, the book page and its menus
+//! - `nav`: where the window is, and how it got there
+//! - `playing`: playback actions, engine events and the listening worker
+//! - `bookmarks`: the bookmarks a book has, the edits that sync them, and the
+//!   position another device left behind; `bookmarks_tab` draws them in the
+//!   column at the right
+//! - `controls`: chapter seeking and the listening controls
+//! - `title_bar`: the player in the title bar, and the window's controls
+//! - `sidebar`: the places and the account, in the column at the left
+//! - `palette` and `search`: ⌘K, finding a book in the library in memory
+//! - `sheets`: the keyboard shortcuts, Settings and the sign-out question,
+//!   over the window
+//! - `settings_page`: Settings' tabs and what's on them (⌘,)
+//! - `panel`: the chapters column at the right
+//! - `ui_state`: the notice line, the toasts, the trail, and what a frame
+//!   reads
+//! - `prefs_view`: the preferences a frame reads, and the actions that change
+//!   them
+//! - `view_ctx` and the views: what a view gets, and the views themselves
+//!
+//! # Adding things
+//!
+//! A server call:
+//! 1. A `Bridge` method that does the work in the background and posts the
+//!    result. Use `self.scoped()` so a result for an account that signed out is
+//!    dropped.
+//! 2. A `Msg` variant for the result, inside the group it belongs to
+//!    (`AccountMsg`, `LibraryMsg`). Failures go as a `Failure`, so only network
+//!    ones are quietened.
+//! 3. A handler for it in the matching `app/*.rs` (`session.rs` for signing in,
+//!    `library.rs` for the books).
+//!
+//! A preference:
+//! 1. A field in `Settings`, with `#[serde(default)]`.
+//! 2. A field in `PrefsView` if a frame reads it, and a `PrefsAction` variant
+//!    with its arm in `apply_prefs`.
+//!
+//! A view:
+//! 1. `app/<view>.rs`, drawing from a `ViewCtx` and pushing `Action`s.
+//! 2. A `Route` for it in `nav.rs`, and its arm in `main_ui`.
+//! 3. An entry in `every_view_draws` in `app/tests.rs` and a route in
+//!    `every_view_names_its_controls` in `app/ui_tests.rs` (every painted
+//!    control needs a `widget_info`), and a scene in `snapshots.rs`.
+
+mod book;
+mod bookmarks;
+mod bookmarks_tab;
+mod controls;
+mod downloads;
+mod downloads_page;
+mod home;
+mod library;
+mod nav;
+mod palette;
+mod panel;
+mod player_view;
+mod playing;
+mod prefs_view;
+mod progress;
+mod search;
+mod series;
+mod session;
+mod settings_page;
+mod sheets;
+mod shortcuts;
+mod sidebar;
+mod sleep;
+mod stats_page;
+mod title_bar;
+mod ui_state;
+mod view_ctx;
+mod virtual_list;
+mod window;
+
+#[cfg(test)]
+mod fixture;
+#[cfg(test)]
+mod snapshots;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod ui_tests;
+
+use crate::art::Art;
+use crate::bridge::{AccountMsg, Bridge, LibraryMsg, Msg};
+use crate::failure::Failure;
+use crate::prefs::{Loaded, Prefs};
+use crate::settings::Paths;
+use crate::tokens::Keeper;
+use shell::theme::{self, Tokens};
+use std::sync::mpsc::{Receiver, channel};
+use std::time::{Duration, Instant};
+
+pub use library::{Books, Details};
+pub use nav::Nav;
+pub use nav::Route;
+pub use prefs_view::{PrefsAction, PrefsView};
+pub use session::{LoginForm, Session};
+pub use ui_state::{Notice, SyncState, UiState};
+
+/// The app's tokio runtime, kept for the app's lifetime (the bridge holds a
+/// handle to it).
+///
+/// Dropping a `Runtime` waits for every `spawn_blocking` call still running,
+/// however long. Quitting gives them [`SHUTDOWN_WAIT`] and then goes: the work
+/// there (shelf writes, keychain calls) is written to survive being cut off.
+struct AppRuntime(Option<tokio::runtime::Runtime>);
+
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
+impl Drop for AppRuntime {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_timeout(SHUTDOWN_WAIT);
+        }
+    }
+}
+
+/// A state change asked for by a view or the title bar, applied after the frame
+/// is drawn. Changes that belong to one part of the app are grouped under it
+/// ([`PrefsAction`]), and that part's module applies them.
+pub enum Action {
+    Go(Route),
+    Back,
+    Forward,
+    /// An earlier breadcrumb: back this many steps.
+    BackBy(usize),
+    /// Connect with what's typed in the sign-in form.
+    SignIn,
+    CheckServer,
+    /// Start a browser sign-in with the server's provider.
+    OpenId,
+    /// Open the waiting browser sign-in's page again: the same attempt, not a
+    /// new one.
+    ReopenBrowser,
+    CancelSignIn,
+    /// Ask before signing out: playback stops and the sign-in has to be
+    /// done again.
+    AskSignOut,
+    /// Back to the sign-in screen; the saved tokens are forgotten. The shelf
+    /// and its books stay.
+    SignOut,
+    /// List the libraries and write what changed. A sync already running
+    /// isn't started twice.
+    SyncNow,
+    /// The library's order, and anything else a setting changes.
+    Prefs(PrefsAction),
+    PlayBook(String),
+    /// Keep the book on this computer: its details are fetched first, then
+    /// the store queues its files.
+    DownloadBook(sources::ItemKey),
+    /// The book's download goes, finished or not.
+    RemoveDownload(sources::ItemKey),
+    /// Every download waits (true) or goes on.
+    PauseDownloads(bool),
+    /// The downloads that gave up are tried again.
+    RetryDownloads,
+    /// Ask before removing every download, over Settings.
+    AskRemoveDownloads,
+    /// Every book's download goes, and the question goes back to Settings.
+    RemoveAllDownloads,
+    /// The book is finished: a progress entry with a stamp after the server's,
+    /// and the server told. The loaded book is stopped first, so its session
+    /// closes before the finish and cannot write the old position afterwards.
+    ///
+    /// The book page's … menu asks for the three settling actions.
+    MarkFinished(String),
+    /// The book is no longer finished, at the place it was left. ABS drops the
+    /// position in the request that clears a finish, so it is written in a
+    /// second one; a book with no known place starts at the beginning.
+    MarkUnfinished(String),
+    /// The book starts again from the beginning, not finished. The loaded book
+    /// moves there and stays as it was: paused or playing.
+    StartOver(String),
+    AddBookmark {
+        item: sources::ItemKey,
+        time: f64,
+        title: String,
+    },
+    RenameBookmark {
+        item: sources::ItemKey,
+        time: f64,
+        title: String,
+    },
+    DeleteBookmark {
+        item: sources::ItemKey,
+        time: f64,
+    },
+    JumpToBookmark {
+        item: sources::ItemKey,
+        time: f64,
+    },
+    UndoReconcile,
+    /// The other-device notice was clicked away: the position stays as it was
+    /// picked up, and Undo goes with the notice.
+    DismissReconcile,
+    Playback(crate::player::Control),
+    Mode(crate::window::Mode),
+    /// The keyboard shortcuts' sheet: open it, or close it if it's open.
+    Shortcuts,
+    /// Settings, on this tab, in its window over the app. From Player or
+    /// Mini, the full window comes back first, as Ond's Settings does.
+    OpenSettings(settings_page::Tab),
+    /// Whichever sheet is open goes.
+    CloseSheet,
+    /// The search palette, over the full window.
+    OpenPalette,
+    ClosePalette,
+    /// An author or narrator chosen in the palette: its name goes in the
+    /// field, which lists its books (they have no pages yet). A series has a
+    /// page, and goes there instead.
+    PaletteName(String),
+    ToggleMini,
+    /// The chapters column: shown, hidden, or on another tab.
+    Panel(panel::PanelAction),
+}
+
+pub struct RedeApp {
+    /// Must stay the first field. Fields drop in order, so the runtime shuts
+    /// down (and its tasks are dropped) before anything declared after it.
+    /// Nothing declared below may need the runtime in its `Drop`: by then it
+    /// is gone, and a `block_on` or `spawn` there would panic or do nothing.
+    _rt: AppRuntime,
+    /// The window's egui context (for theme changes and window commands).
+    ctx: egui::Context,
+    bridge: Bridge,
+    inbox: Receiver<Msg>,
+    /// The user's preferences: the one copy, saved in the background.
+    prefs: Prefs,
+    /// This frame's copy of the preferences (read in `logic`, before drawing).
+    shown: PrefsView,
+    /// Covers, fetched as they're drawn.
+    art: Art,
+
+    /// Who's signed in, and what their shelf is.
+    session: Session,
+    login: Option<LoginForm>,
+    openid: crate::openid::State,
+    /// The shelf's books, and the order they're drawn in.
+    books: Books,
+    /// Where the running sync is.
+    sync: SyncState,
+    /// The window: where it is, the notice line, the toasts' state.
+    ui: UiState,
+    actions: Vec<Action>,
+    player: crate::player::Player,
+    mode: crate::window::Mode,
+    window: window::State,
+    /// The sheet over the window, if one is open.
+    sheet: Option<sheets::Sheet>,
+    engine: Option<audio::EngineHandle>,
+    #[cfg(target_os = "macos")]
+    now_playing: crate::now_playing::Publisher,
+    listening: Option<crate::listening::Listening>,
+    playback_generation: u64,
+    opening: bool,
+    resume_pending: bool,
+    /// When a resume pull has waited long enough to play from the local
+    /// position instead.
+    resume_deadline: Option<Instant>,
+    sleep_wake: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    positions: progress::Positions,
+    stream_dir: std::path::PathBuf,
+    downloads: crate::downloads::State,
+    /// The listening the Stats place counts, once it's been opened.
+    stats: crate::stats::State,
+    pub bookmarks: bookmarks::State,
+    pub reconciliation: Option<crate::listening::Reconciled>,
+}
+
+impl RedeApp {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+        // The window opened from this plan (see `main`); our title bar follows it.
+        crate::window().0.apply_frame(&cc.egui_ctx);
+        let app = Self::build(&cc.egui_ctx, Paths::resolve()?)?;
+        #[cfg(target_os = "macos")]
+        {
+            app.bridge.media_keys();
+            app.bridge.receive_urls();
+        }
+        app.bridge.restore_openid();
+        Ok(app)
+    }
+
+    fn build(ctx: &egui::Context, paths: Paths) -> anyhow::Result<Self> {
+        // Two workers: the shelf's writes and the server's calls, so a listing
+        // doesn't hold up a book's details.
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        let paths = std::sync::Arc::new(paths);
+        let (prefs, loaded) = Prefs::open(&paths.config_file);
+        let (tx, inbox) = channel();
+        let repaint = ctx.clone();
+        let bridge = Bridge::new(rt.handle().clone(), tx, std::sync::Arc::new(move || repaint.request_repaint()), Keeper::start(), paths.clone());
+        let saved = prefs.snapshot();
+        theme::install(ctx, saved.theme);
+        // Before the first frame, so the window never shows at 100% first.
+        shell::zoom::install(ctx, saved.zoom);
+        let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
+        let shown = PrefsView::read(&prefs);
+        let mut ui = UiState::new();
+        if let Loaded::Unreadable { aside } = loaded {
+            ui.notice =
+                Some(Notice::error(format!("Your settings couldn't be read, so Rede started fresh. Sign in again. The old file is at {}.", aside.display())));
+        }
+        // A saved account is resumed with the tokens the keyring kept; without
+        // one, the sign-in form starts empty.
+        let login = saved.account().is_none().then(LoginForm::default);
+        #[cfg(target_os = "macos")]
+        shell::now_playing::intervals(f64::from(saved.playback.skip_back), f64::from(saved.playback.skip_forward));
+        if let Some(account) = saved.account() {
+            bridge.start(account.clone());
+        }
+        Ok(Self {
+            _rt: AppRuntime(Some(rt)),
+            ctx: ctx.clone(),
+            bridge,
+            inbox,
+            prefs,
+            shown,
+            art,
+            session: Session { connecting: saved.account().is_some(), ..Session::default() },
+            login,
+            openid: Default::default(),
+            books: Books::default(),
+            sync: SyncState::default(),
+            ui,
+            actions: Vec::new(),
+            player: crate::player::Player::default(),
+            mode: saved.window.mode,
+            window: window::State::default(),
+            sheet: None,
+            engine: None,
+            #[cfg(target_os = "macos")]
+            now_playing: Default::default(),
+            listening: None,
+            playback_generation: 0,
+            opening: false,
+            resume_pending: false,
+            resume_deadline: None,
+            sleep_wake: Default::default(),
+            positions: progress::Positions::default(),
+            bookmarks: bookmarks::State::default(),
+            reconciliation: None,
+            stream_dir: paths.art_cache.with_file_name("streams"),
+            downloads: Default::default(),
+            stats: Default::default(),
+        })
+    }
+
+    /// Applies one message from the background. Sign-in results from before a
+    /// sign-out are dropped: they belong to an account nobody is using.
+    fn handle(&mut self, msg: impl Into<Msg>) {
+        match msg.into() {
+            Msg::Offline { session, event } if session == self.bridge.session() => self.download_event(event),
+            Msg::Offline { .. } => {}
+            Msg::Account(m) => match m {
+                AccountMsg::SignedIn { session, account, source, shelf, warning } => {
+                    if session != self.bridge.session() {
+                        return;
+                    }
+                    self.signed_in(account, source, shelf, warning);
+                }
+                AccountMsg::SignInFailed { session, error } => {
+                    if session != self.bridge.session() {
+                        return;
+                    }
+                    self.sign_in_failed(error);
+                }
+                AccountMsg::NoTokens { session } => {
+                    if session == self.bridge.session() {
+                        self.needs_sign_in(None);
+                    }
+                }
+                m => self.handle_sign_in(m),
+            },
+            Msg::Library(m) => match m {
+                LibraryMsg::Books(books) => {
+                    if self.session.source.is_some()
+                        && let (Some(account), Some(shelf)) = (&self.session.account, &self.session.shelf)
+                    {
+                        self.bridge.positions(shelf.clone(), books.iter().map(|book| sources::ItemKey::new(account.id, &book.id)).collect());
+                    }
+                    self.books.set(books);
+                }
+                LibraryMsg::SyncProgress(items) => self.sync.applied = items,
+                LibraryMsg::SyncDone(outcome) => self.sync_done(outcome),
+                LibraryMsg::Book { key, item } => self.books.loaded(&key.item, *item),
+                LibraryMsg::BookFailed { key, error } => self.books.failed(&key.item, error),
+            },
+            Msg::Stats { log, history } => {
+                // No answer means the server's gone, as anywhere else; any
+                // other reason is the page's to say.
+                if let Some(Err(e)) = &history
+                    && e.is_network()
+                {
+                    self.show_failure(e.clone());
+                }
+                self.stats.arrived(log, history);
+            }
+            Msg::Bookmarks { session, event } if session == self.bridge.session() => self.bookmark_event(event),
+            Msg::Bookmarks { .. } => {}
+            Msg::Playback { session, event } if session == self.bridge.session() => self.playback_event(event),
+            Msg::Playback { .. } => {}
+            Msg::Engine { session, event } if session == self.bridge.session() => self.engine_event(event),
+            Msg::Engine { .. } => {}
+            Msg::PlaybackTick { session, report } if session == self.bridge.session() => self.report_playback(report),
+            Msg::PlaybackTick { .. } => {}
+            #[cfg(target_os = "macos")]
+            Msg::Remote(remote) => {
+                if let Some(control) = crate::now_playing::control(remote, &self.player, self.shown.playback.skip_back, self.shown.playback.skip_forward) {
+                    self.playback_control(control);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Msg::Artwork { session, id, bytes } => {
+                if session == self.bridge.session() && self.player.book.as_ref().is_some_and(|b| b.key.to_string() == id) {
+                    shell::now_playing::set_artwork(id, bytes);
+                }
+            }
+            Msg::Error(e) => self.show_failure(e),
+        }
+    }
+
+    /// Shows what failed. A read or write on this computer says nothing about
+    /// the server, so only what came from the network is retried quietly.
+    pub(crate) fn show_failure(&mut self, e: Failure) {
+        if e.is_network() {
+            let offline = self.sync.offline;
+            self.sync.offline = true;
+            self.download_connectivity();
+            if self.sync.retry_at.is_none() {
+                let wait = Duration::from_secs(30);
+                self.sync.retry_at = Some(Instant::now() + wait);
+                self.ctx.request_repaint_after(wait);
+            }
+            if offline {
+                return;
+            }
+        }
+        self.show_error(e.into_message());
+    }
+
+    pub(crate) fn show_error(&mut self, text: impl Into<String>) {
+        self.ui.notice = Some(Notice::error(text.into()));
+    }
+
+    pub(crate) fn show_notice(&mut self, text: impl Into<String>) {
+        self.ui.notice = Some(Notice { text: text.into(), error: false });
+    }
+
+    /// Applies one action. Most go to the part of the app they belong to; an
+    /// action never asks for another one later, it applies it at once.
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Go(route) => self.go(route),
+            Action::Back => self.back(),
+            Action::Forward => {
+                self.ui.landing = false;
+                self.ui.nav.forward();
+                self.on_arrive();
+            }
+            Action::BackBy(steps) => {
+                self.ui.landing = false;
+                self.ui.nav.back_by(steps);
+                self.on_arrive();
+            }
+            Action::SignIn => self.sign_in(),
+            Action::CheckServer => self.check_server(),
+            Action::OpenId => self.begin_openid(),
+            Action::ReopenBrowser => self.reopen_browser(),
+            Action::CancelSignIn => self.cancel_sign_in(abs::OpenIdError::Cancelled),
+            Action::AskSignOut => {
+                let from_settings = self.sheet == Some(sheets::Sheet::Settings);
+                self.sheet = Some(sheets::Sheet::SignOut { from_settings });
+            }
+            Action::SignOut => {
+                self.sheet = None;
+                self.sign_out();
+            }
+            Action::SyncNow => self.sync_now(),
+            Action::Prefs(a) => self.apply_prefs(a),
+            Action::DownloadBook(key) => self.download_book(key),
+            Action::RemoveDownload(key) => self.remove_download(&key),
+            Action::PauseDownloads(paused) => {
+                if let Some(store) = self.downloads.store.get() {
+                    store.set_paused(paused);
+                }
+            }
+            Action::RetryDownloads => self.retry_downloads(),
+            Action::AskRemoveDownloads => self.sheet = Some(sheets::Sheet::RemoveDownloads),
+            Action::RemoveAllDownloads => {
+                self.sheet = Some(sheets::Sheet::Settings);
+                self.remove_all_downloads();
+            }
+            Action::PlayBook(id) => self.play_book(id, None),
+            Action::MarkFinished(id) => self.mark_finished(id),
+            Action::MarkUnfinished(id) => self.mark_unfinished(id),
+            Action::StartOver(id) => self.start_over(id),
+            Action::AddBookmark { item, time, title } => {
+                if self.edit_bookmark(item, time, title.clone(), shelf::BookmarkChange::Create) {
+                    self.bookmarked(&title, time);
+                }
+            }
+            Action::RenameBookmark { item, time, title } => {
+                self.edit_bookmark(item, time, title, shelf::BookmarkChange::Rename);
+            }
+            Action::DeleteBookmark { item, time } => {
+                let title = self.bookmarks.title(&item, time);
+                if self.edit_bookmark(item.clone(), time, String::new(), shelf::BookmarkChange::Delete)
+                    && let Some(title) = title
+                {
+                    self.ui.toasts.note(format!("Deleted “{title}”"), "Undo", Action::AddBookmark { item, time, title });
+                }
+            }
+            Action::JumpToBookmark { item, time } => self.jump_to_bookmark(item, time),
+            Action::UndoReconcile => self.undo_reconcile(),
+            Action::DismissReconcile => self.reconciliation = None,
+            Action::Playback(control) => self.playback_control(control),
+            Action::Mode(mode) => self.set_mode(mode),
+            Action::Shortcuts => {
+                self.ui.palette = None;
+                self.sheet = (self.sheet != Some(sheets::Sheet::Shortcuts)).then_some(sheets::Sheet::Shortcuts);
+            }
+            Action::OpenSettings(tab) => {
+                self.ui.palette = None;
+                self.ui.settings = tab;
+                self.set_mode(crate::window::Mode::Full);
+                self.sheet = Some(sheets::Sheet::Settings);
+            }
+            Action::CloseSheet => {
+                // A No to signing out asked from Settings goes back there.
+                let back = matches!(self.sheet, Some(sheets::Sheet::SignOut { from_settings: true } | sheets::Sheet::RemoveDownloads));
+                self.sheet = back.then_some(sheets::Sheet::Settings);
+            }
+            Action::OpenPalette => {
+                self.set_mode(crate::window::Mode::Full);
+                self.sheet = None;
+                if self.ui.palette.is_none() {
+                    self.ui.palette = Some(palette::Palette::default());
+                }
+                self.ctx.request_repaint();
+            }
+            Action::ClosePalette => {
+                self.ui.palette = None;
+                self.ctx.request_repaint();
+            }
+            Action::PaletteName(name) => {
+                if let Some(p) = self.ui.palette.as_mut() {
+                    p.show_name(name);
+                }
+                self.ctx.request_repaint();
+            }
+            Action::ToggleMini => self.set_mode(self.prefs.get(|s| s.window.mini())),
+            Action::Panel(a) => self.apply_panel(a),
+        }
+    }
+
+    /// A change to a preference, saved once the burst of changes ends.
+    fn apply_prefs(&mut self, action: PrefsAction) {
+        match action {
+            PrefsAction::RemoveDownloadsWhenFinished(enabled) => {
+                self.prefs.edit(|s| s.downloads.remove_when_finished = enabled);
+                self.shown.downloads.remove_when_finished = enabled;
+            }
+            PrefsAction::DownloadLimit(limit) => {
+                self.prefs.edit(|s| s.downloads.limit = limit);
+                self.shown.downloads.limit = limit;
+                if let Some(store) = self.downloads.store.get() {
+                    store.set_limit(limit);
+                }
+            }
+            PrefsAction::Playback(mut playback) => {
+                playback.speed = crate::timeline::normalize_speed(playback.speed);
+                playback.skip_back = playback.skip_back.clamp(1, 300);
+                playback.skip_forward = playback.skip_forward.clamp(1, 300);
+                playback.rewind = playback.rewind.min(60);
+                playback.sleep_minutes = playback.sleep_minutes.clamp(5, 120);
+                playback.sleep_rewind = playback.sleep_rewind.min(60);
+                playback.volume = playback.volume.clamp(0.0, 1.0);
+                self.prefs.edit(|s| s.playback = playback);
+                self.shown.playback = playback;
+                if let Some(engine) = &self.engine {
+                    crate::player::apply_speech(playback, engine);
+                    // The sleep fade goes on top of this, so it's the level
+                    // and not the engine's whole volume.
+                    self.player.set_volume(playback.level(), engine);
+                }
+                #[cfg(target_os = "macos")]
+                shell::now_playing::intervals(f64::from(playback.skip_back), f64::from(playback.skip_forward));
+            }
+            PrefsAction::VoiceBoost(enabled) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { voice_boost: enabled, ..self.shown.playback }));
+            }
+            PrefsAction::SkipSilence(enabled) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { skip_silence: enabled, ..self.shown.playback }));
+            }
+            PrefsAction::Volume(level) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { volume: level, muted: false, ..self.shown.playback }));
+            }
+            PrefsAction::Muted(muted) => {
+                self.apply_prefs(PrefsAction::Playback(crate::settings::PlaybackSettings { muted, ..self.shown.playback }));
+            }
+            PrefsAction::Sort(sort) => {
+                if self.prefs.get(|s| s.sort) == sort {
+                    return;
+                }
+                self.prefs.edit(|s| s.sort = sort);
+                // This frame's copy too, so the grid draws in the new order
+                // without waiting for the next frame's read.
+                self.shown.sort = sort;
+                self.ctx.request_repaint();
+            }
+            PrefsAction::Filter(filter) => {
+                if self.prefs.get(|s| s.filter) == filter {
+                    return;
+                }
+                self.prefs.edit(|s| s.filter = filter);
+                self.shown.filter = filter;
+                self.ctx.request_repaint();
+            }
+            PrefsAction::Zoom(percent) => {
+                let percent = shell::zoom::nearest(f64::from(percent));
+                if self.prefs.get(|s| s.zoom) == percent {
+                    return;
+                }
+                self.prefs.edit(|s| s.zoom = percent);
+                self.shown.zoom = percent;
+                shell::zoom::set(&self.ctx, percent);
+                // The window's minimum is the content's, so it follows.
+                self.prefs.get(|s| s.window.plan()).refit(&self.ctx, self.window.seen);
+                shell::zoom::announce(&mut self.ui.toasts, percent);
+            }
+            PrefsAction::ShowPanel(show) => {
+                self.prefs.edit(|s| s.show_panel = show);
+                self.shown.show_panel = show;
+                self.ctx.request_repaint();
+            }
+            PrefsAction::CollapseSidebar(collapsed) => {
+                self.prefs.edit(|s| s.sidebar_collapsed = collapsed);
+                self.shown.sidebar_collapsed = collapsed;
+                self.ctx.request_repaint();
+            }
+        }
+    }
+
+    fn go(&mut self, route: Route) {
+        self.ui.landing = false;
+        self.ui.nav.go(route);
+        self.on_arrive();
+    }
+
+    fn back(&mut self) {
+        self.ui.landing = false;
+        self.ui.nav.back();
+        self.on_arrive();
+    }
+
+    /// Opens on Home rather than the library when a book is in progress, once
+    /// the positions are known. Only while the window is where it opened: a
+    /// pull that comes later never moves the user. `known` says these
+    /// positions held something; an empty first answer (a fresh shelf) waits
+    /// for the server's.
+    fn land(&mut self, known: bool) {
+        if !self.ui.landing {
+            return;
+        }
+        if !self.ui.nav.untouched() {
+            self.ui.landing = false;
+        } else if self.positions.any_in_progress() {
+            self.ui.landing = false;
+            self.ui.nav.land(Route::Home);
+            self.ctx.request_repaint();
+        } else if known {
+            self.ui.landing = false;
+        }
+    }
+
+    /// Loads what the place just arrived at needs. A book's page asks for its
+    /// details unless they're here already.
+    fn on_arrive(&mut self) {
+        if *self.ui.nav.current() == Route::Stats {
+            self.load_stats();
+        }
+        let Route::Book(id) = self.ui.nav.current().clone() else { return };
+        if self.books.details.contains_key(&id) {
+            return;
+        }
+        let Some(account) = self.session.account.clone() else { return };
+        let Some(shelf) = self.session.shelf.clone() else { return };
+        self.books.details.insert(id.clone(), Details::Loading);
+        self.bridge.open_book(self.session.source.clone(), shelf, sources::ItemKey::new(account.id, id));
+    }
+
+    /// Asks for the listening the Stats place counts, unless it was asked for
+    /// lately. Offline, the server isn't asked: this computer's log is what
+    /// there is.
+    pub(super) fn load_stats(&mut self) {
+        let Some(shelf) = self.session.shelf.clone() else { return };
+        if !self.stats.due() {
+            return;
+        }
+        self.stats.asking();
+        let source = self.session.source.clone().filter(|_| !self.sync.offline);
+        self.bridge.listening_stats(source, shelf);
+    }
+
+    fn notice_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = self.ui.notice.clone() else { return };
+        let t = Tokens::of(ui);
+        let color = if notice.error { t.danger } else { t.muted };
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(notice.text).size(12.0).color(color));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if shell::icons::sized_button(ui, shell::icons::Icon::Close, "Dismiss", egui::vec2(20.0, 20.0), 11.0, Some(t.muted)).clicked() {
+                    self.ui.notice = None;
+                }
+            });
+        });
+        ui.add_space(6.0);
+    }
+
+    /// The toasts over the foot of `within`: above the sleep notice when it's
+    /// up, and above Mini's transport, so neither is covered. The Player has
+    /// controls all the way down, so there they hang near the top, over the
+    /// cover.
+    fn toasts_ui(&mut self, ui: &egui::Ui, within: egui::Rect) {
+        self.sync_reconcile_toast();
+        let mut within = within;
+        match self.mode {
+            crate::window::Mode::Mini => within.max.y -= player_view::MINI_PANEL_H - 8.0,
+            crate::window::Mode::Player => within.max.y = within.top() + BAR_H + 150.0,
+            crate::window::Mode::Full => {}
+        }
+        if self.mode != crate::window::Mode::Player
+            && let Some(h) = self.view().sleep_notice_height(ui, within.width())
+        {
+            within.max.y -= h + 12.0;
+        }
+        let ctx = ui.ctx().clone();
+        self.ui.toasts.ui(&ctx, within, &mut self.actions);
+    }
+
+    fn main_ui(&mut self, ui: &mut egui::Ui) {
+        // This frame's copy of the preferences, taken once before anything is
+        // drawn (views never lock them).
+        self.shown = PrefsView::read(&self.prefs);
+        let t = Tokens::of(ui);
+        self.art.poll();
+        // Narrow windows give the page the room: the sidebar folds to its
+        // rail, and the chapters column becomes a sheet over the page. Known
+        // before the title bar, whose toggle says which.
+        // The window's own width: what decides the columns, wherever the
+        // root ui starts (the test harness draws inside a margin).
+        let width = ui.ctx().content_rect().width();
+        let sidebar = sidebar::plan(width, self.shown.sidebar_collapsed);
+        self.ui.panel.narrow = !panel::docks(width - sidebar.unwrap_or(sidebar::RAIL_W));
+        if !self.ui.panel.narrow {
+            self.ui.panel.sheet = false;
+        }
+        if self.mode != crate::window::Mode::Mini {
+            egui::Panel::top("title-bar")
+                .exact_size(crate::app::BAR_H)
+                .resizable(false)
+                .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::symmetric(12, 0)))
+                .show(ui, |ui| self.title_bar(ui));
+        }
+        self.window_keys(ui.ctx());
+        self.playback_keys(ui.ctx());
+        match self.mode {
+            crate::window::Mode::Player => self.player_window(ui),
+            crate::window::Mode::Mini => self.mini_window(ui),
+            crate::window::Mode::Full => {
+                self.sidebar_panel(ui, sidebar, width);
+                self.side_panel(ui);
+                let content = egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 12, bottom: 0 }))
+                    .show(ui, |ui| {
+                        let within = ui.max_rect();
+                        self.notice_bar(ui);
+                        self.view().nav_row(ui);
+                        let route = self.ui.nav.current().clone();
+                        match &route {
+                            Route::Home => self.view().home_page(ui),
+                            Route::Library => self.view().library_page(ui),
+                            Route::Downloads => self.view().downloads_page(ui),
+                            Route::AllSeries => self.view().all_series_page(ui),
+                            Route::Stats => self.view().stats_page(ui),
+                            Route::Book(id) => {
+                                let id = id.clone();
+                                self.view().book_page(ui, &id);
+                            }
+                            Route::Series(name) => {
+                                let name = name.clone();
+                                self.view().series_page(ui, &name);
+                            }
+                        }
+                        // Floats over the foot of the page.
+                        self.view().sleep_notice(ui, within);
+                        within
+                    });
+                self.panel_sheet(ui.ctx(), content.response.rect);
+                self.toasts_ui(ui, content.inner);
+            }
+        }
+        if self.mode != crate::window::Mode::Full {
+            self.toasts_ui(ui, ui.ctx().content_rect());
+        }
+        if self.mode == crate::window::Mode::Full {
+            self.view().palette_ui(ui.ctx());
+        }
+        self.sheet_ui(ui.ctx());
+        // What the views asked for this frame. Applying an action never queues
+        // another, so one pass takes them all.
+        for a in std::mem::take(&mut self.actions) {
+            self.apply(a);
+        }
+    }
+
+    fn logic(&mut self, ctx: &egui::Context) {
+        while let Ok(msg) = self.inbox.try_recv() {
+            self.handle(msg);
+        }
+        self.expire_openid(std::time::SystemTime::now());
+        self.playback_tick(ctx);
+        // The window came to the front: replay what's queued and pull the
+        // server's positions and bookmarks. The library listing has its own,
+        // slower throttle and pulls too when it's due, so only one asks.
+        if self.session.signed_in() && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            if self.sync.running || !self.sync.due() {
+                self.pull_listening();
+            } else {
+                self.send_activity();
+                self.actions.push(Action::SyncNow);
+            }
+        }
+        // A sync the server asked us to hold off on, or one to try again after
+        // the network failed.
+        if let Some(at) = self.sync.retry_at
+            && Instant::now() >= at
+        {
+            self.sync.retry_at = None;
+            if self.session.signed_in() {
+                self.actions.push(Action::SyncNow);
+            }
+        }
+        for a in std::mem::take(&mut self.actions) {
+            self.apply(a);
+        }
+        self.track_window(ctx);
+        shell::chrome::sync(ctx, shell::chrome::Bar { height: (self.mode != crate::window::Mode::Mini).then_some(BAR_H) });
+    }
+}
+
+impl eframe::App for RedeApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        RedeApp::logic(self, ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.login.is_some() {
+            self.login_ui(ui);
+        } else {
+            self.main_ui(ui);
+        }
+        // Window buttons and resize edges where the system draws none (Linux).
+        shell::csd::overlay(ui.ctx(), (self.mode != crate::window::Mode::Mini).then_some(BAR_H));
+    }
+
+    fn on_exit(&mut self) {
+        if let Some(seen) = self.window.seen {
+            self.prefs.edit(|s| s.window.remember(seen));
+        }
+        #[cfg(target_os = "macos")]
+        shell::now_playing::publish(None, shell::now_playing::State::Stopped, 0.0);
+        self.finish_playback();
+        self.prefs.flush();
+    }
+}
+
+/// The title bar's height, as Ond's toolbar: the traffic lights (macOS) and our
+/// own window buttons (Linux) sit centred in it.
+pub const BAR_H: f32 = 52.0;
+
+impl Drop for RedeApp {
+    fn drop(&mut self) {
+        // Work in flight belongs to a session nobody is using any more.
+        self.finish_playback();
+        self.bridge.end_session();
+        self.prefs.flush();
+    }
+}

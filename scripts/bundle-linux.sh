@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# "path+file:///…/crates/app#ond-player@0.1.0" → "0.1.0"
+# "path+file:///…/apps/ond#ond-player@0.1.0" → "0.1.0"
 version="$(cargo pkgid -p ond-player)"
 version="${version##*@}"
 if [[ -z "$version" || "$version" == *"#"* ]]; then

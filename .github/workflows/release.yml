@@ -1,22 +1,53 @@
 name: Release
 
+# Ond and Rede release from this repository, each from tags of its own:
+# `ond-v0.5.0`, `rede-v0.1.0-beta.1`. Ond's tags before Rede were `v0.4.4`, and a
+# `v*` tag is still Ond's. Only the tagged app is built.
 on:
   push:
-    tags: ["v*"]
-  # Builds and uploads the bundles without publishing, to try the packaging.
+    tags: ["v*", "ond-v*", "rede-v*"]
+  # Builds and uploads either app's bundles without publishing.
   workflow_dispatch:
+    inputs:
+      app:
+        description: App to bundle
+        type: choice
+        options: [ond, rede]
+        default: ond
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
-  # These builds look for newer releases (crates/app/src/updates.rs).
+  # These builds look for newer releases (apps/ond/src/updates.rs).
   OND_DISTRIBUTION: github
 
 jobs:
+  # Which app the tag is for and the version it names. A tag must name the
+  # version the app's crate has: the bundles are named from the crate, and
+  # an app that thinks it's older than its own release keeps offering it.
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.tag.outputs.app }}
+      version: ${{ steps.tag.outputs.version }}
+      name: ${{ steps.tag.outputs.name }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: App and version
+        id: tag
+        env:
+          MANUAL_APP: ${{ inputs.app || 'ond' }}
+        run: bash scripts/release-tag.sh "$MANUAL_APP" >> "$GITHUB_OUTPUT"
+
   macos:
+    needs: tag
     runs-on: macos-latest
+    env:
+      APP: ${{ needs.tag.outputs.app }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -73,8 +104,13 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
-      - name: Bundle
+      - name: Bundle Ond
+        if: env.APP == 'ond'
         run: scripts/bundle-macos.sh --universal
+
+      - name: Bundle Rede
+        if: env.APP == 'rede'
+        run: scripts/bundle-rede-macos.sh --universal
 
       - name: Remove signing keychain
         if: always()
@@ -90,7 +126,11 @@ jobs:
             target/bundle/*.zip
 
   linux:
+    needs: tag
+    env:
+      APP: ${{ needs.tag.outputs.app }}
     strategy:
+      fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     # The oldest Ubuntu with libpipewire 0.3.53+, which the PipeWire output
@@ -107,15 +147,20 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libpipewire-0.3-dev clang cmake pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Test
         run: cargo test --workspace --no-fail-fast
 
-      - name: Bundle
+      - name: Bundle Ond
+        if: env.APP == 'ond'
         run: scripts/bundle-linux.sh
+
+      - name: Bundle Rede
+        if: env.APP == 'rede'
+        run: scripts/bundle-rede-linux.sh
 
       - uses: actions/upload-artifact@v7
         with:
@@ -123,6 +168,8 @@ jobs:
           path: target/bundle/*.tar.gz
 
   windows:
+    needs: tag
+    if: needs.tag.outputs.app == 'ond'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -146,29 +193,62 @@ jobs:
           path: target/bundle/*.zip
 
   publish:
-    needs: [macos, linux, windows]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [tag, macos, linux, windows]
+    # Rede deliberately skips Windows; a skipped job must not block its
+    # release, but a failed build must never publish a partial release.
+    if: >-
+      ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
+          needs.tag.result == 'success' && needs.macos.result == 'success' &&
+          needs.linux.result == 'success' &&
+          (needs.tag.outputs.app == 'rede' || needs.windows.result == 'success') }}
     runs-on: ubuntu-latest
+    env:
+      APP: ${{ needs.tag.outputs.app }}
+      VERSION: ${{ needs.tag.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
           sparse-checkout: .github/release-notes
+          # The tags, to find this app's previous release.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      # Hand-written notes for this tag, if there are any, above GitHub's changelog.
+      # Hand-written notes for this version, if there are any, above GitHub's
+      # changelog: .github/release-notes/ond/v0.5.0.md for ond-v0.5.0 (or v0.5.0).
       - name: Release notes
         run: |
-          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          notes=".github/release-notes/$APP/v$VERSION.md"
           [ -f "$notes" ] || : > "$notes"
           echo "notes=$notes" >> "$GITHUB_ENV"
+
+      # A repository-wide previous release might belong to the other app.
+      # Creation order also keeps a stable Rede release after its beta tags.
+      - name: Previous release
+        run: |
+          case "$APP" in
+            ond) pattern='^(ond-)?v[0-9]+\.[0-9]+\.[0-9]+$' ;;
+            rede) pattern='^rede-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ;;
+          esac
+          previous="$(
+            git tag --merged "$GITHUB_SHA" --sort=-creatordate -l | grep -E "$pattern" |
+              awk -v current="$GITHUB_REF_NAME" '$0 != current { print; exit }'
+          )"
+          echo "Previous $APP release: ${previous:-none}"
+          echo "previous=$previous" >> "$GITHUB_ENV"
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          name: ${{ needs.tag.outputs.name }} ${{ needs.tag.outputs.version }}
           body_path: ${{ env.notes }}
-          generate_release_notes: true
+          # Rede's first release would otherwise include Ond's entire history.
+          generate_release_notes: ${{ needs.tag.outputs.app == 'ond' || env.previous != '' }}
+          previous_tag: ${{ env.previous }}
+          prerelease: ${{ needs.tag.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.tag.outputs.app == 'ond' && needs.tag.outputs.prerelease == 'false' }}
+          fail_on_unmatched_files: true
           files: dist/*

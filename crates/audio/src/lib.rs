@@ -123,6 +123,8 @@ mod output;
 pub mod replaygain;
 mod resample;
 mod signal;
+mod speech;
+mod stretch;
 pub mod tap;
 
 pub use channels::ChannelChange;
@@ -159,7 +161,8 @@ pub enum PlaybackMode {
     /// Software volume, ReplayGain and resampling are allowed.
     #[default]
     Normal,
-    /// Samples reach the device untouched; the device follows the source rate.
+    /// At unity speed samples reach the device untouched; the device follows
+    /// the source rate. Stretching is reported as unavailable for bit-perfect.
     BitPerfect,
 }
 
@@ -225,10 +228,23 @@ impl TrackSource {
 #[derive(Debug)]
 pub enum Command {
     Play(TrackSource),
+    /// Start at a source position, before any audio reaches the device.
+    PlayFrom(TrackSource, Duration),
     Pause,
     Resume,
     Stop,
     SetVolume(f32),
+    /// Speech speed with pitch kept. Finite values are clamped to 0.5–3.0 in
+    /// 0.05 steps; non-finite values are ignored. Flushes and refills from the
+    /// current source position through the seek handshake, preserving pause.
+    /// Persists across tracks, seeks and new plays until changed again.
+    SetSpeed(f32),
+    /// Gentle speech compressor, presence EQ and limiter. Off by default.
+    /// Uses the seek hold/flush and a 5 ms wet ramp, preserving source time.
+    SetVoiceBoost(bool),
+    /// Shorten quiet runs before stretching. Off by default. Uses the seek
+    /// hold/flush so already queued audio cannot use the previous setting.
+    SetSkipSilence(bool),
     /// ReplayGain settings. Applies to the current track at once (with a short
     /// glide) and to every track after it.
     SetGain(GainConfig),
@@ -350,7 +366,13 @@ pub struct Status {
     /// it where a seek landed: after the callback has flushed the ring and
     /// before any new audio is queued, so the callback isn't counting then).
     pub(crate) frames_played: AtomicU64,
-    /// 0 when unknown (e.g. unseekable stream without a duration header). Engine.
+    /// Current source time as f64 seconds, stored in one atomic so rate and
+    /// position cannot be read from different tracks. Callback (from timeline
+    /// segments); decoder (after an acknowledged seek, before queuing audio);
+    /// engine (zeroes it on stop and when reopening for a new track).
+    pub(crate) source_position_bits: AtomicU64,
+    /// File duration expressed at the output rate before stretching, or 0
+    /// when unknown. Engine. Accessors scale this for source or output time.
     pub(crate) total_frames: AtomicU64,
     /// The output rate of the current track. Engine.
     pub(crate) sample_rate: AtomicU32,
@@ -371,6 +393,16 @@ pub struct Status {
     pub(crate) track_seq: AtomicU64,
     /// Engine.
     volume_bits: AtomicU32,
+    /// Requested speed as f32 bits (0 in a default snapshot means unity).
+    /// Engine; the decoder captures it with each seek request.
+    speed_bits: AtomicU32,
+    /// Requested speech processing. Engine; captured with each seek.
+    voice_boost: AtomicBool,
+    skip_silence: AtomicBool,
+    /// Cumulative removed source seconds heard in this play session. Callback
+    /// (timeline segments); engine (new Play). Seeks and internal restarts
+    /// retain heard savings, discarding savings in flushed lookahead.
+    pub(crate) silence_saved_bits: AtomicU64,
     /// Engine.
     pub(crate) paused: AtomicBool,
     /// The callback is holding or prebuffering. Callback; engine (sets it the
@@ -414,8 +446,39 @@ impl Status {
         if self.bit_perfect.load(Ordering::Relaxed) { PlaybackMode::BitPerfect } else { PlaybackMode::Normal }
     }
 
+    /// Output time in the current track. A seek sets the equivalent output
+    /// position at the current speed; callbacks then count device frames.
     pub fn position_secs(&self) -> f64 {
         secs(self.frames_played.load(Ordering::Relaxed), self.sample_rate.load(Ordering::Relaxed))
+    }
+
+    pub fn speed(&self) -> f32 {
+        let bits = self.speed_bits.load(Ordering::Relaxed);
+        if bits == 0 { 1.0 } else { f32::from_bits(bits) }
+    }
+
+    pub fn voice_boost(&self) -> bool {
+        self.voice_boost.load(Ordering::Relaxed)
+    }
+
+    pub fn skip_silence(&self) -> bool {
+        self.skip_silence.load(Ordering::Relaxed)
+    }
+
+    /// Removed source seconds, independent of speed, accumulated over this
+    /// play session (including gapless files and repeated listening after seeks).
+    /// New Play/PlayFrom resets this counter; Stop retains the last total.
+    pub fn silence_saved_secs(&self) -> f64 {
+        f64::from_bits(self.silence_saved_bits.load(Ordering::Relaxed))
+    }
+
+    /// Position in the current file's source time, independent of processing
+    /// speed and the device rate. Like `position_secs`, this is the end of the
+    /// last buffer handed to the device, and freezes while paused or buffering.
+    /// At non-unity speed this is nominal source time: pitch-synchronous
+    /// overlap can align the waveform within a two-pitch-period (31 ms) window.
+    pub fn source_position_secs(&self) -> f64 {
+        f64::from_bits(self.source_position_bits.load(Ordering::Relaxed))
     }
 
     /// Playback is using the network: loading, buffering, or still downloading
@@ -451,7 +514,13 @@ impl Status {
         (self.fetched_bytes.load(Ordering::Relaxed), self.total_bytes.load(Ordering::Relaxed))
     }
 
+    /// Nominal output duration at the requested speed.
     pub fn duration_secs(&self) -> Option<f64> {
+        self.source_duration_secs().map(|duration| duration / self.speed() as f64)
+    }
+
+    /// Full file duration in source seconds, or `None` when unknown.
+    pub fn source_duration_secs(&self) -> Option<f64> {
         let total = self.total_frames.load(Ordering::Relaxed);
         (total > 0).then(|| secs(total, self.sample_rate.load(Ordering::Relaxed)))
     }
@@ -467,6 +536,7 @@ impl Status {
         self.buffering.store(buffering, Ordering::Relaxed);
         self.sample_rate.store(RATE, Ordering::Relaxed);
         self.frames_played.store((position * RATE as f64) as u64, Ordering::Relaxed);
+        self.source_position_bits.store(position.to_bits(), Ordering::Relaxed);
         self.total_frames.store((duration * RATE as f64) as u64, Ordering::Relaxed);
         self.total_bytes.store(1_000_000, Ordering::Relaxed);
         self.fetched_bytes.store((fetched.clamp(0.0, 1.0) * 1_000_000.0) as u64, Ordering::Relaxed);
@@ -691,6 +761,10 @@ impl Engine {
                 self.forget_next();
                 self.start(src, None);
             }
+            Command::PlayFrom(src, at) => {
+                self.forget_next();
+                self.start(src, Some(at));
+            }
             Command::Pause => {
                 // Loading too: a pause pressed while a slow server answers must
                 // hold once the track opens (`open_ring` respects `paused`).
@@ -734,6 +808,9 @@ impl Engine {
                 self.apply_mode(m);
             }
             Command::Seek(to) => self.seek(to),
+            Command::SetSpeed(speed) => self.set_speed(speed),
+            Command::SetVoiceBoost(enabled) => self.set_speech(enabled, false),
+            Command::SetSkipSilence(enabled) => self.set_speech(enabled, true),
             Command::SetNext(next) => self.set_next(next),
             Command::SelectDevice(uid) => match self.backend.select_device(uid.as_deref()) {
                 Ok(()) => {
@@ -804,6 +881,7 @@ impl Engine {
     /// Starts a new session at `src`, optionally from `start_at`.
     fn start(&mut self, src: TrackSource, start_at: Option<Duration>) {
         self.stop();
+        self.status.silence_saved_bits.store(0, Ordering::Relaxed);
         self.begin(src, start_at);
     }
 
@@ -849,6 +927,7 @@ impl Engine {
         self.status.set_state(PlayState::Stopped);
         self.status.track_seq.store(0, Ordering::Relaxed);
         self.status.frames_played.store(0, Ordering::Relaxed);
+        self.status.source_position_bits.store(0, Ordering::Relaxed);
         self.status.total_frames.store(0, Ordering::Relaxed);
         self.status.fetched_bytes.store(0, Ordering::Relaxed);
         self.status.total_bytes.store(0, Ordering::Relaxed);
@@ -866,6 +945,37 @@ impl Engine {
 
     fn current(&self) -> Option<&SessionTrack> {
         self.tracks.get(self.out_seq as usize)
+    }
+
+    fn set_speech(&mut self, enabled: bool, silence: bool) {
+        self.poll_session();
+        let setting = if silence { &self.status.skip_silence } else { &self.status.voice_boost };
+        if setting.swap(enabled, Ordering::Relaxed) == enabled {
+            return;
+        }
+        let at = self.held_seek.map(|(_, to)| to).or_else(|| self.take_position().map(|r| r.at));
+        if let Some(at) = at {
+            self.seek(at);
+        }
+        self.report_signal_path();
+    }
+
+    fn set_speed(&mut self, speed: f32) {
+        if !speed.is_finite() {
+            return;
+        }
+        let speed = (speed.clamp(0.5, 3.0) * 20.0).round() / 20.0;
+        if speed == self.status.speed() {
+            return;
+        }
+        // Bring the engine's track up to date before choosing the source time.
+        self.poll_session();
+        let at = self.held_seek.map(|(_, to)| to).or_else(|| self.take_position().map(|r| r.at));
+        self.status.speed_bits.store(speed.to_bits(), Ordering::Relaxed);
+        if let Some(at) = at {
+            self.seek(at);
+        }
+        self.report_signal_path();
     }
 
     fn seek(&mut self, to: Duration) {
@@ -951,7 +1061,7 @@ impl Engine {
         }
         let paused = state == PlayState::Paused;
         if let Some(t) = self.current() {
-            let at = Duration::from_secs_f64(self.status.position_secs());
+            let at = Duration::from_secs_f64(self.status.source_position_secs());
             return Some(Resume { src: t.src.clone(), at, paused, announced: true });
         }
         // The UI hasn't heard this track start, unless this session is itself
@@ -1081,7 +1191,15 @@ impl Engine {
         let caps = self.backend.device_caps();
         // Judged on what reaches the device channel-wise; the mapping itself is folded in below.
         let sent = StreamFormat { channels: ring.format.channels, ..source };
-        let bit_perfect = adjust(assess(self.config.mode, &sent, device_rate, caps.as_ref()), channels, transcoded.as_deref());
+        let stretched = self.status.speed() != 1.0;
+        let speech = self.status.voice_boost() || self.status.skip_silence();
+        let bit_perfect = if speech && self.config.mode == PlaybackMode::BitPerfect {
+            BitPerfectStatus::Unavailable { reason: "speech processing".into(), device_limit: false }
+        } else if stretched && self.config.mode == PlaybackMode::BitPerfect {
+            BitPerfectStatus::Unavailable { reason: format!("speed {}×", self.status.speed()), device_limit: false }
+        } else {
+            adjust(assess(self.config.mode, &sent, device_rate, caps.as_ref()), channels, transcoded.as_deref())
+        };
         // The integer format actually in use: what the callback dithers to.
         let device_bits = caps.as_ref().and_then(|c| c.active_bits);
         let resampled = device_rate != source.sample_rate;
@@ -1089,7 +1207,7 @@ impl Engine {
         let volume = self.config.mode == PlaybackMode::Normal && self.status.volume() < 1.0;
         // The same rule the callback applies to what it plays.
         let treatment = dither::Treatment {
-            processed: resampled || matches!(channels, ChannelChange::Downmix { .. }),
+            processed: speech || stretched || resampled || matches!(channels, ChannelChange::Downmix { .. }),
             gained: matches!(gain, GainState::Applied(g) if g.linear != 1.0) || volume,
             source_bits: source.bits_per_sample,
         };
@@ -1133,7 +1251,8 @@ impl Engine {
         if next.is_local() || self.prefetched.as_ref() == Some(&next.id) {
             return;
         }
-        let near_end = self.status.duration_secs().is_some_and(|d| d - self.status.position_secs() <= PREFETCH_LEAD_SECS);
+        let near_end =
+            self.status.source_duration_secs().is_some_and(|d| (d - self.status.source_position_secs()) / self.status.speed() as f64 <= PREFETCH_LEAD_SECS);
         if progress.is_some_and(|p| p.complete) || near_end {
             cache.prefetch(&next.cache_key(), &next.url);
             self.prefetched = Some(next.id.clone());
@@ -1260,6 +1379,7 @@ impl Engine {
             // The new ring starts on a new track. (A first ring keeps the
             // position a session started at, set by the decoder's seek.)
             self.status.frames_played.store(0, Ordering::Relaxed);
+            self.status.source_position_bits.store(0, Ordering::Relaxed);
             // As at a gapless boundary: the track that was next is playing
             // now, and the UI names the new next once it hears about it.
             self.forget_next();

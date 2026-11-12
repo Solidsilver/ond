@@ -105,6 +105,19 @@ pub(crate) struct Marker {
     pub(crate) source_bits: Option<u32>,
 }
 
+/// A linear piece of source time beside the sample ring. Positions are samples
+/// in the ring and frames in the file, so channel mapping never changes time.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Segment {
+    pub(crate) at: u64,
+    pub(crate) source_frame: f64,
+    pub(crate) source_rate: u32,
+    pub(crate) ratio: f64,
+    pub(crate) processed: bool,
+    pub(crate) skip_silence: bool,
+    pub(crate) silence_saved: f64,
+}
+
 /// Track boundaries a ring can hold at once. The decoder waits for room once
 /// it is this many tracks ahead of the output. (Must stay below
 /// [`crate::replaygain::GAIN_SLOTS`]: the gain table is indexed by track number
@@ -118,6 +131,8 @@ pub struct RingInput {
     pub(crate) samples: Consumer<f32>,
     /// Where the next tracks begin. Pushed by the decoder when it continues gaplessly.
     pub(crate) markers: Consumer<Marker>,
+    segments: Option<Consumer<Segment>>,
+    segment: Option<Segment>,
     /// Set by the decoder after its last push; starvation after this is the end, not an underrun.
     pub(crate) input_done: Arc<AtomicBool>,
     pub(crate) ctl: Arc<RingCtl>,
@@ -148,7 +163,38 @@ impl std::fmt::Debug for RingInput {
 
 impl RingInput {
     pub(crate) fn new(samples: Consumer<f32>, markers: Consumer<Marker>, input_done: Arc<AtomicBool>, ctl: Arc<RingCtl>) -> Self {
-        Self { samples, markers, input_done, ctl, pos: 0, gain: 1.0, rg: 1.0, buffering: true, faded: 0, source_bits: None, processed: false }
+        Self {
+            samples,
+            markers,
+            segments: None,
+            segment: None,
+            input_done,
+            ctl,
+            pos: 0,
+            gain: 1.0,
+            rg: 1.0,
+            buffering: true,
+            faded: 0,
+            source_bits: None,
+            processed: false,
+        }
+    }
+
+    pub(crate) fn with_timeline(mut self, segments: Consumer<Segment>) -> Self {
+        self.segments = Some(segments);
+        self
+    }
+
+    /// Takes the timeline out, so a test can hold a segment's publication to
+    /// `Status` back until it wants it (see the format-change savings test).
+    #[cfg(test)]
+    pub(crate) fn hold_timeline(&mut self) -> Option<Consumer<Segment>> {
+        self.segments.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_timeline(&mut self, segments: Consumer<Segment>) {
+        self.segments = Some(segments);
     }
 
     /// Describes what's in the ring, for the dither decision: the first
@@ -168,7 +214,7 @@ impl RingInput {
     }
 
     fn treatment(&self, gained: bool) -> Treatment {
-        Treatment { processed: self.processed, gained, source_bits: self.source_bits }
+        Treatment { processed: self.processed || self.segment.is_some_and(|s| s.processed), gained, source_bits: self.source_bits }
     }
 
     /// The realtime path for an integer device seen through a float stream:
@@ -200,6 +246,10 @@ impl RingInput {
         if requested != self.ctl.flush_acked.load(Ordering::Relaxed) {
             self.discard();
             while self.markers.pop().is_ok() {}
+            if let Some(segments) = self.segments.as_mut() {
+                while segments.pop().is_ok() {}
+            }
+            self.segment = None;
             self.pos = 0;
             self.buffering = true;
             self.ctl.released_gen.fetch_max(self.ctl.pending_release.load(Ordering::Acquire), Ordering::AcqRel);
@@ -265,6 +315,7 @@ impl RingInput {
             return false;
         }
 
+        self.consume_endpoints(status, bit_perfect);
         let done = self.input_done.load(Ordering::Acquire);
         status.buffered_frames.store((self.samples.slots() / channels) as u64, Ordering::Relaxed);
         if self.buffering {
@@ -307,6 +358,18 @@ impl RingInput {
                 Ok(m) => (m.at - self.pos) as usize,
                 Err(_) => usize::MAX,
             };
+            let source_until = match self.segments.as_mut().and_then(|segments| segments.peek().ok()) {
+                Some(segment) if segment.at <= self.pos => {
+                    self.segment = self.segments.as_mut().and_then(|segments| segments.pop().ok());
+                    if let Some(segment) = self.segment.filter(|segment| segment.skip_silence) {
+                        status.silence_saved_bits.store(segment.silence_saved.to_bits(), Ordering::Relaxed);
+                    }
+                    continue;
+                }
+                Some(segment) => (segment.at - self.pos) as usize,
+                None => usize::MAX,
+            };
+            let until = until.min(source_until);
             let rg_target = if bit_perfect { 1.0 } else { status.gains.get(status.track_seq.load(Ordering::Acquire)) };
             let n = (avail - written).min(until);
             let Ok(chunk) = self.samples.read_chunk(n) else { break };
@@ -325,7 +388,13 @@ impl RingInput {
             written += n;
             self.pos += n as u64;
             status.frames_played.fetch_add((n / channels) as u64, Ordering::Relaxed);
+            if let Some(segment) = self.segment {
+                let frames = (self.pos - segment.at) / channels as u64;
+                let source = (segment.source_frame + frames as f64 * segment.ratio) / segment.source_rate.max(1) as f64;
+                status.source_position_bits.store(source.to_bits(), Ordering::Relaxed);
+            }
         }
+        self.consume_endpoints(status, bit_perfect);
         out[written..].fill(silence);
 
         if written < out.len() {
@@ -339,6 +408,35 @@ impl RingInput {
             self.buffering = true;
         }
         false
+    }
+
+    fn consume_endpoints(&mut self, status: &Status, bit_perfect: bool) {
+        let next = self.segments.as_mut().and_then(|segments| segments.peek().ok());
+        if !self.segment.is_some_and(|segment| segment.skip_silence) && !next.is_some_and(|segment| segment.skip_silence) {
+            return;
+        }
+        // Cuts can end a file without contributing any samples. Consume their
+        // endpoint only after all preceding audio has reached the device.
+        if self.samples.slots() == 0 {
+            while self.markers.peek().is_ok_and(|marker| marker.at <= self.pos) {
+                if let Ok(marker) = self.markers.pop() {
+                    self.source_bits = marker.source_bits;
+                    status.frames_played.store(0, Ordering::Relaxed);
+                    let seq = status.track_seq.fetch_add(1, Ordering::AcqRel) + 1;
+                    if !bit_perfect {
+                        self.rg = status.gains.get(seq);
+                    }
+                }
+            }
+            while self.segments.as_mut().and_then(|segments| segments.peek().ok()).is_some_and(|segment| segment.at <= self.pos) {
+                self.segment = self.segments.as_mut().and_then(|segments| segments.pop().ok());
+                if let Some(segment) = self.segment {
+                    let source = segment.source_frame / segment.source_rate.max(1) as f64;
+                    status.source_position_bits.store(source.to_bits(), Ordering::Relaxed);
+                    status.silence_saved_bits.store(segment.silence_saved.to_bits(), Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     /// Plays up to `frames` queued frames with a linear fade to silence. Returns samples written.

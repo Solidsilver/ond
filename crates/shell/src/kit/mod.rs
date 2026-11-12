@@ -1,0 +1,113 @@
+//! The look both apps are drawn with: every widget whose shape, colours and
+//! spacing should match wherever it appears. A widget belongs here when
+//! either app could use it as it is; what only makes sense in one app (Ond's
+//! managed-settings tag, a track's colour) stays there as a thin wrapper.
+//! Everything is re-exported here, so callers write `kit::switch`.
+//!
+//! - [`text`]: [`elide`], [`elide_middle`], [`elide_job`], the quiet
+//!   [`link`] and [`link_line`] that underline on hover, a page's title
+//!   ([`page_heading`]), the muted
+//!   [`section`] label, [`key_cap`] (a combo drawn as a key), [`chip`] (a
+//!   finding in tinted text), and the one [`empty_state`].
+//! - [`buttons`]: the filled [`primary`], [`secondary`], [`danger`] (and
+//!   [`primary_unavailable`], [`secondary_danger`]), the [`quiet_button`],
+//!   [`heart_button`] and [`hover_heart`], [`tile_button`] (round, on a
+//!   tile's art), [`chip_button`] (a small tinted chip, Rede's speed and
+//!   sleep timer),
+//!   and the [`focus_ring`] every self-painted control shows under Tab.
+//! - [`controls`]: the segmented pill ([`segmented`], [`segmented_wide`],
+//!   [`choice`]; [`icon_choice`] for icons), [`thin_slider`] (and [`thin_slider_marked`]; [`step_slider`] steps a
+//!   whole number on one, beside its [`readout`]), [`switch`]
+//!   (and [`switch_tinted`]), [`stepper`] and its [`step_button`], and
+//!   [`choice_chip`] (one of a grid of choices, lit when on) and
+//!   [`stepper_chip`] (one whose value is the user's own, stepped in place).
+//! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
+//!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
+//!   one; [`kv_section`], [`kv_row`] and [`kv_text`] (a label and its value,
+//!   the values lined up, as an info panel lists facts); [`row_fill`] (a list
+//!   row's selection or hover); [`LIST_W`], the widest a list of rows grows;
+//!   and [`sidebar_row`].
+//! - [`menus`]: [`popover`] (or [`popover_at`]) in the theme's frame,
+//!   [`padded`] to line a block up with its rows, [`popover_title`],
+//!   [`popover_rule`], [`menu_row`] (a command), [`info_row`] (a fact),
+//!   [`switch_row`], and [`menu_label`] (a quiet button with a chevron that
+//!   opens one).
+//! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
+//!   in), [`sheet_header`] (its title, and a × that closes it), and the
+//!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
+//! - [`palette`](mod@palette): the command [`palette`](fn@palette) over the window (⌘K),
+//!   filled by the app's [`PaletteRows`], with its [`PaletteState`] and
+//!   [`palette_icon_tile`] for a row without a cover; and the sidebar's
+//!   [`search_field`] that opens it.
+//! - [`settings`]: the Settings window over the app ([`settings_window`],
+//!   which says what happened in a [`SettingsWindow`]), its tab list
+//!   ([`settings_nav`], its width [`SETTINGS_NAV_W`]), the pane beside it
+//!   ([`settings_pane`]), and About's [`about_header`] with the
+//!   [`app_icon`].
+//! - [`covers`]: what's drawn for an item without art: a
+//!   [`generated_cover`] (a ground in a colour picked from a seed, the
+//!   title set on it), a [`generated_disc`] (a person's initials) and the
+//!   bare [`generated_ground`];
+//!   and what's laid over any cover to say how far along it is
+//!   ([`cover_progress`], a line along its foot; [`cover_badge`], a round
+//!   badge in its corner), with [`progress_bar`], the same line on its own.
+//! - [`charts`]: figures as pictures, each part on a [`card`] under its
+//!   [`card_heading`]: a [`stat_tile`] (and
+//!   [`tile_columns`] to lay a row of them out), a [`bar_chart`], a
+//!   [`level_grid`] of shaded cells (a calendar of days) with its
+//!   [`level_legend`], and a [`share_bar`].
+//! - [`download`]: the [`DownloadMark`] painted by [`download_mark`] on
+//!   whatever is downloaded or on its way (a check in a ring, a filling
+//!   ring, a warning), and the [`download_button`] beside a page's Play.
+//! - [`nav`]: [`nav_row`], the row above a page's heading with back,
+//!   forward and the breadcrumb, which says what was clicked as a
+//!   [`NavClick`].
+//! - [`toasts`]: [`Toasts`], the messages over the foot of the window, in
+//!   one column of one width: notices fade, errors (with a Retry, through
+//!   [`Toasts::error`]) and offers stay until clicked away, and a
+//!   [`Toasts::note`] fades with its button (an Undo).
+
+pub mod buttons;
+pub mod charts;
+pub mod controls;
+pub mod covers;
+pub mod download;
+pub mod menus;
+pub mod nav;
+pub mod palette;
+pub mod rows;
+pub mod settings;
+pub mod sheets;
+pub mod text;
+pub mod toasts;
+
+pub use buttons::*;
+pub use charts::*;
+pub use controls::*;
+pub use covers::*;
+pub use download::*;
+pub use menus::*;
+pub use nav::*;
+pub use palette::*;
+pub use rows::*;
+pub use settings::*;
+pub use sheets::*;
+pub use text::*;
+pub use toasts::Toasts;
+
+/// A harness whose first frame installs the theme (its fonts arrive a
+/// frame later) and whose later frames draw `body`.
+#[cfg(test)]
+fn themed<S: 'static>(state: S, mut body: impl FnMut(&mut egui::Ui, &mut S) + 'static) -> egui_kittest::Harness<'static, (bool, S)> {
+    egui_kittest::Harness::builder().build_ui_state(
+        move |ui, (installed, state): &mut (bool, S)| {
+            if !std::mem::replace(installed, true) {
+                crate::theme::install(ui.ctx(), crate::theme::ThemePref::Light);
+                ui.ctx().request_repaint();
+                return;
+            }
+            body(ui, state);
+        },
+        (false, state),
+    )
+}
