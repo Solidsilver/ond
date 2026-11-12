@@ -361,6 +361,7 @@ struct LibrarySlot {
     library: Arc<Library>,
     account: Option<accounts::AccountId>,
     data: Option<std::path::PathBuf>,
+    art_cache: Option<std::path::PathBuf>,
     analyses: std::sync::Weak<library::AnalysisStore>,
 }
 
@@ -370,7 +371,7 @@ impl Bridge {
             rt,
             tx,
             notify,
-            libraries: Arc::new(Mutex::new(LibrarySlot { library, account: None, data: None, analyses: std::sync::Weak::new() })),
+            libraries: Arc::new(Mutex::new(LibrarySlot { library, account: None, data: None, art_cache: None, analyses: std::sync::Weak::new() })),
             scoped_library: None,
             sync_cancel: Arc::default(),
             album_pass: Arc::default(),
@@ -435,9 +436,16 @@ impl Bridge {
         self.scoped_library.clone().unwrap_or_else(|| self.libraries.lock().unwrap_or_else(|e| e.into_inner()).library.clone())
     }
 
-    pub fn configure_storage(&self, data: std::path::PathBuf, account: Option<accounts::AccountId>, analyses: &Arc<library::AnalysisStore>) {
+    pub fn configure_storage(
+        &self,
+        data: std::path::PathBuf,
+        art_cache: std::path::PathBuf,
+        account: Option<accounts::AccountId>,
+        analyses: &Arc<library::AnalysisStore>,
+    ) {
         let mut slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
         slot.data = Some(data);
+        slot.art_cache = Some(art_cache);
         slot.account = account;
         slot.analyses = Arc::downgrade(analyses);
     }
@@ -447,7 +455,7 @@ impl Bridge {
     pub fn install_storage(&self, account: accounts::AccountId, stores: crate::storage::Stores) -> Arc<library::AnalysisStore> {
         let old = {
             let mut slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
-            let old = (slot.account, Arc::downgrade(&slot.library), slot.analyses.clone(), slot.data.clone());
+            let old = (slot.account, Arc::downgrade(&slot.library), slot.analyses.clone(), slot.data.clone(), slot.art_cache.clone());
             slot.library = stores.library;
             slot.account = Some(account);
             slot.analyses = Arc::downgrade(&stores.analyses);
@@ -455,6 +463,7 @@ impl Bridge {
         };
         if let Some(account) = old.0 {
             let dir = crate::storage::account_dir(old.3.as_ref().expect("persistent library has a data root"), account);
+            let art_dir = old.4.as_ref().map(|root| crate::art::account_dir(root, account));
             self.rt.spawn(async move {
                 // Old requests may still be returning from the network. Their
                 // handles keep the old database alive until they have stopped.
@@ -462,8 +471,13 @@ impl Bridge {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = std::fs::remove_dir_all(&dir) {
-                        tracing::warn!("removing previous library {}: {e}", dir.display());
+                    for (what, path) in [("library", Some(dir)), ("art cache", art_dir)] {
+                        if let Some(path) = path
+                            && let Err(e) = std::fs::remove_dir_all(&path)
+                            && e.kind() != std::io::ErrorKind::NotFound
+                        {
+                            tracing::warn!("removing previous {what} {}: {e}", path.display());
+                        }
                     }
                 })
                 .await;
@@ -1281,10 +1295,14 @@ mod tests {
         let stores = crate::storage::open(dir.path(), Some(account), &mut vec![]).unwrap();
         stores.library.upsert_albums(vec![album("kept", 1)]).unwrap();
         stores.analyses.put("song", b"old analysis").unwrap();
+        let art_root = dir.path().join("art");
+        let old_art = crate::art::account_dir(&art_root, account);
+        std::fs::create_dir_all(&old_art).unwrap();
+        std::fs::write(crate::art::cover_file(&old_art, "al-1", 64), b"old art").unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), stores.library);
-        bridge.configure_storage(dir.path().to_owned(), Some(account), &stores.analyses);
+        bridge.configure_storage(dir.path().to_owned(), art_root.clone(), Some(account), &stores.analyses);
         bridge.end_session();
         let signed_out = Settings { signed_out: true, ..old.clone() };
         let again = signed_out.sign_in("HTTPS://Music.Example.com/", "me");
@@ -1297,6 +1315,7 @@ mod tests {
         rt.block_on(bridge.connected(bridge.session(), source(account), again, "test".into(), true));
         assert!(matches!(rx.try_recv().unwrap(), Msg::Connected { new_account: false, .. }));
         assert_eq!(rt.block_on(bridge.db(|l| l.albums())).unwrap()[0].id, "kept");
+        assert!(crate::art::cover_file(&old_art, "al-1", 64).is_file());
 
         let next = signed_out.sign_in("https://music.example.com", "someone-else");
         let next_account = next.account.unwrap();
@@ -1327,7 +1346,7 @@ mod tests {
         assert!(rt.block_on(bridge.db(|l| l.albums())).unwrap().is_empty());
         drop(stores.analyses);
         let old_folder = crate::storage::account_dir(dir.path(), account);
-        testkit::wait_until("the previous mirror folder to be removed", || !old_folder.exists());
+        testkit::wait_until("the previous mirror and art folders to be removed", || !old_folder.exists() && !old_art.exists());
         assert!(crate::storage::account_dir(dir.path(), next_account).join("library.redb").is_file());
     }
 

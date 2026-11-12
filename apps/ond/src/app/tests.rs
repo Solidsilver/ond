@@ -1491,3 +1491,60 @@ fn a_kept_playlist_rebuilds_its_tracks_from_qualified_download_names() {
     app.on_arrive();
     assert_eq!(app.data.playlist_tracks["pl-1"].iter().map(|t| &t.id).collect::<Vec<_>>(), expected.iter().map(|t| &t.id).collect::<Vec<_>>());
 }
+
+#[test]
+fn two_accounts_keep_separate_art_and_switching_removes_the_old_accounts_art() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let png = |rgba: [u8; 4]| {
+        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba(rgba));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    let (red, blue) = (png([220, 30, 30, 255]), png([30, 30, 220, 255]));
+    let source_for = |account: accounts::AccountId, bytes: Vec<u8>| -> crate::source::Src {
+        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+        fake.account = account;
+        fake.covers.lock().unwrap().insert("al-1".into(), bytes);
+        Arc::new(fake)
+    };
+    let connect = |app: &mut OndApp, account: accounts::AccountId, user: &str, bytes: Vec<u8>| {
+        let stores = crate::storage::open(dir.path(), Some(account), &mut vec![]).unwrap();
+        let session = app.bridge.session();
+        app.handle(Msg::Connected {
+            stores: Some(stores),
+            session,
+            source: source_for(account, bytes),
+            settings: Box::new(Settings { account: Some(account), server: "http://music.local".into(), username: user.into(), ..Default::default() }),
+            server: "test".into(),
+            new_account: true,
+            password_saved: true,
+        });
+    };
+
+    let (one, two) = (accounts::AccountId::new(), accounts::AccountId::new());
+    let art_root = dir.path().join("art");
+    connect(&mut app, one, "one", red.clone());
+    testkit::wait_until("account one's cover to load", || {
+        app.art.poll();
+        app.art.texture("al-1", 40.0).is_some()
+    });
+    let one_dir = crate::art::account_dir(&art_root, one);
+    let one_file = crate::art::cover_file(&one_dir, "al-1", 64);
+    testkit::wait_until("account one's cover to be written", || one_file.exists());
+    assert_eq!(std::fs::read(&one_file).unwrap(), red);
+
+    connect(&mut app, two, "two", blue.clone());
+    assert!(app.art.texture("al-1", 40.0).is_none());
+    testkit::wait_until("account two's cover to load", || {
+        app.art.poll();
+        app.art.texture("al-1", 40.0).is_some()
+    });
+    let two_file = crate::art::cover_file(&crate::art::account_dir(&art_root, two), "al-1", 64);
+    testkit::wait_until("account two's cover to be written", || two_file.exists());
+    assert_eq!(std::fs::read(&two_file).unwrap(), blue);
+    testkit::wait_until("the previous account's art folder to be removed", || !one_dir.exists());
+    assert!(two_file.is_file());
+}

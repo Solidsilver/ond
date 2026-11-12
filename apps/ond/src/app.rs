@@ -443,7 +443,7 @@ impl OndApp {
         let (tx, inbox) = channel();
         let repaint = ctx.clone();
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), stores.library);
-        bridge.configure_storage(data_dir.to_owned(), prefs.get(|s| s.account), &analyses);
+        bridge.configure_storage(data_dir.to_owned(), paths.art_cache.clone(), prefs.get(|s| s.account), &analyses);
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         // Before the first frame, so the window never shows at 100% first.
