@@ -7,6 +7,7 @@ use crate::nav::Nav;
 use crate::settings::Settings;
 use crate::source::Src;
 use crate::theme::{self, Tokens};
+use shell::kit;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -396,8 +397,9 @@ impl OndApp {
                     let mut enter = false;
                     ui.add_enabled_ui(!form.busy, |ui| {
                         let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool, locked: bool, focus: bool| {
+                            // Not the kit's own label: a managed field says so beside it.
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
+                                kit::field_label(ui, label);
                                 if locked {
                                     ui.label(egui::RichText::new(crate::managed::LOCKED).size(11.0).color(t.muted));
                                 }
@@ -415,22 +417,11 @@ impl OndApp {
                                     });
                                 return false;
                             }
-                            let r = ui.add(
-                                egui::TextEdit::singleline(text)
-                                    .hint_text(hint)
-                                    .password(password)
-                                    .desired_width(W)
-                                    .margin(egui::vec2(10.0, 7.0))
-                                    .background_color(t.field),
-                            );
-                            if focus {
-                                r.request_focus();
-                            }
-                            r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            kit::TextField::new(label).hint(hint).password(password).focus(focus).show_input(ui, text)
                         };
                         enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false, locked.0, first == Some(0));
                         if !locked.0 {
-                            ui.label(egui::RichText::new("Your server's address, for example https://music.example.com").size(11.0).color(t.muted));
+                            kit::field_help(ui, "Your server's address, for example https://music.example.com");
                         }
                         ui.add_space(10.0);
                         enter |= field(ui, "Username", &mut form.username, "", false, locked.1, first == Some(1));
@@ -439,26 +430,14 @@ impl OndApp {
                     });
                     ui.add_space(18.0);
                     let label = if form.busy { "Connecting…" } else { "Connect" };
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(W, 34.0), if form.busy { egui::Sense::hover() } else { egui::Sense::click() });
-                    let fill = if form.busy {
-                        t.accent.gamma_multiply(0.6)
-                    } else if resp.hovered() {
-                        t.accent.gamma_multiply(0.88)
-                    } else {
-                        t.accent
-                    };
-                    ui.painter().rect_filled(rect, 7.0, fill);
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::new(13.0, theme::semibold()), t.on_accent);
+                    let resp = kit::form_button(ui, label, true, form.busy.then_some(true));
                     if form.busy {
-                        let r = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(14.0, 14.0));
-                        crate::icons::paint(ui.painter(), r, crate::icons::Icon::Spinner, t.on_accent);
                         ui.ctx().request_repaint_after(Duration::from_millis(33));
                     }
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
                     submit = resp.clicked() || enter;
                     if let Some(e) = &form.error {
                         ui.add_space(12.0);
-                        ui.add(egui::Label::new(egui::RichText::new(e).size(12.0).color(ui.visuals().error_fg_color)).wrap());
+                        kit::field_error(ui, "Sign-in error", e);
                     }
                     // A server that takes the connection and then says nothing
                     // would hold the form until the request times out.
