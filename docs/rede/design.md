@@ -123,7 +123,7 @@ pub struct AccountId(Uuid);                  // assigned when the account is add
 pub struct ItemKey { account: AccountId, item: String }
 ```
 
-- An account's id is local and permanent. The server URL is a property of the account and can change (new domain, local vs remote address) without orphaning progress or downloads.
+- An account's id is local and permanent. Signing in again with the same server (ignoring trailing slashes and case) and username reuses that account's id, shelf, downloads, progress and colour; signing in to another server or user adds a new account with the next `SourceColor`.
 - Two servers can both have an item `abc`; with the account in the key they never collide. This is the part that's expensive to retrofit, so it's in from the start, even with one account.
 - On-disk names include the account: the stream cache and offline store name files `<account>/<file id>.<suffix>`. (Ond keys these by bare server id today; Rede passes the account-qualified id through `CacheKey`, which takes any string.)
 
@@ -138,7 +138,9 @@ An account is one source with its credentials:
 | RSS (later) | none | The subscriptions. |
 | Jellyfin, Subsonic (maybe later) | as their servers want | Subsonic's bookmark endpoints exist for keeping audiobook positions. |
 
-Each account has its own state shown in the UI: online, offline (server unreachable, playing from downloads), signed out (refresh token expired), syncing. One unreachable server doesn't stop the others.
+Each account has its own `SourceColor`, keyring entry (`id`), shelf database and downloads folder, and `settings.json` stores `scope` (`Scope::only(id)`) so Rede shows one active account at a time and reopens on it (falling back to the first account when migrating an older settings file). Switching accounts stops playback, flushes any pending progress and closes the active play session before opening the picked account's keyring tokens and shelf, dropping late results from the previous session. Signing out marks only the active account `signed_out` and forgets its keyring entry while keeping its row and local shelf in the switcher.
+
+An account has its own state shown in the switcher: online, offline (server unreachable, playing from downloads), signed out (refresh token expired or signed out), syncing. One unreachable server doesn't affect the others.
 
 An account can be marked **listener only**: it receives progress (see [Listening with others](#listening-with-others)) but its libraries aren't shown.
 
