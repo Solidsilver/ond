@@ -138,12 +138,15 @@ impl Downloads {
     pub(super) fn opener(rt: tokio::runtime::Handle, ctx: egui::Context, cache: streamcache::StreamCache) -> OpenStore {
         Arc::new(move |dir, limit, account| {
             let repaint = ctx.clone();
+            if let Some(account) = account {
+                crate::storage::qualify_downloads(&dir, account)?;
+            }
             let cfg = offline::OfflineConfig { dir, limit, reply_check: crate::bridge::reply_check() };
             let store = OfflineStore::open(cfg, rt.clone(), Arc::new(move || repaint.request_repaint()))?;
             // A track that finished streaming is linked in rather than downloaded again.
             let cached = cache.clone();
             store.set_cache_lookup(Arc::new(move |r: &TrackRef| {
-                let key = TrackKey::new(account?, r.id.clone());
+                let key = TrackKey::parse(&r.id).ok().filter(|k| Some(k.account) == account)?;
                 cached.complete_path(&streamcache::CacheKey::original(stream_name(&key).into_owned(), r.suffix.clone()))
             }));
             Ok(store)
@@ -339,10 +342,9 @@ impl Downloads {
     }
 }
 
-// Bare for now; the migration in docs/sources.md ("Moving an existing install")
-// switches this to the qualified ItemKey string as it renames the files.
+/// The qualified key keeps files apart across sources.
 pub fn offline_name(key: &TrackKey) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(&key.item)
+    std::borrow::Cow::Owned(key.to_string())
 }
 
 /// The only track boundary into the string-based store. Its account is known
@@ -354,6 +356,11 @@ pub struct OfflineTracks<'a> {
 }
 
 impl<'a> OfflineTracks<'a> {
+    /// Resolves a stored name only inside the account that owns this store.
+    pub fn key(&self, name: &str) -> Option<TrackKey> {
+        TrackKey::parse(name).ok().filter(|key| Some(key.account) == self.account)
+    }
+
     fn name<'k>(&self, key: &'k TrackKey) -> Option<std::borrow::Cow<'k, str>> {
         (Some(key.account) == self.account).then(|| offline_name(key))
     }
@@ -488,12 +495,13 @@ impl OndApp {
             return;
         }
         let url = source.clone();
-        store.set_source(
-            source
-                .capabilities()
-                .downloads
-                .then(|| Arc::new(move |id: &str| url.download_url(id).expect("a downloadable source supplies track URLs")) as offline::UrlFn),
-        );
+        store.set_source(source.capabilities().downloads.then(|| {
+            Arc::new(move |id: &str| {
+                let key = TrackKey::parse(id).expect("downloads have qualified keys");
+                assert_eq!(key.account, url.account());
+                url.download_url(&key.item).expect("a downloadable source supplies track URLs")
+            }) as offline::UrlFn
+        }));
         for p in &self.downloads.snap.pins {
             if let Pin::Playlist(id) = &p.pin {
                 self.bridge.open_playlist(Some(source.clone()), id.clone());
@@ -537,7 +545,7 @@ impl OndApp {
         match pin {
             Pin::Album(id) => self.data.album(id).map(|a| a.name.clone()).unwrap_or_default(),
             Pin::Playlist(id) => self.data.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
-            Pin::Track(id) => self.data.track(id).map(|t| t.title.clone()).unwrap_or_default(),
+            Pin::Track(id) => TrackKey::parse(id).ok().and_then(|k| self.data.track(&k.item)).map(|t| t.title.clone()).unwrap_or_default(),
             Pin::Book(_) => String::new(),
         }
     }

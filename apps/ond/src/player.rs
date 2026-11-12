@@ -947,7 +947,7 @@ mod tests {
     }
 
     fn error(id: Option<&str>) -> audio::Event {
-        audio::Event::Error { track_id: id.map(Into::into), message: "not found".into() }
+        audio::Event::Error { track_id: id.map(|id| crate::test_tracks::key(id).to_string()), message: "not found".into() }
     }
 
     #[test]

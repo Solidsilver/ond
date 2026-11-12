@@ -127,7 +127,7 @@ use crate::settings::Paths;
 use crate::theme::{self, Tokens};
 use crate::window::WindowMode;
 use audio::{Command, EngineHandle, PlayState};
-use library::{Library, Track};
+use library::Track;
 use offline::Pin;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -414,32 +414,7 @@ impl OndApp {
         // busy task can't hold up the stream that feeds playback.
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?;
         let paths = Arc::new(paths);
-        // The db is only a mirror of the server, so an unreadable one is set aside
-        // and rebuilt by the sync that runs on connect.
-        let (library, moved_aside) = Library::open_or_recover(&paths.library_db)?;
         let mut notices: Vec<String> = Vec::new();
-        if let Some(aside) = moved_aside {
-            tracing::warn!("library database was unreadable; moved to {} and starting fresh", aside.display());
-            notices.push(format!("Your library database couldn't be read, so Ond is rebuilding it. The old copy is at {}.", aside.display()));
-        }
-        // Analysis results live apart from the (disposable) library mirror.
-        // Unlike the mirror they can't be rebuilt by a sync, so a set-aside
-        // file is worth telling the user about.
-        let (analyses, analyses_aside) = library::AnalysisStore::open_or_recover(paths.library_db.with_file_name("analysis.redb"))?;
-        let analyses = Arc::new(analyses);
-        if let Some(aside) = analyses_aside {
-            notices.push(format!("Your analysis results couldn't be read, so Ond started a new set. The old copy is at {}.", aside.display()));
-        }
-        match analyses.adopt(&library) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("moved {n} analysis results out of the library database"),
-            Err(e) => tracing::warn!("moving analysis results: {e}"),
-        }
-        let library = Arc::new(library);
-        let (tx, inbox) = channel();
-        let repaint = ctx.clone();
-        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), library.clone());
-
         let (prefs, loaded) = Prefs::open(&paths.config_file);
         if let Loaded::Unreadable { aside } = loaded {
             notices.push(format!("Your settings couldn't be read, so Ond reset them. Sign in again. The old file is at {}.", aside.display()));
@@ -452,6 +427,23 @@ impl OndApp {
                 prefs.edit(|s| s.offline_move_from = Some(from));
             }
         }
+        let data_dir = paths.library_db.parent().expect("the library has a data folder");
+        // A failed move mustn't keep Ond from opening (launched from the Dock,
+        // nobody would see why). This session runs on an empty mirror, which
+        // the sync fills, and the next start tries the move again.
+        let stores = match crate::storage::migrate(&paths, &prefs) {
+            Ok(()) => crate::storage::open(data_dir, prefs.get(|s| s.account), &mut notices)?,
+            Err(e) => {
+                tracing::error!("moving the library into its account folder: {e:#}");
+                notices.push(format!("Ond couldn't move your library into its new folder ({e}). It will try again next time it starts."));
+                crate::storage::Stores::in_memory()?
+            }
+        };
+        let analyses = stores.analyses;
+        let (tx, inbox) = channel();
+        let repaint = ctx.clone();
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), stores.library);
+        bridge.configure_storage(data_dir.to_owned(), prefs.get(|s| s.account), &analyses);
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         // Before the first frame, so the window never shows at 100% first.
@@ -487,7 +479,8 @@ impl OndApp {
             status: engine.status.clone(),
             rt: rt.handle().clone(),
             art_dir: paths.art_cache.clone(),
-            retry_file: paths.library_db.with_file_name("scrobbles.json"),
+            retry_file: saved.account.map(|a| crate::storage::account_dir(data_dir, a)).unwrap_or_else(|| data_dir.join("Sources")).join("scrobbles.json"),
+            retry_root: Some(data_dir.to_owned()),
             scrobble,
             remote: Arc::new(move |r| remote_bridge.post(Msg::Remote(r))),
         });
@@ -570,10 +563,15 @@ impl OndApp {
 
     fn handle(&mut self, msg: impl Into<Msg>) {
         match msg.into() {
+            Msg::Scoped { session, message } => {
+                if session == self.bridge.session() {
+                    self.handle(*message);
+                }
+            }
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::ConnectFailed { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
-            Msg::Connected { source, settings, server, new_account, password_saved, .. } => {
-                self.connected(source, settings, server, new_account, password_saved)
+            Msg::Connected { source, stores, settings, server, new_account, password_saved, .. } => {
+                self.connected(source, stores, settings, server, new_account, password_saved)
             }
             Msg::ConnectFailed { error, .. } => self.connect_failed(error),
             Msg::Unreachable { username, error, .. } => self.unreachable(username, error),
@@ -814,7 +812,13 @@ impl OndApp {
                     && let Some((_, ids)) = self.downloads.store.as_ref().and_then(|s| s.pin_tracks(&Pin::Playlist(id.clone())))
                 {
                     let by_id: HashMap<&str, &Track> = self.data.tracks.all.iter().map(|t| (t.id.as_str(), t)).collect();
-                    let tracks: Vec<Track> = ids.iter().filter_map(|i| by_id.get(i.as_str()).map(|t| (*t).clone())).collect();
+                    let tracks: Vec<Track> = ids
+                        .iter()
+                        .filter_map(|id| {
+                            let key = self.downloads.tracks().key(id)?;
+                            by_id.get(key.item.as_str()).map(|t| (*t).clone())
+                        })
+                        .collect();
                     self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 }
                 self.bridge.open_playlist(self.session.source.clone(), id)

@@ -105,8 +105,7 @@ pub struct PendingPlay {
     pub time_ms: u64,
 }
 
-// The file keeps bare ids until the migration in docs/sources.md moves saved
-// state; it is read back under the account configured at startup.
+// The account folder supplies identity, so the file keeps bare ids.
 #[derive(Serialize, Deserialize)]
 struct SavedPlay {
     id: String,

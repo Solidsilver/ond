@@ -68,17 +68,30 @@ impl Session {
 
 impl OndApp {
     /// Signed in: the session starts (or resumes after an outage).
-    pub(super) fn connected(&mut self, source: Src, mut settings: Box<Settings>, server: String, new_account: bool, password_saved: bool) {
+    pub(super) fn connected(
+        &mut self,
+        source: Src,
+        stores: Option<crate::storage::Stores>,
+        mut settings: Box<Settings>,
+        server: String,
+        new_account: bool,
+        password_saved: bool,
+    ) {
         settings.account = Some(source.account());
-        if new_account {
-            // Work still running for the old account (the library read at
-            // start-up, a sync from before signing in again) would land its
-            // results in the new one's library: from here on it delivers
-            // nothing. The database was cleared for this account, so there's
-            // nothing to read again; the sync below fills it. (A second read
-            // could land after the sync's albums and blank them.)
+        if new_account || stores.is_some() {
+            // Drop the old account's UI state before sync fills the new mirror.
+            // A second library read could arrive after sync and blank its albums.
             self.bridge.end_session();
             self.forget_library();
+        }
+        if let Some(stores) = stores {
+            let store = self.bridge.install_storage(source.account(), stores);
+            self.analysis.records.clear();
+            self.analysis.version += 1;
+            self.analysis.loaded = false;
+            self.analysis.library_run = false;
+            self.analysis.runner.set_store(store.clone());
+            self.bridge.load_analyses(store);
         }
         if !password_saved {
             self.show_notice("Ond couldn't save your password in the system keychain, so it will ask for it again next time.");
@@ -332,11 +345,7 @@ impl OndApp {
         }
         self.prefs.edit(|s| {
             s.signed_out = true;
-            s.account = None;
         });
-        if let Some(s) = &mut self.session.settings {
-            s.account = None;
-        }
         self.now_playing.clear_source();
         self.login = Some(LoginForm { server: saved.server, username: saved.username, ..Default::default() });
     }

@@ -176,7 +176,13 @@ fn perf() {
             .all
             .iter()
             .take(PINS_N)
-            .map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![app.downloads.tracks().track_ref(&crate::test_tracks::key(&t.id), t).unwrap()]))
+            .map(|t| {
+                (
+                    Pin::Track(crate::test_tracks::key(&t.id).to_string()),
+                    t.title.clone(),
+                    vec![app.downloads.tracks().track_ref(&crate::test_tracks::key(&t.id), t).unwrap()],
+                )
+            })
             .collect();
         app.downloads.store().pin_many(pins);
         app.downloads.store().set_paused(true);

@@ -765,7 +765,7 @@ fn every_view_names_its_controls() {
         let pins = vec![
             pin(offline::Pin::Album(album_id(0)), "Album pin", 12),
             pin(offline::Pin::Playlist("pl-0".into()), "Playlist pin", 5),
-            pin(offline::Pin::Track("t-3".into()), "Song pin", 12),
+            pin(offline::Pin::Track(crate::test_tracks::key("t-3").to_string()), "Song pin", 12),
         ];
         app.downloads.snap = std::sync::Arc::new(offline::Snapshot { pins, ..(*app.downloads.snap).clone() });
     }

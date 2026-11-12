@@ -34,6 +34,7 @@ mod queue;
 mod search;
 mod settings;
 mod source;
+mod storage;
 mod sync;
 #[cfg(test)]
 mod test_tracks;

@@ -98,6 +98,8 @@ pub struct Config {
     pub art_dir: PathBuf,
     /// Where plays the server didn't take wait for a retry.
     pub retry_file: PathBuf,
+    /// Data root for switching the retry file when a different account connects.
+    pub retry_root: Option<PathBuf>,
     pub scrobble: bool,
     /// Called for each remote command (on the main thread on macOS).
     pub remote: Arc<dyn Fn(Remote) + Send + Sync>,
@@ -260,12 +262,18 @@ impl Worker {
     fn handle(&mut self, msg: In) {
         match msg {
             In::Source(c) => {
-                let account = c.as_ref().map(|s| s.account());
-                if account != self.cfg.account {
+                if let Some(account) = c.as_ref().map(|s| s.account())
+                    && Some(account) != self.cfg.account
+                {
                     self.flushing = false;
+                    self.cfg.account = Some(account);
+                    if let Some(root) = &self.cfg.retry_root {
+                        let path = crate::storage::account_dir(root, account).join("scrobbles.json");
+                        self.retry = RetryQueue::load(&path, Some(account));
+                    } else {
+                        self.retry.retain_account(Some(account));
+                    }
                 }
-                self.cfg.account = account;
-                self.retry.retain_account(self.cfg.account);
                 self.source = c;
                 self.next_flush = Instant::now();
             }
@@ -519,6 +527,7 @@ mod tests {
                 rt: rt.handle().clone(),
                 art_dir: dir.path().join("art"),
                 retry_file: dir.path().join("scrobbles.json"),
+                retry_root: None,
                 scrobble,
                 remote: Arc::new(|_| {}),
             };

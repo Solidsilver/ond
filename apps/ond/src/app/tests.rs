@@ -470,12 +470,13 @@ fn lyrics_go_to_the_sidebar_or_the_players_drawer() {
 fn download(app: &mut OndApp, dir: &std::path::Path, id: &str) {
     let file = dir.join(format!("cached-{id}.flac"));
     std::fs::write(&file, b"fLaC").unwrap();
-    let want = id.to_owned();
+    let want = crate::test_tracks::key(id).to_string();
+    let name = want.clone();
     app.downloads.store().set_cache_lookup(Arc::new(move |r: &TrackRef| (r.id == want).then(|| file.clone())));
     let t = app.data.tracks.all.iter().find(|t| t.id == id).unwrap().clone();
     app.apply(Action::Offline(OfflineAction::Keep(Keep::Tracks(vec![t]), true)));
     let start = std::time::Instant::now();
-    while !app.downloads.store().snapshot().is_done(id) {
+    while !app.downloads.store().snapshot().is_done(&name) {
         assert!(start.elapsed() < Duration::from_secs(5), "download of {id}");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -490,8 +491,14 @@ fn every_startup_notice_is_shown() {
     let ctx = egui::Context::default();
     let app = app(&ctx, dir.path());
     let shown = app.ui.toasts.texts();
-    assert!(shown.iter().any(|t| t.starts_with("Your library database couldn't be read")), "{shown:?}");
     assert!(shown.iter().any(|t| t.starts_with("Your settings couldn't be read")), "{shown:?}");
+    assert!(dir.path().join("library.redb").exists(), "without an account the old mirror stays unopened");
+    drop(app);
+    std::fs::write(dir.path().join("settings.json"), br#"{"server":"https://music.example.com","username":"me","signed_out":true}"#).unwrap();
+    std::fs::remove_file(dir.path().join("sources-migration.json")).unwrap();
+    let reopened = self::app(&ctx, dir.path());
+    let library_notices = reopened.ui.toasts.texts();
+    assert!(library_notices.iter().any(|t| t.starts_with("Your library database couldn't be read")), "{library_notices:?}");
 }
 
 /// Settings opens on the first tab. The one it opened on before is gone: its
@@ -519,12 +526,12 @@ fn another_account_gets_its_own_library_and_downloads() {
     };
     let connect = |app: &mut OndApp, user: &str, new_account: bool| {
         let session = app.bridge.session();
-        app.handle(Msg::Connected { session, source: source(), settings: login(user), server: "test".into(), new_account, password_saved: true });
+        app.handle(Msg::Connected { stores: None, session, source: source(), settings: login(user), server: "test".into(), new_account, password_saved: true });
     };
     connect(&mut app, "luke", false);
     store_opened(&mut app);
     download(&mut app, dir.path(), "t-2");
-    assert!(app.downloads.snap.is_done("t-2"));
+    assert!(app.downloads.snap.is_done(&crate::test_tracks::key("t-2").to_string()));
 
     // Someone else signs in: the shown library goes, and so do the queue
     // and the old account's downloads (not deleted, just not theirs).
@@ -537,12 +544,12 @@ fn another_account_gets_its_own_library_and_downloads() {
     assert!(app.downloads.snap.pins.is_empty(), "nothing shows as downloaded while sam's store opens");
     store_opened(&mut app);
     assert!(app.downloads.snap.pins.is_empty(), "sam's store starts empty");
-    assert!(!app.downloads.store().snapshot().is_done("t-2"));
+    assert!(!app.downloads.store().snapshot().is_done(&crate::test_tracks::key("t-2").to_string()));
 
     // Back to the first account: its downloads are where they were.
     connect(&mut app, "luke", true);
     store_opened(&mut app);
-    assert!(app.downloads.store().snapshot().is_done("t-2"));
+    assert!(app.downloads.store().snapshot().is_done(&crate::test_tracks::key("t-2").to_string()));
 }
 
 /// Waits for the offline store opening in the background, handling only
@@ -574,7 +581,15 @@ fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
     };
     let connect = |app: &mut OndApp, user: &str| {
         let session = app.bridge.session();
-        app.handle(Msg::Connected { session, source: source(), settings: login(user), server: "test".into(), new_account: false, password_saved: true });
+        app.handle(Msg::Connected {
+            stores: None,
+            session,
+            source: source(),
+            settings: login(user),
+            server: "test".into(),
+            new_account: false,
+            password_saved: true,
+        });
     };
     connect(&mut app, "luke");
     // Signed in as someone else before luke's store came: it's dropped unused.
@@ -590,7 +605,7 @@ fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
     for a in std::mem::take(&mut app.actions) {
         app.apply(a);
     }
-    assert!(app.downloads.store().is_pinned(&Pin::Track("t-3".into())));
+    assert!(app.downloads.store().is_pinned(&Pin::Track(crate::test_tracks::key("t-3").to_string())));
     assert!(app.downloads.store().snapshot().paused);
 }
 
@@ -624,6 +639,8 @@ fn a_downloads_folder_set_in_managed_json_moves_the_downloads_there() {
 #[test]
 fn downloads_moved_to_another_folder_move_in_the_background() {
     let dir = tempfile::tempdir().unwrap();
+    // Normal folder moves still run in the background after startup migration.
+    std::fs::write(dir.path().join("sources-migration.json"), br#"{"version":1,"step":"done","account":null}"#).unwrap();
     let (old, new) = (dir.path().join("old"), dir.path().join("new"));
     let account = Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() };
     let store = old.join(format!("{:08x}", account.account_id().unwrap()));
@@ -695,6 +712,7 @@ fn offline_the_queue_plays_only_what_is_downloaded() {
     // Back online: everything plays again, downloaded songs still from disk.
     let source = crate::source::subsonic::test_source();
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source,
         settings: Box::default(),
@@ -753,6 +771,7 @@ fn a_library_analysis_resumes_once_the_server_answers() {
     assert!(!app.analysis.runner.progress().active());
 
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: source(),
         settings: Box::default(),
@@ -770,6 +789,7 @@ fn a_library_analysis_resumes_once_the_server_answers() {
     app.check_library_analysis();
     assert!(app.prefs_now().analysis_resume);
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: source(),
         settings: Box::default(),
@@ -792,6 +812,7 @@ fn signing_out_forgets_lyrics_and_song_stats() {
     let mut app = app(&ctx, dir.path());
     let source = || crate::source::subsonic::test_source();
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: source(),
         settings: Box::default(),
@@ -809,6 +830,7 @@ fn signing_out_forgets_lyrics_and_song_stats() {
     assert!(app.lyrics.is_empty() && app.song_stats.is_empty(), "nothing left loading for good, nor for the next account");
     // Signed in again: asked for afresh.
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: source(),
         settings: Box::default(),
@@ -822,6 +844,7 @@ fn signing_out_forgets_lyrics_and_song_stats() {
     app.handle(Msg::Lyrics { track_id: t.id.clone(), lyrics: None });
     app.handle(Msg::SongStats { track_id: t.id.clone(), stats: None });
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: source(),
         settings: Box::default(),
@@ -839,6 +862,7 @@ fn working_offline_forgets_lyrics_and_song_stats_still_loading() {
     let mut app = app(&ctx, dir.path());
     let source = crate::source::subsonic::test_source();
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source,
         settings: Box::default(),
@@ -869,11 +893,27 @@ fn another_account_ends_the_old_accounts_session() {
     let source = || crate::source::subsonic::test_source();
     // The same account: the library read at start-up still counts.
     let first = app.bridge.session();
-    app.handle(Msg::Connected { session: first, source: source(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    app.handle(Msg::Connected {
+        stores: None,
+        session: first,
+        source: source(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     assert_eq!(app.bridge.session(), first);
     // Signed in again as someone else, without signing out first: the old
     // account's work in flight (its library read, its sync) is now stale.
-    app.handle(Msg::Connected { session: first, source: source(), settings: Box::default(), server: "test".into(), new_account: true, password_saved: true });
+    app.handle(Msg::Connected {
+        stores: None,
+        session: first,
+        source: source(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: true,
+        password_saved: true,
+    });
     assert_ne!(app.bridge.session(), first);
     assert!(app.session.online && app.data.albums.is_empty());
 }
@@ -885,6 +925,7 @@ fn a_password_the_keychain_refused_is_mentioned() {
     let mut app = app(&ctx, dir.path());
     let source = crate::source::subsonic::test_source();
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source,
         settings: Box::default(),
@@ -945,7 +986,15 @@ fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
     let source = || crate::source::subsonic::test_source();
     // Signed in, then the server went away: a reconnect loop is running.
     let before = app.bridge.session();
-    app.handle(Msg::Connected { session: before, source: source(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    app.handle(Msg::Connected {
+        stores: None,
+        session: before,
+        source: source(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     assert!(app.session.online && app.session.source.is_some());
     app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
     assert!(app.session.unreachable);
@@ -956,13 +1005,22 @@ fn signing_out_ignores_a_reconnect_that_lands_afterwards() {
     assert_ne!(app.bridge.session(), before, "sign-out ends the session");
 
     // The old loop reaches the server after all: stale, ignored.
-    app.handle(Msg::Connected { session: before, source: source(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    app.handle(Msg::Connected {
+        stores: None,
+        session: before,
+        source: source(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     app.handle(Msg::Unreachable { session: before, username: "u".into(), error: "gone".into() });
     assert!(app.login.is_some(), "still on the login screen");
     assert!(app.session.source.is_none() && !app.session.online && !app.session.unreachable);
 
     // A fresh sign-in in the new session works.
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: source(),
         settings: Box::default(),
@@ -992,7 +1050,15 @@ fn cancelling_a_sign_in_drops_what_the_connect_answers_later() {
 
     // The server answers at last, either way: stale, ignored.
     app.handle(Msg::ConnectFailed { session: before, error: "The server didn't answer".into() });
-    app.handle(Msg::Connected { session: before, source: source(), settings: Box::default(), server: "test".into(), new_account: false, password_saved: true });
+    app.handle(Msg::Connected {
+        stores: None,
+        session: before,
+        source: source(),
+        settings: Box::default(),
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     let form = app.login.as_ref().expect("still on the login screen");
     assert!(!form.busy && form.error.is_none());
     assert!(!app.session.online && app.session.source.is_none());
@@ -1008,6 +1074,7 @@ fn a_failed_connect_from_before_a_sign_out_leaves_the_next_sign_in_online() {
     let before = app.bridge.session();
     app.sign_out();
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: source(),
         settings: Box::default(),
@@ -1034,6 +1101,7 @@ fn a_play_or_pin_waiting_for_tracks_is_dropped_on_sign_out() {
 
     app.sign_out();
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source: crate::source::subsonic::test_source(),
         settings: Box::default(),
@@ -1059,7 +1127,10 @@ fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
     let tracks: Vec<Track> = (1..=3).map(|n| track(&format!("y-{n}"), "al-5", n)).collect();
     app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks.clone(), fresh: false });
     assert!(app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
-    assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+    assert_eq!(
+        app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1,
+        ["y-1", "y-2", "y-3"].map(|id| crate::test_tracks::key(id).to_string())
+    );
     // A partial list from the local library (mid-sync, rebuilt) never shrinks the pin.
     app.downloads.snap = app.downloads.store().snapshot();
     // Tiles find it by id, before and after the index catches up.
@@ -1070,10 +1141,13 @@ fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
     // (The stored album now lists only y-1; a library-wide refresh sees that.)
     let all = app.data.tracks.all.to_vec();
     app.handle(LibraryMsg::AllTracks(Box::new(TrackSet::new(all))));
-    assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2", "y-3"]);
+    assert_eq!(
+        app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1,
+        ["y-1", "y-2", "y-3"].map(|id| crate::test_tracks::key(id).to_string())
+    );
     // The album changed on the server: the pin follows.
     app.handle(LibraryMsg::Tracks { album_id: "al-5".into(), tracks: tracks[..2].to_vec(), fresh: true });
-    assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"]);
+    assert_eq!(app.downloads.store().pin_tracks(&Pin::Album("al-5".into())).unwrap().1, ["y-1", "y-2"].map(|id| crate::test_tracks::key(id).to_string()));
     download(&mut app, dir.path(), "t-3");
 
     for route in [Route::Offline, Route::Album("al-5".into()), Route::Album("al-0".into()), Route::Recent, Route::Songs] {
@@ -1088,7 +1162,7 @@ fn keeping_an_album_waits_for_its_tracks_and_the_offline_place_draws() {
         egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT };
     frame(&ctx, &mut app, vec![key]);
     assert!(!app.downloads.store().is_pinned(&Pin::Album("al-5".into())));
-    assert!(app.downloads.store().is_pinned(&Pin::Track("t-3".into())));
+    assert!(app.downloads.store().is_pinned(&Pin::Track(crate::test_tracks::key("t-3").to_string())));
 }
 
 #[test]
@@ -1263,6 +1337,7 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
 
     let source = crate::source::subsonic::test_source();
     app.handle(Msg::Connected {
+        stores: None,
         session: app.bridge.session(),
         source,
         settings: Box::default(),
@@ -1310,7 +1385,15 @@ fn working_offline_stops_connecting_and_hides_what_cant_play() {
     let source = crate::source::subsonic::test_source();
     let settings =
         Box::new(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
-    app.handle(Msg::Connected { session: app.bridge.session(), source, settings, server: "test".into(), new_account: false, password_saved: true });
+    app.handle(Msg::Connected {
+        stores: None,
+        session: app.bridge.session(),
+        source,
+        settings,
+        server: "test".into(),
+        new_account: false,
+        password_saved: true,
+    });
     store_opened(&mut app);
     download(&mut app, dir.path(), "t-2");
 
@@ -1381,4 +1464,30 @@ fn check_now_reports_how_it_went() {
     assert!(app.updates.notes.as_ref().unwrap().1.is_none());
     app.handle(Msg::ReleaseNotes(v, Ok(vec![crate::updates::Block::Heading("Opus".into())])));
     assert!(matches!(&app.updates.notes, Some((_, Some(Ok(b)))) if b.len() == 1));
+}
+
+#[test]
+fn results_queued_before_an_account_switch_never_repopulate_its_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let old = app.bridge.session();
+    app.bridge.end_session();
+    app.forget_library();
+    app.handle(Msg::Scoped { session: old, message: Box::new(LibraryMsg::Albums(vec![crate::sync::tests::album("old", 1)]).into()) });
+    assert!(app.data.albums.is_empty());
+}
+
+#[test]
+fn a_kept_playlist_rebuilds_its_tracks_from_qualified_download_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    let expected = app.data.playlist_tracks["pl-1"].clone();
+    app.keep_offline(Keep::Playlist("pl-1".into()), true);
+    app.data.playlist_tracks.clear();
+    app.session.online = false;
+    app.ui.nav.go(Route::Playlist { id: "pl-1".into(), name: "Late night".into() });
+    app.on_arrive();
+    assert_eq!(app.data.playlist_tracks["pl-1"].iter().map(|t| &t.id).collect::<Vec<_>>(), expected.iter().map(|t| &t.id).collect::<Vec<_>>());
 }

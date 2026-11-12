@@ -130,7 +130,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let cache = StreamCache::new(streamcache::CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
-        let downloads = offline::Snapshot { tracks: [("a1".to_owned(), offline::TrackState::Done { size: 1 })].into(), ..Default::default() };
+        let downloads =
+            offline::Snapshot { tracks: [(crate::test_tracks::key("a1").to_string(), offline::TrackState::Done { size: 1 })].into(), ..Default::default() };
         let keep = Playable {
             account: Some(crate::test_tracks::account()),
             downloads_account: Some(crate::test_tracks::account()),

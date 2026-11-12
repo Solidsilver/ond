@@ -32,6 +32,9 @@
 mod download;
 mod moving;
 mod persist;
+mod renaming;
+
+pub use renaming::rename_ids;
 pub mod pins;
 
 pub use moving::{MoveOutcome, MoveProgress, account_store, move_store, move_store_with};
@@ -369,6 +372,9 @@ impl OfflineStore {
     /// starts the download workers on `rt`.
     pub fn open(cfg: OfflineConfig, rt: tokio::runtime::Handle, on_change: OnChange) -> io::Result<Self> {
         std::fs::create_dir_all(&cfg.dir)?;
+        if cfg.dir.join(renaming::JOURNAL).exists() {
+            return Err(io::Error::other("download renaming must finish before opening the store"));
+        }
         remove_moving(&cfg.dir);
         let (mut pins, trusted) = load_pins(&cfg.dir);
         for s in pins.tracks.values_mut() {

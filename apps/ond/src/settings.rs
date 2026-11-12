@@ -389,10 +389,11 @@ impl Settings {
         serde_json::from_value(kept)
     }
 
-    /// The form cannot distinguish a new server from an address change, so
-    /// keeping the username keeps the account until an explicit sign-out.
+    /// The same server and user keep their mirror and downloads, including
+    /// after signing out. Compare addresses as the existing mirror does.
     pub fn sign_in(&self, server: &str, username: &str) -> Self {
-        let account = if !self.signed_out && self.username == username { self.account } else { None };
+        let same = self.username == username && self.server.trim().trim_end_matches('/').eq_ignore_ascii_case(server.trim().trim_end_matches('/'));
+        let account = if same { self.account } else { None };
         Self {
             account: Some(account.unwrap_or_else(accounts::AccountId::new)),
             server: server.to_owned(),
@@ -458,13 +459,14 @@ mod tests {
     }
 
     #[test]
-    fn an_address_change_keeps_the_account_but_a_new_sign_in_makes_one() {
+    fn the_same_server_and_user_reuse_the_account_even_after_signing_out() {
         let old = login("https://music.example.com", "me").sign_in("https://music.example.com", "me");
         let account = old.account.unwrap();
-        assert_eq!(old.sign_in("https://new-address.example.com", "me").account, Some(account));
+        assert_eq!(old.sign_in("HTTPS://Music.Example.com/", "me").account, Some(account));
+        assert_ne!(old.sign_in("https://new-address.example.com", "me").account, Some(account));
         assert_ne!(old.sign_in("https://music.example.com", "someone-else").account, Some(account));
         let signed_out = Settings { signed_out: true, ..old };
-        assert_ne!(signed_out.sign_in("https://music.example.com", "me").account, Some(account));
+        assert_eq!(signed_out.sign_in("https://music.example.com", "me").account, Some(account));
         assert!(serde_json::to_value(Settings::default()).unwrap().get("account").is_none());
     }
 

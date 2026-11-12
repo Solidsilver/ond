@@ -69,6 +69,7 @@ pub type StreamUrl = Arc<dyn Fn(&TrackKey) -> Option<String> + Send + Sync>;
 
 #[derive(Default)]
 struct State {
+    store: Option<Arc<AnalysisStore>>,
     queue: VecDeque<Job>,
     queued: HashSet<TrackKey>,
     /// Audio seconds in `queue`, kept as jobs come and go so progress (read
@@ -148,6 +149,14 @@ pub struct Config {
     pub on_progress: Arc<dyn Fn() + Send + Sync>,
 }
 
+struct WorkerConfig {
+    playback: StreamCache,
+    scratch: StreamCache,
+    status: Arc<Status>,
+    on_result: Arc<dyn Fn(TrackKey, Record) + Send + Sync>,
+    on_progress: Arc<dyn Fn() + Send + Sync>,
+}
+
 pub struct Runner {
     shared: Arc<Shared>,
 }
@@ -155,6 +164,9 @@ pub struct Runner {
 impl Runner {
     pub fn start(cfg: Config) -> Self {
         let shared = Arc::new(Shared { state: Mutex::default(), wake: Condvar::new(), quit: AtomicBool::new(false) });
+        let Config { store, playback, scratch, status, on_result, on_progress } = cfg;
+        shared.lock().store = Some(store);
+        let cfg = WorkerConfig { playback, scratch, status, on_result, on_progress };
         let worker = shared.clone();
         let spawned = std::thread::Builder::new().name("analysis".into()).spawn(move || {
             lower_priority();
@@ -213,6 +225,13 @@ impl Runner {
         }
         drop(st);
         self.shared.wake.notify_all();
+    }
+
+    /// Replaces the account's results after cancelling its queued work. A
+    /// finished old job is marked cleared before it can store into this one.
+    pub fn set_store(&self, store: Arc<AnalysisStore>) {
+        self.clear();
+        self.shared.lock().store = Some(store);
     }
 
     pub fn progress(&self) -> Progress {
@@ -301,7 +320,7 @@ fn playback_busy(status: &Status) -> bool {
     status.needs_network()
 }
 
-fn run(shared: &Shared, cfg: &Config) {
+fn run(shared: &Shared, cfg: &WorkerConfig) {
     loop {
         // Next job, once not paused and playback doesn't need the bandwidth.
         let (job, server) = {
@@ -343,17 +362,18 @@ fn run(shared: &Shared, cfg: &Config) {
         let mut st = shared.lock();
         let cleared = st.current.take().is_none_or(|c| c.stamp.is_empty());
         match result {
-            Ok(analysis) => {
+            Ok(analysis) if !cleared => {
                 st.done += 1;
                 st.audio_secs += analysis.duration_secs;
                 st.wall_secs += started.elapsed().as_secs_f64();
-                drop(st);
                 let record = Record { stamp: job.stamp.clone(), analysis };
-                if let Err(e) = cfg.store.put(&job.key.item, &record.encode()) {
+                if let Some(Err(e)) = st.store.as_ref().map(|store| store.put(&job.key.item, &record.encode())) {
                     tracing::warn!("storing analysis: {e}");
                 }
+                drop(st);
                 (cfg.on_result)(job.key, record);
             }
+            Ok(_) => {}
             Err(analysis::AnalyzeError::Cancelled) => {
                 // Paused (or quitting): try again first when resumed, unless cleared.
                 if !cleared && !shared.quit.load(Ordering::Relaxed) && st.queued.insert(job.key.clone()) {
@@ -387,7 +407,7 @@ fn analyze_local(job: &Job, stop: &(dyn Fn() -> bool + Sync)) -> Option<Result<T
 fn analyze_job(
     job: &Job,
     url: impl FnOnce() -> Option<String>,
-    cfg: &Config,
+    cfg: &WorkerConfig,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> Result<TrackAnalysis, analysis::AnalyzeError> {
     #[cfg(test)]
@@ -559,8 +579,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = |name: &str| StreamCache::new(streamcache::CacheConfig::new(dir.path().join(name)), rt.handle().clone()).unwrap();
         let status = Arc::new(Status::default());
-        let cfg = Config {
-            store: Arc::new(AnalysisStore::in_memory().unwrap()),
+        let cfg = WorkerConfig {
             playback: cache("play"),
             scratch: cache("scratch"),
             status: status.clone(),

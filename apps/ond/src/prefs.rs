@@ -98,7 +98,7 @@ impl Prefs {
                 }
             },
         };
-        let previous_username = settings.username.clone();
+        let previous_account = settings.account_id();
         let mut managed = Managed::read(&path);
         let mut users = serde_json::to_value(&settings).unwrap_or_default();
         managed.check(&users);
@@ -109,7 +109,7 @@ impl Prefs {
             settings.signed_out = true;
         }
         managed.apply(&mut settings);
-        if settings.username != previous_username {
+        if settings.account_id() != previous_account {
             settings.account = None;
         }
         let offline_was = adopted.iter().find(|(key, _)| key == "offline_dir").map(|(_, old)| serde_json::from_value(old.clone()).ok().flatten());
@@ -120,7 +120,7 @@ impl Prefs {
             prefs.handle.shared.wake.notify_all();
         }
         prefs.edit(|s| {
-            if !s.server.is_empty() && !s.username.is_empty() && !s.signed_out && s.account.is_none() {
+            if !s.server.is_empty() && !s.username.is_empty() && s.account.is_none() {
                 s.account = Some(accounts::AccountId::new());
             }
         });
@@ -213,9 +213,14 @@ impl Prefs {
         Some(e)
     }
 
+    /// Flushes settings before a migration can move files under their identity.
+    pub fn flush_checked(&self) -> anyhow::Result<()> {
+        flush(&self.handle.shared)
+    }
+
     /// Writes now if anything changed (quitting, tests).
     pub fn flush(&self) {
-        flush(&self.handle.shared);
+        let _ = flush(&self.handle.shared);
     }
 }
 
@@ -230,7 +235,7 @@ impl Drop for Handle {
             let _ = writer.join();
         }
         // Whatever the writer hadn't got to yet (or if it never started).
-        flush(&self.shared);
+        let _ = flush(&self.shared);
     }
 }
 
@@ -250,7 +255,7 @@ fn writer_loop(shared: &Shared) {
             continue;
         }
         drop(state);
-        flush(shared);
+        let _ = flush(shared);
         state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
     }
 }
@@ -258,23 +263,25 @@ fn writer_loop(shared: &Shared) {
 /// Writes the latest preferences if anything changed since the last write.
 /// The snapshot is taken while holding the writer lock, so a later write never
 /// carries older preferences than an earlier one.
-fn flush(shared: &Shared) {
+fn flush(shared: &Shared) -> anyhow::Result<()> {
     static WRITER: Mutex<()> = Mutex::new(());
     let _one = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-    let snapshot = {
-        let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    let (snapshot, revision) = {
+        let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.revision == state.written {
-            return;
+            return Ok(());
         }
-        state.written = state.revision;
-        state.settings.clone()
+        (state.settings.clone(), state.revision)
     };
     if let Err(e) = write(&shared.path, &snapshot, &shared.overlay) {
         tracing::warn!("saving settings: {e}");
         if !shared.write_error_told.load(Ordering::Acquire) {
             *shared.write_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
         }
+        return Err(e);
     }
+    shared.state.lock().unwrap_or_else(|e| e.into_inner()).written = revision;
+    Ok(())
 }
 
 /// Writes `settings`, with the user's own values where managed ones lie over them.

@@ -44,6 +44,7 @@ pub struct TrackKey { pub account: AccountId, pub id: Arc<str> }   // likewise A
 ```
 
 - An account's id is made when the source is added and never changes. A server's address and a folder's path are properties of the account and can change without orphaning favourites, downloads or the queue.
+- Until the Sources rows can edit an account's address (milestone 2), Ond's sign-in form decides as its library mirror always has: signing in to the same server and user as before, even after signing out, reuses the account and keeps its folder and downloads; any other sign-in makes a new account. Ond keeps one account at a time until then, so the previous account's folder is removed when another takes over, as its mirror used to be cleared.
 - Inside one source's database, ids stay bare: the database *is* the account, so qualifying every row would only make the stored format bigger and force a migration of every struct. Ids are qualified when they leave the database: in the queue, the merged views, the saved blobs that span sources, the stream cache and the offline store.
 - On disk, names follow Rede: `<account>/<id>` passed through `streamcache::escape_id`, one flat file name per key.
 - The `library` crate stops depending on `subsonic`. The `From<subsonic::…>` conversions in `model.rs` and the `upsert_*` methods that take Subsonic types move to the Subsonic source, which hands the library `Track`, `Album` and `Artist` built its own way. This is the same move `streamcache` already made with `ReplyCheck`.
@@ -137,7 +138,7 @@ Playback opens `file://` paths, which the engine already handles without the str
 
 ## What Ond keeps itself
 
-`ond.redb` holds what doesn't belong to one source:
+`ond.redb` holds what doesn't belong to one source (it arrives with the first of these that's built; see "Moving an existing install"):
 
 - **The queue**, as `TrackKey`s. A source that's removed takes its tracks out of the queue; one that's offline leaves them in, shown as unplayable today.
 - **Ond's playlists:** playlists that may mix sources. A server's own playlists stay on the server and show under it. Creating a playlist from tracks of one Navidrome source creates it on that server, as now; adding a track from another source to it offers to make an Ond playlist instead. Ond playlists export to M3U.
@@ -214,12 +215,15 @@ Snapshots: each piece gets a scene in both apps' snapshot sets, with one source,
 The first start of the new version, before anything else opens the library:
 
 1. Make an account for the configured server, and write it to `settings.json`.
-2. Move `library.redb` and `analysis.redb` into `Sources/<account>/`. A move, not a copy: one rename each, on the same disk.
+2. Move `library.redb`, `analysis.redb` and `scrobbles.json` (the scrobbles waiting to be sent) into `Sources/<account>/`. A move, not a copy: one rename each, on the same disk.
 3. Rewrite the offline store's state with account-qualified names and rename the files, under the state file's atomic write. Stray deletion stays off until this has finished, since a half-moved store would otherwise look stray.
 4. Leave the stream cache: its entries are evictable and the old names simply stop being asked for. Cover art likewise.
-5. Move the saved queue, starred list, pins and playlists' saved copies out of the library's `saved` table into `ond.redb`, account-qualified.
 
-Each step is recorded when done, so a start cut short picks up at the next. A test builds an install from the previous release's files and checks that the queue, downloads, favourites and the library all survive.
+Each step is recorded when done, so a start cut short picks up at the next. A test builds an install in the previous release's layout and checks that downloads, favourites, saved playlists, pending scrobbles and the library all survive.
+
+`ond.redb` isn't part of the move. Nothing saved today spans sources: the queue isn't saved, pins live in the offline store's state, and the starred list and playlists' saved copies are the server's own, so they stay in its library. `ond.redb` arrives with the first thing that does span sources: Ond's own playlists, or favourites for a source that can't hold them.
+
+The `sources` list in `settings.json` arrives with the second kind of source (milestone 3). Until then the one account is the `account` key beside `server` and `username`, and that list will read it as its first entry.
 
 ## Milestones
 

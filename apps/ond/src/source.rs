@@ -19,10 +19,9 @@ pub fn matches_track(key: &TrackKey, account: Option<accounts::AccountId>, id: &
     Some(key.account) == account && key.item == id
 }
 
-// Bare for now; the migration in docs/sources.md ("Moving an existing install")
-// switches this to the qualified ItemKey string as it renames the files.
+/// The qualified key keeps files apart across sources.
 pub fn stream_name(key: &TrackKey) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(&key.item)
+    std::borrow::Cow::Owned(key.to_string())
 }
 
 pub type Src = Arc<dyn MusicSource>;

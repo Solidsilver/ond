@@ -19,8 +19,14 @@ use subsonic::{Client, Credentials};
 /// that part's handler matches its own group whole, so a message added to a
 /// group can't be left unhandled.
 pub enum Msg {
-    /// Signed in. `new_account` means the local library belonged to another
-    /// server or user and was cleared for this one. `password_saved` is false
+    /// Keeps a result scoped even while it waits in the UI inbox. Checking
+    /// only before enqueueing leaves a gap if an account switches meanwhile.
+    Scoped {
+        session: u64,
+        message: Box<Msg>,
+    },
+    /// Signed in. `new_account` means another server or user took over the
+    /// local mirror. `password_saved` is false
     /// when the keychain wouldn't take the password just typed, so the next
     /// launch will ask for it again.
     Connected {
@@ -28,6 +34,7 @@ pub enum Msg {
         /// message if the user signed out since.
         session: u64,
         source: Src,
+        stores: Option<crate::storage::Stores>,
         settings: Box<Settings>,
         server: String,
         new_account: bool,
@@ -322,7 +329,8 @@ pub struct Bridge {
     rt: tokio::runtime::Handle,
     tx: Sender<Msg>,
     notify: Notify,
-    library: Arc<Library>,
+    libraries: Arc<Mutex<LibrarySlot>>,
+    scoped_library: Option<Arc<Library>>,
     /// Stops the running track sync, if any.
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     /// Bumped by each album sync: an older pass still running (from before a
@@ -347,13 +355,23 @@ pub struct Bridge {
     scope: Option<u64>,
 }
 
+/// Scoped work holds its own library, so even a write already queued on the
+/// blocking pool can never follow a later account into its database.
+struct LibrarySlot {
+    library: Arc<Library>,
+    account: Option<accounts::AccountId>,
+    data: Option<std::path::PathBuf>,
+    analyses: std::sync::Weak<library::AnalysisStore>,
+}
+
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, library: Arc<Library>) -> Self {
         Self {
             rt,
             tx,
             notify,
-            library,
+            libraries: Arc::new(Mutex::new(LibrarySlot { library, account: None, data: None, analyses: std::sync::Weak::new() })),
+            scoped_library: None,
             sync_cancel: Arc::default(),
             album_pass: Arc::default(),
             reload_owed: Arc::default(),
@@ -392,6 +410,7 @@ impl Bridge {
     /// still running store nothing more: the next sign-in may be another
     /// account, whose library they'd mix into.
     pub fn end_session(&self) {
+        let _slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
         self.session.fetch_add(1, Ordering::AcqRel);
         self.reconnecting.store(false, Ordering::Relaxed);
         self.cancel_sync();
@@ -408,7 +427,73 @@ impl Bridge {
 
     /// A copy for work on `session`'s behalf, which may have ended already.
     fn scoped_to(&self, session: u64) -> Self {
-        Self { scope: Some(session), ..self.clone() }
+        let library = self.scoped_library.clone().unwrap_or_else(|| self.library());
+        Self { scope: Some(session), scoped_library: Some(library), ..self.clone() }
+    }
+
+    fn library(&self) -> Arc<Library> {
+        self.scoped_library.clone().unwrap_or_else(|| self.libraries.lock().unwrap_or_else(|e| e.into_inner()).library.clone())
+    }
+
+    pub fn configure_storage(&self, data: std::path::PathBuf, account: Option<accounts::AccountId>, analyses: &Arc<library::AnalysisStore>) {
+        let mut slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
+        slot.data = Some(data);
+        slot.account = account;
+        slot.analyses = Arc::downgrade(analyses);
+    }
+
+    /// Installs a prepared mirror only after the UI accepts its live sign-in.
+    /// A cancelled connect can therefore never replace the current library.
+    pub fn install_storage(&self, account: accounts::AccountId, stores: crate::storage::Stores) -> Arc<library::AnalysisStore> {
+        let old = {
+            let mut slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
+            let old = (slot.account, Arc::downgrade(&slot.library), slot.analyses.clone(), slot.data.clone());
+            slot.library = stores.library;
+            slot.account = Some(account);
+            slot.analyses = Arc::downgrade(&stores.analyses);
+            old
+        };
+        if let Some(account) = old.0 {
+            let dir = crate::storage::account_dir(old.3.as_ref().expect("persistent library has a data root"), account);
+            self.rt.spawn(async move {
+                // Old requests may still be returning from the network. Their
+                // handles keep the old database alive until they have stopped.
+                while old.1.strong_count() > 0 || old.2.strong_count() > 0 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = std::fs::remove_dir_all(&dir) {
+                        tracing::warn!("removing previous library {}: {e}", dir.display());
+                    }
+                })
+                .await;
+            });
+        }
+        stores.analyses
+    }
+
+    async fn prepare_storage(&self, account: accounts::AccountId) -> Result<Option<crate::storage::Stores>, String> {
+        let data = {
+            let slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.account == Some(account) {
+                return Ok(None);
+            }
+            slot.data.clone()
+        };
+        let Some(data) = data else {
+            return Ok(None);
+        };
+        let (stores, notices) = tokio::task::spawn_blocking(move || {
+            let mut notices = Vec::new();
+            crate::storage::open(&data, Some(account), &mut notices).map(|s| (s, notices))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        for notice in notices {
+            self.send(Msg::Error(Failure::Local(notice)));
+        }
+        Ok(Some(stores))
     }
 
     /// False once the session this copy works for has ended.
@@ -430,7 +515,13 @@ impl Bridge {
         if !self.current() {
             return;
         }
-        let _ = self.tx.send(msg.into());
+        let msg = msg.into();
+        let msg = match (self.scope, msg) {
+            (_, msg @ (Msg::Connected { .. } | Msg::ConnectFailed { .. } | Msg::Unreachable { .. } | Msg::Scoped { .. })) => msg,
+            (Some(session), msg) => Msg::Scoped { session, message: Box::new(msg) },
+            (None, msg) => msg,
+        };
+        let _ = self.tx.send(msg);
         (self.notify)();
     }
 
@@ -439,7 +530,7 @@ impl Bridge {
         if !self.current() {
             return Err("Signed out".into());
         }
-        crate::sync::blocking(&self.library, f).await
+        crate::sync::blocking(&self.library(), f).await
     }
 
     /// Delivers `msg` to the UI from any thread.
@@ -483,7 +574,7 @@ impl Bridge {
             if !this.current() {
                 return;
             }
-            let l = &this.library;
+            let l = this.library();
             let mut saved = Saved {
                 newest: l.saved(SAVED_NEWEST).ok().flatten(),
                 playlists: l.saved::<Vec<SavedPlaylist>>(SAVED_PLAYLISTS).ok().flatten().map(|p| p.into_iter().map(Into::into).collect()),
@@ -546,7 +637,7 @@ impl Bridge {
 
     /// Reads the stored analysis results.
     pub fn load_analyses(&self, store: Arc<library::AnalysisStore>) {
-        let this = self.clone();
+        let this = self.scoped();
         self.rt.spawn_blocking(move || match store.records() {
             Ok(rows) => {
                 let records = rows.into_iter().filter_map(|(id, b)| analysis::Record::decode(&b).map(|r| (id, r))).collect();
@@ -558,7 +649,7 @@ impl Bridge {
 
     /// Blocking: reads every stored track and sends them to the UI.
     fn load_all_tracks(&self) {
-        match self.library.all_tracks() {
+        match self.library().all_tracks() {
             Ok(t) => self.send(LibraryMsg::AllTracks(Box::new(crate::tracks::TrackSet::new(t)))),
             Err(e) => self.send(Msg::Error(Failure::Local(format!("Couldn't read the library: {e}")))),
         }
@@ -636,13 +727,20 @@ impl Bridge {
         });
     }
 
-    /// Claims the local library for this account (clearing another account's
-    /// mirror) and reports the sign-in. Nothing happens once `session` has
+    /// Prepares this account's mirror and reports the sign-in. Nothing happens once `session` has
     /// ended (the keychain write before this can wait on a prompt for a while).
     async fn connected(&self, session: u64, source: Src, settings: Settings, server: String, password_saved: bool) {
-        let this = self.scoped_to(session);
+        let mut this = self.scoped_to(session);
         if !this.current() {
             return;
+        }
+        let stores = match this.prepare_storage(source.account()).await {
+            Ok(stores) => stores,
+            Err(e) => return this.send(Msg::ConnectFailed { session, error: format!("Couldn't open the library: {e}") }),
+        };
+        let switched = stores.is_some() && this.libraries.lock().unwrap_or_else(|e| e.into_inner()).account.is_some();
+        if let Some(stores) = &stores {
+            this.scoped_library = Some(stores.library.clone());
         }
         let new_account = match settings.account_id() {
             Some(id) => match this.db(move |l| l.claim_account(id)).await {
@@ -655,7 +753,7 @@ impl Bridge {
             },
             None => false,
         };
-        this.send(Msg::Connected { session, source, settings: Box::new(settings), server, new_account, password_saved });
+        this.send(Msg::Connected { session, source, stores, settings: Box::new(settings), server, new_account: switched || new_account, password_saved });
     }
 
     /// Times one ping (for the server popover and the diagnostics bar).
@@ -763,7 +861,7 @@ impl Bridge {
                     this.send(LibraryMsg::SyncProgress(n));
                 }
             };
-            let listed = crate::sync::albums(&this.library, &source, &live, progress).await;
+            let listed = crate::sync::albums(&this.library(), &source, &live, progress).await;
             if !live() {
                 return;
             }
@@ -775,7 +873,7 @@ impl Bridge {
                 }
                 Err(e) => return this.send(LibraryMsg::AlbumSyncDone(Err(e))),
             }
-            let artists = crate::sync::artists(&this.library, &source, &live).await;
+            let artists = crate::sync::artists(&this.library(), &source, &live).await;
             if !live() {
                 return;
             }
@@ -811,7 +909,7 @@ impl Bridge {
             // many were kept, and a needless reload is the safe way to be wrong.)
             let progressed = AtomicBool::new(false);
             let outcome = sync::run(
-                this.library.clone(),
+                this.library(),
                 source,
                 cancel.clone(),
                 || this.current(),
@@ -844,7 +942,7 @@ impl Bridge {
             if this.reload_owed.swap(false, Ordering::AcqRel) || stored {
                 let me = this.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(albums) = me.library.albums() {
+                    if let Ok(albums) = me.library().albums() {
                         me.send(LibraryMsg::Albums(albums));
                     }
                     me.load_all_tracks();
@@ -1073,7 +1171,7 @@ impl Bridge {
     pub fn find_credited(&self, name: String) {
         let this = self.scoped();
         self.rt.spawn_blocking(move || {
-            if let Ok(album_ids) = this.library.albums_crediting(&name) {
+            if let Ok(album_ids) = this.library().albums_crediting(&name) {
                 this.send(LibraryMsg::Credited { name, album_ids });
             }
         });
@@ -1175,6 +1273,65 @@ mod tests {
     use tokio::sync::Semaphore;
 
     #[test]
+    fn signing_back_in_reuses_the_folder_and_another_account_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let old =
+            Settings { server: "https://music.example.com".into(), username: "me".into(), ..Default::default() }.sign_in("https://music.example.com", "me");
+        let account = old.account.unwrap();
+        let stores = crate::storage::open(dir.path(), Some(account), &mut vec![]).unwrap();
+        stores.library.upsert_albums(vec![album("kept", 1)]).unwrap();
+        stores.analyses.put("song", b"old analysis").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), stores.library);
+        bridge.configure_storage(dir.path().to_owned(), Some(account), &stores.analyses);
+        bridge.end_session();
+        let signed_out = Settings { signed_out: true, ..old.clone() };
+        let again = signed_out.sign_in("HTTPS://Music.Example.com/", "me");
+        assert_eq!(again.account, Some(account));
+        let source = |account| {
+            let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+            fake.account = account;
+            Arc::new(fake) as Src
+        };
+        rt.block_on(bridge.connected(bridge.session(), source(account), again, "test".into(), true));
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Connected { new_account: false, .. }));
+        assert_eq!(rt.block_on(bridge.db(|l| l.albums())).unwrap()[0].id, "kept");
+
+        let next = signed_out.sign_in("https://music.example.com", "someone-else");
+        let next_account = next.account.unwrap();
+        assert_ne!(account, next_account);
+        // This write passed its session check already. Its database must stay
+        // the old one even though it finishes after the new mirror opens.
+        let work = bridge.scoped();
+        let (release, held) = std::sync::mpsc::channel();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let job = rt.spawn(async move {
+            work.db(move |l| {
+                entered.send(()).unwrap();
+                held.recv().unwrap();
+                l.upsert_albums(vec![album("late", 1)])
+            })
+            .await
+            .unwrap();
+        });
+        waiting.recv_timeout(testkit::WAIT).unwrap();
+        bridge.end_session();
+        rt.block_on(bridge.connected(bridge.session(), source(next_account), next, "test".into(), true));
+        let Msg::Connected { new_account: true, stores: Some(prepared), .. } = rx.try_recv().unwrap() else { panic!("expected a prepared new mirror") };
+        bridge.end_session();
+        let new_analysis = bridge.install_storage(next_account, prepared);
+        assert!(new_analysis.records().unwrap().is_empty());
+        release.send(()).unwrap();
+        rt.block_on(job).unwrap();
+        assert!(rt.block_on(bridge.db(|l| l.albums())).unwrap().is_empty());
+        drop(stores.analyses);
+        let old_folder = crate::storage::account_dir(dir.path(), account);
+        testkit::wait_until("the previous mirror folder to be removed", || !old_folder.exists());
+        assert!(crate::storage::account_dir(dir.path(), next_account).join("library.redb").is_file());
+    }
+
+    #[test]
     fn the_reply_check_turns_away_subsonic_errors_and_sign_in_pages_but_not_audio() {
         let check = reply_check();
         let envelope = br#"{"subsonic-response":{"status":"failed","error":{"code":40,"message":"Wrong username or password"}}}"#;
@@ -1248,12 +1405,19 @@ mod tests {
         (rt, bridge, rx)
     }
 
+    fn unscoped(msg: Msg) -> Msg {
+        match msg {
+            Msg::Scoped { message, .. } => *message,
+            msg => msg,
+        }
+    }
+
     /// Runs the bridge's tasks until `done`, collecting what they send.
     fn until(rt: &tokio::runtime::Runtime, rx: &Receiver<Msg>, got: &mut Vec<Msg>, mut done: impl FnMut(&[Msg]) -> bool) {
         rt.block_on(async {
             let deadline = testkit::Deadline::new();
             loop {
-                got.extend(rx.try_iter());
+                got.extend(rx.try_iter().map(unscoped));
                 if done(got) {
                     return;
                 }
@@ -1350,7 +1514,7 @@ mod tests {
         // Copies of a copy keep the session they were made for.
         scoped.scoped().send(Msg::Error(Failure::Local("after, again".into())));
         bridge.scoped().send(Msg::Error(Failure::Local("the new session".into())));
-        let texts: Vec<String> = rx.try_iter().filter_map(|m| if let Msg::Error(e) = m { Some(e.into_message()) } else { None }).collect();
+        let texts: Vec<String> = rx.try_iter().map(unscoped).filter_map(|m| if let Msg::Error(e) = m { Some(e.into_message()) } else { None }).collect();
         assert_eq!(texts, ["before", "the new session"]);
         let stored = rt.block_on(scoped.db(|l| l.albums()));
         assert_eq!(stored.unwrap_err(), "Signed out", "nor reads or writes the library");
@@ -1394,7 +1558,7 @@ mod tests {
         // One is stored already; the other three come from the server.
         let stored = Server { albums: albums.clone(), ..Default::default() };
         let one = rt.block_on(sync::Fetch::album(&stored, "a2".into())).unwrap();
-        bridge.library.upsert_album_tracks(one).unwrap();
+        bridge.library().upsert_album_tracks(one).unwrap();
         let gate = Arc::new(Semaphore::new(0));
         // The first album answers last.
         let server = Server { albums, gate: Some(gate.clone()), slow: Some("a0".into()), ..Default::default() };
@@ -1457,7 +1621,7 @@ mod tests {
         bridge.offline_job(|b| b.post(Msg::Error(Failure::Local("second".into()))));
         let mut got = Vec::new();
         rt.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        got.extend(rx.try_iter());
+        got.extend(rx.try_iter().map(unscoped));
         assert!(got.is_empty(), "the second waits for the first");
         gate_tx.send(()).unwrap();
         until(&rt, &rx, &mut got, |m| m.len() == 2);
