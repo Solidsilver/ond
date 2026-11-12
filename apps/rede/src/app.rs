@@ -167,9 +167,9 @@ pub enum Action {
     PlayBook(String),
     /// Keep the book on this computer: its details are fetched first, then
     /// the store queues its files.
-    DownloadBook(sources::ItemKey),
+    DownloadBook(accounts::ItemKey),
     /// The book's download goes, finished or not.
-    RemoveDownload(sources::ItemKey),
+    RemoveDownload(accounts::ItemKey),
     /// Every download waits (true) or goes on.
     PauseDownloads(bool),
     /// The downloads that gave up are tried again.
@@ -192,21 +192,21 @@ pub enum Action {
     /// moves there and stays as it was: paused or playing.
     StartOver(String),
     AddBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
         title: String,
     },
     RenameBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
         title: String,
     },
     DeleteBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
     },
     JumpToBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
     },
     UndoReconcile,
@@ -397,7 +397,7 @@ impl RedeApp {
                     if self.session.source.is_some()
                         && let (Some(account), Some(shelf)) = (&self.session.account, &self.session.shelf)
                     {
-                        self.bridge.positions(shelf.clone(), books.iter().map(|book| sources::ItemKey::new(account.id, &book.id)).collect());
+                        self.bridge.positions(shelf.clone(), books.iter().map(|book| accounts::ItemKey::new(account.id, &book.id)).collect());
                     }
                     self.books.set(books);
                 }
@@ -707,7 +707,7 @@ impl RedeApp {
         let Some(account) = self.session.account.clone() else { return };
         let Some(shelf) = self.session.shelf.clone() else { return };
         self.books.details.insert(id.clone(), Details::Loading);
-        self.bridge.open_book(self.session.source.clone(), shelf, sources::ItemKey::new(account.id, id));
+        self.bridge.open_book(self.session.source.clone(), shelf, accounts::ItemKey::new(account.id, id));
     }
 
     /// Asks for the listening the Stats place counts, unless it was asked for

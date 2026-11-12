@@ -63,7 +63,7 @@ Removing a source deletes its folder, its downloads and its cached art, after as
 
 ## The shared crate
 
-`AccountId` lives in `sources` today, beside Rede's book models. It moves to a small crate, `accounts`, that both apps depend on and that knows nothing about books or music:
+`AccountId` and `ItemKey` live in the small `accounts` crate, shared by both apps and independent of books or music. The crate will also hold the shared source state and UI models as those features are built:
 
 - `AccountId`.
 - `SourceState`: online, connecting, syncing (with progress), scanning, offline (unreachable, or offline by choice), signed out, folder missing.

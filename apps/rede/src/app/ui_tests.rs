@@ -45,7 +45,7 @@ fn a_books_download_button_offers_what_its_state_allows() {
     h.run_steps(3);
     h.get_by_label("Download");
     let store = open_store(app_mut(&mut h), dir.path());
-    let pin = offline::Pin::Book(sources::ItemKey::new(account().id, "book-1").to_string());
+    let pin = offline::Pin::Book(accounts::ItemKey::new(account().id, "book-1").to_string());
     store.pin(pin.clone(), "Dune", vec![offline::TrackRef::new("dune-1", Some("m4b".into()), Some(100))]);
     app_mut(&mut h).downloads.refresh();
     h.run_steps(3);
@@ -597,7 +597,7 @@ fn a_books_series_links_to_its_page_with_the_series_in_order() {
     assert!(first.x < sixth.x, "in the series' order, not the library's");
     assert!(h.query_by_label_contains("Piranesi").is_none(), "only the series' books");
     // With the first finished, the button goes on with the next.
-    let item = sources::ItemKey::new(account().id, "book-0");
+    let item = accounts::ItemKey::new(account().id, "book-0");
     let done = sources::Progress { item, position: sources::Position::from_secs(40_920.0), finished: true, at: Some(std::time::SystemTime::now()) };
     app_mut(&mut h).positions.insert("book-0".into(), done);
     h.run_steps(3);

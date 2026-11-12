@@ -6,8 +6,8 @@
 //! and downloads are all keyed by account already, so a second one is a row in
 //! the list rather than a new shape.
 
+use accounts::AccountId;
 use serde::{Deserialize, Serialize};
-use sources::AccountId;
 use std::path::PathBuf;
 
 /// The keychain service, the same as the bundle id.

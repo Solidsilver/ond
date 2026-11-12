@@ -165,7 +165,7 @@ fn a_book_page_asks_for_its_details_once_and_keeps_them() {
     assert!(matches!(app.books.details.get("book-0"), Some(Details::Loading)));
     // What comes back is kept, and opening the page again doesn't ask anew.
     let item = super::fixture::details(0);
-    app.handle(crate::bridge::LibraryMsg::Book { key: sources::ItemKey::new(super::fixture::account().id, "book-0"), item: Box::new(item) });
+    app.handle(crate::bridge::LibraryMsg::Book { key: accounts::ItemKey::new(super::fixture::account().id, "book-0"), item: Box::new(item) });
     assert!(matches!(app.books.details.get("book-0"), Some(Details::Loaded(_))));
     app.go(Route::Library);
     app.go(book_route(0));
@@ -421,7 +421,7 @@ fn queued_playback_results_from_a_signed_out_account_are_dropped() {
     app.handle(Msg::Playback {
         session,
         event: crate::listening::Event::Positions(vec![sources::Progress {
-            item: sources::ItemKey::new(account().id, "book-0"),
+            item: accounts::ItemKey::new(account().id, "book-0"),
             position: sources::Position::from_secs(500.0),
             finished: false,
             at: None,
@@ -455,7 +455,7 @@ fn progress_bodies(server: &testkit::JsonFake) -> Vec<serde_json::Value> {
 /// A place a pull found, for the tests that start from one.
 fn saved(app: &mut RedeApp, id: &str, secs: f64, finished: bool) {
     let progress = sources::Progress {
-        item: sources::ItemKey::new(account().id, id),
+        item: accounts::ItemKey::new(account().id, id),
         position: sources::Position::from_secs(secs),
         finished,
         at: Some(std::time::SystemTime::now() - Duration::from_secs(60)),
@@ -469,7 +469,7 @@ fn a_book_marked_finished_shows_finished_at_once_and_keeps_the_stamp_it_was_writ
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path(), BOOKS.len());
     let server = listening_server(&mut app);
-    let key = sources::ItemKey::new(account().id, "book-0");
+    let key = accounts::ItemKey::new(account().id, "book-0");
     saved(&mut app, "book-0", 1_200.0, false);
     let version = app.positions.version();
     app.apply(Action::MarkFinished("book-0".into()));
@@ -534,7 +534,7 @@ fn a_progress_intent_from_a_signed_out_account_is_dropped() {
     assert!(app.positions.get("book-0").is_some_and(|p| p.finished));
     app.apply(Action::SignOut);
     let late = sources::Progress {
-        item: sources::ItemKey::new(account().id, "book-0"),
+        item: accounts::ItemKey::new(account().id, "book-0"),
         position: sources::Position::from_secs(1_200.0),
         finished: true,
         at: Some(std::time::SystemTime::now()),
@@ -647,7 +647,7 @@ fn command_b_asks_for_a_bookmark_where_the_book_is_named_for_its_chapter() {
         app.mode = mode;
         command_b(&ctx, &mut app);
         let Some(Action::AddBookmark { item, time, title }) = app.actions.pop() else { panic!("⌘B asks for a bookmark in {mode:?}") };
-        assert_eq!(item, sources::ItemKey::new(account().id, "book-0"));
+        assert_eq!(item, accounts::ItemKey::new(account().id, "book-0"));
         assert_eq!(time, 14_200.0);
         assert_eq!(title, "Chapter 5");
     }
@@ -686,7 +686,7 @@ fn the_window_opens_on_home_only_when_a_book_is_in_progress() {
     // Nothing begun: the library, as before, and a later pull doesn't move it.
     let mut app = super::fixture::app(&ctx, dir.path(), BOOKS.len());
     app.playback_event(crate::listening::Event::Positions(vec![sources::Progress {
-        item: sources::ItemKey::new(account().id, "book-3"),
+        item: accounts::ItemKey::new(account().id, "book-3"),
         position: sources::Position::from_secs(0.0),
         finished: false,
         at: None,

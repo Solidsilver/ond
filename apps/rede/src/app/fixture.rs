@@ -8,7 +8,8 @@
 
 use super::*;
 use crate::settings::{Account, Paths};
-use sources::{Changes, Chapter, Item, ItemKey, ItemSummary, Library, LibraryKind, Series, Stamp, TrackFile};
+use accounts::ItemKey;
+use sources::{Changes, Chapter, Item, ItemSummary, Library, LibraryKind, Series, Stamp, TrackFile};
 use std::path::Path;
 
 /// The account the fixture is signed in to. Nothing talks to it.
@@ -26,7 +27,7 @@ pub fn wall_clock() -> chrono::NaiveDateTime {
 
 pub fn account() -> Account {
     let mut account = Account::new(SERVER, "sam");
-    account.id = sources::AccountId::from_uuid(uuid::Uuid::from_u128(42));
+    account.id = accounts::AccountId::from_uuid(uuid::Uuid::from_u128(42));
     account.device_id = "fixture".into();
     account.libraries = vec![crate::settings::KnownLibrary { id: LIBRARY.into(), name: "Books".into() }];
     account.sign_in = Some(crate::settings::SignInMethod::Password);
@@ -438,7 +439,7 @@ pub fn listened(app: &mut RedeApp) {
 /// Piranesi half listened to, and Dune finished.
 pub fn in_progress(app: &mut RedeApp) {
     let at = |id: &str, secs: f64, finished: bool| {
-        let item = sources::ItemKey::new(account().id, id);
+        let item = accounts::ItemKey::new(account().id, id);
         (id.to_owned(), sources::Progress { item, position: sources::Position::from_secs(secs), finished, at: Some(std::time::SystemTime::now()) })
     };
     for (id, progress) in [at("book-2", 7_980.0, false), at("book-1", 75_720.0, true)] {

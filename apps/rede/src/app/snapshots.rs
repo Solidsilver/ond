@@ -181,7 +181,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     // button goes on with the next.
     scene(h, s, "series", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
-        let item = sources::ItemKey::new(account().id, "book-0");
+        let item = accounts::ItemKey::new(account().id, "book-0");
         let done = sources::Progress { item, position: sources::Position::from_secs(40_920.0), finished: true, at: Some(std::time::SystemTime::now()) };
         app.positions.insert("book-0".into(), done);
         app.go(book_route(3));
@@ -896,7 +896,7 @@ fn palette(ctx: &egui::Context, dir: &std::path::Path, query: &str) -> RedeApp {
     let mut app = app(ctx, dir, BOOKS.len());
     playing(&mut app, true);
     in_progress(&mut app);
-    let item = sources::ItemKey::new(account().id, "book-0");
+    let item = accounts::ItemKey::new(account().id, "book-0");
     let yesterday = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
     let paused = sources::Progress { item, position: sources::Position::from_secs(14_200.0), finished: false, at: Some(yesterday) };
     app.positions.insert("book-0".into(), paused);

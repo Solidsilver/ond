@@ -1,13 +1,13 @@
 //! Who an item belongs to.
 //!
-//! Two servers can both hold an item called `abc`, so every item Rede stores,
-//! caches, downloads or sends progress for is keyed by the account it came
-//! from as well as by its own id. An account's id is a UUID made when the
-//! account is added and never changes: the server address can change (a new
-//! domain, a local address at home and a remote one away), and a key carrying
-//! the address would orphan progress and downloads when it did. This is the
-//! part that is expensive to retrofit, so it's in from the start even though
-//! most people will have one account.
+//! Two servers can both hold an item called `abc`, so both apps qualify an
+//! item's own id with a local, permanent account id wherever it leaves its
+//! source. The account's id is a UUID made when the account is added and
+//! never changes: the server address can change (a new domain, a local
+//! address at home and a remote one away), and a key carrying the address
+//! would orphan progress and downloads when it did. Ond will key tracks the
+//! same way, as described in `docs/sources.md`, so identity belongs here
+//! rather than among either app's models.
 //!
 //! [`ItemKey`]'s string form is `<account>/<item>`, which is what the stream
 //! cache and the offline store name files with. Both pass it through

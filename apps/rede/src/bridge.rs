@@ -12,8 +12,9 @@ use crate::settings::{Account, KnownLibrary, Paths, Settings};
 use crate::sync::{self, Outcome};
 use crate::tokens::Keeper;
 use abs::{AuthError, Version};
+use accounts::ItemKey;
 use shelf::Shelf;
-use sources::{AbsSource, Item, ItemKey, ItemSummary, Source};
+use sources::{AbsSource, Item, ItemSummary, Source};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -264,7 +265,7 @@ impl Bridge {
         self.download_job(move || store.clear());
     }
 
-    pub fn open_downloads(&self, account: sources::AccountId, limit: Option<u64>, stream_dir: std::path::PathBuf, target: crate::downloads::Store) {
+    pub fn open_downloads(&self, account: accounts::AccountId, limit: Option<u64>, stream_dir: std::path::PathBuf, target: crate::downloads::Store) {
         let this = self.scoped();
         let base = self.paths.shelves.with_file_name("downloads");
         let rt = self.rt.clone();

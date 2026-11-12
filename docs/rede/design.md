@@ -53,6 +53,7 @@ apps/
   ond/            Ond (moved from crates/app; package stays ond-player)
   rede/           Rede
 crates/
+  accounts/       permanent account ids and account-qualified item keys (shared)
   audio/          playback engine (shared)
   streamcache/    progressive cache for streamed files (shared)
   offline/        offline download store (shared)
@@ -115,7 +116,7 @@ The shared crates stay free of anything specific to one app, so a third app (pod
 
 ### Identity
 
-Every book, file, chapter and progress record is identified by the account it came from as well as its own id:
+Every book, file, chapter and progress record is identified by the account it came from as well as its own id. The `accounts` crate shares these identity types with Ond:
 
 ```rust
 pub struct AccountId(Uuid);                  // assigned when the account is added

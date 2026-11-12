@@ -22,12 +22,12 @@ use super::nav::Route;
 use super::view_ctx::ViewCtx;
 use super::virtual_list::VirtualList;
 use crate::widgets::elide;
+use accounts::ItemKey;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use offline::Pin;
 use shell::icons::{self, Icon};
 use shell::kit::{self, DownloadMark};
 use shell::theme::Tokens;
-use sources::ItemKey;
 use std::collections::HashMap;
 
 /// A row on the page: the cover, the title over the author and state.
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn each_book_reads_as_its_pin_with_preparing_and_errors_on_top() {
-        let account = sources::AccountId::from_uuid(uuid::Uuid::from_u128(7));
+        let account = accounts::AccountId::from_uuid(uuid::Uuid::from_u128(7));
         let key = |id: &str| ItemKey::new(account, id);
         let mut state = crate::downloads::State {
             snapshot: std::sync::Arc::new(offline::Snapshot {

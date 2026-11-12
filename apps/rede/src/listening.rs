@@ -3,8 +3,9 @@
 //! report remains in its ordered log, independent of the in-memory session.
 
 use crate::failure::Failure;
+use accounts::ItemKey;
 use shelf::Shelf;
-use sources::{DeviceInfo, ItemKey, PlaySession, Position, Progress, ProgressUpdate, Source};
+use sources::{DeviceInfo, PlaySession, Position, Progress, ProgressUpdate, Source};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};

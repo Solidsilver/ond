@@ -1,6 +1,7 @@
 use super::*;
+use accounts::AccountId;
 use audio::StreamFormat;
-use sources::{AccountId, Chapter, ItemSummary, TrackFile};
+use sources::{Chapter, ItemSummary, TrackFile};
 use std::cell::{Cell, RefCell};
 
 pub(crate) struct Fake {
