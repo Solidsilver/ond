@@ -114,7 +114,7 @@ impl ViewCtx<'_> {
                     Verb::PlayNext => self.play_from_album(&tr, QueueAction::PlayNext),
                     Verb::Add => self.play_from_album(&tr, QueueAction::Add),
                     Verb::Download => {
-                        let kept = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
+                        let kept = self.track_pin(&tr).is_some_and(|p| self.downloads.snap.pin(&p).is_some());
                         self.actions.push(Action::Offline(OfflineAction::Keep(super::Keep::Tracks(vec![tr]), !kept)));
                     }
                 }

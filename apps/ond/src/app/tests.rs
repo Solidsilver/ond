@@ -50,6 +50,8 @@ fn app(ctx: &egui::Context, dir: &std::path::Path) -> OndApp {
     };
     let mut app = OndApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
     app.login = None;
+    app.session.settings = Some(Settings { account: Some(crate::test_tracks::account()), ..Default::default() });
+    app.downloads.owner = Some(crate::test_tracks::account());
     let albums: Vec<Album> = (0..60)
         .map(|i| Album {
             id: format!("al-{i}"),
@@ -76,9 +78,9 @@ fn app(ctx: &egui::Context, dir: &std::path::Path) -> OndApp {
         vec![crate::source::Playlist { id: "pl-1".into(), name: "Late night".into(), song_count: 3, duration: 900, cover_art: None, owner: None }];
     app.data.playlist_tracks.insert("pl-1".into(), Arc::new(tracks[..3].to_vec()));
     app.data.credited.insert("Scott LaFaro".into(), vec!["al-1".into(), "al-0".into()]);
-    app.player.queue.play_now(tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
-    app.player.queue.play_next(tracks[..2].to_vec());
-    app.player.queue.add(tracks[5..15].to_vec());
+    app.player.queue.play_now(crate::test_tracks::account(), tracks.clone(), 2, Source::Album { id: "al-0".into(), name: "Album 0".into() });
+    app.player.queue.play_next(crate::test_tracks::account(), tracks[..2].to_vec());
+    app.player.queue.add(crate::test_tracks::account(), tracks[5..15].to_vec());
     app
 }
 
@@ -127,7 +129,7 @@ fn an_album_page_takes_its_own_colors_and_everything_else_the_playing_ones() {
     app.art.preload("al-0", solid(egui::Color32::from_rgb(170, 30, 40)));
     app.art.preload("al-5", solid(egui::Color32::from_rgb(30, 60, 170)));
     let playing: Vec<Track> = (1..=3).map(|n| track(&format!("t-{n}"), "al-0", n)).collect();
-    app.player.queue.play_now(playing, 0, Source::Added);
+    app.player.queue.play_now(crate::test_tracks::account(), playing, 0, Source::Added);
     app.ui.nav.go(Route::Album("al-5".into()));
     let time = std::cell::Cell::new(0.0);
     let settle = |app: &mut OndApp| {
@@ -512,7 +514,9 @@ fn another_account_gets_its_own_library_and_downloads() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let source = || crate::source::subsonic::test_source();
-    let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
+    let login = |user: &str| {
+        Box::new(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: user.into(), ..Default::default() })
+    };
     let connect = |app: &mut OndApp, user: &str, new_account: bool| {
         let session = app.bridge.session();
         app.handle(Msg::Connected { session, source: source(), settings: login(user), server: "test".into(), new_account, password_saved: true });
@@ -565,7 +569,9 @@ fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let source = || crate::source::subsonic::test_source();
-    let login = |user: &str| Box::new(Settings { server: "http://music.local".into(), username: user.into(), ..Default::default() });
+    let login = |user: &str| {
+        Box::new(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: user.into(), ..Default::default() })
+    };
     let connect = |app: &mut OndApp, user: &str| {
         let session = app.bridge.session();
         app.handle(Msg::Connected { session, source: source(), settings: login(user), server: "test".into(), new_account: false, password_saved: true });
@@ -592,7 +598,13 @@ fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
 fn a_downloads_folder_set_in_managed_json_moves_the_downloads_there() {
     let dir = tempfile::tempdir().unwrap();
     let (old, chosen) = (dir.path().join("old"), dir.path().join("music"));
-    let account = Settings { server: "http://music.local".into(), username: "luke".into(), signed_out: true, ..Default::default() };
+    let account = Settings {
+        account: Some(crate::test_tracks::account()),
+        server: "http://music.local".into(),
+        username: "luke".into(),
+        signed_out: true,
+        ..Default::default()
+    };
     let store = old.join(format!("{:08x}", account.account_id().unwrap()));
     std::fs::create_dir_all(&store).unwrap();
     std::fs::write(store.join("t-2.flac"), b"fLaC").unwrap();
@@ -613,7 +625,7 @@ fn a_downloads_folder_set_in_managed_json_moves_the_downloads_there() {
 fn downloads_moved_to_another_folder_move_in_the_background() {
     let dir = tempfile::tempdir().unwrap();
     let (old, new) = (dir.path().join("old"), dir.path().join("new"));
-    let account = Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() };
+    let account = Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() };
     let store = old.join(format!("{:08x}", account.account_id().unwrap()));
     std::fs::create_dir_all(&store).unwrap();
     std::fs::write(store.join("t-2.flac"), b"fLaC").unwrap();
@@ -632,6 +644,28 @@ fn downloads_moved_to_another_folder_move_in_the_background() {
     let shown = app.ui.toasts.texts();
     assert!(shown.iter().any(|t| t.starts_with("Downloads moved to")), "{shown:?}");
     assert!(!shown.iter().any(|t| t.starts_with("Moving downloads")), "the progress notice gives way: {shown:?}");
+}
+
+#[test]
+fn another_accounts_key_never_finds_our_download_or_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&egui::Context::default(), dir.path());
+    download(&mut app, dir.path(), "t-2");
+    let track = app.data.track("t-2").unwrap().clone();
+    let ours = crate::test_tracks::key("t-2");
+    let theirs = crate::source::TrackKey::new(accounts::AccountId::new(), "t-2");
+    let files = app.downloads.tracks();
+    assert!(files.local_path(&ours).is_some());
+    assert!(files.is_done(&ours));
+    assert!(files.local_path(&theirs).is_none());
+    assert!(!files.is_done(&theirs));
+    assert!(files.track(&theirs).is_none());
+    assert!(files.pin(&theirs).is_none());
+    assert!(files.track_ref(&theirs, &track).is_none());
+    app.session.online = true;
+    app.session.source = Some(crate::source::subsonic::test_source());
+    let item = crate::queue::Item { uid: 1, key: theirs, track, source: Source::Added, next: false };
+    assert!(app.with_player(|_, cx| cx.sources.source(&item, None, None)).is_none());
 }
 
 #[test]
@@ -1083,7 +1117,7 @@ fn the_playing_song_queued_next_still_advances_gaplessly() {
     // "Play next" on the song that's playing: the same track, a new queue item.
     let playing = app.player.queue.current.clone().unwrap();
     app.player.queue.clear();
-    app.player.queue.play_next(vec![playing.track.clone()]);
+    app.player.queue.play_next(crate::test_tracks::account(), vec![playing.track.clone()]);
     let copy = app.player.queue.peek_next().unwrap().clone();
     assert_eq!(copy.track.id, playing.track.id);
     assert_ne!(copy.uid, playing.uid);
@@ -1093,7 +1127,7 @@ fn the_playing_song_queued_next_still_advances_gaplessly() {
     // Repeat queue over a single item: each gapless start is the next pass.
     app.player.queue = crate::queue::Queue::default();
     app.player.queue.end = crate::queue::EndAction::RepeatQueue;
-    app.player.queue.play_now(vec![playing.track.clone()], 0, Source::Added);
+    app.player.queue.play_now(crate::test_tracks::account(), vec![playing.track.clone()], 0, Source::Added);
     let first = app.player.queue.current.clone().unwrap();
     app.handle_engine(started(&first));
     let second = app.player.queue.current.clone().unwrap();
@@ -1195,7 +1229,7 @@ fn playing_something_new_can_ask_about_what_you_added() {
     assert_eq!(app.player.queue.prefs.on_play, crate::queue::OnPlay::Ask, "the answer is for this time only");
 
     // Clear: only the new album plays.
-    app.player.queue.add(vec![track("z", "al-0", 1)]);
+    app.player.queue.add(crate::test_tracks::account(), vec![track("z", "al-0", 1)]);
     app.apply(Action::TracksAnswered { tracks: new, source, action: QueueAction::Play { start: 0 }, keep: false });
     assert_eq!(played(&app, 4)[1..], ["new-1", "new-2", "new-3"]);
     assert_eq!(app.player.queue.added_count(), 0);
@@ -1206,7 +1240,8 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
-    app.session.settings = Some(Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
+    app.session.settings =
+        Some(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
     app.session.connecting = true;
     let t = app.data.tracks.all[0].clone();
     let playable = |app: &OndApp| super::playable(&app.session, &app.downloads, &app.cache, app.output.transcode().as_ref(), &t);
@@ -1273,7 +1308,8 @@ fn working_offline_stops_connecting_and_hides_what_cant_play() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let source = crate::source::subsonic::test_source();
-    let settings = Box::new(Settings { server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
+    let settings =
+        Box::new(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
     app.handle(Msg::Connected { session: app.bridge.session(), source, settings, server: "test".into(), new_account: false, password_saved: true });
     store_opened(&mut app);
     download(&mut app, dir.path(), "t-2");

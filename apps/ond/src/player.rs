@@ -4,7 +4,8 @@
 //! (show a notice, analyse a track, check the connection) comes back as
 //! [`Note`]s.
 
-use crate::queue::{OnPlay, Queue, Source};
+use crate::queue::{Item, OnPlay, Queue, Source};
+use accounts::AccountId;
 use audio::{Command, EngineHandle, PlayState, TrackSource};
 use library::Track;
 use std::time::Duration;
@@ -46,12 +47,12 @@ impl Transport for EngineHandle {
 
 /// Where tracks play from, and who hears about them in advance.
 pub trait Sources {
-    /// What the engine needs to play `track` (`None`: it can't play now, e.g.
-    /// offline and not downloaded). `token` is the queue item's id, echoed back
-    /// by the engine; `prev` / `next` are its queue neighbours.
-    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource>;
-    /// `track` is about to play (Now Playing learns its details early).
-    fn announce(&self, track: &Track);
+    /// What the engine needs to play `item` (`None`: it can't play now, e.g.
+    /// offline and not downloaded). The item's uid is echoed back by the
+    /// engine; `prev` / `next` are its queue neighbours on the same account.
+    fn source(&self, item: &Item, prev: Option<&Track>, next: Option<&Track>) -> Option<TrackSource>;
+    /// `item` is about to play (Now Playing learns its details early).
+    fn announce(&self, item: &Item);
     /// The server isn't answering yet but should be soon (it's connecting):
     /// a track that needs it waits instead of being skipped.
     fn waiting(&self) -> bool {
@@ -71,6 +72,7 @@ pub enum Note {
     /// A queue item started playing (`restart`: the engine restarted it, e.g.
     /// after a device change; it isn't a new play).
     Started {
+        key: crate::source::TrackKey,
         track: Box<Track>,
         restart: bool,
     },
@@ -155,8 +157,8 @@ impl Player {
     }
 
     /// The queue entry the engine just started: the current one, or the next (gapless).
-    fn playing_track(&self, token: u64) -> Option<&Track> {
-        [self.queue.current.as_ref(), self.queue.peek_next()].into_iter().flatten().find(|i| i.uid == token).map(|i| &i.track)
+    fn playing_item(&self, token: u64) -> Option<&Item> {
+        [self.queue.current.as_ref(), self.queue.peek_next()].into_iter().flatten().find(|i| i.uid == token)
     }
 
     pub fn handle_engine(&mut self, ev: &audio::Event, cx: &mut Ctx<'_>) {
@@ -169,8 +171,8 @@ impl Player {
                 if self.next_from.as_ref().is_some_and(|s| s.token == *token) {
                     self.playing_from = self.next_from.take();
                 }
-                if let Some(t) = self.playing_track(*token) {
-                    cx.notes.push(Note::Started { track: Box::new(t.clone()), restart: *restart });
+                if let Some(item) = self.playing_item(*token) {
+                    cx.notes.push(Note::Started { key: item.key.clone(), track: Box::new(item.track.clone()), restart: *restart });
                 }
                 // Matched by queue item (the token), so the same song twice in a row
                 // still moves the queue along. With "repeat queue" over a single
@@ -206,7 +208,7 @@ impl Player {
                 // server): carry on with the next rather than leave the queue
                 // parked on it. A track that failed partway, an error not about
                 // a track (the device) or a second failure in a row stops as before.
-                let current = self.queue.current.as_ref().filter(|c| track_id.as_ref() == Some(&c.track.id));
+                let current = self.queue.current.as_ref().filter(|c| track_id.as_deref() == Some(crate::source::stream_name(&c.key).as_ref()));
                 let skip =
                     current.filter(|c| self.started != Some(c.uid) && !self.skipped_failure && self.queue.peek_next().is_some()).map(|c| c.track.title.clone());
                 let text = skip.as_ref().map_or_else(|| message.clone(), |title| format!("Skipped “{title}”: {message}"));
@@ -250,10 +252,10 @@ impl Player {
                 cx.notes.push(Note::Notice("Nothing in the queue is downloaded".to_owned()));
                 return;
             }
-            let prev = self.queue.history.last().map(|i| &i.track);
-            let next = self.queue.peek_next().map(|i| &i.track);
-            if let Some(src) = cx.sources.source(item.uid, prev, &item.track, next) {
-                cx.sources.announce(&item.track);
+            let prev = self.queue.history.last().filter(|i| i.key.account == item.key.account).map(|i| &i.track);
+            let next = self.queue.peek_next().filter(|i| i.key.account == item.key.account).map(|i| &i.track);
+            if let Some(src) = cx.sources.source(item, prev, next) {
+                cx.sources.announce(item);
                 self.playing_from = Some(src.clone());
                 cx.engine.send(Command::Play(src));
                 self.sync_next(cx);
@@ -288,15 +290,16 @@ impl Player {
         if self.queue.current.is_none() {
             return;
         }
-        let next = self.queue.peek_next().map(|i| (i.uid, &i.track));
-        let current = self.queue.current.as_ref().map(|i| &i.track);
-        let after = self.queue.upcoming.get(1).map(|i| &i.track);
-        let source = next.and_then(|(uid, t)| cx.sources.source(uid, current, t, after));
+        let next = self.queue.peek_next();
+        let account = next.map(|i| i.key.account);
+        let current = self.queue.current.as_ref().filter(|i| Some(i.key.account) == account).map(|i| &i.track);
+        let after = self.queue.upcoming.get(1).filter(|i| Some(i.key.account) == account).map(|i| &i.track);
+        let source = next.and_then(|i| cx.sources.source(i, current, after));
         // By queue item, not track: the same song queued twice is two items.
         let sent = source.as_ref().map(|s| s.token);
         if sent != self.sent_next {
-            if let Some((_, t)) = next.filter(|_| source.is_some()) {
-                cx.sources.announce(t);
+            if let Some(item) = next.filter(|_| source.is_some()) {
+                cx.sources.announce(item);
             }
             self.next_from = source.clone();
             cx.engine.send(Command::SetNext(source));
@@ -370,25 +373,25 @@ impl Player {
     }
 
     /// Applies a queue action once the tracks are known.
-    pub fn queue_tracks(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, cx: &mut Ctx<'_>) {
-        self.enqueue(tracks, source, action, None, cx);
+    pub fn queue_tracks(&mut self, account: AccountId, tracks: Vec<Track>, source: Source, action: QueueAction, cx: &mut Ctx<'_>) {
+        self.enqueue(account, tracks, source, action, None, cx);
     }
 
     /// [`queue_tracks`](Self::queue_tracks), with what playing now does to
     /// the tracks the user added given for this once (the answer when the
     /// queue asks).
-    pub fn queue_tracks_with(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, on_play: OnPlay, cx: &mut Ctx<'_>) {
-        self.enqueue(tracks, source, action, Some(on_play), cx);
+    pub fn queue_tracks_with(&mut self, account: AccountId, tracks: Vec<Track>, source: Source, action: QueueAction, on_play: OnPlay, cx: &mut Ctx<'_>) {
+        self.enqueue(account, tracks, source, action, Some(on_play), cx);
     }
 
     /// `on_play`: `None` plays now as the queue's preference says.
-    fn enqueue(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, on_play: Option<OnPlay>, cx: &mut Ctx<'_>) {
+    fn enqueue(&mut self, account: AccountId, tracks: Vec<Track>, source: Source, action: QueueAction, on_play: Option<OnPlay>, cx: &mut Ctx<'_>) {
         if tracks.is_empty() {
             return;
         }
         let play_now = |q: &mut Queue, tracks: Vec<Track>, start: usize, source: Source| match on_play {
-            Some(on_play) => q.play_now_with(tracks, start, source, on_play),
-            None => q.play_now(tracks, start, source),
+            Some(on_play) => q.play_now_with(account, tracks, start, source, on_play),
+            None => q.play_now(account, tracks, start, source),
         };
         match action {
             QueueAction::Play { start } => {
@@ -402,11 +405,11 @@ impl Player {
                 self.start_current(cx);
             }
             QueueAction::PlayNext => {
-                self.queue.play_next(tracks);
+                self.queue.play_next(account, tracks);
                 self.sync_next(cx);
             }
             QueueAction::Add => {
-                self.queue.add(tracks);
+                self.queue.add(account, tracks);
                 self.sync_next(cx);
             }
         }
@@ -543,7 +546,9 @@ mod tests {
     }
 
     impl Sources for FakeSources {
-        fn source(&self, token: u64, _: Option<&Track>, track: &Track, _: Option<&Track>) -> Option<TrackSource> {
+        fn source(&self, item: &Item, _: Option<&Track>, _: Option<&Track>) -> Option<TrackSource> {
+            let track = &item.track;
+            let token = item.uid;
             (!self.unplayable.contains(&track.id)).then(|| TrackSource {
                 id: track.id.clone(),
                 url: format!("test://{}", track.id),
@@ -554,7 +559,7 @@ mod tests {
                 token,
             })
         }
-        fn announce(&self, _: &Track) {}
+        fn announce(&self, _: &Item) {}
         fn waiting(&self) -> bool {
             self.waiting
         }
@@ -605,7 +610,7 @@ mod tests {
     #[test]
     fn play_now_starts_the_first_and_lines_up_the_second() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
         assert_eq!(r.engine.played(), ["a"]);
         assert_eq!(r.engine.last_next(), Some(Some("b".into())));
     }
@@ -613,18 +618,18 @@ mod tests {
     #[test]
     fn a_gapless_start_advances_the_queue_and_lines_up_the_next() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
         let b = r.uid_of("b");
         r.started(b, true);
         assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "b");
         assert_eq!(r.engine.last_next(), Some(Some("c".into())));
-        assert!(matches!(r.notes.last(), Some(Note::Started { track, restart: false }) if track.id == "b"));
+        assert!(matches!(r.notes.last(), Some(Note::Started { track, restart: false, .. }) if track.id == "b"));
     }
 
     #[test]
     fn the_same_song_twice_still_moves_along() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         let second = r.player.queue.upcoming[0].uid;
         r.started(second, true);
         assert_eq!(r.player.queue.current.as_ref().unwrap().uid, second);
@@ -635,7 +640,7 @@ mod tests {
     fn songs_that_cannot_play_are_skipped_with_a_notice() {
         let mut r = Rig::new();
         r.sources.unplayable = ["a".to_owned(), "b".to_owned()].into();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
         assert_eq!(r.engine.played(), ["c"]);
         assert_eq!(r.notes, [Note::Notice("Skipped 2 songs that aren't downloaded".into())]);
     }
@@ -644,7 +649,7 @@ mod tests {
     fn a_next_that_cannot_play_is_not_named() {
         let mut r = Rig::new();
         r.sources.unplayable = ["b".to_owned()].into();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         assert!(matches!(r.engine.last_next(), None | Some(None)), "the engine never hears of b");
         assert_eq!(r.player.sent_next(), None);
     }
@@ -654,7 +659,7 @@ mod tests {
         let mut r = Rig::new();
         r.player.queue.end = crate::queue::EndAction::RepeatQueue;
         r.sources.unplayable = ["a".to_owned(), "b".to_owned()].into();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         assert!(r.engine.played().is_empty());
         assert!(r.engine.stopped());
         assert!(r.notes.contains(&Note::Notice("Nothing in the queue is downloaded".into())));
@@ -665,7 +670,7 @@ mod tests {
         let mut r = Rig::new();
         r.sources.unplayable = ["a".to_owned()].into();
         r.sources.waiting = true;
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         assert!(r.engine.played().is_empty() && r.player.held);
         assert!(r.notes.is_empty(), "nothing said yet");
         // The server answered: it plays.
@@ -683,7 +688,7 @@ mod tests {
         let mut r = Rig::new();
         r.sources.unplayable = ["a".to_owned()].into();
         r.sources.waiting = true;
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         r.sources.waiting = false;
         r.run(|p, cx| p.resume_held(cx));
         assert_eq!(r.engine.played(), ["b"]);
@@ -695,7 +700,7 @@ mod tests {
         let mut r = Rig::new();
         r.player.stop_on_unplayable = true;
         r.sources.unplayable = ["b".to_owned()].into();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
         let ended = r.ended("a");
         r.run(|p, cx| p.handle_engine(&ended, cx));
         assert_eq!(r.engine.played(), ["a"]);
@@ -707,7 +712,7 @@ mod tests {
     #[test]
     fn it_knows_where_the_playing_track_comes_from_also_after_a_gapless_move() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         assert_eq!(r.player.playing_from.as_ref().map(|s| s.url.as_str()), Some("test://a"));
         let b = r.uid_of("b");
         r.started(b, true);
@@ -717,7 +722,7 @@ mod tests {
     #[test]
     fn ended_carries_on_with_the_queue_or_stops() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         let ended = r.ended("a");
         r.run(|p, cx| p.handle_engine(&ended, cx));
         assert_eq!(r.engine.played(), ["a", "b"]);
@@ -730,10 +735,10 @@ mod tests {
     #[test]
     fn an_end_of_a_track_no_longer_playing_does_not_move_the_queue() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         let stale = r.ended("a");
         // The user picks something else before the engine's word on `a` is read.
-        r.run(|p, cx| p.queue_tracks(tracks(&["x", "y"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["x", "y"]), source(), QueueAction::Play { start: 0 }, cx));
         r.run(|p, cx| p.handle_engine(&stale, cx));
         assert_eq!(r.engine.played(), ["a", "x"]);
         assert_eq!(r.player.queue.current.as_ref().map(|c| c.track.id.as_str()), Some("x"), "still on what was picked");
@@ -747,7 +752,7 @@ mod tests {
     #[test]
     fn previous_restarts_after_three_seconds_else_goes_back() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         r.run(|p, cx| p.next(cx));
         r.engine.state.set(Some(PlayState::Playing));
         r.engine.position.set(10.0);
@@ -763,7 +768,7 @@ mod tests {
     #[test]
     fn previous_on_the_first_track_restarts_it_even_early_on() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         r.engine.state.set(Some(PlayState::Playing));
         r.engine.position.set(1.0);
         r.run(|p, cx| p.previous(cx));
@@ -777,7 +782,7 @@ mod tests {
         let mut r = Rig::new();
         r.sources.unplayable = ["a".to_owned()].into();
         r.sources.waiting = true;
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         assert!(r.player.held);
         r.player.pending_seek = Some(5.0);
         r.run(|p, cx| p.reset(cx));
@@ -794,7 +799,7 @@ mod tests {
     #[test]
     fn with_nothing_playing_queue_edits_tell_the_engine_nothing() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Add, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Add, cx));
         let mut sel = None;
         r.run(|p, cx| p.edit(QueueEdit::Clear, &mut sel, cx));
         assert!(r.player.queue.current.is_none());
@@ -805,7 +810,7 @@ mod tests {
     #[test]
     fn play_pause_follows_the_engine_state() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a"]), source(), QueueAction::Add, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a"]), source(), QueueAction::Add, cx));
         r.run(|p, cx| p.play_pause(cx));
         assert_eq!(r.engine.played(), ["a"], "stopped with a queue: starts it");
         r.engine.state.set(Some(PlayState::Playing));
@@ -829,7 +834,7 @@ mod tests {
     #[test]
     fn a_seek_while_stopped_holds_no_position() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Add, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Add, cx));
         r.player.queue.advance();
         assert!(r.player.queue.current.is_some(), "a current item, but nothing playing (offline, or after an error)");
         r.run(|p, cx| p.seek(30.0, cx));
@@ -842,7 +847,7 @@ mod tests {
     #[test]
     fn a_seek_shows_until_the_engine_confirms_it_or_starts_a_track() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         r.engine.state.set(Some(PlayState::Playing));
         r.run(|p, cx| p.seek(42.0, cx));
         assert_eq!(r.player.pending_seek, Some(42.0));
@@ -867,7 +872,7 @@ mod tests {
     #[test]
     fn queue_edits_keep_the_engine_s_next_up_to_date() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c", "d"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c", "d"]), source(), QueueAction::Play { start: 0 }, cx));
         let (b, c, d) = (r.uid_of("b"), r.uid_of("c"), r.uid_of("d"));
         let mut sel = None;
         r.run(|p, cx| p.edit(QueueEdit::Remove(b), &mut sel, cx));
@@ -890,7 +895,7 @@ mod tests {
     #[test]
     fn jump_and_replay_start_over_and_line_up_afresh() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c", "d"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c", "d"]), source(), QueueAction::Play { start: 0 }, cx));
         let (a, c, d) = (r.uid_of("a"), r.uid_of("c"), r.uid_of("d"));
         let nexts = |r: &Rig| r.engine.sent.borrow().iter().filter(|c| matches!(c, Command::SetNext(Some(s)) if s.id == "d")).count();
         let mut sel = None;
@@ -909,7 +914,7 @@ mod tests {
     fn remote_commands_map_onto_the_player() {
         use crate::now_playing::Remote;
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Add, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Add, cx));
         r.run(|p, cx| p.remote(Remote::Pause, cx));
         assert!(r.engine.sent.borrow().iter().all(|c| !matches!(c, Command::Pause)), "stopped: nothing to pause");
         r.run(|p, cx| p.remote(Remote::Play, cx));
@@ -948,7 +953,7 @@ mod tests {
     #[test]
     fn a_track_that_cannot_be_opened_is_skipped() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
         r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
         assert_eq!(r.engine.played(), ["a", "b"]);
         assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "b");
@@ -966,7 +971,7 @@ mod tests {
     #[test]
     fn a_second_failure_in_a_row_stops() {
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b", "c"]), source(), QueueAction::Play { start: 0 }, cx));
         r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
         r.run(|p, cx| p.handle_engine(&error(Some("b")), cx));
         assert_eq!(r.engine.played(), ["a", "b"], "the server may be gone: no run through the whole queue");
@@ -978,7 +983,7 @@ mod tests {
     fn errors_that_are_not_a_track_failing_to_open_stop_as_before() {
         // Not about a track (the device).
         let mut r = Rig::new();
-        r.run(|p, cx| p.queue_tracks(tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "b"]), source(), QueueAction::Play { start: 0 }, cx));
         r.run(|p, cx| p.handle_engine(&error(None), cx));
         assert_eq!(r.engine.played(), ["a"]);
         // Partway through a track that had started (e.g. the connection dropped).

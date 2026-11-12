@@ -46,7 +46,7 @@ fn big_library(app: &mut OndApp) {
 fn big_queue(app: &mut OndApp) {
     let tracks: Vec<Track> = app.data.tracks.all.iter().take(QUEUE_N).cloned().collect();
     app.player.queue = crate::queue::Queue::default();
-    app.player.queue.play_now(tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
+    app.player.queue.play_now(crate::test_tracks::account(), tracks, 0, Source::Album { id: "big-0".into(), name: "A long queue".into() });
 }
 
 struct Timing {
@@ -170,7 +170,14 @@ fn perf() {
     // 2,000 single-song downloads on the Offline page.
     {
         let app = app_mut(&mut h);
-        let pins = app.data.tracks.all.iter().take(PINS_N).map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect();
+        let pins = app
+            .data
+            .tracks
+            .all
+            .iter()
+            .take(PINS_N)
+            .map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![app.downloads.tracks().track_ref(&crate::test_tracks::key(&t.id), t).unwrap()]))
+            .collect();
         app.downloads.store().pin_many(pins);
         app.downloads.store().set_paused(true);
         app.downloads.snap = app.downloads.store().snapshot();

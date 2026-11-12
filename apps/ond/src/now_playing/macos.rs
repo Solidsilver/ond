@@ -24,7 +24,7 @@ pub fn install(handler: Arc<dyn Fn(Remote) + Send + Sync>) {
 
 pub fn publish(info: Option<Info>, state: State, elapsed: f64) {
     let info = info.map(|info| shared::Info {
-        track_id: info.track_id,
+        track_id: info.key.item,
         title: info.title,
         artist: info.artist,
         album: info.album,

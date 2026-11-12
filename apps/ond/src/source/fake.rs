@@ -5,6 +5,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct Fake {
+    pub account: accounts::AccountId,
     pub capabilities: Capabilities,
     pub scrobbles: AtomicUsize,
     pub lyric_calls: AtomicUsize,
@@ -12,12 +13,15 @@ pub struct Fake {
 
 impl Fake {
     pub fn new(capabilities: Capabilities) -> Self {
-        Self { capabilities, scrobbles: AtomicUsize::new(0), lyric_calls: AtomicUsize::new(0) }
+        Self { account: crate::test_tracks::account(), capabilities, scrobbles: AtomicUsize::new(0), lyric_calls: AtomicUsize::new(0) }
     }
 }
 
 #[async_trait]
 impl MusicSource for Fake {
+    fn account(&self) -> accounts::AccountId {
+        self.account
+    }
     fn capabilities(&self) -> Capabilities {
         self.capabilities
     }

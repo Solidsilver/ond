@@ -2,15 +2,17 @@
 //! track plays from (a download, else the server), what the player reports
 //! back, the engine's events, remote commands and the volume.
 
+use super::pins::Downloads;
 use super::{Action, Data, OndApp};
 use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
 use crate::player::{self, Note, Player, QueueEdit};
+use crate::queue::Item;
 use crate::source::Src;
+use crate::source::{TrackKey, stream_name};
 use audio::{Command, PlaybackMode, TrackSource};
 use library::Track;
-use offline::OfflineStore;
 use streamcache::StreamCache;
 
 /// The play/pause button's glyph and name: a spinner while the track is
@@ -30,8 +32,9 @@ pub(super) fn play_pause(state: audio::PlayState, player: &Player) -> (crate::ic
 /// Where queue items play from: a downloaded file first (instant, no
 /// network), else the server while it's reachable (original or transcoded).
 struct AppSources<'a> {
-    /// `None` while the store opens.
-    offline: Option<&'a OfflineStore>,
+    /// Knows its account even while its store opens.
+    offline: &'a Downloads,
+    account: Option<accounts::AccountId>,
     /// Songs streamed before and still whole in the cache play without the
     /// server too.
     cache: &'a StreamCache,
@@ -47,12 +50,16 @@ struct AppSources<'a> {
 impl player::Sources for AppSources<'_> {
     /// With its ReplayGain, and whether it plays as part of its album (from
     /// its queue neighbours `prev` and `next`).
-    fn source(&self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
+    fn source(&self, item: &Item, prev: Option<&Track>, next: Option<&Track>) -> Option<TrackSource> {
+        let (track, key, token) = (&item.track, &item.key, item.uid);
+        if Some(key.account) != self.account {
+            return None;
+        }
         let replay_gain = playback::replay_gain(track);
         let album_context = playback::in_album(prev, track, next);
-        if let Some(path) = self.offline.and_then(|o| o.local_path(&track.id)) {
+        if let Some(path) = self.offline.local_path(key) {
             return Some(TrackSource {
-                id: track.id.clone(),
+                id: stream_name(key).into_owned(),
                 url: format!("file://{}", path.display()),
                 suffix: track.suffix.clone(),
                 replay_gain,
@@ -62,9 +69,9 @@ impl player::Sources for AppSources<'_> {
             });
         }
         let Some(source) = self.source else {
-            let path = cached(self.cache, self.output, track)?;
+            let path = cached(self.cache, self.output, key, track)?;
             return Some(TrackSource {
-                id: track.id.clone(),
+                id: stream_name(key).into_owned(),
                 url: format!("file://{}", path.display()),
                 suffix: path.extension().map(|e| e.to_string_lossy().into_owned()),
                 replay_gain,
@@ -73,16 +80,21 @@ impl player::Sources for AppSources<'_> {
                 token,
             });
         };
+        if source.account() != key.account {
+            return None;
+        }
         let transcode = self.output.transcode();
         let (url, suffix) = source.stream(track, transcode.as_ref());
-        Some(TrackSource { id: track.id.clone(), url, suffix, replay_gain, album_context, transcode, token })
+        Some(TrackSource { id: stream_name(key).into_owned(), url, suffix, replay_gain, album_context, transcode, token })
     }
 
     /// Describes `track` for Now Playing before the engine reaches it.
-    fn announce(&self, track: &Track) {
+    fn announce(&self, item: &Item) {
+        let track = &item.track;
         let album = self.data.album(&track.album_id);
         self.now_playing.known(now_playing::Info {
-            track_id: track.id.clone(),
+            key: item.key.clone(),
+            token: item.uid,
             title: track.title.clone(),
             artist: track.artist.clone(),
             album: album.map(|a| a.name.clone()),
@@ -144,8 +156,8 @@ pub(super) fn origin(src: &TrackSource, cache: &StreamCache) -> Origin {
 }
 
 /// `track`'s file in the stream cache, as it plays now.
-pub(super) fn cached(cache: &StreamCache, output: &Outputs, track: &Track) -> Option<std::path::PathBuf> {
-    crate::local::cached(cache, output.transcode().as_ref(), track)
+pub(super) fn cached(cache: &StreamCache, output: &Outputs, key: &TrackKey, track: &Track) -> Option<std::path::PathBuf> {
+    crate::local::cached(cache, output.transcode().as_ref(), key, track)
 }
 
 /// A change to how audio is output.
@@ -260,7 +272,8 @@ impl OndApp {
     pub(super) fn with_player<R>(&mut self, f: impl FnOnce(&mut Player, &mut player::Ctx<'_>) -> R) -> R {
         let mut notes = Vec::new();
         let sources = AppSources {
-            offline: self.downloads.store.as_ref(),
+            offline: &self.downloads,
+            account: self.session.account(),
             cache: &self.cache,
             source: self.session.live(),
             connecting: self.session.connecting,
@@ -278,8 +291,8 @@ impl OndApp {
                     self.ui.toasts.note(format!("Cleared {songs} from the queue"), "Undo", Action::Queue(QueueEdit::UndoClear));
                 }
                 Note::Probe => self.probe(),
-                Note::Started { track, restart } => {
-                    if self.prefs_now().analyze_playing && !restart {
+                Note::Started { key, track, restart } => {
+                    if Some(key.account) == self.session.account() && self.prefs_now().analyze_playing && !restart {
                         self.enqueue_analysis(std::slice::from_ref(&*track));
                     }
                 }
@@ -302,7 +315,9 @@ impl OndApp {
     /// Where `track` would play from now (tests).
     #[cfg(test)]
     pub(super) fn source(&mut self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
-        self.with_player(|_, cx| cx.sources.source(token, prev, track, next))
+        let key = TrackKey::new(self.session.account()?, track.id.clone());
+        let item = Item { uid: token, key, track: track.clone(), source: crate::queue::Source::Added, next: false };
+        self.with_player(|_, cx| cx.sources.source(&item, prev, next))
     }
 
     /// The server is known to be away (or turned the login down): a track

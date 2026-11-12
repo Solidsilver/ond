@@ -51,6 +51,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn account(&self) -> Option<accounts::AccountId> {
+        self.settings.as_ref().and_then(|s| s.account)
+    }
+
     /// The source, while the server answers.
     pub fn live(&self) -> Option<&Src> {
         self.source.as_ref().filter(|_| self.online)
@@ -64,7 +68,8 @@ impl Session {
 
 impl OndApp {
     /// Signed in: the session starts (or resumes after an outage).
-    pub(super) fn connected(&mut self, source: Src, settings: Box<Settings>, server: String, new_account: bool, password_saved: bool) {
+    pub(super) fn connected(&mut self, source: Src, mut settings: Box<Settings>, server: String, new_account: bool, password_saved: bool) {
+        settings.account = Some(source.account());
         if new_account {
             // Work still running for the old account (the library read at
             // start-up, a sync from before signing in again) would land its
@@ -79,7 +84,7 @@ impl OndApp {
             self.show_notice("Ond couldn't save your password in the system keychain, so it will ask for it again next time.");
         }
         let limit = self.prefs.snapshot().offline_limit_gb.map(|gb| gb * 1_000_000_000);
-        self.downloads.switch_account(settings.account_id(), limit, &self.bridge);
+        self.downloads.switch_account(settings.account_id(), Some(source.account()), limit, &self.bridge);
         self.session.server_label = format!("{} · {}", settings.username, server);
         self.session.server_info = server.clone();
         self.login = None;
@@ -98,20 +103,18 @@ impl OndApp {
         // A store still opening gets the server once it's open.
         self.connect_downloads(&source);
         let url = source.clone();
-        self.analysis.runner.set_server(
-            source
-                .capabilities()
-                .downloads
-                .then(|| Arc::new(move |id: &str| url.download_url(id).expect("a downloadable source supplies track URLs")) as crate::analyze::StreamUrl),
-        );
+        self.analysis.runner.set_server(source.capabilities().downloads.then(|| {
+            Arc::new(move |key: &crate::source::TrackKey| (key.account == url.account()).then(|| url.download_url(&key.item)).flatten())
+                as crate::analyze::StreamUrl
+        }));
         self.bridge.fetch_starred(Some(source.clone()));
         self.diagnostics.latency_asked();
         self.bridge.measure_latency(source.clone());
         self.session.unreachable = false;
         self.session.connecting = false;
         self.session.sign_in = None;
-        self.session.source = Some(source);
-        self.prefs.set_login(&settings.server, &settings.username);
+        self.session.source = Some(source.clone());
+        self.prefs.set_login(&settings.server, &settings.username, source.account());
         self.session.settings = Some(*settings);
         if !self.session.online {
             self.session.online = true;
@@ -181,7 +184,13 @@ impl OndApp {
         if self.downloads.opening {
             return;
         }
-        let keep = crate::local::Playable { downloads: self.downloads.snap.clone(), cache: self.cache.clone(), transcode: self.output.transcode() };
+        let keep = crate::local::Playable {
+            account: self.session.account(),
+            downloads_account: self.downloads.owner,
+            downloads: self.downloads.snap.clone(),
+            cache: self.cache.clone(),
+            transcode: self.output.transcode(),
+        };
         self.bridge.load_local(Some(keep));
     }
 
@@ -321,7 +330,14 @@ impl OndApp {
             let s = saved.clone();
             std::thread::spawn(move || s.forget_password());
         }
-        self.prefs.edit(|s| s.signed_out = true);
+        self.prefs.edit(|s| {
+            s.signed_out = true;
+            s.account = None;
+        });
+        if let Some(s) = &mut self.session.settings {
+            s.account = None;
+        }
+        self.now_playing.clear_source();
         self.login = Some(LoginForm { server: saved.server, username: saved.username, ..Default::default() });
     }
 
@@ -473,8 +489,7 @@ impl OndApp {
         let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
         form.busy = true;
         form.error = None;
-        let settings =
-            Settings { server: form.server.trim().to_owned(), username: form.username.trim().to_owned(), signed_out: false, ..self.prefs.snapshot() };
+        let settings = self.prefs.snapshot().sign_in(form.server.trim(), form.username.trim());
         // Kept in the form until it's answered, so a cancelled connect can be tried again as typed.
         self.bridge.connect(settings, Some(form.password.clone()));
     }

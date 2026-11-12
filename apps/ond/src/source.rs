@@ -13,6 +13,18 @@ use async_trait::async_trait;
 use library::{Album, AlbumTracks, Track};
 use std::sync::Arc;
 
+pub type TrackKey = accounts::ItemKey;
+
+pub fn matches_track(key: &TrackKey, account: Option<accounts::AccountId>, id: &str) -> bool {
+    Some(key.account) == account && key.item == id
+}
+
+// Bare for now; the migration in docs/sources.md ("Moving an existing install")
+// switches this to the qualified ItemKey string as it renames the files.
+pub fn stream_name(key: &TrackKey) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(&key.item)
+}
+
 pub type Src = Arc<dyn MusicSource>;
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +54,7 @@ pub struct Playlist {
 
 #[async_trait]
 pub trait MusicSource: Send + Sync {
+    fn account(&self) -> accounts::AccountId;
     fn capabilities(&self) -> Capabilities;
     /// A folder won't page through a server's library.
     fn paged(&self) -> Option<Arc<dyn Fetch>>;

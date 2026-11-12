@@ -258,7 +258,7 @@ pub(super) fn play_white(app: &mut OndApp) {
     for t in &mut songs {
         t.cover_art = Some(WHITE.into());
     }
-    app.player.queue.play_now(songs, 1, Source::Album { id: album_id(13), name: ALBUMS[13].0.into() });
+    app.player.queue.play_now(crate::test_tracks::account(), songs, 1, Source::Album { id: album_id(13), name: ALBUMS[13].0.into() });
 }
 
 pub(super) fn devices() -> audio::Event {
@@ -340,6 +340,8 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
         app.handle(m);
     }
     app.login = None;
+    app.session.settings = Some(Settings { account: Some(crate::test_tracks::account()), ..Default::default() });
+    app.downloads.owner = Some(crate::test_tracks::account());
     app.session.server_label = "demo · navidrome 0.64.2".into();
     app.sync.label = format!("{} albums", ALBUMS.len());
 
@@ -362,7 +364,12 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     app.data.tracks.all = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.session.online = true;
-    app.session.settings = Some(Settings { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
+    app.session.settings = Some(Settings {
+        account: Some(crate::test_tracks::account()),
+        server: "https://music.example.com".into(),
+        username: "demo".into(),
+        ..Default::default()
+    });
     app.session.server_info = "navidrome 0.64.2".into();
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
@@ -432,14 +439,14 @@ pub(super) fn fill_queue(app: &mut OndApp) {
     let q = &mut app.player.queue;
     *q = crate::queue::Queue::default();
     let history = filler(2, 3);
-    q.play_now(history, 0, Source::Album { id: album_id(2), name: ALBUMS[2].0.into() });
+    q.play_now(crate::test_tracks::account(), history, 0, Source::Album { id: album_id(2), name: ALBUMS[2].0.into() });
     q.advance();
     q.advance();
-    q.play_now(vanguard(), 1, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
-    q.play_next(vec![filler(23, 1).remove(0), kind_of_blue().remove(2)]);
+    q.play_now(crate::test_tracks::account(), vanguard(), 1, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
+    q.play_next(crate::test_tracks::account(), vec![filler(23, 1).remove(0), kind_of_blue().remove(2)]);
     let playlist = Source::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() };
     for (k, t) in filler(20, 9).into_iter().enumerate() {
-        q.upcoming.push(Item { uid: 10_000 + k as u64, track: t, source: playlist.clone(), next: false });
+        q.upcoming.push(Item { uid: 10_000 + k as u64, key: crate::test_tracks::key(&t.id), track: t, source: playlist.clone(), next: false });
     }
     app.engine.status.preview(PlayState::Playing, 141.0, 383.0, 0.72);
 }
@@ -580,7 +587,7 @@ pub(super) fn fixture_waveform(app: &mut OndApp) {
             (section * grain * 255.0).clamp(0.0, 255.0) as u8
         })
         .collect();
-    let id = item.track.id.clone();
+    let id = item.key.clone();
     app.waveforms.insert(id, analysis::Peaks { values });
 }
 
@@ -623,7 +630,7 @@ pub(super) fn steps_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) {
 
 /// Plays Kind of Blue instead (another cover than the fixture's).
 pub(super) fn play_blue(app: &mut OndApp) {
-    app.player.queue.play_now(kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
+    app.player.queue.play_now(crate::test_tracks::account(), kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
 }
 
 /// Hovers the first widget labelled `label` inside `area`, if any.
@@ -739,6 +746,7 @@ pub(super) fn long_info(app: &mut OndApp) -> Option<Item> {
     if let Some(cur) = app.player.queue.current.as_mut() {
         let t = &mut cur.track;
         t.id = "long-credits".into();
+        cur.key.item = t.id.clone();
         t.title = "Leaning on the Everlasting Arms (Live at the Old Dominican Chapel)".into();
         t.contributors = vec![
             person("composer", None, "Anthony Johnson Showalter"),

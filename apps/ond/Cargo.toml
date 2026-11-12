@@ -11,6 +11,7 @@ name = "Ond"
 path = "src/main.rs"
 
 [dependencies]
+accounts = { version = "0.5.0", path = "../../crates/accounts" }
 async-trait = "0.1.92"
 analysis = { version = "0.5.0", path = "../../crates/analysis" }
 anyhow = "1.0.104"

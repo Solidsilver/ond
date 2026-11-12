@@ -77,8 +77,11 @@ impl OndApp {
     /// A result came in, or the stored ones were read.
     pub(super) fn analysis_msg(&mut self, msg: AnalysisMsg) {
         match msg {
-            AnalysisMsg::Analyzed { track_id, record } => {
-                self.analysis.records.insert(track_id, record);
+            AnalysisMsg::Analyzed { key, record } => {
+                if Some(key.account) != self.session.account() {
+                    return;
+                }
+                self.analysis.records.insert(key.item, record);
                 self.analysis.version += 1;
             }
             AnalysisMsg::Loaded(rows) => {
@@ -112,13 +115,14 @@ impl OndApp {
     /// Downloaded copies are read straight from disk (and need no server).
     /// The stream URLs are made by the runner as it gets to each track.
     pub(super) fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
+        let Some(account) = self.session.account() else { return 0 };
         let online = self.session.source.is_some();
         let jobs: Vec<analyze::Job> = tracks
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
             .filter_map(|t| {
-                let local = self.downloads.local_path(&t.id);
-                (online || local.is_some()).then(|| analyze::job_for(t, local))
+                let local = self.downloads.local_path(&crate::source::TrackKey::new(account, t.id.clone()));
+                (online || local.is_some()).then(|| analyze::job_for(account, t, local))
             })
             .collect();
         self.analysis.runner.enqueue(jobs)

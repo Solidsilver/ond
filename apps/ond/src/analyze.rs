@@ -7,6 +7,7 @@
 //! file) and to the UI. A pause, or quitting, stops the track in progress;
 //! it goes back to the front of the queue.
 
+use crate::source::{TrackKey, stream_name};
 use analysis::{Record, TrackAnalysis};
 use audio::Status;
 use library::{AnalysisStore, Track};
@@ -24,7 +25,7 @@ const ASSUMED_SPEED: f64 = 20.0;
 /// thread is a noticeable stall.
 #[derive(Debug, Clone)]
 pub struct Job {
-    pub track_id: String,
+    pub key: TrackKey,
     pub suffix: Option<String>,
     pub stamp: String,
     pub secs: f64,
@@ -37,8 +38,8 @@ pub fn stamp_of(t: &Track) -> String {
     analysis::stamp(t.size, t.suffix.as_deref(), t.bit_depth, t.sample_rate, t.duration_secs)
 }
 
-pub fn job_for(t: &Track, local: Option<std::path::PathBuf>) -> Job {
-    Job { track_id: t.id.clone(), suffix: t.suffix.clone(), stamp: stamp_of(t), secs: f64::from(t.duration_secs.unwrap_or(0)), local }
+pub fn job_for(account: accounts::AccountId, t: &Track, local: Option<std::path::PathBuf>) -> Job {
+    Job { key: TrackKey::new(account, t.id.clone()), suffix: t.suffix.clone(), stamp: stamp_of(t), secs: f64::from(t.duration_secs.unwrap_or(0)), local }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -64,12 +65,12 @@ impl Progress {
 }
 
 /// A track's stream URL on the signed-in server.
-pub type StreamUrl = Arc<dyn Fn(&str) -> String + Send + Sync>;
+pub type StreamUrl = Arc<dyn Fn(&TrackKey) -> Option<String> + Send + Sync>;
 
 #[derive(Default)]
 struct State {
     queue: VecDeque<Job>,
-    queued: HashSet<String>,
+    queued: HashSet<TrackKey>,
     /// Audio seconds in `queue`, kept as jobs come and go so progress (read
     /// every frame during a run) doesn't walk the whole queue.
     queued_secs: f64,
@@ -99,7 +100,7 @@ impl State {
 
     fn pop_front(&mut self) -> Option<Job> {
         let job = self.queue.pop_front()?;
-        self.queued.remove(&job.track_id);
+        self.queued.remove(&job.key);
         self.queued_secs = if self.queue.is_empty() { 0.0 } else { self.queued_secs - job.secs };
         Some(job)
     }
@@ -142,7 +143,7 @@ pub struct Config {
     pub scratch: StreamCache,
     pub status: Arc<Status>,
     /// Called with each finished analysis (on the worker thread).
-    pub on_result: Arc<dyn Fn(String, Record) + Send + Sync>,
+    pub on_result: Arc<dyn Fn(TrackKey, Record) + Send + Sync>,
     /// Called whenever progress changes (on the worker thread).
     pub on_progress: Arc<dyn Fn() + Send + Sync>,
 }
@@ -176,8 +177,8 @@ impl Runner {
         let mut added = 0;
         for job in jobs {
             // A cleared job still stopping counts as gone: it isn't re-queued when it stops.
-            let running = st.current.as_ref().is_some_and(|c| c.track_id == job.track_id && !c.stamp.is_empty());
-            if !running && st.queued.insert(job.track_id.clone()) {
+            let running = st.current.as_ref().is_some_and(|c| c.key == job.key && !c.stamp.is_empty());
+            if !running && st.queued.insert(job.key.clone()) {
                 st.push_back(job);
                 added += 1;
             }
@@ -234,7 +235,7 @@ impl Runner {
             // out as asked.
             let left = progress.total.saturating_sub(progress.done);
             let each = if left > 0 { progress.remaining_secs / left as f64 } else { 0.0 };
-            let job = |id: String| Job { track_id: id, suffix: None, stamp: "stand-in".into(), secs: each, local: None };
+            let job = |id: String| Job { key: crate::test_tracks::key(&id), suffix: None, stamp: "stand-in".into(), secs: each, local: None };
             for i in 0..left.saturating_sub(1) {
                 st.push_back(job(format!("stand-in-{i}")));
             }
@@ -246,9 +247,15 @@ impl Runner {
     }
 
     /// How many of `ids` are queued or being analysed.
-    pub fn pending<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> usize {
+    pub fn pending<'a>(&self, account: Option<accounts::AccountId>, ids: impl IntoIterator<Item = &'a str>) -> usize {
         let st = self.shared.lock();
-        ids.into_iter().filter(|id| st.queued.contains(*id) || st.current.as_ref().is_some_and(|c| c.track_id == *id)).count()
+        let Some(account) = account else { return 0 };
+        ids.into_iter()
+            .filter(|id| {
+                let key = TrackKey::new(account, *id);
+                st.queued.contains(&key) || st.current.as_ref().is_some_and(|c| c.key == key)
+            })
+            .count()
     }
 }
 
@@ -329,7 +336,7 @@ fn run(shared: &Shared, cfg: &Config) {
             }
         };
         // A panic on one odd file fails that job; the worker carries on.
-        let url = || server.as_ref().map(|f| f(&job.track_id));
+        let url = || server.as_ref().and_then(|f| f(&job.key));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_job(&job, url, cfg, &stop)))
             .unwrap_or_else(|p| Err(analysis::AnalyzeError::Failed(format!("crashed: {}", panic_text(&*p)))));
 
@@ -342,19 +349,19 @@ fn run(shared: &Shared, cfg: &Config) {
                 st.wall_secs += started.elapsed().as_secs_f64();
                 drop(st);
                 let record = Record { stamp: job.stamp.clone(), analysis };
-                if let Err(e) = cfg.store.put(&job.track_id, &record.encode()) {
+                if let Err(e) = cfg.store.put(&job.key.item, &record.encode()) {
                     tracing::warn!("storing analysis: {e}");
                 }
-                (cfg.on_result)(job.track_id, record);
+                (cfg.on_result)(job.key, record);
             }
             Err(analysis::AnalyzeError::Cancelled) => {
                 // Paused (or quitting): try again first when resumed, unless cleared.
-                if !cleared && !shared.quit.load(Ordering::Relaxed) && st.queued.insert(job.track_id.clone()) {
+                if !cleared && !shared.quit.load(Ordering::Relaxed) && st.queued.insert(job.key.clone()) {
                     st.push_front(job);
                 }
             }
             Err(analysis::AnalyzeError::Failed(e)) => {
-                tracing::warn!("analysing {}: {e}", job.track_id);
+                tracing::warn!("analysing {}: {e}", job.key);
                 st.done += 1;
                 st.failed += 1;
             }
@@ -384,7 +391,7 @@ fn analyze_job(
     stop: &(dyn Fn() -> bool + Sync),
 ) -> Result<TrackAnalysis, analysis::AnalyzeError> {
     #[cfg(test)]
-    if job.track_id == "test-panic" {
+    if job.key.item == "test-panic" {
         panic!("odd file");
     }
     // A downloaded copy first: no network, no cache churn.
@@ -392,7 +399,7 @@ fn analyze_job(
         return out;
     }
     let Some(url) = url() else { return Err(analysis::AnalyzeError::Failed("not signed in".into())) };
-    let key = CacheKey::original(job.track_id.clone(), job.suffix.clone());
+    let key = CacheKey::original(stream_name(&job.key).into_owned(), job.suffix.clone());
     let cached = cfg.playback.progress(&key).is_some_and(|p| p.complete);
     let cache = if cached { &cfg.playback } else { &cfg.scratch };
     // A download of our own gives way as soon as playback wants the network;
@@ -442,7 +449,7 @@ mod tests {
     use super::*;
 
     fn job(id: &str, secs: f64) -> Job {
-        Job { track_id: id.into(), suffix: None, stamp: "s".into(), secs, local: None }
+        Job { key: crate::test_tracks::key(id), suffix: None, stamp: "s".into(), secs, local: None }
     }
 
     #[test]
@@ -513,6 +520,18 @@ mod tests {
     }
 
     #[test]
+    fn analysis_jobs_with_the_same_id_on_different_accounts_are_distinct() {
+        let runner = idle_runner();
+        let one = job("abc", 10.0);
+        let mut two = one.clone();
+        two.key.account = accounts::AccountId::new();
+        let (a, b) = (one.key.account, two.key.account);
+        assert_eq!(runner.enqueue([one, two]), 2);
+        assert_eq!(runner.pending(Some(a), ["abc"]), 1);
+        assert_eq!(runner.pending(Some(b), ["abc"]), 1);
+    }
+
+    #[test]
     fn a_cleared_job_can_be_queued_again_while_it_stops() {
         let runner = idle_runner();
         runner.enqueue([job("a", 10.0), job("b", 20.0)]);
@@ -526,7 +545,7 @@ mod tests {
         assert_eq!(runner.progress().remaining_secs, 10.0, "only the one still stopping");
         // Queued again before the worker noticed: it isn't lost.
         assert_eq!(runner.enqueue([job("a", 10.0), job("b", 20.0)]), 2);
-        assert_eq!(runner.pending(["a", "b"]), 2);
+        assert_eq!(runner.pending(Some(crate::test_tracks::account()), ["a", "b"]), 2);
         assert_eq!(runner.progress().remaining_secs, 40.0);
     }
 

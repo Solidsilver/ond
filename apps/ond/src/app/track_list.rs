@@ -42,13 +42,13 @@ struct List<'l> {
     tracks: &'l [Track],
     source: &'l Source,
     opts: &'l ListOpts,
-    /// The playing track's id.
-    current: Option<&'l str>,
+    /// The playing track's identity.
+    current: Option<&'l crate::source::TrackKey>,
 }
 
 impl<'l> List<'l> {
     fn new(ui: &Ui, player: &'l crate::player::Player, tracks: &'l [Track], source: &'l Source, opts: &'l ListOpts) -> Self {
-        Self { t: Tokens::of(ui), tracks, source, opts, current: player.queue.current.as_ref().map(|c| c.track.id.as_str()) }
+        Self { t: Tokens::of(ui), tracks, source, opts, current: player.queue.current.as_ref().map(|c| &c.key) }
     }
 
     /// The line where a reorder drag would land, at `drop_at`'s y.
@@ -178,7 +178,7 @@ impl ViewCtx<'_> {
     /// would land: (index to insert at, y of the line).
     fn track_row(&mut self, ui: &mut Ui, list: &List, i: usize, row: &TrackRow) -> Option<(usize, f32)> {
         let tr = &list.tracks[i];
-        let playing = list.current == Some(tr.id.as_str());
+        let playing = list.current.is_some_and(|key| crate::source::matches_track(key, self.session.account(), &tr.id));
         let selected = self.ui.focus == Focus::Main && self.ui.track_sel == Some(i);
         let loved = self.favorites.is_on(StarKind::Song, &tr.id);
         let drop_at = self.track_row_drag(ui, list, i, row);
@@ -243,7 +243,7 @@ impl ViewCtx<'_> {
         // Offline, what isn't downloaded is dimmed rather than hidden.
         let available = self.playable(tr);
         let color = crate::widgets::track_color(t, playing, available);
-        row.mark(ui, rect.right() - col::MARK_FROM_RIGHT, self.downloads.snap.track(&tr.id));
+        row.mark(ui, rect.right() - col::MARK_FROM_RIGHT, self.download_state(tr));
         if opts.numbers {
             if playing {
                 let side = col::NUMBER_PLAYING;
@@ -382,8 +382,8 @@ impl ViewCtx<'_> {
         }
         // Kept on its own: can be removed on its own. Kept with an album or
         // playlist: that's where it's removed.
-        let alone = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
-        if alone || !self.downloads.snap.is_done(&tr.id) {
+        let alone = self.track_pin(tr).is_some_and(|p| self.downloads.snap.pin(&p).is_some());
+        if alone || !matches!(self.download_state(tr), Some(offline::TrackState::Done { .. })) {
             ui.separator();
             super::browse::offline_item(ui, alone, None, || Keep::Tracks(vec![tr.clone()]), self.actions);
         }

@@ -298,7 +298,7 @@ fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
     drop(store);
     std::fs::write(folder.join("offline.json"), b"{\"pins\": [tor").unwrap();
     std::fs::write(folder.join("lost.flac"), vec![0u8; 3000]).unwrap();
-    app.downloads.store = Some((app.downloads.open)(folder.clone(), None).unwrap());
+    app.downloads.store = Some((app.downloads.open)(folder.clone(), None, app.session.account()).unwrap());
     app.downloads.refresh();
     let bad = || std::fs::read_dir(&folder).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("offline.json.bad-")).count();
     assert_eq!(bad(), 1);
@@ -497,7 +497,7 @@ fn songs_selection_scrolls_away_with_the_wheel() {
         let app = app_mut(h);
         let order = app.view().songs_order();
         let t = &app.data.tracks.all[order[row]];
-        let playing = app.player.queue.current.as_ref().is_some_and(|c| c.track.id == t.id);
+        let playing = app.player.queue.current.as_ref().is_some_and(|c| crate::source::matches_track(&c.key, app.session.account(), &t.id));
         format!("{}, {}{}", t.title, t.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" })
     };
     h.key_press(egui::Key::ArrowDown);

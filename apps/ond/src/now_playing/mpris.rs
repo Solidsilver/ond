@@ -108,7 +108,7 @@ async fn serve(handler: Arc<dyn Fn(Remote) + Send + Sync>, mut rx: UnboundedRece
                 let Some(path) = save_art(&art_dir, &track_id, &bytes, art.take()) else { continue };
                 art = Some((track_id, path));
                 match &last {
-                    Some((Some(info), _)) if Some(&info.track_id) == art.as_ref().map(|(id, _)| id) => player.set_metadata(metadata(info, &art)).await,
+                    Some((Some(info), _)) if Some(&info.key.item) == art.as_ref().map(|(id, _)| id) => player.set_metadata(metadata(info, &art)).await,
                     _ => Ok(()),
                 }
             }
@@ -152,12 +152,12 @@ async fn update(
 
 fn metadata(info: &Info, art: &Option<(String, PathBuf)>) -> Metadata {
     let mut m = Metadata::new();
-    m.set_trackid(Some(track_id(&info.track_id)));
+    m.set_trackid(Some(track_id(&info.key.item)));
     m.set_title(Some(info.title.clone()));
     m.set_artist(info.artist.clone().map(|a| [a]));
     m.set_album(info.album.clone());
     m.set_length(info.duration_secs.map(|d| Time::from_micros((d * 1e6) as i64)));
-    let art = art.as_ref().filter(|(id, _)| *id == info.track_id);
+    let art = art.as_ref().filter(|(id, _)| *id == info.key.item);
     m.set_art_url(art.and_then(|(_, path)| url::Url::from_file_path(path).ok()).map(String::from));
     m
 }

@@ -36,3 +36,12 @@ pub fn track(id: &str, album: &str, title: &str) -> Track {
         artists: Vec::new(),
     }
 }
+
+/// One stable account across the UI and playback fixtures.
+pub fn account() -> accounts::AccountId {
+    "00000000-0000-4000-8000-000000000001".parse().unwrap()
+}
+
+pub fn key(id: &str) -> crate::source::TrackKey {
+    crate::source::TrackKey::new(account(), id)
+}

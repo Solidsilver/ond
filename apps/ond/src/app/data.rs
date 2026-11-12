@@ -355,14 +355,16 @@ impl OndApp {
             self.ui.overlay = Some(Overlay::KeepAdded { tracks, source, action, added });
             return;
         }
-        self.with_player(|p, cx| p.queue_tracks(tracks, source, action, cx));
+        let Some(account) = self.session.account() else { return };
+        self.with_player(|p, cx| p.queue_tracks(account, tracks, source, action, cx));
     }
 
     /// Plays what was asked about: keeping the added tracks (after the new
     /// music) or clearing them.
     pub(super) fn queue_tracks_answered(&mut self, tracks: Vec<Track>, source: Source, action: QueueAction, keep: bool) {
         let on_play = if keep { OnPlay::KeepAfter } else { OnPlay::Clear };
-        self.with_player(|p, cx| p.queue_tracks_with(tracks, source, action, on_play, cx));
+        let Some(account) = self.session.account() else { return };
+        self.with_player(|p, cx| p.queue_tracks_with(account, tracks, source, action, on_play, cx));
     }
 
     /// Holds `p` until its tracks load. A newer action for the same list

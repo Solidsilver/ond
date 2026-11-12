@@ -62,7 +62,7 @@ mod analyzing;
 mod commands;
 mod data;
 mod frame;
-mod pins;
+pub(crate) mod pins;
 mod playing;
 mod prefs_view;
 mod session;
@@ -144,7 +144,6 @@ use {
     crate::tracks::TrackSet,
     library::Album,
     offline::TrackRef,
-    pins::track_ref,
     ui_state::QueueUi,
 };
 
@@ -465,9 +464,7 @@ impl OndApp {
         let cache = streamcache::StreamCache::new(cache_cfg, rt.handle().clone())?;
         let downloads = Downloads::start(
             saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone()),
-            if prefs.has_login() { saved.account_id() } else { None },
-            saved.offline_limit_gb.map(|gb| gb * 1_000_000_000),
-            saved.offline_move_from.clone(),
+            &saved,
             Downloads::opener(rt.handle().clone(), ctx.clone(), cache.clone()),
             &bridge,
             &mut notices,
@@ -486,6 +483,7 @@ impl OndApp {
         let scrobble = saved.scrobble;
         let remote_bridge = bridge.clone();
         let now_playing = now_playing::Session::start(now_playing::Config {
+            account: saved.account,
             status: engine.status.clone(),
             rt: rt.handle().clone(),
             art_dir: paths.art_cache.clone(),
@@ -509,7 +507,7 @@ impl OndApp {
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
-                on_result: Arc::new(move |track_id, record| results.post(AnalysisMsg::Analyzed { track_id, record })),
+                on_result: Arc::new(move |key, record| results.post(AnalysisMsg::Analyzed { key, record })),
                 on_progress: ticks,
             })
         };

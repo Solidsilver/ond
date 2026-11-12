@@ -175,7 +175,7 @@ impl ViewCtx<'_> {
         // take `&mut self`.
         let (data, player) = (self.data, self.player);
         let tracks = &data.tracks.all;
-        let current = player.queue.current.as_ref().map(|c| c.track.id.as_str());
+        let current = player.queue.current.as_ref().map(|c| &c.key);
         VirtualList::table("songs", marks.as_deref(), ROW_H, order.len()).show(ui, |ui, range| {
             ui.set_max_width(ui.available_width().min(TABLE_MAX_W));
             // The keys moved the selection: bring its row into view, once. It
@@ -193,15 +193,15 @@ impl ViewCtx<'_> {
     }
 
     /// The `i`th row in the sorted order: a cell per column.
-    fn songs_row(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, i: usize, current: Option<&str>) {
+    fn songs_row(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, i: usize, current: Option<&crate::source::TrackKey>) {
         let row = TrackRow::new(ui, ROW_H, Sense::click());
         let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(i);
-        let playing = current == Some(tr.id.as_str());
+        let playing = current.is_some_and(|key| crate::source::matches_track(key, self.session.account(), &tr.id));
         if ui.is_rect_visible(row.rect) {
             row.fill(ui, t, selected, row.pointer_on());
             let c = columns(row.rect);
             let color = crate::widgets::track_color(t, playing, self.playable(tr));
-            row.mark(ui, c.time.left() + col::INSET, self.downloads.snap.track(&tr.id));
+            row.mark(ui, c.time.left() + col::INSET, self.download_state(tr));
             // The marker has a gutter of its own, so titles line up whether or not one is playing.
             let mut title_x = c.title.left() + col::INSET;
             if playing {

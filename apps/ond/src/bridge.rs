@@ -169,7 +169,7 @@ pub enum LibraryMsg {
 /// About library analysis (`app/analyzing.rs` handles them).
 pub enum AnalysisMsg {
     /// A track's analysis just finished.
-    Analyzed { track_id: String, record: analysis::Record },
+    Analyzed { key: crate::source::TrackKey, record: analysis::Record },
     /// Every stored analysis, read at startup.
     Loaded(Vec<(String, analysis::Record)>),
 }
@@ -618,11 +618,18 @@ impl Bridge {
                     .await;
                     // A saved login's password came from the keychain: nothing to store.
                     let password_saved = saved || stored.unwrap_or(false);
-                    this.connected(session, Arc::new(SubsonicSource::new(client)), settings, server, password_saved).await;
+                    this.connected(
+                        session,
+                        Arc::new(SubsonicSource::new(settings.account.expect("a configured sign-in has an account"), client)),
+                        settings,
+                        server,
+                        password_saved,
+                    )
+                    .await;
                 }
                 Err(PingError::Unreachable(e)) if saved => {
                     this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
-                    this.reconnect(Arc::new(SubsonicSource::new(client)), settings, session);
+                    this.reconnect(Arc::new(SubsonicSource::new(settings.account.expect("a configured sign-in has an account"), client)), settings, session);
                 }
                 Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(failed(e)),
             }

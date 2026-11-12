@@ -5,6 +5,8 @@
 //! "Listened" means the position advanced while playing: seeking ahead doesn't
 //! count, and paused or buffering time doesn't either.
 
+use crate::source::TrackKey;
+use accounts::AccountId;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -30,7 +32,8 @@ pub fn threshold(duration_secs: Option<f64>) -> Option<f64> {
 /// Listening time for one play of one track.
 #[derive(Debug, Clone)]
 pub struct Listen {
-    pub track_id: String,
+    pub key: TrackKey,
+    pub token: u64,
     /// When playback of this track started, ms since the Unix epoch.
     pub started_ms: u64,
     duration_secs: Option<f64>,
@@ -42,8 +45,8 @@ pub struct Listen {
 }
 
 impl Listen {
-    pub fn new(track_id: impl Into<String>, started_ms: u64, duration_secs: Option<f64>) -> Self {
-        Self { track_id: track_id.into(), started_ms, duration_secs, listened: 0.0, last: None, was_playing: false, submitted: false }
+    pub fn new(key: TrackKey, token: u64, started_ms: u64, duration_secs: Option<f64>) -> Self {
+        Self { key, token, started_ms, duration_secs, listened: 0.0, last: None, was_playing: false, submitted: false }
     }
 
     /// The length may only become known once the engine has opened the file.
@@ -96,10 +99,18 @@ impl Listen {
 }
 
 /// A play the server hasn't confirmed yet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPlay {
-    pub id: String,
+    pub key: TrackKey,
     pub time_ms: u64,
+}
+
+// The file keeps bare ids until the migration in docs/sources.md moves saved
+// state; it is read back under the account configured at startup.
+#[derive(Serialize, Deserialize)]
+struct SavedPlay {
+    id: String,
+    time_ms: u64,
 }
 
 /// Plays waiting to be resubmitted, oldest first, kept in a small JSON file so
@@ -115,9 +126,12 @@ const MAX_PENDING: usize = 5000;
 
 impl RetryQueue {
     /// Loads the queue from `path` (a missing or unreadable file is an empty queue).
-    pub fn load(path: &Path) -> Self {
-        let items = std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<Vec<PendingPlay>>(&b).ok()).unwrap_or_default();
-        Self { path: Some(path.to_owned()), items: items.into() }
+    pub fn load(path: &Path, account: Option<AccountId>) -> Self {
+        let items = std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<Vec<SavedPlay>>(&b).ok()).unwrap_or_default();
+        Self {
+            path: Some(path.to_owned()),
+            items: items.into_iter().filter_map(|p| Some(PendingPlay { key: TrackKey::new(account?, p.id), time_ms: p.time_ms })).collect(),
+        }
     }
 
     /// A queue that isn't saved anywhere.
@@ -159,9 +173,17 @@ impl RetryQueue {
         p
     }
 
+    pub fn retain_account(&mut self, account: Option<AccountId>) {
+        let before = self.items.len();
+        self.items.retain(|p| Some(p.key.account) == account);
+        if self.items.len() != before {
+            self.save();
+        }
+    }
+
     fn save(&self) {
         let Some(path) = &self.path else { return };
-        let items: Vec<&PendingPlay> = self.items.iter().collect();
+        let items: Vec<SavedPlay> = self.items.iter().map(|p| SavedPlay { id: p.key.item.clone(), time_ms: p.time_ms }).collect();
         // On the now-playing worker, so waiting for the disk holds nothing up.
         let result = serde_json::to_vec(&items)
             .map_err(std::io::Error::other)
@@ -221,7 +243,7 @@ mod tests {
 
     #[test]
     fn continuous_listening_counts_once() {
-        let mut l = Listen::new("a", 0, Some(200.0));
+        let mut l = Listen::new(crate::test_tracks::key("a"), 1, 0, Some(200.0));
         let mut clock = 0.0;
         play(&mut l, 0.0, 99.0, &mut clock);
         assert!(!l.take_due());
@@ -233,7 +255,7 @@ mod tests {
 
     #[test]
     fn seeking_ahead_is_not_listening() {
-        let mut l = Listen::new("a", 0, Some(200.0));
+        let mut l = Listen::new(crate::test_tracks::key("a"), 1, 0, Some(200.0));
         let mut clock = 0.0;
         play(&mut l, 0.0, 10.0, &mut clock);
         // Jump to near the end without the engine telling us (seen as a jump)...
@@ -243,7 +265,7 @@ mod tests {
         assert!((l.listened_secs() - 29.0).abs() < 0.01, "listened {}", l.listened_secs());
         assert!(!l.take_due());
         // ...and with it telling us.
-        let mut l = Listen::new("b", 0, Some(200.0));
+        let mut l = Listen::new(crate::test_tracks::key("b"), 2, 0, Some(200.0));
         let mut clock = 0.0;
         play(&mut l, 0.0, 10.0, &mut clock);
         clock += 0.1;
@@ -255,7 +277,7 @@ mod tests {
     #[test]
     fn seeking_back_and_relistening_counts() {
         // Listening is time spent, not distinct parts of the track.
-        let mut l = Listen::new("a", 0, Some(100.0));
+        let mut l = Listen::new(crate::test_tracks::key("a"), 1, 0, Some(100.0));
         let mut clock = 0.0;
         play(&mut l, 0.0, 30.0, &mut clock);
         l.seeked(0.0, clock);
@@ -265,7 +287,7 @@ mod tests {
 
     #[test]
     fn paused_and_buffering_time_does_not_count() {
-        let mut l = Listen::new("a", 0, Some(100.0));
+        let mut l = Listen::new(crate::test_tracks::key("a"), 1, 0, Some(100.0));
         let mut clock = 0.0;
         play(&mut l, 0.0, 20.0, &mut clock);
         // Paused for a long time; the position doesn't move.
@@ -282,7 +304,7 @@ mod tests {
     #[test]
     fn a_late_look_still_counts_real_progress() {
         // The poller woke up late: 3 s of wall time, 3 s of position.
-        let mut l = Listen::new("a", 0, Some(100.0));
+        let mut l = Listen::new(crate::test_tracks::key("a"), 1, 0, Some(100.0));
         l.observe(0.0, true, 0.0);
         l.observe(3.0, true, 3.0);
         assert!((l.listened_secs() - 3.0).abs() < 0.01);
@@ -292,14 +314,14 @@ mod tests {
     fn gapless_boundary_starts_a_fresh_listen() {
         // The old listen may see the next track's position before the start event;
         // that's a backwards jump and is ignored.
-        let mut old = Listen::new("a", 0, Some(100.0));
+        let mut old = Listen::new(crate::test_tracks::key("a"), 1, 0, Some(100.0));
         let mut clock = 0.0;
         play(&mut old, 0.0, 99.5, &mut clock);
         assert!(old.take_due());
         clock += 0.5;
         old.observe(0.3, true, clock);
         assert!((old.listened_secs() - 99.5).abs() < 0.01);
-        let mut new = Listen::new("b", 1, Some(100.0));
+        let mut new = Listen::new(crate::test_tracks::key("b"), 2, 1, Some(100.0));
         play(&mut new, 0.3, 49.0, &mut clock);
         assert!(!new.take_due());
         play(&mut new, 49.3, 1.0, &mut clock);
@@ -308,7 +330,7 @@ mod tests {
 
     #[test]
     fn short_tracks_never_count() {
-        let mut l = Listen::new("a", 0, Some(25.0));
+        let mut l = Listen::new(crate::test_tracks::key("a"), 1, 0, Some(25.0));
         let mut clock = 0.0;
         play(&mut l, 0.0, 25.0, &mut clock);
         assert!(!l.take_due());
@@ -316,7 +338,7 @@ mod tests {
 
     #[test]
     fn duration_learned_later_applies() {
-        let mut l = Listen::new("a", 0, None);
+        let mut l = Listen::new(crate::test_tracks::key("a"), 1, 0, None);
         let mut clock = 0.0;
         play(&mut l, 0.0, 60.0, &mut clock);
         assert!(!l.take_due(), "unknown length needs four minutes");
@@ -328,24 +350,38 @@ mod tests {
     fn retry_queue_persists_dedups_and_caps() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scrobbles.json");
-        let mut q = RetryQueue::load(&path);
+        let mut q = RetryQueue::load(&path, Some(crate::test_tracks::account()));
         assert!(q.is_empty());
-        q.push(PendingPlay { id: "a".into(), time_ms: 1 });
-        q.push(PendingPlay { id: "b".into(), time_ms: 2 });
-        q.push(PendingPlay { id: "a".into(), time_ms: 1 });
+        q.push(PendingPlay { key: crate::test_tracks::key("a"), time_ms: 1 });
+        q.push(PendingPlay { key: crate::test_tracks::key("b"), time_ms: 2 });
+        q.push(PendingPlay { key: crate::test_tracks::key("a"), time_ms: 1 });
         assert_eq!(q.len(), 2);
 
-        let mut again = RetryQueue::load(&path);
+        let mut again = RetryQueue::load(&path, Some(crate::test_tracks::account()));
         assert_eq!(again.len(), 2);
-        assert_eq!(again.pop_front().unwrap().id, "a");
-        assert_eq!(RetryQueue::load(&path).front().unwrap().id, "b");
+        assert_eq!(again.pop_front().unwrap().key.item, "a");
+        assert_eq!(RetryQueue::load(&path, Some(crate::test_tracks::account())).front().unwrap().key.item, "b");
 
         let mut big = RetryQueue::in_memory();
         for i in 0..(MAX_PENDING as u64 + 10) {
-            big.push(PendingPlay { id: format!("t{i}"), time_ms: i });
+            big.push(PendingPlay { key: crate::test_tracks::key(&format!("t{i}")), time_ms: i });
         }
         assert_eq!(big.len(), MAX_PENDING);
         assert_eq!(big.front().unwrap().time_ms, 10, "the oldest go first");
+    }
+
+    #[test]
+    fn retry_keys_keep_the_existing_json_bytes_and_gain_the_startup_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scrobbles.json");
+        let old = br#"[{"id":"abc","time_ms":1}]"#;
+        std::fs::write(&path, old).unwrap();
+        let account = AccountId::new();
+        let mut q = RetryQueue::load(&path, Some(account));
+        let play = q.pop_front().unwrap();
+        assert_eq!(play.key, TrackKey::new(account, "abc"));
+        q.push(play);
+        assert_eq!(std::fs::read(&path).unwrap(), old);
     }
 
     #[test]
@@ -353,7 +389,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scrobbles.json");
         std::fs::write(&path, b"not json").unwrap();
-        assert!(RetryQueue::load(&path).is_empty());
+        assert!(RetryQueue::load(&path, Some(crate::test_tracks::account())).is_empty());
     }
 
     #[test]

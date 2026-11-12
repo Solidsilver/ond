@@ -187,7 +187,7 @@ impl ViewCtx<'_> {
         }
         let key = (super::view_ctx::hash_str(id), data.version, analysis.version, tracks.as_ptr() as usize, tracks.len());
         let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis));
-        let analysing = analysis.runner.pending(tracks.iter().map(|t| t.id.as_str()));
+        let analysing = analysis.runner.pending(self.session.account(), tracks.iter().map(|t| t.id.as_str()));
         let page = AlbumHeader { album, tracks, facts: &facts, analysing };
         super::layout::into_gutter(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(("album", id)).auto_shrink(false).content_margin(super::layout::gutter()).show(ui, |ui| {

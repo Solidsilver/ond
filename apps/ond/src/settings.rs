@@ -102,6 +102,9 @@ impl From<DeviceMode> for audio::PlaybackMode {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
+    /// The sign-in's permanent identity; address changes keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<accounts::AccountId>,
     #[serde(default)]
     pub server: String,
     #[serde(default)]
@@ -258,6 +261,7 @@ fn full() -> f32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            account: None,
             server: String::new(),
             username: String::new(),
             stream_cache_mb: None,
@@ -385,6 +389,19 @@ impl Settings {
         serde_json::from_value(kept)
     }
 
+    /// The form cannot distinguish a new server from an address change, so
+    /// keeping the username keeps the account until an explicit sign-out.
+    pub fn sign_in(&self, server: &str, username: &str) -> Self {
+        let account = if !self.signed_out && self.username == username { self.account } else { None };
+        Self {
+            account: Some(account.unwrap_or_else(accounts::AccountId::new)),
+            server: server.to_owned(),
+            username: username.to_owned(),
+            signed_out: false,
+            ..self.clone()
+        }
+    }
+
     /// A stable id for the server account (server address and user), used to
     /// keep each account's library mirror and downloads apart. `None` before a
     /// login. The address is compared without case or a trailing slash.
@@ -438,6 +455,17 @@ mod tests {
         assert_eq!(read(r#"{ "zoom": 400 }"#).zoom, 200);
         let odd = read(r#"{ "zoom": "huge", "theme": "dark" }"#);
         assert_eq!((odd.zoom, odd.theme), (100, crate::theme::ThemePref::Dark));
+    }
+
+    #[test]
+    fn an_address_change_keeps_the_account_but_a_new_sign_in_makes_one() {
+        let old = login("https://music.example.com", "me").sign_in("https://music.example.com", "me");
+        let account = old.account.unwrap();
+        assert_eq!(old.sign_in("https://new-address.example.com", "me").account, Some(account));
+        assert_ne!(old.sign_in("https://music.example.com", "someone-else").account, Some(account));
+        let signed_out = Settings { signed_out: true, ..old };
+        assert_ne!(signed_out.sign_in("https://music.example.com", "me").account, Some(account));
+        assert!(serde_json::to_value(Settings::default()).unwrap().get("account").is_none());
     }
 
     #[test]

@@ -210,7 +210,7 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         let analysis = self.analysis;
         let Some(a) = analysis.of(track) else {
-            let busy = self.analysis.runner.pending([track.id.as_str()]) > 0;
+            let busy = self.analysis.runner.pending(self.session.account(), [track.id.as_str()]) > 0;
             kv_row(ui, "Loudness", |ui| {
                 if busy {
                     ui.label(egui::RichText::new("Analyzing…").size(VALUE).color(t.muted));

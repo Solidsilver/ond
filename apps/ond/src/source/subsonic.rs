@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct SubsonicSource {
+    account: accounts::AccountId,
     client: Client,
 }
 
 impl SubsonicSource {
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    pub fn new(account: accounts::AccountId, client: Client) -> Self {
+        Self { account, client }
     }
 }
 
@@ -43,6 +44,9 @@ fn playlist(p: ::subsonic::Playlist) -> Playlist {
 
 #[async_trait]
 impl MusicSource for SubsonicSource {
+    fn account(&self) -> accounts::AccountId {
+        self.account
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities { scrobbling: true, downloads: true, lyrics: true, playlists: true }
     }
@@ -190,7 +194,7 @@ impl Fetch for SubsonicSource {
 
 #[cfg(test)]
 pub(crate) fn test_source() -> super::Src {
-    Arc::new(SubsonicSource::new(Client::new("http://127.0.0.1:9", ::subsonic::Credentials::new("u", "p")).unwrap()))
+    Arc::new(SubsonicSource::new(crate::test_tracks::account(), Client::new("http://127.0.0.1:9", ::subsonic::Credentials::new("u", "p")).unwrap()))
 }
 
 #[cfg(test)]
@@ -210,7 +214,7 @@ mod tests {
     }
 
     fn source(fake: &JsonFake) -> SubsonicSource {
-        SubsonicSource::new(Client::new(fake.base(), ::subsonic::Credentials::new("u", "p")).unwrap())
+        SubsonicSource::new(crate::test_tracks::account(), Client::new(fake.base(), ::subsonic::Credentials::new("u", "p")).unwrap())
     }
 
     #[tokio::test]

@@ -98,6 +98,7 @@ impl Prefs {
                 }
             },
         };
+        let previous_username = settings.username.clone();
         let mut managed = Managed::read(&path);
         let mut users = serde_json::to_value(&settings).unwrap_or_default();
         managed.check(&users);
@@ -108,6 +109,9 @@ impl Prefs {
             settings.signed_out = true;
         }
         managed.apply(&mut settings);
+        if settings.username != previous_username {
+            settings.account = None;
+        }
         let offline_was = adopted.iter().find(|(key, _)| key == "offline_dir").map(|(_, old)| serde_json::from_value(old.clone()).ok().flatten());
         let prefs = Self::with(settings, path, Overlay { managed, users, offline_was }, debounce);
         if !adopted.is_empty() {
@@ -115,6 +119,11 @@ impl Prefs {
             prefs.lock().revision += 1;
             prefs.handle.shared.wake.notify_all();
         }
+        prefs.edit(|s| {
+            if !s.server.is_empty() && !s.username.is_empty() && !s.signed_out && s.account.is_none() {
+                s.account = Some(accounts::AccountId::new());
+            }
+        });
         (prefs, loaded)
     }
 
@@ -165,8 +174,9 @@ impl Prefs {
     }
 
     /// Records a successful login, keeping every other preference as it is.
-    pub fn set_login(&self, server: &str, username: &str) {
+    pub fn set_login(&self, server: &str, username: &str, account: accounts::AccountId) {
         self.edit(|s| {
+            s.account = Some(account);
             s.server = server.to_owned();
             s.username = username.to_owned();
             s.signed_out = false;
@@ -320,6 +330,20 @@ mod tests {
 
     fn read(path: &Path) -> Settings {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_configured_offline_account_is_minted_and_saved_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{"server":"https://music.example.com","username":"me","work_offline":true}"#).unwrap();
+        let (prefs, _) = Prefs::open(&path);
+        let account = prefs.snapshot().account.unwrap();
+        prefs.flush();
+        assert_eq!(read(&path).account, Some(account));
+        drop(prefs);
+        let (again, _) = Prefs::open(&path);
+        assert_eq!(again.snapshot().account, Some(account));
     }
 
     #[test]
@@ -521,7 +545,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         let (prefs, _) = Prefs::open(&path);
         prefs.edit(|s| s.theme = ThemePref::Dark);
-        prefs.set_login("https://new", "me");
+        prefs.set_login("https://new", "me", accounts::AccountId::new());
         prefs.flush();
         let now = read(&path);
         assert_eq!(now.server, "https://new");
@@ -593,7 +617,7 @@ mod tests {
         assert_eq!((saved.server.as_str(), saved.signed_out), ("https://music.example.com", true), "adopted, so saved");
         // Signed in, the next start is as usual.
         let (prefs, _) = Prefs::open(&path);
-        prefs.set_login("https://music.example.com", "me");
+        prefs.set_login("https://music.example.com", "me", accounts::AccountId::new());
         drop(prefs);
         let (prefs, _) = Prefs::open(&path);
         assert!(!prefs.get(|s| s.signed_out));

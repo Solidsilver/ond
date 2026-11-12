@@ -64,14 +64,13 @@ impl OndApp {
         if !self.ui.prefs.waveform {
             return;
         }
-        let Some(track) = self.player.queue.current.as_ref().map(|c| &c.track) else { return };
+        let Some(item) = self.player.queue.current.as_ref() else { return };
+        let (track, key) = (&item.track, &item.key);
+        if Some(key.account) != self.session.account() {
+            return;
+        }
         let (downloads, cache, transcode) = (&self.downloads, &self.cache, self.ui.transcode.as_ref());
-        self.waveforms.want(&track.id, track.suffix.as_deref(), || {
-            downloads
-                .local_path(&track.id)
-                .or_else(|| cache.complete_path(&streamcache::CacheKey::original(track.id.clone(), track.suffix.clone())))
-                .or_else(|| transcode.and_then(|t| cache.complete_path(&streamcache::CacheKey::transcode(&track.id, &t.format, t.kbps))))
-        });
+        self.waveforms.want(key, track.suffix.as_deref(), || downloads.local_path(key).or_else(|| crate::local::cached(cache, transcode, key, track)));
     }
 
     /// The blurred cover to draw behind the Player or Mini, oldest layer

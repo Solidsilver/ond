@@ -967,7 +967,7 @@ fn appearance_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The next cover arrives: two steps (half a second) into the fade.
     {
         let app = app_mut(h);
-        app.player.queue.play_now(vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
+        app.player.queue.play_now(crate::test_tracks::account(), vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
         let deadline = testkit::Deadline::new();
         while app.art.look(&album_id(0)).is_none() {
             assert!(!deadline.passed(), "the next cover's look never arrived");

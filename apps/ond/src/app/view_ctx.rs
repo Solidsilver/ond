@@ -70,6 +70,16 @@ pub fn hash_str(s: &str) -> u64 {
 }
 
 impl<'a> ViewCtx<'a> {
+    pub fn download_state(&self, track: &Track) -> Option<&offline::TrackState> {
+        let key = crate::source::TrackKey::new(self.session.account()?, track.id.clone());
+        self.downloads.tracks().track(&key)
+    }
+
+    pub fn track_pin(&self, track: &Track) -> Option<offline::Pin> {
+        let key = crate::source::TrackKey::new(self.session.account()?, track.id.clone());
+        self.downloads.tracks().pin(&key)
+    }
+
     pub fn position_secs(&self) -> f64 {
         self.player.position_secs(self.engine)
     }
