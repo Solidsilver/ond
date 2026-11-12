@@ -46,6 +46,12 @@
 //!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its
 //!   [`SwitcherPlace`]) and a menu to change it, which says what was picked
 //!   as a [`SourcePick`].
+//! - [`onboarding`](mod@onboarding): the first-run sheet,
+//!   [`onboarding`](fn@onboarding): the app's welcome line over the kinds
+//!   of source it can add ([`SourceKind`]), a kind's form once picked, and
+//!   the sources added so far, with Add another and Done. The app holds
+//!   where it is ([`OnboardingStep`]) and gets back what happened as an
+//!   [`OnboardingEvent`].
 //! - [`palette`](mod@palette): the command [`palette`](fn@palette) over the window (⌘K),
 //!   filled by the app's [`PaletteRows`], with its [`PaletteState`] and
 //!   [`palette_icon_tile`] for a row without a cover; and the sidebar's
@@ -86,6 +92,7 @@ pub mod download;
 pub mod form;
 pub mod menus;
 pub mod nav;
+pub mod onboarding;
 pub mod palette;
 pub mod rows;
 pub mod settings;
@@ -102,6 +109,7 @@ pub use download::*;
 pub use form::*;
 pub use menus::*;
 pub use nav::*;
+pub use onboarding::*;
 pub use palette::*;
 pub use rows::*;
 pub use settings::*;
