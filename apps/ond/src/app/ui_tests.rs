@@ -324,6 +324,31 @@ fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
     *h.state_mut() = None;
 }
 
+/// The footer's switcher names the server and, when it isn't simply
+/// connected, says what it's doing: a turned-down login as the source's
+/// state, the rest in Ond's own words.
+#[test]
+fn the_footer_says_what_the_server_is_doing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let footer = |h: &Harness<'static, Option<OndApp>>, label: &str| h.query_by_role_and_label(egui::accesskit::Role::Button, label).is_some();
+    assert!(footer(&h, "music.example.com"));
+    for (online, work_offline, sign_in, unreachable, said) in [
+        (false, false, None, false, "music.example.com, Connecting…"),
+        (false, false, None, true, "music.example.com, Can't reach the server"),
+        (false, true, None, false, "music.example.com, Offline mode"),
+        (false, false, Some("Wrong username or password."), false, "music.example.com, Signed out"),
+    ] {
+        let app = app_mut(&mut h);
+        (app.session.online, app.session.work_offline, app.session.unreachable) = (online, work_offline, unreachable);
+        app.session.sign_in = sign_in.map(str::to_owned);
+        h.run_steps(2);
+        assert!(footer(&h, said), "{said}");
+    }
+    *h.state_mut() = None;
+}
+
 /// Sign out in the server popover asks first: Cancel keeps the session, and
 /// only the dialog's own Sign out signs out.
 #[test]
@@ -332,7 +357,7 @@ fn signing_out_from_the_server_popover_waits_for_the_answer() {
     let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     let ask = |h: &mut Harness<'static, Option<OndApp>>| {
-        h.get_by_label("Connected to music.example.com. Click for details.").click();
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "music.example.com").click();
         h.run_steps(2);
         // A frame with the pointer over it first: the popover settles where it
         // goes, and the click lands on the item and not where it was.

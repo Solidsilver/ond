@@ -410,7 +410,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The sidebar footer: server status (click for details), shortcuts, settings.
     reset(h, FULL, Route::Recent);
     let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 900.0));
-    if !click_label(h, "Connected to", sidebar) {
+    if !click_label(h, "music.example.com", sidebar) {
         panic!("(server status not found by label)");
     }
     h.run_steps(3);
@@ -799,7 +799,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "sidebar-syncing");
     let side = egui::Rect::from_min_max(pos2(0.0, 700.0), pos2(216.0, 900.0));
-    if !hover_label(h, "Syncing tracks", side) {
+    if !hover_label(h, "Syncing ·", side) {
         panic!("(sync status not found by label)");
     }
     h.run_steps(30);

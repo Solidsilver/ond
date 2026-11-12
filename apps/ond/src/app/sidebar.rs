@@ -6,12 +6,14 @@ use super::{Action, DragTracks, OndApp, PlaylistAction};
 use crate::icons::{self, Icon};
 use crate::nav::{Nav, Route};
 use crate::theme::{Tokens, semibold};
+use accounts::{AccountId, OfflineReason, Scope, SourceColor, SourceState};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use shell::kit::info_row;
+use shell::kit::{self, info_row};
 
 /// Width of the icon rail (the full sidebar's is the user's, see `layout`).
 pub const RAIL_W: f32 = 52.0;
-/// The footer's buttons (and the server status row's height).
+/// The footer's buttons (and the server switcher's height, in its one-line
+/// look).
 const FOOTER_BUTTON: f32 = 28.0;
 /// The notice that a newer Ond is out.
 const UPDATE_H: f32 = 28.0;
@@ -78,7 +80,7 @@ impl OndApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let status_w = (ui.available_width() - 2.0 * (FOOTER_BUTTON + 2.0) - 4.0).max(40.0);
-                self.server_status(ui, status_w);
+                self.server_switcher(ui, kit::SwitcherPlace::Foot { width: status_w });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.settings_button(ui);
                     self.help_button(ui);
@@ -149,44 +151,44 @@ impl OndApp {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             self.rail_settings_button(ui);
             self.help_button(ui);
-            self.rail_server_status(ui);
+            self.server_switcher(ui, kit::SwitcherPlace::Rail);
         });
     }
 
-    /// The server's state in the footer: a check and the host while connected,
-    /// a ring and progress while syncing, a cloud while offline. Click for the
-    /// details popover (latency, last sync, Sync now, Sign out).
-    fn server_status(&mut self, ui: &mut Ui, width: f32) {
-        let t = Tokens::of(ui);
+    /// The server in the footer, through the kit's source switcher with
+    /// the one account Ond signs in to: a check and the host while
+    /// connected, a ring and progress while syncing, a cloud while offline,
+    /// or the glyph alone in the rail (the words in a tooltip). Click for
+    /// the details popover (latency, last sync, Sync now, Sign out).
+    fn server_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
         let state = self.server_state();
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, FOOTER_BUTTON), Sense::click());
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, t.hover);
-        }
-        let glyph = egui::pos2(rect.left() + 12.0, rect.center().y);
-        state.paint_glyph(ui, glyph);
-        let g = crate::widgets::elide(ui, state.label(), FontId::proportional(11.5), t.muted, rect.width() - 30.0);
-        ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, t.muted);
-        self.server_popover(&resp, &state);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, state.tooltip()));
-        resp.on_hover_ui(|ui| {
-            ui.label(state.tooltip());
-        });
-    }
-
-    /// The rail's version: just the glyph, the words in a tooltip; same popover.
-    fn rail_server_status(&mut self, ui: &mut Ui) {
-        let state = self.server_state();
-        let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 28.0), Sense::click());
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, Tokens::of(ui).hover);
-        }
-        state.paint_glyph(ui, rect.center());
-        self.server_popover(&resp, &state);
-        let tip = || format!("{}\n{}", state.label(), state.tooltip());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip()));
-        resp.on_hover_ui(|ui| {
-            ui.label(tip());
+        let source_state = state.source_state();
+        // Before the first connect has given the account its id, a stand-in
+        // that stays put, so a spinner counts from when it started.
+        static NO_ACCOUNT: std::sync::LazyLock<AccountId> = std::sync::LazyLock::new(AccountId::new);
+        let id = self.session.account().unwrap_or(*NO_ACCOUNT);
+        let sources = [kit::SourceInfo {
+            id,
+            name: state.host(),
+            kind: "Subsonic server",
+            icon: Icon::Disc,
+            color: SourceColor::default(),
+            state: &source_state,
+            detail: Some(state.label()),
+        }];
+        let scope = Scope::only(id);
+        let tooltip = state.tooltip();
+        let switcher =
+            kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Line, add: false, manage: false, tooltip: Some(&tooltip) };
+        let picked = kit::source_switcher(ui, &switcher, place, |ui| self.server_menu(ui, &state));
+        let Some(kit::SourcePick::App(row)) = picked else { return };
+        self.actions.push(match row {
+            ServerRow::MeasureLatency => Action::MeasureLatency,
+            ServerRow::SyncNow => Action::SyncNow,
+            ServerRow::StopSync => Action::StopSync,
+            ServerRow::SignInAgain => Action::SignInAgain,
+            ServerRow::WorkOffline(on) => Action::Offline(super::OfflineAction::WorkOffline(on)),
+            ServerRow::SignOut => Action::AskSignOut,
         });
     }
 
@@ -225,106 +227,100 @@ impl OndApp {
         ServerState::Connecting { host }
     }
 
-    /// Details about the server, Sync now and Sign out, under `resp`.
-    fn server_popover(&mut self, resp: &egui::Response, state: &ServerState) {
-        egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            let t = Tokens::of(ui);
-            ui.set_width(250.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            // Opening the popover refreshes the round trip if it's old.
-            if self.session.online && self.diagnostics.latency_stale() {
-                self.actions.push(Action::MeasureLatency);
-            }
-            let (server, user) = self.session.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(state.host()).font(FontId::new(13.0, semibold())).color(t.text));
-            });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.add(egui::Label::new(egui::RichText::new(&server).size(11.0).color(t.muted)).truncate());
-            });
-            ui.add_space(10.0);
-            let status = match state {
-                ServerState::Connected { .. } | ServerState::Syncing { .. } => match self.diagnostics.latency() {
-                    Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
-                    None => "Connected".to_owned(),
-                },
-                ServerState::Offline { .. } => "Can't reach the server · retrying".to_owned(),
-                ServerState::Connecting { .. } => "Connecting…".to_owned(),
-                ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
-                ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
-            };
-            let status_color = match state {
-                ServerState::Offline { .. } | ServerState::SignIn { .. } => t.warn,
-                _ => t.text,
-            };
-            info_row(ui, "Status", &status, status_color);
-            if let (ServerState::SignIn { .. }, Some(why)) = (state, &self.session.sign_in) {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
-                });
-            }
-            if !user.is_empty() {
-                info_row(ui, "User", &user, t.text);
-            }
-            if !self.session.server_info.is_empty() {
-                info_row(ui, "Server", &self.session.server_info, t.text);
-            }
-            let synced = match state {
-                ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
-                _ => match self.sync.last {
-                    Some(at) => at.format("%-I:%M %p").to_string(),
-                    None if self.session.source.is_some() => "At launch".to_owned(),
-                    None => "Not yet".to_owned(),
-                },
-            };
-            info_row(ui, "Last sync", &synced, t.text);
-            let action = if self.sync.tracks {
-                Some("Stop sync")
-            } else if self.session.source.is_some() && self.session.online {
-                Some("Sync now")
-            } else {
-                None
-            };
-            if let Some(label) = action {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    if crate::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
-                        if self.sync.tracks {
-                            self.actions.push(Action::StopSync);
-                        } else {
-                            self.actions.push(Action::SyncNow);
-                            ui.close();
-                        }
-                    }
-                });
-            }
+    /// The switcher's menu: details about the server, Sync now and Sign
+    /// out. What's chosen comes back for the switcher to hand on.
+    fn server_menu(&self, ui: &mut Ui, state: &ServerState) -> Option<ServerRow> {
+        let t = Tokens::of(ui);
+        // Opening the popover refreshes the round trip if it's old.
+        let mut picked = (self.session.online && self.diagnostics.latency_stale()).then_some(ServerRow::MeasureLatency);
+        let (server, user) = self.session.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
+        ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…") {
-                self.actions.push(Action::SignInAgain);
-            }
-            let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
-            if !self.prefs.managed("work_offline") && menu_item(ui, label) {
-                self.actions.push(Action::Offline(super::OfflineAction::WorkOffline(on)));
-            }
-            // Apart from "Go offline", which it sits under: one is undone
-            // with a click, the other with the password.
-            ui.add_space(2.0);
-            ui.separator();
-            ui.add_space(2.0);
-            if menu_item(ui, "Sign out…") {
-                self.actions.push(Action::AskSignOut);
-            }
-            ui.add_space(2.0);
+            ui.label(egui::RichText::new(state.host()).font(FontId::new(13.0, semibold())).color(t.text));
         });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(egui::RichText::new(&server).size(11.0).color(t.muted)).truncate());
+        });
+        ui.add_space(10.0);
+        let status = match state {
+            ServerState::Connected { .. } | ServerState::Syncing { .. } => match self.diagnostics.latency() {
+                Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
+                None => "Connected".to_owned(),
+            },
+            ServerState::Offline { .. } => "Can't reach the server · retrying".to_owned(),
+            ServerState::Connecting { .. } => "Connecting…".to_owned(),
+            ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
+            ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
+        };
+        let status_color = match state {
+            ServerState::Offline { .. } | ServerState::SignIn { .. } => t.warn,
+            _ => t.text,
+        };
+        info_row(ui, "Status", &status, status_color);
+        if let (ServerState::SignIn { .. }, Some(why)) = (state, &self.session.sign_in) {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
+            });
+        }
+        if !user.is_empty() {
+            info_row(ui, "User", &user, t.text);
+        }
+        if !self.session.server_info.is_empty() {
+            info_row(ui, "Server", &self.session.server_info, t.text);
+        }
+        let synced = match state {
+            ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
+            _ => match self.sync.last {
+                Some(at) => at.format("%-I:%M %p").to_string(),
+                None if self.session.source.is_some() => "At launch".to_owned(),
+                None => "Not yet".to_owned(),
+            },
+        };
+        info_row(ui, "Last sync", &synced, t.text);
+        let action = if self.sync.tracks {
+            Some("Stop sync")
+        } else if self.session.source.is_some() && self.session.online {
+            Some("Sync now")
+        } else {
+            None
+        };
+        if let Some(label) = action {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if crate::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
+                    if self.sync.tracks {
+                        picked = Some(ServerRow::StopSync);
+                    } else {
+                        picked = Some(ServerRow::SyncNow);
+                        ui.close();
+                    }
+                }
+            });
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…") {
+            picked = Some(ServerRow::SignInAgain);
+        }
+        let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
+        if !self.prefs.managed("work_offline") && menu_item(ui, label) {
+            picked = Some(ServerRow::WorkOffline(on));
+        }
+        // Apart from "Go offline", which it sits under: one is undone
+        // with a click, the other with the password.
+        ui.add_space(2.0);
+        ui.separator();
+        ui.add_space(2.0);
+        if menu_item(ui, "Sign out…") {
+            picked = Some(ServerRow::SignOut);
+        }
+        picked
     }
 
     /// The gear: opens Settings.
@@ -546,61 +542,27 @@ impl ServerState {
         }
     }
 
-    /// The small glyph at `c`: a check, a progress ring or spinner, or a cloud.
-    fn paint_glyph(&self, ui: &Ui, c: egui::Pos2) {
-        let t = Tokens::of(ui);
-        let painter = ui.painter();
+    /// The state as the kit's switcher draws it.
+    fn source_state(&self) -> SourceState {
         match self {
-            ServerState::Connected { .. } => icons::status_mark(painter, c, 3.4, icons::Status::Good, None),
-            ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
-            ServerState::Syncing { fraction: None, .. } => {
-                icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                // A sync with no progress to report can stall for good; the
-                // spinner stops rather than holding the window at 20 fps.
-                let now = ui.input(|i| i.time);
-                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(syncing_since_id(), || now));
-                if now - since < SYNC_SPIN_SECS {
-                    ui.ctx().request_repaint_after(SPIN);
-                }
-            }
-            ServerState::Connecting { .. } => {
-                icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                // A connect that hangs past its timeout shouldn't keep the
-                // window drawing 20 times a second: the spinner stops.
-                let now = ui.input(|i| i.time);
-                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(connecting_since_id(), || now));
-                if now - since < CONNECT_SPIN_SECS {
-                    ui.ctx().request_repaint_after(SPIN);
-                }
-            }
-            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => {
-                icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted)
-            }
-            ServerState::SignIn { .. } => super::offline_page::mark(ui, c, 12.0, super::offline_page::Mark::Failed),
-        }
-        if !matches!(self, ServerState::Connecting { .. }) {
-            ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));
-        }
-        if !matches!(self, ServerState::Syncing { fraction: None, .. }) {
-            ui.data_mut(|d| d.remove::<f64>(syncing_since_id()));
+            ServerState::Connected { .. } => SourceState::Online,
+            ServerState::Syncing { fraction, .. } => SourceState::Syncing(*fraction),
+            ServerState::Offline { .. } => SourceState::Offline(OfflineReason::Unreachable),
+            ServerState::Connecting { .. } => SourceState::Connecting,
+            ServerState::SignIn { .. } => SourceState::SignedOut,
+            ServerState::WorkingOffline { .. } => SourceState::Offline(OfflineReason::ByChoice),
         }
     }
 }
 
-/// The spinner's frame interval.
-const SPIN: std::time::Duration = std::time::Duration::from_millis(50);
-/// How long the Connecting spinner turns (the ping gives up after 10 s).
-const CONNECT_SPIN_SECS: f64 = 15.0;
-
-/// How long the indeterminate Syncing spinner turns before it goes still.
-const SYNC_SPIN_SECS: f64 = 30.0;
-
-/// When the footer started showing an indeterminate Syncing.
-fn syncing_since_id() -> egui::Id {
-    egui::Id::unique("server-syncing-since")
-}
-
-/// When the footer started showing Connecting.
-fn connecting_since_id() -> egui::Id {
-    egui::Id::unique("server-connecting-since")
+/// A row of the server menu, as it answers through the switcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerRow {
+    /// Not a row: the menu opened with an old round trip to refresh.
+    MeasureLatency,
+    SyncNow,
+    StopSync,
+    SignInAgain,
+    WorkOffline(bool),
+    SignOut,
 }
