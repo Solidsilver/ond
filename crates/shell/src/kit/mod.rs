@@ -40,6 +40,12 @@
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
 //!   in), [`sheet_header`] (its title, and a × that closes it), and the
 //!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
+//! - [`sources`]: a source as the app describes it ([`SourceInfo`]), the
+//!   [`source_dot`] in its colour (and [`source_dots`], stacked, for All
+//!   sources), and the sidebar's foot, [`source_switcher`]: what's in scope
+//!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its
+//!   [`SwitcherPlace`]) and a menu to change it, which says what was picked
+//!   as a [`SourcePick`].
 //! - [`palette`](mod@palette): the command [`palette`](fn@palette) over the window (⌘K),
 //!   filled by the app's [`PaletteRows`], with its [`PaletteState`] and
 //!   [`palette_icon_tile`] for a row without a cover; and the sidebar's
@@ -84,6 +90,7 @@ pub mod palette;
 pub mod rows;
 pub mod settings;
 pub mod sheets;
+pub mod sources;
 pub mod text;
 pub mod toasts;
 
@@ -99,6 +106,7 @@ pub use palette::*;
 pub use rows::*;
 pub use settings::*;
 pub use sheets::*;
+pub use sources::*;
 pub use text::*;
 pub use toasts::Toasts;
 
