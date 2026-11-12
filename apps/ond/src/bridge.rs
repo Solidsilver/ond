@@ -1,10 +1,10 @@
 //! Background work for the UI. Every function here returns immediately; results
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
-use crate::convert;
 use crate::failure::Failure;
 use crate::favorites::{SavedStarred, StarKind, Starred, UserMeta};
 use crate::settings::Settings;
+use crate::source::{Playlist, Src, subsonic::SubsonicSource};
 use crate::sync;
 use library::{Album, Library, Track};
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use subsonic::{AlbumListType, Client, Credentials};
+use subsonic::{Client, Credentials};
 
 /// What background work tells the UI. Messages for one part of the app are
 /// grouped under it ([`LibraryMsg`], [`AnalysisMsg`], [`OfflineMsg`]), and
@@ -27,7 +27,7 @@ pub enum Msg {
         /// The bridge's session when the connect began; the app drops the
         /// message if the user signed out since.
         session: u64,
-        client: Client,
+        source: Src,
         settings: Box<Settings>,
         server: String,
         new_account: bool,
@@ -130,7 +130,7 @@ pub enum LibraryMsg {
     AlbumUpdated(Box<Album>),
     /// Ids of the most recently added albums, newest first.
     Newest(Vec<String>),
-    Playlists(Vec<subsonic::Playlist>),
+    Playlists(Vec<Playlist>),
     /// A playlist's songs. `fresh`: the server's listing, not the saved copy.
     PlaylistTracks {
         id: String,
@@ -210,7 +210,7 @@ impl From<OfflineMsg> for Msg {
 #[derive(Default)]
 pub struct Saved {
     pub newest: Option<Vec<String>>,
-    pub playlists: Option<Vec<subsonic::Playlist>>,
+    pub playlists: Option<Vec<Playlist>>,
     pub starred: Option<SavedStarred>,
 }
 
@@ -223,8 +223,8 @@ fn saved_playlist_name(id: &str) -> String {
     format!("playlist/{id}")
 }
 
-/// A playlist as saved: [`subsonic::Playlist`] reads numbers leniently,
-/// which needs a self-describing format; the saved copies aren't one.
+/// Frozen playlist layout: changing the live source model must not change
+/// the copies already saved in existing libraries.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedPlaylist {
     id: String,
@@ -235,13 +235,13 @@ struct SavedPlaylist {
     owner: Option<String>,
 }
 
-impl From<&subsonic::Playlist> for SavedPlaylist {
-    fn from(p: &subsonic::Playlist) -> Self {
+impl From<&Playlist> for SavedPlaylist {
+    fn from(p: &Playlist) -> Self {
         Self { id: p.id.clone(), name: p.name.clone(), song_count: p.song_count, duration: p.duration, cover_art: p.cover_art.clone(), owner: p.owner.clone() }
     }
 }
 
-impl From<SavedPlaylist> for subsonic::Playlist {
+impl From<SavedPlaylist> for Playlist {
     fn from(p: SavedPlaylist) -> Self {
         Self { id: p.id, name: p.name, song_count: p.song_count, duration: p.duration, cover_art: p.cover_art, owner: p.owner }
     }
@@ -306,14 +306,6 @@ pub fn connect_error(e: &subsonic::Error) -> String {
 /// (or a proxy's page) from a track: the server answers `200` either way.
 pub fn reply_check() -> streamcache::ReplyCheck {
     streamcache::ReplyCheck::new(subsonic::is_error_reply, subsonic::error_text)
-}
-
-/// Hearts and ratings carried by a list of songs.
-fn song_meta(songs: &[subsonic::Song]) -> UserMeta {
-    UserMeta {
-        starred: songs.iter().map(|s| (StarKind::Song, s.id.clone(), s.starred.is_some())).collect(),
-        ratings: songs.iter().map(|s| (s.id.clone(), s.user_rating.unwrap_or(0))).collect(),
-    }
 }
 
 /// Wakes the UI so it reads what was sent (a repaint, in the app).
@@ -598,7 +590,7 @@ impl Bridge {
                 Ok(c) => c,
                 Err(e) => return this.send(failed(connect_error(&e))),
             };
-            let pinged = ping(&client).await;
+            let pinged = sign_in_ping(&client).await;
             if !this.live(session) {
                 return;
             }
@@ -626,11 +618,11 @@ impl Bridge {
                     .await;
                     // A saved login's password came from the keychain: nothing to store.
                     let password_saved = saved || stored.unwrap_or(false);
-                    this.connected(session, client, settings, server, password_saved).await;
+                    this.connected(session, Arc::new(SubsonicSource::new(client)), settings, server, password_saved).await;
                 }
                 Err(PingError::Unreachable(e)) if saved => {
                     this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
-                    this.reconnect(client, settings, session);
+                    this.reconnect(Arc::new(SubsonicSource::new(client)), settings, session);
                 }
                 Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(failed(e)),
             }
@@ -640,7 +632,7 @@ impl Bridge {
     /// Claims the local library for this account (clearing another account's
     /// mirror) and reports the sign-in. Nothing happens once `session` has
     /// ended (the keychain write before this can wait on a prompt for a while).
-    async fn connected(&self, session: u64, client: Client, settings: Settings, server: String, password_saved: bool) {
+    async fn connected(&self, session: u64, source: Src, settings: Settings, server: String, password_saved: bool) {
         let this = self.scoped_to(session);
         if !this.current() {
             return;
@@ -656,33 +648,33 @@ impl Bridge {
             },
             None => false,
         };
-        this.send(Msg::Connected { session, client, settings: Box::new(settings), server, new_account, password_saved });
+        this.send(Msg::Connected { session, source, settings: Box::new(settings), server, new_account, password_saved });
     }
 
     /// Times one ping (for the server popover and the diagnostics bar).
-    pub fn measure_latency(&self, client: Client) {
+    pub fn measure_latency(&self, source: Src) {
         let this = self.scoped();
         self.rt.spawn(async move {
             let start = std::time::Instant::now();
-            let ok = ping(&client).await.is_ok();
+            let ok = ping(&source).await.is_ok();
             this.send(Msg::Latency(ok.then(|| start.elapsed())));
         });
     }
 
     /// Checks the connection after something failed; if the server is gone,
     /// says so and reconnects in the background.
-    pub fn probe(&self, client: Client, settings: Settings) {
+    pub fn probe(&self, source: Src, settings: Settings) {
         if self.reconnecting.load(Ordering::Relaxed) {
             return;
         }
         let session = self.session();
         let this = self.scoped_to(session);
         self.rt.spawn(async move {
-            if let Err(PingError::Unreachable(e)) = ping(&client).await
+            if let Err(PingError::Unreachable(e)) = ping(&source).await
                 && this.live(session)
             {
                 this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
-                this.reconnect(client, settings, session);
+                this.reconnect(source, settings, session);
             }
         });
     }
@@ -717,7 +709,7 @@ impl Bridge {
 
     /// Pings with backoff (5 s, doubling to half a minute) until the server
     /// answers, or until the user signs out (`session` ends).
-    fn reconnect(&self, client: Client, settings: Settings, session: u64) {
+    fn reconnect(&self, source: Src, settings: Settings, session: u64) {
         if !self.live(session) || self.reconnecting.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -731,14 +723,14 @@ impl Bridge {
                     // (and a new loop may own it now).
                     return;
                 }
-                let pinged = ping(&client).await;
+                let pinged = ping(&source).await;
                 if !this.live(session) {
                     return;
                 }
                 match pinged {
                     Ok(server) => {
                         this.reconnecting.store(false, Ordering::Relaxed);
-                        return this.connected(session, client, settings, server, true).await;
+                        return this.connected(session, source, settings, server, true).await;
                     }
                     Err(PingError::Unreachable(_)) => delay = (delay * 2).min(Duration::from_secs(30)),
                     Err(PingError::Refused(e)) => {
@@ -754,7 +746,7 @@ impl Bridge {
     /// Pages through every album on the server into the local db. Replaces a
     /// pass already running (e.g. from before the server went away): that one
     /// stores and reports nothing more.
-    pub fn sync_albums<F: sync::Fetch>(&self, client: F) {
+    pub fn sync_albums<F: sync::Fetch + Clone>(&self, source: F) {
         let pass = self.album_pass.fetch_add(1, Ordering::AcqRel) + 1;
         let this = self.scoped();
         self.rt.spawn(async move {
@@ -764,7 +756,7 @@ impl Bridge {
                     this.send(LibraryMsg::SyncProgress(n));
                 }
             };
-            let listed = crate::sync::albums(&this.library, &client, &live, progress).await;
+            let listed = crate::sync::albums(&this.library, &source, &live, progress).await;
             if !live() {
                 return;
             }
@@ -776,7 +768,7 @@ impl Bridge {
                 }
                 Err(e) => return this.send(LibraryMsg::AlbumSyncDone(Err(e))),
             }
-            let artists = crate::sync::artists(&this.library, &client, &live).await;
+            let artists = crate::sync::artists(&this.library, &source, &live).await;
             if !live() {
                 return;
             }
@@ -784,14 +776,14 @@ impl Bridge {
                 Ok(stored) => this.send(LibraryMsg::Artists(stored)),
                 Err(e) => this.send(Msg::Error(e)),
             }
-            this.sync_tracks(client);
+            this.sync_tracks(source);
         });
     }
 
     /// Fetches the tracks of every album that changed since the last sync, in
     /// the background. Replaces (cancels) a sync already running; from then on
     /// that one reports nothing (the new one does).
-    pub fn sync_tracks<F: sync::Fetch>(&self, client: F) {
+    pub fn sync_tracks<F: sync::Fetch + Clone>(&self, source: F) {
         // From a session that's over (an album pass finishing after sign-out):
         // it mustn't cancel the new session's sync, let alone store anything.
         if !self.current() {
@@ -813,7 +805,7 @@ impl Bridge {
             let progressed = AtomicBool::new(false);
             let outcome = sync::run(
                 this.library.clone(),
-                client,
+                source,
                 cancel.clone(),
                 || this.current(),
                 |p| {
@@ -868,7 +860,7 @@ impl Bridge {
     }
 
     /// Shows cached tracks immediately, then refreshes them from the server.
-    pub fn open_album(&self, client: Option<Client>, album_id: String) {
+    pub fn open_album(&self, source: Option<Src>, album_id: String) {
         let this = self.scoped();
         self.rt.spawn(async move {
             let id = album_id.clone();
@@ -880,22 +872,20 @@ impl Bridge {
                 cached = true;
                 this.send(LibraryMsg::Tracks { album_id: album_id.clone(), tracks, fresh: false });
             }
-            let Some(client) = client else {
+            let Some(source) = source else {
                 if !cached {
                     this.send(LibraryMsg::LoadFailed { key, error: None });
                 }
                 return;
             };
-            let album = match client.album(&album_id).await {
+            let (album, meta) = match source.album(&album_id).await {
                 Ok(a) => a,
-                Err(e) => return this.send(LibraryMsg::LoadFailed { key, error: Some(Failure::from(e).context("Couldn't load the album")) }),
+                Err(e) => return this.send(LibraryMsg::LoadFailed { key, error: Some(e.context("Couldn't load the album")) }),
             };
-            let mut meta = song_meta(&album.song);
-            meta.starred.push((StarKind::Album, album_id.clone(), album.album.starred.is_some()));
             let id = album_id.clone();
             let stored = this
                 .db(move |l| {
-                    l.upsert_album_tracks(convert::album_tracks(album))?;
+                    l.upsert_album_tracks(album)?;
                     Ok((l.album(&id)?, l.album_tracks(&id)?))
                 })
                 .await;
@@ -913,29 +903,29 @@ impl Bridge {
     }
 
     /// Recently added albums and the user's playlists; both small, fetched on connect.
-    pub fn fetch_home(&self, client: Client) {
+    pub fn fetch_home(&self, source: Src) {
         let this = self.scoped();
         self.rt.spawn(async move {
-            match client.album_list(AlbumListType::Newest, 120, 0).await {
+            match source.newest(120).await {
                 Ok(albums) => {
                     let ids = albums.iter().map(|a| a.id.clone()).collect();
                     // Newest albums may predate the last full sync; announced
                     // only once they're stored, or they'd show as missing.
                     let saved = Vec::clone(&ids);
-                    match this.db(move |l| l.upsert_albums(albums.into_iter().map(convert::album)).and_then(|()| l.save(SAVED_NEWEST, &saved))).await {
+                    match this.db(move |l| l.upsert_albums(albums).and_then(|()| l.save(SAVED_NEWEST, &saved))).await {
                         Ok(()) => this.send(LibraryMsg::Newest(ids)),
                         Err(e) => this.send(Msg::Error(Failure::Local(format!("Couldn't save Recently added: {e}")))),
                     }
                 }
-                Err(e) => this.send(Msg::Error(Failure::from(e).context("Couldn't load Recently added"))),
+                Err(e) => this.send(Msg::Error(e.context("Couldn't load Recently added"))),
             }
-            this.refresh_playlists(&client).await;
+            this.refresh_playlists(&source).await;
         });
     }
 
-    pub fn open_playlist(&self, client: Option<Client>, id: String) {
+    pub fn open_playlist(&self, source: Option<Src>, id: String) {
         let this = self.scoped();
-        let Some(client) = client else {
+        let Some(source) = source else {
             // Offline: the copy saved when it last loaded, if there is one.
             self.rt.spawn(async move {
                 let name = saved_playlist_name(&id);
@@ -947,38 +937,29 @@ impl Bridge {
             return;
         };
         self.rt.spawn(async move {
-            match client.playlist(&id).await {
-                Ok(p) => {
-                    let meta = song_meta(&p.entry);
-                    let tracks: Vec<Track> = p.entry.into_iter().map(song_track).collect();
+            match source.playlist(&id).await {
+                Ok((tracks, meta)) => {
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(LibraryMsg::PlaylistTracks { id: id.clone(), tracks: tracks.clone(), fresh: true });
                     this.keep(saved_playlist_name(&id), tracks).await;
                 }
-                Err(e) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(Failure::from(e).context("Couldn't load the playlist")) }),
+                Err(e) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(e.context("Couldn't load the playlist")) }),
             }
         });
     }
 
     /// Everything the user starred, and the ratings that come with it.
-    pub fn fetch_starred(&self, client: Option<Client>) {
-        let Some(client) = client else { return };
+    pub fn fetch_starred(&self, source: Option<Src>) {
+        let Some(source) = source else { return };
         let this = self.scoped();
         self.rt.spawn(async move {
-            match client.starred().await {
-                Ok(s) => {
-                    let mut ratings: Vec<(String, u8)> = s.song.iter().filter_map(|t| t.user_rating.filter(|r| *r > 0).map(|r| (t.id.clone(), r))).collect();
-                    ratings.extend(s.album.iter().filter_map(|a| a.user_rating.filter(|r| *r > 0).map(|r| (a.id.clone(), r))));
-                    let starred = Starred {
-                        songs: s.song.into_iter().map(song_track).collect(),
-                        albums: s.album.into_iter().map(|a| a.id).collect(),
-                        artists: s.artist.into_iter().map(|a| (a.id, a.name)).collect(),
-                    };
+            match source.starred().await {
+                Ok((starred, ratings)) => {
                     let saved = SavedStarred { starred: starred.clone(), ratings: ratings.clone() };
                     this.send(Msg::Starred { starred, ratings });
                     this.keep(SAVED_STARRED.to_owned(), saved).await;
                 }
-                Err(e) => this.send(Msg::Error(Failure::from(e).context("Couldn't load favorites"))),
+                Err(e) => this.send(Msg::Error(e.context("Couldn't load favorites"))),
             }
         });
     }
@@ -986,37 +967,23 @@ impl Bridge {
     /// Lyrics for one track: structured (synced where possible) first, then
     /// plain `getLyrics` by artist and title. Failures read as "no lyrics":
     /// they're a nicety, never worth an error banner.
-    pub fn fetch_lyrics(&self, client: Option<Client>, track_id: String, artist: Option<String>, title: String) {
-        let Some(client) = client else { return };
+    pub fn fetch_lyrics(&self, source: Option<Src>, track_id: String, artist: Option<String>, title: String) {
+        let Some(source) = source else { return };
         let this = self.scoped();
         self.rt.spawn(async move {
-            let mut lyrics = match client.lyrics_by_song(&track_id).await {
-                Ok(versions) => crate::lyrics::pick(versions),
-                Err(e) => {
-                    tracing::debug!("getLyricsBySongId {track_id}: {e}");
-                    None
-                }
-            };
-            if lyrics.is_none()
-                && let Some(artist) = artist.as_deref()
-            {
-                match client.lyrics(artist, &title).await {
-                    Ok(text) => lyrics = text.as_deref().and_then(crate::lyrics::from_text),
-                    Err(e) => tracing::debug!("getLyrics {title}: {e}"),
-                }
-            }
+            let lyrics = if source.capabilities().lyrics { source.lyrics(&track_id, artist.as_deref(), &title).await.ok().flatten() } else { None };
             this.send(Msg::Lyrics { track_id, lyrics });
         });
     }
 
     /// The playing song's play count and when it was last played, for the
     /// Info tab. Quietly nothing on failure.
-    pub fn fetch_song_stats(&self, client: Option<Client>, track_id: String) {
-        let Some(client) = client else { return };
+    pub fn fetch_song_stats(&self, source: Option<Src>, track_id: String) {
+        let Some(source) = source else { return };
         let this = self.scoped();
         self.rt.spawn(async move {
-            let stats = match client.song(&track_id).await {
-                Ok(s) => Some(crate::lyrics::SongStats { plays: s.play_count, last_played: s.played }),
+            let stats = match source.song_stats(&track_id).await {
+                Ok(s) => Some(s),
                 Err(e) => {
                     tracing::debug!("getSong {track_id}: {e}");
                     None
@@ -1027,22 +994,22 @@ impl Bridge {
     }
 
     /// Loves or unloves; `seq` comes back in the reply so a stale one is recognised.
-    pub fn set_starred(&self, client: Option<Client>, kind: StarKind, id: String, on: bool, seq: u64) {
+    pub fn set_starred(&self, source: Option<Src>, kind: StarKind, id: String, on: bool, seq: u64) {
         let this = self.scoped();
         self.after_previous(format!("star:{kind:?}:{id}"), async move {
-            let error = match &client {
-                Some(c) => c.set_starred(kind, &id, on).await.err().map(Failure::from),
+            let error = match &source {
+                Some(c) => c.set_starred(kind, &id, on).await.err(),
                 None => Some(Failure::Local(NOT_CONNECTED.into())),
             };
             this.send(Msg::StarDone { kind, id, on, seq, error });
         });
     }
 
-    pub fn set_rating(&self, client: Option<Client>, id: String, rating: u8, previous: u8, seq: u64) {
+    pub fn set_rating(&self, source: Option<Src>, id: String, rating: u8, previous: u8, seq: u64) {
         let this = self.scoped();
         self.after_previous(format!("rating:{id}"), async move {
-            let error = match &client {
-                Some(c) => c.set_rating(&id, rating).await.err().map(Failure::from),
+            let error = match &source {
+                Some(c) => c.set_rating(&id, rating).await.err(),
                 None => Some(Failure::Local(NOT_CONNECTED.into())),
             };
             this.send(Msg::RatingDone { id, previous, seq, error });
@@ -1050,51 +1017,48 @@ impl Bridge {
     }
 
     /// Makes a playlist of `song_ids`; the app opens it when it's there.
-    pub fn create_playlist(&self, client: Option<Client>, name: String, song_ids: Vec<String>) {
-        let Some(client) = client else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
+    pub fn create_playlist(&self, source: Option<Src>, name: String, song_ids: Vec<String>) {
+        let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
         let this = self.scoped();
         self.rt.spawn(async move {
-            match client.create_playlist(&name, &song_ids).await {
-                Ok(p) => {
-                    this.refresh_playlists(&client).await;
-                    this.send(Msg::PlaylistCreated { id: p.playlist.id, name: p.playlist.name });
+            match source.create_playlist(&name, &song_ids).await {
+                Ok((id, name)) => {
+                    this.refresh_playlists(&source).await;
+                    this.send(Msg::PlaylistCreated { id, name });
                 }
-                Err(e) => this.send(Msg::Error(Failure::from(e).context("Couldn't create the playlist"))),
+                Err(e) => this.send(Msg::Error(e.context("Couldn't create the playlist"))),
             }
         });
     }
 
     /// Sends one edit, then reloads the playlist list and the playlist (which
     /// also undoes the app's optimistic copy if the edit failed).
-    pub fn edit_playlist(&self, client: Option<Client>, id: String, edit: PlaylistEdit) {
-        let Some(client) = client else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
+    pub fn edit_playlist(&self, source: Option<Src>, id: String, edit: PlaylistEdit) {
+        let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
         let this = self.scoped();
         self.rt.spawn(async move {
-            let result = match &edit {
-                PlaylistEdit::Rename(name) => client.update_playlist(&id, Some(name), &[], &[]).await,
-                PlaylistEdit::Add(songs) => client.update_playlist(&id, None, songs, &[]).await,
-                PlaylistEdit::Remove(at) => client.update_playlist(&id, None, &[], at).await,
-                PlaylistEdit::Replace(songs) => client.replace_playlist(&id, songs).await,
-                PlaylistEdit::Delete => client.delete_playlist(&id).await,
-            };
+            let result = source.edit_playlist(&id, &edit).await;
             if let Err(e) = result {
-                this.send(Msg::Error(Failure::from(e).context("Couldn't change the playlist")));
+                this.send(Msg::Error(e.context("Couldn't change the playlist")));
             }
-            this.refresh_playlists(&client).await;
+            this.refresh_playlists(&source).await;
             if !matches!(edit, PlaylistEdit::Delete) {
-                this.open_playlist(Some(client), id);
+                this.open_playlist(Some(source), id);
             }
         });
     }
 
-    async fn refresh_playlists(&self, client: &Client) {
-        match client.playlists().await {
+    async fn refresh_playlists(&self, source: &Src) {
+        if !source.capabilities().playlists {
+            return;
+        }
+        match source.playlists().await {
             Ok(p) => {
                 let saved: Vec<SavedPlaylist> = p.iter().map(SavedPlaylist::from).collect();
                 self.send(LibraryMsg::Playlists(p));
                 self.keep(SAVED_PLAYLISTS.to_owned(), saved).await;
             }
-            Err(e) => self.send(Msg::Error(Failure::from(e).context("Couldn't load playlists"))),
+            Err(e) => self.send(Msg::Error(e.context("Couldn't load playlists"))),
         }
     }
 
@@ -1111,7 +1075,7 @@ impl Bridge {
     /// Gathers the tracks of `album_ids` in order: stored ones straight from the
     /// db, the rest from the server ([`sync::CONCURRENCY`] at a time, stored on
     /// the way). Offline, an album that isn't stored just isn't there to play.
-    pub fn fetch_tracks<F: sync::Fetch>(&self, client: Option<F>, key: ListKey, album_ids: Vec<String>) {
+    pub fn fetch_tracks<F: sync::Fetch + Clone>(&self, source: Option<F>, key: ListKey, album_ids: Vec<String>) {
         let this = self.scoped();
         self.rt.spawn(async move {
             let ids = album_ids.clone();
@@ -1123,14 +1087,14 @@ impl Bridge {
             };
             let mut missed = 0;
             let mut failed: Option<Failure> = None;
-            if let Some(client) = client {
+            if let Some(source) = source {
                 let mut todo = album_ids.into_iter().enumerate().filter(|(i, _)| lists[*i].is_none()).collect::<Vec<_>>().into_iter();
                 let mut running = tokio::task::JoinSet::new();
                 loop {
                     while running.len() < sync::CONCURRENCY {
                         let Some((i, id)) = todo.next() else { break };
-                        let (me, client) = (this.clone(), client.clone());
-                        running.spawn(async move { (i, me.fetch_album(&client, id).await) });
+                        let (me, source) = (this.clone(), source.clone());
+                        running.spawn(async move { (i, me.fetch_album(&source, id).await) });
                     }
                     let Some(joined) = running.join_next().await else { break };
                     match joined.map_err(|e| Failure::Local(e.to_string())).and_then(|(i, r)| r.map(|t| (i, t))) {
@@ -1156,9 +1120,9 @@ impl Bridge {
     }
 
     /// One album's tracks from the server, stored, as the library has them.
-    async fn fetch_album<F: sync::Fetch>(&self, client: &F, id: String) -> Result<Vec<Track>, Failure> {
-        let album = client.album(id.clone()).await?;
-        self.db(move |l| l.upsert_album_tracks(convert::album_tracks(album)).and_then(|_| l.album_tracks(&id))).await.map_err(Failure::Local)
+    async fn fetch_album<F: sync::Fetch>(&self, source: &F, id: String) -> Result<Vec<Track>, Failure> {
+        let album = source.album(id.clone()).await?;
+        self.db(move |l| l.upsert_album_tracks(album).and_then(|_| l.album_tracks(&id))).await.map_err(Failure::Local)
     }
 }
 
@@ -1169,8 +1133,21 @@ enum PingError {
     Refused(String),
 }
 
+/// Bounds probes even when a source's server takes the connection but never answers.
+async fn ping(source: &Src) -> Result<String, PingError> {
+    match tokio::time::timeout(Duration::from_secs(10), source.ping()).await {
+        Err(_) => Err(PingError::Unreachable("The server didn't answer".into())),
+        Ok(Err(e)) if e.is_network() => {
+            tracing::debug!("ping: {e}");
+            Err(PingError::Unreachable(e.into_message()))
+        }
+        Ok(Err(e)) => Err(PingError::Refused(e.into_message())),
+        Ok(Ok(info)) => Ok(info),
+    }
+}
+
 /// Pings with a timeout, so a black-holed server can't hang the connect.
-async fn ping(client: &Client) -> Result<String, PingError> {
+async fn sign_in_ping(client: &Client) -> Result<String, PingError> {
     match tokio::time::timeout(Duration::from_secs(10), client.ping()).await {
         Err(_) => Err(PingError::Unreachable("The server didn't answer".into())),
         Ok(Err(e @ subsonic::Error::Http(_))) => {
@@ -1180,11 +1157,6 @@ async fn ping(client: &Client) -> Result<String, PingError> {
         Ok(Err(e)) => Err(PingError::Refused(connect_error(&e))),
         Ok(Ok(info)) => Ok(format!("{} {}", info.server_type.as_deref().unwrap_or("subsonic"), info.server_version.as_deref().unwrap_or(&info.version))),
     }
-}
-
-fn song_track(s: subsonic::Song) -> Track {
-    let album = s.album_id.clone().unwrap_or_default();
-    convert::track(s, &album)
 }
 
 #[cfg(test)]
@@ -1209,7 +1181,7 @@ mod tests {
     /// A server whose requests can be held until the test lets them go.
     #[derive(Clone, Default)]
     struct Server {
-        albums: Vec<subsonic::Album>,
+        albums: Vec<Album>,
         /// Requests wait for a permit here (none: they answer at once).
         gate: Option<Arc<Semaphore>>,
         /// The album list fails (after the gate).
@@ -1230,8 +1202,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl sync::Fetch for Server {
-        async fn album_page(&self, _: u32, offset: u32) -> Result<Vec<subsonic::Album>, Failure> {
+        async fn album_page(&self, _: u32, offset: u32) -> Result<Vec<Album>, Failure> {
             self.wait().await;
             self.answered.fetch_add(1, Ordering::SeqCst);
             if self.list_fails {
@@ -1239,10 +1212,10 @@ mod tests {
             }
             Ok(if offset == 0 { self.albums.clone() } else { Vec::new() })
         }
-        async fn artists(&self) -> Result<Vec<subsonic::Artist>, Failure> {
+        async fn artists(&self) -> Result<Vec<library::Artist>, Failure> {
             Ok(Vec::new())
         }
-        async fn album(&self, id: String) -> Result<subsonic::AlbumWithSongs, Failure> {
+        async fn album(&self, id: String) -> Result<library::AlbumTracks, Failure> {
             self.wait().await;
             if self.slow.as_deref() == Some(id.as_str()) {
                 tokio::time::sleep(Duration::from_millis(30)).await;
@@ -1250,20 +1223,20 @@ mod tests {
             let a = self.albums.iter().find(|a| a.id == id).cloned().ok_or(Failure::Server("not found".into()))?;
             let songs = (1..=a.song_count).map(|n| song(format!("{id}-{n}"), &id, n)).collect();
             self.answered.fetch_add(1, Ordering::SeqCst);
-            Ok(subsonic::AlbumWithSongs { album: a, song: songs })
+            Ok(library::AlbumTracks { album: a, tracks: songs })
         }
-        async fn all_songs(&self, _: &'static str, _: u32, _: u32) -> Result<Vec<subsonic::Song>, Failure> {
-            Ok(Vec::new())
+        async fn all_songs(&self, _: &'static str, _: u32, _: u32) -> Result<sync::SongPage, Failure> {
+            Ok(Vec::new().into())
         }
     }
 
     /// One thread runs every task, and only while the test waits in `until`:
     /// when `until` sees a condition, every task has run as far as it can.
-    fn rig(albums: &[subsonic::Album]) -> (tokio::runtime::Runtime, Bridge, Receiver<Msg>) {
+    fn rig(albums: &[Album]) -> (tokio::runtime::Runtime, Bridge, Receiver<Msg>) {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let lib = Library::in_memory().unwrap();
-        lib.upsert_albums(albums.iter().cloned().map(convert::album)).unwrap();
+        lib.upsert_albums(albums.iter().cloned()).unwrap();
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib));
         (rt, bridge, rx)
     }
@@ -1382,7 +1355,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let lib = Library::in_memory().unwrap();
-        lib.upsert_albums(vec![convert::album(album("old", 1))]).unwrap();
+        lib.upsert_albums(vec![album("old", 1)]).unwrap();
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib));
         let mut got = Vec::new();
         // Unhindered, the read sends the stored library.
@@ -1414,7 +1387,7 @@ mod tests {
         // One is stored already; the other three come from the server.
         let stored = Server { albums: albums.clone(), ..Default::default() };
         let one = rt.block_on(sync::Fetch::album(&stored, "a2".into())).unwrap();
-        bridge.library.upsert_album_tracks(convert::album_tracks(one)).unwrap();
+        bridge.library.upsert_album_tracks(one).unwrap();
         let gate = Arc::new(Semaphore::new(0));
         // The first album answers last.
         let server = Server { albums, gate: Some(gate.clone()), slow: Some("a0".into()), ..Default::default() };
@@ -1486,6 +1459,28 @@ mod tests {
     }
 
     #[test]
+    fn a_source_without_lyrics_is_not_asked_for_them() {
+        use crate::source::{Capabilities, fake::Fake};
+        let (rt, bridge, rx) = rig(&[]);
+        let source = Arc::new(Fake::new(Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false }));
+        bridge.fetch_lyrics(Some(source.clone()), "song".into(), Some("artist".into()), "title".into());
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Lyrics { .. })));
+        assert!(matches!(got.last(), Some(Msg::Lyrics { lyrics: None, .. })));
+        assert_eq!(source.lyric_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn saved_playlists_keep_their_existing_bytes_and_round_trip_live_rows() {
+        let playlist =
+            Playlist { id: "id".into(), name: "name".into(), song_count: 128, duration: 300, cover_art: Some("cover".into()), owner: Some("user".into()) };
+        let bytes = postcard::to_allocvec(&SavedPlaylist::from(&playlist)).unwrap();
+        assert_eq!(bytes, b"\x02id\x04name\x80\x01\xac\x02\x01\x05cover\x01\x04user");
+        let saved: SavedPlaylist = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(Playlist::from(saved), playlist);
+    }
+
+    #[test]
     fn connect_errors_read_plainly() {
         let wrong = subsonic::Error::Api { code: 40, message: "Wrong username or password".into() };
         assert_eq!(connect_error(&wrong), "Wrong username or password.");
@@ -1513,7 +1508,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let sign_in = |base: String| {
             let client = Client::new(&base, Credentials::new("joe", "sesame")).unwrap();
-            match rt.block_on(ping(&client)) {
+            match rt.block_on(sign_in_ping(&client)) {
                 Err(PingError::Unreachable(e)) => e,
                 Err(PingError::Refused(e)) => panic!("refused: {e}"),
                 Ok(s) => panic!("connected to {s}"),

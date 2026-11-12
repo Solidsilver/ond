@@ -67,9 +67,9 @@ impl ViewCtx<'_> {
             if ui.button("New playlist…").clicked() {
                 self.actions.push(Action::Overlay(Overlay::new_playlist(tracks.to_vec())));
             }
-            let mine: Vec<subsonic::Playlist> = self.data.playlists.iter().filter(|p| self.owns(p)).cloned().collect();
-            let recent: Vec<&subsonic::Playlist> = self.ui.recent_playlists.iter().filter_map(|id| mine.iter().find(|p| &p.id == id)).collect();
-            let mut rest: Vec<&subsonic::Playlist> = mine.iter().filter(|p| !self.ui.recent_playlists.contains(&p.id)).collect();
+            let mine: Vec<crate::source::Playlist> = self.data.playlists.iter().filter(|p| self.owns(p)).cloned().collect();
+            let recent: Vec<&crate::source::Playlist> = self.ui.recent_playlists.iter().filter_map(|id| mine.iter().find(|p| &p.id == id)).collect();
+            let mut rest: Vec<&crate::source::Playlist> = mine.iter().filter(|p| !self.ui.recent_playlists.contains(&p.id)).collect();
             rest.sort_by_cached_key(|p| p.name.to_lowercase());
             for group in [recent, rest] {
                 if group.is_empty() {

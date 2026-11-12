@@ -5,13 +5,13 @@
 use super::{Action, OndApp, Session};
 use crate::bridge::{Bridge, ListKey, OfflineMsg};
 use crate::prefs::Prefs;
+use crate::source::Src;
 use library::Track;
 use offline::{OfflineStore, Pin, TrackRef};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use subsonic::Client;
 
 /// What a download action applies to, as the user asked for it. The
 /// offline store keeps it as `offline::Pin`s: an album or playlist as one,
@@ -371,8 +371,8 @@ impl OndApp {
             }
             OfflineMsg::Store { generation, store } => match self.downloads.opened(generation, store, &self.bridge) {
                 Ok(true) => {
-                    if let Some(client) = self.session.live().cloned() {
-                        self.connect_downloads(&client);
+                    if let Some(source) = self.session.live().cloned() {
+                        self.connect_downloads(&source);
                     }
                     // Download actions taken while it opened.
                     self.actions.extend(self.downloads.deferred.drain(..).map(Action::Offline));
@@ -431,13 +431,18 @@ impl OndApp {
     /// Hands the offline store the server, and refetches pinned playlists so
     /// what was added to them downloads. Nothing while the store is opening:
     /// it gets the same once it's open.
-    pub(super) fn connect_downloads(&mut self, client: &Client) {
+    pub(super) fn connect_downloads(&mut self, source: &Src) {
         let Some(store) = &self.downloads.store else { return };
-        let url = client.clone();
-        store.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
+        let url = source.clone();
+        store.set_source(
+            source
+                .capabilities()
+                .downloads
+                .then(|| Arc::new(move |id: &str| url.download_url(id).expect("a downloadable source supplies track URLs")) as offline::UrlFn),
+        );
         for p in &self.downloads.snap.pins {
             if let Pin::Playlist(id) = &p.pin {
-                self.bridge.open_playlist(Some(client.clone()), id.clone());
+                self.bridge.open_playlist(Some(source.clone()), id.clone());
             }
         }
     }
@@ -510,8 +515,8 @@ impl OndApp {
             None => {
                 self.wait_to_pin(key.clone(), pin);
                 match key {
-                    ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
-                    ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
+                    ListKey::Album(id) => self.bridge.open_album(self.session.source.clone(), id),
+                    ListKey::Playlist(id) => self.bridge.open_playlist(self.session.source.clone(), id),
                     ListKey::Artist(_) => {}
                 }
             }

@@ -578,7 +578,7 @@ fn long_playlist(app: &mut OndApp, id: &str, n: usize) {
             t
         })
         .collect();
-    app.data.playlists.push(subsonic::Playlist { id: id.into(), name: "Long".into(), song_count: n as u32, duration: 0, cover_art: None, owner: None });
+    app.data.playlists.push(crate::source::Playlist { id: id.into(), name: "Long".into(), song_count: n as u32, duration: 0, cover_art: None, owner: None });
     app.data.playlist_tracks.insert(id.into(), Arc::new(tracks));
 }
 
@@ -870,7 +870,7 @@ fn a_failed_loads_retry_asks_for_the_tracks_again() {
     let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     let app = app_mut(&mut h);
-    app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+    app.session.source = Some(crate::source::subsonic::test_source());
     app.apply(Action::Album("al-missing".into(), QueueAction::Play { start: 0 }));
     assert_eq!(app.pending.len(), 1, "waits for the tracks");
     let text = "Couldn't load the album: the server said no";

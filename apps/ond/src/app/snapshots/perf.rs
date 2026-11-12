@@ -192,7 +192,7 @@ fn perf() {
     {
         let app = app_mut(&mut h);
         let songs: Vec<Track> = app.data.tracks.all.iter().take(PLAYLIST_N).cloned().collect();
-        app.data.playlists.push(subsonic::Playlist {
+        app.data.playlists.push(crate::source::Playlist {
             id: "big-pl".into(),
             name: "Everything".into(),
             song_count: PLAYLIST_N as u32,

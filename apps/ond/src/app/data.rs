@@ -26,7 +26,7 @@ pub struct Data {
     pub version: u64,
     /// Recently added, newest first (album ids from the server).
     pub newest: Vec<String>,
-    pub playlists: Vec<subsonic::Playlist>,
+    pub playlists: Vec<crate::source::Playlist>,
     /// Every stored track once (`all`), grouped by album and indexed by id.
     /// The grouping and the index also have the albums opened since (fresh
     /// from the server); `all` doesn't.
@@ -395,12 +395,12 @@ impl OndApp {
         // subset: fetch it, unless there's no server to ask.
         let stored = self.data.tracks.album(&id);
         let count = self.data.album(&id).map_or(0, |a| a.song_count as usize);
-        let partial = stored.is_some_and(|t| t.len() < count) && self.session.client.is_some();
+        let partial = stored.is_some_and(|t| t.len() < count) && self.session.source.is_some();
         match stored {
             Some(t) if !partial => self.queue_tracks(t.to_vec(), source, action),
             _ => {
                 self.wait_for(Pending { key: ListKey::Album(id.clone()), source, action, fresh: partial });
-                self.bridge.open_album(self.session.client.clone(), id);
+                self.bridge.open_album(self.session.source.clone(), id);
             }
         }
     }
@@ -420,7 +420,7 @@ impl OndApp {
         // Their albums from the first, whatever the start asked for.
         let action = if matches!(action, QueueAction::Play { .. }) { QueueAction::Play { start: 0 } } else { action };
         self.wait_for(Pending { key: key.clone(), source, action, fresh: false });
-        self.bridge.fetch_tracks(self.session.client.clone(), key, ids);
+        self.bridge.fetch_tracks(self.session.source.as_ref().and_then(|s| s.paged()), key, ids);
     }
 
     /// Plays (or queues) a playlist: what's loaded, or once it loads.
@@ -431,7 +431,7 @@ impl OndApp {
             Some(t) => self.queue_tracks(t.to_vec(), source, action),
             None => {
                 self.wait_for(Pending { key: ListKey::Playlist(id.clone()), source, action, fresh: false });
-                self.bridge.open_playlist(self.session.client.clone(), id);
+                self.bridge.open_playlist(self.session.source.clone(), id);
             }
         }
     }

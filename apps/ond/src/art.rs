@@ -15,6 +15,7 @@
 //! reads have their own slots and never wait behind downloads. Looks (for the
 //! playing and the open album, a cover or two) skip the queue and start at once.
 
+use crate::source::Src;
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureOptions, Ui};
 use shell::art::{Lane, Queue, SIZES, bucket};
 use shell::kit::Generated;
@@ -25,7 +26,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
-use subsonic::Client;
 
 // The crop, the cache's file names and the LRU set are the family's, shared
 // with Rede; Ond's callers keep finding them here.
@@ -98,7 +98,7 @@ pub struct Art {
     rt: tokio::runtime::Handle,
     ctx: egui::Context,
     dir: Arc<PathBuf>,
-    client: Option<Client>,
+    source: Option<Src>,
     /// Every cover id asked for, numbered (see [`Key`]), and the ids by
     /// number; the two share each id.
     covers: HashMap<Arc<str>, u32>,
@@ -148,7 +148,7 @@ impl Art {
             rt,
             ctx,
             dir,
-            client: None,
+            source: None,
             covers: HashMap::new(),
             names: Vec::new(),
             textures: HashMap::new(),
@@ -175,8 +175,8 @@ impl Art {
         }
     }
 
-    pub fn set_client(&mut self, client: Client) {
-        self.client = Some(client);
+    pub fn set_source(&mut self, source: Src) {
+        self.source = Some(source);
         // Failures may have been "not connected yet".
         self.missing.clear();
         self.looks.retain(|_, l| l.palette.is_some());
@@ -271,11 +271,11 @@ impl Art {
             let given = self.preloaded.get(cover).cloned();
             #[cfg(not(test))]
             let given: Option<ColorImage> = None;
-            let (client, dir, tx, ctx) = (self.client.clone(), self.dir.clone(), self.look_tx.clone(), self.ctx.clone());
+            let (source, dir, tx, ctx) = (self.source.clone(), self.dir.clone(), self.look_tx.clone(), self.ctx.clone());
             self.rt.spawn(async move {
                 let image = match given {
                     Some(i) => Some(i),
-                    None => load(client.as_ref(), &dir, &key.0, key.1).await,
+                    None => load(source.as_ref(), &dir, &key.0, key.1).await,
                 };
                 let look = tokio::task::spawn_blocking(move || LookParts::of(image.as_ref())).await.unwrap_or_default();
                 let _ = tx.send((key.0, look));
@@ -345,7 +345,7 @@ impl Art {
             match lane {
                 Lane::Disk => {
                     // No server: art already on disk still loads (offline browsing).
-                    let online = self.client.is_some();
+                    let online = self.source.is_some();
                     self.rt.spawn(async move {
                         let outcome = match read_cached(&dir, &cover, key.size).await {
                             Some(bytes) => Outcome::Image(decode_off_thread(bytes, key.size).await),
@@ -357,9 +357,9 @@ impl Art {
                     });
                 }
                 Lane::Net => {
-                    let client = self.client.clone();
+                    let source = self.source.clone();
                     let task = self.rt.spawn(async move {
-                        let bytes = match &client {
+                        let bytes = match &source {
                             Some(c) => fetch_cached(c, &dir, &cover, key.size).await,
                             None => None,
                         };
@@ -525,10 +525,10 @@ pub fn track_cover<'a>(album: Option<&'a library::Album>, track: &'a library::Tr
 
 /// The cached file for `cover` at `size`, else the server's (cached on the
 /// way); `None` when neither has it, or there's no server to ask.
-async fn load(client: Option<&Client>, dir: &Path, cover: &str, size: u32) -> Option<ColorImage> {
+async fn load(source: Option<&Src>, dir: &Path, cover: &str, size: u32) -> Option<ColorImage> {
     let bytes = match read_cached(dir, cover, size).await {
         Some(b) => b,
-        None => fetch_cached(client?, dir, cover, size).await?,
+        None => fetch_cached(source?, dir, cover, size).await?,
     };
     decode_off_thread(bytes, size).await.map(|(image, _)| image)
 }
@@ -548,8 +548,8 @@ async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<(ColorImage, Pri
 
 /// Downloads `cover` at `size` px into the cache (written whole, then renamed
 /// into place) and returns its bytes.
-pub async fn fetch_cached(client: &Client, dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
-    let bytes = client.cover_art(cover, Some(size)).await.ok()?;
+pub async fn fetch_cached(source: &Src, dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
+    let bytes = source.cover(cover, size).await.ok()?;
     let (dir, path) = (dir.to_owned(), cover_file(dir, cover, size));
     // Saved by a task of its own: a load aborted from here on (scrolled past)
     // still leaves the cover cached, and never a half-written file.
@@ -607,7 +607,7 @@ mod tests {
         std::fs::write(cover_file(dir.path(), "al-1", 64), png).unwrap();
         let ctx = egui::Context::default();
         let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned());
-        // Never connected: no client at all.
+        // Never connected: no source at all.
         let deadline = testkit::Deadline::new();
         loop {
             art.poll();

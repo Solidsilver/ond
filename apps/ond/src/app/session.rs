@@ -5,10 +5,10 @@ use super::{OndApp, toolbar};
 use crate::favorites::Favorites;
 use crate::nav::Nav;
 use crate::settings::Settings;
+use crate::source::Src;
 use crate::theme::{self, Tokens};
 use std::sync::Arc;
 use std::time::Duration;
-use subsonic::Client;
 
 #[derive(Default)]
 pub(super) struct LoginForm {
@@ -27,7 +27,7 @@ pub(super) struct LoginForm {
 /// The server connection and who's signed in.
 #[derive(Default)]
 pub struct Session {
-    pub client: Option<Client>,
+    pub source: Option<Src>,
     /// The server answered last time we asked. While it's unreachable only
     /// downloaded tracks play.
     pub online: bool,
@@ -51,9 +51,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// The client, while the server answers.
-    pub fn live(&self) -> Option<&Client> {
-        self.client.as_ref().filter(|_| self.online)
+    /// The source, while the server answers.
+    pub fn live(&self) -> Option<&Src> {
+        self.source.as_ref().filter(|_| self.online)
     }
 
     /// Online, or about to be as far as anyone knows.
@@ -64,7 +64,7 @@ impl Session {
 
 impl OndApp {
     /// Signed in: the session starts (or resumes after an outage).
-    pub(super) fn connected(&mut self, client: Client, settings: Box<Settings>, server: String, new_account: bool, password_saved: bool) {
+    pub(super) fn connected(&mut self, source: Src, settings: Box<Settings>, server: String, new_account: bool, password_saved: bool) {
         if new_account {
             // Work still running for the old account (the library read at
             // start-up, a sync from before signing in again) would land its
@@ -88,22 +88,29 @@ impl OndApp {
         // has this one replace it.
         self.sync.label = "syncing…".into();
         self.sync.albums = true;
-        self.bridge.sync_albums(client.clone());
-        self.bridge.fetch_home(client.clone());
-        self.art.set_client(client.clone());
-        self.now_playing.set_client(client.clone());
+        if let Some(paged) = source.paged() {
+            self.bridge.sync_albums(paged);
+        }
+        self.bridge.fetch_home(source.clone());
+        self.art.set_source(source.clone());
+        self.now_playing.set_source(source.clone());
         self.output.connected(&settings.server);
         // A store still opening gets the server once it's open.
-        self.connect_downloads(&client);
-        let url = client.clone();
-        self.analysis.runner.set_server(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
-        self.bridge.fetch_starred(Some(client.clone()));
+        self.connect_downloads(&source);
+        let url = source.clone();
+        self.analysis.runner.set_server(
+            source
+                .capabilities()
+                .downloads
+                .then(|| Arc::new(move |id: &str| url.download_url(id).expect("a downloadable source supplies track URLs")) as crate::analyze::StreamUrl),
+        );
+        self.bridge.fetch_starred(Some(source.clone()));
         self.diagnostics.latency_asked();
-        self.bridge.measure_latency(client.clone());
+        self.bridge.measure_latency(source.clone());
         self.session.unreachable = false;
         self.session.connecting = false;
         self.session.sign_in = None;
-        self.session.client = Some(client);
+        self.session.source = Some(source);
         self.prefs.set_login(&settings.server, &settings.username);
         self.session.settings = Some(*settings);
         if !self.session.online {
@@ -203,19 +210,19 @@ impl OndApp {
     pub(super) fn refresh_latency(&mut self) {
         if self.session.online
             && self.diagnostics.latency_stale()
-            && let Some(client) = self.session.client.clone()
+            && let Some(source) = self.session.source.clone()
         {
             self.diagnostics.latency_asked();
-            self.bridge.measure_latency(client);
+            self.bridge.measure_latency(source);
         }
     }
 
     /// Something failed; if it was the network, find out whether the server is gone.
     pub(super) fn probe(&self) {
         if self.session.online
-            && let (Some(client), Some(settings)) = (&self.session.client, &self.session.settings)
+            && let (Some(source), Some(settings)) = (&self.session.source, &self.session.settings)
         {
-            self.bridge.probe(client.clone(), settings.clone());
+            self.bridge.probe(source.clone(), settings.clone());
         }
     }
 
@@ -256,7 +263,7 @@ impl OndApp {
     /// The server's gone: browse what's stored, play what's downloaded.
     pub(super) fn set_offline(&mut self) {
         self.session.online = false;
-        self.session.client = None;
+        self.session.source = None;
         if let Some(store) = &self.downloads.store {
             store.set_source(None);
         }

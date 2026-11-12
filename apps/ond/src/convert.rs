@@ -1,6 +1,6 @@
 //! The library knows nothing about servers; Subsonic's shapes become rows here.
-//! These functions will move into the Subsonic source when MusicSource arrives
-//! (docs/sources.md). The orphan rule forbids From between two foreign crates.
+//! The Subsonic source uses these conversions because the orphan rule forbids
+//! From between two foreign crates. They stay here until a separate module move.
 
 use library::{Album, AlbumTracks, Artist, ArtistLink, Contributor, Track};
 
@@ -77,6 +77,14 @@ pub fn bulk_tracks(songs: Vec<subsonic::Song>) -> Vec<Track> {
             Some(track(s, &album_id))
         })
         .collect()
+}
+
+pub fn lyrics(v: subsonic::StructuredLyrics) -> crate::lyrics::StructuredLyrics {
+    crate::lyrics::StructuredLyrics {
+        synced: v.synced,
+        offset: v.offset,
+        line: v.line.into_iter().map(|l| crate::lyrics::LyricLine { start: l.start, value: l.value }).collect(),
+    }
 }
 
 #[cfg(test)]

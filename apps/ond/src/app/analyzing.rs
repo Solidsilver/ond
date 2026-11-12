@@ -112,7 +112,7 @@ impl OndApp {
     /// Downloaded copies are read straight from disk (and need no server).
     /// The stream URLs are made by the runner as it gets to each track.
     pub(super) fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
-        let online = self.session.client.is_some();
+        let online = self.session.source.is_some();
         let jobs: Vec<analyze::Job> = tracks
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
@@ -127,7 +127,7 @@ impl OndApp {
     /// Queues the whole library, once the tracks, the stored results and the
     /// server are all there (so finished tracks aren't redone).
     pub(super) fn resume_library_analysis(&mut self) {
-        if self.prefs_now().analysis_resume && self.analysis.loaded && self.session.client.is_some() && !self.data.tracks.all.is_empty() {
+        if self.prefs_now().analysis_resume && self.analysis.loaded && self.session.source.is_some() && !self.data.tracks.all.is_empty() {
             let all = self.data.tracks.all.clone();
             self.enqueue_analysis(&all);
             self.analysis.library_run = true;

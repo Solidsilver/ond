@@ -567,7 +567,7 @@ impl OndApp {
             } else {
                 match self.sync.last {
                     Some(at) => format!("Last synced at {}", at.format("%-I:%M %p")),
-                    None if self.session.client.is_some() => "Synced at launch".to_owned(),
+                    None if self.session.source.is_some() => "Synced at launch".to_owned(),
                     None => "Not connected".to_owned(),
                 }
             };
@@ -577,7 +577,7 @@ impl OndApp {
                         self.actions.push(Action::StopSync);
                     }
                 } else {
-                    let can = self.session.client.is_some() && self.session.online;
+                    let can = self.session.source.is_some() && self.session.online;
                     let why = if self.session.work_offline { "Offline mode" } else { "Not connected" };
                     if ui.add_enabled_ui(can, |ui| secondary(ui, "Sync now")).inner.on_disabled_hover_text(why).clicked() {
                         self.actions.push(Action::SyncNow);
@@ -640,7 +640,7 @@ impl OndApp {
             ui.painter().rect_filled(r, 2.0, t.hairline);
             ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * frac, r.height())), 2.0, t.accent);
             ui.add_space(ROW_PAD + 4.0);
-        } else if self.session.client.is_some() && !self.data.tracks.all.is_empty() {
+        } else if self.session.source.is_some() && !self.data.tracks.all.is_empty() {
             let (n, secs) = self.unanalysed();
             if n == 0 {
                 setting(ui, "Every track is analyzed", &failed, |_| ());

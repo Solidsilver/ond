@@ -2,10 +2,10 @@
 //! mirrors it so hearts and stars show without asking, and applies changes
 //! right away, rolling them back if the server refuses.
 
+pub use crate::source::StarKind;
 use library::Track;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-pub use subsonic::StarKind;
 
 /// Loved things for the Favorites view, newest first.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]

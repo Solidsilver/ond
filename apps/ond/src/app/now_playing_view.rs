@@ -82,7 +82,7 @@ impl ViewCtx<'_> {
     /// Asks the server for `track`'s lyrics the first time a lyrics view
     /// needs them.
     pub(super) fn ensure_lyrics(&mut self, track: &Track) {
-        if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
+        if !self.lyrics.contains_key(&track.id) && self.session.source.is_some() {
             self.actions.push(Action::NeedLyrics(Box::new(track.clone())));
         }
     }
@@ -106,7 +106,7 @@ impl ViewCtx<'_> {
         match fetched.get(&track.id) {
             Some(Fetch::Done(Some(l))) => self.lyrics_block(ui, track, l, size, t.panel),
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
-            _ if self.session.client.is_none() => note(ui, "Lyrics load when the server is connected."),
+            _ if self.session.source.is_none() => note(ui, "Lyrics load when the server is connected."),
             _ => note(ui, "No lyrics for this song."),
         }
     }

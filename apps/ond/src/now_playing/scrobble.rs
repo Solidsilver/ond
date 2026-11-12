@@ -184,10 +184,10 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub fn of(result: &subsonic::Result<()>) -> Self {
+    pub fn of(result: &Result<(), crate::failure::Failure>) -> Self {
         match result {
             Ok(()) => Outcome::Done,
-            Err(subsonic::Error::Http(_)) => Outcome::Unreachable,
+            Err(crate::failure::Failure::Network(_)) => Outcome::Unreachable,
             Err(_) => Outcome::Refused,
         }
     }
@@ -359,6 +359,6 @@ mod tests {
     #[test]
     fn outcomes() {
         assert_eq!(Outcome::of(&Ok(())), Outcome::Done);
-        assert_eq!(Outcome::of(&Err(subsonic::Error::Api { code: 70, message: "not found".into() })), Outcome::Refused);
+        assert_eq!(Outcome::of(&Err(crate::failure::Failure::Server("not found".into()))), Outcome::Refused);
     }
 }

@@ -33,6 +33,7 @@ mod prefs;
 mod queue;
 mod search;
 mod settings;
+mod source;
 mod sync;
 #[cfg(test)]
 mod test_tracks;

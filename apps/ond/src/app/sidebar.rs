@@ -279,14 +279,14 @@ impl OndApp {
                 ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
                 _ => match self.sync.last {
                     Some(at) => at.format("%-I:%M %p").to_string(),
-                    None if self.session.client.is_some() => "At launch".to_owned(),
+                    None if self.session.source.is_some() => "At launch".to_owned(),
                     None => "Not yet".to_owned(),
                 },
             };
             info_row(ui, "Last sync", &synced, t.text);
             let action = if self.sync.tracks {
                 Some("Stop sync")
-            } else if self.session.client.is_some() && self.session.online {
+            } else if self.session.source.is_some() && self.session.online {
                 Some("Sync now")
             } else {
                 None
@@ -447,9 +447,9 @@ fn active_place(nav: &Nav) -> Option<usize> {
 }
 
 /// Playlists the user can change (others' public ones are read-only).
-pub(super) fn owns(session: &super::Session, p: &subsonic::Playlist) -> bool {
-    match (&p.owner, &session.client) {
-        (Some(owner), Some(c)) => owner == c.username(),
+pub(super) fn owns(session: &super::Session, p: &crate::source::Playlist) -> bool {
+    match (&p.owner, &session.source, &session.settings) {
+        (Some(owner), Some(_), Some(settings)) => owner == &settings.username,
         _ => true,
     }
 }

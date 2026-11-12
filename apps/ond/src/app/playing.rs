@@ -7,11 +7,11 @@ use crate::now_playing::{self, Remote};
 use crate::output::Outputs;
 use crate::playback;
 use crate::player::{self, Note, Player, QueueEdit};
+use crate::source::Src;
 use audio::{Command, PlaybackMode, TrackSource};
 use library::Track;
 use offline::OfflineStore;
 use streamcache::StreamCache;
-use subsonic::Client;
 
 /// The play/pause button's glyph and name: a spinner while the track is
 /// still on its way (buffering, loading, a seek or a hold pending), pause
@@ -36,7 +36,7 @@ struct AppSources<'a> {
     /// server too.
     cache: &'a StreamCache,
     /// Only while the server answers.
-    client: Option<&'a Client>,
+    source: Option<&'a Src>,
     /// The server is connecting: what needs it waits.
     connecting: bool,
     output: &'a Outputs,
@@ -61,7 +61,7 @@ impl player::Sources for AppSources<'_> {
                 token,
             });
         }
-        let Some(client) = self.client else {
+        let Some(source) = self.source else {
             let path = cached(self.cache, self.output, track)?;
             return Some(TrackSource {
                 id: track.id.clone(),
@@ -74,11 +74,8 @@ impl player::Sources for AppSources<'_> {
             });
         };
         let transcode = self.output.transcode();
-        let (url, suffix) = match &transcode {
-            None => (client.stream_url(&track.id), track.suffix.clone()),
-            Some(t) => (client.transcoded_stream_url(&track.id, &t.format, t.kbps), Some(t.format.clone())),
-        };
-        Some(TrackSource { id: track.id.clone(), url: url.to_string(), suffix, replay_gain, album_context, transcode, token })
+        let (url, suffix) = source.stream(track, transcode.as_ref());
+        Some(TrackSource { id: track.id.clone(), url, suffix, replay_gain, album_context, transcode, token })
     }
 
     /// Describes `track` for Now Playing before the engine reaches it.
@@ -265,7 +262,7 @@ impl OndApp {
         let sources = AppSources {
             offline: self.downloads.store.as_ref(),
             cache: &self.cache,
-            client: self.session.live(),
+            source: self.session.live(),
             connecting: self.session.connecting,
             output: &self.output,
             data: &self.data,

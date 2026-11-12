@@ -104,7 +104,7 @@ impl ViewCtx<'_> {
     }
 
     /// Playlists the user can change (others' public ones are read-only).
-    pub(super) fn owns(&self, p: &subsonic::Playlist) -> bool {
+    pub(super) fn owns(&self, p: &crate::source::Playlist) -> bool {
         super::sidebar::owns(self.session, p)
     }
 

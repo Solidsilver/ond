@@ -574,8 +574,8 @@ impl OndApp {
         match msg.into() {
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::ConnectFailed { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
-            Msg::Connected { client, settings, server, new_account, password_saved, .. } => {
-                self.connected(client, settings, server, new_account, password_saved)
+            Msg::Connected { source, settings, server, new_account, password_saved, .. } => {
+                self.connected(source, settings, server, new_account, password_saved)
             }
             Msg::ConnectFailed { error, .. } => self.connect_failed(error),
             Msg::Unreachable { username, error, .. } => self.unreachable(username, error),
@@ -740,28 +740,29 @@ impl OndApp {
                 }
             },
             Action::NeedLyrics(track) => {
-                if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
+                if !self.lyrics.contains_key(&track.id) && self.session.source.is_some() {
                     self.lyrics.insert(track.id.clone(), crate::lyrics::Fetch::Loading);
-                    self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
+                    self.bridge.fetch_lyrics(self.session.source.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
                 }
             }
             Action::NeedSongStats(id) => {
-                if !self.song_stats.contains_key(&id) && self.session.client.is_some() {
+                if !self.song_stats.contains_key(&id) && self.session.source.is_some() {
                     self.song_stats.insert(id.clone(), None);
-                    self.bridge.fetch_song_stats(self.session.client.clone(), id);
+                    self.bridge.fetch_song_stats(self.session.source.clone(), id);
                 }
             }
             Action::SyncNow => {
-                if let Some(client) = self.session.live().cloned()
+                if let Some(source) = self.session.live()
+                    && let Some(paged) = source.paged()
                     && self.sync.begin()
                 {
-                    self.bridge.sync_albums(client);
+                    self.bridge.sync_albums(paged);
                 }
             }
             Action::StopSync => self.bridge.cancel_sync(),
             Action::Reload(key) => match key {
-                ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
-                ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
+                ListKey::Album(id) => self.bridge.open_album(self.session.source.clone(), id),
+                ListKey::Playlist(id) => self.bridge.open_playlist(self.session.source.clone(), id),
                 ListKey::Artist(_) => {}
             },
             Action::ClearArtCache => self.art.clear(),
@@ -806,7 +807,7 @@ impl OndApp {
         self.ui.track_sel = None;
         self.ui.focus = Focus::Main;
         match self.ui.nav.current().clone() {
-            Route::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
+            Route::Album(id) => self.bridge.open_album(self.session.source.clone(), id),
             Route::Artist { name, .. } => self.bridge.find_credited(name),
             Route::Playlist { id, .. } => {
                 // Offline, a kept playlist is rebuilt from its pin and the stored tracks.
@@ -818,9 +819,9 @@ impl OndApp {
                     let tracks: Vec<Track> = ids.iter().filter_map(|i| by_id.get(i.as_str()).map(|t| (*t).clone())).collect();
                     self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 }
-                self.bridge.open_playlist(self.session.client.clone(), id)
+                self.bridge.open_playlist(self.session.source.clone(), id)
             }
-            Route::Favorites => self.bridge.fetch_starred(self.session.client.clone()),
+            Route::Favorites => self.bridge.fetch_starred(self.session.source.clone()),
             _ => {}
         }
     }

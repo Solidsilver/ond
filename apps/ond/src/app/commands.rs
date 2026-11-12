@@ -151,12 +151,12 @@ impl OndApp {
     /// Flips a heart now and tells the server; a refusal puts it back.
     pub(super) fn toggle_star(&mut self, kind: StarKind, id: String, track: Option<Track>, name: Option<String>) {
         let (on, seq) = self.favorites.toggle(kind, &id, track.as_ref(), name.as_deref());
-        self.bridge.set_starred(self.session.client.clone(), kind, id, on, seq);
+        self.bridge.set_starred(self.session.source.clone(), kind, id, on, seq);
     }
 
     pub(super) fn rate(&mut self, id: String, rating: u8) {
         let (previous, seq) = self.favorites.rate(&id, rating);
-        self.bridge.set_rating(self.session.client.clone(), id, rating, previous, seq);
+        self.bridge.set_rating(self.session.source.clone(), id, rating, previous, seq);
     }
 
     pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, seq: u64, error: Option<Failure>) {
@@ -188,12 +188,12 @@ impl OndApp {
     /// Applies a playlist change: locally first where the result is certain
     /// (so lists don't jump), then on the server, which sends back the truth.
     pub(super) fn playlist_action(&mut self, a: PlaylistAction) {
-        let client = self.session.client.clone();
+        let source = self.session.source.clone();
         match a {
             PlaylistAction::Create { name, tracks } => {
                 let name = if name.trim().is_empty() { "Untitled playlist".to_owned() } else { name.trim().to_owned() };
                 let ids = tracks.iter().map(|t| t.id.clone()).collect();
-                self.bridge.create_playlist(client, name, ids);
+                self.bridge.create_playlist(source, name, ids);
             }
             PlaylistAction::Add { id, tracks } => {
                 if tracks.is_empty() {
@@ -210,7 +210,7 @@ impl OndApp {
                 let n = tracks.len();
                 let name = self.data.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
                 self.show_notice(format!("Added {} to {name}", if n == 1 { tracks[0].title.clone() } else { format!("{n} songs") }));
-                self.bridge.edit_playlist(client, id, PlaylistEdit::Add(tracks.into_iter().map(|t| t.id).collect()));
+                self.bridge.edit_playlist(source, id, PlaylistEdit::Add(tracks.into_iter().map(|t| t.id).collect()));
             }
             PlaylistAction::Rename { id, name } => {
                 let name = name.trim().to_owned();
@@ -221,7 +221,7 @@ impl OndApp {
                     p.name = name.clone();
                 }
                 self.ui.nav.rename_playlist(&id, &name);
-                self.bridge.edit_playlist(client, id, PlaylistEdit::Rename(name));
+                self.bridge.edit_playlist(source, id, PlaylistEdit::Rename(name));
             }
             PlaylistAction::Delete { id } => {
                 self.data.playlists.retain(|p| p.id != id);
@@ -229,7 +229,7 @@ impl OndApp {
                 if matches!(self.ui.nav.current(), Route::Playlist { id: cur, .. } if *cur == id) {
                     self.go(Route::Recent);
                 }
-                self.bridge.edit_playlist(client, id, PlaylistEdit::Delete);
+                self.bridge.edit_playlist(source, id, PlaylistEdit::Delete);
             }
             PlaylistAction::Remove { id, index } => {
                 let Some(list) = self.data.playlist_tracks.get_mut(&id) else { return };
@@ -247,7 +247,7 @@ impl OndApp {
                 let text = format!("Removed {} from {name}", gone.title);
                 let undo = PlaylistAction::Restore { id: id.clone(), index, track: Box::new(gone), after };
                 self.ui.toasts.note(text, "Undo", Action::PlaylistEdit(undo));
-                self.bridge.edit_playlist(client, id, PlaylistEdit::Remove(vec![index]));
+                self.bridge.edit_playlist(source, id, PlaylistEdit::Remove(vec![index]));
             }
             PlaylistAction::Restore { id, index, track, after } => {
                 // The whole list goes back to the server, as a move sends it.
@@ -263,7 +263,7 @@ impl OndApp {
                     p.song_count += 1;
                     p.duration += secs;
                 }
-                self.bridge.edit_playlist(client, id, PlaylistEdit::Replace(ids));
+                self.bridge.edit_playlist(source, id, PlaylistEdit::Replace(ids));
             }
             PlaylistAction::Move { id, from, to } => {
                 let Some(list) = self.data.playlist_tracks.get_mut(&id) else { return };
@@ -274,7 +274,7 @@ impl OndApp {
                     self.ui.track_sel = Some(to.min(list.len() - 1));
                 }
                 let ids = list.iter().map(|t| t.id.clone()).collect();
-                self.bridge.edit_playlist(client, id, PlaylistEdit::Replace(ids));
+                self.bridge.edit_playlist(source, id, PlaylistEdit::Replace(ids));
             }
         }
     }

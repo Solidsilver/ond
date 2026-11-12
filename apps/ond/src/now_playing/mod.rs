@@ -29,6 +29,7 @@ use smtc as system;
 pub use smtc::set_window;
 pub mod scrobble;
 
+use crate::source::Src;
 use audio::{PlayState, Status};
 use scrobble::{Listen, Outcome, PendingPlay, RetryQueue};
 use std::collections::HashMap;
@@ -36,7 +37,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
-use subsonic::Client;
 
 /// A command from outside the app: media keys, Control Center, headphones.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,7 +102,7 @@ pub struct Config {
 }
 
 enum In {
-    Client(Client),
+    Source(Src),
     Known(Info),
     Engine(audio::Event),
     Scrobbling(bool),
@@ -129,8 +129,8 @@ impl Session {
         Self { tx }
     }
 
-    pub fn set_client(&self, client: Client) {
-        let _ = self.tx.send(In::Client(client));
+    pub fn set_source(&self, source: Src) {
+        let _ = self.tx.send(In::Source(source));
     }
 
     /// Describes a track the engine may start (the current one and the next).
@@ -184,7 +184,7 @@ impl Publisher {
 struct Worker {
     cfg: Config,
     tx: Sender<In>,
-    client: Option<Client>,
+    source: Option<Src>,
     scrobble: bool,
     /// Metadata for recently named tracks, by id.
     known: HashMap<String, Info>,
@@ -217,7 +217,7 @@ impl Worker {
             scrobble: cfg.scrobble,
             cfg,
             tx,
-            client: None,
+            source: None,
             known: HashMap::new(),
             current: None,
             listen: None,
@@ -253,8 +253,8 @@ impl Worker {
 
     fn handle(&mut self, msg: In) {
         match msg {
-            In::Client(c) => {
-                self.client = Some(c);
+            In::Source(c) => {
+                self.source = Some(c);
                 self.next_flush = Instant::now();
             }
             In::Known(info) => {
@@ -296,11 +296,12 @@ impl Worker {
                 self.listen = Some(Listen::new(track_id.clone(), started_ms, info.as_ref().and_then(|i| i.duration_secs)));
                 self.publisher.reset();
                 if self.scrobble
-                    && let Some(client) = self.client.clone()
+                    && let Some(source) = self.source.clone()
+                    && source.capabilities().scrobbling
                 {
                     // "Now playing" is best effort; it's stale soon anyway.
                     self.cfg.rt.spawn(async move {
-                        if let Err(e) = client.scrobble(&track_id, started_ms, false).await {
+                        if let Err(e) = source.scrobble(&track_id, started_ms, false).await {
                             tracing::debug!("now playing: {e}");
                         }
                     });
@@ -364,11 +365,11 @@ impl Worker {
     }
 
     fn submit(&mut self, play: PendingPlay) {
-        if !self.scrobble {
+        if !self.scrobble || self.source.as_ref().is_some_and(|s| !s.capabilities().scrobbling) {
             return;
         }
         // Keep plays in order: behind any that are still waiting.
-        if !self.retry.is_empty() || self.client.is_none() {
+        if !self.retry.is_empty() || self.source.is_none() {
             self.retry.push(play);
             self.flush_retries();
             return;
@@ -377,10 +378,10 @@ impl Worker {
     }
 
     fn send(&mut self, play: PendingPlay, from_retry: bool) {
-        let Some(client) = self.client.clone() else { return };
+        let Some(source) = self.source.clone() else { return };
         let tx = self.tx.clone();
         self.cfg.rt.spawn(async move {
-            let result = client.scrobble(&play.id, play.time_ms, true).await;
+            let result = source.scrobble(&play.id, play.time_ms, true).await;
             if let Err(e) = &result {
                 tracing::info!("scrobble {}: {e}", play.id);
             }
@@ -411,7 +412,7 @@ impl Worker {
 
     /// Sends the oldest waiting play; each answer sends the next.
     fn flush_retries(&mut self) {
-        if self.flushing || self.client.is_none() {
+        if self.flushing || self.source.as_ref().is_none_or(|s| !s.capabilities().scrobbling) {
             return;
         }
         let Some(play) = self.retry.front().cloned() else {
@@ -427,7 +428,7 @@ impl Worker {
     fn fetch_artwork(&self, info: &Info) {
         let Some(cover) = info.cover.clone() else { return };
         let dir = self.cfg.art_dir.clone();
-        let client = self.client.clone();
+        let source = self.source.clone();
         let track_id = info.track_id.clone();
         info.track_id.clone_into(&mut self.art_for.lock().unwrap_or_else(|e| e.into_inner()));
         let art_for = Arc::clone(&self.art_for);
@@ -443,8 +444,8 @@ impl Worker {
                     return hand_over(bytes);
                 }
             }
-            let Some(client) = client else { return };
-            if let Some(bytes) = crate::art::fetch_cached(&client, &dir, &cover, 512).await {
+            let Some(source) = source else { return };
+            if let Some(bytes) = crate::art::fetch_cached(&source, &dir, &cover, 512).await {
                 hand_over(bytes);
             }
         });
@@ -477,7 +478,7 @@ mod tests {
         assert!(p.should("b", State::Playing, 1.0, 34.0));
     }
 
-    /// A worker with no client (plays it submits wait in its retry queue) over a
+    /// A worker with no source (plays it submits wait in its retry queue) over a
     /// `Status` the test sets with `preview`. Its clock is moved by hand.
     struct Rig {
         w: Worker,
@@ -580,9 +581,26 @@ mod tests {
         assert_eq!(r.w.retry.len(), 2, "played again: counted again");
     }
 
-    fn client() -> Client {
+    fn source() -> Src {
         // Requests are spawned on the rig's runtime, which never runs them.
-        Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap()
+        crate::source::subsonic::test_source()
+    }
+
+    #[test]
+    fn a_source_without_scrobbling_sends_no_plays_or_retries() {
+        use crate::source::{Capabilities, fake::Fake};
+        use std::sync::atomic::Ordering;
+        let mut r = Rig::new(true);
+        let source = Arc::new(Fake::new(Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false }));
+        r.w.retry.push(pending("old", 1));
+        r.w.handle(In::Source(source.clone()));
+        r.w.flush_retries();
+        r.started("a", false);
+        r.play(0.0, 245);
+        r._rt.block_on(async { tokio::task::yield_now().await });
+        assert_eq!(source.scrobbles.load(Ordering::SeqCst), 0);
+        assert!(!r.w.flushing);
+        assert_eq!(r.w.retry.len(), 1, "only the earlier play remains queued");
     }
 
     fn pending(id: &str, time_ms: u64) -> PendingPlay {
@@ -597,7 +615,7 @@ mod tests {
     fn a_new_play_waits_behind_older_ones() {
         let mut r = Rig::new(true);
         r.w.retry.push(pending("old", 1));
-        r.w.handle(In::Client(client()));
+        r.w.handle(In::Source(source()));
         r.w.flush_retries();
         assert!(r.w.flushing, "the old play is being sent");
         r.started("a", false);
@@ -616,7 +634,7 @@ mod tests {
     #[test]
     fn a_play_goes_straight_out_when_nothing_waits() {
         let mut r = Rig::new(true);
-        r.w.handle(In::Client(client()));
+        r.w.handle(In::Source(source()));
         r.started("a", false);
         r.play(0.0, 245);
         assert!(r.w.retry.is_empty(), "sent, not queued");
@@ -634,7 +652,7 @@ mod tests {
         let mut r = Rig::new(true);
         r.w.retry.push(pending("a", 1));
         r.w.retry.push(pending("b", 2));
-        r.w.handle(In::Client(client()));
+        r.w.handle(In::Source(source()));
         r.w.flush_retries();
         let before = Instant::now();
         answer(&mut r, pending("a", 1), Outcome::Unreachable, true);

@@ -367,7 +367,7 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
         .enumerate()
-        .map(|(i, n)| subsonic::Playlist { id: format!("pl-{i}"), name: (*n).into(), song_count: 12, duration: 3000, cover_art: None, owner: None })
+        .map(|(i, n)| crate::source::Playlist { id: format!("pl-{i}"), name: (*n).into(), song_count: 12, duration: 3000, cover_art: None, owner: None })
         .collect();
     // A playlist mixing albums, for its page and mosaic.
     let mut mix = filler(20, 3);
