@@ -15,6 +15,11 @@ pub(crate) trait TokenStore: Send + 'static {
     fn forget(&self, account: &Account);
 }
 
+#[cfg(test)]
+pub(crate) trait TokenLoad {
+    fn load(&self, account: &Account) -> Option<Tokens>;
+}
+
 impl TokenStore for Settings {
     fn store(&self, account: &Account, tokens: &Tokens) {
         if let Err(e) = self.store_tokens(account, tokens) {

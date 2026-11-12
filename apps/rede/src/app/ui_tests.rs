@@ -1882,3 +1882,27 @@ fn an_empty_query_offers_the_books_in_progress_and_none_found_says_so() {
     type_in_palette(&mut h, "zzqx");
     h.get_by_label("No books match");
 }
+
+#[test]
+fn switching_accounts_from_the_sidebar_shows_signed_out_rows_and_activates_the_picked_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    let second =
+        crate::settings::Account { color: accounts::SourceColor::new(1), signed_out: true, ..crate::settings::Account::new("https://two.example.com", "alex") };
+    let second_id = second.id;
+    app_mut(&mut h).prefs.edit(|s| {
+        s.accounts.push(second);
+    });
+    app_mut(&mut h).shown = PrefsView::read(&app_mut(&mut h).prefs);
+    h.run_steps(2);
+
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("alex, Signed out").click();
+    h.run_steps(2);
+
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.scope.single()), Some(second_id));
+    let form = app_mut(&mut h).login.as_ref().expect("signed-out account opens sign-in");
+    assert_eq!(form.username, "alex");
+    assert_eq!(form.server, "https://two.example.com");
+}

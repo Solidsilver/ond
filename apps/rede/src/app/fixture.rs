@@ -209,9 +209,13 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     });
     app.shown = PrefsView::read(&app.prefs);
     app.session = Session { account: Some(signed_in), source: None, shelf: Some(shelf.clone()), connecting: false };
-    app.handle(crate::bridge::LibraryMsg::Books(listed));
+    let session = app.bridge.session();
+    app.handle(crate::bridge::Msg::Library { session, event: crate::bridge::LibraryMsg::Books(listed) });
     for (n, book) in all.iter().enumerate().take(books) {
-        app.handle(crate::bridge::LibraryMsg::Book { key: ItemKey::new(account().id, book.id.clone()), item: Box::new(details(n)) });
+        app.handle(crate::bridge::Msg::Library {
+            session,
+            event: crate::bridge::LibraryMsg::Book { key: ItemKey::new(account().id, book.id.clone()), item: Box::new(details(n)) },
+        });
     }
     // Square, portrait and landscape art exercise the fit; the remaining
     // books keep their title placeholders, including a cover still loading.

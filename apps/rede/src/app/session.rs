@@ -79,6 +79,11 @@ impl RedeApp {
     pub(super) fn signed_in(&mut self, account: Account, source: Arc<dyn Source>, shelf: Arc<Shelf>, warning: Option<String>) {
         // Another account signed in: what's on screen came from the old one.
         let changed = self.session.account.as_ref().map(|a| a.id) != Some(account.id);
+        if changed && self.session.account.is_some() {
+            let finished = self.teardown_session();
+            self.bridge.track_finish(finished);
+        }
+        let account = Account { signed_out: false, ..account };
         self.session = Session { account: Some(account.clone()), source: Some(source.clone()), shelf: Some(shelf.clone()), connecting: false };
         self.bridge.close_downloads(self.downloads.store.clone());
         self.downloads = Default::default();
@@ -100,6 +105,7 @@ impl RedeApp {
             self.downloads.store.clone(),
         ));
         self.prefs.edit(|s| s.put_account(account.clone()));
+        self.shown = super::PrefsView::read(&self.prefs);
         if changed {
             self.stats = Default::default();
             self.books.clear();
@@ -212,12 +218,7 @@ impl RedeApp {
                     return;
                 }
                 let username = login.user.username.unwrap_or_default();
-                let account = if account.username.is_empty() || account.username == username {
-                    Account { username, ..account }
-                } else {
-                    Account::new(account.server, username)
-                };
-                let account = Account { sign_in: Some(SignInMethod::OpenId), ..account };
+                let account = self.prefs.get(|s| s.account_for_sign_in(account.server, username, Some(SignInMethod::OpenId)));
                 self.bridge.accept_openid(account, client, login.tokens, warning);
             }
             _ => {}
@@ -304,28 +305,20 @@ impl RedeApp {
         }
         form.busy = true;
         form.error = None;
-        // The same user on a new address is the same account (its shelf and
-        // progress stay); another user is another one.
-        let account = match form.account.clone() {
-            Some(a) if a.username == username => Account { server, username, ..a },
-            _ => Account::new(server, username),
-        };
-        let account = Account { sign_in: Some(SignInMethod::Password), ..account };
+        let account = self.prefs.get(|s| s.account_for_sign_in(server, username, Some(SignInMethod::Password)));
         form.account = Some(account.clone());
         self.session.connecting = true;
         self.bridge.sign_in(account, form.password.clone());
     }
 
-    /// Signs out: the tokens go, and nothing else. The sign-in screen comes
-    /// back with the account filled in, and anything in flight is dropped.
-    pub(super) fn sign_out(&mut self) {
-        let Some(account) = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned())) else { return };
+    /// Stops playback, finishes the listening worker and clears the active
+    /// account's in-memory state so either signing out or switching starts clean.
+    pub(super) fn teardown_session(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
         self.set_mode(crate::window::Mode::Full);
         self.playback_control(crate::player::Control::Stop);
         self.playback_generation += 1;
         self.opening = false;
         let finished = self.listening.take().map(crate::listening::Listening::finish);
-        self.bridge.sign_out_after(account.clone(), self.session.source.clone(), finished);
         if let Some(engine) = self.engine.take() {
             engine.shutdown(Duration::from_secs(2));
         }
@@ -343,6 +336,42 @@ impl RedeApp {
         self.sync = super::SyncState::default();
         self.ui.nav = super::Nav::default();
         self.ui.notice = None;
+        finished
+    }
+
+    /// Switches to `id`, stopping playback and flushing pending progress for
+    /// the current account before opening the target shelf and session.
+    pub(super) fn switch_account(&mut self, id: accounts::AccountId) {
+        let Some(account) = self.prefs.get(|s| s.account_by_id(id).cloned()) else { return };
+        if self.session.account.as_ref().map(|a| a.id) == Some(id) && (self.session.signed_in() || self.session.connecting) && !account.signed_out {
+            return;
+        }
+        let finished = self.teardown_session();
+        self.openid.pending = None;
+        self.openid.exchanging = false;
+        self.prefs.edit(|s| s.scope.choose_one(id));
+        self.shown = super::PrefsView::read(&self.prefs);
+        if account.signed_out {
+            self.bridge.end_session();
+            self.bridge.track_finish(finished);
+            self.login = Some(LoginForm::for_account(Some(&account)));
+        } else {
+            self.login = None;
+            self.session = Session { connecting: true, ..Session::default() };
+            self.bridge.switch_account(account, finished);
+        }
+    }
+
+    /// Signs out: the tokens go, and nothing else. The sign-in screen comes
+    /// back with the account filled in, and anything in flight is dropped.
+    pub(super) fn sign_out(&mut self) {
+        let Some(mut account) = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned())) else { return };
+        account.signed_out = true;
+        let source = self.session.source.clone();
+        self.prefs.edit(|s| s.set_signed_out(account.id, true));
+        self.shown = super::PrefsView::read(&self.prefs);
+        let finished = self.teardown_session();
+        self.bridge.sign_out_after(account.clone(), source, finished);
         self.login = Some(LoginForm::for_account(Some(&account)));
         self.onboarding = Some(kit::OnboardingStep::Kinds);
     }
