@@ -165,12 +165,15 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
-    // The first-run sheet's tiles, and the account added with Done.
-    for (login, step) in [(Some(LoginForm::default()), shell::kit::OnboardingStep::Kinds), (None, shell::kit::OnboardingStep::Added)] {
+    // The first-run sheet, on its one kind's form, and the account added
+    // with Done.
+    for (login, step, heading) in
+        [(Some(LoginForm::default()), shell::kit::OnboardingStep::Kinds, "Audiobookshelf"), (None, shell::kit::OnboardingStep::Added, "Where are your books?")]
+    {
         app_mut(&mut h).login = login;
         app_mut(&mut h).onboarding = Some(step);
         h.run_steps(3);
-        h.get_by_label("Where are your books?");
+        h.get_by_label(heading);
         h.check_accessibility();
     }
     app_mut(&mut h).onboarding = None;
@@ -701,14 +704,14 @@ fn signing_out_is_in_the_account_menu() {
     assert!(app_mut(&mut h).login.is_some(), "the sign-in screen comes back");
     assert!(!app_mut(&mut h).session.signed_in());
     assert_eq!(app_mut(&mut h).onboarding, Some(shell::kit::OnboardingStep::Kinds), "on the first-run sheet");
-    h.get_by_label("Audiobookshelf, Your own server, at home or away.").click();
-    h.run_steps(2);
+    // Its one kind's form, filled in for the account.
     h.get_by_label("Sign in");
+    assert_eq!(app_mut(&mut h).login.as_ref().map(|f| f.username.as_str()), Some("sam"));
 }
 
-/// Without an account the window is the first-run sheet: Audiobookshelf
-/// opens the sign-in form and Back the tiles, and once signed in the sheet
-/// lists the account with Done, the only way on, which opens the library.
+/// Without an account the window is the first-run sheet, which with one
+/// kind of source is Audiobookshelf's sign-in form: no tiles, and no Back
+/// to them. Signing in opens the library.
 #[test]
 fn signing_in_goes_through_the_first_run_sheet() {
     use shell::kit::OnboardingStep;
@@ -721,18 +724,10 @@ fn signing_in_goes_through_the_first_run_sheet() {
     app.onboarding = Some(OnboardingStep::Kinds);
     *h.state_mut() = Some(app);
     h.run_steps(2);
-    h.get_by_label("Where are your books?");
-    assert!(h.query_by_label("Done").is_none(), "no way on without an account");
-    let tile = "Audiobookshelf, Your own server, at home or away.";
-    h.get_by_label(tile).click();
-    h.run_steps(2);
-    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Form(0)));
     h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Server");
-    h.get_by_label("Back").click();
-    h.run_steps(2);
-    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Kinds));
-    h.get_by_label(tile).click();
-    h.run_steps(2);
+    assert!(h.query_by_label_contains("Your own server").is_none(), "no tile to pick");
+    assert!(h.query_by_label("Back").is_none(), "nothing to go back to");
+    assert!(h.query_by_label("Done").is_none(), "no way on without an account");
 
     let account = account();
     let client = abs::Client::new("http://127.0.0.1:9", account.device()).unwrap();
@@ -741,11 +736,7 @@ fn signing_in_goes_through_the_first_run_sheet() {
     let session = app.bridge.session();
     app.handle(crate::bridge::AccountMsg::SignedIn { session, account, source, shelf: shelf(dir.path()), warning: None });
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Added));
-    h.get_by_label("sam, Audiobookshelf, added");
-    assert!(h.query_by_label("Add another").is_none(), "one account at a time");
-    h.get_by_label("Done").click();
-    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).onboarding, None);
     assert!(!app_mut(&mut h).signing_in(), "the library is up");
 }
 

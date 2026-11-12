@@ -1,11 +1,11 @@
 //! The first-run sheet: where Rede opens without an account to resume, and
 //! where signing out leads. It's the kit's [`onboarding`](fn@kit::onboarding)
-//! with Audiobookshelf as its one kind; picking it shows the sign-in form
-//! (`session`). Once signed in, the sheet lists the account with Done,
-//! which opens the library.
+//! with Audiobookshelf as its one kind, so it opens on the sign-in form
+//! (`session`) with no tiles to pick from. Once signed in, the sheet closes
+//! on the library.
 //!
 //! The form opened on its own, when a saved login stops working, is drawn
-//! in the same sheet, on the form with no way back to the tiles.
+//! in the same sheet.
 
 use super::{Action, RedeApp};
 use accounts::SourceColor;
@@ -46,12 +46,9 @@ impl RedeApp {
             if bar.double_clicked() {
                 shell::chrome::title_double_click(ui.ctx());
             }
-            let busy = self.login.as_ref().is_some_and(|f| f.busy) || self.openid.pending.is_some();
+            let waiting = self.login.as_ref().is_some_and(|f| f.busy) || self.openid.pending.is_some();
             let (step, back) = match self.onboarding {
-                // The form needs its fields; without them the tiles lead
-                // back to it.
-                Some(OnboardingStep::Form(_)) if self.login.is_none() => (OnboardingStep::Kinds, false),
-                Some(step) => (step, !busy),
+                Some(step) => (step, true),
                 None => (OnboardingStep::Form(AUDIOBOOKSHELF), false),
             };
             let form_height = self.login_form_height();
@@ -72,7 +69,17 @@ impl RedeApp {
                     detail: None,
                 })
                 .collect();
-            let sheet = kit::Onboarding { welcome: "Where are your books?", kinds: &KINDS, added: &added, step, add_another: ADD_ANOTHER, back, form_height };
+            let sheet = kit::Onboarding {
+                welcome: "Where are your books?",
+                kinds: &KINDS,
+                added: &added,
+                step,
+                add_another: ADD_ANOTHER,
+                back,
+                cancel: false,
+                waiting,
+                form_height,
+            };
             if let Some(event) = kit::onboarding(ui, &sheet, |ui, _| self.login_form(ui, compact)) {
                 self.actions.push(Action::Onboarding(event));
             }
@@ -97,15 +104,16 @@ impl RedeApp {
             // Not while the form waits: the sheet doesn't offer it then.
             OnboardingEvent::Back if self.login.as_ref().is_some_and(|f| f.busy) || self.openid.pending.is_some() => {}
             OnboardingEvent::Back | OnboardingEvent::AddAnother => *step = OnboardingStep::Kinds,
-            OnboardingEvent::Done if self.session.signed_in() => self.onboarding = None,
-            OnboardingEvent::Done => {}
+            OnboardingEvent::Done | OnboardingEvent::Open(_) if self.session.signed_in() => self.onboarding = None,
+            OnboardingEvent::Done | OnboardingEvent::Open(_) | OnboardingEvent::Cancel => {}
         }
     }
 
-    /// Signed in: the sheet, if it's up, lists the account.
+    /// Signed in: the sheet, if it's up, moves on as the kit says, which
+    /// without Add another is to close on the library.
     pub(super) fn source_added(&mut self) {
-        if let Some(step) = self.onboarding.as_mut() {
-            *step = OnboardingStep::Added;
+        if self.onboarding.is_some() {
+            self.onboarding = OnboardingStep::after_adding(ADD_ANOTHER);
         }
     }
 }

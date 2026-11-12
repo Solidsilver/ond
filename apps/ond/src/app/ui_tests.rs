@@ -387,8 +387,8 @@ fn signing_out_from_the_server_popover_waits_for_the_answer() {
 
 /// Without a login the window is the first-run sheet: a kind that isn't
 /// here yet can't be picked, Navidrome opens the login form and Back the
-/// tiles, and once the server answers the sheet lists it with Done, the
-/// only way on, which opens the library.
+/// tiles, and once the server answers the library opens: Ond holds one
+/// server, so there's no step that only says Done.
 #[test]
 fn signing_in_goes_through_the_first_run_sheet() {
     use shell::kit::OnboardingStep;
@@ -438,12 +438,9 @@ fn signing_in_goes_through_the_first_run_sheet() {
         password_saved: true,
     });
     h.run_steps(2);
-    assert_eq!(step(&mut h), Some(OnboardingStep::Added));
-    h.get_by_label("music.example.com, Navidrome, added");
-    assert!(h.query_by_label("Add another").is_none(), "one server at a time");
-    h.get_by_label("Done").click();
-    h.run_steps(2);
+    assert_eq!(step(&mut h), None, "the sheet is gone");
     assert!(!app_mut(&mut h).signing_in(), "the library is up");
+    assert!(h.query_by_label("Done").is_none() && h.query_by_label("Add another").is_none());
     *h.state_mut() = None;
 }
 
@@ -887,20 +884,18 @@ fn every_view_names_its_controls() {
     assert!(app_mut(&mut h).ui.palette.is_some(), "the palette is open");
     h.check_accessibility();
     // Signing in: the first-run sheet's tiles, Navidrome's form (and
-    // waiting on it), a server added, and the form on its own.
+    // waiting on it), and the form on its own.
     let form = || session::LoginForm { server: "http://localhost:4533".into(), ..Default::default() };
     let busy = || session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() };
-    let added = Some((accounts::AccountId::new(), "https://music.example.com".to_owned()));
-    for (login, step, added) in [
-        (Some(form()), Some(shell::kit::OnboardingStep::Kinds), None),
-        (Some(form()), Some(shell::kit::OnboardingStep::Form(0)), None),
-        (Some(busy()), Some(shell::kit::OnboardingStep::Form(0)), None),
-        (None, Some(shell::kit::OnboardingStep::Added), added),
-        (Some(session::LoginForm { closable: true, ..form() }), None, None),
+    for (login, step) in [
+        (Some(form()), Some(shell::kit::OnboardingStep::Kinds)),
+        (Some(form()), Some(shell::kit::OnboardingStep::Form(0))),
+        (Some(busy()), Some(shell::kit::OnboardingStep::Form(0))),
+        (Some(session::LoginForm { closable: true, ..form() }), None),
     ] {
         reset(&mut h, FULL, Route::Recent);
         app_mut(&mut h).login = login;
-        app_mut(&mut h).onboarding = step.map(|step| onboarding::Onboard { step, added: added.clone() });
+        app_mut(&mut h).onboarding = step.map(|step| onboarding::Onboard { step, added: None });
         h.run_steps(2);
         assert!(h.query_by_label_contains("Where's your music?").is_some() || h.query_by_label("Navidrome").is_some(), "the sheet is drawn");
         h.check_accessibility();

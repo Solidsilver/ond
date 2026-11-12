@@ -2,7 +2,8 @@
 //! where signing out leads. It's the kit's [`onboarding`](fn@kit::onboarding)
 //! with the kinds of source Ond knows of, of which only Navidrome can be
 //! added yet; picking it shows the login form (`session`). Once the server
-//! answers, the sheet lists it with Done, which opens the library.
+//! answers, the sheet closes on the library: Ond holds one server, so
+//! there's no Add another and no step that would only say Done.
 //!
 //! The login form opened on its own, to sign in again over the library, is
 //! drawn in the same sheet, on the form with no way back to the tiles.
@@ -60,12 +61,12 @@ impl OndApp {
             if bar.double_clicked() {
                 crate::chrome::title_double_click(ui.ctx());
             }
-            let busy = self.login.as_ref().is_some_and(|f| f.busy);
+            let waiting = self.login.as_ref().is_some_and(|f| f.busy);
             let (step, back) = match &self.onboarding {
                 // The form needs its fields; without them (the server went
                 // away before it answered) the tiles lead back to it.
                 Some(o) if matches!(o.step, OnboardingStep::Form(_)) && self.login.is_none() => (OnboardingStep::Kinds, false),
-                Some(o) => (o.step, !busy),
+                Some(o) => (o.step, true),
                 None => (OnboardingStep::Form(NAVIDROME), false),
             };
             let host = self.onboarding.as_ref().and_then(|o| o.added.as_ref()).map(|(id, server)| (*id, super::diagnostics::server_host(server)));
@@ -81,8 +82,17 @@ impl OndApp {
                     detail: None,
                 })
                 .collect();
-            let sheet =
-                kit::Onboarding { welcome: "Where's your music?", kinds: &KINDS, added: &added, step, add_another: ADD_ANOTHER, back, form_height: FORM_H };
+            let sheet = kit::Onboarding {
+                welcome: "Where's your music?",
+                kinds: &KINDS,
+                added: &added,
+                step,
+                add_another: ADD_ANOTHER,
+                back,
+                cancel: false,
+                waiting,
+                form_height: FORM_H,
+            };
             if let Some(event) = kit::onboarding(ui, &sheet, |ui, _| self.login_form(ui)) {
                 self.actions.push(Action::Onboarding(event));
             }
@@ -107,16 +117,24 @@ impl OndApp {
             // offer it then.
             OnboardingEvent::Back if self.login.as_ref().is_some_and(|f| f.busy) => {}
             OnboardingEvent::Back | OnboardingEvent::AddAnother => sheet.step = OnboardingStep::Kinds,
-            OnboardingEvent::Done if sheet.added.is_some() => self.onboarding = None,
-            OnboardingEvent::Done => {}
+            OnboardingEvent::Done | OnboardingEvent::Open(_) if sheet.added.is_some() => self.onboarding = None,
+            // Ond's sheet is never over a server in view, so it offers no
+            // Cancel.
+            OnboardingEvent::Done | OnboardingEvent::Open(_) | OnboardingEvent::Cancel => {}
         }
     }
 
-    /// A server answered the login form: the sheet, if it's up, lists it.
+    /// A server answered the login form: the sheet, if it's up, moves on
+    /// as the kit says, which without Add another is to close on the
+    /// library.
     pub(super) fn source_added(&mut self, server: &str, account: AccountId) {
-        if let Some(sheet) = self.onboarding.as_mut() {
-            sheet.added = Some((account, server.to_owned()));
-            sheet.step = OnboardingStep::Added;
+        let Some(sheet) = self.onboarding.as_mut() else { return };
+        match OnboardingStep::after_adding(ADD_ANOTHER) {
+            Some(step) => {
+                sheet.added = Some((account, server.to_owned()));
+                sheet.step = step;
+            }
+            None => self.onboarding = None,
         }
     }
 }

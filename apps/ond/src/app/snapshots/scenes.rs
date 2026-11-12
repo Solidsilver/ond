@@ -888,12 +888,6 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
     s.shoot(h, "login-busy");
 
-    // Signed in from the sheet: the server, and Done.
-    reset(h, FULL, Route::Recent);
-    let account = app_mut(h).session.account().unwrap_or_default();
-    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Added, added: Some((account, "https://music.example.com".into())) });
-    s.shoot(h, "login-added");
-
     // Signing in again over the library: the form alone.
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm {
