@@ -84,6 +84,7 @@ impl RedeApp {
         self.downloads = Default::default();
         self.bridge.open_downloads(account.id, self.shown.downloads.limit, self.stream_dir.clone(), self.downloads.store.clone());
         self.login = None;
+        self.source_added();
         self.openid.pending = None;
         self.openid.exchanging = false;
         self.art.set_source(Some(source.clone()));
@@ -343,6 +344,7 @@ impl RedeApp {
         self.ui.nav = super::Nav::default();
         self.ui.notice = None;
         self.login = Some(LoginForm::for_account(Some(&account)));
+        self.onboarding = Some(kit::OnboardingStep::Kinds);
     }
 
     /// Signs out and says why: the server turned the saved login down.
@@ -420,11 +422,13 @@ impl RedeApp {
         self.ctx.request_repaint_after(wait);
     }
 
-    /// The sign-in screen. The server chooses which ways in the form offers;
-    /// when it offers its provider, that leads (most accounts use it) and the
-    /// password form follows under a divider, so one button is plainly the
-    /// main one.
-    pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
+    /// The sign-in form, in the first-run sheet's column. The server
+    /// chooses which ways in the form offers; when it offers its provider,
+    /// that leads (most accounts use it) and the password form follows under
+    /// a divider, so one button is plainly the main one. `compact` is a short
+    /// window: less space, and no help for an address the server has already
+    /// answered at.
+    pub(super) fn login_form(&mut self, ui: &mut egui::Ui, compact: bool) {
         let Some(form) = self.login.as_mut() else { return };
         let t = Tokens::of(ui);
         let waiting = self.openid.pending.as_ref();
@@ -444,161 +448,128 @@ impl RedeApp {
             None => None,
         };
         let spin = spin(ui, phase);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
-            let strip = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), super::BAR_H));
-            let bar = ui.interact(strip, ui.scope_id().with("login-titlebar"), egui::Sense::click_and_drag());
-            if bar.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if bar.double_clicked() {
-                shell::chrome::title_double_click(ui.ctx());
-            }
-            // Roughly how tall the column is, so it sits a little above the
-            // middle whatever the server offers.
-            let form_h = if let Some(pending) = waiting {
-                if pending.flow.used_fallback() { 360.0 } else { 260.0 }
-            } else if oidc && local {
-                400.0
-            } else if local {
-                320.0
-            } else {
-                250.0
-            };
-            let room = ui.available_height();
-            // A short window keeps the buttons in view: a smaller heading, and
-            // no help for an address the server has already answered at.
-            let compact = room < form_h + 160.0;
-            // Shorter still, it scrolls rather than cutting the error off.
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.add_space(((room - form_h) * 0.42).max(if compact { 12.0 } else { 24.0 }));
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("Rede").font(egui::FontId::new(if compact { 22.0 } else { 28.0 }, theme::semibold())).color(t.text));
-                    if !compact {
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Sign in to Audiobookshelf").size(13.0).color(t.muted));
-                    }
-                    ui.add_space(if compact { 14.0 } else { 24.0 });
-                });
-                ui.horizontal(|ui| {
-                    ui.add_space(((ui.available_width() - FORM_W) / 2.0).max(0.0));
-                    ui.vertical(|ui| {
-                        ui.set_width(FORM_W);
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        if let Some(pending) = waiting {
-                            action = waiting_ui(ui, &t, pending, exchanging, spin);
-                            return;
-                        }
-                        if let Some(message) = custom_message {
-                            ui.add(egui::Label::new(egui::RichText::new(message).size(12.0).color(t.muted)).wrap());
-                            ui.add_space(14.0);
-                        }
-                        let mut enter = false;
-                        // The error, if there is one, goes under the field it's
-                        // about; one about the sign-in as a whole waits below
-                        // the buttons.
-                        let error = form.error.clone();
-                        let on = error.as_deref().and_then(error_field);
-                        let about = |field: Field| error.as_deref().filter(|_| on == Some(field));
-                        ui.add_enabled_ui(!form.busy, |ui| {
-                            enter |= kit::TextField::new(Field::Server.label())
-                                .hint("books.example.com")
-                                .focus(!form.focused)
-                                .error(about(Field::Server))
-                                .help((!(compact && status.is_some())).then_some("Your Audiobookshelf server's address"))
-                                .show(ui, &mut form.server);
-                            form.focused = true;
-                        });
-                        // The button that's waiting on the server says so; the
-                        // rest are greyed out until it answers.
-                        let form_busy = form.busy;
-                        let button = |ui: &mut egui::Ui, label: &str, primary: bool, busy: bool| {
-                            if form_busy && busy {
-                                kit::form_button(ui, "Connecting…", primary, Some(spin));
-                                false
-                            } else {
-                                ui.add_enabled_ui(!form_busy, |ui| kit::form_button(ui, label, primary, None)).inner.clicked()
-                            }
-                        };
-                        // The space above a button, less when room is short.
-                        let gap = if compact { 12.0 } else { 18.0 };
-                        if status.is_none() {
-                            ui.add_space(gap);
-                            if button(ui, "Sign in", true, true) || enter {
-                                action = Some(Action::CheckServer);
-                            }
-                        }
-                        if oidc {
-                            ui.add_space(gap);
-                            if button(ui, oidc_label, true, !password_busy) {
-                                action = Some(Action::OpenId);
-                            }
-                            if !local {
-                                ui.add_space(6.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(egui::RichText::new("You'll finish signing in in your browser.").size(11.0).color(t.muted));
-                                });
-                            }
-                        }
-                        if local {
-                            if oidc {
-                                ui.add_space(if compact { 8.0 } else { 14.0 });
-                                kit::or_divider(ui);
-                                ui.add_space(if compact { 2.0 } else { 6.0 });
-                            } else {
-                                ui.add_space(10.0);
-                            }
-                            ui.add_enabled_ui(!form.busy, |ui| {
-                                enter |= kit::TextField::new(Field::Username.label()).error(about(Field::Username)).show(ui, &mut form.username);
-                                ui.add_space(10.0);
-                                enter |= kit::TextField::new(Field::Password.label()).password(true).error(about(Field::Password)).show(ui, &mut form.password);
-                            });
-                            ui.add_space(gap);
-                            if button(ui, "Sign in", !oidc, password_busy || !oidc) || enter {
-                                action = Some(Action::SignIn);
-                            }
-                        }
-                        if status.is_some() && !local && !oidc {
-                            ui.add_space(14.0);
-                            kit::notice(
-                                ui,
-                                "No way to sign in",
-                                if crate::openid::SUPPORTED {
-                                    "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID."
-                                } else {
-                                    "Browser sign-in is only available on macOS for now. Ask your admin to enable an Audiobookshelf password for this account."
-                                },
-                            );
-                        }
-                        if let Some(error) = &form.error
-                            && error_field(error).is_none()
-                        {
-                            ui.add_space(12.0);
-                            kit::field_error(ui, "Sign-in error", error);
-                        }
-                        if let Some(warning) = &form.warning {
-                            ui.add_space(14.0);
-                            kit::notice(ui, "Update recommended", warning);
-                        }
-                        // A server that takes the connection and then says
-                        // nothing would hold the form until the request times out.
-                        if form.busy {
-                            ui.add_space(16.0);
-                            ui.vertical_centered(|ui| {
-                                if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
-                                    action = Some(Action::CancelSignIn);
-                                }
-                            });
-                        }
-                    });
-                });
-                ui.add_space(24.0);
-            });
-        });
-        if let Some(action) = action {
-            self.actions.push(action);
+        if let Some(pending) = waiting {
+            self.actions.extend(waiting_ui(ui, &t, pending, exchanging, spin));
+            return;
         }
-        for action in std::mem::take(&mut self.actions) {
-            self.apply(action);
+        if let Some(message) = custom_message {
+            ui.add(egui::Label::new(egui::RichText::new(message).size(12.0).color(t.muted)).wrap());
+            ui.add_space(14.0);
+        }
+        let mut enter = false;
+        // The error, if there is one, goes under the field it's
+        // about; one about the sign-in as a whole waits below
+        // the buttons.
+        let error = form.error.clone();
+        let on = error.as_deref().and_then(error_field);
+        let about = |field: Field| error.as_deref().filter(|_| on == Some(field));
+        ui.add_enabled_ui(!form.busy, |ui| {
+            enter |= kit::TextField::new(Field::Server.label())
+                .hint("books.example.com")
+                .focus(!form.focused)
+                .error(about(Field::Server))
+                .help((!(compact && status.is_some())).then_some("Your Audiobookshelf server's address"))
+                .show(ui, &mut form.server);
+            form.focused = true;
+        });
+        // The button that's waiting on the server says so; the
+        // rest are greyed out until it answers.
+        let form_busy = form.busy;
+        let button = |ui: &mut egui::Ui, label: &str, primary: bool, busy: bool| {
+            if form_busy && busy {
+                kit::form_button(ui, "Connecting…", primary, Some(spin));
+                false
+            } else {
+                ui.add_enabled_ui(!form_busy, |ui| kit::form_button(ui, label, primary, None)).inner.clicked()
+            }
+        };
+        // The space above a button, less when room is short.
+        let gap = if compact { 12.0 } else { 18.0 };
+        if status.is_none() {
+            ui.add_space(gap);
+            if button(ui, "Sign in", true, true) || enter {
+                action = Some(Action::CheckServer);
+            }
+        }
+        if oidc {
+            ui.add_space(gap);
+            if button(ui, oidc_label, true, !password_busy) {
+                action = Some(Action::OpenId);
+            }
+            if !local {
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("You'll finish signing in in your browser.").size(11.0).color(t.muted));
+                });
+            }
+        }
+        if local {
+            if oidc {
+                ui.add_space(if compact { 8.0 } else { 14.0 });
+                kit::or_divider(ui);
+                ui.add_space(if compact { 2.0 } else { 6.0 });
+            } else {
+                ui.add_space(10.0);
+            }
+            ui.add_enabled_ui(!form.busy, |ui| {
+                enter |= kit::TextField::new(Field::Username.label()).error(about(Field::Username)).show(ui, &mut form.username);
+                ui.add_space(10.0);
+                enter |= kit::TextField::new(Field::Password.label()).password(true).error(about(Field::Password)).show(ui, &mut form.password);
+            });
+            ui.add_space(gap);
+            if button(ui, "Sign in", !oidc, password_busy || !oidc) || enter {
+                action = Some(Action::SignIn);
+            }
+        }
+        if status.is_some() && !local && !oidc {
+            ui.add_space(14.0);
+            kit::notice(
+                ui,
+                "No way to sign in",
+                if crate::openid::SUPPORTED {
+                    "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID."
+                } else {
+                    "Browser sign-in is only available on macOS for now. Ask your admin to enable an Audiobookshelf password for this account."
+                },
+            );
+        }
+        if let Some(error) = &form.error
+            && error_field(error).is_none()
+        {
+            ui.add_space(12.0);
+            kit::field_error(ui, "Sign-in error", error);
+        }
+        if let Some(warning) = &form.warning {
+            ui.add_space(14.0);
+            kit::notice(ui, "Update recommended", warning);
+        }
+        // A server that takes the connection and then says
+        // nothing would hold the form until the request times out.
+        if form.busy {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
+                    action = Some(Action::CancelSignIn);
+                }
+            });
+        }
+        self.actions.extend(action);
+    }
+
+    /// Roughly how tall the sign-in form is, whatever the server offers.
+    pub(super) fn login_form_height(&self) -> f32 {
+        let Some(form) = self.login.as_ref() else { return 0.0 };
+        let status = form.status.as_ref().filter(|_| form.checked_server == form.server.trim());
+        let local = status.is_some_and(|s| s.auth_methods.is_empty() || s.auth_methods.iter().any(|m| m == "local"));
+        let oidc = crate::openid::SUPPORTED && status.is_some_and(|s| s.auth_methods.iter().any(|m| m == "openid"));
+        if let Some(pending) = self.openid.pending.as_ref() {
+            if pending.flow.used_fallback() { 300.0 } else { 200.0 }
+        } else if oidc && local {
+            340.0
+        } else if local {
+            260.0
+        } else {
+            190.0
         }
     }
 
@@ -611,9 +582,6 @@ impl RedeApp {
         }
     }
 }
-
-/// The sign-in column's width, Ond's.
-const FORM_W: f32 = 320.0;
 
 /// Waiting for the browser: what's happening, a way out, and a way back to
 /// the page if its tab went missing. Centred, since there's nothing to fill

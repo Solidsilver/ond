@@ -193,6 +193,7 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
     app.bridge.use_openid_store(crate::openid::TestStore::default());
     app.login = None;
+    app.onboarding = None;
     let shelf = shelf(dir);
     let all = summaries();
     let listed: Vec<ItemSummary> = all.iter().take(books).cloned().collect();
@@ -235,11 +236,13 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     app
 }
 
-/// An app at its sign-in screen, with nothing saved.
+/// An app at its sign-in form, with nothing saved: the first-run sheet,
+/// with Audiobookshelf picked.
 pub fn signed_out(ctx: &egui::Context, dir: &Path) -> RedeApp {
     let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
     app.bridge.use_openid_store(crate::openid::TestStore::default());
     app.login = Some(LoginForm::default());
+    app.onboarding = Some(shell::kit::OnboardingStep::Form(0));
     app.session = Session::default();
     app
 }
@@ -254,7 +257,7 @@ pub fn book_route(n: usize) -> Route {
 pub fn frame(ctx: &egui::Context, app: &mut RedeApp) {
     let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(FULL[0], FULL[1]))), ..Default::default() };
     let mut out = ctx.run_ui(input, |ui| {
-        if app.login.is_some() {
+        if app.signing_in() {
             app.login_ui(ui);
         } else {
             app.main_ui(ui);

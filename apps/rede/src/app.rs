@@ -9,6 +9,7 @@
 //! actions and messages each one handles are in their own modules:
 //!
 //! - `session`: signing in, resuming, and signing out
+//! - `onboarding`: the first-run sheet the sign-in form is drawn in
 //! - `library`: the books the shelf has, in the order drawn
 //! - `home`: the books in progress and the newest
 //! - `progress`: where each book is, and how a cover says it
@@ -70,6 +71,7 @@ mod downloads_page;
 mod home;
 mod library;
 mod nav;
+mod onboarding;
 mod palette;
 mod panel;
 mod player_view;
@@ -153,6 +155,8 @@ pub enum Action {
     /// new one.
     ReopenBrowser,
     CancelSignIn,
+    /// Something done on the first-run sheet.
+    Onboarding(shell::kit::OnboardingEvent),
     /// Ask before signing out: playback stops and the sign-in has to be
     /// done again.
     AskSignOut,
@@ -254,6 +258,9 @@ pub struct RedeApp {
     /// Who's signed in, and what their shelf is.
     session: Session,
     login: Option<LoginForm>,
+    /// Where the first-run sheet is, while it's up (first run, or after
+    /// signing out).
+    onboarding: Option<shell::kit::OnboardingStep>,
     openid: crate::openid::State,
     /// The shelf's books, and the order they're drawn in.
     books: Books,
@@ -324,6 +331,7 @@ impl RedeApp {
         // A saved account is resumed with the tokens the keyring kept; without
         // one, the sign-in form starts empty.
         let login = saved.account().is_none().then(LoginForm::default);
+        let onboarding = login.is_some().then(shell::kit::OnboardingStep::default);
         #[cfg(target_os = "macos")]
         shell::now_playing::intervals(f64::from(saved.playback.skip_back), f64::from(saved.playback.skip_forward));
         if let Some(account) = saved.account() {
@@ -339,6 +347,7 @@ impl RedeApp {
             art,
             session: Session { connecting: saved.account().is_some(), ..Session::default() },
             login,
+            onboarding,
             openid: Default::default(),
             books: Books::default(),
             sync: SyncState::default(),
@@ -488,6 +497,7 @@ impl RedeApp {
             Action::OpenId => self.begin_openid(),
             Action::ReopenBrowser => self.reopen_browser(),
             Action::CancelSignIn => self.cancel_sign_in(abs::OpenIdError::Cancelled),
+            Action::Onboarding(event) => self.onboarding_event(event),
             Action::AskSignOut => {
                 let from_settings = self.sheet == Some(sheets::Sheet::Settings);
                 self.sheet = Some(sheets::Sheet::SignOut { from_settings });
@@ -876,7 +886,7 @@ impl eframe::App for RedeApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.login.is_some() {
+        if self.signing_in() {
             self.login_ui(ui);
         } else {
             self.main_ui(ui);

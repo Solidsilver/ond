@@ -52,7 +52,7 @@ fn window(theme: egui::Theme) -> Harness<'static, Option<RedeApp>> {
         .build_ui_state(
             |ui, app: &mut Option<RedeApp>| {
                 let Some(app) = app else { return };
-                whole_window(ui, |ui| if app.login.is_some() { app.login_ui(ui) } else { app.main_ui(ui) });
+                whole_window(ui, |ui| if app.signing_in() { app.login_ui(ui) } else { app.main_ui(ui) });
                 shell::chrome::stand_in_lights(ui.ctx(), (app.mode != crate::window::Mode::Mini).then_some(super::BAR_H));
             },
             None,
@@ -68,9 +68,29 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         *h.state_mut() = Some(build());
         s.shoot(h, name);
     }
-    // The sign-in screen, as a first start shows it.
+    // The first-run sheet, as a first start shows it, then its form.
     let dir = tempfile::tempdir().unwrap();
-    scene(h, s, "signin", || signed_out(&ctx, dir.path()));
+    scene(h, s, "signin", || {
+        let mut app = signed_out(&ctx, dir.path());
+        app.onboarding = Some(shell::kit::OnboardingStep::Kinds);
+        app
+    });
+    scene(h, s, "signin-form", || signed_out(&ctx, dir.path()));
+    // Signed in from the sheet: the account, and Done.
+    scene(h, s, "signin-added", || {
+        let mut app = super::fixture::app(&ctx, dir.path(), 0);
+        app.onboarding = Some(shell::kit::OnboardingStep::Added);
+        app
+    });
+    // A saved login that stopped working: the form alone.
+    scene(h, s, "signin-again", || {
+        let mut app = signed_out(&ctx, dir.path());
+        app.onboarding = None;
+        let form = app.login.as_mut().unwrap();
+        (form.server, form.username) = ("https://books.example.com".into(), "sam".into());
+        form.error = Some("Your session has ended. Sign in again.".into());
+        app
+    });
     // Once the server has said how it signs people in: passwords, its
     // provider, both, and waiting on the browser (through Rede's own link, and
     // through Audiobookshelf's when the server hasn't allowed Rede's).
