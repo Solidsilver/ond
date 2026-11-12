@@ -704,9 +704,56 @@ fn signing_out_is_in_the_account_menu() {
     assert!(app_mut(&mut h).login.is_some(), "the sign-in screen comes back");
     assert!(!app_mut(&mut h).session.signed_in());
     assert_eq!(app_mut(&mut h).onboarding, Some(shell::kit::OnboardingStep::Kinds), "on the first-run sheet");
-    // Its one kind's form, filled in for the account.
+    // Its one kind's form, filled in for the account, under it, signed
+    // out; with nothing signed in, nothing but the form leads on.
     h.get_by_label("Sign in");
     assert_eq!(app_mut(&mut h).login.as_ref().map(|f| f.username.as_str()), Some("sam"));
+    h.get_by_label("sam, Audiobookshelf, Signed out");
+    assert!(h.query_by_label("Done").is_none());
+}
+
+/// A window signed in to sam, with alex signed in too but not in view.
+fn two_signed_in(dir: &Path) -> (Harness<'static, Option<RedeApp>>, accounts::AccountId) {
+    let mut h = window(dir, BOOKS.len());
+    let alex = crate::settings::Account { color: accounts::SourceColor::new(1), ..crate::settings::Account::new("https://two.example.com", "alex") };
+    let id = alex.id;
+    app_mut(&mut h).prefs.edit(|s| s.accounts.push(alex));
+    app_mut(&mut h).shown = PrefsView::read(&app_mut(&mut h).prefs);
+    h.run_steps(2);
+    (h, id)
+}
+
+/// Signing out of sam while alex is still signed in lists both over sam's
+/// form, and alex's row takes you back to alex.
+#[test]
+fn signing_out_with_another_account_signed_in_lets_you_pick_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, alex) = two_signed_in(dir.path());
+    app_mut(&mut h).apply(Action::SignOut);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).login.as_ref().map(|f| f.username.as_str()), Some("sam"), "the form is still sam's");
+    h.get_by_label("sam, Audiobookshelf, Signed out");
+    h.get_by_label("Done");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "alex, Audiobookshelf, Online").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in(), "the sheet is gone");
+    assert!(app.session.connecting, "alex's saved login is being tried");
+    assert_eq!(app.prefs.get(|s| s.scope.single()), Some(alex));
+}
+
+/// Done does the same, on the account still signed in.
+#[test]
+fn signing_out_with_another_account_signed_in_lets_done_go_back_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, alex) = two_signed_in(dir.path());
+    app_mut(&mut h).apply(Action::SignOut);
+    h.run_steps(2);
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in());
+    assert_eq!(app.prefs.get(|s| s.scope.single()), Some(alex));
 }
 
 /// Without an account the window is the first-run sheet, which with one
@@ -718,8 +765,9 @@ fn signing_in_goes_through_the_first_run_sheet() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = window(dir.path(), BOOKS.len());
     let ctx = h.ctx.clone();
-    // The fixture app lets go of its shelf before the sign-in opens it.
+    // A folder of its own, with no account saved in it.
     *h.state_mut() = None;
+    let dir = tempfile::tempdir().unwrap();
     let mut app = signed_out(&ctx, dir.path());
     app.onboarding = Some(OnboardingStep::Kinds);
     *h.state_mut() = Some(app);

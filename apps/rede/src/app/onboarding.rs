@@ -11,8 +11,15 @@
 //! goes the usual way, beside the account in view (see `session`), and
 //! the new account takes over once it's in.
 //!
-//! The form opened on its own, when a saved login stops working, is drawn
-//! in the same sheet.
+//! Signing out shows the sheet too, the form filled in for that account,
+//! under every account there is. While another is still signed in, picking
+//! it or Done switches to it (`session`), so signing out of one account
+//! never strands the others. With none signed in it's a first run, the
+//! signed-out accounts listed.
+//!
+//! The form opened on its own, when a saved login stops working or on
+//! switching to an account that's signed out, is drawn in the same sheet,
+//! with the same list.
 
 use super::{Action, RedeApp};
 use accounts::{AccountId, SourceColor, SourceState};
@@ -93,16 +100,15 @@ impl RedeApp {
         }
     }
 
-    /// The accounts the sheet lists, each with its state: the one in view
-    /// as it is, the others signed in or out. Only alongside an account in
-    /// view: on a first run there's none.
+    /// The accounts the sheet lists, each signed in or out; the one in view,
+    /// if any, is signed in.
     fn listed_accounts(&self) -> Vec<(AccountId, String, SourceColor, SourceState)> {
-        let Some(live) = self.session.account.as_ref().filter(|_| self.session.signed_in()).map(|a| a.id) else { return Vec::new() };
+        let live = self.session.account.as_ref().filter(|_| self.session.signed_in()).map(|a| a.id);
         self.prefs.get(|s| {
             s.accounts
                 .iter()
                 .map(|a| {
-                    let state = if a.id == live || !a.signed_out { SourceState::Online } else { SourceState::SignedOut };
+                    let state = if Some(a.id) == live || !a.signed_out { SourceState::Online } else { SourceState::SignedOut };
                     (a.id, a.username.clone(), a.color, state)
                 })
                 .collect()
@@ -120,9 +126,6 @@ impl RedeApp {
 
     /// What was done on the sheet.
     pub(super) fn onboarding_event(&mut self, event: OnboardingEvent) {
-        if self.onboarding.is_none() {
-            return;
-        }
         // The sheet offers nothing but the form's own Cancel while the form
         // waits.
         let waiting = self.login.as_ref().is_some_and(|f| f.busy) || self.openid.pending.is_some();
@@ -142,7 +145,14 @@ impl RedeApp {
                 self.login = Some(super::LoginForm::default());
             }
             OnboardingEvent::Done | OnboardingEvent::Cancel if self.session.signed_in() => self.leave_sheet(),
-            OnboardingEvent::Done | OnboardingEvent::Cancel => {}
+            // Signed out with another account still signed in: back to it.
+            OnboardingEvent::Done => {
+                if let Some(id) = self.prefs.get(|s| s.accounts.iter().find(|a| !a.signed_out).map(|a| a.id)) {
+                    self.leave_sheet();
+                    self.switch_account(id);
+                }
+            }
+            OnboardingEvent::Cancel => {}
             OnboardingEvent::Open(id) => {
                 self.leave_sheet();
                 self.switch_account(id);

@@ -76,17 +76,33 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app
     });
     scene(h, s, "signin-form", || signed_out(&ctx, dir.path()));
-    // Signed in from the sheet: the accounts, Add another and Done.
+    // Signed in from the sheet: the accounts, Add another and Done. Its own
+    // folder, as for the scenes below that save accounts, so the sign-in
+    // scenes after it stay a first run.
+    let signed = tempfile::tempdir().unwrap();
     scene(h, s, "signin-added", || {
-        let mut app = super::fixture::app(&ctx, dir.path(), 0);
+        let mut app = super::fixture::app(&ctx, signed.path(), 0);
         app.onboarding = Some(shell::kit::OnboardingStep::Added);
         app
     });
     // The switcher's Add source…: the form over the account in view, with
     // Cancel back to it.
     scene(h, s, "signin-add-source", || {
-        let mut app = super::fixture::app(&ctx, dir.path(), BOOKS.len());
+        let mut app = super::fixture::app(&ctx, signed.path(), BOOKS.len());
         app.apply(Action::AddSource);
+        app
+    });
+    // Signed out of sam with alex still signed in: both listed over sam's
+    // form, and Done back to alex. Its own folder, so alex isn't in the
+    // scenes after it.
+    let other = tempfile::tempdir().unwrap();
+    scene(h, s, "signin-another-signed-in", || {
+        let mut app = signed_out(&ctx, other.path());
+        let sam = crate::settings::Account { signed_out: true, ..account() };
+        let alex = crate::settings::Account { color: accounts::SourceColor::new(1), ..crate::settings::Account::new("https://two.example.com", "alex") };
+        app.prefs.edit(|s| s.accounts = vec![sam.clone(), alex]);
+        app.login = Some(LoginForm::for_account(Some(&sam)));
+        app.onboarding = Some(shell::kit::OnboardingStep::Kinds);
         app
     });
     // A saved login that stopped working: the form alone.
