@@ -50,6 +50,7 @@ fn app(ctx: &egui::Context, dir: &std::path::Path) -> OndApp {
     };
     let mut app = OndApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
     app.login = None;
+    app.onboarding = None;
     app.session.settings = Some(Settings { account: Some(crate::test_tracks::account()), ..Default::default() });
     app.downloads.owner = Some(crate::test_tracks::account());
     let albums: Vec<Album> = (0..60)
@@ -1330,6 +1331,7 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
     app.apply(Action::SignInAgain);
     let form = app.login.as_ref().unwrap();
     assert!(form.closable && form.username == "luke");
+    assert!(app.onboarding.is_none(), "the form alone, not the first-run sheet");
     assert_eq!(form.error.as_deref(), Some("Wrong username or password."));
     // A sign-in from the form that fails stays on it.
     app.handle(Msg::ConnectFailed { session: app.bridge.session(), error: "Couldn't reach the server.".into() });

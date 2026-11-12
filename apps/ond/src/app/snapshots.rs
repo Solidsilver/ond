@@ -93,7 +93,7 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, s
                         if app.sync.last != Some(synced) {
                             app.sync.last = Some(synced);
                         }
-                        if app.login.is_some() {
+                        if app.signing_in() {
                             app.login_ui(ui);
                         } else {
                             app.main_ui(ui);

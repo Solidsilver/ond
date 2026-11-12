@@ -2,6 +2,8 @@
 //! visualizers and managed settings, each shot to a PNG.
 
 use super::*;
+use crate::app::onboarding::Onboard;
+use shell::kit::OnboardingStep;
 
 fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The Player: artwork, transport and the queue; lyrics in a drawer that
@@ -860,9 +862,16 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "player-verified");
 
+    // The first run: the sheet's tiles, then Navidrome's form.
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard::default());
     s.shoot(h, "login");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
+    s.shoot(h, "login-form");
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm {
@@ -871,11 +880,30 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         error: Some(crate::bridge::connect_error(&subsonic::Error::Api { code: 40, message: "Wrong username or password".into() })),
         ..Default::default()
     });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
     s.shoot(h, "login-error");
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
     s.shoot(h, "login-busy");
+
+    // Signed in from the sheet: the server, and Done.
+    reset(h, FULL, Route::Recent);
+    let account = app_mut(h).session.account().unwrap_or_default();
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Added, added: Some((account, "https://music.example.com".into())) });
+    s.shoot(h, "login-added");
+
+    // Signing in again over the library: the form alone.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(LoginForm {
+        server: "https://music.example.com".into(),
+        username: "demo".into(),
+        error: Some("Wrong username or password.".into()),
+        closable: true,
+        ..Default::default()
+    });
+    s.shoot(h, "login-again");
 
     // Zoomed. Sizes are in points, so a 1440×900 window at 150% is 960×600
     // of them; the narrowest full window is its minimum, 900×560 points at
@@ -1089,8 +1117,10 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     egui::Popup::close_all(&h.ctx);
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(super::session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
     s.shoot(h, "managed-sign-in");
     app_mut(h).login = None;
+    app_mut(h).onboarding = None;
 }
 
 /// Zooms to `percent` as the keys do, without the toast.

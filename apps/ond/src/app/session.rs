@@ -1,12 +1,13 @@
-//! The server connection and who's signed in: the login form, connecting,
-//! going offline and coming back, and signing out.
+//! The server connection and who's signed in: the login form (drawn in the
+//! first-run sheet, `onboarding`), connecting, going offline and coming
+//! back, and signing out.
 
-use super::{OndApp, toolbar};
+use super::OndApp;
 use crate::favorites::Favorites;
 use crate::nav::Nav;
 use crate::settings::Settings;
 use crate::source::Src;
-use crate::theme::{self, Tokens};
+use crate::theme::Tokens;
 use shell::kit;
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,6 +103,7 @@ impl OndApp {
         self.session.server_label = format!("{} · {}", settings.username, server);
         self.session.server_info = server.clone();
         self.login = None;
+        self.source_added(&settings.server, source.account());
         // Always a new pass, even if the flags say one runs: any still
         // running is from before the server went away, and the bridge
         // has this one replace it.
@@ -350,12 +352,16 @@ impl OndApp {
         self.now_playing.clear_source();
         self.art.clear_source();
         self.login = Some(LoginForm { server: saved.server, username: saved.username, ..Default::default() });
+        self.onboarding = Some(super::onboarding::Onboard::default());
     }
 
-    pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
+    /// The sign-in form, in the first-run sheet's column: the server, the
+    /// username and the password (a field managed.json sets is shown, not
+    /// edited), Connect, and what went wrong.
+    pub(super) fn login_form(&mut self, ui: &mut egui::Ui) {
         let Some(form) = self.login.as_mut() else { return };
         let locked = (self.ui.prefs.server_managed, self.ui.prefs.username_managed);
-        let (mut submit, mut close, mut cancel) = (false, false, false);
+        let (mut close, mut cancel) = (false, false);
         // The first field that wants typing, focused when the form appears.
         let first = if !form.focused && !form.busy {
             form.focused = true;
@@ -370,96 +376,70 @@ impl OndApp {
             None
         };
         let t = Tokens::of(ui);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
-            // The top strip is the title bar here too.
-            let strip = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), toolbar::TOOLBAR_H));
-            let bar = ui.interact(strip, ui.scope_id().with("login-titlebar"), egui::Sense::click_and_drag());
-            if bar.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if bar.double_clicked() {
-                crate::chrome::title_double_click(ui.ctx());
-            }
-            const W: f32 = 320.0;
-            const FORM_H: f32 = 330.0;
-            ui.add_space(((ui.available_height() - FORM_H) * 0.42).max(24.0));
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Ond").font(egui::FontId::new(28.0, theme::semibold())).color(t.text));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Connect to your server").size(13.0).color(t.muted));
-                ui.add_space(24.0);
-            });
-            ui.horizontal(|ui| {
-                ui.add_space(((ui.available_width() - W) / 2.0).max(0.0));
-                ui.vertical(|ui| {
-                    ui.set_width(W);
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    let mut enter = false;
-                    ui.add_enabled_ui(!form.busy, |ui| {
-                        let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool, locked: bool, focus: bool| {
-                            // Not the kit's own label: a managed field says so beside it.
-                            ui.horizontal(|ui| {
-                                kit::field_label(ui, label);
-                                if locked {
-                                    ui.label(egui::RichText::new(crate::managed::LOCKED).size(11.0).color(t.muted));
-                                }
-                            });
-                            if locked {
-                                // Set by the system's configuration: a value to read, not
-                                // a greyed-out field that looks empty.
-                                egui::Frame::new()
-                                    .fill(t.field)
-                                    .corner_radius(ui.visuals().widgets.inactive.corner_radius)
-                                    .inner_margin(egui::Margin::symmetric(10, 7))
-                                    .show(ui, |ui| {
-                                        ui.set_width(W - 20.0);
-                                        ui.add(egui::Label::new(egui::RichText::new(text.as_str()).color(t.text)).truncate());
-                                    });
-                                return false;
-                            }
-                            kit::TextField::new(label).hint(hint).password(password).focus(focus).show_input(ui, text)
-                        };
-                        enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false, locked.0, first == Some(0));
-                        if !locked.0 {
-                            kit::field_help(ui, "Your server's address, for example https://music.example.com");
-                        }
-                        ui.add_space(10.0);
-                        enter |= field(ui, "Username", &mut form.username, "", false, locked.1, first == Some(1));
-                        ui.add_space(10.0);
-                        enter |= field(ui, "Password", &mut form.password, "", true, false, first == Some(2));
-                    });
-                    ui.add_space(18.0);
-                    let label = if form.busy { "Connecting…" } else { "Connect" };
-                    let resp = kit::form_button(ui, label, true, form.busy.then_some(true));
-                    if form.busy {
-                        ui.ctx().request_repaint_after(Duration::from_millis(33));
-                    }
-                    submit = resp.clicked() || enter;
-                    if let Some(e) = &form.error {
-                        ui.add_space(12.0);
-                        kit::field_error(ui, "Sign-in error", e);
-                    }
-                    // A server that takes the connection and then says nothing
-                    // would hold the form until the request times out.
-                    if form.busy {
-                        ui.add_space(16.0);
-                        ui.vertical_centered(|ui| {
-                            if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
-                                cancel = true;
-                            }
-                        });
-                    }
-                    if form.closable {
-                        ui.add_space(if form.busy { 8.0 } else { 16.0 });
-                        ui.vertical_centered(|ui| {
-                            if crate::widgets::link(ui, "Keep browsing offline", egui::FontId::proportional(12.0), t.accent).clicked() {
-                                close = true;
-                            }
-                        });
+        let w = ui.available_width();
+        let mut enter = false;
+        ui.add_enabled_ui(!form.busy, |ui| {
+            let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool, locked: bool, focus: bool| {
+                // Not the kit's own label: a managed field says so beside it.
+                ui.horizontal(|ui| {
+                    kit::field_label(ui, label);
+                    if locked {
+                        ui.label(egui::RichText::new(crate::managed::LOCKED).size(11.0).color(t.muted));
                     }
                 });
-            });
+                if locked {
+                    // Set by the system's configuration: a value to read, not
+                    // a greyed-out field that looks empty.
+                    egui::Frame::new()
+                        .fill(t.field)
+                        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+                        .inner_margin(egui::Margin::symmetric(10, 7))
+                        .show(ui, |ui| {
+                            ui.set_width(w - 20.0);
+                            ui.add(egui::Label::new(egui::RichText::new(text.as_str()).color(t.text)).truncate());
+                        });
+                    return false;
+                }
+                kit::TextField::new(label).hint(hint).password(password).focus(focus).show_input(ui, text)
+            };
+            enter |= field(ui, "Server", &mut form.server, "https://music.example.com", false, locked.0, first == Some(0));
+            if !locked.0 {
+                kit::field_help(ui, "Your server's address, for example https://music.example.com");
+            }
+            ui.add_space(10.0);
+            enter |= field(ui, "Username", &mut form.username, "", false, locked.1, first == Some(1));
+            ui.add_space(10.0);
+            enter |= field(ui, "Password", &mut form.password, "", true, false, first == Some(2));
         });
+        ui.add_space(18.0);
+        let label = if form.busy { "Connecting…" } else { "Connect" };
+        let resp = kit::form_button(ui, label, true, form.busy.then_some(true));
+        if form.busy {
+            ui.ctx().request_repaint_after(Duration::from_millis(33));
+        }
+        let submit = resp.clicked() || enter;
+        if let Some(e) = &form.error {
+            ui.add_space(12.0);
+            kit::field_error(ui, "Sign-in error", e);
+        }
+        // A server that takes the connection and then says nothing
+        // would hold the form until the request times out.
+        if form.busy {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
+                    cancel = true;
+                }
+            });
+        }
+        if form.closable {
+            ui.add_space(if form.busy { 8.0 } else { 16.0 });
+            ui.vertical_centered(|ui| {
+                if crate::widgets::link(ui, "Keep browsing offline", egui::FontId::proportional(12.0), t.accent).clicked() {
+                    close = true;
+                }
+            });
+        }
         let busy = form.busy;
         if close {
             if busy {

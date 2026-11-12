@@ -381,6 +381,69 @@ fn signing_out_from_the_server_popover_waits_for_the_answer() {
     h.run_steps(3);
     let app = app_mut(&mut h);
     assert!(app.login.is_some() && !app.session.online, "signed out once confirmed");
+    assert!(app.onboarding.is_some(), "on the first-run sheet");
+    *h.state_mut() = None;
+}
+
+/// Without a login the window is the first-run sheet: a kind that isn't
+/// here yet can't be picked, Navidrome opens the login form and Back the
+/// tiles, and once the server answers the sheet lists it with Done, the
+/// only way on, which opens the library.
+#[test]
+fn signing_in_goes_through_the_first_run_sheet() {
+    use shell::kit::OnboardingStep;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    app_mut(&mut h).login = Some(session::LoginForm { server: "http://127.0.0.1:9".into(), ..Default::default() });
+    app_mut(&mut h).onboarding = Some(onboarding::Onboard::default());
+    h.run_steps(2);
+    let step = |h: &mut Harness<'static, Option<OndApp>>| app_mut(h).onboarding.as_ref().map(|o| o.step);
+    h.get_by_label("Where's your music?");
+    assert!(h.query_by_label("Done").is_none(), "no way on without a server");
+    assert!(h.query_by_label_contains("Recently added").is_none(), "nothing else shows");
+    h.get_by_label("Jellyfin, coming later").click();
+    h.run_steps(2);
+    assert_eq!(step(&mut h), Some(OnboardingStep::Kinds), "Jellyfin can't be picked yet");
+
+    h.get_by_label_contains("Navidrome, ").click();
+    h.run_steps(2);
+    assert_eq!(step(&mut h), Some(OnboardingStep::Form(0)));
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Server");
+    h.get_by_label("Back").click();
+    h.run_steps(2);
+    assert_eq!(step(&mut h), Some(OnboardingStep::Kinds));
+
+    h.get_by_label_contains("Navidrome, ").click();
+    h.run_steps(2);
+    {
+        let form = app_mut(&mut h).login.as_mut().unwrap();
+        form.username = "u".into();
+        form.password = "p".into();
+    }
+    h.get_by_label("Connect").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).login.as_ref().is_some_and(|f| f.busy), "connecting");
+    assert!(h.query_by_label("Back").is_none(), "no way back while it waits");
+
+    let app = app_mut(&mut h);
+    let settings = crate::settings::Settings { server: "https://music.example.com".into(), username: "u".into(), ..Default::default() };
+    app.handle(Msg::Connected {
+        stores: None,
+        session: app.bridge.session(),
+        source: crate::source::subsonic::test_source(),
+        settings: Box::new(settings),
+        server: "navidrome 0.64.2".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    h.run_steps(2);
+    assert_eq!(step(&mut h), Some(OnboardingStep::Added));
+    h.get_by_label("music.example.com, Navidrome, added");
+    assert!(h.query_by_label("Add another").is_none(), "one server at a time");
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    assert!(!app_mut(&mut h).signing_in(), "the library is up");
     *h.state_mut() = None;
 }
 
@@ -458,7 +521,7 @@ fn a_managed_zoom_stays_as_managed() {
 
 /// The full window with the fixture library, for the behaviour tests below.
 fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
-    window(dir, FULL, |ui, app| app.main_ui(ui))
+    window(dir, FULL, |ui, app| if app.signing_in() { app.sign_in_ui(ui) } else { app.main_ui(ui) })
 }
 
 /// A window `size` big with the fixture library, drawn by `draw`.
@@ -823,13 +886,23 @@ fn every_view_names_its_controls() {
     h.run_steps(2);
     assert!(app_mut(&mut h).ui.palette.is_some(), "the palette is open");
     h.check_accessibility();
-    for form in [
-        session::LoginForm { server: "http://localhost:4533".into(), ..Default::default() },
-        session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() },
+    // Signing in: the first-run sheet's tiles, Navidrome's form (and
+    // waiting on it), a server added, and the form on its own.
+    let form = || session::LoginForm { server: "http://localhost:4533".into(), ..Default::default() };
+    let busy = || session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() };
+    let added = Some((accounts::AccountId::new(), "https://music.example.com".to_owned()));
+    for (login, step, added) in [
+        (Some(form()), Some(shell::kit::OnboardingStep::Kinds), None),
+        (Some(form()), Some(shell::kit::OnboardingStep::Form(0)), None),
+        (Some(busy()), Some(shell::kit::OnboardingStep::Form(0)), None),
+        (None, Some(shell::kit::OnboardingStep::Added), added),
+        (Some(session::LoginForm { closable: true, ..form() }), None, None),
     ] {
         reset(&mut h, FULL, Route::Recent);
-        app_mut(&mut h).login = Some(form);
+        app_mut(&mut h).login = login;
+        app_mut(&mut h).onboarding = step.map(|step| onboarding::Onboard { step, added: added.clone() });
         h.run_steps(2);
+        assert!(h.query_by_label_contains("Where's your music?").is_some() || h.query_by_label("Navidrome").is_some(), "the sheet is drawn");
         h.check_accessibility();
     }
     for section in [

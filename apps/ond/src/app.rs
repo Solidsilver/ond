@@ -9,6 +9,7 @@
 //! actions and messages each one handles are in their own modules:
 //!
 //! - `session`: the server connection, the login form, offline and back, signing out
+//! - `onboarding`: the first-run sheet the login form is drawn in
 //! - `data`: the library as loaded, the sync's state, the search index, queue
 //!   actions waiting for tracks
 //! - `pins`: offline downloads ([`OfflineAction`])
@@ -62,6 +63,7 @@ mod analyzing;
 mod commands;
 mod data;
 mod frame;
+mod onboarding;
 pub(crate) mod pins;
 mod playing;
 mod prefs_view;
@@ -230,6 +232,8 @@ pub enum Action {
     CancelSignIn,
     /// Close the login form and keep browsing what's stored.
     CloseLogin,
+    /// Something done on the first-run sheet.
+    Onboarding(shell::kit::OnboardingEvent),
     Update(UpdateAction),
     Album(String, QueueAction),
     Artist(String, QueueAction),
@@ -333,6 +337,8 @@ pub struct OndApp {
     engine: EngineHandle,
 
     login: Option<LoginForm>,
+    /// The first-run sheet, while it's up (first run, or after signing out).
+    onboarding: Option<onboarding::Onboard>,
     /// The server connection and who's signed in.
     session: Session,
     /// Where the library sync is.
@@ -519,6 +525,8 @@ impl OndApp {
             None
         };
         let connecting = login.is_none() && !work_offline;
+        // Without a login to resume, the window opens on the first-run sheet.
+        let onboarding = login.is_some().then(onboarding::Onboard::default);
 
         let shown = PrefsView::read(&prefs);
         let mut player = Player::default();
@@ -531,6 +539,7 @@ impl OndApp {
             inbox,
             engine,
             login,
+            onboarding,
             session: Session { settings: prefs.has_login().then(|| saved.clone()), connecting, work_offline, ..Default::default() },
             sync: SyncState::default(),
             data: Data::default(),
@@ -770,6 +779,7 @@ impl OndApp {
             Action::SignIn => self.sign_in(),
             Action::CancelSignIn => self.cancel_sign_in(),
             Action::CloseLogin => self.login = None,
+            Action::Onboarding(event) => self.onboarding_event(event),
             Action::Update(a) => self.update_action(a),
             Action::Album(id, action) => self.play_album(id, action),
             Action::Artist(name, action) => self.play_artist(name, action),
@@ -851,6 +861,21 @@ impl OndApp {
             if self.ui.overlay.is_none() || matches!(cmd, Cmd::Shortcuts | Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset) {
                 self.actions.push(Action::Command(cmd));
             }
+        }
+    }
+
+    /// The window while signing in: the first-run sheet or the login form.
+    fn sign_in_ui(&mut self, ui: &mut egui::Ui) {
+        // Logging in needs the full window. (Read from this frame's copy
+        // of the preferences, which `logic` took, not by locking them.)
+        if self.ui.prefs.mode != WindowMode::Full {
+            self.set_mode(Some(WindowMode::Full));
+        }
+        self.login_ui(ui);
+        crate::csd::overlay(ui.ctx(), Some(toolbar::TOOLBAR_H));
+        // The form asks for its changes as actions too, applied once it's drawn.
+        for a in std::mem::take(&mut self.actions) {
+            self.apply(a);
         }
     }
 
@@ -1099,18 +1124,8 @@ impl eframe::App for OndApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
-        if self.login.is_some() {
-            // Logging in needs the full window. (Read from this frame's copy
-            // of the preferences, which `logic` took, not by locking them.)
-            if self.ui.prefs.mode != WindowMode::Full {
-                self.set_mode(Some(WindowMode::Full));
-            }
-            self.login_ui(ui);
-            crate::csd::overlay(ui.ctx(), Some(toolbar::TOOLBAR_H));
-            // The form asks for its changes as actions too, applied once it's drawn.
-            for a in std::mem::take(&mut self.actions) {
-                self.apply(a);
-            }
+        if self.signing_in() {
+            self.sign_in_ui(ui);
         } else {
             self.main_ui(ui);
         }

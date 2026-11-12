@@ -340,6 +340,7 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
         app.handle(m);
     }
     app.login = None;
+    app.onboarding = None;
     app.session.settings = Some(Settings { account: Some(crate::test_tracks::account()), ..Default::default() });
     app.downloads.owner = Some(crate::test_tracks::account());
     app.session.server_label = "demo · navidrome 0.64.2".into();
@@ -474,6 +475,7 @@ pub(super) fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Rout
     app.ui.np_details = false;
     app.ui.lyrics_follow = crate::lyrics::Follow::default();
     app.login = None;
+    app.onboarding = None;
     app.session.online = true;
     app.sync.albums = false;
     app.sync.tracks = false;
