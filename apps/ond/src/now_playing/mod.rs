@@ -94,7 +94,8 @@ pub struct Config {
     pub account: Option<accounts::AccountId>,
     pub status: Arc<Status>,
     pub rt: tokio::runtime::Handle,
-    /// The cover art cache, read for artwork (and filled when it's missing).
+    /// The cover art cache root (each account has a folder inside it), read
+    /// for artwork (and filled when it's missing).
     pub art_dir: PathBuf,
     /// Where plays the server didn't take wait for a retry.
     pub retry_file: PathBuf,
@@ -453,7 +454,7 @@ impl Worker {
     /// the server (and into the cache for the UI).
     fn fetch_artwork(&self, info: &Info) {
         let Some(cover) = info.cover.clone() else { return };
-        let dir = self.cfg.art_dir.clone();
+        let dir = crate::art::account_dir(&self.cfg.art_dir, info.key.account);
         let source = self.source.clone().filter(|s| s.account() == info.key.account);
         let key = info.key.clone();
         *self.art_for.lock().unwrap_or_else(|e| e.into_inner()) = Some(key.clone());
@@ -764,5 +765,61 @@ mod tests {
         assert!(r.w.known.values().any(|i| i.key.item == "a"));
         r.started("a", true);
         assert_eq!(r.w.current.as_ref().map(|c| c.key.item.as_str()), Some("a"));
+    }
+
+    #[test]
+    fn artwork_for_two_accounts_with_the_same_cover_id_stays_separate() {
+        use crate::source::{Capabilities, fake::Fake};
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let art_dir = dir.path().join("art");
+        let status = Arc::new(Status::default());
+        let (one, two) = (accounts::AccountId::new(), accounts::AccountId::new());
+        let cfg = Config {
+            account: Some(one),
+            status,
+            rt: rt.handle().clone(),
+            art_dir: art_dir.clone(),
+            retry_file: dir.path().join("scrobbles.json"),
+            retry_root: None,
+            scrobble: false,
+            remote: Arc::new(|_| {}),
+        };
+        let (tx, _rx) = channel();
+        let mut w = Worker::new(cfg, tx);
+        let source_for = |account: accounts::AccountId, bytes: &[u8]| -> Src {
+            let mut fake = Fake::new(Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+            fake.account = account;
+            fake.covers.lock().unwrap().insert("cov-1".into(), bytes.to_vec());
+            Arc::new(fake)
+        };
+        let start = |w: &mut Worker, account: accounts::AccountId, token: u64| {
+            let info = Info {
+                key: TrackKey::new(account, "t-1"),
+                token,
+                title: "Song".into(),
+                artist: None,
+                album: None,
+                duration_secs: Some(SONG_SECS),
+                cover: Some("cov-1".into()),
+            };
+            w.handle(In::Known(info));
+            let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+            w.engine(audio::Event::TrackStarted { track_id: "t-1".into(), token, format, gapless: false, restart: false });
+        };
+
+        w.handle(In::Source(Some(source_for(one, b"cover-one"))));
+        start(&mut w, one, 1);
+        let one_file = crate::art::cover_file(&crate::art::account_dir(&art_dir, one), "cov-1", 512);
+        testkit::wait_until("account one's now-playing cover to be cached", || one_file.exists());
+        assert_eq!(std::fs::read(&one_file).unwrap(), b"cover-one");
+        assert!(!crate::art::cover_file(&art_dir, "cov-1", 512).exists());
+
+        w.handle(In::Source(Some(source_for(two, b"cover-two"))));
+        start(&mut w, two, 2);
+        let two_file = crate::art::cover_file(&crate::art::account_dir(&art_dir, two), "cov-1", 512);
+        testkit::wait_until("account two's now-playing cover to be cached", || two_file.exists());
+        assert_eq!(std::fs::read(&two_file).unwrap(), b"cover-two");
+        assert_eq!(std::fs::read(&one_file).unwrap(), b"cover-one");
     }
 }

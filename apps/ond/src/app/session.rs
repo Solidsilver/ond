@@ -347,6 +347,7 @@ impl OndApp {
             s.signed_out = true;
         });
         self.now_playing.clear_source();
+        self.art.clear_source();
         self.login = Some(LoginForm { server: saved.server, username: saved.username, ..Default::default() });
     }
 

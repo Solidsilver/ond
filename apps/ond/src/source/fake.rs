@@ -2,6 +2,8 @@
 //! so tests can prove that capabilities stop requests at the app boundary.
 
 use super::*;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct Fake {
@@ -9,11 +11,18 @@ pub struct Fake {
     pub capabilities: Capabilities,
     pub scrobbles: AtomicUsize,
     pub lyric_calls: AtomicUsize,
+    pub covers: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl Fake {
     pub fn new(capabilities: Capabilities) -> Self {
-        Self { account: crate::test_tracks::account(), capabilities, scrobbles: AtomicUsize::new(0), lyric_calls: AtomicUsize::new(0) }
+        Self {
+            account: crate::test_tracks::account(),
+            capabilities,
+            scrobbles: AtomicUsize::new(0),
+            lyric_calls: AtomicUsize::new(0),
+            covers: Mutex::default(),
+        }
     }
 }
 
@@ -69,8 +78,8 @@ impl MusicSource for Fake {
         self.scrobbles.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn cover(&self, _: &str, _: u32) -> Result<Vec<u8>, Failure> {
-        panic!("unexpected cover")
+    async fn cover(&self, id: &str, _: u32) -> Result<Vec<u8>, Failure> {
+        Ok(self.covers.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned().unwrap_or_else(|| panic!("unexpected cover {id}")))
     }
     fn stream(&self, _: &Track, _: Option<&audio::Transcode>) -> (String, Option<String>) {
         panic!("unexpected stream")

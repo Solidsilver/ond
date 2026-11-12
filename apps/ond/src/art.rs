@@ -16,6 +16,7 @@
 //! playing and the open album, a cover or two) skip the queue and start at once.
 
 use crate::source::Src;
+use accounts::AccountId;
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureOptions, Ui};
 use shell::art::{Lane, Queue, SIZES, bucket};
 use shell::kit::Generated;
@@ -61,8 +62,14 @@ enum Outcome {
 /// two covers has the same print.
 type Print = u64;
 
-/// A finished job: its key, its number in the queue and what it found.
-type Loaded = (Key, u64, Outcome);
+/// Where `account` keeps its cached covers under the art cache `root`.
+pub fn account_dir(root: &Path, account: AccountId) -> PathBuf {
+    root.join(account.to_string())
+}
+
+/// A finished job: the cache generation it started under, its key, its number
+/// in the queue and what it found.
+type Loaded = (u64, Key, u64, Outcome);
 
 /// Covers whose [`Look`] is kept: enough that going back to a few album
 /// pages finds their colors at once.
@@ -97,7 +104,12 @@ impl LookParts {
 pub struct Art {
     rt: tokio::runtime::Handle,
     ctx: egui::Context,
-    dir: Arc<PathBuf>,
+    root: PathBuf,
+    account: Option<AccountId>,
+    dir: Option<Arc<PathBuf>>,
+    /// Bumped when switching accounts or clearing so late results from an
+    /// earlier account's tasks are ignored.
+    generation: u64,
     source: Option<Src>,
     /// Every cover id asked for, numbered (see [`Key`]), and the ids by
     /// number; the two share each id.
@@ -127,8 +139,8 @@ pub struct Art {
     /// that count was started.
     disk: Arc<AtomicU64>,
     counted: Option<Instant>,
-    look_tx: Sender<(String, LookParts)>,
-    look_rx: Receiver<(String, LookParts)>,
+    look_tx: Sender<(u64, String, LookParts)>,
+    look_rx: Receiver<(u64, String, LookParts)>,
     /// Images given by [`Art::preload`], so looks work without a server.
     #[cfg(test)]
     preloaded: HashMap<String, ColorImage>,
@@ -138,16 +150,20 @@ pub struct Art {
 }
 
 impl Art {
-    pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, dir: PathBuf) -> Self {
+    pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, root: PathBuf, account: Option<AccountId>) -> Self {
         let (tx, rx) = channel();
         let (look_tx, look_rx) = channel();
-        let dir = Arc::new(dir);
-        let trim = dir.clone();
-        rt.spawn_blocking(move || shell::art::trim_disk_cache(&trim, DISK_BUDGET));
+        let dir = account.map(|a| Arc::new(account_dir(&root, a)));
+        if let Some(trim) = dir.clone() {
+            rt.spawn_blocking(move || shell::art::trim_disk_cache(&trim, DISK_BUDGET));
+        }
         Self {
             rt,
             ctx,
+            root,
+            account,
             dir,
+            generation: 0,
             source: None,
             covers: HashMap::new(),
             names: Vec::new(),
@@ -176,13 +192,53 @@ impl Art {
     }
 
     pub fn set_source(&mut self, source: Src) {
+        let next = source.account();
+        let switched = self.account.is_some_and(|prev| prev != next);
         self.source = Some(source);
-        // Failures may have been "not connected yet".
+        if switched {
+            self.reset_memory();
+        } else {
+            // Failures may have been "not connected yet".
+            self.missing.clear();
+            self.looks.retain(|_, l| l.palette.is_some());
+            // The dropped looks leave the LRU too, or they'd count against its
+            // budget and evict real ones.
+            self.looks_lru.retain(|cover| self.looks.contains_key(cover));
+            self.looks_pending.clear();
+        }
+        if self.account != Some(next) {
+            self.generation += 1;
+            self.account = Some(next);
+            let dir = Arc::new(account_dir(&self.root, next));
+            self.dir = Some(dir.clone());
+            self.disk = Arc::new(AtomicU64::new(u64::MAX));
+            self.counted = None;
+            self.rt.spawn_blocking(move || shell::art::trim_disk_cache(&dir, DISK_BUDGET));
+            self.ctx.request_repaint();
+        }
+    }
+
+    pub fn clear_source(&mut self) {
+        self.source = None;
+        for (_, (_, task)) in self.downloads.drain() {
+            task.abort();
+        }
+    }
+
+    fn reset_memory(&mut self) {
+        for (_, (_, task)) in self.downloads.drain() {
+            task.abort();
+        }
+        self.queue.clear();
+        self.textures.clear();
+        self.prints.clear();
+        self.portraits.clear();
+        self.stand_ins.clear();
+        self.lru = Lru::new(TEXTURE_BUDGET);
         self.missing.clear();
-        self.looks.retain(|_, l| l.palette.is_some());
-        // The dropped looks leave the LRU too, or they'd count against its
-        // budget and evict real ones.
-        self.looks_lru.retain(|cover| self.looks.contains_key(cover));
+        self.looks.clear();
+        self.looks_lru = Lru::new(LOOKS);
+        self.looks_pending.clear();
     }
 
     /// `cover` at `size`, numbering the cover the first time it's seen.
@@ -204,8 +260,11 @@ impl Art {
     pub fn poll(&mut self) {
         let mut uploads = 0;
         while uploads < UPLOADS_PER_FRAME
-            && let Ok((key, job, outcome)) = self.rx.try_recv()
+            && let Ok((generation, key, job, outcome)) = self.rx.try_recv()
         {
+            if generation != self.generation {
+                continue;
+            }
             if self.downloads.get(&key).is_some_and(|d| d.0 == job) {
                 self.downloads.remove(&key);
             }
@@ -237,7 +296,10 @@ impl Art {
             self.textures.insert(key, tex);
             self.prints.insert(key, print);
         }
-        while let Ok((cover, parts)) = self.look_rx.try_recv() {
+        while let Ok((generation, cover, parts)) = self.look_rx.try_recv() {
+            if generation != self.generation {
+                continue;
+            }
             self.looks_pending.remove(&cover);
             let backdrop = parts.blurred.map(|(image, extremes)| crate::visuals::backdrop::Blurred {
                 texture: self.ctx.load_texture(format!("backdrop:{cover}"), image.clone(), TextureOptions::LINEAR),
@@ -271,14 +333,17 @@ impl Art {
             let given = self.preloaded.get(cover).cloned();
             #[cfg(not(test))]
             let given: Option<ColorImage> = None;
-            let (source, dir, tx, ctx) = (self.source.clone(), self.dir.clone(), self.look_tx.clone(), self.ctx.clone());
+            let (source, dir, tx, ctx, generation) = (self.source.clone(), self.dir.clone(), self.look_tx.clone(), self.ctx.clone(), self.generation);
             self.rt.spawn(async move {
                 let image = match given {
                     Some(i) => Some(i),
-                    None => load(source.as_ref(), &dir, &key.0, key.1).await,
+                    None => match dir.as_deref() {
+                        Some(dir) => load(source.as_ref(), dir, &key.0, key.1).await,
+                        None => None,
+                    },
                 };
                 let look = tokio::task::spawn_blocking(move || LookParts::of(image.as_ref())).await.unwrap_or_default();
-                let _ = tx.send((key.0, look));
+                let _ = tx.send((generation, key.0, look));
                 ctx.request_repaint();
             });
         }
@@ -341,33 +406,38 @@ impl Art {
     fn launch(&mut self) {
         for (key, job, lane) in self.queue.start() {
             let cover = self.names[key.cover as usize].clone();
-            let (tx, ctx, dir) = (self.tx.clone(), self.ctx.clone(), self.dir.clone());
+            let (tx, ctx, dir, generation) = (self.tx.clone(), self.ctx.clone(), self.dir.clone(), self.generation);
             match lane {
                 Lane::Disk => {
                     // No server: art already on disk still loads (offline browsing).
                     let online = self.source.is_some();
                     self.rt.spawn(async move {
-                        let outcome = match read_cached(&dir, &cover, key.size).await {
-                            Some(bytes) => Outcome::Image(decode_off_thread(bytes, key.size).await),
+                        let outcome = match dir.as_deref() {
+                            Some(dir) => match read_cached(dir, &cover, key.size).await {
+                                Some(bytes) => Outcome::Image(decode_off_thread(bytes, key.size).await),
+                                None if online => Outcome::Miss,
+                                None => Outcome::Image(None),
+                            },
                             None if online => Outcome::Miss,
                             None => Outcome::Image(None),
                         };
-                        let _ = tx.send((key, job, outcome));
+                        let _ = tx.send((generation, key, job, outcome));
                         ctx.request_repaint();
                     });
                 }
                 Lane::Net => {
                     let source = self.source.clone();
                     let task = self.rt.spawn(async move {
-                        let bytes = match &source {
-                            Some(c) => fetch_cached(c, &dir, &cover, key.size).await,
-                            None => None,
+                        let bytes = match (&source, dir.as_deref()) {
+                            (Some(c), Some(dir)) => fetch_cached(c, dir, &cover, key.size).await,
+                            (Some(c), None) => c.cover(&cover, key.size).await.ok(),
+                            (None, _) => None,
                         };
                         let image = match bytes {
                             Some(b) => decode_off_thread(b, key.size).await,
                             None => None,
                         };
-                        let _ = tx.send((key, job, Outcome::Image(image)));
+                        let _ = tx.send((generation, key, job, Outcome::Image(image)));
                         ctx.request_repaint();
                     });
                     self.downloads.insert(key, (job, task.abort_handle()));
@@ -383,9 +453,12 @@ impl Art {
         if let Some(bytes) = self.pinned_disk {
             return Some(bytes);
         }
+        let Some(dir) = self.dir.clone() else {
+            return Some(0);
+        };
         if self.counted.is_none_or(|at| at.elapsed() > RECOUNT) {
             self.counted = Some(Instant::now());
-            let (dir, disk, ctx) = (self.dir.clone(), self.disk.clone(), self.ctx.clone());
+            let (disk, ctx) = (self.disk.clone(), self.ctx.clone());
             self.rt.spawn_blocking(move || {
                 disk.store(shell::art::cached_files(&dir).iter().map(|f| f.1).sum(), Ordering::Relaxed);
                 ctx.request_repaint();
@@ -404,26 +477,20 @@ impl Art {
     /// Forgets every cover, here and on disk: what's on screen loads again
     /// from the server.
     pub fn clear(&mut self) {
-        for (_, (_, task)) in self.downloads.drain() {
-            task.abort();
+        self.reset_memory();
+        self.generation += 1;
+        if let Some(dir) = self.dir.clone() {
+            let (disk, ctx) = (self.disk.clone(), self.ctx.clone());
+            self.rt.spawn_blocking(move || {
+                for (path, _, _) in shell::art::cached_files(&dir) {
+                    let _ = std::fs::remove_file(path);
+                }
+                disk.store(shell::art::cached_files(&dir).iter().map(|f| f.1).sum(), Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+        } else {
+            self.disk.store(0, Ordering::Relaxed);
         }
-        self.queue.clear();
-        self.textures.clear();
-        self.prints.clear();
-        self.portraits.clear();
-        self.stand_ins.clear();
-        self.lru = Lru::new(TEXTURE_BUDGET);
-        self.missing.clear();
-        self.looks.clear();
-        self.looks_lru = Lru::new(LOOKS);
-        let (dir, disk, ctx) = (self.dir.clone(), self.disk.clone(), self.ctx.clone());
-        self.rt.spawn_blocking(move || {
-            for (path, _, _) in shell::art::cached_files(&dir) {
-                let _ = std::fs::remove_file(path);
-            }
-            disk.store(shell::art::cached_files(&dir).iter().map(|f| f.1).sum(), Ordering::Relaxed);
-            ctx.request_repaint();
-        });
         self.ctx.request_repaint();
     }
 
@@ -575,11 +642,25 @@ fn print(data: impl Hash) -> Print {
 mod tests {
     use super::*;
 
+    fn png_bytes(rgba: [u8; 4]) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba(rgba));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    fn source_with_cover(account: AccountId, id: &str, bytes: Vec<u8>) -> Src {
+        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+        fake.account = account;
+        fake.covers.lock().unwrap().insert(id.into(), bytes);
+        Arc::new(fake)
+    }
+
     #[test]
     fn the_same_photo_for_two_artists_is_the_servers_stand_in() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let mut art = Art::new(rt.handle().clone(), egui::Context::default(), dir.path().to_owned());
+        let mut art = Art::new(rt.handle().clone(), egui::Context::default(), dir.path().to_owned(), None);
         let image = |c: u8| ColorImage::new([4, 4], vec![Color32::from_gray(c); 16]);
         art.preload("ar-1", image(10));
         art.preload("ar-2", image(20));
@@ -596,27 +677,20 @@ mod tests {
     fn cached_art_loads_without_a_server() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        let account = AccountId::new();
+        let account_cache = account_dir(dir.path(), account);
+        std::fs::create_dir_all(&account_cache).unwrap();
         // A 64 px cover already on disk from an earlier session.
-        let png = {
-            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 40, 255]));
-            let mut out = std::io::Cursor::new(Vec::new());
-            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
-            out.into_inner()
-        };
+        let png = png_bytes([200, 40, 40, 255]);
         let png_len = png.len() as u64;
-        std::fs::write(cover_file(dir.path(), "al-1", 64), png).unwrap();
+        std::fs::write(cover_file(&account_cache, "al-1", 64), png).unwrap();
         let ctx = egui::Context::default();
-        let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned());
+        let mut art = Art::new(rt.handle().clone(), ctx, dir.path().to_owned(), Some(account));
         // Never connected: no source at all.
-        let deadline = testkit::Deadline::new();
-        loop {
+        testkit::wait_until("cached art to load offline", || {
             art.poll();
-            if art.texture("al-1", 40.0).is_some() {
-                break;
-            }
-            assert!(!deadline.passed(), "cached art never loaded offline");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            art.texture("al-1", 40.0).is_some()
+        });
         // Art that isn't cached can't load without a server, and isn't asked for again.
         let deadline = testkit::Deadline::new();
         while !art.covers.get("al-2").is_some_and(|&cover| art.missing.contains(&Key { cover, size: 64 })) {
@@ -626,18 +700,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         // Clearing forgets the loaded cover and deletes the file, and the size says so.
-        let deadline = testkit::Deadline::new();
-        while art.disk_size() != Some(png_len) {
-            assert!(!deadline.passed(), "the cache was never counted");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        testkit::wait_until("the cache to be counted", || art.disk_size() == Some(png_len));
         art.clear();
         assert!(art.texture("al-1", 40.0).is_none());
-        let deadline = testkit::Deadline::new();
-        while art.disk_size() != Some(0) {
-            assert!(!deadline.passed(), "the cache was never cleared");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!cover_file(dir.path(), "al-1", 64).exists());
+        testkit::wait_until("the cache to be cleared", || art.disk_size() == Some(0));
+        assert!(!cover_file(&account_cache, "al-1", 64).exists());
+    }
+
+    #[test]
+    fn two_accounts_with_the_same_cover_id_do_not_collide() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (AccountId::new(), AccountId::new());
+        let (red, blue) = (png_bytes([220, 30, 30, 255]), png_bytes([30, 30, 220, 255]));
+        let mut art = Art::new(rt.handle().clone(), egui::Context::default(), dir.path().to_owned(), Some(one));
+        art.set_source(source_with_cover(one, "al-1", red.clone()));
+        testkit::wait_until("account one's cover to load", || {
+            art.poll();
+            art.texture("al-1", 40.0).is_some()
+        });
+        let one_file = cover_file(&account_dir(dir.path(), one), "al-1", 64);
+        testkit::wait_until("account one's cover to land on disk", || one_file.exists());
+        assert_eq!(std::fs::read(&one_file).unwrap(), red);
+        assert!(!cover_file(dir.path(), "al-1", 64).exists(), "nothing is written flat under art/");
+
+        // Switching to another account drops in-memory textures and reads/writes its own folder.
+        art.set_source(source_with_cover(two, "al-1", blue.clone()));
+        assert!(art.texture("al-1", 40.0).is_none(), "never reuses the previous account's texture");
+        testkit::wait_until("account two's cover to load", || {
+            art.poll();
+            art.texture("al-1", 40.0).is_some()
+        });
+        let two_file = cover_file(&account_dir(dir.path(), two), "al-1", 64);
+        testkit::wait_until("account two's cover to land on disk", || two_file.exists());
+        assert_eq!(std::fs::read(&two_file).unwrap(), blue);
+        assert_eq!(std::fs::read(&one_file).unwrap(), red, "account one's cover on disk stays intact");
+
+        // Clearing account two leaves account one's cached art intact.
+        art.clear();
+        testkit::wait_until("account two's cache to clear", || !two_file.exists());
+        assert_eq!(std::fs::read(&one_file).unwrap(), red);
     }
 }

@@ -504,7 +504,7 @@ impl OndApp {
                 on_progress: ticks,
             })
         };
-        let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
+        let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone(), saved.account);
 
         // With a saved login the library opens at once (what's stored),
         // while the server is tried in the background.
