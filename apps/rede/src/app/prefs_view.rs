@@ -3,9 +3,12 @@
 //! are asked for as actions and applied after the frame.
 
 use crate::prefs::Prefs;
-use crate::settings::{LibraryFilter, LibrarySort};
+use crate::settings::{Account, LibraryFilter, LibrarySort};
+use accounts::Scope;
 
 pub struct PrefsView {
+    pub accounts: Vec<Account>,
+    pub scope: Scope,
     pub sort: LibrarySort,
     /// Which books the library shows.
     pub filter: LibraryFilter,
@@ -22,6 +25,8 @@ pub struct PrefsView {
 impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
         prefs.get(|s| Self {
+            accounts: s.accounts.clone(),
+            scope: s.scope.clone(),
             sort: s.sort,
             filter: s.filter,
             zoom: s.zoom,

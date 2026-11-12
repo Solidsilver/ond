@@ -159,6 +159,9 @@ pub enum Action {
     /// Back to the sign-in screen; the saved tokens are forgotten. The shelf
     /// and its books stay.
     SignOut,
+    /// Open another configured account, stopping playback and flushing any
+    /// pending progress from the current one first.
+    SwitchAccount(accounts::AccountId),
     /// List the libraries and write what changed. A sync already running
     /// isn't started twice.
     SyncNow,
@@ -302,6 +305,21 @@ impl RedeApp {
     }
 
     fn build(ctx: &egui::Context, paths: Paths) -> anyhow::Result<Self> {
+        Self::build_with(ctx, paths, Keeper::start(), |_| {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn build_with_store<S>(ctx: &egui::Context, paths: Paths, store: std::sync::Arc<S>) -> anyhow::Result<Self>
+    where
+        S: Send + Sync + 'static,
+        std::sync::Arc<S>: crate::tokens::TokenStore + crate::tokens::TokenLoad,
+    {
+        Self::build_with(ctx, paths, Keeper::with_store(store.clone()), |bridge| {
+            bridge.use_token_store(store);
+        })
+    }
+
+    fn build_with(ctx: &egui::Context, paths: Paths, keeper: Keeper, configure: impl FnOnce(&mut Bridge)) -> anyhow::Result<Self> {
         // Two workers: the shelf's writes and the server's calls, so a listing
         // doesn't hold up a book's details.
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
@@ -309,7 +327,8 @@ impl RedeApp {
         let (prefs, loaded) = Prefs::open(&paths.config_file);
         let (tx, inbox) = channel();
         let repaint = ctx.clone();
-        let bridge = Bridge::new(rt.handle().clone(), tx, std::sync::Arc::new(move || repaint.request_repaint()), Keeper::start(), paths.clone());
+        let mut bridge = Bridge::new(rt.handle().clone(), tx, std::sync::Arc::new(move || repaint.request_repaint()), keeper, paths.clone());
+        configure(&mut bridge);
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         // Before the first frame, so the window never shows at 100% first.
@@ -321,13 +340,20 @@ impl RedeApp {
             ui.notice =
                 Some(Notice::error(format!("Your settings couldn't be read, so Rede started fresh. Sign in again. The old file is at {}.", aside.display())));
         }
-        // A saved account is resumed with the tokens the keyring kept; without
-        // one, the sign-in form starts empty.
-        let login = saved.account().is_none().then(LoginForm::default);
+        // A saved account is resumed with the tokens the keyring kept unless
+        // the user signed out of it; without one, the sign-in form starts
+        // empty.
+        let active = saved.account().cloned();
+        let login = match active.as_ref() {
+            Some(account) if account.signed_out => Some(LoginForm::for_account(Some(account))),
+            Some(_) => None,
+            None => Some(LoginForm::default()),
+        };
         #[cfg(target_os = "macos")]
         shell::now_playing::intervals(f64::from(saved.playback.skip_back), f64::from(saved.playback.skip_forward));
-        if let Some(account) = saved.account() {
-            bridge.start(account.clone());
+        let connecting = active.as_ref().is_some_and(|a| !a.signed_out);
+        if let Some(account) = active.filter(|a| !a.signed_out) {
+            bridge.start(account);
         }
         Ok(Self {
             _rt: AppRuntime(Some(rt)),
@@ -337,7 +363,7 @@ impl RedeApp {
             prefs,
             shown,
             art,
-            session: Session { connecting: saved.account().is_some(), ..Session::default() },
+            session: Session { connecting, ..Session::default() },
             login,
             openid: Default::default(),
             books: Books::default(),
@@ -392,7 +418,7 @@ impl RedeApp {
                 }
                 m => self.handle_sign_in(m),
             },
-            Msg::Library(m) => match m {
+            Msg::Library { session, event } if session == self.bridge.session() => match event {
                 LibraryMsg::Books(books) => {
                     if self.session.source.is_some()
                         && let (Some(account), Some(shelf)) = (&self.session.account, &self.session.shelf)
@@ -406,7 +432,8 @@ impl RedeApp {
                 LibraryMsg::Book { key, item } => self.books.loaded(&key.item, *item),
                 LibraryMsg::BookFailed { key, error } => self.books.failed(&key.item, error),
             },
-            Msg::Stats { log, history } => {
+            Msg::Library { .. } => {}
+            Msg::Stats { session, log, history } if session == self.bridge.session() => {
                 // No answer means the server's gone, as anywhere else; any
                 // other reason is the page's to say.
                 if let Some(Err(e)) = &history
@@ -416,6 +443,7 @@ impl RedeApp {
                 }
                 self.stats.arrived(log, history);
             }
+            Msg::Stats { .. } => {}
             Msg::Bookmarks { session, event } if session == self.bridge.session() => self.bookmark_event(event),
             Msg::Bookmarks { .. } => {}
             Msg::Playback { session, event } if session == self.bridge.session() => self.playback_event(event),
@@ -436,7 +464,8 @@ impl RedeApp {
                     shell::now_playing::set_artwork(id, bytes);
                 }
             }
-            Msg::Error(e) => self.show_failure(e),
+            Msg::Error { session, error } if session == self.bridge.session() => self.show_failure(error),
+            Msg::Error { .. } => {}
         }
     }
 
@@ -495,6 +524,10 @@ impl RedeApp {
             Action::SignOut => {
                 self.sheet = None;
                 self.sign_out();
+            }
+            Action::SwitchAccount(id) => {
+                self.sheet = None;
+                self.switch_account(id);
             }
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),

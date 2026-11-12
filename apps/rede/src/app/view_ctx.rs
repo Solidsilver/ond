@@ -6,9 +6,11 @@
 use super::session::Session;
 use super::{Action, Books, Nav, RedeApp, SyncState};
 use crate::art::Art;
-use crate::settings::{LibraryFilter, LibrarySort};
+use crate::settings::{Account, LibraryFilter, LibrarySort};
 
 pub struct ViewCtx<'a> {
+    pub accounts: &'a [Account],
+    pub scope: &'a accounts::Scope,
     pub books: &'a mut Books,
     pub session: &'a Session,
     pub sync: &'a SyncState,
@@ -49,6 +51,8 @@ impl RedeApp {
     pub(super) fn view(&mut self) -> ViewCtx<'_> {
         let bookmarks = self.current_bookmarks();
         ViewCtx {
+            accounts: &self.shown.accounts,
+            scope: &self.shown.scope,
             bookmarks,
             books: &mut self.books,
             session: &self.session,

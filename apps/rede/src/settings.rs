@@ -2,11 +2,11 @@
 //! platform's config folder, where the app's files live, and the tokens in the
 //! system keyring.
 //!
-//! One account is shown in the UI, but the file holds a list: the ids, tracks
-//! and downloads are all keyed by account already, so a second one is a row in
-//! the list rather than a new shape.
+//! All accounts live in the same list, each keyed by its local [`AccountId`]
+//! with its own shelf and downloads folder; `scope` remembers which one is
+//! open.
 
-use accounts::AccountId;
+use accounts::{AccountId, Scope, SourceColor};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -105,6 +105,13 @@ pub struct Account {
     /// account saved before Rede kept it, until it signs in again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<SignInMethod>,
+    /// The dot colour shown when more than one account is configured.
+    #[serde(default)]
+    pub color: SourceColor,
+    /// True after signing out so the row stays in the switcher until the user
+    /// signs back in or removes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_out: bool,
 }
 
 /// How an account proves who it is: a password typed into Rede, or the
@@ -136,6 +143,8 @@ impl Account {
             device_id: uuid::Uuid::new_v4().to_string(),
             libraries: Vec::new(),
             sign_in: None,
+            color: SourceColor::default(),
+            signed_out: false,
         }
     }
 
@@ -153,9 +162,14 @@ impl Account {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
-    /// The accounts, oldest first. The UI shows the first for now.
+    /// The accounts, oldest first.
     #[serde(default)]
     pub accounts: Vec<Account>,
+    /// Which account is open. Rede shows one source at a time, so `only` names
+    /// the active account; `all` (from an older file) or a missing id falls
+    /// back leniently to the first account.
+    #[serde(default)]
+    pub scope: Scope,
     #[serde(default)]
     pub theme: shell::theme::ThemePref,
     /// How large the interface is drawn, in percent (one of
@@ -186,6 +200,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             accounts: Vec::new(),
+            scope: Scope::default(),
             theme: Default::default(),
             zoom: shell::zoom::DEFAULT,
             sort: Default::default(),
@@ -284,19 +299,74 @@ fn set(root: &mut serde_json::Value, path: &[String], value: serde_json::Value) 
     }
 }
 
+fn same_server(a: &str, b: &str) -> bool {
+    a.trim().trim_end_matches('/').eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
+}
+
 impl Settings {
-    /// The account the UI shows, if one was ever signed in.
+    /// The active account named by `scope`, falling back to the first account
+    /// when `scope` is still `all` (an older file) or names an account that was
+    /// removed.
     pub fn account(&self) -> Option<&Account> {
-        self.accounts.first()
+        self.scope.single().and_then(|id| self.account_by_id(id)).or_else(|| self.accounts.first())
     }
 
-    /// Remembers `account` as the one in use: replacing the first account's
-    /// details, or adding the first one.
+    /// The account with `id`, whichever position it holds.
+    pub fn account_by_id(&self, id: AccountId) -> Option<&Account> {
+        self.accounts.iter().find(|a| a.id == id)
+    }
+
+    /// The existing account for `(server, username)`, ignoring trailing slashes
+    /// and case differences in the server URL.
+    pub fn find_account(&self, server: &str, username: &str) -> Option<&Account> {
+        self.accounts.iter().find(|a| a.username == username && same_server(&a.server, server))
+    }
+
+    /// Reuses an existing account for `(server, username)` (keeping its id,
+    /// device id, shelf, downloads and colour) or builds a new one with the
+    /// next colour over existing accounts.
+    pub fn account_for_sign_in(&self, server: impl Into<String>, username: impl Into<String>, sign_in: Option<SignInMethod>) -> Account {
+        let server = server.into();
+        let username = username.into();
+        if let Some(existing) = self.find_account(&server, &username) {
+            Account { server, username, sign_in, signed_out: false, ..existing.clone() }
+        } else {
+            let color = accounts::next_color(self.accounts.iter().map(|a| a.color));
+            Account { color, sign_in, ..Account::new(server, username) }
+        }
+    }
+
+    /// Stores `account` (updating the row with the same id in place, or adding
+    /// a new row) and makes it the active account.
     pub fn put_account(&mut self, account: Account) {
-        match self.accounts.first_mut() {
+        let id = account.id;
+        match self.account_by_id_mut(id) {
             Some(existing) => *existing = account,
             None => self.accounts.push(account),
         }
+        self.scope.choose_one(id);
+    }
+
+    /// Records whether `id` is signed out while keeping its row and local data.
+    pub fn set_signed_out(&mut self, id: AccountId, signed_out: bool) {
+        if let Some(existing) = self.account_by_id_mut(id) {
+            existing.signed_out = signed_out;
+        }
+    }
+
+    /// Removes `id` from `accounts` and `scope`, picking the first remaining
+    /// account when the removed account was active.
+    #[allow(dead_code)] // Exercised by tests; wired to the Sources tab in a later milestone.
+    pub fn remove_account(&mut self, id: AccountId) -> Option<Account> {
+        let index = self.accounts.iter().position(|a| a.id == id)?;
+        let removed = self.accounts.remove(index);
+        self.scope.drop_account(id);
+        if self.scope.single().and_then(|active| self.account_by_id(active)).is_none()
+            && let Some(first) = self.accounts.first()
+        {
+            self.scope.choose_one(first.id);
+        }
+        Some(removed)
     }
 
     /// The account with `id`, whichever position it holds.
@@ -386,6 +456,29 @@ impl Paths {
     /// An account's shelf: `accounts/<id>.redb`.
     pub fn shelf(&self, account: &Account) -> PathBuf {
         self.shelves.join(format!("{}.redb", account.id))
+    }
+
+    /// An account's downloads folder: `downloads/<account_hex>`.
+    #[allow(dead_code)] // Exercised by tests; wired to the Sources tab in a later milestone.
+    pub fn downloads(&self, account: &Account) -> PathBuf {
+        self.shelves.with_file_name("downloads").join(format!("{:08x}", account.id.as_uuid().as_u128()))
+    }
+
+    /// Deletes an inactive account's shelf database and downloaded files if
+    /// present; missing files are ignored.
+    #[allow(dead_code)] // Exercised by tests; wired to the Sources tab in a later milestone.
+    pub fn purge_account(&self, account: &Account) -> std::io::Result<()> {
+        match std::fs::remove_file(self.shelf(account)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        match std::fs::remove_dir_all(self.downloads(account)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        Ok(())
     }
 }
 
@@ -499,15 +592,85 @@ mod tests {
     }
 
     #[test]
-    fn the_account_in_use_is_the_first_and_is_replaced_in_place() {
+    fn signing_in_again_reuses_the_matching_account_and_a_second_adds_one() {
         let mut s = login();
-        let mut again = s.account().unwrap().clone();
-        again.username = "alex".into();
-        s.put_account(again.clone());
+        let first_id = s.account().unwrap().id;
+        let first_device = s.account().unwrap().device_id.clone();
+
+        let reused = s.account_for_sign_in("HTTPS://BOOKS.EXAMPLE.COM/", "sam", Some(SignInMethod::Password));
+        assert_eq!(reused.id, first_id);
+        assert_eq!(reused.device_id, first_device);
+        assert_eq!(reused.color, SourceColor::new(0));
+        assert!(!reused.signed_out);
+        s.put_account(reused);
         assert_eq!(s.accounts.len(), 1);
-        assert_eq!(s.account().unwrap().username, "alex");
-        assert_eq!(s.account_by_id_mut(again.id).map(|a| a.username.as_str()), Some("alex"));
+        assert_eq!(s.scope, Scope::only(first_id));
+
+        let other = s.account_for_sign_in("https://other.example.com", "sam", Some(SignInMethod::OpenId));
+        assert_ne!(other.id, first_id);
+        assert_eq!(other.color, SourceColor::new(1));
+        s.put_account(other.clone());
+        assert_eq!(s.accounts.len(), 2);
+        assert_eq!(s.scope, Scope::only(other.id));
+        assert_eq!(s.account().map(|a| a.id), Some(other.id));
+
+        assert_eq!(s.account_by_id_mut(other.id).map(|a| a.username.as_str()), Some("sam"));
         assert!(s.account_by_id_mut(AccountId::new()).is_none());
+    }
+
+    #[test]
+    fn an_old_settings_file_without_scope_opens_on_its_first_account_and_active_scope_survives_a_save() {
+        let legacy_first = Account::new("https://one.example.com", "sam");
+        let legacy_json = serde_json::json!({
+            "accounts": [{
+                "id": legacy_first.id,
+                "server": legacy_first.server,
+                "username": legacy_first.username,
+                "device_id": legacy_first.device_id,
+            }]
+        });
+        let loaded = Settings::from_json(&serde_json::to_vec(&legacy_json).unwrap()).unwrap();
+        assert_eq!(loaded.account().map(|a| a.id), Some(legacy_first.id));
+        assert_eq!(loaded.accounts[0].color, SourceColor::default());
+        assert!(!loaded.accounts[0].signed_out);
+
+        let mut s = loaded;
+        let second = s.account_for_sign_in("https://two.example.com", "alex", Some(SignInMethod::Password));
+        s.put_account(second.clone());
+        let saved = serde_json::to_vec(&s).unwrap();
+        let reopened = Settings::from_json(&saved).unwrap();
+        assert_eq!(reopened.scope, Scope::only(second.id));
+        assert_eq!(reopened.account().map(|a| a.id), Some(second.id));
+
+        let stale = Settings { scope: Scope::only(AccountId::new()), ..reopened };
+        assert_eq!(stale.account().map(|a| a.id), Some(legacy_first.id), "an unknown active id falls back to the first account");
+    }
+
+    #[test]
+    fn removing_an_account_drops_it_from_settings_and_deletes_its_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths { config_file: dir.path().join("settings.json"), shelves: dir.path().join("accounts"), art_cache: dir.path().join("art") };
+        std::fs::create_dir_all(&paths.shelves).unwrap();
+
+        let mut s = login();
+        let first = s.account().unwrap().clone();
+        let second = s.account_for_sign_in("https://two.example.com", "sam", None);
+        s.put_account(first.clone());
+        s.put_account(second.clone());
+
+        std::fs::write(paths.shelf(&second), b"shelf").unwrap();
+        std::fs::create_dir_all(paths.downloads(&second)).unwrap();
+        std::fs::write(paths.downloads(&second).join("book.mp3"), b"audio").unwrap();
+
+        let removed = s.remove_account(second.id).unwrap();
+        assert_eq!(removed.id, second.id);
+        assert_eq!(s.accounts.len(), 1);
+        assert_eq!(s.account().map(|a| a.id), Some(first.id));
+
+        paths.purge_account(&removed).unwrap();
+        assert!(!paths.shelf(&removed).exists());
+        assert!(!paths.downloads(&removed).exists());
+        paths.purge_account(&removed).unwrap();
     }
 
     #[test]

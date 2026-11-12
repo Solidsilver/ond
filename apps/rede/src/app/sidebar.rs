@@ -2,9 +2,10 @@
 //! search field that opens the palette (⌘K), the places to browse under the
 //! library's name, and the account at the foot, with its state (connected,
 //! syncing, offline) and its menu, and the keyboard shortcuts beside it.
-//! The foot is the kit's source switcher with the one account Rede signs in
-//! to, so it looks as the account row did; the account menu's rows are
-//! Rede's, drawn under it.
+//! The foot is the kit's source switcher with every configured account
+//! (active one at its live state, others online or signed out); clicking another
+//! switches to it via `Action::SwitchAccount`, while the account menu's rows
+//! are Rede's, drawn under it.
 //!
 //! The places are a list so Authors and Collections join Home, Library,
 //! Series, Downloads and Stats as rows when they come. Downloads carries a ring
@@ -19,7 +20,7 @@
 use super::nav::Route;
 use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction, RedeApp};
-use accounts::{OfflineReason, Scope, SourceColor, SourceState};
+use accounts::{OfflineReason, Scope, SourceState};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use shell::icons::{self, Icon};
 use shell::kit;
@@ -306,27 +307,45 @@ impl ViewCtx<'_> {
     /// or the rail. Click for its menu.
     fn account_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
         let t = Tokens::of(ui);
-        let Some(account) = self.session.account.clone() else {
+        let active = self
+            .session
+            .account
+            .clone()
+            .or_else(|| self.scope.single().and_then(|id| self.accounts.iter().find(|a| a.id == id).cloned()))
+            .or_else(|| self.accounts.first().cloned());
+        let Some(account) = active else {
             if matches!(place, kit::SwitcherPlace::Foot { .. }) {
                 ui.label(egui::RichText::new("Not signed in").size(12.0).color(t.muted));
             }
             return;
         };
         let state = self.account_state();
-        let host = host(&account.server);
-        let (line, tooltip, source_state) = (state.line(host), state.tooltip(host), state.source_state());
-        // Rede signs in to one account at a time: its settings keep a list,
-        // but signing in replaces the first, and there's no switching
-        // between them yet.
-        let sources = [kit::SourceInfo {
-            id: account.id,
-            name: &account.username,
-            kind: "Audiobookshelf",
-            icon: Icon::Headphones,
-            color: SourceColor::default(),
-            state: &source_state,
-            detail: Some(&line),
-        }];
+        let active_host = host(&account.server);
+        let (line, tooltip, active_source_state) = (state.line(active_host), state.tooltip(active_host), state.source_state());
+        let mut entries: Vec<(accounts::AccountId, String, accounts::SourceColor, SourceState, String)> = Vec::with_capacity(self.accounts.len().max(1));
+        for saved in self.accounts {
+            if saved.id == account.id {
+                entries.push((account.id, account.username.clone(), account.color, active_source_state, line.clone()));
+            } else {
+                let row_state = if saved.signed_out { SourceState::SignedOut } else { SourceState::Online };
+                entries.push((saved.id, saved.username.clone(), saved.color, row_state, host(&saved.server).to_owned()));
+            }
+        }
+        if !entries.iter().any(|(id, ..)| *id == account.id) {
+            entries.push((account.id, account.username.clone(), account.color, active_source_state, line));
+        }
+        let sources: Vec<_> = entries
+            .iter()
+            .map(|(id, name, color, source_state, detail)| kit::SourceInfo {
+                id: *id,
+                name,
+                kind: "Audiobookshelf",
+                icon: Icon::Headphones,
+                color: *color,
+                state: source_state,
+                detail: Some(detail),
+            })
+            .collect();
         let scope = Scope::only(account.id);
         let switcher =
             kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add: false, manage: false, tooltip: Some(&tooltip) };
@@ -338,7 +357,8 @@ impl ViewCtx<'_> {
                 AccountRow::Shortcuts => Action::Shortcuts,
                 AccountRow::SignOut => Action::AskSignOut,
             }),
-            Some(kit::SourcePick::Source(_) | kit::SourcePick::All | kit::SourcePick::Add | kit::SourcePick::Manage) | None => {}
+            Some(kit::SourcePick::Source(id)) => self.actions.push(Action::SwitchAccount(id)),
+            Some(kit::SourcePick::All | kit::SourcePick::Add | kit::SourcePick::Manage) | None => {}
         }
     }
 
