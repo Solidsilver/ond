@@ -1,4 +1,4 @@
-//! Who an item belongs to.
+//! Who an item belongs to, and the shared source models both apps show.
 //!
 //! Two servers can both hold an item called `abc`, so both apps qualify an
 //! item's own id with a local, permanent account id wherever it leaves its
@@ -15,6 +15,18 @@
 //! `[A-Za-z0-9_-]`, so the `/` becomes `%2F`: the pair stays one flat file
 //! name, can't be read as a directory, and the escaping is reversible, so two
 //! keys never share a name.
+//!
+//! [`SourceState`], [`Scope`] and [`SourceColor`] live here too so `shell::kit`
+//! and both apps share one model of what a source is doing, which sources are
+//! shown and which palette slot each source carries.
+
+mod color;
+mod scope;
+mod state;
+
+pub use color::{SourceColor, next_color};
+pub use scope::Scope;
+pub use state::{OfflineReason, SourceState};
 
 use std::fmt;
 use std::str::FromStr;
