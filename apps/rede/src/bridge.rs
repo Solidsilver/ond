@@ -198,6 +198,17 @@ pub struct Bridge {
     /// Set on a copy made by [`scoped`](Self::scoped): the session its work
     /// belongs to. Once that session ends, the copy's messages are dropped.
     scope: Option<u64>,
+    /// Bumped by each sign-in attempt (checking a server, starting a browser
+    /// sign-in) and by a cancel: an older attempt's answer is dropped. It's
+    /// apart from `session` so that an attempt beside a live account leaves
+    /// that account's work alone.
+    attempts: Arc<AtomicU64>,
+    /// Set on a copy working for one attempt: once a newer one starts, or
+    /// it's cancelled, the copy's messages are dropped.
+    attempt: Option<u64>,
+    /// Set on a copy made by [`beside`](Self::beside): the sign-in it starts
+    /// is beside a live account, whose session and login it leaves alone.
+    beside: bool,
 }
 
 /// Serializes blocking keyring operations. A delayed cleanup may remove an
@@ -224,6 +235,9 @@ impl Bridge {
             shelves: Arc::default(),
             finishing: Arc::default(),
             scope: None,
+            attempts: Arc::default(),
+            attempt: None,
+            beside: false,
         }
     }
 
@@ -461,9 +475,47 @@ impl Bridge {
         Self { scope: Some(session), ..self.clone() }
     }
 
-    /// False once the session this copy works for has ended.
+    /// False once the session this copy works for has ended, or the
+    /// sign-in attempt it works for was overtaken or cancelled.
     fn current(&self) -> bool {
-        self.scope.is_none_or(|s| self.live(s))
+        self.scope.is_none_or(|s| self.live(s)) && self.attempt.is_none_or(|a| self.attempts.load(Ordering::Acquire) == a)
+    }
+
+    /// A copy whose sign-in steps run beside the live account when `live`:
+    /// adding an account while another is in view (Add source…). A new
+    /// attempt then doesn't end the session, the login is kept beside the
+    /// live one's, and a cancel forgets only the attempt. Without a live
+    /// account, sign-in works as it always has.
+    pub fn beside(&self, live: bool) -> Self {
+        Self { beside: live, ..self.clone() }
+    }
+
+    /// A copy for a new sign-in attempt, which an older one's answers no
+    /// longer count against. Without a live account beside it, the session
+    /// ends too, as signing in has always done.
+    fn new_attempt(&self) -> Self {
+        if !self.beside {
+            self.end_session();
+        }
+        let attempt = self.attempts.fetch_add(1, Ordering::AcqRel) + 1;
+        Self { scope: Some(self.session()), attempt: Some(attempt), ..self.clone() }
+    }
+
+    /// A copy for the next step of the attempt under way.
+    fn attempt_scoped(&self) -> Self {
+        Self { scope: Some(self.scope.unwrap_or_else(|| self.session())), attempt: Some(self.attempts.load(Ordering::Acquire)), ..self.clone() }
+    }
+
+    /// Starts the login a sign-in step makes: beside the live one, or in
+    /// its place.
+    fn start_login(&self, account: Account) {
+        if self.beside { self.keeper.try_account(account) } else { self.keeper.use_account(account) }
+    }
+
+    /// An account signed in: its login, if it was an attempt beside the
+    /// live one, is the live one now.
+    pub fn adopt_login(&self) {
+        self.keeper.adopt();
     }
 
     fn library(&self, event: LibraryMsg) {
@@ -561,8 +613,7 @@ impl Bridge {
 
     /// Discovers authentication before showing credential controls.
     pub fn server_status(&self, account: Account) {
-        self.end_session();
-        let this = self.scoped();
+        let this = self.new_attempt();
         self.rt.spawn(async move {
             let session = this.scope.unwrap();
             let result = async {
@@ -588,8 +639,7 @@ impl Bridge {
     }
 
     pub fn begin_openid(&self, account: Account, warning: Option<String>) {
-        self.end_session();
-        let this = self.scoped();
+        let this = self.new_attempt();
         self.rt.spawn(async move {
             let session = this.scope.unwrap();
             let result = async {
@@ -646,8 +696,13 @@ impl Bridge {
     }
 
     pub fn cancel_login(&self) {
-        self.end_session();
-        self.keeper.cancel_login();
+        self.attempts.fetch_add(1, Ordering::AcqRel);
+        if self.beside {
+            self.keeper.cancel_attempt();
+        } else {
+            self.end_session();
+            self.keeper.cancel_login();
+        }
     }
 
     pub fn clear_openid(&self) {
@@ -662,7 +717,7 @@ impl Bridge {
     }
 
     pub fn complete_openid(&self, pending: crate::openid::Pending, callback: String) {
-        let this = self.scoped();
+        let this = self.attempt_scoped();
         let account = pending.account;
         self.rt.spawn(async move {
             let session = this.scope.unwrap();
@@ -686,8 +741,8 @@ impl Bridge {
 
     /// The UI has identified the account and accepted this session's result.
     pub fn accept_openid(&self, account: Account, client: abs::Client, tokens: abs::Tokens, warning: Option<String>) {
-        let this = self.scoped();
-        self.keeper.use_account(account.clone());
+        let this = self.attempt_scoped();
+        self.start_login(account.clone());
         let hook = self.keeper.hook();
         hook(abs::AuthEvent::Tokens(tokens));
         client.set_auth_hook(hook);
@@ -713,9 +768,9 @@ impl Bridge {
     /// first: Rede needs 2.26 (refresh tokens) and warns below 2.36 (the
     /// refresh token was accepted as an access token until then).
     pub fn sign_in(&self, account: Account, password: String) {
-        let session = self.session();
-        let this = self.scoped_to(session);
-        self.keeper.use_account(account.clone());
+        let this = self.attempt_scoped();
+        let session = this.scope.unwrap_or_default();
+        self.start_login(account.clone());
         let hook = self.keeper.hook();
         self.rt.spawn(async move {
             let failed = |error: String| Msg::Account(AccountMsg::SignInFailed { session, error });
@@ -739,9 +794,10 @@ impl Bridge {
             if let Err(e) = client.login(&account.username, &password).await {
                 return this.send(failed(sign_in_error(&e)));
             }
-            if !this.live(session) {
-                // Signed out while the password was on its way. The tokens the
-                // sign-in just got are for an account nobody wants.
+            if !this.current() {
+                // Signed out or cancelled while the password was on its way.
+                // The tokens the sign-in just got are for an account nobody
+                // wants.
                 let _ = client.logout().await;
                 return;
             }

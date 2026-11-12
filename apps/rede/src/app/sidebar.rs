@@ -4,8 +4,9 @@
 //! syncing, offline) and its menu, and the keyboard shortcuts beside it.
 //! The foot is the kit's source switcher with every configured account
 //! (active one at its live state, others online or signed out); clicking another
-//! switches to it via `Action::SwitchAccount`, while the account menu's rows
-//! are Rede's, drawn under it.
+//! switches to it via `Action::SwitchAccount`, and Add source… opens the
+//! first-run sheet over it (`Action::AddSource`), while the account menu's
+//! rows are Rede's, drawn under it.
 //!
 //! The places are a list so Authors and Collections join Home, Library,
 //! Series, Downloads and Stats as rows when they come. Downloads carries a ring
@@ -347,8 +348,10 @@ impl ViewCtx<'_> {
             })
             .collect();
         let scope = Scope::only(account.id);
-        let switcher =
-            kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add: false, manage: false, tooltip: Some(&tooltip) };
+        // Another account is added beside the one in view, so only once
+        // it's in.
+        let add = self.session.signed_in();
+        let switcher = kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add, manage: false, tooltip: Some(&tooltip) };
         let picked = kit::source_switcher(ui, &switcher, place, |ui| self.account_menu(ui, &account, &state));
         match picked {
             Some(kit::SourcePick::App(row)) => self.actions.push(match row {
@@ -358,7 +361,8 @@ impl ViewCtx<'_> {
                 AccountRow::SignOut => Action::AskSignOut,
             }),
             Some(kit::SourcePick::Source(id)) => self.actions.push(Action::SwitchAccount(id)),
-            Some(kit::SourcePick::All | kit::SourcePick::Add | kit::SourcePick::Manage) | None => {}
+            Some(kit::SourcePick::Add) => self.actions.push(Action::AddSource),
+            Some(kit::SourcePick::All | kit::SourcePick::Manage) | None => {}
         }
     }
 

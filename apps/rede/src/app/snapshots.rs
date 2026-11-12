@@ -76,10 +76,17 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         app
     });
     scene(h, s, "signin-form", || signed_out(&ctx, dir.path()));
-    // Signed in from the sheet: the account, and Done.
+    // Signed in from the sheet: the accounts, Add another and Done.
     scene(h, s, "signin-added", || {
         let mut app = super::fixture::app(&ctx, dir.path(), 0);
         app.onboarding = Some(shell::kit::OnboardingStep::Added);
+        app
+    });
+    // The switcher's Add source…: the form over the account in view, with
+    // Cancel back to it.
+    scene(h, s, "signin-add-source", || {
+        let mut app = super::fixture::app(&ctx, dir.path(), BOOKS.len());
+        app.apply(Action::AddSource);
         app
     });
     // A saved login that stopped working: the form alone.

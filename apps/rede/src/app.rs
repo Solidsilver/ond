@@ -166,6 +166,9 @@ pub enum Action {
     /// Open another configured account, stopping playback and flushing any
     /// pending progress from the current one first.
     SwitchAccount(accounts::AccountId),
+    /// The first-run sheet over the account in view, to sign in to another
+    /// (the switcher's Add source…).
+    AddSource,
     /// List the libraries and write what changed. A sync already running
     /// isn't started twice.
     SyncNow,
@@ -538,6 +541,10 @@ impl RedeApp {
             Action::SwitchAccount(id) => {
                 self.sheet = None;
                 self.switch_account(id);
+            }
+            Action::AddSource => {
+                self.sheet = None;
+                self.add_source();
             }
             Action::SyncNow => self.sync_now(),
             Action::Prefs(a) => self.apply_prefs(a),

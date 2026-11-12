@@ -5,6 +5,11 @@
 //! Signing out forgets local tokens and asks the server to end its login as
 //! a best effort. The shelf and downloaded art stay where they are, so signing
 //! back in finds the library at once.
+//!
+//! Signing in while an account is in view (the switcher's Add source…) runs
+//! beside it: each step goes through [`Bridge::beside`](crate::bridge::Bridge::beside),
+//! so the account in view keeps its session and its login until the new one
+//! signs in, and a cancel leaves it as it was.
 
 use super::{Action, RedeApp};
 use crate::failure::SIGNED_OUT;
@@ -79,10 +84,17 @@ impl RedeApp {
     pub(super) fn signed_in(&mut self, account: Account, source: Arc<dyn Source>, shelf: Arc<Shelf>, warning: Option<String>) {
         // Another account signed in: what's on screen came from the old one.
         let changed = self.session.account.as_ref().map(|a| a.id) != Some(account.id);
-        if changed && self.session.account.is_some() {
+        // Signed in beside an account in view: its session goes, and its
+        // work still in flight with it.
+        let beside = self.session.signed_in();
+        if beside || (changed && self.session.account.is_some()) {
             let finished = self.teardown_session();
+            if beside {
+                self.bridge.end_session();
+            }
             self.bridge.track_finish(finished);
         }
+        self.bridge.adopt_login();
         let account = Account { signed_out: false, ..account };
         self.session = Session { account: Some(account.clone()), source: Some(source.clone()), shelf: Some(shelf.clone()), connecting: false };
         self.bridge.close_downloads(self.downloads.store.clone());
@@ -150,6 +162,7 @@ impl RedeApp {
     }
 
     pub(super) fn check_server(&mut self) {
+        let bridge = self.sign_in_bridge();
         let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
         if form.server.trim().is_empty() {
             form.error = Some("Enter the server's address, for example books.example.com.".into());
@@ -159,10 +172,17 @@ impl RedeApp {
         form.status = None;
         form.error = None;
         form.checked_server = form.server.trim().to_owned();
-        self.bridge.server_status(Account::new(&form.checked_server, ""));
+        bridge.server_status(Account::new(&form.checked_server, ""));
+    }
+
+    /// The bridge for a sign-in step: beside the account in view, if one
+    /// is.
+    fn sign_in_bridge(&self) -> crate::bridge::Bridge {
+        self.bridge.beside(self.session.signed_in())
     }
 
     pub(super) fn begin_openid(&mut self) {
+        let bridge = self.sign_in_bridge();
         let Some(form) = self.login.as_mut().filter(|f| !f.busy && f.status.is_some() && f.server.trim() == f.checked_server) else { return };
         if !crate::openid::SUPPORTED {
             form.error = Some("Browser sign-in is only available on macOS for now. Use an Audiobookshelf password on Linux.".into());
@@ -172,7 +192,7 @@ impl RedeApp {
         form.error = None;
         let account =
             form.account.clone().map(|a| Account { server: form.checked_server.clone(), ..a }).unwrap_or_else(|| Account::new(&form.checked_server, ""));
-        self.bridge.begin_openid(account, form.warning.clone());
+        bridge.begin_openid(account, form.warning.clone());
     }
 
     pub(super) fn handle_sign_in(&mut self, msg: crate::bridge::AccountMsg) {
@@ -219,7 +239,7 @@ impl RedeApp {
                 }
                 let username = login.user.username.unwrap_or_default();
                 let account = self.prefs.get(|s| s.account_for_sign_in(account.server, username, Some(SignInMethod::OpenId)));
-                self.bridge.accept_openid(account, client, login.tokens, warning);
+                self.sign_in_bridge().accept_openid(account, client, login.tokens, warning);
             }
             _ => {}
         }
@@ -269,7 +289,7 @@ impl RedeApp {
     }
 
     pub(super) fn cancel_sign_in(&mut self, reason: abs::OpenIdError) {
-        self.bridge.cancel_login();
+        self.sign_in_bridge().cancel_login();
         self.openid.exchanging = false;
         self.openid.pending = None;
         self.openid.early_redirect = None;
@@ -288,6 +308,7 @@ impl RedeApp {
             self.check_server();
             return;
         }
+        let bridge = self.sign_in_bridge();
         let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
         let server = form.server.trim().to_owned();
         let username = form.username.trim().to_owned();
@@ -308,7 +329,7 @@ impl RedeApp {
         let account = self.prefs.get(|s| s.account_for_sign_in(server, username, Some(SignInMethod::Password)));
         form.account = Some(account.clone());
         self.session.connecting = true;
-        self.bridge.sign_in(account, form.password.clone());
+        bridge.sign_in(account, form.password.clone());
     }
 
     /// Stops playback, finishes the listening worker and clears the active

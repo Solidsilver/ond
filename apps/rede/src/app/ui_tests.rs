@@ -736,8 +736,98 @@ fn signing_in_goes_through_the_first_run_sheet() {
     let session = app.bridge.session();
     app.handle(crate::bridge::AccountMsg::SignedIn { session, account, source, shelf: shelf(dir.path()), warning: None });
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).onboarding, None);
+    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Added));
+    h.get_by_label("sam, Audiobookshelf, Online");
+    h.get_by_label("Add another");
+    h.get_by_label("Done").click();
+    h.run_steps(2);
     assert!(!app_mut(&mut h).signing_in(), "the library is up");
+}
+
+/// A second account's sign-in, as the bridge would answer it, for the
+/// account `name` at `server`, its shelf under `dir`.
+fn second_account_signs_in(h: &mut Harness<'static, Option<RedeApp>>, dir: &Path, server: &str, name: &str) -> accounts::AccountId {
+    let app = app_mut(h);
+    let account = app.prefs.get(|s| s.account_for_sign_in(server, name, Some(crate::settings::SignInMethod::Password)));
+    let id = account.id;
+    let client = abs::Client::new("http://127.0.0.1:9", account.device()).unwrap();
+    let source: std::sync::Arc<dyn sources::Source> = std::sync::Arc::new(sources::AbsSource::new(account.id, client, Vec::new()));
+    let shelf_dir = dir.join(name);
+    std::fs::create_dir_all(&shelf_dir).unwrap();
+    let session = app.bridge.session();
+    app.handle(crate::bridge::AccountMsg::SignedIn { session, account, source, shelf: shelf(&shelf_dir), warning: None });
+    h.run_steps(2);
+    id
+}
+
+/// Opens the switcher's menu and picks Add source….
+fn add_source(h: &mut Harness<'static, Option<RedeApp>>) {
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("Add source…").click();
+    h.run_steps(3);
+}
+
+/// Add source… opens the form over the account in view, which lists it.
+/// Checking a server there leaves that account's session running, and
+/// once the new account signs in the sheet lists both with Add another and
+/// Done, which lands on the new one.
+#[test]
+fn add_source_then_signing_in_adds_a_second_account_and_done_lands_on_it() {
+    use shell::kit::OnboardingStep;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    let sam = account().id;
+    let session = app_mut(&mut h).bridge.session();
+    add_source(&mut h);
+    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Kinds));
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Server");
+    h.get_by_label("sam, Audiobookshelf, Online");
+    h.get_by_label("Cancel");
+    assert!(h.query_by_label("Done").is_none(), "Cancel stands in for it");
+
+    app_mut(&mut h).login.as_mut().unwrap().server = "http://127.0.0.1:9".into();
+    h.get_by_label("Sign in").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert_eq!(app.bridge.session(), session, "checking the server leaves sam's session alone");
+    assert!(app.session.signed_in() && app.session.account.as_ref().map(|a| a.id) == Some(sam));
+
+    let alex = second_account_signs_in(&mut h, dir.path(), "https://two.example.com", "alex");
+    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Added));
+    h.get_by_label("sam, Audiobookshelf, Online");
+    h.get_by_label("alex, Audiobookshelf, Online");
+    h.get_by_label("Add another");
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in(), "the library is up");
+    assert_eq!(app.session.account.as_ref().map(|a| a.id), Some(alex));
+    assert_ne!(app.bridge.session(), session, "sam's work in flight is dropped");
+    assert_eq!(app.prefs.get(|s| (s.accounts.len(), s.scope.single())), (2, Some(alex)));
+}
+
+/// Cancel on the Add source… sheet returns to the library on the account
+/// that was in view, its session and its books as they were.
+#[test]
+fn cancelling_add_source_keeps_the_current_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).go(book_route(1));
+    h.run_steps(2);
+    let session = app_mut(&mut h).bridge.session();
+    add_source(&mut h);
+    assert!(app_mut(&mut h).signing_in());
+    app_mut(&mut h).login.as_mut().unwrap().server = "two.example.com".into();
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in() && app.login.is_none());
+    assert!(app.session.signed_in() && app.session.account.as_ref().map(|a| a.id) == Some(account().id));
+    assert_eq!(app.bridge.session(), session);
+    assert_eq!(app.prefs.get(|s| s.accounts.len()), 1, "nothing was added");
+    assert_eq!(*app.ui.nav.current(), book_route(1), "still on the book");
 }
 
 #[test]
