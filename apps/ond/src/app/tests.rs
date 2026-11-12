@@ -1497,12 +1497,7 @@ fn two_accounts_keep_separate_art_and_switching_removes_the_old_accounts_art() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
-    let png = |rgba: [u8; 4]| {
-        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba(rgba));
-        let mut out = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
-        out.into_inner()
-    };
+    let png = crate::test_tracks::png;
     let (red, blue) = (png([220, 30, 30, 255]), png([30, 30, 220, 255]));
     let source_for = |account: accounts::AccountId, bytes: Vec<u8>| -> crate::source::Src {
         let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });

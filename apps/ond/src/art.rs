@@ -193,6 +193,11 @@ impl Art {
 
     pub fn set_source(&mut self, source: Src) {
         let next = source.account();
+        // The one place an account's folder is made (see `fetch_cached`). A
+        // single mkdir, made before any download can try to save into it.
+        if let Err(e) = std::fs::create_dir_all(account_dir(&self.root, next)) {
+            tracing::warn!("making the cover cache for {next}: {e}");
+        }
         let switched = self.account.is_some_and(|prev| prev != next);
         self.source = Some(source);
         if switched {
@@ -615,14 +620,19 @@ async fn decode_off_thread(bytes: Vec<u8>, size: u32) -> Option<(ColorImage, Pri
 
 /// Downloads `cover` at `size` px into the cache (written whole, then renamed
 /// into place) and returns its bytes.
+///
+/// The cover is saved only if the account's folder exists. [`Art::set_source`]
+/// makes it; once a removed account's folder is gone, a download still in
+/// flight for it fails to save instead of bringing the folder back for
+/// nothing to clean up.
 pub async fn fetch_cached(source: &Src, dir: &Path, cover: &str, size: u32) -> Option<Vec<u8>> {
     let bytes = source.cover(cover, size).await.ok()?;
-    let (dir, path) = (dir.to_owned(), cover_file(dir, cover, size));
+    let path = cover_file(dir, cover, size);
     // Saved by a task of its own: a load aborted from here on (scrolled past)
     // still leaves the cover cached, and never a half-written file.
     tokio::spawn(async move {
         let tmp = path.with_extension("part");
-        if tokio::fs::create_dir_all(&dir).await.is_ok() && tokio::fs::write(&tmp, &bytes).await.is_ok() {
+        if tokio::fs::write(&tmp, &bytes).await.is_ok() {
             let _ = tokio::fs::rename(&tmp, &path).await;
         }
         bytes
@@ -641,13 +651,6 @@ fn print(data: impl Hash) -> Print {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn png_bytes(rgba: [u8; 4]) -> Vec<u8> {
-        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba(rgba));
-        let mut out = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
-        out.into_inner()
-    }
 
     fn source_with_cover(account: AccountId, id: &str, bytes: Vec<u8>) -> Src {
         let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
@@ -681,7 +684,7 @@ mod tests {
         let account_cache = account_dir(dir.path(), account);
         std::fs::create_dir_all(&account_cache).unwrap();
         // A 64 px cover already on disk from an earlier session.
-        let png = png_bytes([200, 40, 40, 255]);
+        let png = crate::test_tracks::png([200, 40, 40, 255]);
         let png_len = png.len() as u64;
         std::fs::write(cover_file(&account_cache, "al-1", 64), png).unwrap();
         let ctx = egui::Context::default();
@@ -708,11 +711,23 @@ mod tests {
     }
 
     #[test]
+    fn a_download_finishing_after_its_accounts_folder_is_removed_does_not_bring_it_back() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let account = AccountId::new();
+        let gone = account_dir(dir.path(), account);
+        let bytes = crate::test_tracks::png([1, 2, 3, 255]);
+        let source = source_with_cover(account, "al-1", bytes.clone());
+        assert_eq!(rt.block_on(fetch_cached(&source, &gone, "al-1", 64)), Some(bytes), "the cover still shows");
+        assert!(!gone.exists());
+    }
+
+    #[test]
     fn two_accounts_with_the_same_cover_id_do_not_collide() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (one, two) = (AccountId::new(), AccountId::new());
-        let (red, blue) = (png_bytes([220, 30, 30, 255]), png_bytes([30, 30, 220, 255]));
+        let (red, blue) = (crate::test_tracks::png([220, 30, 30, 255]), crate::test_tracks::png([30, 30, 220, 255]));
         let mut art = Art::new(rt.handle().clone(), egui::Context::default(), dir.path().to_owned(), Some(one));
         art.set_source(source_with_cover(one, "al-1", red.clone()));
         testkit::wait_until("account one's cover to load", || {

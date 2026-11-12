@@ -808,6 +808,8 @@ mod tests {
             w.engine(audio::Event::TrackStarted { track_id: "t-1".into(), token, format, gapless: false, restart: false });
         };
 
+        // The UI's art cache makes the folder when the account connects.
+        std::fs::create_dir_all(crate::art::account_dir(&art_dir, one)).unwrap();
         w.handle(In::Source(Some(source_for(one, b"cover-one"))));
         start(&mut w, one, 1);
         let one_file = crate::art::cover_file(&crate::art::account_dir(&art_dir, one), "cov-1", 512);
@@ -815,6 +817,8 @@ mod tests {
         assert_eq!(std::fs::read(&one_file).unwrap(), b"cover-one");
         assert!(!crate::art::cover_file(&art_dir, "cov-1", 512).exists());
 
+        // The UI's art cache makes the folder when the account connects.
+        std::fs::create_dir_all(crate::art::account_dir(&art_dir, two)).unwrap();
         w.handle(In::Source(Some(source_for(two, b"cover-two"))));
         start(&mut w, two, 2);
         let two_file = crate::art::cover_file(&crate::art::account_dir(&art_dir, two), "cov-1", 512);

@@ -45,3 +45,12 @@ pub fn account() -> accounts::AccountId {
 pub fn key(id: &str) -> crate::source::TrackKey {
     crate::source::TrackKey::new(account(), id)
 }
+
+/// A 64 px PNG filled with one colour, for a cover a fake source serves or the
+/// cache already holds.
+pub fn png(rgba: [u8; 4]) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(64, 64, image::Rgba(rgba));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
