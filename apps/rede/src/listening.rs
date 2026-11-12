@@ -172,107 +172,118 @@ pub fn spawn_with_downloads(
         }
     });
     rt.spawn(async move {
-        let mut worker = Worker { source, shelf, device, session: None, active: None, downloads, local, reachable: true, refused_sessions: HashSet::new(), notify: notify.clone() };
-        notify(Event::Bookmarks(worker.shelf.bookmark_snapshot().map_err(local_error)));
-        let mut received = worker.shelf.pending_progress().ok().and_then(|p| p.last().map(|p| p.id)).unwrap_or(0);
-        if current() { worker.pull(None, &*notify).await; }
-        let mut retry_delay = RETRY_DELAY;
-        let mut retry_at = tokio::time::Instant::now() + retry_delay;
-        loop {
-            tokio::select! {
-                biased;
-                request = rx.recv() => {
-                    let Some(Envelope { request, id }) = request else { break };
-                    match request {
-                        Request::Open { generation, key, at } if current() => {
-                            // Opening must not wait for bookmark sync: the book
-                            // starts playing as soon as its position is known.
-                            let failed = if worker.reachable { worker.pull_positions(Some(received.saturating_add(1)), &*notify).await } else { true };
-                            let result = worker.open(generation, key, at).await.map(Box::new);
-                            notify(Event::Opened { generation, result });
-                            if !failed {
+        let mut finish_done = None;
+        {
+            let mut worker = Worker { source, shelf, device, session: None, active: None, downloads, local, reachable: true, refused_sessions: HashSet::new(), notify: notify.clone() };
+            notify(Event::Bookmarks(worker.shelf.bookmark_snapshot().map_err(local_error)));
+            let mut received = worker.shelf.pending_progress().ok().and_then(|p| p.last().map(|p| p.id)).unwrap_or(0);
+            if current() { worker.pull(None, &*notify).await; }
+            let mut retry_delay = RETRY_DELAY;
+            let mut retry_at = tokio::time::Instant::now() + retry_delay;
+            loop {
+                tokio::select! {
+                    biased;
+                    request = rx.recv() => {
+                        let Some(Envelope { request, id }) = request else { break };
+                        match request {
+                            Request::Open { generation, key, at } if current() => {
+                                // Opening must not wait for bookmark sync: the book
+                                // starts playing as soon as its position is known.
+                                let failed = if worker.reachable { worker.pull_positions(Some(received.saturating_add(1)), &*notify).await } else { true };
+                                let result = worker.open(generation, key, at).await.map(Box::new);
+                                notify(Event::Opened { generation, result });
+                                if !failed {
+                                    let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
+                                }
+                            }
+                            Request::Refresh { generation } if current() => {
+                                if let Some(session) = &mut worker.session && session.generation == generation {
+                                    let result = worker.source.refresh_tracks(&session.session).await.map_err(Failure::from);
+                                    if let Ok(tracks) = &result { session.session.tracks.clone_from(tracks); }
+                                    notify(Event::Refreshed { generation, result });
+                                }
+                            }
+                            Request::Report { generation, update, close } => {
+                                let id = id.expect("the journal saved every report");
+                                received = id;
+                                if let Err(error) = worker.report(id, generation, update.clone(), close).await && !error.is_network() {
+                                    notify(Event::Error(error));
+                                }
+                                notify(Event::Positions(vec![Progress { item: update.item, position: update.position, finished: update.finished, at: Some(update.at) }]));
+                            }
+                            Request::Activity { item } if current() => { worker.active = item; }
+                            Request::Bookmark { .. } if current() => {
                                 let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
                             }
-                        }
-                        Request::Refresh { generation } if current() => {
-                            if let Some(session) = &mut worker.session && session.generation == generation {
-                                let result = worker.source.refresh_tracks(&session.session).await.map_err(Failure::from);
-                                if let Ok(tracks) = &result { session.session.tracks.clone_from(tracks); }
-                                notify(Event::Refreshed { generation, result });
+                            Request::Set(update) if current() => {
+                                let id = id.expect("a set entry is durable");
+                                received = id;
+                                // The entry may restore an unfinished position over
+                                // a finished row, so it needs the server's current
+                                // list to decide whether a reset PATCH comes first.
+                                let result = match worker.source.progress().await.map_err(Failure::from) {
+                                    Ok(remote) => worker.source.set_progress(std::slice::from_ref(&update), &remote).await.map_err(Failure::from),
+                                    Err(e) => Err(e),
+                                };
+                                match result {
+                                    Ok(()) => { if let Err(e) = worker.shelf.mark_synced(&[id]) { notify(Event::Error(local_error(e))); } }
+                                    Err(e) => notify(Event::Error(e)),
+                                }
+                                if let Some(session) = &mut worker.session && session.key == update.item { session.position = update.position; }
+                                notify(Event::Positions(vec![Progress { item: update.item, position: update.position, finished: update.finished, at: Some(update.at) }]));
                             }
-                        }
-                        Request::Report { generation, update, close } => {
-                            let id = id.expect("the journal saved every report");
-                            received = id;
-                            if let Err(error) = worker.report(id, generation, update.clone(), close).await && !error.is_network() {
-                                notify(Event::Error(error));
+                            Request::Resume { generation } if current() => {
+                                // ResumeReady comes straight after the positions:
+                                // the app waits on it, and bookmark sync must not
+                                // hold playback up.
+                                let failed = if worker.reachable { worker.pull_positions(Some(received.saturating_add(1)), &*notify).await } else { true };
+                                notify(Event::ResumeReady { generation });
+                                if !failed {
+                                    let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
+                                }
                             }
-                            notify(Event::Positions(vec![Progress { item: update.item, position: update.position, finished: update.finished, at: Some(update.at) }]));
-                        }
-                        Request::Activity { item } if current() => { worker.active = item; }
-                        Request::Bookmark { .. } if current() => {
-                            let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
-                        }
-                        Request::Set(update) if current() => {
-                            let id = id.expect("a set entry is durable");
-                            received = id;
-                            // The entry may restore an unfinished position over
-                            // a finished row, so it needs the server's current
-                            // list to decide whether a reset PATCH comes first.
-                            let result = match worker.source.progress().await.map_err(Failure::from) {
-                                Ok(remote) => worker.source.set_progress(std::slice::from_ref(&update), &remote).await.map_err(Failure::from),
-                                Err(e) => Err(e),
-                            };
-                            match result {
-                                Ok(()) => { if let Err(e) = worker.shelf.mark_synced(&[id]) { notify(Event::Error(local_error(e))); } }
-                                Err(e) => notify(Event::Error(e)),
+                            Request::Reachable(reachable) if current() => { worker.reachable = reachable; }
+                            Request::Reconcile if current() => {
+                                worker.pull(Some(received.saturating_add(1)), &*notify).await;
                             }
-                            if let Some(session) = &mut worker.session && session.key == update.item { session.position = update.position; }
-                            notify(Event::Positions(vec![Progress { item: update.item, position: update.position, finished: update.finished, at: Some(update.at) }]));
-                        }
-                        Request::Resume { generation } if current() => {
-                            // ResumeReady comes straight after the positions:
-                            // the app waits on it, and bookmark sync must not
-                            // hold playback up.
-                            let failed = if worker.reachable { worker.pull_positions(Some(received.saturating_add(1)), &*notify).await } else { true };
-                            notify(Event::ResumeReady { generation });
-                            if !failed {
-                                let _ = sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
+                            Request::Finish(done) => {
+                                // Flush any queued progress for this account before
+                                // closing its session and releasing the shelf.
+                                let _ = worker.replay(None).await;
+                                let _ = worker.close().await;
+                                finish_done = Some(done);
+                                break;
                             }
-                        }
-                        Request::Reachable(reachable) if current() => { worker.reachable = reachable; }
-                        Request::Reconcile if current() => {
-                            worker.pull(Some(received.saturating_add(1)), &*notify).await;
-                        }
-                        Request::Finish(done) => {
-                            let _ = worker.close().await;
-                            let _ = done.send(());
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                _ = tokio::time::sleep_until(retry_at) => {
-                    let mut failed = false;
-                    if current() {
-                        if let Err(e) = worker.replay(Some(received.saturating_add(1))).await {
-                            failed = true;
-                            notify(Event::Error(e));
-                        }
-                        // Only queued bookmark edits are retried here: a pull already
-                        // asks when the window is focused, so an idle app asks nothing.
-                        match worker.shelf.pending_bookmarks() {
-                            Ok(pending) if !pending.is_empty() => {
-                                failed |= sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
-                            }
-                            Ok(_) => {}
-                            Err(e) => notify(Event::Error(local_error(e))),
+                            _ => {}
                         }
                     }
-                    retry_delay = next_retry_delay(retry_delay, failed);
-                    retry_at = tokio::time::Instant::now() + retry_delay;
+                    _ = tokio::time::sleep_until(retry_at) => {
+                        let mut failed = false;
+                        if current() {
+                            if let Err(e) = worker.replay(Some(received.saturating_add(1))).await {
+                                failed = true;
+                                notify(Event::Error(e));
+                            }
+                            // Only queued bookmark edits are retried here: a pull already
+                            // asks when the window is focused, so an idle app asks nothing.
+                            match worker.shelf.pending_bookmarks() {
+                                Ok(pending) if !pending.is_empty() => {
+                                    failed |= sync_bookmarks(&*worker.source, &worker.shelf, &*notify).await;
+                                }
+                                Ok(_) => {}
+                                Err(e) => notify(Event::Error(local_error(e))),
+                            }
+                        }
+                        retry_delay = next_retry_delay(retry_delay, failed);
+                        retry_at = tokio::time::Instant::now() + retry_delay;
+                    }
                 }
             }
+        }
+        // Signal after `worker` drops so the next account (or a quick
+        // re-sign-in) never races redb's single-opener lock.
+        if let Some(done) = finish_done {
+            let _ = done.send(());
         }
     });
     Listening(tx)
