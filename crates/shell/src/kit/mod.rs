@@ -21,6 +21,11 @@
 //!   (and [`switch_tinted`]), [`stepper`] and its [`step_button`], and
 //!   [`choice_chip`] (one of a grid of choices, lit when on) and
 //!   [`stepper_chip`] (one whose value is the user's own, stepped in place).
+//! - [`form`]: a form's pieces, for signing in and a source's settings: a
+//!   [`TextField`] with its [`field_label`], [`field_error`] and
+//!   [`field_help`], the full-width [`form_button`] (the main way in, or a
+//!   quieter one, either able to say it's waiting), the [`or_divider`]
+//!   between two ways in, and a [`notice`] to read.
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
 //!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
 //!   one; [`kv_section`], [`kv_row`] and [`kv_text`] (a label and its value,
@@ -72,6 +77,7 @@ pub mod charts;
 pub mod controls;
 pub mod covers;
 pub mod download;
+pub mod form;
 pub mod menus;
 pub mod nav;
 pub mod palette;
@@ -86,6 +92,7 @@ pub use charts::*;
 pub use controls::*;
 pub use covers::*;
 pub use download::*;
+pub use form::*;
 pub use menus::*;
 pub use nav::*;
 pub use palette::*;

@@ -12,6 +12,7 @@ use crate::settings::{Account, SignInMethod};
 use crate::sync::Outcome;
 use shelf::Shelf;
 use shell::icons::Icon;
+use shell::kit;
 use shell::theme::{self, Tokens};
 use sources::Source;
 use std::sync::Arc;
@@ -497,27 +498,25 @@ impl RedeApp {
                         // the buttons.
                         let error = form.error.clone();
                         let on = error.as_deref().and_then(error_field);
+                        let about = |field: Field| error.as_deref().filter(|_| on == Some(field));
                         ui.add_enabled_ui(!form.busy, |ui| {
-                            enter |= login_field(ui, &t, Field::Server, &mut form.server, "books.example.com", !form.focused, on == Some(Field::Server));
+                            enter |= kit::TextField::new(Field::Server.label())
+                                .hint("books.example.com")
+                                .focus(!form.focused)
+                                .error(about(Field::Server))
+                                .help((!(compact && status.is_some())).then_some("Your Audiobookshelf server's address"))
+                                .show(ui, &mut form.server);
                             form.focused = true;
-                            if on == Some(Field::Server)
-                                && let Some(error) = &error
-                            {
-                                field_error(ui, &t, Field::Server, error);
-                            }
-                            if !(compact && status.is_some()) {
-                                ui.label(egui::RichText::new("Your Audiobookshelf server's address").size(11.0).color(t.muted));
-                            }
                         });
                         // The button that's waiting on the server says so; the
                         // rest are greyed out until it answers.
                         let form_busy = form.busy;
                         let button = |ui: &mut egui::Ui, label: &str, primary: bool, busy: bool| {
                             if form_busy && busy {
-                                form_button(ui, label, primary, Some(spin));
+                                kit::form_button(ui, "Connecting…", primary, Some(spin));
                                 false
                             } else {
-                                ui.add_enabled_ui(!form_busy, |ui| form_button(ui, label, primary, None)).inner.clicked()
+                                ui.add_enabled_ui(!form_busy, |ui| kit::form_button(ui, label, primary, None)).inner.clicked()
                             }
                         };
                         // The space above a button, less when room is short.
@@ -543,25 +542,15 @@ impl RedeApp {
                         if local {
                             if oidc {
                                 ui.add_space(if compact { 8.0 } else { 14.0 });
-                                or_divider(ui, &t);
+                                kit::or_divider(ui);
                                 ui.add_space(if compact { 2.0 } else { 6.0 });
                             } else {
                                 ui.add_space(10.0);
                             }
                             ui.add_enabled_ui(!form.busy, |ui| {
-                                enter |= login_field(ui, &t, Field::Username, &mut form.username, "", false, on == Some(Field::Username));
-                                if on == Some(Field::Username)
-                                    && let Some(error) = &error
-                                {
-                                    field_error(ui, &t, Field::Username, error);
-                                }
+                                enter |= kit::TextField::new(Field::Username.label()).error(about(Field::Username)).show(ui, &mut form.username);
                                 ui.add_space(10.0);
-                                enter |= login_field(ui, &t, Field::Password, &mut form.password, "", false, on == Some(Field::Password));
-                                if on == Some(Field::Password)
-                                    && let Some(error) = &error
-                                {
-                                    field_error(ui, &t, Field::Password, error);
-                                }
+                                enter |= kit::TextField::new(Field::Password.label()).password(true).error(about(Field::Password)).show(ui, &mut form.password);
                             });
                             ui.add_space(gap);
                             if button(ui, "Sign in", !oidc, password_busy || !oidc) || enter {
@@ -570,9 +559,8 @@ impl RedeApp {
                         }
                         if status.is_some() && !local && !oidc {
                             ui.add_space(14.0);
-                            notice(
+                            kit::notice(
                                 ui,
-                                &t,
                                 "No way to sign in",
                                 if crate::openid::SUPPORTED {
                                     "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID."
@@ -585,12 +573,11 @@ impl RedeApp {
                             && error_field(error).is_none()
                         {
                             ui.add_space(12.0);
-                            let shown = ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(t.danger)).wrap());
-                            shown.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Sign-in error: {error}")));
+                            kit::field_error(ui, "Sign-in error", error);
                         }
                         if let Some(warning) = &form.warning {
                             ui.add_space(14.0);
-                            notice(ui, &t, "Update recommended", warning);
+                            kit::notice(ui, "Update recommended", warning);
                         }
                         // A server that takes the connection and then says
                         // nothing would hold the form until the request times out.
@@ -659,7 +646,7 @@ fn waiting_ui(ui: &mut egui::Ui, t: &Tokens, pending: &crate::openid::Pending, e
     });
     if pending.flow.used_fallback() {
         ui.add_space(22.0);
-        notice(ui, t, "Rede's link isn't allowed on this server", crate::openid::FALLBACK);
+        kit::notice(ui, "Rede's link isn't allowed on this server", crate::openid::FALLBACK);
     }
     action
 }
@@ -700,86 +687,6 @@ fn spin(ui: &egui::Ui, phase: Option<Phase>) -> bool {
     turning
 }
 
-/// One of the form's full-width buttons: the accent fill for the main way in,
-/// the quiet field fill for the other. `busy` is `Some` on the one waiting
-/// for the server, which says so (with a spinner while `Some(true)`) and takes
-/// no clicks.
-fn form_button(ui: &mut egui::Ui, label: &str, primary: bool, busy: Option<bool>) -> egui::Response {
-    let t = Tokens::of(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), if busy.is_some() { egui::Sense::hover() } else { egui::Sense::click() });
-    let hovered = resp.hovered() && busy.is_none();
-    let (fill, ink) = match (primary, busy.is_some(), hovered) {
-        (true, true, _) => (t.accent.gamma_multiply(0.6), t.on_accent),
-        (true, false, true) => (t.accent.gamma_multiply(0.88), t.on_accent),
-        (true, false, false) => (t.accent, t.on_accent),
-        (false, _, true) => (t.selected, t.accent),
-        (false, _, false) => (t.field, t.accent),
-    };
-    let text = if busy.is_some() { "Connecting…" } else { label };
-    if ui.is_rect_visible(rect) {
-        let p = ui.painter();
-        p.rect_filled(rect, 7.0, fill);
-        // A long provider name is cut rather than spilling out of the button.
-        let galley = crate::widgets::elide(ui, text, egui::FontId::new(13.0, theme::semibold()), ink, rect.width() - 56.0);
-        p.galley(rect.center() - galley.size() / 2.0, galley, ink);
-        if busy == Some(true) {
-            let r = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(14.0, 14.0));
-            shell::icons::paint(p, r, Icon::Spinner, ink);
-        }
-        shell::kit::focus_ring(ui, &resp, rect, 7.0);
-    }
-    let (text, enabled) = (text.to_owned(), ui.is_enabled() && busy.is_none());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &text));
-    if busy.is_none() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
-}
-
-/// A hairline either side of a small "or", between the provider and the
-/// password.
-fn or_divider(ui: &mut egui::Ui, t: &Tokens) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
-    let p = ui.painter();
-    let galley = p.layout_no_wrap("or".to_owned(), egui::FontId::proportional(11.0), t.muted);
-    let gap = galley.size().x / 2.0 + 10.0;
-    let (y, mid) = (rect.center().y, rect.center().x);
-    let stroke = egui::Stroke::new(1.0, t.hairline);
-    p.hline(rect.left()..=mid - gap, y, stroke);
-    p.hline(mid + gap..=rect.right(), y, stroke);
-    p.galley(rect.center() - galley.size() / 2.0, galley, t.muted);
-}
-
-/// Something the form wants read but can't act on, outlined as Ond outlines
-/// its notices: a short title, then the detail in muted text.
-fn notice(ui: &mut egui::Ui, t: &Tokens, title: &str, body: &str) {
-    egui::Frame::new().stroke(egui::Stroke::new(1.0, t.hairline)).corner_radius(8).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(egui::RichText::new(title).font(egui::FontId::new(12.5, theme::semibold())).color(t.text));
-        ui.add(egui::Label::new(egui::RichText::new(body).size(12.0).color(t.muted)).wrap());
-    });
-}
-
-fn login_field(ui: &mut egui::Ui, t: &Tokens, field: Field, text: &mut String, hint: &str, focus: bool, refused: bool) -> bool {
-    let label = field.label();
-    ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
-    let r = ui.add(
-        egui::TextEdit::singleline(text)
-            .hint_text(hint)
-            .password(field == Field::Password)
-            .desired_width(f32::INFINITY)
-            .margin(egui::vec2(10.0, 7.0))
-            .background_color(t.field),
-    );
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
-    // The border says which field the error below it is about.
-    if refused {
-        ui.painter().rect_stroke(r.rect, 4.0, egui::Stroke::new(1.0, t.danger), egui::StrokeKind::Inside);
-    }
-    if focus {
-        r.request_focus();
-    }
-    r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-}
-
 /// The field a sign-in error is about, so it can be shown under it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Field {
@@ -815,14 +722,6 @@ fn error_field(error: &str) -> Option<Field> {
         || error.contains("not like an Audiobookshelf server")
         || error.contains("instead of the server's API");
     address.then_some(Field::Server)
-}
-
-/// What went wrong with one field, under it in the danger colour and named
-/// with the field, so a screen reader says which one it's about.
-fn field_error(ui: &mut egui::Ui, t: &Tokens, field: Field, error: &str) {
-    let resp = ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(t.danger)).wrap());
-    let name = format!("{}: {error}", field.label());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &name));
 }
 
 #[cfg(test)]
