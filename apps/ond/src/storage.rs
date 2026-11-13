@@ -38,14 +38,32 @@ pub fn account_dir(data: &Path, account: AccountId) -> PathBuf {
 /// The operation stamp distinguishes an old bare id from a qualified key,
 /// including a bare id that happens to look exactly like an ItemKey.
 pub fn qualify_downloads(dir: &Path, account: AccountId) -> std::io::Result<()> {
-    const PREFIX: &str = "ond-item-keys-v1/";
-    let qualify = |previous: Option<&str>, id: &str| {
-        let item =
-            if previous.is_some_and(|p| p.starts_with(PREFIX)) { ItemKey::parse(id).map(|k| k.item).unwrap_or_else(|_| id.to_owned()) } else { id.to_owned() };
+    const TRACKS: &str = "ond-item-keys-v1/";
+    const COLLECTIONS: &str = "ond-item-keys-v2/";
+    let qualify_track = |previous: Option<&str>, id: &str| {
+        let item = if previous.is_some_and(|p| p.starts_with(TRACKS) || p.starts_with(COLLECTIONS)) {
+            ItemKey::parse(id).map(|k| k.item).unwrap_or_else(|_| id.to_owned())
+        } else {
+            id.to_owned()
+        };
         ItemKey::new(account, item).to_string()
     };
-    offline::rename_ids(dir, &format!("{PREFIX}{account}"), qualify, |previous, pin| match pin {
-        offline::Pin::Track(id) => offline::Pin::Track(qualify(previous, id)),
+    let qualify_collection = |previous: Option<&str>, id: &str| {
+        if previous.is_some_and(|p| p.starts_with(COLLECTIONS)) {
+            let item = ItemKey::parse(id).map(|k| k.item).unwrap_or_else(|_| id.to_owned());
+            return ItemKey::new(account, item).to_string();
+        }
+        // The first All sources build could add qualified pins to a v1
+        // store alongside older bare ones. Keep those in the same namespace.
+        if previous.is_some_and(|p| p.starts_with(TRACKS)) && ItemKey::parse(id).is_ok_and(|k| k.account == account) {
+            return id.to_owned();
+        }
+        ItemKey::new(account, id).to_string()
+    };
+    offline::rename_ids(dir, &format!("{COLLECTIONS}{account}"), qualify_track, |previous, pin| match pin {
+        offline::Pin::Track(id) => offline::Pin::Track(qualify_track(previous, id)),
+        offline::Pin::Album(id) => offline::Pin::Album(qualify_collection(previous, id)),
+        offline::Pin::Playlist(id) if !id.starts_with("ond:") => offline::Pin::Playlist(qualify_collection(previous, id)),
         p => p.clone(),
     })
 }
@@ -270,7 +288,7 @@ mod tests {
         let dir = offline::account_store(&base, prefs.snapshot().account_id().unwrap()).unwrap();
         let store =
             OfflineStore::open(OfflineConfig { dir: dir.clone(), limit: None, reply_check: Default::default() }, rt.handle().clone(), Arc::new(|| {})).unwrap();
-        assert!(store.is_pinned(&Pin::Album("a".into())));
+        assert!(store.is_pinned(&Pin::Album(ItemKey::new(account, "a").to_string())));
         assert!(store.is_pinned(&Pin::Track(TrackKey::new(account, "one").to_string())));
         let snap = store.snapshot();
         let adapter = OfflineTracks { account: Some(account), snap: &snap, store: Some(&store) };
@@ -396,5 +414,69 @@ mod tests {
         assert_eq!(std::fs::read(filename(&ItemKey::new(next, &bare).to_string())).unwrap(), b"one");
         let pins: Pins = serde_json::from_slice(&std::fs::read(dir.path().join("offline.json")).unwrap()).unwrap();
         assert_eq!(pins.pins[0].pin, Pin::Track(ItemKey::new(next, bare).to_string()));
+    }
+    #[test]
+    fn old_collection_pins_migrate_once_and_still_refresh_play_and_replace() {
+        for prior_tracks_migration in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let account = AccountId::new();
+            let mut pins = Pins::default();
+            for pin in [Pin::Album("album".into()), Pin::Playlist("playlist".into()), Pin::Playlist("ond:personal".into())] {
+                pins.set(pin, "Kept".into(), vec![TrackRef::new("song", Some("flac".into()), Some(3))]);
+            }
+            pins.tracks.get_mut("song").unwrap().done = Some(3);
+            std::fs::write(dir.path().join("offline.json"), serde_json::to_vec(&pins).unwrap()).unwrap();
+            std::fs::write(dir.path().join("song.flac"), b"one").unwrap();
+            if prior_tracks_migration {
+                offline::rename_ids(dir.path(), &format!("ond-item-keys-v1/{account}"), |_, id| ItemKey::new(account, id).to_string(), |_, pin| pin.clone())
+                    .unwrap();
+            }
+            qualify_downloads(dir.path(), account).unwrap();
+            let once = std::fs::read(dir.path().join("offline.json")).unwrap();
+            qualify_downloads(dir.path(), account).unwrap();
+            assert_eq!(std::fs::read(dir.path().join("offline.json")).unwrap(), once);
+            let round_trip: Pins = serde_json::from_slice(&once).unwrap();
+            let key = ItemKey::new(account, "song").to_string();
+            assert_eq!(
+                round_trip.pins.iter().map(|p| p.pin.clone()).collect::<Vec<_>>(),
+                [
+                    Pin::Album(ItemKey::new(account, "album").to_string()),
+                    Pin::Playlist(ItemKey::new(account, "playlist").to_string()),
+                    Pin::Playlist("ond:personal".into()),
+                ]
+            );
+            assert!(round_trip.pins.iter().all(|p| p.tracks == [key.clone()]));
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let store = OfflineStore::open(
+                OfflineConfig { dir: dir.path().to_owned(), limit: None, reply_check: Default::default() },
+                rt.handle().clone(),
+                Arc::new(|| {}),
+            )
+            .unwrap();
+            for pin in [Pin::Album(ItemKey::new(account, "album").to_string()), Pin::Playlist(ItemKey::new(account, "playlist").to_string())] {
+                assert!(store.is_pinned(&pin));
+                assert_eq!(store.pin_tracks(&pin).unwrap().1.as_slice(), std::slice::from_ref(&key));
+                store.update(&pin, "Refreshed", vec![TrackRef::new(&key, Some("flac".into()), Some(3))]);
+                store.pin(pin, "Kept again", vec![TrackRef::new(&key, Some("flac".into()), Some(3))]);
+            }
+            assert_eq!(store.snapshot().pins.len(), 3);
+            assert_eq!(std::fs::read(store.local_path(&key).unwrap()).unwrap(), b"one");
+        }
+    }
+
+    #[test]
+    fn collection_pins_already_created_by_all_sources_are_not_qualified_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = AccountId::new();
+        let pin = Pin::Album(ItemKey::new(account, "album").to_string());
+        let song = ItemKey::new(account, "song").to_string();
+        let mut pins = Pins::default();
+        pins.set(pin.clone(), "Album".into(), vec![TrackRef::new(&song, None, None)]);
+        std::fs::write(dir.path().join("offline.json"), serde_json::to_vec(&pins).unwrap()).unwrap();
+        std::fs::write(dir.path().join(".renamed-ids"), format!("ond-item-keys-v1/{account}")).unwrap();
+        qualify_downloads(dir.path(), account).unwrap();
+        let pins: Pins = serde_json::from_slice(&std::fs::read(dir.path().join("offline.json")).unwrap()).unwrap();
+        assert_eq!(pins.pins[0].pin, pin);
+        assert_eq!(pins.pins[0].tracks, [song]);
     }
 }
