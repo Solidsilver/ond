@@ -51,6 +51,9 @@
 //!   state, and a menu ([`SourceRowMenu`]) to rename it in place, recolour
 //!   it with the [`source_color_picker`], sync it, sign out or remove it,
 //!   which says what was chosen as a [`SourceRowEvent`].
+//! - [`source_chips`](mod@source_chips): the filter chips over a library
+//!   page in All sources, [`source_chips`](fn@source_chips), read from an
+//!   [`accounts::Scope`], which say what was clicked as a [`SourceChip`].
 //! - [`onboarding`](mod@onboarding): the first-run sheet,
 //!   [`onboarding`](fn@onboarding): the app's welcome line over the kinds
 //!   of source it can add ([`SourceKind`]), a kind's form once picked, and
@@ -102,6 +105,7 @@ pub mod palette;
 pub mod rows;
 pub mod settings;
 pub mod sheets;
+pub mod source_chips;
 pub mod source_row;
 pub mod sources;
 pub mod text;
@@ -120,6 +124,7 @@ pub use palette::*;
 pub use rows::*;
 pub use settings::*;
 pub use sheets::*;
+pub use source_chips::*;
 pub use source_row::*;
 pub use sources::*;
 pub use text::*;
