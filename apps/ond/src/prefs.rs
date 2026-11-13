@@ -90,7 +90,8 @@ impl Prefs {
                 Ok(mut s) => {
                     s.migrate();
                     let legacy = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v.as_object().cloned()).is_some_and(|map| {
-                        !map.contains_key("sources") && ["server", "username", "account", "source_name", "source_color"].iter().any(|k| map.contains_key(*k))
+                        (!map.contains_key("sources") && ["server", "username", "account", "source_name", "source_color"].iter().any(|k| map.contains_key(*k)))
+                            || has_unkeyed_folders(&map)
                     });
                     (s, Loaded::Read, legacy)
                 }
@@ -292,6 +293,18 @@ fn flush(shared: &Shared) -> anyhow::Result<()> {
 }
 
 /// Writes `settings`, with the user's own values where managed ones lie over them.
+fn has_unkeyed_folders(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(sources) = map.get("sources").and_then(serde_json::Value::as_array) else { return false };
+    sources.iter().any(|entry| {
+        entry.get("folders").and_then(serde_json::Value::as_array).is_some_and(|folders| {
+            folders.iter().any(|item| match item {
+                serde_json::Value::Object(o) => o.get("key").and_then(serde_json::Value::as_str).is_none_or(str::is_empty),
+                _ => true,
+            })
+        })
+    })
+}
+
 fn write(path: &Path, settings: &Settings, overlay: &Overlay) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

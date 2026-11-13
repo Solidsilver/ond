@@ -783,7 +783,8 @@ impl OndApp {
         let id = entry.id;
         group(ui, "Folders", |ui| {
             ui.add_space(8.0);
-            match kit::folder_list(ui, &entry.folders, "No folders", false) {
+            let paths = entry.folder_paths();
+            match kit::folder_list(ui, &paths, "No folders", false) {
                 Some(kit::FolderListEvent::Remove(i)) => self.actions.push(SourceAction::RemoveFolder(id, i).into()),
                 Some(kit::FolderListEvent::Choose) => self.actions.push(SourceAction::Choose(FolderTarget::Source(id)).into()),
                 None => {}
@@ -812,7 +813,7 @@ impl OndApp {
         if matches!(state, super::sidebar::ServerState::Syncing { .. }) || entry.kind == SourceKind::Subsonic {
             return state.label().to_owned();
         }
-        let folders: Vec<String> = entry.folders.iter().map(|f| f.display().to_string()).collect();
+        let folders: Vec<String> = entry.folders.iter().map(|f| f.path.display().to_string()).collect();
         let mut detail = folders.join(", ");
         if self.session.skipped > 0 {
             detail.push_str(&format!(" · {} skipped", crate::fmt::plural(self.session.skipped, "file")));

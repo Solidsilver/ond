@@ -16,7 +16,7 @@ pub(super) fn default_name(entry: &crate::settings::SourceEntry) -> String {
     match entry.kind {
         crate::settings::SourceKind::Subsonic => super::diagnostics::server_host(&entry.server).to_owned(),
         crate::settings::SourceKind::Local => {
-            entry.folders.first().and_then(|f| f.file_name()).map_or_else(|| "Music folder".to_owned(), |n| n.to_string_lossy().into_owned())
+            entry.folders.first().and_then(|f| f.path.file_name()).map_or_else(|| "Music folder".to_owned(), |n| n.to_string_lossy().into_owned())
         }
     }
 }
@@ -287,7 +287,7 @@ impl OndApp {
         // Under the name: a server's address and user, or a folder source's folders.
         let (server, user) = match entry {
             Some(e) if caps.network => (e.server.clone(), e.username.clone()),
-            Some(e) => (e.folders.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", "), String::new()),
+            Some(e) => (e.folders.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>().join(", "), String::new()),
             None => Default::default(),
         };
         let (title, _) = self.source_look(state);

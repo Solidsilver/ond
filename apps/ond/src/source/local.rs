@@ -13,7 +13,7 @@ use crate::lyrics::{LyricLine, Lyrics, SongStats, StructuredLyrics};
 use crate::sync::Fetch;
 use async_trait::async_trait;
 use library::{Album, AlbumTracks, Artist, ArtistLink, Contributor, Library, Track};
-use scan::{ScanIndex, ScanProgress, ScannedAlbum, ScannedArtist, ScannedTrack, TrackLyrics, TrackMove};
+use scan::{ScanIndex, ScanProgress, ScanRoot, ScannedAlbum, ScannedArtist, ScannedTrack, TrackLyrics, TrackMove};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -88,7 +88,7 @@ struct LocalState {
 /// Music source backed by one or more local folders on disk.
 pub struct LocalSource {
     account: accounts::AccountId,
-    folders: Vec<PathBuf>,
+    folders: Vec<ScanRoot>,
     scan_index_path: Option<PathBuf>,
     state: Mutex<LocalState>,
 }
@@ -99,7 +99,7 @@ impl LocalSource {
     /// When `data_dir` is supplied, loads any saved incremental scan index from
     /// `Sources/<account>/scan.json` so playback, covers, and lyrics work right
     /// away on restart before the next rescan finishes.
-    pub fn new(account: accounts::AccountId, folders: Vec<PathBuf>, data_dir: Option<&Path>) -> Self {
+    pub fn new(account: accounts::AccountId, folders: Vec<ScanRoot>, data_dir: Option<&Path>) -> Self {
         let scan_index_path = data_dir.map(|d| crate::storage::account_dir(d, account).join("scan.json"));
         let index = match &scan_index_path {
             Some(path) => ScanIndex::load(path).unwrap_or_else(|e| {
@@ -112,8 +112,8 @@ impl LocalSource {
     }
 
     #[allow(dead_code)]
-    pub fn folders(&self) -> &[PathBuf] {
-        &self.folders
+    pub fn folders(&self) -> Vec<PathBuf> {
+        self.folders.iter().map(|r| r.path.clone()).collect()
     }
 
     /// Moves `(old track id -> new track id)` detected by the most recent completed scan.
@@ -250,7 +250,7 @@ impl MusicSource for LocalSource {
     }
 
     async fn ping(&self) -> Result<String, Failure> {
-        if self.folders.iter().any(|p| p.exists()) { Ok("Local folders".into()) } else { Err(Failure::Local("Configured music folder not found".into())) }
+        if self.folders.iter().any(|r| r.path.exists()) { Ok("Local folders".into()) } else { Err(Failure::Local("Configured music folder not found".into())) }
     }
 
     async fn album(&self, id: &str) -> Result<(AlbumTracks, UserMeta), Failure> {
@@ -503,7 +503,8 @@ mod tests {
         fs::write(album_dir.join("cover.jpg"), b"folder-jpeg").unwrap();
 
         let account = AccountId::new();
-        let source = LocalSource::new(account, vec![music.clone()], Some(&data));
+        let roots = vec![ScanRoot::new("music", music.clone())];
+        let source = LocalSource::new(account, roots.clone(), Some(&data));
         assert!(!source.capabilities().stars);
         assert!(!source.capabilities().ratings);
         assert!(!source.capabilities().playlists);
@@ -549,7 +550,7 @@ mod tests {
         assert!(matches!(source.create_playlist("List", std::slice::from_ref(&t1.id)).await, Err(Failure::Local(_))));
 
         // Re-open with saved scan.json: playback, covers, and lyrics work before a rescan.
-        let reopened = LocalSource::new(account, vec![music.clone()], Some(&data));
+        let reopened = LocalSource::new(account, roots, Some(&data));
         let (re_url, _) = reopened.stream(t1, None);
         assert_eq!(re_url, url);
         assert_eq!(reopened.cover(t1.cover_art.as_deref().unwrap(), 300).await.unwrap(), b"embedded-png");

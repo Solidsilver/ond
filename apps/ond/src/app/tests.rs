@@ -1636,7 +1636,7 @@ fn a_first_run_adds_a_music_folder_and_plays_from_it_with_no_server() {
     assert_eq!(app.data.albums.len(), 1);
     assert_eq!(app.data.albums[0].name, "Portrait in Jazz");
     let saved = app.prefs.snapshot();
-    assert_eq!(saved.primary().map(|e| (e.kind, e.folders.clone())), Some((crate::settings::SourceKind::Local, vec![music.clone()])));
+    assert_eq!(saved.primary().map(|e| (e.kind, e.folder_paths())), Some((crate::settings::SourceKind::Local, vec![music.clone()])));
     assert!(!app.session.caps().network && !app.session.caps().stars && !app.session.caps().downloads);
     assert!(app.session.online, "a folder needs no server to be ready");
     frame(&ctx, &mut app, Vec::new());
@@ -1767,5 +1767,59 @@ fn a_folder_sources_folders_change_and_it_rescans() {
     until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.sync.tracks);
     // The last folder stays: a source with none would scan to nothing.
     app.apply(Action::Sources(SourceAction::RemoveFolder(id, 0)));
-    assert_eq!(app.prefs.snapshot().source(id).unwrap().folders, [music]);
+    assert_eq!(app.prefs.snapshot().source(id).unwrap().folder_paths(), [music]);
+}
+
+#[test]
+fn plain_folder_paths_in_settings_get_stable_keys_and_save_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let source_id = accounts::AccountId::new();
+    let cfg = dir.path().join("settings.json");
+    std::fs::write(
+        &cfg,
+        serde_json::to_vec(&serde_json::json!({
+            "sources": [
+                { "id": source_id, "kind": "local", "folders": [music] }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (prefs, loaded) = crate::prefs::Prefs::open(&cfg);
+    assert!(matches!(loaded, crate::prefs::Loaded::Read));
+    let key = prefs.get(|s| s.source(source_id).unwrap().folders[0].key.clone());
+    assert!(!key.is_empty());
+    drop(prefs);
+
+    let on_disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&cfg).unwrap()).unwrap();
+    assert_eq!(on_disk["sources"][0]["folders"][0]["key"], key);
+    assert_eq!(on_disk["sources"][0]["folders"][0]["path"], music.to_string_lossy().as_ref());
+}
+
+#[test]
+fn removing_an_earlier_folder_keeps_later_folders_track_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = music_folder(dir.path());
+    let second = dir.path().join("second");
+    let blue = second.join("Miles Davis").join("Kind of Blue");
+    std::fs::create_dir_all(&blue).unwrap();
+    add_song(&blue, 9);
+
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), first);
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    let id = app.session.account().unwrap();
+
+    let extra = second.clone();
+    app.pick_folder = Arc::new(move |_, _, done| done(Some(extra.clone())));
+    app.apply(Action::Sources(SourceAction::Choose(FolderTarget::Source(id))));
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+
+    let second_track_id_before = app.data.tracks.all.iter().find(|t| t.title == "Song 9").unwrap().id.clone();
+    app.apply(Action::Sources(SourceAction::RemoveFolder(id, 0)));
+    until(&mut app, |a| a.data.tracks.all.len() == 1 && !a.sync.tracks);
+    assert_eq!(app.data.tracks.all[0].id, second_track_id_before);
 }

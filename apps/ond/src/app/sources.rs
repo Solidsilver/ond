@@ -17,7 +17,7 @@
 use super::session::LoginForm;
 use super::{Action, OndApp};
 use crate::bridge::Msg;
-use crate::settings::SourceKind;
+use crate::settings::{FolderEntry, SourceKind};
 use accounts::AccountId;
 use shell::kit;
 use std::path::{Path, PathBuf};
@@ -126,8 +126,8 @@ impl OndApp {
             }
             FolderTarget::Source(id) => {
                 let Some(mut folders) = self.prefs.get(|s| s.source(id).map(|e| e.folders.clone())) else { return };
-                if !folders.contains(&path) {
-                    folders.push(path);
+                if !folders.iter().any(|f| f.path == path) {
+                    folders.push(FolderEntry::new(path));
                     self.set_folders(id, folders);
                 }
             }
@@ -136,7 +136,7 @@ impl OndApp {
 
     fn choose_folder(&self, target: FolderTarget) {
         let start = match target {
-            FolderTarget::Source(id) => self.prefs.get(|s| s.source(id).and_then(|e| e.folders.first().and_then(|f| f.parent()).map(Path::to_path_buf))),
+            FolderTarget::Source(id) => self.prefs.get(|s| s.source(id).and_then(|e| e.folders.first().and_then(|f| f.path.parent()).map(Path::to_path_buf))),
             FolderTarget::Onboarding => None,
         };
         let start = start.or_else(|| directories::UserDirs::new().map(|u| u.audio_dir().unwrap_or(u.home_dir()).to_path_buf())).unwrap_or_default();
@@ -166,11 +166,17 @@ impl OndApp {
         self.prefs.edit(|s| {
             let account = match id.filter(|a| s.source(*a).is_some()) {
                 Some(a) => {
-                    s.set_folders(a, folders.clone());
+                    let existing = s.source(a).map(|e| e.folders.clone()).unwrap_or_default();
+                    let entries =
+                        folders.iter().map(|p| existing.iter().find(|f| f.path == *p).cloned().unwrap_or_else(|| FolderEntry::new(p.clone()))).collect();
+                    s.set_folders(a, entries);
                     s.set_source_name(a, name.clone());
                     a
                 }
-                None => s.add_local(name.clone(), folders.clone()),
+                None => {
+                    let entries = folders.iter().cloned().map(FolderEntry::new).collect();
+                    s.add_local(name.clone(), entries)
+                }
             };
             s.make_primary(account);
             s.signed_out = false;
@@ -210,7 +216,7 @@ impl OndApp {
 
     /// A source's folders changed: saved, and when it's the one in use it
     /// connects again with them and is scanned.
-    fn set_folders(&mut self, id: AccountId, folders: Vec<PathBuf>) {
+    fn set_folders(&mut self, id: AccountId, folders: Vec<FolderEntry>) {
         self.prefs.edit(|s| s.set_folders(id, folders.clone()));
         if let Some(s) = self.session.settings.as_mut() {
             s.set_folders(id, folders);

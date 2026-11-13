@@ -734,7 +734,7 @@ impl Bridge {
     /// login failure: the app opens offline and keeps retrying until it's back.
     pub fn connect(&self, settings: Settings, password: Option<String>) {
         if settings.primary().is_some_and(|e| e.kind == crate::settings::SourceKind::Local) {
-            let folders = settings.primary().map(|e| e.folders.clone()).unwrap_or_default();
+            let folders = settings.primary().map(|e| e.scan_roots()).unwrap_or_default();
             self.connect_local(settings, folders);
             return;
         }
@@ -806,7 +806,7 @@ impl Bridge {
     }
 
     /// Prepares a local-folder source and announces it as the live session.
-    pub fn connect_local(&self, settings: Settings, folders: Vec<std::path::PathBuf>) {
+    pub fn connect_local(&self, settings: Settings, folders: Vec<scan::ScanRoot>) {
         let session = self.session();
         let this = self.scoped_to(session);
         self.rt.spawn(async move {
@@ -1900,7 +1900,7 @@ mod tests {
         std::fs::write(music.join("track.wav"), &wav).unwrap();
 
         let (rt, bridge, rx) = rig(&[]);
-        let source: Src = Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![music.clone()], None));
+        let source: Src = Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![scan::ScanRoot::new("music", music.clone())], None));
         bridge.sync_source(&source);
         bridge.measure_latency(source.clone());
         bridge.fetch_starred(Some(source.clone()));

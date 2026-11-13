@@ -122,6 +122,46 @@ impl<'de> Deserialize<'de> for SourceKind {
     }
 }
 
+/// One local music folder configured on a source, paired with a stable key so
+/// moving, removing, or reordering folders preserves their track and cover ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FolderEntry {
+    pub key: String,
+    pub path: PathBuf,
+}
+
+impl FolderEntry {
+    /// Creates a folder entry with a fresh random key.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { key: accounts::AccountId::new().to_string(), path: path.into() }
+    }
+
+    /// Creates a folder entry with an explicit key.
+    #[cfg(test)]
+    pub fn with_key(key: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self { key: key.into(), path: path.into() }
+    }
+}
+
+impl<'de> Deserialize<'de> for FolderEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawFolder {
+            Path(PathBuf),
+            Entry {
+                #[serde(default)]
+                key: String,
+                path: PathBuf,
+            },
+        }
+        match RawFolder::deserialize(deserializer)? {
+            RawFolder::Path(path) => Ok(Self::new(path)),
+            RawFolder::Entry { key, path } => Ok(if key.is_empty() { Self::new(path) } else { Self { key, path } }),
+        }
+    }
+}
+
 /// One configured music source in `settings.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceEntry {
@@ -138,7 +178,7 @@ pub struct SourceEntry {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub username: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub folders: Vec<PathBuf>,
+    pub folders: Vec<FolderEntry>,
 }
 
 impl SourceEntry {
@@ -154,8 +194,18 @@ impl SourceEntry {
         }
     }
 
-    pub fn local(id: accounts::AccountId, name: Option<String>, color: accounts::SourceColor, folders: Vec<PathBuf>) -> Self {
+    pub fn local(id: accounts::AccountId, name: Option<String>, color: accounts::SourceColor, folders: Vec<FolderEntry>) -> Self {
         Self { id, kind: SourceKind::Local, name, color, server: String::new(), username: String::new(), folders }
+    }
+
+    /// Configured folder paths without keys, for display and forms.
+    pub fn folder_paths(&self) -> Vec<PathBuf> {
+        self.folders.iter().map(|f| f.path.clone()).collect()
+    }
+
+    /// Configured folders paired with their stable keys for [`scan::scan_folders`].
+    pub fn scan_roots(&self) -> Vec<scan::ScanRoot> {
+        self.folders.iter().map(|f| scan::ScanRoot::new(f.key.clone(), f.path.clone())).collect()
     }
 
     fn matches_subsonic(&self, server: &str, username: &str) -> bool {
@@ -645,7 +695,7 @@ impl Settings {
 
     /// Appends a local-folder source entry with a fresh [`accounts::AccountId`] and next
     /// unused colour, returning the new account id.
-    pub fn add_local(&mut self, name: Option<String>, folders: Vec<PathBuf>) -> accounts::AccountId {
+    pub fn add_local(&mut self, name: Option<String>, folders: Vec<FolderEntry>) -> accounts::AccountId {
         let id = accounts::AccountId::new();
         let color = accounts::next_color(self.sources.iter().map(|s| s.color));
         self.sources.push(SourceEntry::local(id, name, color, folders));
@@ -663,7 +713,7 @@ impl Settings {
     }
 
     /// Replaces a local source's folders.
-    pub fn set_folders(&mut self, id: accounts::AccountId, folders: Vec<PathBuf>) {
+    pub fn set_folders(&mut self, id: accounts::AccountId, folders: Vec<FolderEntry>) {
         if let Some(entry) = self.sources.iter_mut().find(|s| s.id == id && s.kind == SourceKind::Local) {
             entry.folders = folders;
         }
@@ -815,7 +865,7 @@ mod tests {
         let mut s = Settings::default();
         let sub_id = accounts::AccountId::new();
         s.sources.push(SourceEntry::subsonic(sub_id, "https://music.example.com", "me"));
-        let local_id = s.add_local(Some("Music folder".into()), vec![PathBuf::from("/Users/me/Music")]);
+        let local_id = s.add_local(Some("Music folder".into()), vec![FolderEntry::new("/Users/me/Music")]);
         s.scope = accounts::Scope::all();
         s.scope.toggle_chip(sub_id);
         s.scope.toggle_chip(local_id);
@@ -824,9 +874,10 @@ mod tests {
         let back = Settings::from_json(&json).unwrap();
         assert_eq!(back, s);
         assert_eq!(back.sources[1].kind, SourceKind::Local);
-        assert_eq!(back.sources[1].folders, vec![PathBuf::from("/Users/me/Music")]);
+        assert_eq!(back.sources[1].folder_paths(), vec![PathBuf::from("/Users/me/Music")]);
 
-        // An unrecognized kind falls back leniently without dropping the entry.
+        // An unrecognized kind falls back leniently without dropping the entry,
+        // and plain folder path strings get fresh keys.
         let future = serde_json::json!({
             "sources": [
                 { "id": local_id, "kind": "plex", "name": "Future", "color": 1, "folders": ["/tmp/music"] }
@@ -836,6 +887,8 @@ mod tests {
         assert_eq!(parsed.sources.len(), 1);
         assert_eq!(parsed.sources[0].kind, SourceKind::Subsonic);
         assert_eq!(parsed.sources[0].name.as_deref(), Some("Future"));
+        assert_eq!(parsed.sources[0].folder_paths(), vec![PathBuf::from("/tmp/music")]);
+        assert!(!parsed.sources[0].folders[0].key.is_empty());
     }
 
     #[test]
@@ -844,16 +897,16 @@ mod tests {
         let server_id = server.account().unwrap();
         assert!(server.account_id().is_some());
         let mut both = server.clone();
-        let folder = both.add_local(None, vec![PathBuf::from("/Users/me/Music")]);
+        let folder = both.add_local(None, vec![FolderEntry::new("/Users/me/Music")]);
         assert_eq!(both.account(), Some(server_id), "adding a folder doesn't make it the one in use by itself");
         both.make_primary(folder);
         assert_eq!(both.account(), Some(folder));
         assert_eq!(both.sources.len(), 2, "the server stays configured");
         assert_eq!(both.account_id(), None, "no server's downloads while a folder is in use");
         assert_eq!(both.server(), "https://music.example.com", "its address is still there to sign in with");
-        both.set_folders(folder, vec![PathBuf::from("/Volumes/Archive")]);
-        assert_eq!(both.source(folder).unwrap().folders, [PathBuf::from("/Volumes/Archive")]);
-        both.set_folders(server_id, vec![PathBuf::from("/nowhere")]);
+        both.set_folders(folder, vec![FolderEntry::new("/Volumes/Archive")]);
+        assert_eq!(both.source(folder).unwrap().folder_paths(), [PathBuf::from("/Volumes/Archive")]);
+        both.set_folders(server_id, vec![FolderEntry::new("/nowhere")]);
         assert!(both.source(server_id).unwrap().folders.is_empty(), "a server has no folders");
 
         let back = both.sign_in("https://music.example.com/", "me");

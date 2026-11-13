@@ -294,26 +294,47 @@ fn set_subsonic_field(users: &mut Value, key: &str, value: Value) {
     }
 }
 
-/// Ensures a `sources` entry in `managed.json` keeps a stable `id` even when
-/// omitted by the Nix config.
+/// Deterministic FNV-1a UUIDv4-shaped id from bytes, so managed sources and
+/// folders keep stable keys when omitted from `managed.json`.
+fn fnv_uuid(bytes: &[u8]) -> String {
+    let fnv = |seed: u64| bytes.iter().fold(seed, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    let hi = fnv(0xcbf2_9ce4_8422_2325);
+    let lo = fnv(0x8422_2325_cbf2_9ce4);
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+        (hi >> 32) as u32,
+        ((hi >> 16) & 0xffff) as u16,
+        (hi & 0x0fff) as u16,
+        ((lo >> 48) as u16 & 0x3fff) | 0x8000,
+        lo & 0xffff_ffff_ffff
+    )
+}
+
+/// Ensures a `sources` entry (and any plain-path `folders` inside it) in
+/// `managed.json` keeps a stable `id` and stable folder `key`s when omitted.
 fn with_managed_id(raw: &Value) -> Value {
     let mut entry = raw.clone();
-    if let Some(map) = entry.as_object_mut()
-        && !map.contains_key("id")
-    {
-        let canonical = serde_json::to_string(raw).unwrap_or_default();
-        let fnv = |seed: u64, bytes: &[u8]| -> u64 { bytes.iter().fold(seed, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)) };
-        let hi = fnv(0xcbf2_9ce4_8422_2325, canonical.as_bytes());
-        let lo = fnv(0x8422_2325_cbf2_9ce4, canonical.as_bytes());
-        let uuid = format!(
-            "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-            (hi >> 32) as u32,
-            ((hi >> 16) & 0xffff) as u16,
-            (hi & 0x0fff) as u16,
-            ((lo >> 48) as u16 & 0x3fff) | 0x8000,
-            lo & 0xffff_ffff_ffff
-        );
-        map.insert("id".into(), Value::String(uuid));
+    if let Some(map) = entry.as_object_mut() {
+        if !map.contains_key("id") {
+            let canonical = serde_json::to_string(raw).unwrap_or_default();
+            map.insert("id".into(), Value::String(fnv_uuid(canonical.as_bytes())));
+        }
+        if let Some(Value::Array(folders)) = map.get_mut("folders") {
+            for item in folders {
+                match item {
+                    Value::String(path) => {
+                        let key = fnv_uuid(path.as_bytes());
+                        *item = serde_json::json!({ "key": key, "path": path });
+                    }
+                    Value::Object(obj) if obj.get("key").and_then(Value::as_str).is_none_or(str::is_empty) => {
+                        if let Some(path) = obj.get("path").and_then(Value::as_str) {
+                            obj.insert("key".into(), Value::String(fnv_uuid(path.as_bytes())));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     entry
 }
@@ -420,7 +441,7 @@ mod tests {
         m.apply(&mut s);
         assert_eq!(s.sources.len(), 1);
         assert_eq!(s.sources[0].kind, crate::settings::SourceKind::Local);
-        assert_eq!(s.sources[0].folders, vec![PathBuf::from("/mnt/music")]);
+        assert_eq!(s.sources[0].folder_paths(), vec![PathBuf::from("/mnt/music")]);
 
         // Writing restores the user's own sources list.
         let mut saved = serde_json::to_value(&s).unwrap();
