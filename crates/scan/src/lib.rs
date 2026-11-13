@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 
 /// Audio file extensions probed during a scan. Non-audio files (covers,
 /// lyrics, OS metadata) are left untouched rather than counted as skipped.
@@ -83,6 +83,7 @@ pub struct Contributor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScannedTrack {
     pub id: String,
+    pub root_index: usize,
     pub path: PathBuf,
     pub rel_path: String,
     pub album_id: String,
@@ -174,6 +175,7 @@ struct FileStamp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct IndexedFile {
     id: String,
+    root_index: usize,
     rel_path: String,
     stamp: Option<FileStamp>,
     probed: ProbedFile,
@@ -254,9 +256,13 @@ pub struct ScanResult {
     pub index: ScanIndex,
 }
 
-/// Deterministic track id from a path relative to its scanned root.
-pub fn track_id_for_rel(rel_path: &str) -> String {
-    hash_id(&format!("ond-track-v1\0{rel_path}"))
+/// Deterministic track id from the root's index and path relative to that root.
+pub fn track_id(root_index: usize, rel_path: &str) -> String {
+    hash_id(&format!("ond-track-v2\0{root_index}\0{rel_path}"))
+}
+
+fn index_key(root_index: usize, rel_path: &str) -> String {
+    format!("{root_index}\0{rel_path}")
 }
 
 /// Scan `roots` once without incremental state.
@@ -269,6 +275,7 @@ pub fn scan(roots: &[PathBuf]) -> ScanResult {
 /// true and invoking `on_progress` after each candidate audio file.
 pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mut on_progress: impl FnMut(ScanProgress)) -> ScanResult {
     struct Candidate {
+        root_index: usize,
         path: PathBuf,
         rel_path: String,
         rel_folder: String,
@@ -278,10 +285,10 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
-    let mut seen_rel: HashSet<String> = HashSet::new();
+    let mut seen_rel: HashSet<(usize, String)> = HashSet::new();
     let mut folder_covers: HashMap<PathBuf, Option<(String, PathBuf)>> = HashMap::new();
 
-    for root in roots {
+    for (root_index, root) in roots.iter().enumerate() {
         if !root.exists() {
             continue;
         }
@@ -304,7 +311,7 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
                 continue;
             };
             let rel_path = normalize_rel(rel);
-            if !seen_rel.insert(rel_path.clone()) {
+            if !seen_rel.insert((root_index, rel_path.clone())) {
                 continue;
             }
             let rel_folder = rel.parent().map(normalize_rel).unwrap_or_default();
@@ -319,7 +326,7 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
             let meta = entry.metadata().ok();
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             let stamp = meta.as_ref().and_then(file_stamp);
-            candidates.push(Candidate { path: entry.path().to_path_buf(), rel_path, rel_folder, folder_key: parent_dir, size, stamp });
+            candidates.push(Candidate { root_index, path: entry.path().to_path_buf(), rel_path, rel_folder, folder_key: parent_dir, size, stamp });
         }
     }
 
@@ -339,9 +346,10 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
         }
         on_progress(ScanProgress { scanned: idx, total, skipped: skipped_paths.len(), current: Some(c.path.clone()) });
 
-        let id = track_id_for_rel(&c.rel_path);
+        let id = track_id(c.root_index, &c.rel_path);
+        let key = index_key(c.root_index, &c.rel_path);
         let reused_entry =
-            if prev_valid { prev.files.get(&c.rel_path).filter(|old| old.stamp.is_some() && old.stamp == c.stamp).map(|old| old.probed.clone()) } else { None };
+            if prev_valid { prev.files.get(&key).filter(|old| old.stamp.is_some() && old.stamp == c.stamp).map(|old| old.probed.clone()) } else { None };
 
         let probed = match reused_entry {
             Some(p) => {
@@ -363,8 +371,15 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
 
         let mb_rec = probed.mb_recording_id.clone().or_else(|| probed.mb_track_id.clone());
         new_entries.insert(
-            c.rel_path.clone(),
-            IndexedFile { id: id.clone(), rel_path: c.rel_path.clone(), stamp: c.stamp, probed: probed.clone(), mb_recording_key: mb_rec },
+            key,
+            IndexedFile {
+                id: id.clone(),
+                root_index: c.root_index,
+                rel_path: c.rel_path.clone(),
+                stamp: c.stamp,
+                probed: probed.clone(),
+                mb_recording_key: mb_rec,
+            },
         );
 
         let (folder_cover_rel, folder_cover_path) = match folder_covers.get(&c.folder_key).and_then(|v| v.as_ref()) {
@@ -373,6 +388,7 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
         };
         raw_files.push(RawScannedFile {
             id,
+            root_index: c.root_index,
             path: c.path,
             rel_path: c.rel_path,
             rel_folder: c.rel_folder,

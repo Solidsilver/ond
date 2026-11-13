@@ -370,3 +370,36 @@ fn lrc_sidecar_beats_embedded_lyrics_and_parses_offset() {
 
     assert_eq!(read_lyrics(&embedded_only).unwrap(), Some(TrackLyrics::Plain("Embedded fallback\nSecond line".into())));
 }
+
+#[test]
+fn two_roots_with_the_same_relative_file_both_appear_with_different_ids() {
+    let tmp = TempDir::new().unwrap();
+    let root_a = tmp.path().join("drive-a");
+    let root_b = tmp.path().join("drive-b");
+
+    write_file(&root_a, "Album/01.flac", &make_flac(&[("TITLE", "Track From A"), ("ARTIST", "Artist A"), ("ALBUM", "Record A")], None, 40));
+    write_file(&root_a, "Album/cover.jpg", b"cover-from-a");
+    write_file(&root_b, "Album/01.flac", &make_flac(&[("TITLE", "Track From B"), ("ARTIST", "Artist B"), ("ALBUM", "Record B")], None, 50));
+    write_file(&root_b, "Album/cover.jpg", b"cover-from-b");
+
+    let roots = vec![root_a, root_b];
+    let res = scan(&roots);
+    assert_eq!(res.tracks.len(), 2, "identical relative paths under distinct roots must both appear");
+    assert_eq!(res.albums.len(), 2);
+
+    let t_a = res.tracks.iter().find(|t| t.title == "Track From A").unwrap();
+    let t_b = res.tracks.iter().find(|t| t.title == "Track From B").unwrap();
+    assert_eq!(t_a.root_index, 0);
+    assert_eq!(t_b.root_index, 1);
+    assert_ne!(t_a.id, t_b.id);
+    assert_ne!(t_a.cover_art, t_b.cover_art);
+    assert_eq!(read_cover(&res.index, t_a.cover_art.as_deref().unwrap()).unwrap().as_deref(), Some(b"cover-from-a".as_slice()));
+    assert_eq!(read_cover(&res.index, t_b.cover_art.as_deref().unwrap()).unwrap().as_deref(), Some(b"cover-from-b".as_slice()));
+
+    // Incremental rescan with both identical relative paths reuses both entries separately.
+    let cancel = AtomicBool::new(false);
+    let again = scan_folders(&roots, &res.index, &cancel, |_| {});
+    assert_eq!(again.tracks.len(), 2);
+    assert_eq!(again.reused, 2);
+    assert_eq!(again.rescanned, 0);
+}
