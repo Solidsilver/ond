@@ -427,7 +427,10 @@ fn signing_in_goes_through_the_first_run_sheet() {
     assert!(h.query_by_label("Back").is_none(), "no way back while it waits");
 
     let app = app_mut(&mut h);
-    let settings = crate::settings::Settings { server: "https://music.example.com".into(), username: "u".into(), ..Default::default() };
+    let settings = crate::settings::Settings {
+        sources: vec![crate::settings::SourceEntry::subsonic(accounts::AccountId::new(), "https://music.example.com", "u")],
+        ..Default::default()
+    };
     app.handle(Msg::Connected {
         stores: None,
         session: app.bridge.session(),
@@ -1052,12 +1055,12 @@ fn the_sources_tab_renames_and_recolours_the_server() {
     h.run();
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
-    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name.as_deref(), Some("Home"));
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name(), Some("Home"));
     h.get_by_label_contains("Home, Navidrome, ").click();
     h.run_steps(2);
     h.get_by_label("Green").click();
     h.run_steps(3);
-    assert_eq!(app_mut(&mut h).prefs.snapshot().source_color, accounts::SourceColor::new(2));
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_color(), accounts::SourceColor::new(2));
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Home, music.example.com");
@@ -1080,6 +1083,6 @@ fn a_managed_server_is_locked_in_the_sources_tab() {
     h.get_by_label("Sign out…");
     app_mut(&mut h).actions.push(Action::Prefs(PrefsAction::SourceName("Elsewhere".into())));
     h.run_steps(2);
-    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name, None, "locked");
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name(), None, "locked");
     *h.state_mut() = None;
 }

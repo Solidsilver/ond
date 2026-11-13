@@ -100,22 +100,126 @@ impl From<DeviceMode> for audio::PlaybackMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Settings {
-    /// The sign-in's permanent identity; address changes keep it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account: Option<accounts::AccountId>,
+/// What kind of music source a [`SourceEntry`] describes.
+///
+/// Unknown kinds (from newer builds or hand edits) fall back to
+/// [`SourceKind::Subsonic`] so the rest of the file stays readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    #[default]
+    Subsonic,
+    Local,
+}
+
+impl<'de> Deserialize<'de> for SourceKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            Some(s) if s.eq_ignore_ascii_case("local") => SourceKind::Local,
+            _ => SourceKind::Subsonic,
+        })
+    }
+}
+
+/// One configured music source in `settings.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEntry {
+    #[serde(default = "accounts::AccountId::new")]
+    pub id: accounts::AccountId,
     #[serde(default)]
-    pub server: String,
-    #[serde(default)]
-    pub username: String,
-    /// What the server was renamed to in Settings' Sources tab; without one
-    /// it goes by its host.
+    pub kind: SourceKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_name: Option<String>,
-    /// The server's dot colour, shown once Ond holds more than one source.
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "is_first_color")]
-    pub source_color: accounts::SourceColor,
+    pub color: accounts::SourceColor,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<PathBuf>,
+}
+
+impl SourceEntry {
+    pub fn subsonic(id: accounts::AccountId, server: impl Into<String>, username: impl Into<String>) -> Self {
+        Self {
+            id,
+            kind: SourceKind::Subsonic,
+            name: None,
+            color: accounts::SourceColor::default(),
+            server: server.into(),
+            username: username.into(),
+            folders: Vec::new(),
+        }
+    }
+
+    pub fn local(id: accounts::AccountId, name: Option<String>, color: accounts::SourceColor, folders: Vec<PathBuf>) -> Self {
+        Self { id, kind: SourceKind::Local, name, color, server: String::new(), username: String::new(), folders }
+    }
+
+    fn matches_subsonic(&self, server: &str, username: &str) -> bool {
+        self.kind == SourceKind::Subsonic
+            && self.username == username
+            && self.server.trim().trim_end_matches('/').eq_ignore_ascii_case(server.trim().trim_end_matches('/'))
+    }
+
+    fn keyring_account(&self) -> String {
+        self.id.to_string()
+    }
+
+    fn legacy_keyring_account(&self) -> Option<String> {
+        (!self.username.is_empty() && !self.server.is_empty()).then(|| format!("{}@{}", self.username, self.server))
+    }
+
+    /// Blocking: may show a Keychain prompt. Call off the UI thread.
+    /// Reads the account-id entry first, falling back once to `<user>@<server>`
+    /// and migrating it to `<account-id>`.
+    pub fn load_password(&self) -> Option<String> {
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())
+            && let Ok(pw) = entry.get_password()
+        {
+            return Some(pw);
+        }
+        let legacy = self.legacy_keyring_account()?;
+        let old = keyring::Entry::new(KEYRING_SERVICE, &legacy).ok()?;
+        let pw = old.get_password().ok()?;
+        if let Ok(new) = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())
+            && new.set_password(&pw).is_ok()
+        {
+            let _ = old.delete_credential();
+        }
+        Some(pw)
+    }
+
+    /// Blocking: may show a Keychain prompt. Call off the UI thread.
+    pub fn forget_password(&self) {
+        if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account()) {
+            let _ = e.delete_credential();
+        }
+        if let Some(legacy) = self.legacy_keyring_account()
+            && let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, &legacy)
+        {
+            let _ = e.delete_credential();
+        }
+    }
+
+    /// Blocking: may show a Keychain prompt. Call off the UI thread.
+    pub fn store_password(&self, password: &str) -> anyhow::Result<()> {
+        keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())?.set_password(password)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
+pub struct Settings {
+    /// Configured sources (`subsonic` servers and `local` folders).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceEntry>,
+    /// Which sources are active in the UI (defaults to `all: true`).
+    #[serde(default, skip_serializing_if = "is_default_scope")]
+    pub scope: accounts::Scope,
     /// Size cap for the streaming cache; `None` uses the default (2 GB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_cache_mb: Option<u64>,
@@ -245,6 +349,93 @@ pub struct Settings {
     pub experimental: crate::visuals::Experimental,
 }
 
+impl Serialize for Settings {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Settings::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        migrate_legacy_value(&mut value);
+        // Inner remote impl calls field deserializers directly without recursing.
+        #[derive(Deserialize)]
+        struct Helper(#[serde(with = "Settings")] Settings);
+        Helper::deserialize(value.into_deserializer()).map(|h| h.0).map_err(serde::de::Error::custom)
+    }
+}
+
+fn migrate_legacy_value(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else { return };
+    let legacy_account = obj.remove("account");
+    let legacy_server = obj.remove("server");
+    let legacy_username = obj.remove("username");
+    let legacy_name = obj.remove("source_name");
+    let legacy_color = obj.remove("source_color");
+
+    let account = legacy_account.and_then(|v| serde_json::from_value::<accounts::AccountId>(v).ok());
+    let server = legacy_server.and_then(|v| v.as_str().map(str::to_owned));
+    let username = legacy_username.and_then(|v| v.as_str().map(str::to_owned));
+    let name = legacy_name.and_then(|v| v.as_str().map(str::to_owned));
+    let color = legacy_color.and_then(|v| serde_json::from_value::<accounts::SourceColor>(v).ok());
+
+    let has_server = server.as_deref().is_some_and(|s| !s.is_empty());
+    let has_user = username.as_deref().is_some_and(|s| !s.is_empty());
+    if account.is_none() && !has_server && !has_user && name.is_none() && color.is_none() {
+        return;
+    }
+
+    let sources = match obj.get_mut("sources") {
+        Some(serde_json::Value::Array(arr)) => arr,
+        _ => {
+            obj.insert("sources".into(), serde_json::Value::Array(Vec::new()));
+            match obj.get_mut("sources") {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => unreachable!(),
+            }
+        }
+    };
+
+    let idx = sources.iter().position(|e| e.get("kind").and_then(|k| k.as_str()).is_none_or(|k| !k.eq_ignore_ascii_case("local")));
+    let target = match idx {
+        Some(i) => &mut sources[i],
+        None => {
+            let entry = serde_json::json!({
+                "id": account.unwrap_or_else(accounts::AccountId::new),
+                "kind": "subsonic",
+            });
+            sources.push(entry);
+            sources.last_mut().expect("pushed entry")
+        }
+    };
+
+    if let Some(map) = target.as_object_mut() {
+        if let Some(id) = account
+            && idx.is_some()
+        {
+            map.insert("id".into(), serde_json::to_value(id).unwrap_or(serde_json::Value::Null));
+        }
+        if let Some(s) = server {
+            map.insert("server".into(), serde_json::Value::String(s));
+        }
+        if let Some(u) = username {
+            map.insert("username".into(), serde_json::Value::String(u));
+        }
+        if let Some(n) = name {
+            map.insert("name".into(), serde_json::Value::String(n));
+        }
+        if let Some(c) = color {
+            map.insert("color".into(), serde_json::to_value(c).unwrap_or(serde_json::Value::Null));
+        }
+    }
+}
+
+fn is_default_scope(scope: &accounts::Scope) -> bool {
+    *scope == accounts::Scope::default()
+}
+
 /// Each value in `obj` that isn't itself an object, with its path.
 fn leaves_of(obj: &serde_json::Map<String, serde_json::Value>, at: &mut Vec<String>, out: &mut Vec<(Vec<String>, serde_json::Value)>) {
     for (key, value) in obj {
@@ -272,11 +463,8 @@ fn full() -> f32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            account: None,
-            server: String::new(),
-            username: String::new(),
-            source_name: None,
-            source_color: accounts::SourceColor::default(),
+            sources: Vec::new(),
+            scope: accounts::Scope::default(),
             stream_cache_mb: None,
             output_device: None,
             device_modes: Default::default(),
@@ -402,56 +590,125 @@ impl Settings {
         serde_json::from_value(kept)
     }
 
+    pub fn primary(&self) -> Option<&SourceEntry> {
+        self.sources.first()
+    }
+
+    pub fn primary_mut(&mut self) -> Option<&mut SourceEntry> {
+        self.sources.first_mut()
+    }
+
+    pub fn subsonic(&self) -> Option<&SourceEntry> {
+        self.sources.iter().find(|s| s.kind == SourceKind::Subsonic)
+    }
+
+    pub fn subsonic_mut(&mut self) -> Option<&mut SourceEntry> {
+        self.sources.iter_mut().find(|s| s.kind == SourceKind::Subsonic)
+    }
+
+    #[allow(dead_code)]
+    pub fn source(&self, id: accounts::AccountId) -> Option<&SourceEntry> {
+        self.sources.iter().find(|s| s.id == id)
+    }
+
+    pub fn account(&self) -> Option<accounts::AccountId> {
+        self.primary().map(|s| s.id)
+    }
+
+    pub fn server(&self) -> &str {
+        self.subsonic().map_or("", |s| s.server.as_str())
+    }
+
+    pub fn username(&self) -> &str {
+        self.subsonic().map_or("", |s| s.username.as_str())
+    }
+
+    pub fn source_name(&self) -> Option<&str> {
+        self.primary().and_then(|s| s.name.as_deref())
+    }
+
+    pub fn source_color(&self) -> accounts::SourceColor {
+        self.primary().map_or_else(accounts::SourceColor::default, |s| s.color)
+    }
+
+    pub fn set_source_name(&mut self, name: Option<String>) {
+        if let Some(entry) = self.primary_mut() {
+            entry.name = name;
+        }
+    }
+
+    pub fn set_source_color(&mut self, color: accounts::SourceColor) {
+        if let Some(entry) = self.primary_mut() {
+            entry.color = color;
+        }
+    }
+
+    /// Appends a local-folder source entry with a fresh [`accounts::AccountId`] and next
+    /// unused colour, returning the new account id.
+    #[allow(dead_code)]
+    pub fn add_local(&mut self, name: Option<String>, folders: Vec<PathBuf>) -> accounts::AccountId {
+        let id = accounts::AccountId::new();
+        let color = accounts::next_color(self.sources.iter().map(|s| s.color));
+        self.sources.push(SourceEntry::local(id, name, color, folders));
+        id
+    }
+
+    /// Sets or updates a Subsonic account entry in [`Self::sources`].
+    ///
     /// The same server and user keep their mirror and downloads, including
     /// after signing out. Compare addresses as the existing mirror does.
     pub fn sign_in(&self, server: &str, username: &str) -> Self {
-        let same = self.username == username && self.server.trim().trim_end_matches('/').eq_ignore_ascii_case(server.trim().trim_end_matches('/'));
-        let account = if same { self.account } else { None };
-        Self {
-            account: Some(account.unwrap_or_else(accounts::AccountId::new)),
-            server: server.to_owned(),
-            username: username.to_owned(),
-            // Another account starts with no name and the first colour.
-            source_name: if same { self.source_name.clone() } else { None },
-            source_color: if same { self.source_color } else { accounts::SourceColor::default() },
-            signed_out: false,
-            ..self.clone()
+        let mut next = self.clone();
+        let existing = next.subsonic().filter(|s| s.matches_subsonic(server, username)).cloned();
+        let entry = match existing {
+            Some(mut s) => {
+                s.server = server.to_owned();
+                s.username = username.to_owned();
+                s
+            }
+            None => SourceEntry::subsonic(accounts::AccountId::new(), server, username),
+        };
+        if let Some(slot) = next.sources.iter_mut().find(|s| s.kind == SourceKind::Subsonic) {
+            *slot = entry;
+        } else {
+            next.sources.insert(0, entry);
         }
+        next.signed_out = false;
+        next
     }
 
     /// A stable id for the server account (server address and user), used to
     /// keep each account's library mirror and downloads apart. `None` before a
     /// login. The address is compared without case or a trailing slash.
     pub fn account_id(&self) -> Option<u32> {
-        let server = self.server.trim().trim_end_matches('/').to_lowercase();
-        if server.is_empty() || self.username.is_empty() {
+        let s = self.subsonic()?;
+        let server = s.server.trim().trim_end_matches('/').to_lowercase();
+        if server.is_empty() || s.username.is_empty() {
             return None;
         }
         // FNV-1a: stable across builds and Rust versions, unlike `DefaultHasher`.
-        let key = format!("{server}\n{}", self.username);
+        let key = format!("{server}\n{}", s.username);
         Some(key.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193)))
-    }
-
-    fn keyring_account(&self) -> String {
-        format!("{}@{}", self.username, self.server)
     }
 
     /// Blocking: may show a Keychain prompt. Call off the UI thread.
     pub fn load_password(&self) -> Option<String> {
-        keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account()).ok()?.get_password().ok()
+        self.subsonic()?.load_password()
     }
 
     /// Blocking: may show a Keychain prompt. Call off the UI thread.
     pub fn forget_password(&self) {
-        if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account()) {
-            let _ = e.delete_credential();
+        if let Some(s) = self.subsonic() {
+            s.forget_password();
         }
     }
 
     /// Blocking: may show a Keychain prompt. Call off the UI thread.
     pub fn store_password(&self, password: &str) -> anyhow::Result<()> {
-        keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())?.set_password(password)?;
-        Ok(())
+        let Some(s) = self.subsonic() else {
+            anyhow::bail!("no Subsonic source configured");
+        };
+        s.store_password(password)
     }
 }
 
@@ -460,7 +717,7 @@ mod tests {
     use super::*;
 
     fn login(server: &str, user: &str) -> Settings {
-        Settings { server: server.into(), username: user.into(), ..Default::default() }
+        Settings { sources: vec![SourceEntry::subsonic(accounts::AccountId::new(), server, user)], ..Default::default() }
     }
 
     #[test]
@@ -477,30 +734,97 @@ mod tests {
     #[test]
     fn the_same_server_and_user_reuse_the_account_even_after_signing_out() {
         let old = login("https://music.example.com", "me").sign_in("https://music.example.com", "me");
-        let account = old.account.unwrap();
-        assert_eq!(old.sign_in("HTTPS://Music.Example.com/", "me").account, Some(account));
-        assert_ne!(old.sign_in("https://new-address.example.com", "me").account, Some(account));
-        assert_ne!(old.sign_in("https://music.example.com", "someone-else").account, Some(account));
+        let account = old.account().unwrap();
+        assert_eq!(old.sign_in("HTTPS://Music.Example.com/", "me").account(), Some(account));
+        assert_ne!(old.sign_in("https://new-address.example.com", "me").account(), Some(account));
+        assert_ne!(old.sign_in("https://music.example.com", "someone-else").account(), Some(account));
         let signed_out = Settings { signed_out: true, ..old };
-        assert_eq!(signed_out.sign_in("https://music.example.com", "me").account, Some(account));
-        assert!(serde_json::to_value(Settings::default()).unwrap().get("account").is_none());
+        assert_eq!(signed_out.sign_in("https://music.example.com", "me").account(), Some(account));
+        let empty = serde_json::to_value(Settings::default()).unwrap();
+        assert!(empty.get("account").is_none() && empty.get("sources").is_none());
     }
 
     #[test]
     fn the_servers_name_and_colour_stay_with_its_account_and_another_starts_fresh() {
-        let named = Settings {
-            source_name: Some("Home".into()),
-            source_color: accounts::SourceColor::new(3),
-            ..login("https://music.example.com", "me").sign_in("https://music.example.com", "me")
-        };
+        let mut named = login("https://music.example.com", "me").sign_in("https://music.example.com", "me");
+        named.set_source_name(Some("Home".into()));
+        named.set_source_color(accounts::SourceColor::new(3));
         let json = serde_json::to_value(&named).unwrap();
-        assert_eq!((&json["source_name"], &json["source_color"]), (&serde_json::json!("Home"), &serde_json::json!(3)));
+        assert_eq!((&json["sources"][0]["name"], &json["sources"][0]["color"]), (&serde_json::json!("Home"), &serde_json::json!(3)));
+        assert!(json.get("source_name").is_none() && json.get("source_color").is_none());
         let again = named.sign_in("https://music.example.com/", "me");
-        assert_eq!((again.source_name.as_deref(), again.source_color), (Some("Home"), accounts::SourceColor::new(3)));
+        assert_eq!((again.source_name(), again.source_color()), (Some("Home"), accounts::SourceColor::new(3)));
         let other = named.sign_in("https://other.example.com", "me");
-        assert_eq!((other.source_name, other.source_color), (None, accounts::SourceColor::default()));
+        assert_eq!((other.source_name(), other.source_color()), (None, accounts::SourceColor::default()));
         let fresh = serde_json::to_value(Settings::default()).unwrap();
-        assert!(fresh.get("source_name").is_none() && fresh.get("source_color").is_none(), "nothing written until it's set");
+        assert!(fresh.get("sources").is_none(), "nothing written until a source is configured");
+    }
+
+    #[test]
+    fn old_single_account_settings_read_as_one_subsonic_source_and_save_in_new_shape() {
+        let id = accounts::AccountId::new();
+        let legacy = serde_json::json!({
+            "account": id,
+            "server": "https://music.example.com",
+            "username": "me",
+            "source_name": "Home server",
+            "source_color": 2,
+        });
+        let settings = Settings::from_json(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(settings.sources.len(), 1);
+        let entry = &settings.sources[0];
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.kind, SourceKind::Subsonic);
+        assert_eq!(entry.name.as_deref(), Some("Home server"));
+        assert_eq!(entry.color, accounts::SourceColor::new(2));
+        assert_eq!((entry.server.as_str(), entry.username.as_str()), ("https://music.example.com", "me"));
+
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved.get("account").is_none());
+        assert!(saved.get("server").is_none());
+        assert!(saved.get("username").is_none());
+        assert!(saved.get("source_name").is_none());
+        assert!(saved.get("source_color").is_none());
+        assert_eq!(saved["sources"][0]["id"], serde_json::json!(id));
+        assert_eq!(saved["sources"][0]["kind"], "subsonic");
+    }
+
+    #[test]
+    fn sources_list_holds_local_and_subsonic_entries_and_falls_back_on_unknown_kind() {
+        let mut s = Settings::default();
+        let sub_id = accounts::AccountId::new();
+        s.sources.push(SourceEntry::subsonic(sub_id, "https://music.example.com", "me"));
+        let local_id = s.add_local(Some("Music folder".into()), vec![PathBuf::from("/Users/me/Music")]);
+        s.scope = accounts::Scope::all();
+        s.scope.toggle_chip(sub_id);
+        s.scope.toggle_chip(local_id);
+
+        let json = serde_json::to_vec(&s).unwrap();
+        let back = Settings::from_json(&json).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.sources[1].kind, SourceKind::Local);
+        assert_eq!(back.sources[1].folders, vec![PathBuf::from("/Users/me/Music")]);
+
+        // An unrecognized kind falls back leniently without dropping the entry.
+        let future = serde_json::json!({
+            "sources": [
+                { "id": local_id, "kind": "plex", "name": "Future", "color": 1, "folders": ["/tmp/music"] }
+            ]
+        });
+        let parsed = Settings::from_json(&serde_json::to_vec(&future).unwrap()).unwrap();
+        assert_eq!(parsed.sources.len(), 1);
+        assert_eq!(parsed.sources[0].kind, SourceKind::Subsonic);
+        assert_eq!(parsed.sources[0].name.as_deref(), Some("Future"));
+    }
+
+    #[test]
+    fn source_helper_exposes_primary_entry_and_keychain_key_uses_account_id() {
+        let id = accounts::AccountId::new();
+        let entry = SourceEntry::subsonic(id, "https://music.example.com", "me");
+        assert_eq!(entry.keyring_account(), id.to_string());
+        assert_eq!(entry.legacy_keyring_account().as_deref(), Some("me@https://music.example.com"));
+        let s = Settings { sources: vec![entry], ..Default::default() };
+        assert_eq!(s.source(id).unwrap().username, "me");
     }
 
     #[test]

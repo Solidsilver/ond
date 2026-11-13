@@ -126,6 +126,9 @@ pub enum LibraryMsg {
     SyncProgress(usize),
     /// The album list sync finished (`Ok`: how many albums) or failed.
     AlbumSyncDone(Result<usize, Failure>),
+    /// Configured local folders that were missing during the latest scan (empty
+    /// when every configured folder was present).
+    FolderMissing(Vec<std::path::PathBuf>),
     /// An album's tracks. `fresh`: straight from the server's `getAlbum` (the
     /// complete list), not the local library (which may be partial).
     Tracks {
@@ -674,6 +677,11 @@ impl Bridge {
     /// With a saved login (`password` is `None`) an unreachable server isn't a
     /// login failure: the app opens offline and keeps retrying until it's back.
     pub fn connect(&self, settings: Settings, password: Option<String>) {
+        if settings.primary().is_some_and(|e| e.kind == crate::settings::SourceKind::Local) {
+            let folders = settings.primary().map(|e| e.folders.clone()).unwrap_or_default();
+            self.connect_local(settings, folders);
+            return;
+        }
         let session = self.session();
         // Scoped: the keychain can hold this up behind a prompt for as long
         // as the user likes, and a sign-out and new sign-in may come first.
@@ -691,7 +699,7 @@ impl Bridge {
                     }
                 }
             };
-            let client = match Client::new(&settings.server, Credentials::new(&settings.username, &password)) {
+            let client = match Client::new(settings.server(), Credentials::new(settings.username(), &password)) {
                 Ok(c) => c,
                 Err(e) => return this.send(failed(connect_error(&e))),
             };
@@ -725,7 +733,7 @@ impl Bridge {
                     let password_saved = saved || stored.unwrap_or(false);
                     this.connected(
                         session,
-                        Arc::new(SubsonicSource::new(settings.account.expect("a configured sign-in has an account"), client)),
+                        Arc::new(SubsonicSource::new(settings.account().expect("a configured sign-in has an account"), client)),
                         settings,
                         server,
                         password_saved,
@@ -733,10 +741,27 @@ impl Bridge {
                     .await;
                 }
                 Err(PingError::Unreachable(e)) if saved => {
-                    this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
-                    this.reconnect(Arc::new(SubsonicSource::new(settings.account.expect("a configured sign-in has an account"), client)), settings, session);
+                    this.send(Msg::Unreachable { session, username: settings.username().to_owned(), error: e });
+                    this.reconnect(Arc::new(SubsonicSource::new(settings.account().expect("a configured sign-in has an account"), client)), settings, session);
                 }
                 Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(failed(e)),
+            }
+        });
+    }
+
+    /// Prepares a local-folder source and announces it as the live session.
+    pub fn connect_local(&self, settings: Settings, folders: Vec<std::path::PathBuf>) {
+        let session = self.session();
+        let this = self.scoped_to(session);
+        self.rt.spawn(async move {
+            let Some(account) = settings.account() else {
+                return this.send(Msg::ConnectFailed { session, error: "Local source is missing an account id.".into() });
+            };
+            let data = this.libraries.lock().unwrap_or_else(|e| e.into_inner()).data.clone();
+            let source: Src = Arc::new(crate::source::local::LocalSource::new(account, folders, data.as_deref()));
+            match ping(&source).await {
+                Ok(server) => this.connected(session, source, settings, server, true).await,
+                Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(Msg::ConnectFailed { session, error: e }),
             }
         });
     }
@@ -772,6 +797,10 @@ impl Bridge {
 
     /// Times one ping (for the server popover and the diagnostics bar).
     pub fn measure_latency(&self, source: Src) {
+        if !source.capabilities().network {
+            self.send(Msg::Latency(None));
+            return;
+        }
         let this = self.scoped();
         self.rt.spawn(async move {
             let start = std::time::Instant::now();
@@ -783,7 +812,7 @@ impl Bridge {
     /// Checks the connection after something failed; if the server is gone,
     /// says so and reconnects in the background.
     pub fn probe(&self, source: Src, settings: Settings) {
-        if self.reconnecting.load(Ordering::Relaxed) {
+        if !source.capabilities().network || self.reconnecting.load(Ordering::Relaxed) {
             return;
         }
         let session = self.session();
@@ -792,7 +821,7 @@ impl Bridge {
             if let Err(PingError::Unreachable(e)) = ping(&source).await
                 && this.live(session)
             {
-                this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
+                this.send(Msg::Unreachable { session, username: settings.username().to_owned(), error: e });
                 this.reconnect(source, settings, session);
             }
         });
@@ -857,6 +886,80 @@ impl Bridge {
                         this.reconnecting.store(false, Ordering::Relaxed);
                         return this.send(Msg::ConnectFailed { session, error: e });
                     }
+                }
+            }
+        });
+    }
+
+    /// Starts the appropriate library sync for `source`.
+    pub fn sync_source(&self, source: &Src) {
+        if let Some(paged) = source.paged() {
+            self.sync_albums(paged);
+        } else if source.local().is_some() {
+            self.sync_local(source.clone());
+        }
+    }
+
+    /// Scans `source`'s local folders incrementally into the library database,
+    /// reporting progress and reloading albums/artists/tracks when done.
+    pub fn sync_local(&self, source: Src) {
+        if !self.current() {
+            return;
+        }
+        let pass = self.album_pass.fetch_add(1, Ordering::AcqRel) + 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Some(old) = self.sync_cancel.lock().unwrap_or_else(|e| e.into_inner()).replace(cancel.clone()) {
+            old.store(true, Ordering::Relaxed);
+        }
+        let this = self.scoped();
+        self.rt.spawn_blocking(move || {
+            let Some(local) = source.local() else { return };
+            let live = || this.current() && this.album_pass.load(Ordering::Acquire) == pass && this.is_current(&cancel);
+            let mut last = Instant::now() - Duration::from_secs(1);
+            let outcome = local.sync(&this.library(), &cancel, |p| {
+                if (p.scanned == p.total || last.elapsed() >= Duration::from_millis(100)) && live() {
+                    last = Instant::now();
+                    this.send(LibraryMsg::TrackSync(sync::Progress { done: p.scanned, total: p.total, unit: sync::Unit::Tracks }));
+                }
+            });
+            if !live() {
+                return;
+            }
+            match outcome {
+                Ok(synced) => {
+                    tracing::debug!(
+                        albums = synced.album_count,
+                        tracks = synced.track_count,
+                        reused = synced.reused,
+                        rescanned = synced.rescanned,
+                        skipped = synced.skipped,
+                        missing = synced.missing_roots.len(),
+                        moves = synced.moves.len(),
+                        stamp = %synced.stamp,
+                        "local scan complete"
+                    );
+                    this.send(LibraryMsg::FolderMissing(synced.missing_roots));
+                    this.send(LibraryMsg::Albums(synced.albums));
+                    this.send(LibraryMsg::Artists(synced.artists));
+                    this.send(LibraryMsg::Newest(synced.newest_ids));
+                    this.send(LibraryMsg::AlbumSyncDone(Ok(synced.album_count)));
+                    this.load_all_tracks();
+                    this.send(LibraryMsg::TrackSyncDone(sync::Outcome::Done { fetched: synced.rescanned, bulk: false }));
+                }
+                Err(crate::source::local::LocalSyncError::Cancelled) => {
+                    this.send(LibraryMsg::AlbumSyncDone(Ok(0)));
+                    this.send(LibraryMsg::TrackSyncDone(sync::Outcome::Cancelled));
+                }
+                Err(err @ crate::source::local::LocalSyncError::FolderMissing(_)) => {
+                    let missing = match &err {
+                        crate::source::local::LocalSyncError::FolderMissing(paths) => paths.clone(),
+                        _ => Vec::new(),
+                    };
+                    this.send(LibraryMsg::FolderMissing(missing));
+                    this.send(LibraryMsg::AlbumSyncDone(Err(err.into())));
+                }
+                Err(err) => {
+                    this.send(LibraryMsg::AlbumSyncDone(Err(err.into())));
                 }
             }
         });
@@ -1025,18 +1128,21 @@ impl Bridge {
     pub fn fetch_home(&self, source: Src) {
         let this = self.scoped();
         self.rt.spawn(async move {
-            match source.newest(120).await {
-                Ok(albums) => {
-                    let ids = albums.iter().map(|a| a.id.clone()).collect();
-                    // Newest albums may predate the last full sync; announced
-                    // only once they're stored, or they'd show as missing.
-                    let saved = Vec::clone(&ids);
-                    match this.db(move |l| l.upsert_albums(albums).and_then(|()| l.save(SAVED_NEWEST, &saved))).await {
-                        Ok(()) => this.send(LibraryMsg::Newest(ids)),
-                        Err(e) => this.send(Msg::Error(Failure::Local(format!("Couldn't save Recently added: {e}")))),
+            // Local scans populate Newest once the background scan completes.
+            if source.local().is_none() {
+                match source.newest(120).await {
+                    Ok(albums) => {
+                        let ids = albums.iter().map(|a| a.id.clone()).collect();
+                        // Newest albums may predate the last full sync; announced
+                        // only once they're stored, or they'd show as missing.
+                        let saved = Vec::clone(&ids);
+                        match this.db(move |l| l.upsert_albums(albums).and_then(|()| l.save(SAVED_NEWEST, &saved))).await {
+                            Ok(()) => this.send(LibraryMsg::Newest(ids)),
+                            Err(e) => this.send(Msg::Error(Failure::Local(format!("Couldn't save Recently added: {e}")))),
+                        }
                     }
+                    Err(e) => this.send(Msg::Error(e.context("Couldn't load Recently added"))),
                 }
-                Err(e) => this.send(Msg::Error(e.context("Couldn't load Recently added"))),
             }
             this.refresh_playlists(&source).await;
         });
@@ -1070,6 +1176,10 @@ impl Bridge {
     /// Everything the user starred, and the ratings that come with it.
     pub fn fetch_starred(&self, source: Option<Src>) {
         let Some(source) = source else { return };
+        if !source.capabilities().stars && !source.capabilities().ratings {
+            self.send(Msg::Starred { starred: Starred { songs: Vec::new(), albums: Vec::new(), artists: Vec::new() }, ratings: Vec::new() });
+            return;
+        }
         let this = self.scoped();
         self.rt.spawn(async move {
             match source.starred().await {
@@ -1289,9 +1399,8 @@ mod tests {
     #[test]
     fn signing_back_in_reuses_the_folder_and_another_account_replaces_it() {
         let dir = tempfile::tempdir().unwrap();
-        let old =
-            Settings { server: "https://music.example.com".into(), username: "me".into(), ..Default::default() }.sign_in("https://music.example.com", "me");
-        let account = old.account.unwrap();
+        let old = Settings::default().sign_in("https://music.example.com", "me");
+        let account = old.account().unwrap();
         let stores = crate::storage::open(dir.path(), Some(account), &mut vec![]).unwrap();
         stores.library.upsert_albums(vec![album("kept", 1)]).unwrap();
         stores.analyses.put("song", b"old analysis").unwrap();
@@ -1306,9 +1415,9 @@ mod tests {
         bridge.end_session();
         let signed_out = Settings { signed_out: true, ..old.clone() };
         let again = signed_out.sign_in("HTTPS://Music.Example.com/", "me");
-        assert_eq!(again.account, Some(account));
+        assert_eq!(again.account(), Some(account));
         let source = |account| {
-            let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+            let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities::none());
             fake.account = account;
             Arc::new(fake) as Src
         };
@@ -1318,7 +1427,7 @@ mod tests {
         assert!(crate::art::cover_file(&old_art, "al-1", 64).is_file());
 
         let next = signed_out.sign_in("https://music.example.com", "someone-else");
-        let next_account = next.account.unwrap();
+        let next_account = next.account().unwrap();
         assert_ne!(account, next_account);
         // This write passed its session check already. Its database must stay
         // the old one even though it finishes after the new mirror opens.
@@ -1652,7 +1761,7 @@ mod tests {
     fn a_source_without_lyrics_is_not_asked_for_them() {
         use crate::source::{Capabilities, fake::Fake};
         let (rt, bridge, rx) = rig(&[]);
-        let source = Arc::new(Fake::new(Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false }));
+        let source = Arc::new(Fake::new(Capabilities::none()));
         bridge.fetch_lyrics(Some(source.clone()), "song".into(), Some("artist".into()), "title".into());
         let mut got = Vec::new();
         until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Lyrics { .. })));
@@ -1710,5 +1819,55 @@ mod tests {
         );
         assert_eq!(sign_in(proxy_page("502 Bad Gateway", "502 Bad Gateway")), "The server answered with an error (502 Bad Gateway).");
         assert_eq!(sign_in(proxy_page("503 Service Unavailable", "Service Unavailable")), "The server answered with an error (503 Service Unavailable).");
+    }
+
+    #[test]
+    fn bridge_sync_local_populates_library_and_skips_network_or_stars() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        // Minimal valid 48-byte 44.1kHz stereo 16-bit PCM WAV file.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[0u8; 4]);
+        std::fs::write(music.join("track.wav"), &wav).unwrap();
+
+        let (rt, bridge, rx) = rig(&[]);
+        let source: Src = Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![music.clone()], None));
+        bridge.sync_source(&source);
+        bridge.measure_latency(source.clone());
+        bridge.fetch_starred(Some(source.clone()));
+
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| {
+            m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::TrackSyncDone(_))))
+                && m.iter().any(|m| matches!(m, Msg::Latency(_)))
+                && m.iter().any(|m| matches!(m, Msg::Starred { .. }))
+        });
+        assert!(got.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 1)));
+        assert!(got.iter().any(|m| matches!(m, Msg::Latency(None))));
+        assert!(got.iter().any(|m| matches!(m, Msg::Starred { starred, .. } if starred.songs.is_empty())));
+        assert!(!got.iter().any(|m| matches!(m, Msg::Error(_))));
+
+        // Renaming the folder away keeps the stored album in library.redb and
+        // reports FolderMissing.
+        let away = dir.path().join("music-away");
+        std::fs::rename(&music, &away).unwrap();
+        got.clear();
+        bridge.sync_source(&source);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AlbumSyncDone(Err(_))))));
+        assert!(got.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::FolderMissing(paths)) if paths == std::slice::from_ref(&music))));
+        assert_eq!(rt.block_on(bridge.db(|l| l.albums())).unwrap().len(), 1);
     }
 }

@@ -82,17 +82,21 @@ fn migrate_with(paths: &Paths, prefs: &Prefs, mut completed: impl FnMut(Step) ->
             return Ok(());
         }
         prefs.edit(|s| {
-            s.account.get_or_insert_with(AccountId::new);
+            if s.account().is_none()
+                && let Some(entry) = s.subsonic_mut()
+            {
+                entry.id = AccountId::new();
+            }
         });
         prefs.flush_checked()?;
-        let p = Progress { version: 1, step: Step::Account, account: prefs.get(|s| s.account) };
+        let p = Progress { version: 1, step: Step::Account, account: prefs.get(|s| s.account()) };
         record(&p)?;
         completed(Step::Account)?;
         progress = Some(p);
     }
     let mut progress = progress.expect("the account step was recorded");
     let account = progress.account.ok_or_else(|| anyhow::anyhow!("migration has no account"))?;
-    anyhow::ensure!(prefs.get(|s| s.account) == Some(account), "migration account differs from settings");
+    anyhow::ensure!(prefs.get(|s| s.account()) == Some(account), "migration account differs from settings");
     if progress.step == Step::Account {
         let dir = account_dir(data, account);
         std::fs::create_dir_all(&dir)?;
@@ -245,8 +249,8 @@ mod tests {
 
     fn verify(paths: &Paths, prefs: &Prefs) {
         migrate(paths, prefs).unwrap();
-        let account = prefs.get(|s| s.account).unwrap();
-        assert_eq!(crate::settings::Settings::read(&paths.config_file).unwrap().account, Some(account));
+        let account = prefs.get(|s| s.account()).unwrap();
+        assert_eq!(crate::settings::Settings::read(&paths.config_file).unwrap().account(), Some(account));
         let root = paths.library_db.parent().unwrap();
         let stores = open(root, Some(account), &mut vec![]).unwrap();
         assert_eq!(stores.library.albums().unwrap().len(), 2);
@@ -322,7 +326,7 @@ mod tests {
             })
             .is_err()
         );
-        let account = prefs.get(|s| s.account).unwrap();
+        let account = prefs.get(|s| s.account()).unwrap();
         let store_dir = offline::account_store(&paths.offline, prefs.snapshot().account_id().unwrap()).unwrap();
         let new = |id: &str| store_dir.join(streamcache::file_name(&TrackKey::new(account, id).to_string(), Some("flac")));
         // A destination conflict stops the real operation after its state write.
@@ -365,7 +369,7 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         let paths = old_install(other.path());
         let (prefs, _) = Prefs::open(&paths.config_file);
-        let account = prefs.get(|s| s.account).unwrap();
+        let account = prefs.get(|s| s.account()).unwrap();
         let folder = account_dir(other.path(), account);
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("scrobbles.json"), b"[]").unwrap();

@@ -636,7 +636,7 @@ mod tests {
         use crate::source::{Capabilities, fake::Fake};
         use std::sync::atomic::Ordering;
         let mut r = Rig::new(true);
-        let mut fake = Fake::new(Capabilities { scrobbling: true, downloads: false, lyrics: false, playlists: false });
+        let mut fake = Fake::new(Capabilities { scrobbling: true, ..Capabilities::none() });
         fake.account = accounts::AccountId::new();
         let source = Arc::new(fake);
         r.w.retry.push(pending("abc", 1));
@@ -667,7 +667,7 @@ mod tests {
         use crate::source::{Capabilities, fake::Fake};
         use std::sync::atomic::Ordering;
         let mut r = Rig::new(true);
-        let source = Arc::new(Fake::new(Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false }));
+        let source = Arc::new(Fake::new(Capabilities::none()));
         r.w.retry.push(pending("old", 1));
         r.w.handle(In::Source(Some(source.clone())));
         r.w.flush_retries();
@@ -788,7 +788,7 @@ mod tests {
         let (tx, _rx) = channel();
         let mut w = Worker::new(cfg, tx);
         let source_for = |account: accounts::AccountId, bytes: &[u8]| -> Src {
-            let mut fake = Fake::new(Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+            let mut fake = Fake::new(Capabilities::none());
             fake.account = account;
             fake.covers.lock().unwrap().insert("cov-1".into(), bytes.to_vec());
             Arc::new(fake)

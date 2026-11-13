@@ -51,7 +51,8 @@ fn app(ctx: &egui::Context, dir: &std::path::Path) -> OndApp {
     let mut app = OndApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
     app.login = None;
     app.onboarding = None;
-    app.session.settings = Some(Settings { account: Some(crate::test_tracks::account()), ..Default::default() });
+    app.session.settings =
+        Some(Settings { sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "", "")], ..Default::default() });
     app.downloads.owner = Some(crate::test_tracks::account());
     let albums: Vec<Album> = (0..60)
         .map(|i| Album {
@@ -523,7 +524,10 @@ fn another_account_gets_its_own_library_and_downloads() {
     let mut app = app(&ctx, dir.path());
     let source = || crate::source::subsonic::test_source();
     let login = |user: &str| {
-        Box::new(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: user.into(), ..Default::default() })
+        Box::new(Settings {
+            sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "http://music.local", user)],
+            ..Default::default()
+        })
     };
     let connect = |app: &mut OndApp, user: &str, new_account: bool| {
         let session = app.bridge.session();
@@ -578,7 +582,10 @@ fn another_accounts_downloads_open_in_the_background_and_wait_for_nothing() {
     let mut app = app(&ctx, dir.path());
     let source = || crate::source::subsonic::test_source();
     let login = |user: &str| {
-        Box::new(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: user.into(), ..Default::default() })
+        Box::new(Settings {
+            sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "http://music.local", user)],
+            ..Default::default()
+        })
     };
     let connect = |app: &mut OndApp, user: &str| {
         let session = app.bridge.session();
@@ -615,9 +622,7 @@ fn a_downloads_folder_set_in_managed_json_moves_the_downloads_there() {
     let dir = tempfile::tempdir().unwrap();
     let (old, chosen) = (dir.path().join("old"), dir.path().join("music"));
     let account = Settings {
-        account: Some(crate::test_tracks::account()),
-        server: "http://music.local".into(),
-        username: "luke".into(),
+        sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "http://music.local", "luke")],
         signed_out: true,
         ..Default::default()
     };
@@ -643,7 +648,8 @@ fn downloads_moved_to_another_folder_move_in_the_background() {
     // Normal folder moves still run in the background after startup migration.
     std::fs::write(dir.path().join("sources-migration.json"), br#"{"version":1,"step":"done","account":null}"#).unwrap();
     let (old, new) = (dir.path().join("old"), dir.path().join("new"));
-    let account = Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() };
+    let account =
+        Settings { sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "http://music.local", "luke")], ..Default::default() };
     let store = old.join(format!("{:08x}", account.account_id().unwrap()));
     std::fs::create_dir_all(&store).unwrap();
     std::fs::write(store.join("t-2.flac"), b"fLaC").unwrap();
@@ -1315,8 +1321,10 @@ fn a_refused_saved_login_keeps_the_library_up_and_asks_to_sign_in() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
-    app.session.settings =
-        Some(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
+    app.session.settings = Some(Settings {
+        sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "http://music.local", "luke")],
+        ..Default::default()
+    });
     app.session.connecting = true;
     let t = app.data.tracks.all[0].clone();
     let playable = |app: &OndApp| super::playable(&app.session, &app.downloads, &app.cache, app.output.transcode().as_ref(), &t);
@@ -1385,8 +1393,10 @@ fn working_offline_stops_connecting_and_hides_what_cant_play() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let source = crate::source::subsonic::test_source();
-    let settings =
-        Box::new(Settings { account: Some(crate::test_tracks::account()), server: "http://music.local".into(), username: "luke".into(), ..Default::default() });
+    let settings = Box::new(Settings {
+        sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "http://music.local", "luke")],
+        ..Default::default()
+    });
     app.handle(Msg::Connected {
         stores: None,
         session: app.bridge.session(),
@@ -1502,7 +1512,7 @@ fn two_accounts_keep_separate_art_and_switching_removes_the_old_accounts_art() {
     let png = crate::test_tracks::png;
     let (red, blue) = (png([220, 30, 30, 255]), png([30, 30, 220, 255]));
     let source_for = |account: accounts::AccountId, bytes: Vec<u8>| -> crate::source::Src {
-        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities::none());
         fake.account = account;
         fake.covers.lock().unwrap().insert("al-1".into(), bytes);
         Arc::new(fake)
@@ -1514,7 +1524,7 @@ fn two_accounts_keep_separate_art_and_switching_removes_the_old_accounts_art() {
             stores: Some(stores),
             session,
             source: source_for(account, bytes),
-            settings: Box::new(Settings { account: Some(account), server: "http://music.local".into(), username: user.into(), ..Default::default() }),
+            settings: Box::new(Settings { sources: vec![crate::settings::SourceEntry::subsonic(account, "http://music.local", user)], ..Default::default() }),
             server: "test".into(),
             new_account: true,
             password_saved: true,
@@ -1544,4 +1554,26 @@ fn two_accounts_keep_separate_art_and_switching_removes_the_old_accounts_art() {
     assert_eq!(std::fs::read(&two_file).unwrap(), blue);
     testkit::wait_until("the previous account's art folder to be removed", || !one_dir.exists());
     assert!(two_file.is_file());
+}
+
+#[test]
+fn missing_folder_sets_source_state_without_dropping_existing_albums() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.session.online = true;
+    app.session.connecting = false;
+    let before = app.data.albums.len();
+    assert!(before > 0);
+    let missing = dir.path().join("unplugged-drive");
+
+    app.handle(Msg::Library(LibraryMsg::FolderMissing(vec![missing.clone()])));
+
+    assert_eq!(app.session.folder_missing, vec![missing]);
+    assert_eq!(app.data.albums.len(), before);
+    assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
+
+    app.handle(Msg::Library(LibraryMsg::FolderMissing(Vec::new())));
+    assert!(app.session.folder_missing.is_empty());
+    assert_eq!(app.server_state().source_state(), accounts::SourceState::Online);
 }

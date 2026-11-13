@@ -341,7 +341,8 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     }
     app.login = None;
     app.onboarding = None;
-    app.session.settings = Some(Settings { account: Some(crate::test_tracks::account()), ..Default::default() });
+    app.session.settings =
+        Some(Settings { sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "", "")], ..Default::default() });
     app.downloads.owner = Some(crate::test_tracks::account());
     app.session.server_label = "demo · navidrome 0.64.2".into();
     app.sync.label = format!("{} albums", ALBUMS.len());
@@ -365,12 +366,13 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     app.data.tracks.all = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.session.online = true;
-    app.session.settings = Some(Settings {
-        account: Some(crate::test_tracks::account()),
-        server: "https://music.example.com".into(),
-        username: "demo".into(),
-        ..Default::default()
+    let source = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
+    app.prefs.edit(|s| {
+        if s.sources.is_empty() {
+            s.sources.push(source.clone());
+        }
     });
+    app.session.settings = Some(Settings { sources: vec![source], ..Default::default() });
     app.session.server_info = "navidrome 0.64.2".into();
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()

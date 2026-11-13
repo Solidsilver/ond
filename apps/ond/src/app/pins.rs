@@ -162,7 +162,7 @@ impl Downloads {
         bridge: &Bridge,
         notices: &mut Vec<String>,
     ) -> anyhow::Result<Self> {
-        let (account, owner) = (settings.account_id(), settings.account);
+        let (account, owner) = (settings.account_id(), settings.account());
         let limit = settings.offline_limit_gb.map(|gb| gb * 1_000_000_000);
         let move_from = settings.offline_move_from.clone();
         let mut downloads = Downloads {

@@ -189,7 +189,7 @@ impl ViewCtx<'_> {
 
         // Server.
         if let Some(s) = &self.session.settings {
-            let host = server_host(&s.server);
+            let host = server_host(s.server());
             let (text, tone) = if !self.session.online {
                 (format!("{host} · offline"), Tone::Warn)
             } else {
@@ -198,7 +198,7 @@ impl ViewCtx<'_> {
                     None => (host.clone(), Tone::Normal),
                 }
             };
-            let detail = format!("{}\n{}", s.server, if self.session.server_info.is_empty() { "Not connected" } else { &self.session.server_info });
+            let detail = format!("{}\n{}", s.server(), if self.session.server_info.is_empty() { "Not connected" } else { &self.session.server_info });
             out.push(Segment { text, detail, tone });
         }
 

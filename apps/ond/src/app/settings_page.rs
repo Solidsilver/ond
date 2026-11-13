@@ -699,7 +699,7 @@ impl OndApp {
     /// now and Sign out…. It can't be removed until Ond holds several, and
     /// one set in managed.json is locked.
     fn source_settings(&mut self, ui: &mut Ui) {
-        if self.session.settings.as_ref().is_none_or(|s| s.server.is_empty()) {
+        if self.session.settings.as_ref().is_none_or(|s| s.account_id().is_none()) {
             group(ui, "Sources", |ui| setting(ui, "Not connected", "", |_| ()));
             return;
         }
@@ -733,7 +733,7 @@ impl OndApp {
     fn account_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let (server, user) = match &self.session.settings {
-            Some(s) => (s.server.clone(), s.username.clone()),
+            Some(s) => (s.server().to_owned(), s.username().to_owned()),
             None => (String::new(), String::new()),
         };
         if server.is_empty() {

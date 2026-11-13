@@ -653,7 +653,7 @@ mod tests {
     use super::*;
 
     fn source_with_cover(account: AccountId, id: &str, bytes: Vec<u8>) -> Src {
-        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities::none());
         fake.account = account;
         fake.covers.lock().unwrap().insert(id.into(), bytes);
         Arc::new(fake)
