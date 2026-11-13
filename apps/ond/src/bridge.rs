@@ -107,6 +107,16 @@ pub enum Msg {
         id: String,
         name: String,
     },
+    /// A save location was picked for an M3U playlist export.
+    M3uPathChosen {
+        id: String,
+        path: std::path::PathBuf,
+    },
+    /// Exporting a playlist to M3U finished (or failed).
+    M3uExported {
+        path: std::path::PathBuf,
+        error: Option<Failure>,
+    },
     /// Selected from the native menu bar.
     Menu(crate::keys::Cmd),
     /// The folder picker's answer, and what it was asked for.
@@ -345,6 +355,7 @@ pub struct Bridge {
     notify: Notify,
     libraries: Arc<Mutex<LibrarySlot>>,
     scoped_library: Option<Arc<Library>>,
+    ond_store: Arc<crate::store::OndStore>,
     /// Stops the running track sync, if any.
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     /// One event-driven scan queue for the live local source.
@@ -384,13 +395,14 @@ struct LibrarySlot {
 }
 
 impl Bridge {
-    pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, library: Arc<Library>) -> Self {
+    pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, library: Arc<Library>, ond_store: Arc<crate::store::OndStore>) -> Self {
         Self {
             rt,
             tx,
             notify,
             libraries: Arc::new(Mutex::new(LibrarySlot { library, account: None, data: None, art_cache: None, analyses: std::sync::Weak::new() })),
             scoped_library: None,
+            ond_store,
             sync_cancel: Arc::default(),
             local_watch: Arc::default(),
             local_scan: Arc::default(),
@@ -401,6 +413,17 @@ impl Bridge {
             session: Arc::default(),
             in_order: Arc::default(),
             scope: None,
+        }
+    }
+
+    /// A lightweight callback that posts a message without keeping the stores
+    /// or runtime handles inside [`Bridge`] alive (for global OS hooks).
+    pub fn poster(&self) -> impl Fn(Msg) + Clone + Send + Sync + 'static {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        move |msg| {
+            let _ = tx.send(msg);
+            (notify)();
         }
     }
 
@@ -485,16 +508,22 @@ impl Bridge {
             old
         };
         if let Some(account) = old.0.filter(|a| !keep.contains(a)) {
+            if let Err(e) = self.ond_store.remove_account(account) {
+                tracing::warn!("removing ond.redb data for {account}: {e}");
+            }
             self.remove_account_files(account, old.1, old.2, old.3, old.4);
         }
         stores.analyses
     }
 
-    /// A source was removed: its folder (library, scan index, analyses) and
-    /// its cached art go, once nothing still reads them. When it's the one in
+    /// A source was removed: its folder (library, scan index, analyses),
+    /// its cached art and its entries in `ond.redb` go. When it's the one in
     /// use, an empty library in memory takes its place, whose analysis store
     /// is returned for the app to hand on.
     pub fn forget_account(&self, account: accounts::AccountId) -> Option<Arc<library::AnalysisStore>> {
+        if let Err(e) = self.ond_store.remove_account(account) {
+            tracing::warn!("removing ond.redb data for {account}: {e}");
+        }
         let (old, fresh) = {
             let mut slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
             if slot.account == Some(account) {
@@ -744,7 +773,7 @@ impl Bridge {
     /// login failure: the app opens offline and keeps retrying until it's back.
     pub fn connect(&self, settings: Settings, password: Option<String>) {
         if settings.primary().is_some_and(|e| e.kind == crate::settings::SourceKind::Local) {
-            let folders = settings.primary().map(|e| e.folders.clone()).unwrap_or_default();
+            let folders = settings.primary().map(|e| e.scan_roots()).unwrap_or_default();
             self.connect_local(settings, folders);
             return;
         }
@@ -816,7 +845,7 @@ impl Bridge {
     }
 
     /// Prepares a local-folder source and announces it as the live session.
-    pub fn connect_local(&self, settings: Settings, folders: Vec<std::path::PathBuf>) {
+    pub fn connect_local(&self, settings: Settings, folders: Vec<scan::ScanRoot>) {
         let session = self.session();
         let this = self.scoped_to(session);
         self.rt.spawn(async move {
@@ -1020,6 +1049,11 @@ impl Bridge {
                         stamp = %synced.stamp,
                         "local scan complete"
                     );
+                    if !synced.moves.is_empty()
+                        && let Err(e) = this.ond_store.apply_moves(source.account(), &synced.moves)
+                    {
+                        tracing::warn!("migrating ond.redb entries across moved files: {e}");
+                    }
                     this.send(LibraryMsg::FolderMissing(synced.missing_roots));
                     this.send(LibraryMsg::Skipped(synced.skipped));
                     this.send(LibraryMsg::Albums(synced.albums));
@@ -1027,6 +1061,18 @@ impl Bridge {
                     this.send(LibraryMsg::Newest(synced.newest_ids));
                     this.send(LibraryMsg::AlbumSyncDone(Ok(synced.album_count)));
                     this.load_all_tracks();
+                    if !source.capabilities().stars || !source.capabilities().ratings {
+                        match this.read_ond_starred(source.account()) {
+                            Ok((starred, ratings)) => this.send(Msg::Starred { starred, ratings }),
+                            Err(e) => tracing::warn!("reloading ond.redb stars after scan: {e}"),
+                        }
+                    }
+                    if !source.capabilities().playlists {
+                        match this.read_ond_playlists(source.account()) {
+                            Ok(playlists) => this.send(LibraryMsg::Playlists(playlists)),
+                            Err(e) => tracing::warn!("reloading ond.redb playlists after scan: {e}"),
+                        }
+                    }
                     this.send(LibraryMsg::TrackSyncDone(sync::Outcome::Done { fetched: synced.rescanned, bulk: false }));
                 }
                 Err(crate::source::local::LocalSyncError::Cancelled) => {
@@ -1227,6 +1273,12 @@ impl Bridge {
         });
     }
 
+    /// Ond's cross-source store for hearts, ratings and playlists.
+    #[cfg(test)]
+    pub fn ond_store(&self) -> &Arc<crate::store::OndStore> {
+        &self.ond_store
+    }
+
     pub fn open_playlist(&self, source: Option<Src>, id: String) {
         let this = self.scoped();
         let Some(source) = source else {
@@ -1240,6 +1292,14 @@ impl Bridge {
             });
             return;
         };
+        if !source.capabilities().playlists {
+            self.rt.spawn_blocking(move || match this.read_ond_playlist_tracks(source.account(), &id) {
+                Ok(Some(tracks)) => this.send(LibraryMsg::PlaylistTracks { id, tracks, fresh: true }),
+                Ok(None) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(Failure::Local("Playlist not found".into())) }),
+                Err(e) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(e.context("Couldn't load the playlist")) }),
+            });
+            return;
+        }
         self.rt.spawn(async move {
             match source.playlist(&id).await {
                 Ok((tracks, meta)) => {
@@ -1255,21 +1315,103 @@ impl Bridge {
     /// Everything the user starred, and the ratings that come with it.
     pub fn fetch_starred(&self, source: Option<Src>) {
         let Some(source) = source else { return };
-        if !source.capabilities().stars && !source.capabilities().ratings {
-            self.send(Msg::Starred { starred: Starred { songs: Vec::new(), albums: Vec::new(), artists: Vec::new() }, ratings: Vec::new() });
+        let caps = source.capabilities();
+        let this = self.scoped();
+        if !caps.stars && !caps.ratings {
+            self.rt.spawn_blocking(move || match this.read_ond_starred(source.account()) {
+                Ok((starred, ratings)) => this.send(Msg::Starred { starred, ratings }),
+                Err(e) => this.send(Msg::Error(e.context("Couldn't load favorites"))),
+            });
             return;
         }
-        let this = self.scoped();
         self.rt.spawn(async move {
-            match source.starred().await {
-                Ok((starred, ratings)) => {
-                    let saved = SavedStarred { starred: starred.clone(), ratings: ratings.clone() };
-                    this.send(Msg::Starred { starred, ratings });
-                    this.keep(SAVED_STARRED.to_owned(), saved).await;
+            let mut merged = match source.starred().await {
+                Ok(pair) => pair,
+                Err(e) => return this.send(Msg::Error(e.context("Couldn't load favorites"))),
+            };
+            if !caps.stars || !caps.ratings {
+                let account = source.account();
+                let me = this.clone();
+                if let Ok((ond_starred, ond_ratings)) =
+                    tokio::task::spawn_blocking(move || me.read_ond_starred(account)).await.unwrap_or_else(|e| Err(Failure::Local(e.to_string())))
+                {
+                    if !caps.stars {
+                        merged.0 = ond_starred;
+                    }
+                    if !caps.ratings {
+                        merged.1 = ond_ratings;
+                    }
                 }
-                Err(e) => this.send(Msg::Error(e.context("Couldn't load favorites"))),
             }
+            let saved = SavedStarred { starred: merged.0.clone(), ratings: merged.1.clone() };
+            this.send(Msg::Starred { starred: merged.0, ratings: merged.1 });
+            this.keep(SAVED_STARRED.to_owned(), saved).await;
         });
+    }
+
+    fn read_ond_starred(&self, account: accounts::AccountId) -> Result<(Starred, Vec<(String, u8)>), Failure> {
+        let raw = self.ond_store.starred(account).map_err(|e| Failure::Local(e.to_string()))?;
+        let ratings = self.ond_store.ratings(account).map_err(|e| Failure::Local(e.to_string()))?;
+        let lib = self.library();
+        let songs = if raw.songs.is_empty() { Vec::new() } else { lib.tracks(&raw.songs).map_err(|e| Failure::Local(e.to_string()))? };
+        let artist_names: HashMap<String, String> = if raw.artists.is_empty() {
+            HashMap::new()
+        } else {
+            lib.artists().map_err(|e| Failure::Local(e.to_string()))?.into_iter().map(|a| (a.id, a.name)).collect()
+        };
+        let artists = raw
+            .artists
+            .into_iter()
+            .map(|(id, stored_name)| {
+                let name = artist_names.get(&id).cloned().or(stored_name).unwrap_or_else(|| id.clone());
+                (id, name)
+            })
+            .collect();
+        Ok((Starred { songs, albums: raw.albums, artists }, ratings))
+    }
+
+    fn read_ond_playlists(&self, account: accounts::AccountId) -> Result<Vec<Playlist>, Failure> {
+        let lists = self.ond_store.playlists().map_err(|e| Failure::Local(e.to_string()))?;
+        let mut all_ids = Vec::new();
+        for pl in &lists {
+            for e in &pl.entries {
+                if e.account == account {
+                    all_ids.push(e.item.clone());
+                }
+            }
+        }
+        let by_id: HashMap<String, Track> = if all_ids.is_empty() {
+            HashMap::new()
+        } else {
+            self.library().tracks(&all_ids).map_err(|e| Failure::Local(e.to_string()))?.into_iter().map(|t| (t.id.clone(), t)).collect()
+        };
+        Ok(lists
+            .into_iter()
+            .map(|pl| {
+                let mut count = 0u32;
+                let mut duration = 0u32;
+                let mut cover_art = None;
+                for e in pl.entries.iter().filter(|e| e.account == account) {
+                    if let Some(t) = by_id.get(&e.item) {
+                        count += 1;
+                        duration += t.duration_secs.unwrap_or(0);
+                        if cover_art.is_none() {
+                            cover_art = t.cover_art.clone();
+                        }
+                    }
+                }
+                Playlist { id: pl.id, name: pl.name, song_count: count, duration, cover_art, owner: None }
+            })
+            .collect())
+    }
+
+    fn read_ond_playlist_tracks(&self, account: accounts::AccountId, id: &str) -> Result<Option<Vec<Track>>, Failure> {
+        let Some(pl) = self.ond_store.playlist(id).map_err(|e| Failure::Local(e.to_string()))? else {
+            return Ok(None);
+        };
+        let ids: Vec<String> = pl.entries.into_iter().filter(|e| e.account == account).map(|e| e.item).collect();
+        let tracks = self.library().tracks(&ids).map_err(|e| Failure::Local(e.to_string()))?;
+        Ok(Some(tracks))
     }
 
     /// Lyrics for one track: structured (synced where possible) first, then
@@ -1302,11 +1444,20 @@ impl Bridge {
     }
 
     /// Loves or unloves; `seq` comes back in the reply so a stale one is recognised.
-    pub fn set_starred(&self, source: Option<Src>, kind: StarKind, id: String, on: bool, seq: u64) {
+    pub fn set_starred(&self, source: Option<Src>, kind: StarKind, id: String, name: Option<String>, on: bool, seq: u64) {
         let this = self.scoped();
         self.after_previous(format!("star:{kind:?}:{id}"), async move {
             let error = match &source {
-                Some(c) => c.set_starred(kind, &id, on).await.err(),
+                Some(c) if c.capabilities().stars => c.set_starred(kind, &id, on).await.err(),
+                Some(c) => {
+                    let key = accounts::ItemKey::new(c.account(), &id);
+                    let store = Arc::clone(&this.ond_store);
+                    let res = tokio::task::spawn_blocking(move || store.set_starred(kind, &key, on, name.as_deref()))
+                        .await
+                        .map_err(|e| Failure::Local(e.to_string()))
+                        .and_then(|r| r.map_err(|e| Failure::Local(e.to_string())));
+                    res.err()
+                }
                 None => Some(Failure::Local(NOT_CONNECTED.into())),
             };
             this.send(Msg::StarDone { kind, id, on, seq, error });
@@ -1317,7 +1468,16 @@ impl Bridge {
         let this = self.scoped();
         self.after_previous(format!("rating:{id}"), async move {
             let error = match &source {
-                Some(c) => c.set_rating(&id, rating).await.err(),
+                Some(c) if c.capabilities().ratings => c.set_rating(&id, rating).await.err(),
+                Some(c) => {
+                    let key = accounts::ItemKey::new(c.account(), &id);
+                    let store = Arc::clone(&this.ond_store);
+                    let res = tokio::task::spawn_blocking(move || store.set_rating(&key, rating))
+                        .await
+                        .map_err(|e| Failure::Local(e.to_string()))
+                        .and_then(|r| r.map_err(|e| Failure::Local(e.to_string())));
+                    res.err()
+                }
                 None => Some(Failure::Local(NOT_CONNECTED.into())),
             };
             this.send(Msg::RatingDone { id, previous, seq, error });
@@ -1328,6 +1488,22 @@ impl Bridge {
     pub fn create_playlist(&self, source: Option<Src>, name: String, song_ids: Vec<String>) {
         let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
         let this = self.scoped();
+        if !source.capabilities().playlists {
+            self.rt.spawn_blocking(move || {
+                let entries: Vec<accounts::ItemKey> = song_ids.iter().map(|id| accounts::ItemKey::new(source.account(), id)).collect();
+                match this.ond_store.create_playlist(&name, &entries) {
+                    Ok(created) => {
+                        match this.read_ond_playlists(source.account()) {
+                            Ok(p) => this.send(LibraryMsg::Playlists(p)),
+                            Err(e) => this.send(Msg::Error(e.context("Couldn't load playlists"))),
+                        }
+                        this.send(Msg::PlaylistCreated { id: created.id, name: created.name });
+                    }
+                    Err(e) => this.send(Msg::Error(Failure::Local(e.to_string()).context("Couldn't create the playlist"))),
+                }
+            });
+            return;
+        }
         self.rt.spawn(async move {
             match source.create_playlist(&name, &song_ids).await {
                 Ok((id, name)) => {
@@ -1344,6 +1520,39 @@ impl Bridge {
     pub fn edit_playlist(&self, source: Option<Src>, id: String, edit: PlaylistEdit) {
         let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
         let this = self.scoped();
+        if !source.capabilities().playlists {
+            self.rt.spawn_blocking(move || {
+                let account = source.account();
+                let res = match &edit {
+                    PlaylistEdit::Rename(name) => this.ond_store.rename_playlist(&id, name).map(|_| ()),
+                    PlaylistEdit::Add(ids) => {
+                        let entries: Vec<_> = ids.iter().map(|tid| accounts::ItemKey::new(account, tid)).collect();
+                        this.ond_store.add_to_playlist(&id, &entries).map(|_| ())
+                    }
+                    PlaylistEdit::Remove(indices) => this.ond_store.remove_from_playlist(&id, indices).map(|_| ()),
+                    PlaylistEdit::Replace(ids) => {
+                        let entries: Vec<_> = ids.iter().map(|tid| accounts::ItemKey::new(account, tid)).collect();
+                        this.ond_store.replace_playlist_entries(&id, entries).map(|_| ())
+                    }
+                    PlaylistEdit::Delete => this.ond_store.delete_playlist(&id).map(|_| ()),
+                };
+                if let Err(e) = res {
+                    this.send(Msg::Error(Failure::Local(e.to_string()).context("Couldn't change the playlist")));
+                }
+                match this.read_ond_playlists(account) {
+                    Ok(p) => this.send(LibraryMsg::Playlists(p)),
+                    Err(e) => this.send(Msg::Error(e.context("Couldn't load playlists"))),
+                }
+                if !matches!(edit, PlaylistEdit::Delete) {
+                    match this.read_ond_playlist_tracks(account, &id) {
+                        Ok(Some(tracks)) => this.send(LibraryMsg::PlaylistTracks { id, tracks, fresh: true }),
+                        Ok(None) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: None }),
+                        Err(e) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(e.context("Couldn't load the playlist")) }),
+                    }
+                }
+            });
+            return;
+        }
         self.rt.spawn(async move {
             let result = source.edit_playlist(&id, &edit).await;
             if let Err(e) = result {
@@ -1358,6 +1567,13 @@ impl Bridge {
 
     async fn refresh_playlists(&self, source: &Src) {
         if !source.capabilities().playlists {
+            let me = self.clone();
+            let account = source.account();
+            match tokio::task::spawn_blocking(move || me.read_ond_playlists(account)).await {
+                Ok(Ok(p)) => self.send(LibraryMsg::Playlists(p)),
+                Ok(Err(e)) => self.send(Msg::Error(e.context("Couldn't load playlists"))),
+                Err(e) => self.send(Msg::Error(Failure::Local(e.to_string()).context("Couldn't load playlists"))),
+            }
             return;
         }
         match source.playlists().await {
@@ -1368,6 +1584,46 @@ impl Bridge {
             }
             Err(e) => self.send(Msg::Error(e.context("Couldn't load playlists"))),
         }
+    }
+
+    /// Exports an Ond playlist to an M3U file at `dest` (file paths for local tracks).
+    pub fn export_playlist_m3u(&self, source: Option<Src>, id: String, dest: std::path::PathBuf) {
+        let this = self.scoped();
+        self.rt.spawn_blocking(move || {
+            let lib = this.library();
+            let result = (|| -> Result<(), Failure> {
+                let mut track_ids = Vec::new();
+                let pl = this.ond_store.playlist(&id).map_err(|e| Failure::Local(e.to_string()))?;
+                if let Some(pl) = &pl {
+                    for e in &pl.entries {
+                        if source.as_ref().is_some_and(|s| s.account() == e.account) {
+                            track_ids.push(e.item.clone());
+                        }
+                    }
+                }
+                let meta: HashMap<String, Track> = if track_ids.is_empty() {
+                    HashMap::new()
+                } else {
+                    lib.tracks(&track_ids).map_err(|e| Failure::Local(e.to_string()))?.into_iter().map(|t| (t.id.clone(), t)).collect()
+                };
+                let body = this
+                    .ond_store
+                    .export_m3u(&id, |key| {
+                        let path = source.as_ref().filter(|s| s.account() == key.account).and_then(|s| s.local())?.track_path(&key.item)?;
+                        let tr = meta.get(&key.item);
+                        Some(crate::store::M3uTrack {
+                            location: path.to_string_lossy().into_owned(),
+                            title: tr.map(|t| t.title.clone()),
+                            artist: tr.and_then(|t| t.artist.clone()).filter(|s| !s.is_empty()),
+                            duration_secs: tr.and_then(|t| t.duration_secs),
+                        })
+                    })
+                    .map_err(|e| Failure::Local(e.to_string()))?
+                    .ok_or_else(|| Failure::Local("Playlist not found".into()))?;
+                std::fs::write(&dest, body).map_err(|e| Failure::Local(e.to_string()))
+            })();
+            this.send(Msg::M3uExported { path: dest, error: result.err() });
+        });
     }
 
     /// Looks up which stored albums credit `name` (composer, performer, ...).
@@ -1489,7 +1745,8 @@ mod tests {
         std::fs::write(crate::art::cover_file(&old_art, "al-1", 64), b"old art").unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), stores.library);
+        let ond_store = Arc::new(crate::store::OndStore::in_memory().unwrap());
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), stores.library, ond_store);
         bridge.configure_storage(dir.path().to_owned(), art_root.clone(), Some(account), &stores.analyses);
         bridge.end_session();
         let signed_out = Settings { signed_out: true, ..old.clone() };
@@ -1608,7 +1865,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let lib = Library::in_memory().unwrap();
         lib.upsert_albums(albums.iter().cloned()).unwrap();
-        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib));
+        let ond_store = Arc::new(crate::store::OndStore::in_memory().unwrap());
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib), ond_store);
         (rt, bridge, rx)
     }
 
@@ -1734,7 +1992,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let lib = Library::in_memory().unwrap();
         lib.upsert_albums(vec![album("old", 1)]).unwrap();
-        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib));
+        let ond_store = Arc::new(crate::store::OndStore::in_memory().unwrap());
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(|| {}), Arc::new(lib), ond_store);
         let mut got = Vec::new();
         // Unhindered, the read sends the stored library.
         bridge.load_local(None);
@@ -1912,7 +2171,7 @@ mod tests {
     }
 
     fn watched_folder(music: &std::path::Path) -> Src {
-        Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![music.to_owned()], None))
+        Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![scan::ScanRoot::new("music", music.to_owned())], None))
     }
 
     fn seed_folder(music: &std::path::Path) {
@@ -1980,7 +2239,8 @@ mod tests {
                 }
             })
         };
-        let bridge = Bridge::new(rt.handle().clone(), tx, notify, Arc::new(Library::in_memory().unwrap()));
+        let bridge =
+            Bridge::new(rt.handle().clone(), tx, notify, Arc::new(Library::in_memory().unwrap()), Arc::new(crate::store::OndStore::in_memory().unwrap()));
         let source = watched_folder(&music);
         bridge.sync_source(&source);
         let mut got = Vec::new();
@@ -2053,7 +2313,7 @@ mod tests {
         std::fs::write(music.join("track.wav"), &wav).unwrap();
 
         let (rt, bridge, rx) = rig(&[]);
-        let source: Src = Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![music.clone()], None));
+        let source: Src = Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![scan::ScanRoot::new("music", music.clone())], None));
         bridge.sync_source(&source);
         bridge.measure_latency(source.clone());
         bridge.fetch_starred(Some(source.clone()));

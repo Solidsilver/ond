@@ -270,7 +270,8 @@ fn incremental_rescan_reuses_unchanged_files_and_reports_moves() {
 
     let cancel = AtomicBool::new(false);
     let mut progress_calls = 0;
-    let pass1 = scan_folders(&[tmp.path().to_path_buf()], &ScanIndex::default(), &cancel, |_| progress_calls += 1);
+    let roots = [ScanRoot::new("root-1", tmp.path())];
+    let pass1 = scan_folders(&roots, &ScanIndex::default(), &cancel, |_| progress_calls += 1);
     assert_eq!(pass1.rescanned, 3);
     assert_eq!(pass1.reused, 0);
     assert!(progress_calls >= 3);
@@ -280,7 +281,7 @@ fn incremental_rescan_reuses_unchanged_files_and_reports_moves() {
     let reloaded = ScanIndex::load(&index_path).unwrap();
 
     // Rescan with no changes reuses everything.
-    let pass2 = scan_folders(&[tmp.path().to_path_buf()], &reloaded, &cancel, |_| {});
+    let pass2 = scan_folders(&roots, &reloaded, &cancel, |_| {});
     assert_eq!(pass2.reused, 3);
     assert_eq!(pass2.rescanned, 0);
     assert!(pass2.moves.is_empty());
@@ -296,7 +297,7 @@ fn incremental_rescan_reuses_unchanged_files_and_reports_moves() {
     std::fs::create_dir_all(tmp.path().join("New")).unwrap();
     std::fs::rename(&p_tags, tmp.path().join("New/renamed_two.flac")).unwrap();
 
-    let pass3 = scan_folders(&[tmp.path().to_path_buf()], &pass2.index, &cancel, |_| {});
+    let pass3 = scan_folders(&roots, &pass2.index, &cancel, |_| {});
     assert_eq!(pass3.reused, 1);
     assert_eq!(pass3.rescanned, 2);
     let new_mbid_id = pass3.tracks.iter().find(|t| t.rel_path == "New/renamed_one.flac").unwrap().id.clone();
@@ -382,22 +383,22 @@ fn two_roots_with_the_same_relative_file_both_appear_with_different_ids() {
     write_file(&root_b, "Album/01.flac", &make_flac(&[("TITLE", "Track From B"), ("ARTIST", "Artist B"), ("ALBUM", "Record B")], None, 50));
     write_file(&root_b, "Album/cover.jpg", b"cover-from-b");
 
-    let roots = vec![root_a, root_b];
-    let res = scan(&roots);
+    let cancel = AtomicBool::new(false);
+    let roots = vec![ScanRoot::new("root-a", root_a), ScanRoot::new("root-b", root_b)];
+    let res = scan_folders(&roots, &ScanIndex::default(), &cancel, |_| {});
     assert_eq!(res.tracks.len(), 2, "identical relative paths under distinct roots must both appear");
     assert_eq!(res.albums.len(), 2);
 
     let t_a = res.tracks.iter().find(|t| t.title == "Track From A").unwrap();
     let t_b = res.tracks.iter().find(|t| t.title == "Track From B").unwrap();
-    assert_eq!(t_a.root_index, 0);
-    assert_eq!(t_b.root_index, 1);
+    assert_eq!(t_a.root_key, "root-a");
+    assert_eq!(t_b.root_key, "root-b");
     assert_ne!(t_a.id, t_b.id);
     assert_ne!(t_a.cover_art, t_b.cover_art);
     assert_eq!(read_cover(&res.index, t_a.cover_art.as_deref().unwrap()).unwrap().as_deref(), Some(b"cover-from-a".as_slice()));
     assert_eq!(read_cover(&res.index, t_b.cover_art.as_deref().unwrap()).unwrap().as_deref(), Some(b"cover-from-b".as_slice()));
 
     // Incremental rescan with both identical relative paths reuses both entries separately.
-    let cancel = AtomicBool::new(false);
     let again = scan_folders(&roots, &res.index, &cancel, |_| {});
     assert_eq!(again.tracks.len(), 2);
     assert_eq!(again.reused, 2);
@@ -414,7 +415,7 @@ fn missing_roots_are_reported_and_partial_scans_preserve_unmounted_roots() {
     write_file(&root_present, "A/01.flac", &make_flac(&[("TITLE", "Present"), ("ARTIST", "Artist A"), ("ALBUM", "Album A")], None, 40));
     write_file(&root_unmounted, "B/01.flac", &make_flac(&[("TITLE", "Mounted"), ("ARTIST", "Artist B"), ("ALBUM", "Album B")], None, 50));
 
-    let roots = vec![root_present.clone(), root_unmounted.clone()];
+    let roots = vec![ScanRoot::new("present-key", root_present.clone()), ScanRoot::new("unmounted-key", root_unmounted.clone())];
     let cancel = AtomicBool::new(false);
     let initial = scan_folders(&roots, &ScanIndex::default(), &cancel, |_| {});
     assert!(initial.missing_roots.is_empty());
@@ -429,4 +430,67 @@ fn missing_roots_are_reported_and_partial_scans_preserve_unmounted_roots() {
     assert!(partial.moves.is_empty());
     assert_eq!(partial.albums.len(), 2, "album from the missing root must be kept");
     assert_eq!(partial.tracks.len(), 3, "tracks from the missing root must stay beside newly scanned tracks");
+}
+
+#[test]
+fn moving_a_folder_with_the_same_key_keeps_track_album_and_cover_ids() {
+    let tmp = TempDir::new().unwrap();
+    let root_a = tmp.path().join("drive-old/Music");
+    let root_b = tmp.path().join("drive-new/Library");
+
+    write_file(&root_a, "Mix/cover.jpg", b"mix-cover");
+    write_file(&root_a, "Mix/01.flac", &make_flac(&[("TITLE", "One"), ("ARTIST", "Artist One"), ("ALBUM", "Night Mix")], None, 40));
+    write_file(&root_a, "Mix/02.flac", &make_flac(&[("TITLE", "Two"), ("ARTIST", "Artist Two"), ("ALBUM", "Night Mix")], None, 50));
+
+    let cancel = AtomicBool::new(false);
+    let first = scan_folders(&[ScanRoot::new("stable-key", &root_a)], &ScanIndex::default(), &cancel, |_| {});
+    assert_eq!(first.tracks.len(), 2);
+    assert!(first.albums[0].compilation);
+
+    std::fs::create_dir_all(root_b.parent().unwrap()).unwrap();
+    std::fs::rename(&root_a, &root_b).unwrap();
+
+    let second = scan_folders(&[ScanRoot::new("stable-key", &root_b)], &first.index, &cancel, |_| {});
+    assert!(second.moves.is_empty(), "moving a keyed root must not look like moved tracks");
+    assert_eq!(second.reused, 2);
+    assert_eq!(second.albums[0].id, first.albums[0].id);
+    assert!(second.albums[0].compilation);
+    assert_eq!(second.tracks.iter().map(|t| &t.id).collect::<Vec<_>>(), first.tracks.iter().map(|t| &t.id).collect::<Vec<_>>());
+    assert_eq!(second.tracks[0].cover_art, first.tracks[0].cover_art);
+    assert!(second.tracks[0].path.starts_with(&root_b));
+    assert_eq!(read_cover(&second.index, second.tracks[0].cover_art.as_deref().unwrap()).unwrap().as_deref(), Some(b"mix-cover".as_slice()));
+}
+
+#[test]
+fn removing_or_reordering_folders_keeps_the_remaining_folders_ids() {
+    let tmp = TempDir::new().unwrap();
+    let root_a = tmp.path().join("first");
+    let root_b = tmp.path().join("second");
+
+    write_file(&root_a, "A/01.flac", &make_flac(&[("TITLE", "A1"), ("ARTIST", "Artist A"), ("ALBUM", "Album A")], None, 40));
+    write_file(&root_b, "B/cover.jpg", b"cover-b");
+    write_file(&root_b, "B/01.flac", &make_flac(&[("TITLE", "B1"), ("ARTIST", "Artist One"), ("ALBUM", "Comp B")], None, 50));
+    write_file(&root_b, "B/02.flac", &make_flac(&[("TITLE", "B2"), ("ARTIST", "Artist Two"), ("ALBUM", "Comp B")], None, 60));
+
+    let entry_a = ScanRoot::new("key-a", &root_a);
+    let entry_b = ScanRoot::new("key-b", &root_b);
+    let cancel = AtomicBool::new(false);
+
+    let initial = scan_folders(&[entry_a.clone(), entry_b.clone()], &ScanIndex::default(), &cancel, |_| {});
+    let b_tracks_initial: Vec<_> =
+        initial.tracks.iter().filter(|t| t.root_key == "key-b").map(|t| (t.id.clone(), t.cover_art.clone(), t.album_id.clone())).collect();
+    assert_eq!(b_tracks_initial.len(), 2);
+
+    // Reorder [B, A]: B's track ids, cover ids, and album id stay identical.
+    let reordered = scan_folders(&[entry_b.clone(), entry_a], &initial.index, &cancel, |_| {});
+    let b_tracks_reordered: Vec<_> =
+        reordered.tracks.iter().filter(|t| t.root_key == "key-b").map(|t| (t.id.clone(), t.cover_art.clone(), t.album_id.clone())).collect();
+    assert_eq!(b_tracks_reordered, b_tracks_initial);
+    assert!(reordered.moves.is_empty());
+
+    // Remove the first folder (A), leaving only B: B's ids stay identical.
+    let removed = scan_folders(&[entry_b], &initial.index, &cancel, |_| {});
+    let b_tracks_removed: Vec<_> = removed.tracks.iter().map(|t| (t.id.clone(), t.cover_art.clone(), t.album_id.clone())).collect();
+    assert_eq!(b_tracks_removed, b_tracks_initial);
+    assert!(removed.moves.is_empty());
 }

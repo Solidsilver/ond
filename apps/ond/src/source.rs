@@ -52,6 +52,12 @@ impl Capabilities {
         Self { stars: false, ratings: false, playlists: false, lyrics: true, scrobbling: false, transcoding: false, downloads: false, network: false }
     }
 
+    /// Effective capabilities when Ond's own store (`ond.redb`) backs
+    /// hearts, ratings and playlists for any source that lacks them.
+    pub const fn with_ond_store(self) -> Self {
+        Self { stars: true, ratings: true, playlists: true, ..self }
+    }
+
     /// Empty capabilities for minimal test fakes.
     #[cfg(test)]
     pub const fn none() -> Self {

@@ -822,12 +822,16 @@ pub(super) fn local_account() -> accounts::AccountId {
 /// folders, the server kept in the list behind it. [`use_server`] puts the
 /// fixture's server back.
 pub(super) fn use_folder(app: &mut OndApp) {
-    let folders = vec![PathBuf::from("/Users/demo/Music"), PathBuf::from("/Volumes/Archive/Lossless")];
-    let local = crate::settings::SourceEntry::local(local_account(), None, accounts::SourceColor::new(1), folders.clone());
+    let folders = vec![
+        crate::settings::FolderEntry::with_key("demo-music", "/Users/demo/Music"),
+        crate::settings::FolderEntry::with_key("demo-lossless", "/Volumes/Archive/Lossless"),
+    ];
+    let roots: Vec<scan::ScanRoot> = folders.iter().map(|f| scan::ScanRoot::new(f.key.clone(), f.path.clone())).collect();
+    let local = crate::settings::SourceEntry::local(local_account(), None, accounts::SourceColor::new(1), folders);
     let server = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
     app.prefs.edit(|s| s.sources = vec![local.clone(), server.clone()]);
     app.session.settings = Some(Settings { sources: vec![local, server], ..Default::default() });
-    app.session.source = Some(Arc::new(crate::source::local::LocalSource::new(local_account(), folders, None)));
+    app.session.source = Some(Arc::new(crate::source::local::LocalSource::new(local_account(), roots, None)));
     app.session.folder_missing.clear();
     app.session.skipped = 0;
     app.session.server_label = "Music".into();

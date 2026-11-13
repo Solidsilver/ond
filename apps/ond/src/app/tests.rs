@@ -1651,8 +1651,9 @@ fn a_first_run_adds_a_music_folder_and_plays_from_it_with_no_server() {
     assert_eq!(app.data.albums.len(), 1);
     assert_eq!(app.data.albums[0].name, "Portrait in Jazz");
     let saved = app.prefs.snapshot();
-    assert_eq!(saved.primary().map(|e| (e.kind, e.folders.clone())), Some((crate::settings::SourceKind::Local, vec![music.clone()])));
-    assert!(!app.session.caps().network && !app.session.caps().stars && !app.session.caps().downloads);
+    assert_eq!(saved.primary().map(|e| (e.kind, e.folder_paths())), Some((crate::settings::SourceKind::Local, vec![music.clone()])));
+    assert!(!app.session.caps().network && !app.session.caps().downloads && !app.session.caps().scrobbling && !app.session.caps().transcoding);
+    assert!(app.session.caps().stars && app.session.caps().ratings && app.session.caps().playlists);
     assert!(app.session.online, "a folder needs no server to be ready");
     frame(&ctx, &mut app, Vec::new());
 
@@ -1664,12 +1665,12 @@ fn a_first_run_adds_a_music_folder_and_plays_from_it_with_no_server() {
     assert!(std::path::Path::new(path).starts_with(&music), "{path}");
     assert_eq!(super::playing::origin(&from, &app.cache, app.session.caps().downloads), super::playing::Origin::File);
 
-    // What a folder can't do isn't done, from a key or a menu either.
+    // Offline mode stays gated for a local folder, while hearts go to Ond's store.
+    app.apply(Action::Offline(OfflineAction::WorkOffline(true)));
+    assert!(!app.session.work_offline);
     let track = app.data.tracks.all[0].clone();
     app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Song, id: track.id.clone(), track: Some(Box::new(track.clone())), name: None });
-    assert!(!app.favorites.is_on(crate::favorites::StarKind::Song, &track.id));
-    app.apply(Action::NewPlaylist);
-    assert!(app.ui.overlay.is_none());
+    assert!(app.favorites.is_on(crate::favorites::StarKind::Song, &track.id));
 }
 
 #[test]
@@ -1872,5 +1873,173 @@ fn a_folder_sources_folders_change_and_it_rescans() {
     until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.sync.tracks);
     // The last folder stays: a source with none would scan to nothing.
     app.apply(Action::Sources(SourceAction::RemoveFolder(id, 0)));
-    assert_eq!(app.prefs.snapshot().source(id).unwrap().folders, [music]);
+    assert_eq!(app.prefs.snapshot().source(id).unwrap().folder_paths(), [music]);
+}
+
+#[test]
+fn plain_folder_paths_in_settings_get_stable_keys_and_save_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let source_id = accounts::AccountId::new();
+    let cfg = dir.path().join("settings.json");
+    std::fs::write(
+        &cfg,
+        serde_json::to_vec(&serde_json::json!({
+            "sources": [
+                { "id": source_id, "kind": "local", "folders": [music] }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (prefs, loaded) = crate::prefs::Prefs::open(&cfg);
+    assert!(matches!(loaded, crate::prefs::Loaded::Read));
+    let key = prefs.get(|s| s.source(source_id).unwrap().folders[0].key.clone());
+    assert!(!key.is_empty());
+    drop(prefs);
+
+    let on_disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&cfg).unwrap()).unwrap();
+    assert_eq!(on_disk["sources"][0]["folders"][0]["key"], key);
+    assert_eq!(on_disk["sources"][0]["folders"][0]["path"], music.to_string_lossy().as_ref());
+}
+
+#[test]
+fn removing_an_earlier_folder_keeps_later_folders_track_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = music_folder(dir.path());
+    let second = dir.path().join("second");
+    let blue = second.join("Miles Davis").join("Kind of Blue");
+    std::fs::create_dir_all(&blue).unwrap();
+    add_song(&blue, 9);
+
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), first);
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    let id = app.session.account().unwrap();
+
+    let extra = second.clone();
+    app.pick_folder = Arc::new(move |_, _, done| done(Some(extra.clone())));
+    app.apply(Action::Sources(SourceAction::Choose(FolderTarget::Source(id))));
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+
+    let second_track_id_before = app.data.tracks.all.iter().find(|t| t.title == "Song 9").unwrap().id.clone();
+    app.apply(Action::Sources(SourceAction::RemoveFolder(id, 0)));
+    until(&mut app, |a| a.data.tracks.all.len() == 1 && !a.sync.tracks);
+    assert_eq!(app.data.tracks.all[0].id, second_track_id_before);
+}
+
+#[test]
+fn loving_and_rating_a_local_track_persists_across_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let account;
+    let loved_id;
+    let album_id;
+    {
+        let mut app = first_run(&ctx, dir.path(), music.clone());
+        add_folder_from_the_sheet(&mut app);
+        until(&mut app, |a| a.data.tracks.all.len() == 3);
+        account = app.session.account().unwrap();
+        let track = app.data.tracks.all[0].clone();
+        loved_id = track.id.clone();
+        album_id = app.data.albums[0].id.clone();
+
+        app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Song, id: loved_id.clone(), track: Some(Box::new(track)), name: None });
+        app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Album, id: album_id.clone(), track: None, name: None });
+        app.apply(Action::Rate(loved_id.clone(), 4));
+        let key = accounts::ItemKey::new(account, &loved_id);
+        let store = app.bridge.ond_store().clone();
+        testkit::wait_until("ond.redb persists love and rating", || {
+            store.is_starred(crate::favorites::StarKind::Song, &key).unwrap_or(false) && store.rating(&key).unwrap_or(0) == 4
+        });
+    }
+    assert!(dir.path().join("ond.redb").is_file());
+    // Wait for background worker threads from the dropped app to release their redb locks.
+    let account_dir = crate::storage::account_dir(dir.path(), account);
+    let lib_db = account_dir.join("library.redb");
+    let analysis_db = account_dir.join("analysis.redb");
+    let ond_db = dir.path().join("ond.redb");
+    testkit::wait_until("previous instance released database locks", || {
+        library::Library::open(&lib_db).is_ok() && library::AnalysisStore::open(&analysis_db).is_ok() && crate::store::OndStore::open(&ond_db).is_ok()
+    });
+
+    let mut reopened = first_run(&ctx, dir.path(), music);
+    until(&mut reopened, |a| {
+        a.data.tracks.all.len() == 3 && a.favorites.is_on(crate::favorites::StarKind::Song, &loved_id) && a.favorites.rating(&loved_id) == 4
+    });
+    assert!(reopened.favorites.is_on(crate::favorites::StarKind::Album, &album_id));
+}
+
+#[test]
+fn an_ond_playlist_of_local_tracks_survives_a_rescan_that_moves_a_file_and_exports_m3u() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+
+    let first = app.data.tracks.all[0].clone();
+    let second = app.data.tracks.all[1].clone();
+    app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Song, id: first.id.clone(), track: Some(Box::new(first.clone())), name: None });
+    app.apply(Action::Rate(first.id.clone(), 5));
+    app.apply(Action::PlaylistEdit(PlaylistAction::Create { name: "Sunday spin".into(), tracks: vec![first.clone(), second.clone()] }));
+    until(&mut app, |a| a.data.playlists.len() == 1);
+    let playlist_id = app.data.playlists[0].id.clone();
+    until(&mut app, |a| a.data.playlist_tracks.get(&playlist_id).is_some_and(|ts| ts.len() == 2));
+
+    let src = music.join("Bill Evans Trio").join("Portrait in Jazz").join("01 Song 1.flac");
+    let moved_dir = music.join("Moved");
+    std::fs::create_dir_all(&moved_dir).unwrap();
+    let moved_file = moved_dir.join("01 Song 1.flac");
+    std::fs::rename(&src, &moved_file).unwrap();
+
+    app.apply(Action::SyncNow);
+    until(&mut app, |a| {
+        !a.sync.tracks && a.data.tracks.all.len() == 3 && a.data.playlist_tracks.get(&playlist_id).is_some_and(|ts| ts.len() == 2 && ts[0].id != first.id)
+    });
+    let new_first_id = app.data.playlist_tracks[&playlist_id][0].id.clone();
+    assert_eq!(app.data.playlist_tracks[&playlist_id][0].title, "Song 1");
+    assert_eq!(app.data.playlist_tracks[&playlist_id][1].id, second.id);
+    assert!(app.favorites.is_on(crate::favorites::StarKind::Song, &new_first_id));
+    assert!(!app.favorites.is_on(crate::favorites::StarKind::Song, &first.id));
+    assert_eq!(app.favorites.rating(&new_first_id), 5);
+
+    let m3u_dest = dir.path().join("sunday.m3u");
+    let dest_for_picker = m3u_dest.clone();
+    app.save_m3u = Arc::new(move |_, _, done| done(Some(dest_for_picker.clone())));
+    app.apply(Action::PlaylistEdit(PlaylistAction::ExportM3u { id: playlist_id, name: "Sunday spin".into() }));
+    until(&mut app, |_| m3u_dest.is_file());
+    let exported = std::fs::read_to_string(&m3u_dest).unwrap();
+    assert!(exported.starts_with("#EXTM3U\n"));
+    assert!(exported.contains(&moved_file.to_string_lossy().into_owned()), "{exported}");
+}
+
+#[test]
+fn removing_a_local_source_cleans_up_its_stars_ratings_and_playlist_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music);
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+
+    let account = app.session.account().unwrap();
+    let track = app.data.tracks.all[0].clone();
+    app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Song, id: track.id.clone(), track: Some(Box::new(track.clone())), name: None });
+    app.apply(Action::Rate(track.id.clone(), 3));
+    app.apply(Action::PlaylistEdit(PlaylistAction::Create { name: "To clean".into(), tracks: vec![track] }));
+    until(&mut app, |a| a.data.playlists.len() == 1);
+    let playlist_id = app.data.playlists[0].id.clone();
+
+    app.apply(Action::Sources(SourceAction::Remove(account)));
+
+    let starred = app.bridge.ond_store().starred(account).unwrap();
+    assert!(starred.songs.is_empty() && starred.albums.is_empty() && starred.artists.is_empty());
+    assert!(app.bridge.ond_store().ratings(account).unwrap().is_empty());
+    let playlist = app.bridge.ond_store().playlist(&playlist_id).unwrap().unwrap();
+    assert!(playlist.entries.is_empty());
 }

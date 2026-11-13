@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 /// Tracks together with the folder-level cover path discovered in each parent directory.
 pub struct RawScannedFile {
     pub id: String,
-    pub root_index: usize,
+    pub root_key: String,
     pub path: PathBuf,
     pub rel_path: String,
     pub rel_folder: String,
@@ -60,13 +60,13 @@ pub fn group(files: Vec<RawScannedFile>) -> GroupedLibrary {
     let mut track_paths: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     // Detect folder+album combinations with mixed artists and no explicit album artist.
-    let mut folder_album_artists: HashMap<(usize, String, String), BTreeSet<String>> = HashMap::new();
-    let mut folder_album_has_explicit_aa: HashMap<(usize, String, String), bool> = HashMap::new();
-    let mut folder_album_comp_flag: HashMap<(usize, String, String), bool> = HashMap::new();
+    let mut folder_album_artists: HashMap<(String, String, String), BTreeSet<String>> = HashMap::new();
+    let mut folder_album_has_explicit_aa: HashMap<(String, String, String), bool> = HashMap::new();
+    let mut folder_album_comp_flag: HashMap<(String, String, String), bool> = HashMap::new();
 
     for f in &files {
         let album_title = album_title_for(f);
-        let key = (f.root_index, f.rel_folder.clone(), album_title.to_lowercase());
+        let key = (f.root_key.clone(), f.rel_folder.clone(), album_title.to_lowercase());
         if !f.probed.album_artists.is_empty() {
             folder_album_has_explicit_aa.insert(key.clone(), true);
         }
@@ -79,7 +79,7 @@ pub fn group(files: Vec<RawScannedFile>) -> GroupedLibrary {
         }
     }
 
-    let compilation_folders: BTreeSet<(usize, String, String)> = folder_album_artists
+    let compilation_folders: BTreeSet<(String, String, String)> = folder_album_artists
         .iter()
         .filter_map(|(k, artists)| {
             let explicit_aa = folder_album_has_explicit_aa.get(k).copied().unwrap_or(false);
@@ -109,7 +109,7 @@ pub fn group(files: Vec<RawScannedFile>) -> GroupedLibrary {
 
     for f in files {
         let album_title = album_title_for(&f);
-        let folder_album_key = (f.root_index, f.rel_folder.clone(), album_title.to_lowercase());
+        let folder_album_key = (f.root_key.clone(), f.rel_folder.clone(), album_title.to_lowercase());
         let is_folder_comp = compilation_folders.contains(&folder_album_key);
 
         let effective_album_artist = if !f.probed.album_artists.is_empty() {
@@ -134,7 +134,7 @@ pub fn group(files: Vec<RawScannedFile>) -> GroupedLibrary {
         }
         let dir_cover_id = match (&f.folder_cover_rel, &f.folder_cover_path) {
             (Some(rel), Some(path)) => {
-                let cid = format!("dir-{}", hash_id(&format!("ond-cover-v2\0{}\0{rel}", f.root_index)));
+                let cid = format!("dir-{}", hash_id(&format!("ond-cover-v2\0{}\0{rel}", f.root_key)));
                 covers.insert(cid.clone(), path.clone());
                 Some(cid)
             }
@@ -169,7 +169,7 @@ pub fn group(files: Vec<RawScannedFile>) -> GroupedLibrary {
 
         let track = ScannedTrack {
             id: f.id,
-            root_index: f.root_index,
+            root_key: f.root_key,
             path: f.path,
             rel_path: f.rel_path,
             album_id: album_id.clone(),

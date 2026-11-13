@@ -5,11 +5,11 @@
 //! compilations while keeping disc numbers), discovers embedded and folder
 //! covers, and reads `.lrc` sidecar or embedded lyrics.
 //!
-//! Track IDs are deterministic hashes of paths relative to their folder root,
-//! so moving an entire library root keeps all IDs intact. Rescans skip files
-//! whose `(size, mtime)` stamp matches [`ScanIndex`], and pair tracks that
-//! vanish and appear in the same pass by MusicBrainz recording ID or matching
-//! tags and length so callers can migrate user state across file moves.
+//! Track IDs are deterministic hashes of paths relative to their folder root's
+//! stable key, so moving, reordering, or removing other roots keeps IDs intact.
+//! Rescans skip files whose `(size, mtime)` stamp matches [`ScanIndex`], and
+//! pair tracks that vanish and appear in the same pass by MusicBrainz recording
+//! ID or matching tags and length so callers can migrate user state across file moves.
 
 mod group;
 mod lyrics;
@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 
 /// Audio file extensions probed during a scan. Non-audio files (covers,
 /// lyrics, OS metadata) are left untouched rather than counted as skipped.
@@ -45,6 +45,19 @@ pub enum Error {
     Serialize(#[from] serde_json::Error),
     #[error("probe error: {0}")]
     Probe(String),
+}
+
+/// One root music folder paired with its stable identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ScanRoot {
+    pub key: String,
+    pub path: PathBuf,
+}
+
+impl ScanRoot {
+    pub fn new(key: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self { key: key.into(), path: path.into() }
+    }
 }
 
 /// Progress reported during [`scan_folders`].
@@ -84,7 +97,7 @@ pub struct Contributor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScannedTrack {
     pub id: String,
-    pub root_index: usize,
+    pub root_key: String,
     pub path: PathBuf,
     pub rel_path: String,
     pub album_id: String,
@@ -176,7 +189,7 @@ struct FileStamp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct IndexedFile {
     id: String,
-    root_index: usize,
+    root_key: String,
     rel_path: String,
     stamp: Option<FileStamp>,
     probed: ProbedFile,
@@ -263,26 +276,28 @@ pub struct ScanResult {
     pub index: ScanIndex,
 }
 
-/// Deterministic track id from the root's index and path relative to that root.
-pub fn track_id(root_index: usize, rel_path: &str) -> String {
-    hash_id(&format!("ond-track-v2\0{root_index}\0{rel_path}"))
+/// Deterministic track id from the root's stable key and path relative to that root.
+pub fn track_id(root_key: &str, rel_path: &str) -> String {
+    hash_id(&format!("ond-track-v2\0{root_key}\0{rel_path}"))
 }
 
-fn index_key(root_index: usize, rel_path: &str) -> String {
-    format!("{root_index}\0{rel_path}")
+fn index_key(root_key: &str, rel_path: &str) -> String {
+    format!("{root_key}\0{rel_path}")
 }
 
-/// Scan `roots` once without incremental state.
+/// Scan `roots` once without incremental state, using each root's position as
+/// its key. Callers with persistent settings should prefer [`scan_folders`].
 pub fn scan(roots: &[PathBuf]) -> ScanResult {
     let cancel = AtomicBool::new(false);
-    scan_folders(roots, &ScanIndex::default(), &cancel, |_| {})
+    let keyed: Vec<ScanRoot> = roots.iter().enumerate().map(|(i, p)| ScanRoot::new(i.to_string(), p.clone())).collect();
+    scan_folders(&keyed, &ScanIndex::default(), &cancel, |_| {})
 }
 
 /// Scan `roots` incrementally using `prev`, stopping early if `cancel` becomes
 /// true and invoking `on_progress` after each candidate audio file.
-pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mut on_progress: impl FnMut(ScanProgress)) -> ScanResult {
+pub fn scan_folders(roots: &[ScanRoot], prev: &ScanIndex, cancel: &AtomicBool, mut on_progress: impl FnMut(ScanProgress)) -> ScanResult {
     struct Candidate {
-        root_index: usize,
+        root_key: String,
         path: PathBuf,
         rel_path: String,
         rel_folder: String,
@@ -292,15 +307,17 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
-    let mut seen_rel: HashSet<(usize, String)> = HashSet::new();
+    let mut seen_rel: HashSet<(String, String)> = HashSet::new();
     let mut folder_covers: HashMap<PathBuf, Option<(String, PathBuf)>> = HashMap::new();
     let mut missing_roots: Vec<PathBuf> = Vec::new();
-    let mut missing_root_indices: HashSet<usize> = HashSet::new();
+    let mut missing_root_keys: HashSet<String> = HashSet::new();
 
-    for (root_index, root) in roots.iter().enumerate() {
+    for scan_root in roots {
+        let root = &scan_root.path;
+        let root_key = &scan_root.key;
         if !root.is_dir() || std::fs::read_dir(root).is_err() {
             missing_roots.push(root.clone());
-            missing_root_indices.insert(root_index);
+            missing_root_keys.insert(root_key.clone());
             continue;
         }
         let mut walker = WalkDir::new(root).follow_links(true).sort_by_file_name().into_iter();
@@ -322,7 +339,7 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
                 continue;
             };
             let rel_path = normalize_rel(rel);
-            if !seen_rel.insert((root_index, rel_path.clone())) {
+            if !seen_rel.insert((root_key.clone(), rel_path.clone())) {
                 continue;
             }
             let rel_folder = rel.parent().map(normalize_rel).unwrap_or_default();
@@ -337,7 +354,15 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
             let meta = entry.metadata().ok();
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             let stamp = meta.as_ref().and_then(file_stamp);
-            candidates.push(Candidate { root_index, path: entry.path().to_path_buf(), rel_path, rel_folder, folder_key: parent_dir, size, stamp });
+            candidates.push(Candidate {
+                root_key: root_key.clone(),
+                path: entry.path().to_path_buf(),
+                rel_path,
+                rel_folder,
+                folder_key: parent_dir,
+                size,
+                stamp,
+            });
         }
     }
 
@@ -357,8 +382,8 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
         }
         on_progress(ScanProgress { scanned: idx, total, skipped: skipped_paths.len(), current: Some(c.path.clone()) });
 
-        let id = track_id(c.root_index, &c.rel_path);
-        let key = index_key(c.root_index, &c.rel_path);
+        let id = track_id(&c.root_key, &c.rel_path);
+        let key = index_key(&c.root_key, &c.rel_path);
         let reused_entry =
             if prev_valid { prev.files.get(&key).filter(|old| old.stamp.is_some() && old.stamp == c.stamp).map(|old| old.probed.clone()) } else { None };
 
@@ -389,7 +414,7 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
             key,
             IndexedFile {
                 id: id.clone(),
-                root_index: c.root_index,
+                root_key: c.root_key.clone(),
                 rel_path: c.rel_path.clone(),
                 stamp: c.stamp,
                 probed: probed.clone(),
@@ -401,7 +426,7 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
 
         raw_files.push(RawScannedFile {
             id,
-            root_index: c.root_index,
+            root_key: c.root_key,
             path: c.path,
             rel_path: c.rel_path,
             rel_folder: c.rel_folder,
@@ -417,21 +442,20 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
 
     // Preserve tracks and covers cached in `prev` for any root that was unavailable
     // so an unplugged drive never wipes its portion of the library or triggers moves.
-    if prev_valid && !cancelled && !missing_root_indices.is_empty() {
+    if prev_valid && !cancelled && !missing_root_keys.is_empty() {
         for (key, old) in &prev.files {
-            if !missing_root_indices.contains(&old.root_index) {
+            if !missing_root_keys.contains(&old.root_key) {
                 continue;
             }
             new_entries.insert(key.clone(), old.clone());
-            let path = prev
-                .track_path(&old.id)
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| roots.get(old.root_index).map(|r| r.join(&old.rel_path)).unwrap_or_else(|| PathBuf::from(&old.rel_path)));
+            let path = prev.track_path(&old.id).map(Path::to_path_buf).unwrap_or_else(|| {
+                roots.iter().find(|r| r.key == old.root_key).map(|r| r.path.join(&old.rel_path)).unwrap_or_else(|| PathBuf::from(&old.rel_path))
+            });
             let rel_folder = Path::new(&old.rel_path).parent().map(normalize_rel).unwrap_or_default();
             reused += 1;
             raw_files.push(RawScannedFile {
                 id: old.id.clone(),
-                root_index: old.root_index,
+                root_key: old.root_key.clone(),
                 path,
                 rel_path: old.rel_path.clone(),
                 rel_folder,

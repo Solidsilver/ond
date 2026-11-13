@@ -216,6 +216,11 @@ impl OndApp {
                     crate::sync::Outcome::Done { .. } => {
                         self.sync.last = Some(chrono::Local::now());
                         self.first_scan_done(None);
+                        if !self.session.source_caps().playlists {
+                            for id in self.data.playlist_tracks.keys().cloned().collect::<Vec<_>>() {
+                                self.bridge.open_playlist(self.session.source.clone(), id);
+                            }
+                        }
                         format!("{albums} albums · {tracks} tracks")
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),

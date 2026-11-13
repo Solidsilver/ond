@@ -402,6 +402,8 @@ pub struct OndApp {
     updates: Updates,
     /// The folder picker (the system's; a test's answers at once).
     pick_folder: sources::FolderPicker,
+    /// Save dialog for exporting playlists as M3U.
+    save_m3u: sources::SaveFilePicker,
 }
 
 impl OndApp {
@@ -411,12 +413,12 @@ impl OndApp {
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
         app.gpu = cc.wgpu_render_state.as_ref().map(|s| crate::visuals::gpu::Target::new(s.target_format, &s.adapter));
         // The app is running by now, so NSApp takes the menu bar.
-        let bridge = app.bridge.clone();
-        app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
+        let post = app.bridge.poster();
+        app.menu = crate::menu::MenuBar::install(move |cmd| post(Msg::Menu(cmd)));
         app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
-        let bridge = app.bridge.clone();
+        let post = app.bridge.poster();
         crate::updates::start(app.bridge.runtime(), &crate::updates::OND, app.update_check.clone(), app.update_now.clone(), move |r| {
-            bridge.post(Msg::UpdateChecked(r))
+            post(Msg::UpdateChecked(r))
         });
         // The window opened from this plan (see `main`); our title bar follows it.
         app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
@@ -453,10 +455,23 @@ impl OndApp {
                 crate::storage::Stores::in_memory()?
             }
         };
+        let ond_store = match crate::store::OndStore::open_or_recover(data_dir.join("ond.redb")) {
+            Ok((store, aside)) => {
+                if aside.is_some() {
+                    notices.push("Ond couldn't read its saved favorites and playlists, so it started a fresh store.".into());
+                }
+                Arc::new(store)
+            }
+            Err(e) => {
+                tracing::error!("opening ond.redb: {e}");
+                notices.push(format!("Ond couldn't open its favorites and playlists store ({e}). Changes won't persist this session."));
+                Arc::new(crate::store::OndStore::in_memory()?)
+            }
+        };
         let analyses = stores.analyses;
         let (tx, inbox) = channel();
         let repaint = ctx.clone();
-        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), stores.library);
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), stores.library, ond_store);
         bridge.configure_storage(data_dir.to_owned(), paths.art_cache.clone(), prefs.get(|s| s.account()), &analyses);
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
@@ -487,7 +502,7 @@ impl OndApp {
         let output = Outputs::restore(&engine, prefs.clone());
         engine.send(Command::SetVolume(saved.volume));
         let scrobble = saved.scrobble;
-        let remote_bridge = bridge.clone();
+        let post_remote = bridge.poster();
         let now_playing = now_playing::Session::start(now_playing::Config {
             account: saved.account(),
             status: engine.status.clone(),
@@ -496,7 +511,7 @@ impl OndApp {
             retry_file: saved.account().map(|a| crate::storage::account_dir(data_dir, a)).unwrap_or_else(|| data_dir.join("Sources")).join("scrobbles.json"),
             retry_root: Some(data_dir.to_owned()),
             scrobble,
-            remote: Arc::new(move |r| remote_bridge.post(Msg::Remote(r))),
+            remote: Arc::new(move |r| post_remote(Msg::Remote(r))),
         });
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
@@ -509,13 +524,13 @@ impl OndApp {
         }
         bridge.load_analyses(analyses.clone());
         let analyzer = {
-            let (results, ticks) = (bridge.clone(), bridge.notifier());
+            let (post_analysis, ticks) = (bridge.poster(), bridge.notifier());
             analyze::Runner::start(analyze::Config {
                 store: analyses,
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
-                on_result: Arc::new(move |key, record| results.post(AnalysisMsg::Analyzed { key, record })),
+                on_result: Arc::new(move |key, record| post_analysis(AnalysisMsg::Analyzed { key, record }.into())),
                 on_progress: ticks,
             })
         };
@@ -571,6 +586,7 @@ impl OndApp {
             update_now: Arc::default(),
             updates: Updates::default(),
             pick_folder: sources::system_picker(),
+            save_m3u: sources::system_save_m3u(),
             prefs,
             analysis: Analysis::new(analyzer),
             favorites: Favorites::default(),
@@ -618,6 +634,14 @@ impl OndApp {
                 self.ui.recent_playlists.truncate(3);
                 self.go(Route::Playlist { id, name });
             }
+            Msg::M3uPathChosen { id, path } => self.bridge.export_playlist_m3u(self.session.source.clone(), id, path),
+            Msg::M3uExported { path, error } => match error {
+                None => {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("playlist.m3u");
+                    self.show_notice(format!("Exported {name}"));
+                }
+                Some(e) => self.show_failure(e.context("Couldn't export the playlist")),
+            },
             Msg::Menu(cmd) => self.command(cmd),
             Msg::FolderChosen { target, path } => self.folder_chosen(target, path),
             Msg::UpdateChecked(result) => self.update_checked(result),

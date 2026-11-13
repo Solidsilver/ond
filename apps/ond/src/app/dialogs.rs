@@ -139,7 +139,11 @@ impl OndApp {
                     }
                 }
                 Overlay::Delete { id, name } => {
-                    let body = "This deletes the playlist on the server. The songs stay in your library.";
+                    let body = if self.session.source_caps().playlists {
+                        "This deletes the playlist on the server. The songs stay in your library."
+                    } else {
+                        "This deletes the playlist. The songs stay in your library."
+                    };
                     if let Some(yes) = confirm(ui, &format!("Delete “{name}”?"), body, "Delete") {
                         done = Some(yes.then(|| Action::PlaylistEdit(PlaylistAction::Delete { id: id.clone() })));
                     }

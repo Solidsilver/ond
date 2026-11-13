@@ -1113,10 +1113,10 @@ fn a_managed_server_is_locked_in_the_sources_tab() {
     *h.state_mut() = None;
 }
 
-/// A folder of music in use hides what it can't do (hearts, downloads,
-/// playlists, Favorites and Offline, Work Offline and Sign out, scrobbling
-/// and streaming settings), and its Sources row rescans and asks before
-/// removing it, saying the music files are kept.
+/// A folder of music in use hides what it can't do (downloads, Offline, Work
+/// Offline and Sign out, scrobbling and streaming settings) while keeping
+/// Favorites and Playlists backed by Ond's store, and its Sources row rescans
+/// and asks before removing it, saying the music files are kept.
 #[test]
 fn a_folder_source_hides_what_it_cant_do_and_says_its_files_are_kept() {
     let dir = tempfile::tempdir().unwrap();
@@ -1125,9 +1125,9 @@ fn a_folder_source_hides_what_it_cant_do_and_says_its_files_are_kept() {
     assert!(h.query_by_label("Favorites").is_some() && h.query_by_label("Offline").is_some(), "a server has both");
     use_folder(app_mut(&mut h));
     h.run_steps(3);
-    for gone in ["Favorites", "Offline", "Playlists", "New Playlist (⌘N)", "Love", "Unlove"] {
-        assert!(h.query_by_label(gone).is_none(), "{gone} is hidden for a folder");
-    }
+    assert!(h.query_by_label("Favorites").is_some(), "Favorites is shown via Ond's store");
+    assert!(h.query_by_label("Playlists").is_some(), "Playlists is shown via Ond's store");
+    assert!(h.query_by_label("Offline").is_none(), "Offline is hidden for a folder");
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Music").click();
     h.run_steps(2);
     assert!(h.query_by_label("Rescan").is_some());
