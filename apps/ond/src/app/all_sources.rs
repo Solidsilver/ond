@@ -73,6 +73,7 @@ impl OndApp {
 
     pub(super) fn start_source(&mut self, settings: crate::settings::Settings) {
         let Some(account) = settings.account() else { return };
+        self.art.add_account(account);
         let network = settings.primary().is_none_or(|s| crate::source::Kind::of(s.kind).capabilities.network);
         let connect = !(network && (self.session.work_offline || settings.signed_out));
         let bridge = if let Some(b) = self.multi.bridges.get(&account) {
@@ -264,9 +265,6 @@ impl OndApp {
                 self.art.add_source(source.clone());
                 self.now_playing.add_source(source.clone());
                 self.refresh_analysis_sources();
-                if self.prefs.get(|s| s.account()) == Some(account) {
-                    self.art.set_source(source.clone());
-                }
                 self.connect_downloads(&source);
                 if owns_form {
                     self.login = None;

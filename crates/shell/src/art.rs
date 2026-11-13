@@ -76,6 +76,20 @@ impl<K: Clone + Eq + Hash> Lru<K> {
         evicted
     }
 
+    /// Changes the budget, evicting the oldest entries until it is met.
+    pub fn set_budget(&mut self, budget: usize) -> Vec<K> {
+        self.budget = budget;
+        let mut evicted = Vec::new();
+        while self.total > budget {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, (time, _))| *time).map(|(key, _)| key.clone()) else { break };
+            if let Some((_, weight)) = self.entries.remove(&oldest) {
+                self.total -= weight;
+            }
+            evicted.push(oldest);
+        }
+        evicted
+    }
+
     /// Keeps only the entries `keep` says to, and stops counting the rest.
     pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
         let mut dropped = 0;
@@ -423,6 +437,21 @@ mod tests {
         l.insert("a", 60);
         assert!(l.insert("a", 70).is_empty());
         assert_eq!(l.total(), 70);
+    }
+
+    #[test]
+    fn shrinking_an_lru_budget_evicts_old_entries_including_an_oversized_last_one() {
+        let mut lru = Lru::new(100);
+        lru.insert("a", 40);
+        lru.insert("b", 40);
+        lru.touch(&"a");
+        assert_eq!(lru.set_budget(50), ["b"]);
+        assert_eq!(lru.total(), 40);
+        assert_eq!(lru.set_budget(20), ["a"]);
+        assert!(lru.is_empty());
+        assert!(lru.set_budget(100).is_empty());
+        assert!(lru.insert("c", 80).is_empty());
+        assert_eq!(lru.total(), 80);
     }
 
     /// Starts what's ready and returns just the keys, in order.

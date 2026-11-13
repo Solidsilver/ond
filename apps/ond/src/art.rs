@@ -14,6 +14,11 @@
 //! fast scroll doesn't leave a backlog ahead of what's on screen now. Disk
 //! reads have their own slots and never wait behind downloads. Looks (for the
 //! playing and the open album, a cover or two) skip the queue and start at once.
+//!
+//! Each account has one cache owner, including the primary account held here.
+//! Owners share fixed total GPU and disk limits in equal portions. Adding or
+//! removing an owner resizes every portion and trims existing contents; a
+//! qualified id routes to its owner before the bare id enters that cache.
 
 use crate::source::Src;
 use accounts::AccountId;
@@ -23,9 +28,9 @@ use shell::kit::Generated;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 // The crop, the cache's file names and the LRU set are the family's, shared
@@ -101,9 +106,18 @@ impl LookParts {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Budget {
+    texture: usize,
+    disk: u64,
+}
+
 pub struct Art {
     sources: HashMap<AccountId, Box<Art>>,
-    routed: bool,
+    limits: Budget,
+    budget: Budget,
+    disk_limit: Arc<AtomicU64>,
+    trim_gate: Arc<Mutex<()>>,
     rt: tokio::runtime::Handle,
     ctx: egui::Context,
     root: PathBuf,
@@ -153,15 +167,19 @@ pub struct Art {
 
 impl Art {
     pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, root: PathBuf, account: Option<AccountId>) -> Self {
+        Self::with_budget(rt, ctx, root, account, Budget { texture: TEXTURE_BUDGET, disk: DISK_BUDGET })
+    }
+
+    fn with_budget(rt: tokio::runtime::Handle, ctx: egui::Context, root: PathBuf, account: Option<AccountId>, limits: Budget) -> Self {
         let (tx, rx) = channel();
         let (look_tx, look_rx) = channel();
         let dir = account.map(|a| Arc::new(account_dir(&root, a)));
-        if let Some(trim) = dir.clone() {
-            rt.spawn_blocking(move || shell::art::trim_disk_cache(&trim, DISK_BUDGET));
-        }
-        Self {
+        let art = Self {
             sources: HashMap::new(),
-            routed: false,
+            limits,
+            budget: limits,
+            disk_limit: Arc::new(AtomicU64::new(limits.disk)),
+            trim_gate: Arc::default(),
             rt,
             ctx,
             root,
@@ -172,7 +190,7 @@ impl Art {
             covers: HashMap::new(),
             names: Vec::new(),
             textures: HashMap::new(),
-            lru: Lru::new(TEXTURE_BUDGET),
+            lru: Lru::new(limits.texture),
             queue: Queue::new(),
             downloads: HashMap::new(),
             missing: HashSet::new(),
@@ -192,30 +210,105 @@ impl Art {
             preloaded: HashMap::new(),
             #[cfg(test)]
             pinned_disk: None,
-        }
+        };
+        art.trim_disk();
+        art
     }
 
     fn source_art(&mut self, account: AccountId) -> &mut Art {
-        self.sources.entry(account).or_insert_with(|| {
-            let mut art = Self::new(self.rt.clone(), self.ctx.clone(), self.root.clone(), Some(account));
-            art.routed = true;
-            Box::new(art)
-        })
+        if self.account == Some(account) {
+            return self;
+        }
+        if self.account.is_none() && !self.sources.contains_key(&account) {
+            self.reset_memory();
+            self.generation += 1;
+            self.account = Some(account);
+            self.dir = Some(Arc::new(account_dir(&self.root, account)));
+            self.disk = Arc::new(AtomicU64::new(u64::MAX));
+            self.counted = None;
+        } else if !self.sources.contains_key(&account) {
+            let art = Self::with_budget(self.rt.clone(), self.ctx.clone(), self.root.clone(), Some(account), self.limits);
+            self.sources.insert(account, Box::new(art));
+        } else {
+            return self.sources.get_mut(&account).expect("account's cache");
+        }
+        self.rebalance();
+        if self.account == Some(account) { self } else { self.sources.get_mut(&account).expect("new account's cache") }
+    }
+
+    fn rebalance(&mut self) {
+        let owners = self.sources.len() + usize::from(self.account.is_some());
+        let portion = Budget { texture: self.limits.texture / owners.max(1), disk: self.limits.disk / owners.max(1) as u64 };
+        self.set_budget(if self.account.is_some() || owners == 0 { portion } else { Budget { texture: 0, disk: 0 } });
+        for art in self.sources.values_mut() {
+            art.set_budget(portion);
+        }
+    }
+
+    fn set_budget(&mut self, budget: Budget) {
+        if budget.texture > self.budget.texture {
+            self.missing.clear();
+        }
+        self.budget = budget;
+        for gone in self.lru.set_budget(budget.texture) {
+            self.textures.remove(&gone);
+            self.prints.remove(&gone);
+        }
+        self.disk_limit.store(budget.disk, Ordering::Relaxed);
+        self.trim_disk();
+    }
+
+    fn trim_disk(&self) {
+        if let Some(dir) = self.dir.clone() {
+            let (limit, gate) = (self.disk_limit.clone(), self.trim_gate.clone());
+            self.rt.spawn_blocking(move || {
+                let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+                shell::art::trim_disk_cache(&dir, limit.load(Ordering::Relaxed));
+            });
+        }
+    }
+
+    /// Reserves a share even for a source starting offline or signed out.
+    pub fn add_account(&mut self, account: AccountId) {
+        self.source_art(account);
     }
 
     pub fn add_source(&mut self, source: Src) {
-        self.source_art(source.account()).set_source(source);
+        self.source_art(source.account()).set_source_owned(source);
     }
     pub fn offline_source(&mut self, account: AccountId) {
-        if let Some(art) = self.sources.get_mut(&account) {
+        if self.account == Some(account) {
+            self.clear_source();
+        } else if let Some(art) = self.sources.get_mut(&account) {
             art.clear_source();
         }
     }
     pub fn remove_source(&mut self, account: AccountId) {
-        self.sources.remove(&account);
+        if self.account == Some(account) {
+            self.clear_source();
+            self.reset_memory();
+            self.generation += 1;
+            self.account = None;
+            self.dir = None;
+            // Queued trims of the old folder keep its last limit; this empty
+            // owner must not turn their limit into zero while being reused.
+            self.disk_limit = Arc::new(AtomicU64::new(0));
+        } else {
+            self.sources.remove(&account);
+        }
+        self.rebalance();
     }
 
     pub fn set_source(&mut self, source: Src) {
+        if self.sources.contains_key(&source.account()) {
+            self.source_art(source.account()).set_source_owned(source);
+        } else {
+            self.set_source_owned(source);
+            self.rebalance();
+        }
+    }
+
+    fn set_source_owned(&mut self, source: Src) {
         let next = source.account();
         // The one place an account's folder is made (see `fetch_cached`). A
         // single mkdir, made before any download can try to save into it.
@@ -239,10 +332,10 @@ impl Art {
             self.generation += 1;
             self.account = Some(next);
             let dir = Arc::new(account_dir(&self.root, next));
-            self.dir = Some(dir.clone());
+            self.dir = Some(dir);
             self.disk = Arc::new(AtomicU64::new(u64::MAX));
             self.counted = None;
-            self.rt.spawn_blocking(move || shell::art::trim_disk_cache(&dir, DISK_BUDGET));
+            self.trim_disk();
             self.ctx.request_repaint();
         }
     }
@@ -263,7 +356,7 @@ impl Art {
         self.prints.clear();
         self.portraits.clear();
         self.stand_ins.clear();
-        self.lru = Lru::new(TEXTURE_BUDGET);
+        self.lru = Lru::new(self.budget.texture);
         self.missing.clear();
         self.looks.clear();
         self.looks_lru = Lru::new(LOOKS);
@@ -320,6 +413,10 @@ impl Art {
                 self.ctx.request_repaint();
             }
             let weight = image.width() * image.height() * 4;
+            if weight > self.budget.texture {
+                self.missing.insert(key);
+                continue;
+            }
             let tex = self.ctx.load_texture(format!("art:{}:{}", self.names[key.cover as usize], key.size), image, TextureOptions::LINEAR);
             for gone in self.lru.insert(key, weight) {
                 self.textures.remove(&gone);
@@ -328,10 +425,12 @@ impl Art {
             self.textures.insert(key, tex);
             self.prints.insert(key, print);
         }
+        let mut looks_loaded = false;
         while let Ok((generation, cover, parts)) = self.look_rx.try_recv() {
             if generation != self.generation {
                 continue;
             }
+            looks_loaded = true;
             self.looks_pending.remove(&cover);
             let backdrop = parts.blurred.map(|(image, extremes)| crate::visuals::backdrop::Blurred {
                 texture: self.ctx.load_texture(format!("backdrop:{cover}"), image.clone(), TextureOptions::LINEAR),
@@ -344,6 +443,9 @@ impl Art {
             }
             self.looks.insert(cover, Arc::new(look));
         }
+        if uploads > 0 || looks_loaded {
+            self.trim_disk();
+        }
         for key in self.queue.next_frame() {
             if let Some((_, task)) = self.downloads.remove(&key) {
                 task.abort();
@@ -355,11 +457,13 @@ impl Art {
     /// `cover`'s look, once worked out; the first ask starts that (in the
     /// background, ahead of the queue) and returns `None` meanwhile.
     pub fn look(&mut self, cover: &str) -> Option<Arc<Look>> {
-        if !self.routed
-            && let Some(account) = crate::source::identity::account(cover)
-        {
-            return self.source_art(account).look(crate::source::identity::bare(cover));
+        if let Some(account) = crate::source::identity::account(cover) {
+            return self.source_art(account).look_bare(crate::source::identity::bare(cover));
         }
+        self.look_bare(cover)
+    }
+
+    fn look_bare(&mut self, cover: &str) -> Option<Arc<Look>> {
         if let Some(l) = self.looks.get(cover) {
             self.looks_lru.touch(cover);
             return Some(l.clone());
@@ -391,11 +495,13 @@ impl Art {
     /// the right size isn't here yet, and meanwhile returns any other size
     /// already loaded so a resize doesn't flash the placeholder.
     pub fn texture(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
-        if !self.routed
-            && let Some(account) = crate::source::identity::account(cover)
-        {
-            return self.source_art(account).texture(crate::source::identity::bare(cover), points);
+        if let Some(account) = crate::source::identity::account(cover) {
+            return self.source_art(account).texture_bare(crate::source::identity::bare(cover), points);
         }
+        self.texture_bare(cover, points)
+    }
+
+    fn texture_bare(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
         let key = self.shown(cover, points)?;
         self.textures.get(&key).cloned()
     }
@@ -404,11 +510,13 @@ impl Art {
     /// the server sends for every artist it has no photo of. That one is
     /// known once it's come back for a second artist; until then it shows.
     pub fn portrait(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
-        if !self.routed
-            && let Some(account) = crate::source::identity::account(cover)
-        {
-            return self.source_art(account).portrait(crate::source::identity::bare(cover), points);
+        if let Some(account) = crate::source::identity::account(cover) {
+            return self.source_art(account).portrait_bare(crate::source::identity::bare(cover), points);
         }
+        self.portrait_bare(cover, points)
+    }
+
+    fn portrait_bare(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
         let key = self.shown(cover, points)?;
         if let Some(&print) = self.prints.get(&key) {
             let first = *self.portraits.entry(print).or_insert(key.cover);
@@ -437,11 +545,13 @@ impl Art {
     /// Asks for `cover` at `points` wide before it's drawn (just past the
     /// viewport); it loads after everything on screen.
     pub fn prefetch(&mut self, cover: &str, points: f32) {
-        if !self.routed
-            && let Some(account) = crate::source::identity::account(cover)
-        {
-            return self.source_art(account).prefetch(crate::source::identity::bare(cover), points);
+        if let Some(account) = crate::source::identity::account(cover) {
+            return self.source_art(account).prefetch_bare(crate::source::identity::bare(cover), points);
         }
+        self.prefetch_bare(cover, points)
+    }
+
+    fn prefetch_bare(&mut self, cover: &str, points: f32) {
         let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
         if !self.textures.contains_key(&key) {
             self.request(key, true);
@@ -505,6 +615,15 @@ impl Art {
         if let Some(bytes) = self.pinned_disk {
             return Some(bytes);
         }
+        let own = self.disk_size_owned();
+        let mut others = Some(0u64);
+        for art in self.sources.values_mut() {
+            others = others.zip(art.disk_size()).map(|(total, bytes)| total + bytes);
+        }
+        own.zip(others).map(|(own, others)| own + others)
+    }
+
+    fn disk_size_owned(&mut self) -> Option<u64> {
         let Some(dir) = self.dir.clone() else {
             return Some(0);
         };
@@ -558,7 +677,7 @@ impl Art {
         }
         self.textures.clear();
         self.prints.clear();
-        self.lru = Lru::new(TEXTURE_BUDGET);
+        self.lru = Lru::new(self.budget.texture);
     }
 
     /// Marks `cover` as art the server doesn't have, at every size.
@@ -600,11 +719,13 @@ impl Art {
 
     /// Whether `cover` at `points` wide is known not to be had.
     fn is_missing(&mut self, cover: &str, points: f32) -> bool {
-        if !self.routed
-            && let Some(account) = crate::source::identity::account(cover)
-        {
-            return self.source_art(account).is_missing(crate::source::identity::bare(cover), points);
+        if let Some(account) = crate::source::identity::account(cover) {
+            return self.source_art(account).is_missing_bare(crate::source::identity::bare(cover), points);
         }
+        self.is_missing_bare(cover, points)
+    }
+
+    fn is_missing_bare(&mut self, cover: &str, points: f32) -> bool {
         let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
         self.missing.contains(&key)
     }
@@ -613,11 +734,13 @@ impl Art {
     /// when there's none: for drawing what's at hand (an artist's albums on
     /// their disc) without a request of its own.
     pub fn loaded(&mut self, cover: &str) -> Option<TextureHandle> {
-        if !self.routed
-            && let Some(account) = crate::source::identity::account(cover)
-        {
-            return self.source_art(account).loaded(crate::source::identity::bare(cover));
+        if let Some(account) = crate::source::identity::account(cover) {
+            return self.source_art(account).loaded_bare(crate::source::identity::bare(cover));
         }
+        self.loaded_bare(cover)
+    }
+
+    fn loaded_bare(&mut self, cover: &str) -> Option<TextureHandle> {
         let &n = self.covers.get(cover)?;
         let key = SIZES.iter().rev().map(|&size| Key { cover: n, size }).find(|k| self.textures.contains_key(k))?;
         self.lru.touch(&key);
@@ -783,6 +906,114 @@ mod tests {
         let source = source_with_cover(account, "al-1", bytes.clone());
         assert_eq!(rt.block_on(fetch_cached(&source, &gone, "al-1", 64)), Some(bytes), "the cover still shows");
         assert!(!gone.exists());
+    }
+
+    #[test]
+    fn qualified_primary_covers_have_one_owner_even_when_their_bare_id_looks_qualified() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (AccountId::new(), AccountId::new());
+        let bare = accounts::ItemKey::new(two, "cover").to_string();
+        let qualified = accounts::ItemKey::new(one, &bare).to_string();
+        let source = source_with_cover(one, &bare, crate::test_tracks::png([220, 30, 30, 255]));
+        let mut art = Art::new(rt.handle().clone(), egui::Context::default(), dir.path().to_owned(), Some(one));
+        art.add_source(source.clone());
+        art.set_source(source);
+        testkit::wait_until("the qualified primary cover to load", || {
+            art.poll();
+            art.texture(&qualified, 40.0).is_some()
+        });
+        assert!(art.sources.is_empty(), "the primary owner is reused and the bare id is not routed a second time");
+        assert!(art.covers.contains_key(bare.as_str()));
+        assert!(cover_file(&account_dir(dir.path(), one), &bare, 64).is_file());
+        art.offline_source(one);
+        assert!(art.source.is_none());
+        assert!(art.loaded(&qualified).is_some(), "offline keeps its cached cover");
+    }
+
+    #[test]
+    fn adding_sources_splits_one_texture_budget_and_removing_them_restores_the_share() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two, three) = (AccountId::new(), AccountId::new(), AccountId::new());
+        let weight = 64 * 64 * 4;
+        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities::none());
+        fake.account = one;
+        for id in ["old", "new"] {
+            fake.covers.lock().unwrap().insert(id.into(), crate::test_tracks::png([220, 30, 30, 255]));
+        }
+        let mut art = Art::with_budget(
+            rt.handle().clone(),
+            egui::Context::default(),
+            dir.path().to_owned(),
+            Some(one),
+            Budget { texture: 2 * weight, disk: DISK_BUDGET },
+        );
+        art.add_source(Arc::new(fake));
+        let qualified = |account, id| accounts::ItemKey::new(account, id).to_string();
+        for id in ["old", "new"] {
+            let id = qualified(one, id);
+            testkit::wait_until("the primary cover to load", || {
+                art.poll();
+                art.texture(&id, 40.0).is_some()
+            });
+        }
+        art.add_source(source_with_cover(two, "new", crate::test_tracks::png([30, 30, 220, 255])));
+        assert!(art.loaded(&qualified(one, "old")).is_none(), "the old texture is evicted when the primary's share shrinks");
+        assert!(art.loaded(&qualified(one, "new")).is_some());
+        testkit::wait_until("the second account's cover to load", || {
+            art.poll();
+            art.texture(&qualified(two, "new"), 40.0).is_some()
+        });
+        assert_ne!(art.loaded(&qualified(one, "new")).unwrap().id(), art.loaded(&qualified(two, "new")).unwrap().id());
+        art.add_source(source_with_cover(three, "new", crate::test_tracks::png([30, 220, 30, 255])));
+        for account in [one, two, three] {
+            assert!(art.loaded(&qualified(account, "new")).is_none(), "no share can retain even one oversized texture");
+        }
+        testkit::wait_until("the oversized image to be rejected", || {
+            art.poll();
+            art.texture(&qualified(two, "new"), 40.0);
+            art.is_missing(&qualified(two, "new"), 40.0)
+        });
+        art.remove_source(one);
+        art.remove_source(three);
+        testkit::wait_until("the remaining account to reclaim the budget", || {
+            art.poll();
+            art.texture(&qualified(two, "new"), 40.0).is_some()
+        });
+        assert_eq!(art.sources[&two].budget.texture, 2 * weight);
+    }
+
+    #[test]
+    fn each_account_folder_is_trimmed_once_under_a_shared_disk_budget() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (AccountId::new(), AccountId::new());
+        for account in [one, two] {
+            let folder = account_dir(dir.path(), account);
+            std::fs::create_dir_all(&folder).unwrap();
+            for id in ["old", "new"] {
+                std::fs::write(cover_file(&folder, id, 64), vec![0; 50]).unwrap();
+            }
+        }
+        let mut art =
+            Art::with_budget(rt.handle().clone(), egui::Context::default(), dir.path().to_owned(), Some(one), Budget { texture: TEXTURE_BUDGET, disk: 100 });
+        art.add_account(one);
+        art.add_account(two);
+        assert!(art.source.is_none() && art.sources[&two].source.is_none(), "offline accounts still share the disk limit");
+        let bytes = |account| shell::art::cached_files(&account_dir(dir.path(), account)).iter().map(|f| f.1).sum::<u64>();
+        testkit::wait_until("both folders to fit their shares", || bytes(one) == 50 && bytes(two) == 50);
+        assert!(!art.sources.contains_key(&one), "exactly one owner manages the primary folder");
+        testkit::wait_until("the total disk use to be reported", || art.disk_size() == Some(100));
+        art.remove_source(one);
+        for id in ["old", "new"] {
+            std::fs::write(cover_file(&account_dir(dir.path(), two), id, 64), vec![0; 50]).unwrap();
+        }
+        art.set_source(source_with_cover(two, "unused", Vec::new()));
+        assert!(art.account.is_none(), "the existing second owner is reused");
+        assert_eq!(art.sources[&two].budget.disk, 100);
+        assert_eq!(bytes(two), 100);
+        assert_eq!(bytes(one), 50, "removing a source stops managing its old folder");
     }
 
     #[test]
