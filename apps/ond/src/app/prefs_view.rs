@@ -17,6 +17,8 @@ use crate::window::WindowMode;
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrefsView {
     pub scope: accounts::Scope,
+    /// Each source's name and colour, once there's more than one.
+    pub sources: super::source_look::SourceMarks,
     /// Full, Player or Mini.
     pub mode: WindowMode,
     /// The Player's lyrics drawer is open.
@@ -76,6 +78,7 @@ impl PrefsView {
         let (server_managed, username_managed) = (prefs.managed("server") || prefs.managed("sources"), prefs.managed("username") || prefs.managed("sources"));
         prefs.get(|s| Self {
             scope: s.scope.clone(),
+            sources: super::source_look::SourceMarks::read(s),
             mode: s.window.mode,
             lyrics_open: s.window.lyrics_open,
             system_title_bar: s.window.system_title_bar,

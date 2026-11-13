@@ -141,6 +141,7 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         let n = self.data.tracks.all.len();
         self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
+        self.scope_chips(ui);
         if n == 0 {
             let (title, body) = if self.session.sync.tracks {
                 ("Syncing your tracks…", "Songs appear here as the library comes in.")
@@ -213,7 +214,12 @@ impl ViewCtx<'_> {
                 row.line(ui, x, w - 2.0 * col::INSET, text, font, color);
             };
             cell(ui, &tr.title, title_x, c.title.right() - title_x + col::INSET, title_font(13.0, playing), color);
-            cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + col::INSET, c.artist.width(), FontId::proportional(13.0), t.muted);
+            // Where it comes from leads the artist, while sources are mixed.
+            let (artist_x, artist_w) = match self.source_dot(&tr.id) {
+                Some(color) => (shell::kit::source_dot_lead(ui, c.artist.left() + col::INSET, row.cy(), color), c.artist.width() - shell::kit::DOT_LEAD),
+                None => (c.artist.left() + col::INSET, c.artist.width()),
+            };
+            cell(ui, tr.artist.as_deref().unwrap_or(""), artist_x, artist_w, FontId::proportional(13.0), t.muted);
             let album = self.data.album(&tr.album_id).map_or("", |a| a.name.as_str());
             cell(ui, album, c.album.left() + col::INSET, c.album.width(), FontId::proportional(13.0), t.muted);
             row.right_text(ui, c.time.right() - col::INSET, length(tr), FontId::proportional(12.0), t.muted);

@@ -9,6 +9,7 @@ use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::settings::ViewMode;
+use crate::source::identity;
 use crate::theme::{Tokens, semibold};
 use crate::widgets::{choice, elide, view_picker};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
@@ -90,7 +91,6 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, descending: bool, data: &Data) -
 
 impl OndApp {
     pub(super) fn main_view(&mut self, ui: &mut Ui) {
-        self.scope_chips(ui);
         self.trail_bar(ui);
         let route = self.ui.nav.current().clone();
         match &route {
@@ -128,6 +128,9 @@ impl OndApp {
         let sort = (*route == Route::Albums && view == ViewMode::Grid).then_some((&AlbumSort::ALL[..], &mut self.ui.sort));
         if heading_bar(ui, &title, sub, Some(&mut view), sort, |s| s.label().into()) {
             self.ui.sort_desc = false;
+        }
+        if matches!(route, Route::Albums | Route::Recent) {
+            self.view().scope_chips(ui);
         }
         if view != self.ui.prefs.album_view {
             self.actions.push(Action::Prefs(PrefsAction::AlbumView(view)));
@@ -185,38 +188,84 @@ impl OndApp {
         }
         let (cols, tile) = grid_metrics(ui.available_width());
         let row_h = tile + LABEL_H + GAP_Y;
-        // Two grids with a heading between: lines of two heights, so the
-        // virtual list's variable-height layout rather than its grid.
-        let (own_rows, credited_rows) = (own.len().div_ceil(cols), credited.len().div_ceil(cols));
-        let head = if credited_rows > 0 { 1 } else { 0 };
-        let mut heights = vec![row_h; own_rows + head + credited_rows];
-        if head > 0 {
-            heights[own_rows] = CREDITED_HEAD_H;
+        // Grids with headings between (each source's part of a merged
+        // artist, then the albums crediting them): lines of two heights, so
+        // the virtual list's variable-height layout rather than its grid.
+        let mut lines = Vec::new();
+        let groups = self.artist_groups(route, name, &own);
+        for (mark, albums) in &groups {
+            if let Some(mark) = mark {
+                lines.push(ArtistLine::Source(mark.color, mark.name.clone()));
+            }
+            lines.extend(albums.chunks(cols).map(|row| ArtistLine::Albums(row.to_vec())));
         }
+        if !credited.is_empty() {
+            lines.push(ArtistLine::Credited);
+            lines.extend(credited.chunks(cols).map(|row| ArtistLine::Albums(row.to_vec())));
+        }
+        let heights: Vec<f32> = lines.iter().map(|l| if matches!(l, ArtistLine::Albums(_)) { row_h } else { CREDITED_HEAD_H }).collect();
         super::layout::into_gutter(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show_viewport(
                 ui,
                 |ui, viewport| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     super::virtual_list::visible_lines(ui, viewport, &heights, |ui, k| {
-                        ui.push_id(k, |ui| {
-                            if k < own_rows {
-                                self.view().grid_row(ui, &own[k * cols..((k + 1) * cols).min(own.len())], tile);
-                            } else if k == own_rows && head > 0 {
+                        ui.push_id(k, |ui| match &lines[k] {
+                            ArtistLine::Albums(row) => self.view().grid_row(ui, row, tile),
+                            head => {
                                 ui.allocate_ui_with_layout(vec2(ui.available_width(), CREDITED_HEAD_H), egui::Layout::top_down(egui::Align::Min), |ui| {
                                     ui.set_min_height(CREDITED_HEAD_H);
                                     ui.add_space(6.0);
-                                    ui.label(egui::RichText::new("Also credited on").font(FontId::new(15.0, semibold())).color(t.text));
+                                    let font = FontId::new(15.0, semibold());
+                                    match head {
+                                        ArtistLine::Source(color, name) => {
+                                            shell::kit::source_label(ui, *color, name, font, t.text);
+                                        }
+                                        _ => {
+                                            ui.label(egui::RichText::new("Also credited on").font(font).color(t.text));
+                                        }
+                                    }
                                 });
-                            } else {
-                                let r = k - own_rows - head;
-                                self.view().grid_row(ui, &credited[r * cols..((r + 1) * cols).min(credited.len())], tile);
                             }
                         });
                     });
                 },
             )
         });
+    }
+
+    /// An artist's own albums, split by source under each source's dot and
+    /// name when they're a merged artist with albums from more than one
+    /// (so two artists merged wrongly by name show apart); else one group
+    /// without a heading. Groups follow the sources' order.
+    fn artist_groups(&self, route: &Route, name: &str, own: &[usize]) -> Vec<(Option<super::source_look::Mark>, Vec<usize>)> {
+        let id = match route {
+            Route::Artist { id, .. } => id.as_deref(),
+            _ => None,
+        };
+        let spans = self.data.merged_artist(id, name).is_some_and(|m| m.albums.len() > 1);
+        if !spans || !super::source_look::mixed(&self.session) {
+            return vec![(None, own.to_vec())];
+        }
+        let marks = &self.ui.prefs.sources;
+        let mut groups: Vec<(Option<super::source_look::Mark>, Vec<usize>)> = marks
+            .iter()
+            .map(|m| {
+                let albums = own.iter().copied().filter(|&i| identity::account(&self.data.albums[i].id) == Some(m.id)).collect();
+                (Some(m.clone()), albums)
+            })
+            .collect();
+        groups.retain(|(_, albums): &(_, Vec<usize>)| !albums.is_empty());
+        // Anything without a known source stays on the page, last.
+        let placed: usize = groups.iter().map(|(_, a)| a.len()).sum();
+        if placed < own.len() {
+            let rest = own.iter().copied().filter(|&i| identity::account(&self.data.albums[i].id).is_none_or(|a| marks.get(a).is_none())).collect();
+            groups.push((None, rest));
+        }
+        if groups.len() < 2 {
+            return vec![(None, own.to_vec())];
+        }
+        groups
     }
 
     /// The artist's name and album count, and (when they have albums) the
@@ -285,8 +334,19 @@ pub(super) fn heading_bar<T: Copy + PartialEq>(
     changed
 }
 
-/// The "Also credited on" line between an artist's own albums and the rest.
+/// The "Also credited on" line between an artist's own albums and the
+/// rest, and a source's heading over its part of a merged artist's.
 const CREDITED_HEAD_H: f32 = 34.0;
+
+/// A line of an artist's page.
+enum ArtistLine {
+    /// One source's albums follow.
+    Source(accounts::SourceColor, String),
+    /// The albums crediting the artist follow.
+    Credited,
+    /// A row of tiles.
+    Albums(Vec<usize>),
+}
 
 /// The artist page's memo key for the albums crediting them: the grid's own
 /// route and library version, and a hash of the credited ids, which arrive
@@ -494,8 +554,16 @@ impl ViewCtx<'_> {
             let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
             let title = elide(ui, &album.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
-            let sub = elide(ui, album.artist.as_deref().unwrap_or_default(), FontId::proportional(12.0), t.muted, tile - mark_w);
-            ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
+            // Where it comes from leads the artist, while sources are mixed.
+            let dot = self.source_dot(id);
+            let dot_w = if dot.is_some() { shell::kit::DOT_LEAD } else { 0.0 };
+            let sub = elide(ui, album.artist.as_deref().unwrap_or_default(), FontId::proportional(12.0), t.muted, tile - mark_w - dot_w);
+            let sub_top = art.bottom() + 24.0;
+            let x = match dot {
+                Some(color) => shell::kit::source_dot_lead(ui, rect.left(), sub_top + sub.size().y / 2.0, color),
+                None => rect.left(),
+            };
+            ui.painter().galley(pos2(x, sub_top), sub, t.muted);
             if let Some(m) = mark {
                 super::offline_page::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
             }

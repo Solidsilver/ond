@@ -44,6 +44,20 @@ impl OndApp {
         self.ui.overlay = Some(super::Overlay::MixedPlaylist);
     }
 
+    /// What the mixed-playlist sheet says: which source can't hold songs
+    /// from which, in the names the user gave them.
+    pub(super) fn mixed_playlist_body(&self) -> String {
+        let Some(pending) = &self.multi.pending_playlist else { return String::new() };
+        let settings = self.prefs.snapshot();
+        let name = |a: AccountId| settings.source(a).map_or_else(|| "Another source".to_owned(), super::source_look::name_of);
+        let mut others: Vec<AccountId> = pending.entries.iter().map(|k| k.account).filter(|a| *a != pending.source.account).collect();
+        others.sort();
+        others.dedup();
+        let from: Vec<String> = others.iter().map(|a| name(*a)).collect();
+        let both = if from.len() > 1 { "all of them" } else { "both" };
+        format!("{} can't hold songs from {}. Ond can keep a copy of this playlist that holds {both}.", name(pending.source.account), from.join(" or "))
+    }
+
     pub(super) fn ond_playlist_action(&mut self, action: &PlaylistAction) -> bool {
         if let PlaylistAction::AcceptMixed(accept) = action {
             let pending = self.multi.pending_playlist.take();

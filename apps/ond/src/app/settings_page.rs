@@ -813,31 +813,37 @@ impl OndApp {
         }
     }
 
+    /// Every live source, each with its own state: syncing or scanning and
+    /// how far, can't reach its server, signed out, folder missing, and the
+    /// files a folder's last scan skipped. Under the list, a line for each
+    /// source that needs explaining.
     fn all_source_settings(&mut self, ui: &mut Ui) {
+        use super::source_look::{Detail, describe};
+        let t = Tokens::of(ui);
         let configured = self.prefs.get(|s| s.sources.clone());
+        let locked = self.prefs.managed("sources").then_some(crate::managed::LOCKED);
+        let mut notes = Vec::new();
         group(ui, "Sources", |ui| {
             for entry in &configured {
-                let kind = crate::source::Kind::of(entry.kind);
                 let runtime = self.session.get(entry.id);
-                let state = runtime.map(|s| s.state(self.session.work_offline)).unwrap_or(SourceState::SignedOut);
-                let name = entry.name.clone().unwrap_or_else(|| super::sidebar::default_name(entry));
-                let detail = runtime
-                    .map(|s| {
-                        if s.sync.albums || s.sync.tracks {
-                            s.sync.label.clone()
-                        } else if kind.scans {
-                            format!("{} · {} skipped", entry.folder_paths().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "), s.skipped)
-                        } else {
-                            s.server_label.clone()
-                        }
-                    })
-                    .unwrap_or_default();
-                let source =
-                    kit::SourceInfo { id: entry.id, name: &name, kind: kind.name, icon: kind.icon, color: entry.color, state: &state, detail: Some(&detail) };
+                let described = describe(entry, runtime, self.session.work_offline, Detail::Long);
+                let kind = described.kind;
+                if let Some(s) = runtime {
+                    if !s.folder_missing.is_empty() {
+                        let missing: Vec<String> = s.folder_missing.iter().map(|p| p.display().to_string()).collect();
+                        notes.push(format!(
+                            "{}: not found: {}. Its albums stay in the library and play again once it's back.",
+                            described.name,
+                            missing.join(", ")
+                        ));
+                    }
+                    if let Some(why) = s.sign_in.as_ref().filter(|_| described.state == SourceState::SignedOut) {
+                        notes.push(format!("{}: {why}", described.name));
+                    }
+                }
                 let sync = runtime.is_some_and(|s| s.online && !s.sync.albums && !s.sync.tracks);
                 let menu = kit::SourceRowMenu { rename: true, color: true, sync: sync.then_some(kind.sync), sign_out: kind.capabilities.network, remove: true };
-                let locked = self.prefs.managed("sources").then_some(crate::managed::LOCKED);
-                if let Some(event) = kit::source_row(ui, &kit::SourceRow { source, menu, locked }) {
+                if let Some(event) = kit::source_row(ui, &kit::SourceRow { source: described.info(), menu, locked }) {
                     let action = match event {
                         kit::SourceRowEvent::Rename(name) => PrefsAction::SourceName(entry.id, name).into(),
                         kit::SourceRowEvent::Color(color) => PrefsAction::SourceColor(entry.id, color).into(),
@@ -852,6 +858,10 @@ impl OndApp {
                 self.actions.push(Action::Onboarding(kit::OnboardingEvent::AddAnother));
             }
         });
+        for line in notes {
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(egui::RichText::new(line).size(12.0).color(t.muted)).wrap());
+        }
     }
 
     /// What a source in use says under its name: how far a sync or scan has

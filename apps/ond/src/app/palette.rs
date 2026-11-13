@@ -55,7 +55,8 @@ impl ViewCtx<'_> {
         let mut verb = palette_keys(ctx);
         let (Some(palette), Some(index)) = (self.ui.palette.as_mut(), self.search.index.as_mut()) else { return };
         // Borrowed from the library, not from `self`, so rows can paint art.
-        let mut hits = Hits { art: &mut *self.art, data: self.data, index, results: &mut palette.results };
+        let dots = super::source_look::mixed(self.session).then(|| self.ui.prefs.sources.clone());
+        let mut hits = Hits { art: &mut *self.art, data: self.data, index, results: &mut palette.results, dots };
         let out = kit::palette(ctx, "palette", &TEXT, &mut palette.state, &mut hits);
         if let Some((_, play)) = out.clicked {
             verb = Some(if play { Verb::Play } else { Verb::Open });
@@ -154,6 +155,14 @@ struct Hits<'h> {
     data: &'h super::Data,
     index: &'h mut SearchIndex,
     results: &'h mut Results,
+    /// Each source's mark, while the library mixes sources.
+    dots: Option<super::source_look::SourceMarks>,
+}
+
+impl Hits<'_> {
+    fn dot(&self, id: &str) -> Option<accounts::SourceColor> {
+        self.dots.as_ref()?.get(crate::source::identity::account(id)?).map(|m| m.color)
+    }
 }
 
 impl kit::PaletteRows for Hits<'_> {
@@ -172,11 +181,11 @@ impl kit::PaletteRows for Hits<'_> {
         let keys = "⏎ open    ⌘⏎ play";
         let (index, data) = (&*self.index, self.data);
         let Some(hit) = self.results.hit(n) else { return PaletteRow { title: String::new(), detail: String::new(), keys, dot: None } };
-        let (title, detail) = match hit {
+        let (title, detail, dot) = match hit {
             Hit::Artist(i) => {
                 let a = &index.artists[i];
                 super::artists::avatar(self.art, ui, tile, a.cover.as_deref(), &a.name, &a.album_covers);
-                (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")))
+                (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")), None)
             }
             Hit::Album(i) => {
                 let a = &index.albums[i];
@@ -188,7 +197,7 @@ impl kit::PaletteRows for Hits<'_> {
                     Some(y) => format!("{} · {y}", a.artist),
                     None => a.artist.clone(),
                 };
-                (a.title.clone(), sub)
+                (a.title.clone(), sub, self.dot(&a.id))
             }
             Hit::Track(i) => {
                 let tr = &index.tracks[i];
@@ -196,9 +205,9 @@ impl kit::PaletteRows for Hits<'_> {
                     Some(al) => self.art.paint_as(ui, tile, al.cover_art.as_deref(), 4.0, &crate::art::album_cover(al)),
                     None => self.art.paint(ui, tile, None, 4.0),
                 }
-                (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album))
+                (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album), self.dot(&tr.id))
             }
         };
-        PaletteRow { title, detail, keys, dot: None }
+        PaletteRow { title, detail, keys, dot }
     }
 }

@@ -275,7 +275,9 @@ impl ViewCtx<'_> {
         let text_w = rect.right() - col::TEXT_FROM_RIGHT - actions_w - x;
         let title_font = title_font(13.0, playing);
         if opts.artist {
-            row.two_lines(ui, x, text_w, (&tr.title, title_font, color), (tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted));
+            // Where it comes from leads the artist, while sources are mixed.
+            let artist = (tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted);
+            row.two_lines_from(ui, x, text_w, (&tr.title, title_font, color), artist, self.source_dot(&tr.id));
         } else {
             let title_w = row.line(ui, x, text_w, &tr.title, title_font, color);
             if hovered {

@@ -220,35 +220,37 @@ impl OndApp {
         });
     }
 
+    /// The switcher with several sources live: each source with its own
+    /// state, All sources, Add and Manage, then going offline or online for
+    /// every server at once. Hovering it lists what each source is doing.
     fn all_sources_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
+        use super::source_look::{Detail, describe};
         let settings = self.prefs.snapshot();
-        let states: Vec<_> =
-            settings.sources.iter().map(|e| self.session.get(e.id).map(|s| s.state(self.session.work_offline)).unwrap_or(SourceState::SignedOut)).collect();
-        let names: Vec<_> = settings.sources.iter().map(|e| e.name.clone().unwrap_or_else(|| default_name(e))).collect();
-        let sources: Vec<_> = settings
-            .sources
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let kind = crate::source::Kind::of(e.kind);
-                kit::SourceInfo { id: e.id, name: &names[i], kind: kind.name, icon: kind.icon, color: e.color, state: &states[i], detail: None }
-            })
-            .collect();
+        let described: Vec<_> = settings.sources.iter().map(|e| describe(e, self.session.get(e.id), self.session.work_offline, Detail::Short)).collect();
+        let sources: Vec<_> = described.iter().map(|d| d.info()).collect();
+        let tooltip = sources.iter().map(|s| format!("{} · {}", s.name, s.line())).collect::<Vec<_>>().join("\n");
         let switcher = kit::SourceSwitcher {
             sources: &sources,
             scope: &self.session.scope,
             look: kit::SwitcherLook::Line,
             add: !self.prefs.managed("sources"),
             manage: true,
-            tooltip: None,
+            tooltip: Some(&tooltip),
         };
-        let pick = kit::source_switcher::<()>(ui, &switcher, place, |_| None);
+        // Work Offline is one switch for every server; folders aren't touched by it.
+        let servers = described.iter().any(|d| d.kind.capabilities.network);
+        let offline = (servers && !self.prefs.managed("work_offline")).then_some(self.session.work_offline);
+        let pick = kit::source_switcher(ui, &switcher, place, |ui| {
+            let (label, on) = if offline? { ("Go online", false) } else { ("Go offline", true) };
+            menu_item(ui, label).then_some(on)
+        });
         let action = match pick {
             Some(kit::SourcePick::Source(account)) => Action::Scope(super::all_sources::ScopeAction::One(account)),
             Some(kit::SourcePick::All) => Action::Scope(super::all_sources::ScopeAction::All),
             Some(kit::SourcePick::Manage) => Action::OpenSettings(super::settings_page::Section::Sources),
             Some(kit::SourcePick::Add) => Action::Onboarding(kit::OnboardingEvent::AddAnother),
-            _ => return,
+            Some(kit::SourcePick::App(on)) => Action::Offline(super::OfflineAction::WorkOffline(on)),
+            None => return,
         };
         self.actions.push(action);
     }

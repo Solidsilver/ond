@@ -14,6 +14,7 @@ use library::Track;
 impl ViewCtx<'_> {
     pub(super) fn playlists_page(&mut self, ui: &mut Ui) {
         shell::kit::page_heading(ui, "Playlists", None);
+        self.scope_chips(ui);
         if self.data.playlists.is_empty() {
             crate::widgets::empty_state(ui, Icon::List, "No playlists", "Make a playlist from any song's menu.");
             return;

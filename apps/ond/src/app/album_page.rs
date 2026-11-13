@@ -265,6 +265,11 @@ impl ViewCtx<'_> {
         ui.spacing_mut().item_spacing.x = 0.0;
         let small = FontId::proportional(12.0);
         let mut sep = separator(t, 12.0);
+        // Where it comes from leads, while sources are mixed.
+        if let Some(mark) = super::source_look::mark_of(self.session, &self.ui.prefs.sources, &album.id) {
+            sep(ui);
+            shell::kit::source_label(ui, mark.color, &mark.name, small.clone(), t.muted);
+        }
         for g in album.all_genres() {
             sep(ui);
             if link(ui, g, small.clone(), t.muted).clicked() {

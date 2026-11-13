@@ -12,6 +12,8 @@
 //! - `onboarding`: the first-run sheet the login form is drawn in
 //! - `sources`: a folder of music added from the sheet, a source's folders,
 //!   the folder picker, removing a source ([`SourceAction`])
+//! - `source_look`: each source's name, colour and state as the switcher,
+//!   chips, dots and Settings show them, and when dots are drawn
 //! - `data`: the library as loaded, the sync's state, the search index, queue
 //!   actions waiting for tracks
 //! - `pins`: offline downloads ([`OfflineAction`])
@@ -102,6 +104,7 @@ mod seek;
 mod settings_page;
 mod sidebar;
 mod songs;
+mod source_look;
 mod table;
 mod toolbar;
 mod track_list;

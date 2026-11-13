@@ -1,6 +1,7 @@
 //! Sheets over the window: naming a playlist, confirming a delete or a sign-out, asking
-//! whether to keep the tracks you added, the keyboard shortcut list (⌘/) and
-//! settings (⌘,). One at a time; Esc or a click outside closes it.
+//! whether to keep the tracks you added, offering an Ond copy of a server
+//! playlist that can't hold another source's songs, the keyboard shortcut
+//! list (⌘/) and settings (⌘,). One at a time; Esc or a click outside closes it.
 
 use super::commands::PlaylistAction;
 use super::{Action, OndApp};
@@ -9,7 +10,7 @@ use crate::theme::{Tokens, semibold};
 use crate::widgets::{primary, secondary};
 use egui::{FontId, Key, Modifiers, vec2};
 use library::Track;
-use shell::kit::{DIALOG_W, ShortcutGroup, confirm, shortcuts_sheet};
+use shell::kit::{DIALOG_W, ShortcutGroup, ask, confirm, shortcuts_sheet};
 
 pub enum Overlay {
     SignOutSource {
@@ -75,6 +76,7 @@ impl OndApp {
         }
         // Experimental keys are listed only while their experiment is on.
         let visualizer = self.ui.prefs.experimental.visualizer;
+        let mixed_body = if matches!(self.ui.overlay, Some(Overlay::MixedPlaylist)) { self.mixed_playlist_body() } else { String::new() };
         let Some(overlay) = self.ui.overlay.as_mut() else { return };
         let id = egui::Id::unique("overlay");
         let frame = shell::kit::sheet_frame(ctx);
@@ -93,12 +95,7 @@ impl OndApp {
                     }
                 }
                 Overlay::MixedPlaylist => {
-                    if let Some(yes) = confirm(
-                        ui,
-                        "Make an Ond playlist instead?",
-                        "This playlist has songs from another source. Ond can keep a copy with songs from both.",
-                        "Make playlist",
-                    ) {
+                    if let Some(yes) = ask(ui, "Make an Ond playlist instead?", &mixed_body, "Make Ond playlist") {
                         done = Some(Some(Action::PlaylistEdit(PlaylistAction::AcceptMixed(yes))));
                     }
                 }
@@ -176,6 +173,10 @@ impl OndApp {
         });
         if modal.should_close() {
             done = Some(None);
+        }
+        // Closed without an answer, the offer is declined, so it's not left waiting.
+        if matches!(done, Some(None)) && matches!(self.ui.overlay, Some(Overlay::MixedPlaylist)) {
+            done = Some(Some(Action::PlaylistEdit(PlaylistAction::AcceptMixed(false))));
         }
         if let Some(action) = done {
             ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));

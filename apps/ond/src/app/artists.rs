@@ -32,6 +32,7 @@ impl ViewCtx<'_> {
     pub(super) fn artists_page(&mut self, ui: &mut Ui) {
         let Some(index) = &self.search.index else {
             self.heading(ui, "Artists", None);
+            self.scope_chips(ui);
             crate::widgets::empty_state(ui, Icon::Person, "Loading your library…", "");
             return;
         };
@@ -43,6 +44,7 @@ impl ViewCtx<'_> {
         if heading_bar(ui, "Artists", Some(artists.len().to_string()), Some(&mut view), sort, |s| s.label().into()) {
             self.ui.artist_desc = false;
         }
+        self.scope_chips(ui);
         if view != self.ui.prefs.artist_view {
             self.actions.push(Action::Prefs(PrefsAction::ArtistView(view)));
         }

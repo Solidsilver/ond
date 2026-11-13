@@ -307,31 +307,6 @@ impl OndApp {
         self.search.stale = true;
     }
 
-    pub(super) fn scope_chips(&mut self, ui: &mut egui::Ui) {
-        if self.session.accounts.len() < 2 || !self.session.scope.is_all() {
-            return;
-        }
-        let settings = self.prefs.snapshot();
-        let states: Vec<_> = settings
-            .sources
-            .iter()
-            .map(|e| self.session.get(e.id).map(|s| s.state(self.session.work_offline)).unwrap_or(accounts::SourceState::SignedOut))
-            .collect();
-        let names: Vec<_> = settings.sources.iter().map(|e| e.name.clone().unwrap_or_else(|| super::sidebar::default_name(e))).collect();
-        let sources: Vec<_> = settings
-            .sources
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let kind = crate::source::Kind::of(e.kind);
-                shell::kit::SourceInfo { id: e.id, name: &names[i], kind: kind.name, icon: kind.icon, color: e.color, state: &states[i], detail: None }
-            })
-            .collect();
-        if let Some(chip) = shell::kit::source_chips(ui, &sources, &self.session.scope) {
-            self.actions.push(Action::Prefs(super::PrefsAction::Scope(ScopeAction::Chip(chip))));
-        }
-    }
-
     pub(super) fn apply_scope(&mut self, action: ScopeAction) {
         let mut scope = self.session.scope.clone();
         match action {

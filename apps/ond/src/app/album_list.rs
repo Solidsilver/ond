@@ -86,7 +86,14 @@ impl ViewCtx<'_> {
             let cell = |ui: &Ui, r: Rect, text: &str| {
                 row.line(ui, r.left() + col::INSET, r.width() - 2.0 * col::INSET, text, FontId::proportional(13.0), t.muted);
             };
-            cell(ui, c.artist, album.artist.as_deref().unwrap_or(""));
+            match self.source_dot(&album.id) {
+                Some(color) => {
+                    let x = shell::kit::source_dot_lead(ui, c.artist.left() + col::INSET, row.cy(), color);
+                    let w = c.artist.right() - col::INSET - x;
+                    row.line(ui, x, w, album.artist.as_deref().unwrap_or(""), FontId::proportional(13.0), t.muted);
+                }
+                None => cell(ui, c.artist, album.artist.as_deref().unwrap_or("")),
+            }
             cell(ui, c.year, &album.year.map(|y| y.to_string()).unwrap_or_default());
             cell(ui, c.genre, &album.all_genres().join(", "));
             row.right_text(ui, c.songs.right() - col::INSET, album.song_count.to_string(), FontId::proportional(12.0), t.muted);
