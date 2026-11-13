@@ -139,7 +139,7 @@ pub struct AlbumV3 {
 impl AlbumV3 {
     /// Index key parts: artist, year, title, id. Groups an artist's albums
     /// chronologically; the id keeps same-named albums distinct.
-    pub(crate) fn sort_parts(&self) -> (String, i32, String) {
+    pub fn sort_parts(&self) -> (String, i32, String) {
         (fold(self.artist.as_deref().unwrap_or("")), self.year.unwrap_or(0), fold(self.sort.as_deref().unwrap_or(&self.name)))
     }
 

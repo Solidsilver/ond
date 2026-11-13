@@ -76,7 +76,13 @@ impl Data {
         let artists: Vec<_> = sources.iter().map(|d| (d.account, d.artists_version)).collect();
         let lists: Vec<_> = sources.iter().map(|d| (d.account, d.lists_version)).collect();
         if self.merged_album_versions != albums {
-            self.set_albums(sources.iter().flat_map(|d| d.albums.iter().cloned()).collect());
+            let mut merged: Vec<_> = sources.iter().flat_map(|d| d.albums.iter().cloned()).collect();
+            // Each source's albums come in its database's order (artist,
+            // year, title); merged, they're put back in that order together.
+            if sources.len() > 1 {
+                merged.sort_by_cached_key(|a| (a.sort_parts(), a.id.clone()));
+            }
+            self.set_albums(merged);
             self.newest = sources.iter().flat_map(|d| d.newest.iter().cloned()).collect();
         }
         if self.merged_track_versions != tracks {
@@ -670,6 +676,27 @@ pub(super) fn belongs_to(key: &ListKey, account: accounts::AccountId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_sources_albums_merge_in_artist_order_not_one_source_after_the_other() {
+        let source = |n: u32, albums: &[(&str, &str)]| {
+            let account: accounts::AccountId = format!("00000000-0000-4000-8000-{n:012x}").parse().unwrap();
+            let mut d = Data { account: Some(account), ..Default::default() };
+            d.set_albums(
+                albums
+                    .iter()
+                    .map(|(name, artist)| Album { artist: Some((*artist).into()), ..album(&accounts::ItemKey::new(account, *name).to_string(), name) })
+                    .collect(),
+            );
+            d
+        };
+        let server = source(1, &[("Moon Safari", "Air"), ("OK Computer", "Radiohead")]);
+        let folder = source(2, &[("Fingerlings", "Andrew Bird"), ("Kid A", "Radiohead")]);
+        let mut merged = Data::default();
+        merged.merge_sources(&[&server, &folder]);
+        let names: Vec<&str> = merged.albums.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Moon Safari", "Fingerlings", "Kid A", "OK Computer"]);
+    }
 
     fn album(id: &str, name: &str) -> Album {
         Album {
