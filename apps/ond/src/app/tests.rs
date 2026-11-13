@@ -1567,15 +1567,30 @@ fn missing_folder_sets_source_state_without_dropping_existing_albums() {
     assert!(before > 0);
     let missing = dir.path().join("unplugged-drive");
 
+    app.sync.albums = true;
+    app.sync.tracks = true;
+    app.sync.progress = Some(crate::sync::Progress { done: 0, total: 1, unit: crate::sync::Unit::Tracks });
     app.handle(Msg::Library(LibraryMsg::FolderMissing(vec![missing.clone()])));
 
     assert_eq!(app.session.folder_missing, vec![missing]);
+    assert!(!app.sync.albums && !app.sync.tracks && app.sync.progress.is_none());
+    assert!(app.ui.toasts.texts().is_empty());
     assert_eq!(app.data.albums.len(), before);
     assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
 
     app.handle(Msg::Library(LibraryMsg::FolderMissing(Vec::new())));
     assert!(app.session.folder_missing.is_empty());
     assert_eq!(app.server_state().source_state(), accounts::SourceState::Online);
+}
+
+#[test]
+fn a_scan_storage_failure_still_shows_its_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.handle(LibraryMsg::AlbumSyncDone(Err(crate::failure::Failure::Local("Couldn't save scanned library: disk is full".into()))));
+    assert!(app.ui.toasts.texts().contains(&"Couldn't save scanned library: disk is full"));
+    assert!(!app.sync.albums && !app.sync.tracks);
 }
 
 /// A folder of three tagged FLACs of one album, under `dir/music`.
@@ -1773,6 +1788,11 @@ fn a_missing_folder_keeps_its_albums_fails_plainly_and_clears_once_back() {
     assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
     assert_eq!(app.data.albums.len(), 1, "the albums stay");
     assert_eq!(app.data.tracks.all.len(), 3);
+    assert!(app.ui.toasts.texts().is_empty(), "missing folders are shown as source state");
+    app.apply(Action::SyncNow);
+    until(&mut app, |a| !a.sync.albums && !a.sync.tracks);
+    assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
+    assert!(app.ui.toasts.texts().is_empty(), "a manual rescan must stay quiet too");
 
     let album = app.data.albums[0].id.clone();
     app.apply(Action::Album(album, crate::player::QueueAction::Play { start: 0 }));

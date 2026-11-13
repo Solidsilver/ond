@@ -134,7 +134,8 @@ pub enum LibraryMsg {
     /// The album list sync finished (`Ok`: how many albums) or failed.
     AlbumSyncDone(Result<usize, Failure>),
     /// Configured local folders that were missing during the latest scan (empty
-    /// when every configured folder was present).
+    /// when every configured folder was present). A nonempty list also ends
+    /// the scan when no roots are available; it is source state, not an error.
     FolderMissing(Vec<std::path::PathBuf>),
     /// Files in the local folders that looked like audio but couldn't be
     /// read, on the latest scan.
@@ -1032,13 +1033,8 @@ impl Bridge {
                     this.send(LibraryMsg::AlbumSyncDone(Ok(0)));
                     this.send(LibraryMsg::TrackSyncDone(sync::Outcome::Cancelled));
                 }
-                Err(err @ crate::source::local::LocalSyncError::FolderMissing(_)) => {
-                    let missing = match &err {
-                        crate::source::local::LocalSyncError::FolderMissing(paths) => paths.clone(),
-                        _ => Vec::new(),
-                    };
-                    this.send(LibraryMsg::FolderMissing(missing));
-                    this.send(LibraryMsg::AlbumSyncDone(Err(err.into())));
+                Err(crate::source::local::LocalSyncError::FolderMissing(paths)) => {
+                    this.send(LibraryMsg::FolderMissing(paths));
                 }
                 Err(err) => {
                     this.send(LibraryMsg::AlbumSyncDone(Err(err.into())));
@@ -2079,8 +2075,8 @@ mod tests {
         std::fs::rename(&music, &away).unwrap();
         got.clear();
         bridge.sync_source(&source);
-        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AlbumSyncDone(Err(_))))));
-        assert!(got.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::FolderMissing(paths)) if paths == std::slice::from_ref(&music))));
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::FolderMissing(paths)) if paths == std::slice::from_ref(&music))));
+        assert!(!got.iter().any(|m| matches!(m, Msg::Error(_) | Msg::Library(LibraryMsg::AlbumSyncDone(Err(_))))));
         assert_eq!(rt.block_on(bridge.db(|l| l.albums())).unwrap().len(), 1);
     }
 }
