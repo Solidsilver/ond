@@ -16,7 +16,7 @@ use model::{PlaylistEntryV1, PlaylistV1, RatingV1, StarredV1};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 use scan::TrackMove;
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -336,29 +336,6 @@ impl OndStore {
     pub fn add_to_playlist(&self, id: &str, entries: &[ItemKey]) -> Result<bool> {
         self.update_playlist(id, |pl| {
             pl.entries.extend(entries.iter().map(entry_to_v1));
-            true
-        })
-    }
-
-    /// Removes entries at zero-based `indices` from an Ond playlist.
-    pub fn remove_from_playlist(&self, id: &str, indices: &[usize]) -> Result<bool> {
-        let to_drop: BTreeSet<usize> = indices.iter().copied().collect();
-        self.update_playlist(id, |pl| {
-            let before = pl.entries.len();
-            let mut idx = 0usize;
-            pl.entries.retain(|_| {
-                let keep = !to_drop.contains(&idx);
-                idx += 1;
-                keep
-            });
-            pl.entries.len() != before
-        })
-    }
-
-    /// Replaces the ordered track list of an Ond playlist (for reorder / restore).
-    pub fn replace_playlist_entries(&self, id: &str, entries: Vec<ItemKey>) -> Result<bool> {
-        self.update_playlist(id, |pl| {
-            pl.entries = entries.iter().map(entry_to_v1).collect();
             true
         })
     }

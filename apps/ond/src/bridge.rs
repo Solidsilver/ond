@@ -1175,12 +1175,6 @@ impl Bridge {
                             Err(e) => tracing::warn!("reloading ond.redb stars after scan: {e}"),
                         }
                     }
-                    if !source.capabilities().playlists {
-                        match this.read_ond_playlists(source.account()) {
-                            Ok(playlists) => this.send(LibraryMsg::Playlists(playlists)),
-                            Err(e) => tracing::warn!("reloading ond.redb playlists after scan: {e}"),
-                        }
-                    }
                     this.send(LibraryMsg::TrackSyncDone(sync::Outcome::Done { fetched: synced.rescanned, bulk: false }));
                 }
                 Err(crate::source::local::LocalSyncError::Cancelled) => {
@@ -1418,12 +1412,7 @@ impl Bridge {
             return;
         };
         if !source.capabilities().playlists {
-            self.rt.spawn_blocking(move || match this.read_ond_playlist_tracks(source.account(), &id) {
-                Ok(Some(tracks)) => this.send(LibraryMsg::PlaylistTracks { id, tracks, fresh: true }),
-                Ok(None) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(Failure::Local("Playlist not found".into())) }),
-                Err(e) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(e.context("Couldn't load the playlist")) }),
-            });
-            return;
+            return this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(Failure::Local("This source has no server playlists".into())) });
         }
         self.rt.spawn(async move {
             match source.playlist(&id).await {
@@ -1497,60 +1486,6 @@ impl Bridge {
             })
             .collect();
         Ok((Starred { songs, albums: raw.albums, artists }, ratings))
-    }
-
-    fn read_ond_playlists(&self, account: accounts::AccountId) -> Result<Vec<Playlist>, Failure> {
-        if self.account_tag.is_some() {
-            return Ok(Vec::new());
-        }
-        let lists = self.ond_store.playlists().map_err(|e| Failure::Local(e.to_string()))?;
-        let mut all_ids = Vec::new();
-        for pl in &lists {
-            for e in &pl.entries {
-                if e.account == account {
-                    all_ids.push(e.item.clone());
-                }
-            }
-        }
-        let by_id: HashMap<String, Track> = if all_ids.is_empty() {
-            HashMap::new()
-        } else {
-            self.library().tracks(&all_ids).map_err(|e| Failure::Local(e.to_string()))?.into_iter().map(|t| (t.id.clone(), t)).collect()
-        };
-        Ok(lists
-            .into_iter()
-            .map(|pl| {
-                let mut count = 0u32;
-                let mut duration = 0u32;
-                let mut cover_art = None;
-                for e in pl.entries.iter().filter(|e| e.account == account) {
-                    if let Some(t) = by_id.get(&e.item) {
-                        count += 1;
-                        duration += t.duration_secs.unwrap_or(0);
-                        if cover_art.is_none() {
-                            cover_art = t.cover_art.clone();
-                        }
-                    }
-                }
-                Playlist {
-                    id: if self.account_tag.is_some() { format!("ond:{}", pl.id) } else { pl.id },
-                    name: pl.name,
-                    song_count: count,
-                    duration,
-                    cover_art,
-                    owner: None,
-                }
-            })
-            .collect())
-    }
-
-    fn read_ond_playlist_tracks(&self, account: accounts::AccountId, id: &str) -> Result<Option<Vec<Track>>, Failure> {
-        let Some(pl) = self.ond_store.playlist(id).map_err(|e| Failure::Local(e.to_string()))? else {
-            return Ok(None);
-        };
-        let ids: Vec<String> = pl.entries.into_iter().filter(|e| e.account == account).map(|e| e.item).collect();
-        let tracks = self.library().tracks(&ids).map_err(|e| Failure::Local(e.to_string()))?;
-        Ok(Some(tracks))
     }
 
     /// Lyrics for one track: structured (synced where possible) first, then
@@ -1673,31 +1608,14 @@ impl Bridge {
     /// Makes a playlist of `song_ids`; the app opens it when it's there.
     pub fn create_playlist(&self, source: Option<Src>, name: String, song_ids: Vec<String>) {
         let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
-        if source.capabilities().playlists && song_ids.iter().any(|id| crate::source::identity::account(id).is_some_and(|a| a != source.account())) {
+        if !source.capabilities().playlists {
+            return self.send(Msg::Error(Failure::Local("This source has no server playlists".into())));
+        }
+        if song_ids.iter().any(|id| crate::source::identity::account(id).is_some_and(|a| a != source.account())) {
             return self.send(Msg::Error(Failure::Local("Songs from another source need an Ond playlist".into())));
         }
-        let song_ids: Vec<_> =
-            if source.capabilities().playlists { song_ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect() } else { song_ids };
+        let song_ids: Vec<_> = song_ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect();
         let this = self.scoped();
-        if !source.capabilities().playlists {
-            self.rt.spawn_blocking(move || {
-                let entries: Vec<accounts::ItemKey> = song_ids.iter().map(|id| crate::source::identity::key(source.account(), id)).collect();
-                match this.ond_store.create_playlist(&name, &entries) {
-                    Ok(created) => {
-                        match this.read_ond_playlists(source.account()) {
-                            Ok(p) => this.send(LibraryMsg::Playlists(p)),
-                            Err(e) => this.send(Msg::Error(e.context("Couldn't load playlists"))),
-                        }
-                        this.send(Msg::PlaylistCreated {
-                            id: if this.account_tag.is_some() { format!("ond:{}", created.id) } else { created.id },
-                            name: created.name,
-                        });
-                    }
-                    Err(e) => this.send(Msg::Error(Failure::Local(e.to_string()).context("Couldn't create the playlist"))),
-                }
-            });
-            return;
-        }
         self.rt.spawn(async move {
             match source.create_playlist(&name, &song_ids).await {
                 Ok((id, name)) => {
@@ -1713,55 +1631,21 @@ impl Bridge {
     /// also undoes the app's optimistic copy if the edit failed).
     pub fn edit_playlist(&self, source: Option<Src>, id: String, edit: PlaylistEdit) {
         let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
+        if !source.capabilities().playlists {
+            return self.send(Msg::Error(Failure::Local("This source has no server playlists".into())));
+        }
         let id = crate::source::identity::bare(&id).to_owned();
         let edit = match edit {
             PlaylistEdit::Add(ids) | PlaylistEdit::Replace(ids)
-                if source.capabilities().playlists && ids.iter().any(|id| crate::source::identity::account(id).is_some_and(|a| a != source.account())) =>
+                if ids.iter().any(|id| crate::source::identity::account(id).is_some_and(|a| a != source.account())) =>
             {
                 return self.send(Msg::Error(Failure::Local("Songs from another source need an Ond playlist".into())));
             }
-            PlaylistEdit::Add(ids) if source.capabilities().playlists => {
-                PlaylistEdit::Add(ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect())
-            }
-            PlaylistEdit::Replace(ids) if source.capabilities().playlists => {
-                PlaylistEdit::Replace(ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect())
-            }
+            PlaylistEdit::Add(ids) => PlaylistEdit::Add(ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect()),
+            PlaylistEdit::Replace(ids) => PlaylistEdit::Replace(ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect()),
             edit => edit,
         };
         let this = self.scoped();
-        if !source.capabilities().playlists {
-            self.rt.spawn_blocking(move || {
-                let account = source.account();
-                let res = match &edit {
-                    PlaylistEdit::Rename(name) => this.ond_store.rename_playlist(&id, name).map(|_| ()),
-                    PlaylistEdit::Add(ids) => {
-                        let entries: Vec<_> = ids.iter().map(|tid| crate::source::identity::key(account, tid)).collect();
-                        this.ond_store.add_to_playlist(&id, &entries).map(|_| ())
-                    }
-                    PlaylistEdit::Remove(indices) => this.ond_store.remove_from_playlist(&id, indices).map(|_| ()),
-                    PlaylistEdit::Replace(ids) => {
-                        let entries: Vec<_> = ids.iter().map(|tid| crate::source::identity::key(account, tid)).collect();
-                        this.ond_store.replace_playlist_entries(&id, entries).map(|_| ())
-                    }
-                    PlaylistEdit::Delete => this.ond_store.delete_playlist(&id).map(|_| ()),
-                };
-                if let Err(e) = res {
-                    this.send(Msg::Error(Failure::Local(e.to_string()).context("Couldn't change the playlist")));
-                }
-                match this.read_ond_playlists(account) {
-                    Ok(p) => this.send(LibraryMsg::Playlists(p)),
-                    Err(e) => this.send(Msg::Error(e.context("Couldn't load playlists"))),
-                }
-                if !matches!(edit, PlaylistEdit::Delete) {
-                    match this.read_ond_playlist_tracks(account, &id) {
-                        Ok(Some(tracks)) => this.send(LibraryMsg::PlaylistTracks { id, tracks, fresh: true }),
-                        Ok(None) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: None }),
-                        Err(e) => this.send(LibraryMsg::LoadFailed { key: ListKey::Playlist(id), error: Some(e.context("Couldn't load the playlist")) }),
-                    }
-                }
-            });
-            return;
-        }
         self.rt.spawn(async move {
             let result = source.edit_playlist(&id, &edit).await;
             if let Err(e) = result {
@@ -1777,13 +1661,7 @@ impl Bridge {
 
     async fn refresh_playlists(&self, source: &Src) {
         if !source.capabilities().playlists {
-            let me = self.clone();
-            let account = source.account();
-            match tokio::task::spawn_blocking(move || me.read_ond_playlists(account)).await {
-                Ok(Ok(p)) => self.send(LibraryMsg::Playlists(p)),
-                Ok(Err(e)) => self.send(Msg::Error(e.context("Couldn't load playlists"))),
-                Err(e) => self.send(Msg::Error(Failure::Local(e.to_string()).context("Couldn't load playlists"))),
-            }
+            self.send(LibraryMsg::Playlists(Vec::new()));
             return;
         }
         match source.playlists().await {
@@ -2531,6 +2409,20 @@ mod tests {
         std::fs::create_dir(music.join("album")).unwrap();
         std::fs::copy(music.join("seed.flac"), music.join("album").join("next.flac")).unwrap();
         until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 2)));
+    }
+
+    #[test]
+    fn a_source_bridge_cannot_create_or_edit_global_ond_playlists() {
+        let (_rt, bridge, rx) = rig(&[]);
+        let account = accounts::AccountId::new();
+        let source: Src = Arc::new(crate::source::local::LocalSource::new(account, Vec::new(), None));
+        bridge.create_playlist(Some(source.clone()), "Wrong path".into(), vec!["1".into()]);
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Error(Failure::Local(_))));
+        assert!(bridge.ond_store().playlists().unwrap().is_empty());
+        let playlist = bridge.ond_store().create_playlist("Owned by Ond", &[accounts::ItemKey::new(account, "1")]).unwrap();
+        bridge.edit_playlist(Some(source), format!("ond:{}", playlist.id), PlaylistEdit::Delete);
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Error(Failure::Local(_))));
+        assert!(bridge.ond_store().playlist(&playlist.id).unwrap().is_some());
     }
 
     #[test]

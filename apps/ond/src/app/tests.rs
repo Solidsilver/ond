@@ -1992,6 +1992,9 @@ fn an_ond_playlist_of_local_tracks_survives_a_rescan_that_moves_a_file_and_expor
     app.apply(Action::PlaylistEdit(PlaylistAction::Create { name: "Sunday spin".into(), tracks: vec![first.clone(), second.clone()] }));
     until(&mut app, |a| a.data.playlists.len() == 1);
     let playlist_id = app.data.playlists[0].id.clone();
+    assert!(playlist_id.starts_with("ond:"));
+    assert!(playlist_id.trim_start_matches("ond:").parse::<accounts::AccountId>().is_ok());
+    assert!(crate::source::identity::account(&playlist_id).is_none());
     until(&mut app, |a| a.data.playlist_tracks.get(&playlist_id).is_some_and(|ts| ts.len() == 2));
 
     let src = music.join("Bill Evans Trio").join("Portrait in Jazz").join("01 Song 1.flac");

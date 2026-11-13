@@ -68,8 +68,10 @@ fn playlists_support_create_rename_edit_reorder_delete_and_mixed_sources() {
     assert_eq!(store.playlist(&created.id).unwrap().unwrap().entries, [k1.clone(), k2.clone(), k3.clone()]);
 
     assert!(store.rename_playlist(&created.id, "Quiet Jazz").unwrap());
-    assert!(store.replace_playlist_entries(&created.id, vec![k3.clone(), k1.clone(), k2.clone()]).unwrap());
-    assert!(store.remove_from_playlist(&created.id, &[1, 99]).unwrap());
+    let before = vec![k1.clone(), k2.clone(), k3.clone()];
+    let reordered = vec![k3.clone(), k1.clone(), k2.clone()];
+    assert!(store.replace_playlist_entries_if_unchanged(&created.id, &before, reordered.clone()).unwrap());
+    assert!(store.replace_playlist_entries_if_unchanged(&created.id, &reordered, vec![k3.clone(), k2.clone()]).unwrap());
 
     let fetched = store.playlist(&created.id).unwrap().unwrap();
     assert_eq!(fetched.name, "Quiet Jazz");
