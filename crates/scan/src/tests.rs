@@ -403,3 +403,30 @@ fn two_roots_with_the_same_relative_file_both_appear_with_different_ids() {
     assert_eq!(again.reused, 2);
     assert_eq!(again.rescanned, 0);
 }
+
+#[test]
+fn missing_roots_are_reported_and_partial_scans_preserve_unmounted_roots() {
+    let tmp = TempDir::new().unwrap();
+    let root_present = tmp.path().join("present");
+    let root_unmounted = tmp.path().join("unmounted");
+    let root_unmounted_moved = tmp.path().join("unmounted-moved");
+
+    write_file(&root_present, "A/01.flac", &make_flac(&[("TITLE", "Present"), ("ARTIST", "Artist A"), ("ALBUM", "Album A")], None, 40));
+    write_file(&root_unmounted, "B/01.flac", &make_flac(&[("TITLE", "Mounted"), ("ARTIST", "Artist B"), ("ALBUM", "Album B")], None, 50));
+
+    let roots = vec![root_present.clone(), root_unmounted.clone()];
+    let cancel = AtomicBool::new(false);
+    let initial = scan_folders(&roots, &ScanIndex::default(), &cancel, |_| {});
+    assert!(initial.missing_roots.is_empty());
+    assert_eq!(initial.albums.len(), 2);
+
+    // Rename one root away and add a track in the remaining root.
+    std::fs::rename(&root_unmounted, &root_unmounted_moved).unwrap();
+    write_file(&root_present, "A/02.flac", &make_flac(&[("TITLE", "Present Two"), ("ARTIST", "Artist A"), ("ALBUM", "Album A")], None, 45));
+
+    let partial = scan_folders(&roots, &initial.index, &cancel, |_| {});
+    assert_eq!(partial.missing_roots, vec![root_unmounted]);
+    assert!(partial.moves.is_empty());
+    assert_eq!(partial.albums.len(), 2, "album from the missing root must be kept");
+    assert_eq!(partial.tracks.len(), 3, "tracks from the missing root must stay beside newly scanned tracks");
+}

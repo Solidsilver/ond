@@ -1555,3 +1555,25 @@ fn two_accounts_keep_separate_art_and_switching_removes_the_old_accounts_art() {
     testkit::wait_until("the previous account's art folder to be removed", || !one_dir.exists());
     assert!(two_file.is_file());
 }
+
+#[test]
+fn missing_folder_sets_source_state_without_dropping_existing_albums() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx, dir.path());
+    app.session.online = true;
+    app.session.connecting = false;
+    let before = app.data.albums.len();
+    assert!(before > 0);
+    let missing = dir.path().join("unplugged-drive");
+
+    app.handle(Msg::Library(LibraryMsg::FolderMissing(vec![missing.clone()])));
+
+    assert_eq!(app.session.folder_missing, vec![missing]);
+    assert_eq!(app.data.albums.len(), before);
+    assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
+
+    app.handle(Msg::Library(LibraryMsg::FolderMissing(Vec::new())));
+    assert!(app.session.folder_missing.is_empty());
+    assert_eq!(app.server_state().source_state(), accounts::SourceState::Online);
+}

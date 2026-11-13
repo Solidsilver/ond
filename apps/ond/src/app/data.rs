@@ -241,6 +241,9 @@ impl OndApp {
                 self.sync.label = "Sync failed".into();
                 self.show_failure_or_retry(e, Some(Action::SyncNow));
             }
+            LibraryMsg::FolderMissing(paths) => {
+                self.session.folder_missing = paths;
+            }
             LibraryMsg::LoadFailed { key, error } => {
                 // One that only waited for a complete listing plays what's stored.
                 if let Some(at) = self.pending.iter().position(|p| p.key == key && p.fresh) {

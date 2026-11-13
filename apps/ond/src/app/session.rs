@@ -50,6 +50,8 @@ pub struct Session {
     pub server_label: String,
     /// "navidrome 0.64.2", as the server reported it.
     pub server_info: String,
+    /// Local source folders missing or unreadable on the last scan.
+    pub folder_missing: Vec<std::path::PathBuf>,
 }
 
 impl Session {
@@ -139,6 +141,7 @@ impl OndApp {
         self.session.unreachable = false;
         self.session.connecting = false;
         self.session.sign_in = None;
+        self.session.folder_missing.clear();
         self.session.source = Some(source.clone());
         if settings.primary().is_some_and(|e| e.kind != crate::settings::SourceKind::Local) {
             self.prefs.set_login(settings.server(), settings.username(), source.account());
@@ -360,6 +363,7 @@ impl OndApp {
         self.session.unreachable = false;
         self.session.connecting = false;
         self.session.sign_in = None;
+        self.session.folder_missing.clear();
         // Whoever signs in next is online.
         if self.session.work_offline {
             self.session.work_offline = false;

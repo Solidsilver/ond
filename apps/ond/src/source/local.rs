@@ -36,8 +36,44 @@ pub struct LocalSync {
     pub skipped: usize,
     #[allow(dead_code)]
     pub skipped_paths: Vec<PathBuf>,
+    pub missing_roots: Vec<PathBuf>,
     pub moves: Vec<TrackMove>,
     pub stamp: String,
+}
+
+/// Typed failure from [`LocalSource::sync`] so callers can tell missing folders
+/// apart from user cancellation and database errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalSyncError {
+    Cancelled,
+    FolderMissing(Vec<PathBuf>),
+    Storage(String),
+}
+
+impl std::fmt::Display for LocalSyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Scan stopped"),
+            Self::FolderMissing(paths) => f.write_str(&format_missing_folders(paths)),
+            Self::Storage(msg) => write!(f, "Couldn't save scanned library: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for LocalSyncError {}
+
+impl From<LocalSyncError> for Failure {
+    fn from(err: LocalSyncError) -> Self {
+        Failure::Local(err.to_string())
+    }
+}
+
+fn format_missing_folders(paths: &[PathBuf]) -> String {
+    match paths {
+        [] => "Music folder not found".into(),
+        [only] => format!("Music folder not found: {}", only.display()),
+        many => format!("{} music folders not found ({})", many.len(), many[0].display()),
+    }
 }
 
 #[derive(Default)]
@@ -99,11 +135,19 @@ impl LocalSource {
     }
 
     /// Incrementally scans `folders` and updates `library` when anything changed.
-    pub fn sync(&self, library: &Library, cancel: &AtomicBool, mut on_progress: impl FnMut(ScanProgress)) -> Result<LocalSync, Failure> {
+    ///
+    /// When all configured folders are missing or unreadable, returns
+    /// [`LocalSyncError::FolderMissing`] without touching `library` or the saved
+    /// scan index. When only some folders are missing, cached albums from those
+    /// folders are kept and [`LocalSync::missing_roots`] lists the missing paths.
+    pub fn sync(&self, library: &Library, cancel: &AtomicBool, mut on_progress: impl FnMut(ScanProgress)) -> Result<LocalSync, LocalSyncError> {
         let prev = self.state.lock().unwrap_or_else(|e| e.into_inner()).index.clone();
         let result = scan::scan_folders(&self.folders, &prev, cancel, &mut on_progress);
         if result.cancelled {
-            return Err(Failure::Local("Scan stopped".into()));
+            return Err(LocalSyncError::Cancelled);
+        }
+        if !self.folders.is_empty() && result.missing_roots.len() >= self.folders.len() {
+            return Err(LocalSyncError::FolderMissing(result.missing_roots));
         }
 
         let artists: Vec<Artist> = result.artists.into_iter().map(convert_artist).collect();
@@ -143,7 +187,7 @@ impl LocalSource {
                 Ok(())
             })();
             if let Err(e) = write {
-                return Err(Failure::Local(format!("Couldn't save scanned library: {e}")));
+                return Err(LocalSyncError::Storage(e.to_string()));
             }
         }
 
@@ -163,6 +207,7 @@ impl LocalSource {
             rescanned: result.rescanned,
             skipped: result.skipped,
             skipped_paths: result.skipped_paths.clone(),
+            missing_roots: result.missing_roots,
             moves: result.moves.clone(),
             stamp,
         };
@@ -595,5 +640,17 @@ mod tests {
         assert_eq!(rescan.moves.len(), 1);
         assert_eq!(rescan.moves[0].from, old_id);
         assert_ne!(rescan.moves[0].to, old_id);
+
+        // Renaming the music folder away must preserve the library and scan index
+        // while reporting the missing root.
+        let away = dir.path().join("music-away");
+        let index_file = crate::storage::account_dir(&data, account).join("scan.json");
+        let index_before = fs::read(&index_file).unwrap();
+        fs::rename(&music, &away).unwrap();
+        let err = reopened.sync(&lib, &cancel, |_| {}).unwrap_err();
+        assert_eq!(err, LocalSyncError::FolderMissing(vec![music.clone()]));
+        assert_eq!(lib.albums().unwrap().len(), 1, "existing albums stay when folder is missing");
+        assert_eq!(lib.track_count().unwrap(), 2);
+        assert_eq!(fs::read(&index_file).unwrap(), index_before, "scan index stays untouched");
     }
 }

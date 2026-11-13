@@ -221,6 +221,9 @@ impl OndApp {
         if self.session.online && (self.sync.albums || self.sync.tracks) {
             return ServerState::Syncing { host, label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None };
         }
+        if !self.session.folder_missing.is_empty() {
+            return ServerState::FolderMissing { host };
+        }
         if self.session.online {
             return ServerState::Connected { host };
         }
@@ -259,12 +262,13 @@ impl OndApp {
                 None => "Connected".to_owned(),
             },
             ServerState::Offline { .. } => "Can't reach the server · retrying".to_owned(),
+            ServerState::FolderMissing { .. } => "Folder missing".to_owned(),
             ServerState::Connecting { .. } => "Connecting…".to_owned(),
             ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
             ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
         };
         let status_color = match state {
-            ServerState::Offline { .. } | ServerState::SignIn { .. } => t.warn,
+            ServerState::Offline { .. } | ServerState::FolderMissing { .. } | ServerState::SignIn { .. } => t.warn,
             _ => t.text,
         };
         info_row(ui, "Status", &status, status_color);
@@ -512,6 +516,10 @@ pub(super) enum ServerState {
     WorkingOffline {
         host: String,
     },
+    /// A configured local folder is missing or unreadable.
+    FolderMissing {
+        host: String,
+    },
 }
 
 impl ServerState {
@@ -520,6 +528,7 @@ impl ServerState {
             ServerState::Connected { host }
             | ServerState::Syncing { host, .. }
             | ServerState::Offline { host }
+            | ServerState::FolderMissing { host }
             | ServerState::Connecting { host }
             | ServerState::SignIn { host }
             | ServerState::WorkingOffline { host } => host,
@@ -532,6 +541,7 @@ impl ServerState {
             ServerState::Connected { host } => host,
             ServerState::Syncing { label, .. } => label,
             ServerState::Offline { .. } => "Can't reach the server",
+            ServerState::FolderMissing { .. } => "Folder missing",
             ServerState::Connecting { .. } => "Connecting…",
             ServerState::SignIn { .. } => "Sign in again",
             ServerState::WorkingOffline { .. } => "Offline mode",
@@ -543,6 +553,7 @@ impl ServerState {
             ServerState::Connected { host } => format!("Connected to {host}. Click for details."),
             ServerState::Syncing { detail, .. } => format!("{detail}\nYou can browse while it runs. New albums and tracks appear as they arrive."),
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
+            ServerState::FolderMissing { .. } => "A configured music folder is missing or unreadable. Existing albums stay in your library.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
             ServerState::SignIn { .. } => "The server didn't accept the saved login. Downloaded music still plays. Click to sign in.".into(),
             ServerState::WorkingOffline { .. } => {
@@ -557,6 +568,7 @@ impl ServerState {
             ServerState::Connected { .. } => SourceState::Online,
             ServerState::Syncing { fraction, .. } => SourceState::Syncing(*fraction),
             ServerState::Offline { .. } => SourceState::Offline(OfflineReason::Unreachable),
+            ServerState::FolderMissing { .. } => SourceState::FolderMissing,
             ServerState::Connecting { .. } => SourceState::Connecting,
             ServerState::SignIn { .. } => SourceState::SignedOut,
             ServerState::WorkingOffline { .. } => SourceState::Offline(OfflineReason::ByChoice),

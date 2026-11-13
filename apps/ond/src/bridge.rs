@@ -126,6 +126,9 @@ pub enum LibraryMsg {
     SyncProgress(usize),
     /// The album list sync finished (`Ok`: how many albums) or failed.
     AlbumSyncDone(Result<usize, Failure>),
+    /// Configured local folders that were missing during the latest scan (empty
+    /// when every configured folder was present).
+    FolderMissing(Vec<std::path::PathBuf>),
     /// An album's tracks. `fresh`: straight from the server's `getAlbum` (the
     /// complete list), not the local library (which may be partial).
     Tracks {
@@ -930,10 +933,12 @@ impl Bridge {
                         reused = synced.reused,
                         rescanned = synced.rescanned,
                         skipped = synced.skipped,
+                        missing = synced.missing_roots.len(),
                         moves = synced.moves.len(),
                         stamp = %synced.stamp,
                         "local scan complete"
                     );
+                    this.send(LibraryMsg::FolderMissing(synced.missing_roots));
                     this.send(LibraryMsg::Albums(synced.albums));
                     this.send(LibraryMsg::Artists(synced.artists));
                     this.send(LibraryMsg::Newest(synced.newest_ids));
@@ -941,12 +946,20 @@ impl Bridge {
                     this.load_all_tracks();
                     this.send(LibraryMsg::TrackSyncDone(sync::Outcome::Done { fetched: synced.rescanned, bulk: false }));
                 }
-                Err(_) if cancel.load(Ordering::Relaxed) => {
+                Err(crate::source::local::LocalSyncError::Cancelled) => {
                     this.send(LibraryMsg::AlbumSyncDone(Ok(0)));
                     this.send(LibraryMsg::TrackSyncDone(sync::Outcome::Cancelled));
                 }
-                Err(e) => {
-                    this.send(LibraryMsg::AlbumSyncDone(Err(e)));
+                Err(err @ crate::source::local::LocalSyncError::FolderMissing(_)) => {
+                    let missing = match &err {
+                        crate::source::local::LocalSyncError::FolderMissing(paths) => paths.clone(),
+                        _ => Vec::new(),
+                    };
+                    this.send(LibraryMsg::FolderMissing(missing));
+                    this.send(LibraryMsg::AlbumSyncDone(Err(err.into())));
+                }
+                Err(err) => {
+                    this.send(LibraryMsg::AlbumSyncDone(Err(err.into())));
                 }
             }
         });
@@ -1831,7 +1844,7 @@ mod tests {
         std::fs::write(music.join("track.wav"), &wav).unwrap();
 
         let (rt, bridge, rx) = rig(&[]);
-        let source: Src = Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![music], None));
+        let source: Src = Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![music.clone()], None));
         bridge.sync_source(&source);
         bridge.measure_latency(source.clone());
         bridge.fetch_starred(Some(source.clone()));
@@ -1846,5 +1859,15 @@ mod tests {
         assert!(got.iter().any(|m| matches!(m, Msg::Latency(None))));
         assert!(got.iter().any(|m| matches!(m, Msg::Starred { starred, .. } if starred.songs.is_empty())));
         assert!(!got.iter().any(|m| matches!(m, Msg::Error(_))));
+
+        // Renaming the folder away keeps the stored album in library.redb and
+        // reports FolderMissing.
+        let away = dir.path().join("music-away");
+        std::fs::rename(&music, &away).unwrap();
+        got.clear();
+        bridge.sync_source(&source);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AlbumSyncDone(Err(_))))));
+        assert!(got.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::FolderMissing(paths)) if paths == std::slice::from_ref(&music))));
+        assert_eq!(rt.block_on(bridge.db(|l| l.albums())).unwrap().len(), 1);
     }
 }

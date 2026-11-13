@@ -180,6 +180,10 @@ struct IndexedFile {
     stamp: Option<FileStamp>,
     probed: ProbedFile,
     mb_recording_key: Option<String>,
+    #[serde(default)]
+    folder_cover_rel: Option<String>,
+    #[serde(default)]
+    folder_cover_path: Option<PathBuf>,
 }
 
 /// Persisted state from a previous scan for incremental rescans, cover
@@ -251,6 +255,8 @@ pub struct ScanResult {
     pub reused: usize,
     /// Files opened and probed in this scan.
     pub rescanned: usize,
+    /// Roots that did not exist or could not be read during this pass.
+    pub missing_roots: Vec<PathBuf>,
     /// Whether scanning stopped early via the cancel flag.
     pub cancelled: bool,
     pub index: ScanIndex,
@@ -287,9 +293,13 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut seen_rel: HashSet<(usize, String)> = HashSet::new();
     let mut folder_covers: HashMap<PathBuf, Option<(String, PathBuf)>> = HashMap::new();
+    let mut missing_roots: Vec<PathBuf> = Vec::new();
+    let mut missing_root_indices: HashSet<usize> = HashSet::new();
 
     for (root_index, root) in roots.iter().enumerate() {
-        if !root.exists() {
+        if !root.is_dir() || std::fs::read_dir(root).is_err() {
+            missing_roots.push(root.clone());
+            missing_root_indices.insert(root_index);
             continue;
         }
         let mut walker = WalkDir::new(root).follow_links(true).sort_by_file_name().into_iter();
@@ -369,6 +379,10 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
             },
         };
 
+        let (folder_cover_rel, folder_cover_path) = match folder_covers.get(&c.folder_key).and_then(|v| v.as_ref()) {
+            Some((r, p)) => (Some(r.clone()), Some(p.clone())),
+            None => (None, None),
+        };
         let mb_rec = probed.mb_recording_id.clone().or_else(|| probed.mb_track_id.clone());
         new_entries.insert(
             key,
@@ -379,13 +393,11 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
                 stamp: c.stamp,
                 probed: probed.clone(),
                 mb_recording_key: mb_rec,
+                folder_cover_rel: folder_cover_rel.clone(),
+                folder_cover_path: folder_cover_path.clone(),
             },
         );
 
-        let (folder_cover_rel, folder_cover_path) = match folder_covers.get(&c.folder_key).and_then(|v| v.as_ref()) {
-            Some((r, p)) => (Some(r.clone()), Some(p.clone())),
-            None => (None, None),
-        };
         raw_files.push(RawScannedFile {
             id,
             root_index: c.root_index,
@@ -402,6 +414,35 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
 
     on_progress(ScanProgress { scanned: total, total, skipped: skipped_paths.len(), current: None });
 
+    // Preserve tracks and covers cached in `prev` for any root that was unavailable
+    // so an unplugged drive never wipes its portion of the library or triggers moves.
+    if prev_valid && !cancelled && !missing_root_indices.is_empty() {
+        for (key, old) in &prev.files {
+            if !missing_root_indices.contains(&old.root_index) {
+                continue;
+            }
+            new_entries.insert(key.clone(), old.clone());
+            let path = prev
+                .track_path(&old.id)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| roots.get(old.root_index).map(|r| r.join(&old.rel_path)).unwrap_or_else(|| PathBuf::from(&old.rel_path)));
+            let rel_folder = Path::new(&old.rel_path).parent().map(normalize_rel).unwrap_or_default();
+            reused += 1;
+            raw_files.push(RawScannedFile {
+                id: old.id.clone(),
+                root_index: old.root_index,
+                path,
+                rel_path: old.rel_path.clone(),
+                rel_folder,
+                folder_cover_rel: old.folder_cover_rel.clone(),
+                folder_cover_path: old.folder_cover_path.clone(),
+                size: old.stamp.map_or(0, |s| s.size),
+                modified_secs: old.stamp.map(|s| s.mtime_secs),
+                probed: old.probed.clone(),
+            });
+        }
+    }
+
     let moves = if prev_valid && !cancelled { detect_moves(&prev.files, &new_entries) } else { Vec::new() };
     let grouped = group::group(raw_files);
 
@@ -417,6 +458,7 @@ pub fn scan_folders(roots: &[PathBuf], prev: &ScanIndex, cancel: &AtomicBool, mu
         moves,
         reused,
         rescanned,
+        missing_roots,
         cancelled,
         index,
     }
