@@ -1502,7 +1502,7 @@ fn two_accounts_keep_separate_art_and_switching_removes_the_old_accounts_art() {
     let png = crate::test_tracks::png;
     let (red, blue) = (png([220, 30, 30, 255]), png([30, 30, 220, 255]));
     let source_for = |account: accounts::AccountId, bytes: Vec<u8>| -> crate::source::Src {
-        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities { scrobbling: false, downloads: false, lyrics: false, playlists: false });
+        let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities::none());
         fake.account = account;
         fake.covers.lock().unwrap().insert("al-1".into(), bytes);
         Arc::new(fake)

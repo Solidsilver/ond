@@ -48,7 +48,7 @@ impl MusicSource for SubsonicSource {
         self.account
     }
     fn capabilities(&self) -> Capabilities {
-        Capabilities { scrobbling: true, downloads: true, lyrics: true, playlists: true }
+        Capabilities::subsonic()
     }
 
     fn paged(&self) -> Option<Arc<dyn Fetch>> {

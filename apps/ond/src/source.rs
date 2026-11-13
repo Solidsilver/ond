@@ -2,6 +2,7 @@
 //! ask the source, never which kind it is. Subsonic is the only kind until
 //! local folders arrive (docs/sources.md); paged servers share sync.rs.
 
+pub mod local;
 pub mod subsonic;
 
 use crate::bridge::PlaylistEdit;
@@ -28,10 +29,32 @@ pub type Src = Arc<dyn MusicSource>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Capabilities {
-    pub scrobbling: bool,
-    pub downloads: bool,
-    pub lyrics: bool,
+    pub stars: bool,
+    pub ratings: bool,
     pub playlists: bool,
+    pub lyrics: bool,
+    pub scrobbling: bool,
+    pub transcoding: bool,
+    pub downloads: bool,
+    pub network: bool,
+}
+
+impl Capabilities {
+    /// All features supported by a standard OpenSubsonic server.
+    pub const fn subsonic() -> Self {
+        Self { stars: true, ratings: true, playlists: true, lyrics: true, scrobbling: true, transcoding: true, downloads: true, network: true }
+    }
+
+    /// Capabilities of a local-folder source.
+    pub const fn local() -> Self {
+        Self { stars: false, ratings: false, playlists: false, lyrics: true, scrobbling: false, transcoding: false, downloads: false, network: false }
+    }
+
+    /// Empty capabilities for minimal test fakes.
+    #[cfg(test)]
+    pub const fn none() -> Self {
+        Self { stars: false, ratings: false, playlists: false, lyrics: false, scrobbling: false, transcoding: false, downloads: false, network: false }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,6 +80,10 @@ pub trait MusicSource: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// A folder won't page through a server's library.
     fn paged(&self) -> Option<Arc<dyn Fetch>>;
+    /// Local source handle when this source scans local folders.
+    fn local(&self) -> Option<&local::LocalSource> {
+        None
+    }
     /// The same friendly server description and failures used at sign-in.
     async fn ping(&self) -> Result<String, Failure>;
     async fn album(&self, id: &str) -> Result<(AlbumTracks, UserMeta), Failure>;

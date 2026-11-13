@@ -758,10 +758,10 @@ impl OndApp {
             }
             Action::SyncNow => {
                 if let Some(source) = self.session.live()
-                    && let Some(paged) = source.paged()
+                    && (source.paged().is_some() || source.local().is_some())
                     && self.sync.begin()
                 {
-                    self.bridge.sync_albums(paged);
+                    self.bridge.sync_source(source);
                 }
             }
             Action::StopSync => self.bridge.cancel_sync(),

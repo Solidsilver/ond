@@ -83,7 +83,7 @@ impl player::Sources for AppSources<'_> {
         if source.account() != key.account {
             return None;
         }
-        let transcode = self.output.transcode();
+        let transcode = source.capabilities().transcoding.then(|| self.output.transcode()).flatten();
         let (url, suffix) = source.stream(track, transcode.as_ref());
         Some(TrackSource { id: stream_name(key).into_owned(), url, suffix, replay_gain, album_context, transcode, token })
     }

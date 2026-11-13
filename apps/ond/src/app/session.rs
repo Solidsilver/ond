@@ -109,9 +109,7 @@ impl OndApp {
         // has this one replace it.
         self.sync.label = "syncing…".into();
         self.sync.albums = true;
-        if let Some(paged) = source.paged() {
-            self.bridge.sync_albums(paged);
-        }
+        self.bridge.sync_source(&source);
         self.bridge.fetch_home(source.clone());
         self.art.set_source(source.clone());
         self.now_playing.set_source(source.clone());
@@ -124,8 +122,12 @@ impl OndApp {
                 as crate::analyze::StreamUrl
         }));
         self.bridge.fetch_starred(Some(source.clone()));
-        self.diagnostics.latency_asked();
-        self.bridge.measure_latency(source.clone());
+        if source.capabilities().network {
+            self.diagnostics.latency_asked();
+            self.bridge.measure_latency(source.clone());
+        } else {
+            self.diagnostics.set_latency(None);
+        }
         self.session.unreachable = false;
         self.session.connecting = false;
         self.session.sign_in = None;
@@ -236,6 +238,7 @@ impl OndApp {
         if self.session.online
             && self.diagnostics.latency_stale()
             && let Some(source) = self.session.source.clone()
+            && source.capabilities().network
         {
             self.diagnostics.latency_asked();
             self.bridge.measure_latency(source);
@@ -246,6 +249,7 @@ impl OndApp {
     pub(super) fn probe(&self) {
         if self.session.online
             && let (Some(source), Some(settings)) = (&self.session.source, &self.session.settings)
+            && source.capabilities().network
         {
             self.bridge.probe(source.clone(), settings.clone());
         }
