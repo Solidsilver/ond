@@ -621,9 +621,17 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         }
     }
     h.set_size(egui::vec2(FULL[0], FULL[1]));
-    // Settings › Sources with three accounts, then with one signed out and
-    // the one in view offline, its row's menu open, and the question before
-    // removing one.
+    // Settings › Sources with the account in view syncing; with three
+    // accounts, then with one signed out and the one in view offline, its
+    // row's menu open; and the question before removing one.
+    scene(h, s, "settings-sources-syncing", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app.sync.running = true;
+        app.sync.applied = 40;
+        app.apply(Action::OpenSettings(super::settings_page::Tab::Sources));
+        app
+    });
     fn sources(ctx: &egui::Context, dir: &std::path::Path, trouble: bool) -> RedeApp {
         let mut app = app(ctx, dir, BOOKS.len());
         playing(&mut app, false);

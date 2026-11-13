@@ -15,9 +15,11 @@
 //! with its menu (rename, colour, Sync now for the one in view, Sign out…,
 //! Remove…; see `manage`), and Add source…, which opens the first-run
 //! sheet as the switcher's does; the switcher's Manage sources… opens it.
-//! Account says who's signed in where, and has Sync now and Sign out… (the
-//! account menu keeps them too, a click from the sidebar). About is
-//! Ond's About without the updates, which Rede doesn't look for yet.
+//! Under them, the account in view has its own group: its full address,
+//! who's signed in and how, and the last sync with Sync now (the account
+//! menu keeps Sync now and Sign out… too, a click from the sidebar). Its
+//! state is on its row. About is Ond's About without the updates, which
+//! Rede doesn't look for yet.
 
 use super::manage::SourceAction;
 use super::view_ctx::ViewCtx;
@@ -34,12 +36,11 @@ pub enum Tab {
     Downloads,
     Appearance,
     Sources,
-    Account,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [Tab::Playback, Tab::Downloads, Tab::Appearance, Tab::Sources, Tab::Account, Tab::About];
+    pub const ALL: [Tab; 5] = [Tab::Playback, Tab::Downloads, Tab::Appearance, Tab::Sources, Tab::About];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -47,7 +48,6 @@ impl Tab {
             Tab::Downloads => "Downloads",
             Tab::Appearance => "Appearance",
             Tab::Sources => "Sources",
-            Tab::Account => "Account",
             Tab::About => "About",
         }
     }
@@ -73,7 +73,6 @@ impl ViewCtx<'_> {
             Tab::Downloads => self.download_settings(ui),
             Tab::Appearance => self.appearance_settings(ui),
             Tab::Sources => self.source_settings(ui),
-            Tab::Account => self.account_settings(ui),
             Tab::About => about(ui),
         }
     }
@@ -166,7 +165,8 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Every account, each with its menu, then Add source….
+    /// Every account, each with its menu, then Add source…, then the
+    /// account in view.
     fn source_settings(&mut self, ui: &mut Ui) {
         let can_sync = self.session.source.is_some() && !self.sync.running;
         kit::group(ui, "Sources", |ui| {
@@ -203,27 +203,21 @@ impl ViewCtx<'_> {
                 self.actions.push(Action::AddSource);
             }
         });
+        ui.add_space(20.0);
+        self.account_settings(ui);
     }
 
-    /// The server and its state, the last sync, and who's signed in.
+    /// The account in view, under its name: its full address, who's signed
+    /// in and how, and the last sync with Sync now. Its state is on its
+    /// row, and Sign out… in the row's menu.
     fn account_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let Some(account) = self.session.account.clone() else {
-            kit::group(ui, "Server", |ui| kit::setting(ui, "Not signed in", "", |_| ()));
-            return;
-        };
+        let Some(account) = self.session.account.clone() else { return };
         let state = self.account_state();
-        kit::group(ui, "Server", |ui| {
+        kit::group(ui, account.display_name(), |ui| {
             kit::setting(ui, "Address", "", |ui| value(ui, &account.server, t.muted));
-            let (status, color) = match &state {
-                super::sidebar::AccountState::Connected => ("Connected", t.ok),
-                super::sidebar::AccountState::Syncing(_) => ("Connected", t.ok),
-                super::sidebar::AccountState::Connecting => ("Connecting…", t.muted),
-                super::sidebar::AccountState::Offline => ("Can't reach the server", t.warn),
-            };
-            kit::setting(ui, "Status", "", |ui| value(ui, status, color));
-        });
-        kit::group(ui, "Library", |ui| {
+            let how = account.sign_in.map(|m| format!("With {}.", m.phrase())).unwrap_or_default();
+            kit::setting(ui, "Signed in as", &how, |ui| value(ui, &account.username, t.muted));
             let label = match (&state, self.sync.synced) {
                 (super::sidebar::AccountState::Syncing(line), _) => line.clone(),
                 (_, Some(at)) => format!("Synced {}", crate::fmt::ago(at)),
@@ -234,15 +228,6 @@ impl ViewCtx<'_> {
             kit::setting(ui, &label, hint, |ui| {
                 if ui.add_enabled_ui(can_sync, |ui| kit::secondary(ui, "Sync now")).inner.clicked() {
                     self.actions.push(Action::SyncNow);
-                }
-            });
-        });
-        kit::group(ui, "Signed in", |ui| {
-            let how = account.sign_in.map(|m| format!("Signed in with {}. ", m.phrase())).unwrap_or_default();
-            let hint = format!("{how}Signing out forgets the saved sign-in. Your books and your place in each stay on this computer.");
-            kit::setting(ui, &account.username, &hint, |ui| {
-                if kit::secondary_danger(ui, "Sign out…").clicked() {
-                    self.actions.push(Action::AskSignOut);
                 }
             });
         });

@@ -1356,12 +1356,12 @@ fn the_sidebar_gear_opens_settings_in_the_column_and_the_rail() {
     let mut h = window(dir.path(), BOOKS.len());
     for collapsed in [false, true] {
         app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
-        app_mut(&mut h).ui.settings = super::settings_page::Tab::Account;
+        app_mut(&mut h).ui.settings = super::settings_page::Tab::Sources;
         h.run_steps(3);
         h.get_by_label(&shell::keys::shown("Settings (⌘,)")).click();
         h.run_steps(3);
         assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
-        assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account, "on the tab it was last on");
+        assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Sources, "on the tab it was last on");
         h.key_press(egui::Key::Escape);
         h.run_steps(2);
         assert_eq!(app_mut(&mut h).sheet, None);
@@ -1374,17 +1374,32 @@ fn settings_lists_its_tabs_and_each_names_its_controls() {
     let mut h = window(dir.path(), BOOKS.len());
     app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::Playback));
     h.run_steps(3);
-    h.get_by_label("Account").click();
+    assert!(h.query_by_label("Account").is_none(), "the account is on Sources");
+    app_mut(&mut h).sync.synced = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(12 * 60));
+    h.get_by_label("Sources").click();
     h.run_steps(3);
-    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Sources);
     h.check_accessibility();
-    for label in ["https://books.example.com", "sam", "Sync now", "Sign out…"] {
+    // The account in view: its address, who's signed in and how, and the
+    // last sync.
+    for label in ["https://books.example.com", "Signed in as", "With a password.", "Synced 12 minutes ago", "Sync now"] {
         h.get_by_label(label);
     }
-    h.get_by_label_contains("Signed in with a password.");
-    // Sign out… asks first; Cancel goes back to Settings.
-    h.get_by_label("Sign out…").click();
-    h.run_steps(3);
+    app_mut(&mut h).sync.running = true;
+    app_mut(&mut h).sync.applied = 40;
+    h.run_steps(2);
+    h.get_by_label("Syncing… 40 books");
+    app_mut(&mut h).sync.running = false;
+    h.run_steps(2);
+    // Sign out… is in its row's menu, and asks first; Cancel goes back to
+    // Settings.
+    let sign_out = |h: &mut egui_kittest::Harness<'_, _>| {
+        h.get_by_label("sam, Audiobookshelf, books.example.com").click();
+        h.run_steps(3);
+        h.get_by_label("Sign out…").click();
+        h.run_steps(3);
+    };
+    sign_out(&mut h);
     assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::SignOut { from_settings: true }));
     h.get_by_label("Sign out of books.example.com?");
     h.check_accessibility();
@@ -1392,8 +1407,7 @@ fn settings_lists_its_tabs_and_each_names_its_controls() {
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings), "Settings is back");
     assert!(app_mut(&mut h).login.is_none());
-    h.get_by_label("Sign out…").click();
-    h.run_steps(3);
+    sign_out(&mut h);
     h.get_by_label("Sign out").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).login.is_some(), "signed out, to the sign-in screen");
@@ -2075,7 +2089,7 @@ fn the_sources_tab_lists_every_account_and_its_menu_renames_recolours_and_remove
     // The other: its colour, then Remove….
     h.get_by_label("alex, Audiobookshelf, office.example.com").click();
     h.run_steps(3);
-    assert!(h.query_by_label("Sync now").is_none(), "only the account in view syncs");
+    assert_eq!(h.query_all_by_label("Sync now").count(), 1, "only the account in view syncs: its button, not this menu");
     assert!(h.query_by_label("Rename").is_some());
     h.get_by_label("Violet").click();
     h.run_steps(3);
