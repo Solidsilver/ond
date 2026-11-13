@@ -1672,6 +1672,23 @@ fn a_rescan_finds_a_song_added_to_the_folder() {
 }
 
 #[test]
+fn a_watched_folder_adds_and_removes_a_copied_song_without_rescan() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    let album = music.join("Bill Evans Trio").join("Portrait in Jazz");
+    let copied = album.join("copied.flac");
+    std::fs::copy(album.join("01 Song 1.flac"), &copied).unwrap();
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+    std::fs::remove_file(copied).unwrap();
+    until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.sync.tracks);
+    assert!(app.ui.toasts.texts().is_empty());
+}
+
+#[test]
 fn a_missing_folder_keeps_its_albums_fails_plainly_and_clears_once_back() {
     let dir = tempfile::tempdir().unwrap();
     let music = music_folder(dir.path());
@@ -1682,7 +1699,6 @@ fn a_missing_folder_keeps_its_albums_fails_plainly_and_clears_once_back() {
 
     let away = dir.path().join("unplugged");
     std::fs::rename(&music, &away).unwrap();
-    app.apply(Action::SyncNow);
     until(&mut app, |a| !a.session.folder_missing.is_empty() && !a.sync.albums && !a.sync.tracks);
     assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
     assert_eq!(app.data.albums.len(), 1, "the albums stay");
@@ -1693,7 +1709,6 @@ fn a_missing_folder_keeps_its_albums_fails_plainly_and_clears_once_back() {
     until(&mut app, |a| a.ui.toasts.texts().iter().any(|t| t.contains("isn't there")));
 
     std::fs::rename(&away, &music).unwrap();
-    app.apply(Action::SyncNow);
     until(&mut app, |a| a.session.folder_missing.is_empty() && !a.sync.tracks && !a.sync.albums);
     assert_eq!(app.server_state().source_state(), accounts::SourceState::Online);
 }

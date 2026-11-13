@@ -1,6 +1,8 @@
 //! Background work for the UI. Every function here returns immediately; results
 //! arrive later as [`Msg`]s, each followed by a repaint request.
 
+mod local_watch;
+
 use crate::failure::Failure;
 use crate::favorites::{SavedStarred, StarKind, Starred, UserMeta};
 use crate::settings::Settings;
@@ -344,6 +346,10 @@ pub struct Bridge {
     scoped_library: Option<Arc<Library>>,
     /// Stops the running track sync, if any.
     sync_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// One event-driven scan queue for the live local source.
+    local_watch: Arc<Mutex<Option<local_watch::LocalWatch>>>,
+    /// Keeps a cancelled blocking scan from overlapping its replacement.
+    local_scan: Arc<tokio::sync::Mutex<()>>,
     /// Bumped by each album sync: an older pass still running (from before a
     /// reconnect) stops storing and reporting once a newer one starts.
     album_pass: Arc<AtomicU64>,
@@ -385,6 +391,8 @@ impl Bridge {
             libraries: Arc::new(Mutex::new(LibrarySlot { library, account: None, data: None, art_cache: None, analyses: std::sync::Weak::new() })),
             scoped_library: None,
             sync_cancel: Arc::default(),
+            local_watch: Arc::default(),
+            local_scan: Arc::default(),
             album_pass: Arc::default(),
             reload_owed: Arc::default(),
             reconnecting: Arc::default(),
@@ -426,6 +434,7 @@ impl Bridge {
         self.session.fetch_add(1, Ordering::AcqRel);
         self.reconnecting.store(false, Ordering::Relaxed);
         self.cancel_sync();
+        self.local_watch.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 
     fn live(&self, session: u64) -> bool {
@@ -955,9 +964,24 @@ impl Bridge {
         }
     }
 
-    /// Scans `source`'s local folders incrementally into the library database,
-    /// reporting progress and reloading albums/artists/tracks when done.
+    /// Requests an incremental rescan, starting this session's native folder
+    /// watch on the first call. Requests during a scan coalesce into one more.
     pub fn sync_local(&self, source: Src) {
+        if !self.current() || source.local().is_none() {
+            return;
+        }
+        let this = self.scoped();
+        let mut watch = self.local_watch.lock().unwrap_or_else(|e| e.into_inner());
+        if watch.as_ref().is_some_and(|w| w.rescan(&source)) {
+            return;
+        }
+        self.cancel_sync();
+        *watch = Some(local_watch::LocalWatch::start(this, source));
+    }
+
+    /// One pass, awaited by the local scan queue before it accepts another.
+    async fn scan_local(&self, source: Src) {
+        let serial = self.local_scan.clone().lock_owned().await;
         if !self.current() {
             return;
         }
@@ -967,9 +991,11 @@ impl Bridge {
             old.store(true, Ordering::Relaxed);
         }
         let this = self.scoped();
-        self.rt.spawn_blocking(move || {
+        let work = self.rt.spawn_blocking(move || {
+            let _serial = serial;
             let Some(local) = source.local() else { return };
             let live = || this.current() && this.album_pass.load(Ordering::Acquire) == pass && this.is_current(&cancel);
+            this.send(LibraryMsg::SyncProgress(0));
             let mut last = Instant::now() - Duration::from_secs(1);
             let outcome = local.sync(&this.library(), &cancel, |p| {
                 if (p.scanned == p.total || last.elapsed() >= Duration::from_millis(100)) && live() {
@@ -1019,6 +1045,7 @@ impl Bridge {
                 }
             }
         });
+        let _ = work.await;
     }
 
     /// Pages through every album on the server into the local db. Replaces a
@@ -1875,6 +1902,136 @@ mod tests {
         );
         assert_eq!(sign_in(proxy_page("502 Bad Gateway", "502 Bad Gateway")), "The server answered with an error (502 Bad Gateway).");
         assert_eq!(sign_in(proxy_page("503 Service Unavailable", "Service Unavailable")), "The server answered with an error (503 Service Unavailable).");
+    }
+
+    /// Keep collecting through another debounce window: a rescan caused by
+    /// the scan's own reads, or by a duplicated native event, is observable.
+    fn watch_settles(rt: &tokio::runtime::Runtime, rx: &Receiver<Msg>, got: &mut Vec<Msg>) {
+        let quiet = testkit::Deadline::within(Duration::from_secs(4));
+        until(rt, rx, got, |_| quiet.passed());
+    }
+
+    fn scan_count(messages: &[Msg]) -> usize {
+        messages.iter().filter(|m| matches!(m, Msg::Library(LibraryMsg::SyncProgress(0)))).count()
+    }
+
+    fn watched_folder(music: &std::path::Path) -> Src {
+        Arc::new(crate::source::local::LocalSource::new(accounts::AccountId::new(), vec![music.to_owned()], None))
+    }
+
+    fn seed_folder(music: &std::path::Path) {
+        std::fs::create_dir_all(music).unwrap();
+        std::fs::write(music.join("seed.flac"), crate::test_tracks::flac(&[], None)).unwrap();
+    }
+
+    #[test]
+    fn fifty_files_in_a_watched_folder_cause_one_incremental_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        seed_folder(&music);
+        let (rt, bridge, rx) = rig(&[]);
+        bridge.sync_source(&watched_folder(&music));
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 1)));
+        watch_settles(&rt, &rx, &mut got);
+        assert_eq!(scan_count(&got), 1, "the startup scan must not trigger itself");
+        got.clear();
+        for n in 0..50 {
+            std::fs::copy(music.join("seed.flac"), music.join(format!("song-{n}.flac"))).unwrap();
+        }
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 51)));
+        watch_settles(&rt, &rx, &mut got);
+        assert_eq!(scan_count(&got), 1, "the whole burst is one scan");
+    }
+
+    #[test]
+    fn replacing_a_root_during_the_debounce_keeps_its_subfolders_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        seed_folder(&music);
+        let (rt, bridge, rx) = rig(&[]);
+        bridge.sync_source(&watched_folder(&music));
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 1)));
+        got.clear();
+        std::fs::rename(&music, dir.path().join("old-music")).unwrap();
+        seed_folder(&music);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 1)));
+        std::fs::create_dir(music.join("album")).unwrap();
+        std::fs::copy(music.join("seed.flac"), music.join("album").join("next.flac")).unwrap();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 2)));
+    }
+
+    #[test]
+    fn rescan_requests_during_a_scan_coalesce_without_cancelling_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        seed_folder(&music);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let first = Arc::new(AtomicBool::new(true));
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let notify: Notify = {
+            let gate = gate.clone();
+            Arc::new(move || {
+                if first.swap(false, Ordering::Relaxed) {
+                    let deadline = testkit::Deadline::new();
+                    let mut open = gate.0.lock().unwrap();
+                    while !*open {
+                        assert!(!deadline.passed(), "scan was never released");
+                        open = gate.1.wait_timeout(open, deadline.left()).unwrap().0;
+                    }
+                }
+            })
+        };
+        let bridge = Bridge::new(rt.handle().clone(), tx, notify, Arc::new(Library::in_memory().unwrap()));
+        let source = watched_folder(&music);
+        bridge.sync_source(&source);
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| scan_count(m) == 1);
+        for _ in 0..50 {
+            bridge.sync_source(&source);
+        }
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        until(&rt, &rx, &mut got, |m| m.iter().filter(|m| matches!(m, Msg::Library(LibraryMsg::TrackSyncDone(_)))).count() == 2);
+        watch_settles(&rt, &rx, &mut got);
+        assert_eq!(scan_count(&got), 2, "one current scan and one follow-up");
+        assert!(!got.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::TrackSyncDone(sync::Outcome::Cancelled)))));
+    }
+
+    #[test]
+    fn ending_a_local_session_stops_watching_its_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        seed_folder(&music);
+        let (rt, bridge, rx) = rig(&[]);
+        bridge.sync_source(&watched_folder(&music));
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 1)));
+        bridge.end_session();
+        got.clear();
+        std::fs::copy(music.join("seed.flac"), music.join("new.flac")).unwrap();
+        watch_settles(&rt, &rx, &mut got);
+        assert_eq!(scan_count(&got), 0);
+        assert_eq!(rt.block_on(bridge.db(|l| l.track_count())).unwrap(), 1);
+    }
+
+    #[test]
+    fn an_initially_missing_folder_is_scanned_when_its_ancestors_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("drive").join("music");
+        let (rt, bridge, rx) = rig(&[]);
+        bridge.sync_source(&watched_folder(&music));
+        let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::FolderMissing(paths)) if !paths.is_empty())));
+        seed_folder(&music);
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 1)));
+        assert!(got.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::FolderMissing(paths)) if paths.is_empty())));
+        // Once the root returns, its recursive watch must cover new subfolders.
+        std::fs::create_dir(music.join("album")).unwrap();
+        std::fs::copy(music.join("seed.flac"), music.join("album").join("next.flac")).unwrap();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 2)));
     }
 
     #[test]

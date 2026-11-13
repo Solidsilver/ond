@@ -14,6 +14,7 @@
 mod group;
 mod lyrics;
 mod probe;
+pub mod watch;
 
 pub use lyrics::{TimedLine, TrackLyrics};
 
