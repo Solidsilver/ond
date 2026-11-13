@@ -31,6 +31,8 @@
 //! - `sheets`: the keyboard shortcuts, Settings and the sign-out question,
 //!   over the window
 //! - `settings_page`: Settings' tabs and what's on them (⌘,)
+//! - `manage`: what the Sources tab does to an account (rename, recolour,
+//!   sign out, remove)
 //! - `panel`: the chapters column at the right
 //! - `ui_state`: the notice line, the toasts, the trail, and what a frame
 //!   reads
@@ -70,6 +72,7 @@ mod downloads;
 mod downloads_page;
 mod home;
 mod library;
+mod manage;
 mod nav;
 mod onboarding;
 mod palette;
@@ -172,6 +175,8 @@ pub enum Action {
     /// List the libraries and write what changed. A sync already running
     /// isn't started twice.
     SyncNow,
+    /// A change to one account from Settings' Sources tab.
+    Source(manage::SourceAction),
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
     PlayBook(String),
@@ -547,6 +552,7 @@ impl RedeApp {
                 self.add_source();
             }
             Action::SyncNow => self.sync_now(),
+            Action::Source(a) => self.source_action(a),
             Action::Prefs(a) => self.apply_prefs(a),
             Action::DownloadBook(key) => self.download_book(key),
             Action::RemoveDownload(key) => self.remove_download(&key),
@@ -598,7 +604,15 @@ impl RedeApp {
             }
             Action::CloseSheet => {
                 // A No to signing out asked from Settings goes back there.
-                let back = matches!(self.sheet, Some(sheets::Sheet::SignOut { from_settings: true } | sheets::Sheet::RemoveDownloads));
+                let back = matches!(
+                    self.sheet,
+                    Some(
+                        sheets::Sheet::SignOut { from_settings: true }
+                            | sheets::Sheet::RemoveDownloads
+                            | sheets::Sheet::SignOutOf(_)
+                            | sheets::Sheet::RemoveSource(_)
+                    )
+                );
                 self.sheet = back.then_some(sheets::Sheet::Settings);
             }
             Action::OpenPalette => {

@@ -1030,3 +1030,120 @@ fn an_old_settings_file_with_one_account_opens_on_it() {
     assert_eq!(active.color, accounts::SourceColor::default());
     assert_eq!(app.books.all().iter().map(|b| b.title.as_str()).collect::<Vec<_>>(), ["Legacy Account Book"]);
 }
+
+/// Two accounts signed in through fakes, the second in view.
+fn two_accounts(dir: &std::path::Path, tokens: std::sync::Arc<MemoryTokens>) -> (RedeApp, [testkit::JsonFake; 2], [accounts::AccountId; 2]) {
+    let ctx = egui::Context::default();
+    let server_a = abs_fake("sam", "book-a", "Book From A", Default::default());
+    let server_b = abs_fake("alex", "book-b", "Book From B", Default::default());
+    let mut app = RedeApp::build_with_store(&ctx, paths(dir), tokens).unwrap();
+    sign_in_via_form(&mut app, server_a.base(), "sam");
+    let id_a = app.session.account.as_ref().unwrap().id;
+    sign_in_via_form(&mut app, server_b.base(), "alex");
+    let id_b = app.session.account.as_ref().unwrap().id;
+    (app, [server_a, server_b], [id_a, id_b])
+}
+
+/// Where `id`'s shelf lives on disk.
+fn shelf_of(dir: &std::path::Path, id: accounts::AccountId) -> std::path::PathBuf {
+    paths(dir).shelves.join(format!("{id}.redb"))
+}
+
+#[test]
+fn removing_an_account_not_in_view_deletes_its_shelf_and_sign_in_and_leaves_the_one_in_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = std::sync::Arc::new(MemoryTokens::default());
+    let (mut app, _servers, [id_a, id_b]) = two_accounts(dir.path(), tokens.clone());
+    let shelf_a = shelf_of(dir.path(), id_a);
+    assert!(shelf_a.is_file() && tokens.0.lock().unwrap().contains_key(&id_a));
+    let session = app.bridge.session();
+
+    app.apply(Action::Source(manage::SourceAction::AskRemove(id_a)));
+    assert_eq!(app.sheet, Some(sheets::Sheet::RemoveSource(id_a)), "it asks first");
+    app.apply(Action::Source(manage::SourceAction::Remove(id_a)));
+    assert_eq!(app.sheet, Some(sheets::Sheet::Settings), "and goes back to Settings");
+
+    assert_eq!(app.prefs.get(|s| s.accounts.iter().map(|a| a.id).collect::<Vec<_>>()), [id_b]);
+    assert_eq!(app.bridge.session(), session, "the account in view carries on");
+    assert!(app.session.signed_in() && app.session.account.as_ref().unwrap().id == id_b);
+    testkit::wait_until("A's shelf and sign-in to go", || !shelf_a.exists() && !tokens.0.lock().unwrap().contains_key(&id_a));
+    assert!(shelf_of(dir.path(), id_b).is_file(), "B's shelf stays");
+}
+
+#[test]
+fn removing_the_account_in_view_opens_the_next_and_drops_what_the_old_one_had_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = std::sync::Arc::new(MemoryTokens::default());
+    let (mut app, _servers, [id_a, id_b]) = two_accounts(dir.path(), tokens.clone());
+    let shelf_b = shelf_of(dir.path(), id_b);
+    let session_b = app.bridge.session();
+
+    app.apply(Action::Source(manage::SourceAction::Remove(id_b)));
+    assert_ne!(app.bridge.session(), session_b, "B's session ended");
+    app.handle(Msg::Library { session: session_b, event: crate::bridge::LibraryMsg::Books(vec![summaries()[1].clone()]) });
+    app.handle(Msg::Error { session: session_b, error: crate::failure::Failure::Server("late error from B".into()) });
+    assert_eq!(app.books.len(), 0);
+    assert!(app.ui.notice.is_none());
+
+    pump(&mut app, |app| app.session.signed_in() && app.sync.synced.is_some());
+    assert_eq!(app.session.account.as_ref().unwrap().id, id_a);
+    assert_eq!(app.books.all().iter().map(|b| b.title.as_str()).collect::<Vec<_>>(), ["Book From A"]);
+    assert_eq!(app.prefs.get(|s| (s.accounts.len(), s.scope.clone())), (1, accounts::Scope::only(id_a)));
+    testkit::wait_until("B's shelf and sign-in to go", || !shelf_b.exists() && !tokens.0.lock().unwrap().contains_key(&id_b));
+}
+
+#[test]
+fn removing_the_last_account_opens_the_first_run_sheet() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let tokens = std::sync::Arc::new(MemoryTokens::default());
+    let server = abs_fake("sam", "book-a", "Book From A", Default::default());
+    let mut app = RedeApp::build_with_store(&ctx, paths(dir.path()), tokens.clone()).unwrap();
+    sign_in_via_form(&mut app, server.base(), "sam");
+    let id = app.session.account.as_ref().unwrap().id;
+    let shelf = shelf_of(dir.path(), id);
+    app.sheet = Some(sheets::Sheet::Settings);
+
+    app.apply(Action::Source(manage::SourceAction::Remove(id)));
+    assert!(app.prefs.get(|s| s.accounts.is_empty()));
+    assert!(app.signing_in() && app.onboarding.is_some(), "the first-run sheet");
+    assert!(app.login.as_ref().is_some_and(|f| f.server.is_empty() && f.account.is_none()), "on a blank form");
+    assert_eq!(app.sheet, None);
+    assert!(!app.session.signed_in());
+    testkit::wait_until("the shelf and sign-in to go", || !shelf.exists() && tokens.0.lock().unwrap().is_empty());
+    frame(&ctx, &mut app);
+}
+
+#[test]
+fn signing_out_of_an_account_not_in_view_forgets_only_its_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = std::sync::Arc::new(MemoryTokens::default());
+    let (mut app, _servers, [id_a, id_b]) = two_accounts(dir.path(), tokens.clone());
+    let session = app.bridge.session();
+    app.apply(Action::Source(manage::SourceAction::AskSignOut(id_a)));
+    assert_eq!(app.sheet, Some(sheets::Sheet::SignOutOf(id_a)));
+    app.apply(Action::Source(manage::SourceAction::SignOut(id_a)));
+    assert_eq!(app.sheet, Some(sheets::Sheet::Settings));
+    testkit::wait_until("A's sign-in to go", || !tokens.0.lock().unwrap().contains_key(&id_a));
+    assert!(tokens.0.lock().unwrap().contains_key(&id_b), "B's stays");
+    assert_eq!(app.prefs.get(|s| s.accounts.iter().map(|a| (a.id, a.signed_out)).collect::<Vec<_>>()), [(id_a, true), (id_b, false)]);
+    assert_eq!(app.bridge.session(), session);
+    assert!(app.session.signed_in());
+    assert!(shelf_of(dir.path(), id_a).is_file(), "its books stay on this computer");
+}
+
+#[test]
+fn renaming_and_recolouring_an_account_saves_it_and_shows_it_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = std::sync::Arc::new(MemoryTokens::default());
+    let (mut app, _servers, [id_a, id_b]) = two_accounts(dir.path(), tokens);
+    app.apply(Action::Source(manage::SourceAction::Rename(id_b, "Office".into())));
+    app.apply(Action::Source(manage::SourceAction::Color(id_b, accounts::SourceColor::new(6))));
+    app.apply(Action::Source(manage::SourceAction::Rename(id_a, "Home".into())));
+    let live = app.session.account.as_ref().unwrap();
+    assert_eq!((live.display_name(), live.color), ("Office", accounts::SourceColor::new(6)), "the account in view, at once");
+    let saved = app.prefs.get(|s| s.accounts.iter().map(|a| (a.display_name().to_owned(), a.color)).collect::<Vec<_>>());
+    assert_eq!(saved, [("Home".to_owned(), accounts::SourceColor::new(0)), ("Office".to_owned(), accounts::SourceColor::new(6))]);
+    let shown: Vec<String> = app.view().source_entries().into_iter().map(|e| e.name).collect();
+    assert_eq!(shown, ["Home", "Office"]);
+}

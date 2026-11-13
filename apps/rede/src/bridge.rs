@@ -830,21 +830,28 @@ impl Bridge {
         }
     }
 
-    /// Removes an inactive account's keyring entry, shelf and downloaded files.
-    #[allow(dead_code)] // Exercised by tests; wired to the Sources tab in a later milestone.
+    /// Removes an account's keyring entry, shelf and downloaded files. An
+    /// account that was in view is removed once its listening worker has
+    /// flushed and let its shelf go, and after its downloads have closed
+    /// (the deletion waits behind them in the downloads' queue).
     pub fn purge_account(&self, account: Account) {
         self.keeper.forget(account.clone());
         let this = self.clone();
         self.rt.spawn(async move {
             this.wait_finishing().await;
             let paths = this.paths.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            this.download_job(move || {
                 if let Err(e) = paths.purge_account(&account) {
                     tracing::warn!("removing account files: {e}");
                 }
-            })
-            .await;
+            });
         });
+    }
+
+    /// Forgets an account's saved sign-in, for one not in view: nothing of
+    /// its runs to stop.
+    pub fn forget_tokens(&self, account: Account) {
+        self.keeper.forget(account);
     }
 
     fn open_account_shelf(&self, path: &std::path::Path) -> Result<Arc<Shelf>, String> {

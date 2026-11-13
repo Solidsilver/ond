@@ -2035,3 +2035,63 @@ fn switching_accounts_from_the_sidebar_shows_signed_out_rows_and_activates_the_p
     assert_eq!(form.username, "alex");
     assert_eq!(form.server, "https://two.example.com");
 }
+
+/// A second account on file, signed in but not in view.
+fn second_account(app: &mut RedeApp) -> accounts::AccountId {
+    let other = crate::settings::Account { color: accounts::SourceColor::new(3), ..crate::settings::Account::new("https://office.example.com", "alex") };
+    let id = other.id;
+    app.prefs.edit(move |s| s.accounts.push(other));
+    id
+}
+
+/// Manage sources… opens Settings on Sources, which lists every account;
+/// a row's menu renames and recolours it in place, and Remove… asks
+/// first, saying what goes, before the account is gone.
+#[test]
+fn the_sources_tab_lists_every_account_and_its_menu_renames_recolours_and_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    let alex = second_account(app_mut(&mut h));
+    h.run_steps(2);
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("Manage sources…").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Sources);
+    h.check_accessibility();
+    h.get_by_label("Add source…");
+
+    // The account in view: rename it in place.
+    h.get_by_label("sam, Audiobookshelf, books.example.com").click();
+    h.run_steps(3);
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.get_by_label("Source name").type_text("Home");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.account_by_id(account().id).map(|a| a.display_name().to_owned())), Some("Home".into()));
+    // The other: its colour, then Remove….
+    h.get_by_label("alex, Audiobookshelf, office.example.com").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Sync now").is_none(), "only the account in view syncs");
+    assert!(h.query_by_label("Rename").is_some());
+    h.get_by_label("Violet").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.account_by_id(alex).map(|a| a.color)), Some(accounts::SourceColor::new(4)));
+    h.get_by_label("alex, Audiobookshelf, office.example.com").click();
+    h.run_steps(3);
+    h.get_by_label("Remove…").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::RemoveSource(alex)));
+    h.get_by_label("Remove alex?");
+    h.get_by_label_contains("Its downloads and its library on this computer are deleted");
+    h.check_accessibility();
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings), "back on the tab");
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.accounts.iter().map(|a| a.id).collect::<Vec<_>>()), [account().id]);
+    assert!(h.query_by_label_contains("alex").is_none());
+    assert!(app_mut(&mut h).session.signed_in(), "the account in view carries on");
+}

@@ -1,7 +1,8 @@
 //! The sheets over the window, one at a time, as Ond's: the keyboard
 //! shortcuts (⌘/), with its title and a × at the top; Settings (⌘,), the
 //! kit's window with Rede's tabs (see `settings_page`); and the questions
-//! before signing out and before removing every download. Esc or a click outside closes each.
+//! before signing out, before removing an account, and before removing
+//! every download. Esc or a click outside closes each.
 
 use super::settings_page::Tab;
 use super::view_ctx::ViewCtx;
@@ -22,6 +23,12 @@ pub enum Sheet {
     /// Remove every download? Asked from Settings, where either answer goes
     /// back.
     RemoveDownloads,
+    /// Sign out of an account that isn't in view? Asked from the Sources
+    /// tab, where either answer goes back.
+    SignOutOf(accounts::AccountId),
+    /// Remove an account, and what this computer keeps of it? Asked from
+    /// the Sources tab.
+    RemoveSource(accounts::AccountId),
 }
 
 /// A group of shortcuts: its name, and each row's description and keys.
@@ -80,6 +87,8 @@ impl RedeApp {
                 Sheet::Settings => false,
                 Sheet::SignOut { .. } => view.sign_out_sheet(ui),
                 Sheet::RemoveDownloads => view.remove_downloads_sheet(ui),
+                Sheet::SignOutOf(id) => view.sign_out_of_sheet(ui, id),
+                Sheet::RemoveSource(id) => view.remove_source_sheet(ui, id),
             };
             if close {
                 view.actions.push(Action::CloseSheet);
@@ -116,6 +125,39 @@ impl ViewCtx<'_> {
         match kit::confirm(ui, &title, body, "Sign out") {
             Some(true) => {
                 self.actions.push(Action::SignOut);
+                false
+            }
+            Some(false) => true,
+            None => false,
+        }
+    }
+
+    /// Sign out of an account that isn't in view? Its Cancel goes back to
+    /// Settings.
+    fn sign_out_of_sheet(&mut self, ui: &mut Ui, id: accounts::AccountId) -> bool {
+        let Some(account) = self.accounts.iter().find(|a| a.id == id) else { return true };
+        let title = format!("Sign out of {}?", super::sidebar::host(&account.server));
+        let body = "Rede forgets the sign-in. Its books and your place in each stay on this computer.";
+        match kit::confirm(ui, &title, body, "Sign out") {
+            Some(true) => {
+                self.actions.push(super::manage::SourceAction::SignOut(id).into());
+                false
+            }
+            Some(false) => true,
+            None => false,
+        }
+    }
+
+    /// Remove an account? Says what goes with it. Its Cancel goes back to
+    /// Settings.
+    fn remove_source_sheet(&mut self, ui: &mut Ui, id: accounts::AccountId) -> bool {
+        let Some(account) = self.accounts.iter().find(|a| a.id == id) else { return true };
+        let title = format!("Remove {}?", account.display_name());
+        let body = "Its downloads and its library on this computer are deleted, and Rede forgets the sign-in. \
+                    The server keeps your books and your place in each, apart from any listening this computer hasn't sent yet.";
+        match kit::confirm(ui, &title, body, "Remove") {
+            Some(true) => {
+                self.actions.push(super::manage::SourceAction::Remove(id).into());
                 false
             }
             Some(false) => true,

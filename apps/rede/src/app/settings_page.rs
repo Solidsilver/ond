@@ -11,10 +11,15 @@
 //! Playback holds the preferences that used to be a sheet: the skips, the
 //! rewinds, the sleep timer's length, and the two speech switches. The speed
 //! isn't here: the one saved is the one playing, and the Playback popover
-//! sets it. Account says who's signed in where, and has Sync now and Sign
-//! out… (the account menu keeps them too, a click from the sidebar). About is
+//! sets it. Sources lists every account with the kit's source rows, each
+//! with its menu (rename, colour, Sync now for the one in view, Sign out…,
+//! Remove…; see `manage`), and Add source…, which opens the first-run
+//! sheet as the switcher's does; the switcher's Manage sources… opens it.
+//! Account says who's signed in where, and has Sync now and Sign out… (the
+//! account menu keeps them too, a click from the sidebar). About is
 //! Ond's About without the updates, which Rede doesn't look for yet.
 
+use super::manage::SourceAction;
 use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction};
 use egui::{FontId, Ui};
@@ -28,18 +33,20 @@ pub enum Tab {
     Playback,
     Downloads,
     Appearance,
+    Sources,
     Account,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Playback, Tab::Downloads, Tab::Appearance, Tab::Account, Tab::About];
+    pub const ALL: [Tab; 6] = [Tab::Playback, Tab::Downloads, Tab::Appearance, Tab::Sources, Tab::Account, Tab::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Playback => "Playback",
             Tab::Downloads => "Downloads",
             Tab::Appearance => "Appearance",
+            Tab::Sources => "Sources",
             Tab::Account => "Account",
             Tab::About => "About",
         }
@@ -65,6 +72,7 @@ impl ViewCtx<'_> {
             Tab::Playback => self.playback_settings(ui),
             Tab::Downloads => self.download_settings(ui),
             Tab::Appearance => self.appearance_settings(ui),
+            Tab::Sources => self.source_settings(ui),
             Tab::Account => self.account_settings(ui),
             Tab::About => about(ui),
         }
@@ -154,6 +162,45 @@ impl ViewCtx<'_> {
             let hint = "⌘+ and ⌘− also zoom; ⌘0 goes back to 100%.";
             if kit::setting(ui, "Zoom", hint, |ui| kit::stepper(ui, &mut zoom, &shell::zoom::STEPS, "zoom", shell::zoom::label)) {
                 self.actions.push(Action::Prefs(PrefsAction::Zoom(zoom)));
+            }
+        });
+    }
+
+    /// Every account, each with its menu, then Add source….
+    fn source_settings(&mut self, ui: &mut Ui) {
+        let can_sync = self.session.source.is_some() && !self.sync.running;
+        kit::group(ui, "Sources", |ui| {
+            let entries = self.source_entries();
+            if entries.is_empty() {
+                kit::setting(ui, "Not signed in", "", |_| ());
+            }
+            for entry in &entries {
+                let menu = kit::SourceRowMenu {
+                    rename: true,
+                    color: true,
+                    sync: (entry.live && can_sync).then_some("Sync now"),
+                    sign_out: !entry.signed_out,
+                    remove: true,
+                };
+                let id = entry.id;
+                let action = match kit::source_row(ui, &kit::SourceRow { source: entry.info(), menu, locked: None }) {
+                    Some(kit::SourceRowEvent::Rename(name)) => SourceAction::Rename(id, name).into(),
+                    Some(kit::SourceRowEvent::Color(color)) => SourceAction::Color(id, color).into(),
+                    Some(kit::SourceRowEvent::Sync) => Action::SyncNow,
+                    Some(kit::SourceRowEvent::SignOut) if entry.live => Action::AskSignOut,
+                    Some(kit::SourceRowEvent::SignOut) => SourceAction::AskSignOut(id).into(),
+                    Some(kit::SourceRowEvent::Remove) => SourceAction::AskRemove(id).into(),
+                    None => continue,
+                };
+                self.actions.push(action);
+            }
+        });
+        // Another account is added beside the one in view, so only once
+        // it's in.
+        let hint = "Sign in to another Audiobookshelf account. Rede shows one at a time; the switcher at the foot of the sidebar moves between them.";
+        kit::setting(ui, "Add a source", hint, |ui| {
+            if ui.add_enabled_ui(self.session.signed_in(), |ui| kit::secondary(ui, "Add source…")).inner.clicked() {
+                self.actions.push(Action::AddSource);
             }
         });
     }

@@ -109,7 +109,7 @@ impl RedeApp {
                 .iter()
                 .map(|a| {
                     let state = if Some(a.id) == live || !a.signed_out { SourceState::Online } else { SourceState::SignedOut };
-                    (a.id, a.username.clone(), a.color, state)
+                    (a.id, a.display_name().to_owned(), a.color, state)
                 })
                 .collect()
         })

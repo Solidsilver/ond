@@ -303,55 +303,77 @@ impl ViewCtx<'_> {
         }
     }
 
+    /// The account in view: the session's, else the one the scope names,
+    /// else the first.
+    pub(super) fn active_account(&self) -> Option<crate::settings::Account> {
+        self.session
+            .account
+            .clone()
+            .or_else(|| self.scope.single().and_then(|id| self.accounts.iter().find(|a| a.id == id).cloned()))
+            .or_else(|| self.accounts.first().cloned())
+    }
+
+    /// Every account as the switcher and Settings' Sources tab list it: the
+    /// one in view at its live state with that state's line, the others
+    /// signed out or not, under their server's host.
+    pub(super) fn source_entries(&self) -> Vec<SourceEntry> {
+        let Some(account) = self.active_account() else { return Vec::new() };
+        let state = self.account_state();
+        let line = state.line(host(&account.server));
+        let live = || SourceEntry {
+            id: account.id,
+            name: account.display_name().to_owned(),
+            color: account.color,
+            state: state.source_state(),
+            detail: line.clone(),
+            live: true,
+            signed_out: false,
+        };
+        let mut entries: Vec<SourceEntry> = self
+            .accounts
+            .iter()
+            .map(|saved| {
+                if saved.id == account.id {
+                    live()
+                } else {
+                    SourceEntry {
+                        id: saved.id,
+                        name: saved.display_name().to_owned(),
+                        color: saved.color,
+                        state: if saved.signed_out { SourceState::SignedOut } else { SourceState::Online },
+                        detail: host(&saved.server).to_owned(),
+                        live: false,
+                        signed_out: saved.signed_out,
+                    }
+                }
+            })
+            .collect();
+        if !entries.iter().any(|e| e.id == account.id) {
+            entries.push(live());
+        }
+        entries
+    }
+
     /// The account at the foot of the column, through the kit's source
     /// switcher: who, and the server's state, in the column (`Some` width)
     /// or the rail. Click for its menu.
     fn account_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
         let t = Tokens::of(ui);
-        let active = self
-            .session
-            .account
-            .clone()
-            .or_else(|| self.scope.single().and_then(|id| self.accounts.iter().find(|a| a.id == id).cloned()))
-            .or_else(|| self.accounts.first().cloned());
-        let Some(account) = active else {
+        let Some(account) = self.active_account() else {
             if matches!(place, kit::SwitcherPlace::Foot { .. }) {
                 ui.label(egui::RichText::new("Not signed in").size(12.0).color(t.muted));
             }
             return;
         };
         let state = self.account_state();
-        let active_host = host(&account.server);
-        let (line, tooltip, active_source_state) = (state.line(active_host), state.tooltip(active_host), state.source_state());
-        let mut entries: Vec<(accounts::AccountId, String, accounts::SourceColor, SourceState, String)> = Vec::with_capacity(self.accounts.len().max(1));
-        for saved in self.accounts {
-            if saved.id == account.id {
-                entries.push((account.id, account.username.clone(), account.color, active_source_state, line.clone()));
-            } else {
-                let row_state = if saved.signed_out { SourceState::SignedOut } else { SourceState::Online };
-                entries.push((saved.id, saved.username.clone(), saved.color, row_state, host(&saved.server).to_owned()));
-            }
-        }
-        if !entries.iter().any(|(id, ..)| *id == account.id) {
-            entries.push((account.id, account.username.clone(), account.color, active_source_state, line));
-        }
-        let sources: Vec<_> = entries
-            .iter()
-            .map(|(id, name, color, source_state, detail)| kit::SourceInfo {
-                id: *id,
-                name,
-                kind: "Audiobookshelf",
-                icon: Icon::Headphones,
-                color: *color,
-                state: source_state,
-                detail: Some(detail),
-            })
-            .collect();
+        let tooltip = state.tooltip(host(&account.server));
+        let entries = self.source_entries();
+        let sources: Vec<_> = entries.iter().map(SourceEntry::info).collect();
         let scope = Scope::only(account.id);
         // Another account is added beside the one in view, so only once
         // it's in.
         let add = self.session.signed_in();
-        let switcher = kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add, manage: false, tooltip: Some(&tooltip) };
+        let switcher = kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add, manage: true, tooltip: Some(&tooltip) };
         let picked = kit::source_switcher(ui, &switcher, place, |ui| self.account_menu(ui, &account, &state));
         match picked {
             Some(kit::SourcePick::App(row)) => self.actions.push(match row {
@@ -362,7 +384,8 @@ impl ViewCtx<'_> {
             }),
             Some(kit::SourcePick::Source(id)) => self.actions.push(Action::SwitchAccount(id)),
             Some(kit::SourcePick::Add) => self.actions.push(Action::AddSource),
-            Some(kit::SourcePick::All | kit::SourcePick::Manage) | None => {}
+            Some(kit::SourcePick::Manage) => self.actions.push(Action::OpenSettings(super::settings_page::Tab::Sources)),
+            Some(kit::SourcePick::All) | None => {}
         }
     }
 
@@ -432,6 +455,34 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         if icons::sized_button(ui, Icon::Help, "Keyboard shortcuts (⌘/)", vec2(side, side), 15.0, Some(t.muted)).clicked() {
             self.actions.push(Action::Shortcuts);
+        }
+    }
+}
+
+/// An account as the switcher and the Sources tab show it.
+pub(super) struct SourceEntry {
+    pub id: accounts::AccountId,
+    pub name: String,
+    pub color: accounts::SourceColor,
+    pub state: SourceState,
+    /// The server's host, or the account in view's live line.
+    pub detail: String,
+    /// The account in view.
+    pub live: bool,
+    pub signed_out: bool,
+}
+
+impl SourceEntry {
+    /// The entry as the kit's widgets take it.
+    pub fn info(&self) -> kit::SourceInfo<'_> {
+        kit::SourceInfo {
+            id: self.id,
+            name: &self.name,
+            kind: "Audiobookshelf",
+            icon: Icon::Headphones,
+            color: self.color,
+            state: &self.state,
+            detail: Some(&self.detail),
         }
     }
 }

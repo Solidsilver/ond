@@ -108,6 +108,10 @@ pub struct Account {
     /// The dot colour shown when more than one account is configured.
     #[serde(default)]
     pub color: SourceColor,
+    /// What the user renamed the account to in Settings' Sources tab;
+    /// without one it goes by its username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// True after signing out so the row stays in the switcher until the user
     /// signs back in or removes it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -144,8 +148,15 @@ impl Account {
             libraries: Vec::new(),
             sign_in: None,
             color: SourceColor::default(),
+            name: None,
             signed_out: false,
         }
+    }
+
+    /// What the account is called: the name it was given, else its
+    /// username.
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.username)
     }
 
     /// What the client tells the server about this device.
@@ -354,9 +365,24 @@ impl Settings {
         }
     }
 
+    /// Gives `id` the name `name`; its username, or nothing, takes the given
+    /// name away.
+    pub fn rename_account(&mut self, id: AccountId, name: &str) {
+        if let Some(existing) = self.account_by_id_mut(id) {
+            let name = name.trim();
+            existing.name = (!name.is_empty() && name != existing.username).then(|| name.to_owned());
+        }
+    }
+
+    /// Gives `id` the dot colour `color`.
+    pub fn set_color(&mut self, id: AccountId, color: SourceColor) {
+        if let Some(existing) = self.account_by_id_mut(id) {
+            existing.color = color;
+        }
+    }
+
     /// Removes `id` from `accounts` and `scope`, picking the first remaining
     /// account when the removed account was active.
-    #[allow(dead_code)] // Exercised by tests; wired to the Sources tab in a later milestone.
     pub fn remove_account(&mut self, id: AccountId) -> Option<Account> {
         let index = self.accounts.iter().position(|a| a.id == id)?;
         let removed = self.accounts.remove(index);
@@ -459,14 +485,12 @@ impl Paths {
     }
 
     /// An account's downloads folder: `downloads/<account_hex>`.
-    #[allow(dead_code)] // Exercised by tests; wired to the Sources tab in a later milestone.
     pub fn downloads(&self, account: &Account) -> PathBuf {
         self.shelves.with_file_name("downloads").join(format!("{:08x}", account.id.as_uuid().as_u128()))
     }
 
     /// Deletes an inactive account's shelf database and downloaded files if
     /// present; missing files are ignored.
-    #[allow(dead_code)] // Exercised by tests; wired to the Sources tab in a later milestone.
     pub fn purge_account(&self, account: &Account) -> std::io::Result<()> {
         match std::fs::remove_file(self.shelf(account)) {
             Ok(()) => {}
@@ -671,6 +695,22 @@ mod tests {
         assert!(!paths.shelf(&removed).exists());
         assert!(!paths.downloads(&removed).exists());
         paths.purge_account(&removed).unwrap();
+    }
+
+    #[test]
+    fn a_renamed_account_keeps_its_name_across_a_save_and_its_username_takes_it_back() {
+        let mut s = login();
+        let id = s.accounts[0].id;
+        assert_eq!(s.accounts[0].display_name(), "sam");
+        assert!(!serde_json::to_string(&s).unwrap().contains("\"name\""), "no name is written until one is given");
+        s.rename_account(id, "  Home  ");
+        s.set_color(id, SourceColor::new(4));
+        let read = Settings::from_json(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!((read.accounts[0].display_name(), read.accounts[0].color), ("Home", SourceColor::new(4)));
+        let again = read.account_for_sign_in("https://books.example.com", "sam", None);
+        assert_eq!(again.display_name(), "Home", "signing in again keeps the name");
+        s.rename_account(id, "sam");
+        assert_eq!(s.accounts[0].name, None);
     }
 
     #[test]

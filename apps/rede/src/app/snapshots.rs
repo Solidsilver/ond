@@ -621,6 +621,42 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         }
     }
     h.set_size(egui::vec2(FULL[0], FULL[1]));
+    // Settings › Sources with three accounts, then with one signed out and
+    // the one in view offline, its row's menu open, and the question before
+    // removing one.
+    fn sources(ctx: &egui::Context, dir: &std::path::Path, trouble: bool) -> RedeApp {
+        let mut app = app(ctx, dir, BOOKS.len());
+        playing(&mut app, false);
+        app.sync.synced = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(12 * 60));
+        app.sync.offline = trouble;
+        let office = crate::settings::Account {
+            color: accounts::SourceColor::new(3),
+            name: Some("Office".into()),
+            signed_out: trouble,
+            ..crate::settings::Account::new("https://office.example.com", "alex")
+        };
+        let family = crate::settings::Account { color: accounts::SourceColor::new(5), ..crate::settings::Account::new("https://family.example.org", "kim") };
+        app.prefs.edit(move |s| s.accounts.extend([office, family]));
+        app.apply(Action::OpenSettings(super::settings_page::Tab::Sources));
+        app
+    }
+    // Each in a folder of its own, so the accounts they save don't reach
+    // the scenes after them.
+    let three = tempfile::tempdir().unwrap();
+    scene(h, s, "settings-sources-three", || sources(&ctx, three.path(), false));
+    let trouble = tempfile::tempdir().unwrap();
+    scene(h, s, "settings-sources-trouble", || sources(&ctx, trouble.path(), true));
+    h.get_by_label("Office, Audiobookshelf, Signed out").click();
+    h.run_steps(3);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "settings-sources-menu");
+    egui::Popup::close_all(&ctx);
+    scene(h, s, "sheet-remove-source", || {
+        let mut app = sources(&ctx, three.path(), false);
+        let office = app.prefs.get(|p| p.accounts[1].id);
+        app.apply(Action::Source(super::manage::SourceAction::AskRemove(office)));
+        app
+    });
     // Settings › Downloads with the fixture's downloads, and the question
     // before removing them all.
     scene(h, s, "settings-downloads-filled", || {
