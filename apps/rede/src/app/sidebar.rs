@@ -373,7 +373,8 @@ impl ViewCtx<'_> {
         // Another account is added beside the one in view, so only once
         // it's in.
         let add = self.session.signed_in();
-        let switcher = kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add, manage: true, tooltip: Some(&tooltip) };
+        let switcher =
+            kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add, manage: true, toggles: false, tooltip: Some(&tooltip) };
         let picked = kit::source_switcher(ui, &switcher, place, |ui| self.account_menu(ui, &account, &state));
         match picked {
             Some(kit::SourcePick::App(row)) => self.actions.push(match row {
@@ -385,7 +386,8 @@ impl ViewCtx<'_> {
             Some(kit::SourcePick::Source(id)) => self.actions.push(Action::SwitchAccount(id)),
             Some(kit::SourcePick::Add) => self.actions.push(Action::AddSource),
             Some(kit::SourcePick::Manage) => self.actions.push(Action::OpenSettings(super::settings_page::Tab::Sources)),
-            Some(kit::SourcePick::All) | None => {}
+            // Rede shows one account at a time, and asks for no boxes.
+            Some(kit::SourcePick::All | kit::SourcePick::Toggle(_)) | None => {}
         }
     }
 

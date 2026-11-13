@@ -9,6 +9,13 @@
 //! draws its own rows at the menu's foot. The switcher hands back what was
 //! picked as a [`SourcePick`], which the app turns into its own actions.
 //!
+//! All sources narrowed by the filter chips to some of them shows as those
+//! sources: their names ("Home server, Music folder", or "2 of 3 sources"
+//! where that doesn't fit) over their dots. An app that can show some
+//! sources together asks for [`SourceSwitcher::toggles`], a box on each
+//! source's row in the menu, ticked as its chip is lit, that adds it to the
+//! set or takes it out; the row itself still picks that source alone.
+//!
 //! With one source nothing mentions sources: the switcher is the account
 //! row each app drew before there could be several, in the app's
 //! [`SwitcherLook`] (Ond's one line beside its buttons, Rede's two lines
@@ -60,6 +67,9 @@ pub enum SourcePick<R> {
     Source(AccountId),
     /// Every source together.
     All,
+    /// A source's box in the menu: add it to the sources shown together,
+    /// or take it out (the filter chips' set). The menu stays open.
+    Toggle(AccountId),
     /// Add source…
     Add,
     /// Manage sources…
@@ -102,6 +112,10 @@ pub struct SourceSwitcher<'a> {
     pub add: bool,
     /// Offer Manage sources… in the menu.
     pub manage: bool,
+    /// Give each source in the menu a box that adds it to or takes it from
+    /// the sources shown together, for an app that can show some of them
+    /// at once. Without it the menu checks the one in scope.
+    pub toggles: bool,
     /// What hovering the switcher says, in the app's words, when it has
     /// more to say than the row shows.
     pub tooltip: Option<&'a str>,
@@ -255,6 +269,9 @@ enum Shown<'s, 'a> {
     Single(&'s SourceInfo<'a>),
     /// One of several, in scope.
     One(&'s SourceInfo<'a>),
+    /// Some of several, narrowed by the filter chips: the ones included,
+    /// fewer than all.
+    Some(Vec<&'s SourceInfo<'a>>),
     /// All of several.
     All,
 }
@@ -265,16 +282,30 @@ impl<'s, 'a> Shown<'s, 'a> {
             [only] => Shown::Single(only),
             many => match switcher.scope.single().and_then(|id| many.iter().find(|s| s.id == id)) {
                 Some(one) => Shown::One(one),
-                None => Shown::All,
+                None => {
+                    let included: Vec<_> = many.iter().filter(|s| switcher.scope.includes(s.id)).collect();
+                    if switcher.scope.has_chips() && !included.is_empty() && included.len() < many.len() { Shown::Some(included) } else { Shown::All }
+                }
             },
         }
     }
 
-    /// The row's name: the source's, or All sources.
-    fn title(&self) -> &str {
+    /// The row's name: the source's, the included ones' names, or All
+    /// sources.
+    fn title(&self) -> String {
         match self {
-            Shown::Single(s) | Shown::One(s) => s.name,
-            Shown::All => "All sources",
+            Shown::Single(s) | Shown::One(s) => s.name.to_owned(),
+            Shown::Some(some) => names(some),
+            Shown::All => "All sources".to_owned(),
+        }
+    }
+
+    /// The row's name when [`title`](Self::title) doesn't fit: how many
+    /// of the sources are included.
+    fn short_title(&self, sources: &[SourceInfo<'_>]) -> Option<String> {
+        match self {
+            Shown::Some(some) => Some(format!("{} of {} sources", some.len(), sources.len())),
+            _ => None,
         }
     }
 
@@ -285,9 +316,12 @@ impl<'s, 'a> Shown<'s, 'a> {
             (Shown::Single(s), _) | (Shown::One(s), SwitcherLook::Card) => s.line(),
             (Shown::One(s), SwitcherLook::Line) if matches!(s.state, SourceState::Online) => s.name.to_owned(),
             (Shown::One(s), SwitcherLook::Line) => format!("{} · {}", s.name, s.line()),
-            (Shown::All, SwitcherLook::Card) => all_line(switcher.sources),
+            (Shown::All, SwitcherLook::Card) => all_line(switcher.sources.iter()),
             // Trouble is flagged at the row's end; there's no room to say it too.
             (Shown::All, SwitcherLook::Line) => "All sources".to_owned(),
+            (Shown::Some(some), SwitcherLook::Line) => names(some),
+            (Shown::Some(some), SwitcherLook::Card) if troubled(some.iter().copied()).next().is_some() => all_line(some.iter().copied()),
+            (Shown::Some(_), SwitcherLook::Card) => self.short_title(switcher.sources).unwrap_or_default(),
         }
     }
 
@@ -296,7 +330,9 @@ impl<'s, 'a> Shown<'s, 'a> {
     fn label(&self, switcher: &SourceSwitcher<'_>) -> String {
         let line = match self {
             Shown::Single(s) | Shown::One(s) => s.line(),
-            Shown::All => all_line(switcher.sources),
+            Shown::Some(some) if troubled(some.iter().copied()).next().is_some() => all_line(some.iter().copied()),
+            Shown::Some(_) => self.short_title(switcher.sources).unwrap_or_default(),
+            Shown::All => all_line(switcher.sources.iter()),
         };
         let title = self.title();
         if line == title { line } else { format!("{title}, {line}") }
@@ -306,7 +342,8 @@ impl<'s, 'a> Shown<'s, 'a> {
     fn state(&self, sources: &[SourceInfo<'a>]) -> Option<(AccountId, SourceState)> {
         match self {
             Shown::Single(s) | Shown::One(s) => Some((s.id, *s.state)),
-            Shown::All => troubled(sources).next().map(|s| (s.id, *s.state)),
+            Shown::Some(some) => troubled(some.iter().copied()).next().map(|s| (s.id, *s.state)),
+            Shown::All => troubled(sources.iter()).next().map(|s| (s.id, *s.state)),
         }
     }
 
@@ -314,6 +351,7 @@ impl<'s, 'a> Shown<'s, 'a> {
         match self {
             Shown::Single(_) => Vec::new(),
             Shown::One(s) => vec![s.color],
+            Shown::Some(some) => some.iter().map(|s| s.color).collect(),
             Shown::All => sources.iter().map(|s| s.color).collect(),
         }
     }
@@ -329,17 +367,32 @@ pub fn flagged(state: &SourceState) -> bool {
 }
 
 /// The sources the switcher flags.
-fn troubled<'s, 'a>(sources: &'s [SourceInfo<'a>]) -> impl Iterator<Item = &'s SourceInfo<'a>> {
-    sources.iter().filter(|s| flagged(s.state))
+fn troubled<'s, 'a: 's>(sources: impl Iterator<Item = &'s SourceInfo<'a>>) -> impl Iterator<Item = &'s SourceInfo<'a>> {
+    sources.filter(|s| flagged(s.state))
 }
 
-/// All sources' line: which needs attention, or how many there are.
-fn all_line(sources: &[SourceInfo<'_>]) -> String {
-    let trouble: Vec<_> = troubled(sources).collect();
+/// Several sources' line: which needs attention, or how many there are.
+fn all_line<'s, 'a: 's>(sources: impl Iterator<Item = &'s SourceInfo<'a>> + Clone) -> String {
+    let trouble: Vec<_> = troubled(sources.clone()).collect();
     match trouble.as_slice() {
-        [] => format!("{} sources", sources.len()),
+        [] => format!("{} sources", sources.count()),
         [one] => format!("{} · {}", one.name, one.state.label()),
         many => format!("{} need attention", many.len()),
+    }
+}
+
+/// The included sources' names, in the menu's order.
+fn names(some: &[&SourceInfo<'_>]) -> String {
+    some.iter().map(|s| s.name).collect::<Vec<_>>().join(", ")
+}
+
+/// `full` when it fits in `room` in `font`, else `short` (cut to fit if
+/// even that doesn't).
+fn fitted(ui: &Ui, full: &str, short: Option<String>, font: FontId, ink: Color32, room: f32) -> std::sync::Arc<egui::Galley> {
+    let g = ui.painter().layout_no_wrap(full.to_owned(), font.clone(), ink);
+    match short {
+        Some(short) if g.size().x > room => elide(ui, &short, font, ink, room),
+        _ => elide(ui, full, font, ink, room),
     }
 }
 
@@ -381,13 +434,13 @@ fn foot(ui: &mut Ui, switcher: &SourceSwitcher<'_>, shown: &Shown<'_, '_>, width
             }
             // Several sources with one in trouble: a flag at the row's end,
             // the menu and the tooltip say which and why.
-            let flag = !matches!(shown, Shown::Single(_) | Shown::One(_)) && troubled(switcher.sources).next().is_some();
+            let flag = !matches!(shown, Shown::Single(_) | Shown::One(_)) && troubled(switcher.sources.iter()).next().is_some();
             let mut right = rect.right() - 6.0;
             if flag {
                 flag_mark(ui, pos2(rect.right() - 14.0, lead.y));
                 right -= 20.0;
             }
-            let g = elide(ui, &line, FontId::proportional(11.5), t.muted, right - text_x);
+            let g = fitted(ui, &line, shown.short_title(switcher.sources), FontId::proportional(11.5), t.muted, right - text_x);
             ui.painter().galley(pos2(text_x, rect.center().y - g.size().y / 2.0), g, t.muted);
         }
         SwitcherLook::Card => {
@@ -395,11 +448,11 @@ fn foot(ui: &mut Ui, switcher: &SourceSwitcher<'_>, shown: &Shown<'_, '_>, width
             match shown {
                 Shown::Single(s) => avatar(ui, lead, s.name, None),
                 Shown::One(s) => avatar(ui, lead, s.name, Some(s.color)),
-                Shown::All => source_dots(ui, lead, &colors, t.sidebar),
+                Shown::Some(_) | Shown::All => source_dots(ui, lead, &colors, t.sidebar),
             }
             let x = lead.x + AVATAR / 2.0 + 8.0;
             let room = rect.right() - x - 6.0;
-            let name = elide(ui, shown.title(), FontId::new(12.5, semibold()), t.text, room);
+            let name = fitted(ui, &shown.title(), shown.short_title(switcher.sources), FontId::new(12.5, semibold()), t.text, room);
             let indent = if state.is_some() { 12.0 } else { 0.0 };
             let line = elide(ui, &line, FontId::proportional(11.0), t.muted, room - indent);
             let top = rect.center().y - (name.size().y + line.size().y) / 2.0;
@@ -456,9 +509,15 @@ fn menu<R>(ui: &mut Ui, switcher: &SourceSwitcher<'_>, shown: &Shown<'_, '_>, ro
     if several {
         let ground = ui.visuals().window_fill;
         for s in switcher.sources {
-            let on = matches!(shown, Shown::One(one) if one.id == s.id);
-            if source_menu_row(ui, s, on) {
-                picked = Some(SourcePick::Source(s.id));
+            let on = match shown {
+                Shown::One(one) => one.id == s.id,
+                // A box is ticked as its filter chip is lit.
+                _ => switcher.toggles && switcher.scope.chip_selected(s.id),
+            };
+            match source_menu_row(ui, s, on, switcher.toggles) {
+                Some(RowPick::Row) => picked = Some(SourcePick::Source(s.id)),
+                Some(RowPick::Toggle) => picked = Some(SourcePick::Toggle(s.id)),
+                None => {}
             }
         }
         let colors: Vec<SourceColor> = switcher.sources.iter().map(|s| s.color).collect();
@@ -486,20 +545,36 @@ fn menu<R>(ui: &mut Ui, switcher: &SourceSwitcher<'_>, shown: &Shown<'_, '_>, ro
     picked
 }
 
-/// A source in the menu: a check when it's the one in scope, its dot, its
-/// name, and its line under it (in the warning colour when it's
-/// [`flagged`]). True when chosen, and the menu closes.
-fn source_menu_row(ui: &mut Ui, s: &SourceInfo<'_>, on: bool) -> bool {
+/// What was clicked on a source's row in the menu.
+enum RowPick {
+    /// The row: show that source alone. The menu closes.
+    Row,
+    /// Its box: add it to the sources shown together, or take it out.
+    Toggle,
+}
+
+/// A source in the menu: a check when it's the one in scope (or, with
+/// `toggles`, a box at its leading edge, ticked when it's included), its
+/// dot, its name, and its line under it (in the warning colour when it's
+/// [`flagged`]).
+fn source_menu_row(ui: &mut Ui, s: &SourceInfo<'_>, on: bool, toggles: bool) -> Option<RowPick> {
     let t = Tokens::of(ui);
     let line = s.line();
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), MENU_SOURCE_H), Sense::click());
+    // Interacted after the row, so it's on top of it: the gutter is the box's.
+    let tick = toggles.then(|| {
+        let hit = Rect::from_min_max(rect.left_top(), pos2(rect.left() + MENU_DOT_X - DOT_R - 2.0, rect.bottom()));
+        ui.interact(hit, resp.id.with("toggle"), Sense::click())
+    });
     if ui.is_rect_visible(rect) {
-        if resp.hovered() {
+        if resp.hovered() || tick.as_ref().is_some_and(|b| b.hovered()) {
             ui.painter().rect_filled(rect, 5.0, t.hover);
         }
         focus_ring(ui, &resp, rect.shrink(2.0), 3.0);
-        if on {
-            check(ui, rect);
+        match &tick {
+            Some(tick) => tick_box(ui, tick, rect, on),
+            None if on => check(ui, rect),
+            None => {}
         }
         source_dot(ui, pos2(rect.left() + MENU_DOT_X, rect.center().y), s.color);
         let x = rect.left() + MENU_TEXT_X;
@@ -513,12 +588,37 @@ fn source_menu_row(ui: &mut Ui, s: &SourceInfo<'_>, on: bool) -> bool {
         ui.painter().galley(pos2(x, below_y), below, ink);
     }
     let label = format!("{}, {line}", s.name);
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, true, on, &label));
+    if let Some(tick) = &tick {
+        let name = format!("Include {}", s.name);
+        tick.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, &name));
+        // The row picks the source alone; its box says whether it's ticked.
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, &label));
+        if tick.clicked() {
+            return Some(RowPick::Toggle);
+        }
+    } else {
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, true, on, &label));
+    }
     if resp.clicked() {
         ui.close();
-        return true;
+        return Some(RowPick::Row);
     }
-    false
+    None
+}
+
+/// The box in a source row's gutter: an outline, filled with the accent
+/// and ticked when the source is included; ringed when focused.
+fn tick_box(ui: &Ui, tick: &Response, row: Rect, on: bool) {
+    let t = Tokens::of(ui);
+    let r = Rect::from_center_size(pos2(row.left() + POPOVER_PAD + 6.0, row.center().y), vec2(13.0, 13.0));
+    if on {
+        ui.painter().rect_filled(r, 3.0, t.accent);
+        icons::paint(ui.painter(), r.shrink(2.5), Icon::Check, t.on_accent);
+    } else {
+        let ink = if tick.hovered() { t.text } else { t.muted };
+        ui.painter().rect_stroke(r, 3.0, egui::Stroke::new(1.2, ink), egui::StrokeKind::Inside);
+    }
+    focus_ring(ui, tick, r.expand(2.0), 4.0);
 }
 
 /// All sources in the menu: the stacked dots, checked when it's the scope.
@@ -676,8 +776,18 @@ mod tests {
     type Seen = Option<SourcePick<&'static str>>;
 
     fn harness(sources: Vec<SourceInfo<'static>>, scope: Scope, look: SwitcherLook, place: SwitcherPlace) -> egui_kittest::Harness<'static, (bool, Seen)> {
+        harness_with(sources, scope, look, place, false)
+    }
+
+    fn harness_with(
+        sources: Vec<SourceInfo<'static>>,
+        scope: Scope,
+        look: SwitcherLook,
+        place: SwitcherPlace,
+        toggles: bool,
+    ) -> egui_kittest::Harness<'static, (bool, Seen)> {
         themed(None, move |ui, seen: &mut Seen| {
-            let switcher = SourceSwitcher { sources: &sources, scope: &scope, look, add: true, manage: true, tooltip: None };
+            let switcher = SourceSwitcher { sources: &sources, scope: &scope, look, add: true, manage: true, toggles, tooltip: None };
             ui.add_space(300.0);
             let picked = source_switcher(ui, &switcher, place, |ui| menu_row(ui, "Settings…").then_some("settings"));
             if picked.is_some() {
@@ -777,6 +887,74 @@ mod tests {
         h.run();
         h.get_by_label("All sources, 3 sources");
         assert!(!flag(&h));
+    }
+
+    /// All sources narrowed by the chips to Home server and Music folder.
+    fn narrowed() -> Scope {
+        let mut scope = Scope::all();
+        scope.toggle_chip(id(1));
+        scope.toggle_chip(id(3));
+        scope
+    }
+
+    /// The words painted on the last frame.
+    fn texts(h: &egui_kittest::Harness<'_, (bool, Seen)>) -> Vec<String> {
+        shapes(h)
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_narrowed_scope_names_its_sources_or_counts_them_when_they_dont_fit() {
+        let sources = three(&ONLINE);
+        for look in [SwitcherLook::Line, SwitcherLook::Card] {
+            let mut h = harness(sources.to_vec(), narrowed(), look, SwitcherPlace::Foot { width: 220.0 });
+            h.run();
+            h.get_by_label("Home server, Music folder, 2 of 3 sources");
+            assert!(texts(&h).contains(&"Home server, Music folder".to_owned()), "{look:?}: {:?}", texts(&h));
+            assert_eq!(dots(&h, &[sources[0].color, sources[2].color]), 2, "the included sources' dots");
+            assert_eq!(dots(&h, &[sources[1].color]), 0, "and not the other's");
+            let mut h = harness(sources.to_vec(), narrowed(), look, SwitcherPlace::Foot { width: 130.0 });
+            h.run();
+            assert!(texts(&h).contains(&"2 of 3 sources".to_owned()), "{look:?}: {:?}", texts(&h));
+        }
+        // Every chip lit is every source: All sources.
+        let mut all = narrowed();
+        all.toggle_chip(id(2));
+        let mut h = harness(sources.to_vec(), all, SwitcherLook::Line, SwitcherPlace::Foot { width: 220.0 });
+        h.run();
+        h.get_by_label("All sources, 3 sources");
+    }
+
+    #[test]
+    fn the_menus_boxes_tick_the_included_sources_and_toggle_them_without_picking() {
+        use egui::accesskit::{Role, Toggled};
+        use egui_kittest::kittest::NodeT;
+        let mut h = harness_with(three(&ONLINE).to_vec(), narrowed(), SwitcherLook::Line, SwitcherPlace::Foot { width: 220.0 }, true);
+        h.run();
+        h.get_by_label("Home server, Music folder, 2 of 3 sources").click();
+        h.run();
+        let ticked =
+            |h: &egui_kittest::Harness<'_, _>, name: &str| h.get_by_role_and_label(Role::CheckBox, name).accesskit_node().toggled() == Some(Toggled::True);
+        assert!(ticked(&h, "Include Home server") && !ticked(&h, "Include Office") && ticked(&h, "Include Music folder"));
+        h.get_by_role_and_label(Role::CheckBox, "Include Office").click();
+        h.run();
+        assert_eq!(h.state().1, Some(SourcePick::Toggle(id(2))));
+        assert!(h.query_by_label("Office, Synced yesterday").is_some(), "the menu stays open");
+        // The row itself still picks the source alone.
+        h.get_by_role_and_label(Role::MenuItem, "Office, Synced yesterday").click();
+        h.run();
+        assert_eq!(h.state().1, Some(SourcePick::Source(id(2))));
+        // Without the boxes (Rede), the one in scope is checked as before.
+        let mut h = harness(three(&ONLINE).to_vec(), Scope::only(id(1)), SwitcherLook::Card, SwitcherPlace::Foot { width: 220.0 });
+        h.run();
+        h.get_by_label("Home server, Synced 2 min ago").click();
+        h.run();
+        assert!(h.query_by_role(Role::CheckBox).is_none());
     }
 
     #[test]
@@ -898,13 +1076,14 @@ mod tests {
         let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
         std::fs::create_dir_all(&out).unwrap();
         let one = vec![SourceInfo { detail: Some("music.example.com"), ..three(&ONLINE)[0] }];
-        let scenes: [(&str, Vec<SourceInfo<'static>>, Scope); 6] = [
+        let scenes: [(&str, Vec<SourceInfo<'static>>, Scope); 7] = [
             ("one", one.clone(), Scope::all()),
             ("three", three(&ONLINE).to_vec(), Scope::all()),
             ("three-one", three(&ONLINE).to_vec(), Scope::only(id(1))),
             ("trouble", three(&OUT).to_vec(), Scope::only(id(2))),
             ("trouble-all", three(&OUT).to_vec(), Scope::all()),
             ("unreachable", three(&AWAY).to_vec(), Scope::all()),
+            ("narrowed", three(&ONLINE).to_vec(), narrowed()),
         ];
         for (theme, pref) in [("light", theme::ThemePref::Light), ("dark", theme::ThemePref::Dark)] {
             for (name, sources, scope) in &scenes {
@@ -913,12 +1092,12 @@ mod tests {
                 let mut h = canvas(vec2(560.0, 64.0), pref, move |ui| {
                     ui.horizontal(|ui| {
                         for look in [SwitcherLook::Line, SwitcherLook::Card] {
-                            let s = SourceSwitcher { sources: &sources, scope: &scope, look, add: false, manage: false, tooltip: None };
+                            let s = SourceSwitcher { sources: &sources, scope: &scope, look, add: false, manage: false, toggles: false, tooltip: None };
                             ui.allocate_ui(vec2(196.0, 48.0), |ui| source_switcher(ui, &s, SwitcherPlace::Foot { width: 196.0 }, |_| None::<()>));
                             ui.add_space(8.0);
                         }
                         for look in [SwitcherLook::Line, SwitcherLook::Card] {
-                            let s = SourceSwitcher { sources: &sources, scope: &scope, look, add: false, manage: false, tooltip: None };
+                            let s = SourceSwitcher { sources: &sources, scope: &scope, look, add: false, manage: false, toggles: false, tooltip: None };
                             source_switcher(ui, &s, SwitcherPlace::Rail, |_| None::<()>);
                             ui.add_space(12.0);
                         }
@@ -933,11 +1112,13 @@ mod tests {
                 ("three", &scenes[2].1, &scenes[2].2),
                 ("trouble", &scenes[3].1, &scenes[3].2),
                 ("unreachable", &scenes[5].1, &scenes[5].2),
+                ("narrowed", &scenes[6].1, &scenes[6].2),
             ] {
                 let (sources, scope) = (sources.clone(), scope.clone());
                 let mut h = canvas(vec2(300.0, 400.0), pref, move |ui| {
                     ui.add_space(340.0);
-                    let s = SourceSwitcher { sources: &sources, scope: &scope, look: SwitcherLook::Card, add: true, manage: true, tooltip: None };
+                    let toggles = scope.has_chips();
+                    let s = SourceSwitcher { sources: &sources, scope: &scope, look: SwitcherLook::Card, add: true, manage: true, toggles, tooltip: None };
                     source_switcher(ui, &s, SwitcherPlace::Foot { width: 216.0 }, |ui| {
                         menu_row(ui, "Settings…");
                         menu_row(ui, "Keyboard shortcuts");

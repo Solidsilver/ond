@@ -203,8 +203,15 @@ impl OndApp {
         let sources = [kit::SourceInfo { id, name: &name, kind: kind.name, icon: kind.icon, color, state: &source_state, detail: Some(state.label()) }];
         let scope = Scope::only(id);
         let tooltip = state.tooltip(self.session.caps().network);
-        let switcher =
-            kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Line, add: false, manage: true, tooltip: Some(&tooltip) };
+        let switcher = kit::SourceSwitcher {
+            sources: &sources,
+            scope: &scope,
+            look: kit::SwitcherLook::Line,
+            add: false,
+            manage: true,
+            toggles: false,
+            tooltip: Some(&tooltip),
+        };
         let picked = kit::source_switcher(ui, &switcher, place, |ui| self.server_menu(ui, &state));
         if picked == Some(kit::SourcePick::Manage) {
             return self.actions.push(Action::OpenSettings(super::settings_page::Section::Sources));
@@ -235,6 +242,7 @@ impl OndApp {
             look: kit::SwitcherLook::Line,
             add: !self.prefs.managed("sources"),
             manage: true,
+            toggles: false,
             tooltip: Some(&tooltip),
         };
         // Work Offline is one switch for every server; folders aren't touched by it.
@@ -250,7 +258,7 @@ impl OndApp {
             Some(kit::SourcePick::Manage) => Action::OpenSettings(super::settings_page::Section::Sources),
             Some(kit::SourcePick::Add) => Action::Onboarding(kit::OnboardingEvent::AddAnother),
             Some(kit::SourcePick::App(on)) => Action::Offline(super::OfflineAction::WorkOffline(on)),
-            None => return,
+            Some(kit::SourcePick::Toggle(_)) | None => return,
         };
         self.actions.push(action);
     }
