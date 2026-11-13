@@ -3413,6 +3413,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "roxmltree",
+ "scan",
  "serde",
  "serde_json",
  "shell",

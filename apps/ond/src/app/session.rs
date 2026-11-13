@@ -54,7 +54,7 @@ pub struct Session {
 
 impl Session {
     pub fn account(&self) -> Option<accounts::AccountId> {
-        self.settings.as_ref().and_then(|s| s.account)
+        self.settings.as_ref().and_then(|s| s.account())
     }
 
     /// The source, while the server answers.
@@ -79,7 +79,11 @@ impl OndApp {
         new_account: bool,
         password_saved: bool,
     ) {
-        settings.account = Some(source.account());
+        if let Some(entry) = settings.primary_mut() {
+            entry.id = source.account();
+        } else {
+            settings.sources.push(crate::settings::SourceEntry::subsonic(source.account(), "", ""));
+        }
         if new_account || stores.is_some() {
             // Drop the old account's UI state before sync fills the new mirror.
             // A second library read could arrive after sync and blank its albums.
@@ -100,10 +104,14 @@ impl OndApp {
         }
         let limit = self.prefs.snapshot().offline_limit_gb.map(|gb| gb * 1_000_000_000);
         self.downloads.switch_account(settings.account_id(), Some(source.account()), limit, &self.bridge);
-        self.session.server_label = format!("{} · {}", settings.username, server);
+        self.session.server_label = if settings.username().is_empty() {
+            settings.source_name().map(str::to_owned).unwrap_or_else(|| server.clone())
+        } else {
+            format!("{} · {server}", settings.username())
+        };
         self.session.server_info = server.clone();
         self.login = None;
-        self.source_added(&settings.server, source.account());
+        self.source_added(settings.server(), source.account());
         // Always a new pass, even if the flags say one runs: any still
         // running is from before the server went away, and the bridge
         // has this one replace it.
@@ -113,7 +121,7 @@ impl OndApp {
         self.bridge.fetch_home(source.clone());
         self.art.set_source(source.clone());
         self.now_playing.set_source(source.clone());
-        self.output.connected(&settings.server);
+        self.output.connected(settings.server());
         // A store still opening gets the server once it's open.
         self.connect_downloads(&source);
         let url = source.clone();
@@ -132,7 +140,15 @@ impl OndApp {
         self.session.connecting = false;
         self.session.sign_in = None;
         self.session.source = Some(source.clone());
-        self.prefs.set_login(&settings.server, &settings.username, source.account());
+        if settings.primary().is_some_and(|e| e.kind != crate::settings::SourceKind::Local) {
+            self.prefs.set_login(settings.server(), settings.username(), source.account());
+        } else if let Some(entry) = settings.primary().cloned() {
+            self.prefs.edit(|s| {
+                if s.sources.is_empty() {
+                    s.sources.push(entry.clone());
+                }
+            });
+        }
         self.session.settings = Some(*settings);
         if !self.session.online {
             self.session.online = true;
@@ -216,7 +232,13 @@ impl OndApp {
     /// needed.
     pub(super) fn sign_in_again(&mut self) {
         let s = self.session.settings.clone().unwrap_or_default();
-        self.login = Some(LoginForm { server: s.server, username: s.username, error: self.session.sign_in.clone(), closable: true, ..Default::default() });
+        self.login = Some(LoginForm {
+            server: s.server().to_owned(),
+            username: s.username().to_owned(),
+            error: self.session.sign_in.clone(),
+            closable: true,
+            ..Default::default()
+        });
     }
 
     /// The server stopped answering: carry on offline while reconnecting.
@@ -304,7 +326,7 @@ impl OndApp {
     /// Asks before signing out: it stops what's playing and the password has
     /// to be typed again.
     pub(super) fn ask_sign_out(&mut self) {
-        let server = self.session.settings.as_ref().map_or_else(|| self.prefs.snapshot().server, |s| s.server.clone());
+        let server = self.session.settings.as_ref().map_or_else(|| self.prefs.snapshot().server().to_owned(), |s| s.server().to_owned());
         let host = super::diagnostics::server_host(&server);
         self.ui.palette = None;
         let from_settings = matches!(self.ui.overlay, Some(super::dialogs::Overlay::Settings));
@@ -355,7 +377,7 @@ impl OndApp {
         });
         self.now_playing.clear_source();
         self.art.clear_source();
-        self.login = Some(LoginForm { server: saved.server, username: saved.username, ..Default::default() });
+        self.login = Some(LoginForm { server: saved.server().to_owned(), username: saved.username().to_owned(), ..Default::default() });
         self.onboarding = Some(super::onboarding::Onboard::default());
     }
 

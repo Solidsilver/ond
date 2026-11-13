@@ -197,12 +197,12 @@ impl OndApp {
     /// the Sources tab, else its host.
     pub(super) fn source_look(&self, state: &ServerState) -> (String, SourceColor) {
         let saved = self.session.settings.as_ref();
-        let name = saved.and_then(|s| s.source_name.clone()).unwrap_or_else(|| state.host().to_owned());
-        (name, saved.map(|s| s.source_color).unwrap_or_default())
+        let name = saved.and_then(|s| s.source_name()).map(str::to_owned).unwrap_or_else(|| state.host().to_owned());
+        (name, saved.map_or_else(SourceColor::default, |s| s.source_color()))
     }
 
     pub(super) fn server_state(&self) -> ServerState {
-        let host = self.session.settings.as_ref().map(|s| super::diagnostics::server_host(&s.server)).unwrap_or_default();
+        let host = self.session.settings.as_ref().map(|s| super::diagnostics::server_host(s.server())).unwrap_or_default();
         if let Some(p) = self.sync.progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
             // Short enough for the footer; the counts are in the tooltip and popover.
@@ -242,7 +242,7 @@ impl OndApp {
         let t = Tokens::of(ui);
         // Opening the popover refreshes the round trip if it's old.
         let mut picked = (self.session.online && self.diagnostics.latency_stale()).then_some(ServerRow::MeasureLatency);
-        let (server, user) = self.session.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
+        let (server, user) = self.session.settings.as_ref().map(|s| (s.server().to_owned(), s.username().to_owned())).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             ui.label(egui::RichText::new(state.host()).font(FontId::new(13.0, semibold())).color(t.text));
@@ -454,7 +454,7 @@ fn active_place(nav: &Nav) -> Option<usize> {
 /// Playlists the user can change (others' public ones are read-only).
 pub(super) fn owns(session: &super::Session, p: &crate::source::Playlist) -> bool {
     match (&p.owner, &session.source, &session.settings) {
-        (Some(owner), Some(_), Some(settings)) => owner == &settings.username,
+        (Some(owner), Some(_), Some(settings)) => owner == settings.username(),
         _ => true,
     }
 }

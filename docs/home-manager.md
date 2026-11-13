@@ -36,14 +36,15 @@ Take a setting out of your config and Ond goes back to what the user had picked 
 
 Names and values are the same as in Ond's own `settings.json`. Ond logs a warning for a setting it doesn't know or a value it can't read, and ignores that one setting.
 
-### Account
+### Account and sources
 
 | Setting | Values |
 |---|---|
-| `server` | The server's address, like `"https://music.example.com"` |
-| `username` | Your username on it |
+| `sources` | List of configured sources, each with `kind` (`"subsonic"` or `"local"`), optional `id`, `name`, `color` (0–7), plus `server`/`username` (Subsonic) or `folders` (local paths) |
+| `server` | Legacy shorthand: the Navidrome/OpenSubsonic server's address, like `"https://music.example.com"` |
+| `username` | Legacy shorthand: your username on that server |
 
-These fill in the sign-in form and lock those two fields. The password isn't a setting: Ond asks for it once and keeps it in the system keyring. If you change the server or username, Ond asks you to sign in again. Settings › Sources shows a managed server locked: it can be given a colour, but not renamed.
+`server` and `username` continue to work as before (equivalent to one managed `"subsonic"` source) and fill in the sign-in form while locking those fields. The password isn't a setting: Ond asks for it once and keeps it in the system keyring. If you change the server or username, Ond asks you to sign in again. Settings › Sources shows a managed source locked: it can be given a colour, but not renamed or removed.
 
 ### Appearance
 

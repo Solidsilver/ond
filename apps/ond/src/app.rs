@@ -438,7 +438,7 @@ impl OndApp {
         // nobody would see why). This session runs on an empty mirror, which
         // the sync fills, and the next start tries the move again.
         let stores = match crate::storage::migrate(&paths, &prefs) {
-            Ok(()) => crate::storage::open(data_dir, prefs.get(|s| s.account), &mut notices)?,
+            Ok(()) => crate::storage::open(data_dir, prefs.get(|s| s.account()), &mut notices)?,
             Err(e) => {
                 tracing::error!("moving the library into its account folder: {e:#}");
                 notices.push(format!("Ond couldn't move your library into its new folder ({e}). It will try again next time it starts."));
@@ -449,7 +449,7 @@ impl OndApp {
         let (tx, inbox) = channel();
         let repaint = ctx.clone();
         let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), stores.library);
-        bridge.configure_storage(data_dir.to_owned(), paths.art_cache.clone(), prefs.get(|s| s.account), &analyses);
+        bridge.configure_storage(data_dir.to_owned(), paths.art_cache.clone(), prefs.get(|s| s.account()), &analyses);
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         // Before the first frame, so the window never shows at 100% first.
@@ -481,11 +481,11 @@ impl OndApp {
         let scrobble = saved.scrobble;
         let remote_bridge = bridge.clone();
         let now_playing = now_playing::Session::start(now_playing::Config {
-            account: saved.account,
+            account: saved.account(),
             status: engine.status.clone(),
             rt: rt.handle().clone(),
             art_dir: paths.art_cache.clone(),
-            retry_file: saved.account.map(|a| crate::storage::account_dir(data_dir, a)).unwrap_or_else(|| data_dir.join("Sources")).join("scrobbles.json"),
+            retry_file: saved.account().map(|a| crate::storage::account_dir(data_dir, a)).unwrap_or_else(|| data_dir.join("Sources")).join("scrobbles.json"),
             retry_root: Some(data_dir.to_owned()),
             scrobble,
             remote: Arc::new(move |r| remote_bridge.post(Msg::Remote(r))),
@@ -510,14 +510,14 @@ impl OndApp {
                 on_progress: ticks,
             })
         };
-        let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone(), saved.account);
+        let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone(), saved.account());
 
         // With a saved login the library opens at once (what's stored),
         // while the server is tried in the background.
         let login = if !prefs.has_login() {
             Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() })
         } else if saved.signed_out {
-            Some(LoginForm { server: saved.server.clone(), username: saved.username.clone(), ..Default::default() })
+            Some(LoginForm { server: saved.server().to_owned(), username: saved.username().to_owned(), ..Default::default() })
         } else {
             if !work_offline {
                 bridge.connect(saved.clone(), None);

@@ -72,7 +72,7 @@ impl PrefsView {
     }
 
     pub fn read(prefs: &Prefs) -> Self {
-        let (server_managed, username_managed) = (prefs.managed("server"), prefs.managed("username"));
+        let (server_managed, username_managed) = (prefs.managed("server") || prefs.managed("sources"), prefs.managed("username") || prefs.managed("sources"));
         prefs.get(|s| Self {
             mode: s.window.mode,
             lyrics_open: s.window.lyrics_open,
@@ -155,7 +155,7 @@ impl OndApp {
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
                 // A managed server is the Nix config's, name and all.
-                PrefsAction::SourceName(_) => "server",
+                PrefsAction::SourceName(_) => return self.prefs.managed("server") || self.prefs.managed("sources"),
                 PrefsAction::SourceColor(_) => return false,
                 // Partly managed groups: the managed parts are put back.
                 PrefsAction::WaveformBars(_)
@@ -210,8 +210,8 @@ impl OndApp {
             PrefsAction::SourceName(name) => {
                 let edit = |s: &mut crate::settings::Settings| {
                     let name = name.trim();
-                    let host = super::diagnostics::server_host(&s.server);
-                    s.source_name = (!name.is_empty() && name != host).then(|| name.to_owned());
+                    let host = super::diagnostics::server_host(s.server());
+                    s.set_source_name((!name.is_empty() && name != host).then(|| name.to_owned()));
                 };
                 self.prefs.edit(edit);
                 // The session's copy is what the switcher and Settings draw.
@@ -220,9 +220,9 @@ impl OndApp {
                 }
             }
             PrefsAction::SourceColor(color) => {
-                self.prefs.edit(|s| s.source_color = color);
+                self.prefs.edit(|s| s.set_source_color(color));
                 if let Some(s) = self.session.settings.as_mut() {
-                    s.source_color = color;
+                    s.set_source_color(color);
                 }
             }
             PrefsAction::Experimental(x) => self.prefs.edit(|s| s.experimental = x),

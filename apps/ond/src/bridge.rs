@@ -674,6 +674,11 @@ impl Bridge {
     /// With a saved login (`password` is `None`) an unreachable server isn't a
     /// login failure: the app opens offline and keeps retrying until it's back.
     pub fn connect(&self, settings: Settings, password: Option<String>) {
+        if settings.primary().is_some_and(|e| e.kind == crate::settings::SourceKind::Local) {
+            let folders = settings.primary().map(|e| e.folders.clone()).unwrap_or_default();
+            self.connect_local(settings, folders);
+            return;
+        }
         let session = self.session();
         // Scoped: the keychain can hold this up behind a prompt for as long
         // as the user likes, and a sign-out and new sign-in may come first.
@@ -691,7 +696,7 @@ impl Bridge {
                     }
                 }
             };
-            let client = match Client::new(&settings.server, Credentials::new(&settings.username, &password)) {
+            let client = match Client::new(settings.server(), Credentials::new(settings.username(), &password)) {
                 Ok(c) => c,
                 Err(e) => return this.send(failed(connect_error(&e))),
             };
@@ -725,7 +730,7 @@ impl Bridge {
                     let password_saved = saved || stored.unwrap_or(false);
                     this.connected(
                         session,
-                        Arc::new(SubsonicSource::new(settings.account.expect("a configured sign-in has an account"), client)),
+                        Arc::new(SubsonicSource::new(settings.account().expect("a configured sign-in has an account"), client)),
                         settings,
                         server,
                         password_saved,
@@ -733,8 +738,8 @@ impl Bridge {
                     .await;
                 }
                 Err(PingError::Unreachable(e)) if saved => {
-                    this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
-                    this.reconnect(Arc::new(SubsonicSource::new(settings.account.expect("a configured sign-in has an account"), client)), settings, session);
+                    this.send(Msg::Unreachable { session, username: settings.username().to_owned(), error: e });
+                    this.reconnect(Arc::new(SubsonicSource::new(settings.account().expect("a configured sign-in has an account"), client)), settings, session);
                 }
                 Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(failed(e)),
             }
@@ -742,12 +747,11 @@ impl Bridge {
     }
 
     /// Prepares a local-folder source and announces it as the live session.
-    #[allow(dead_code)]
     pub fn connect_local(&self, settings: Settings, folders: Vec<std::path::PathBuf>) {
         let session = self.session();
         let this = self.scoped_to(session);
         self.rt.spawn(async move {
-            let Some(account) = settings.account else {
+            let Some(account) = settings.account() else {
                 return this.send(Msg::ConnectFailed { session, error: "Local source is missing an account id.".into() });
             };
             let data = this.libraries.lock().unwrap_or_else(|e| e.into_inner()).data.clone();
@@ -814,7 +818,7 @@ impl Bridge {
             if let Err(PingError::Unreachable(e)) = ping(&source).await
                 && this.live(session)
             {
-                this.send(Msg::Unreachable { session, username: settings.username.clone(), error: e });
+                this.send(Msg::Unreachable { session, username: settings.username().to_owned(), error: e });
                 this.reconnect(source, settings, session);
             }
         });
@@ -1382,9 +1386,8 @@ mod tests {
     #[test]
     fn signing_back_in_reuses_the_folder_and_another_account_replaces_it() {
         let dir = tempfile::tempdir().unwrap();
-        let old =
-            Settings { server: "https://music.example.com".into(), username: "me".into(), ..Default::default() }.sign_in("https://music.example.com", "me");
-        let account = old.account.unwrap();
+        let old = Settings::default().sign_in("https://music.example.com", "me");
+        let account = old.account().unwrap();
         let stores = crate::storage::open(dir.path(), Some(account), &mut vec![]).unwrap();
         stores.library.upsert_albums(vec![album("kept", 1)]).unwrap();
         stores.analyses.put("song", b"old analysis").unwrap();
@@ -1399,7 +1402,7 @@ mod tests {
         bridge.end_session();
         let signed_out = Settings { signed_out: true, ..old.clone() };
         let again = signed_out.sign_in("HTTPS://Music.Example.com/", "me");
-        assert_eq!(again.account, Some(account));
+        assert_eq!(again.account(), Some(account));
         let source = |account| {
             let mut fake = crate::source::fake::Fake::new(crate::source::Capabilities::none());
             fake.account = account;
@@ -1411,7 +1414,7 @@ mod tests {
         assert!(crate::art::cover_file(&old_art, "al-1", 64).is_file());
 
         let next = signed_out.sign_in("https://music.example.com", "someone-else");
-        let next_account = next.account.unwrap();
+        let next_account = next.account().unwrap();
         assert_ne!(account, next_account);
         // This write passed its session check already. Its database must stay
         // the old one even though it finishes after the new mirror opens.

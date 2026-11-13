@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 /// ending in `*` takes any key there. The rest of the settings file is the
 /// app's own state (where windows were, the volume, column widths).
 const ALLOWED: &[&str] = &[
+    "sources",
     "server",
     "username",
     "scrobble",
@@ -166,6 +167,14 @@ impl Managed {
             if !ADOPTED.contains(&key.as_str()) {
                 continue;
             }
+            if (key == "server" || key == "username") && use_sources_slot(users, &key) {
+                let old = get_subsonic_field(users, &key).cloned().unwrap_or(Value::Null);
+                if old != *value {
+                    set_subsonic_field(users, &key, value.clone());
+                    changed.push((key, old));
+                }
+                continue;
+            }
             let old = get(users, path).cloned().unwrap_or(Value::Null);
             if old != *value {
                 set(users, path, value.clone());
@@ -211,6 +220,9 @@ fn collect(obj: &Map<String, Value>, at: &mut Vec<String>, out: &mut Vec<(Vec<St
             Value::String(dir) if dotted == "offline_dir" => {
                 out.push((at.clone(), Value::String(crate::settings::offline_folder(dir.into()).to_string_lossy().into_owned())))
             }
+            Value::Array(entries) if dotted == "sources" => {
+                out.push((at.clone(), Value::Array(entries.iter().map(with_managed_id).collect())));
+            }
             _ if exact => out.push((at.clone(), value.clone())),
             Value::Object(inner) if under || any_key => collect(inner, at, out),
             _ if under && at.len() > 1 => out.push((at.clone(), value.clone())),
@@ -248,6 +260,62 @@ fn remove(v: &mut Value, path: &[String]) {
     if let Some(o) = parent.as_object_mut() {
         o.remove(last);
     }
+}
+
+fn use_sources_slot(users: &Value, key: &str) -> bool {
+    users.get("sources").is_some_and(Value::is_array) || users.get(key).is_none()
+}
+
+fn first_subsonic(sources: &[Value]) -> Option<usize> {
+    sources.iter().position(|e| e.get("kind").and_then(Value::as_str).is_none_or(|k| !k.eq_ignore_ascii_case("local")))
+}
+
+fn get_subsonic_field<'a>(users: &'a Value, key: &str) -> Option<&'a Value> {
+    let arr = users.get("sources")?.as_array()?;
+    let idx = first_subsonic(arr)?;
+    arr[idx].get(key)
+}
+
+fn set_subsonic_field(users: &mut Value, key: &str, value: Value) {
+    let Some(top) = users.as_object_mut() else { return };
+    if !top.get("sources").is_some_and(Value::is_array) {
+        top.insert("sources".into(), Value::Array(Vec::new()));
+    }
+    let Some(arr) = top.get_mut("sources").and_then(Value::as_array_mut) else { return };
+    let idx = match first_subsonic(arr) {
+        Some(i) => i,
+        None => {
+            arr.push(serde_json::json!({ "id": accounts::AccountId::new(), "kind": "subsonic" }));
+            arr.len() - 1
+        }
+    };
+    if let Some(entry) = arr[idx].as_object_mut() {
+        entry.insert(key.to_owned(), value);
+    }
+}
+
+/// Ensures a `sources` entry in `managed.json` keeps a stable `id` even when
+/// omitted by the Nix config.
+fn with_managed_id(raw: &Value) -> Value {
+    let mut entry = raw.clone();
+    if let Some(map) = entry.as_object_mut()
+        && !map.contains_key("id")
+    {
+        let canonical = serde_json::to_string(raw).unwrap_or_default();
+        let fnv = |seed: u64, bytes: &[u8]| -> u64 { bytes.iter().fold(seed, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)) };
+        let hi = fnv(0xcbf2_9ce4_8422_2325, canonical.as_bytes());
+        let lo = fnv(0x8422_2325_cbf2_9ce4, canonical.as_bytes());
+        let uuid = format!(
+            "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+            (hi >> 32) as u32,
+            ((hi >> 16) & 0xffff) as u16,
+            (hi & 0x0fff) as u16,
+            ((lo >> 48) as u16 & 0x3fff) | 0x8000,
+            lo & 0xffff_ffff_ffff
+        );
+        map.insert("id".into(), Value::String(uuid));
+    }
+    entry
 }
 
 #[cfg(test)]
@@ -332,5 +400,31 @@ mod tests {
         let dir = saved["offline_dir"].as_str().unwrap();
         assert_eq!(Path::new(dir), Path::new("/data/music/Ond Offline"), "a folder of Ond's own inside it, as when picked in Settings");
         assert!(m.adopt(&mut users).is_empty(), "nothing changes the second time");
+    }
+
+    #[test]
+    fn managed_sources_overlay_keeps_a_deterministic_id_and_preserves_users_own() {
+        let mut m = managed(json!({
+            "sources": [
+                { "kind": "local", "name": "Library", "folders": ["/mnt/music"] }
+            ]
+        }));
+        assert!(m.has("sources"));
+        let own = Settings {
+            sources: vec![crate::settings::SourceEntry::subsonic(accounts::AccountId::new(), "https://music.example.com", "me")],
+            ..Default::default()
+        };
+        let users = serde_json::to_value(&own).unwrap();
+        m.check(&users);
+        let mut s = own.clone();
+        m.apply(&mut s);
+        assert_eq!(s.sources.len(), 1);
+        assert_eq!(s.sources[0].kind, crate::settings::SourceKind::Local);
+        assert_eq!(s.sources[0].folders, vec![PathBuf::from("/mnt/music")]);
+
+        // Writing restores the user's own sources list.
+        let mut saved = serde_json::to_value(&s).unwrap();
+        m.restore(&mut saved, &users);
+        assert_eq!(saved["sources"][0]["server"], "https://music.example.com");
     }
 }

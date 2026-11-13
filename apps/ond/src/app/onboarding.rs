@@ -109,7 +109,8 @@ impl OndApp {
                 // the server took away (going unreachable closes it).
                 if self.login.is_none() {
                     let saved = self.prefs.snapshot();
-                    self.login = Some(super::session::LoginForm { server: saved.server, username: saved.username, ..Default::default() });
+                    self.login =
+                        Some(super::session::LoginForm { server: saved.server().to_owned(), username: saved.username().to_owned(), ..Default::default() });
                 }
             }
             OnboardingEvent::Picked(_) => {}
