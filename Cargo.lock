@@ -4338,6 +4338,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "scan"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "symphonia",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
