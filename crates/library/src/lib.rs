@@ -588,6 +588,13 @@ impl Library {
         track_ids(&rt, album_id)?.iter().filter_map(|id| get_row_or_skip(&rows, id).transpose()).collect()
     }
 
+    /// Looks up tracks by id in the given order, skipping any missing row.
+    pub fn tracks(&self, ids: &[String]) -> Result<Vec<Track>> {
+        let rt = self.db.begin_read()?;
+        let rows = rt.open_table(TRACKS)?;
+        ids.iter().filter_map(|id| get_row_or_skip(&rows, id).transpose()).collect()
+    }
+
     /// All artists by folded sort name: the order of `ARTISTS_BY_NAME`,
     /// rebuilt in memory like [`all_tracks`](Self::all_tracks).
     pub fn artists(&self) -> Result<Vec<Artist>> {
