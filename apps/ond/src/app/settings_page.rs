@@ -684,7 +684,11 @@ impl OndApp {
         } else {
             setting(ui, "Library analysis", "Available once the library has synced.", |_| ());
         }
-        let hint = "Each track is measured once it has downloaded for playback.";
+        let hint = if self.session.caps().downloads {
+            "Each track is measured once it has downloaded for playback."
+        } else {
+            "Each track is measured from its music file as it plays."
+        };
         self.pref_switch(ui, "analyze_playing", "Analyze tracks as they play", hint, self.ui.prefs.analyze_playing, AnalysisAction::AnalyzePlaying);
         note(
             ui,

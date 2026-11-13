@@ -1658,6 +1658,76 @@ fn a_first_run_adds_a_music_folder_and_plays_from_it_with_no_server() {
 }
 
 #[test]
+fn analyzing_a_folder_library_reads_its_files_and_shows_the_results() {
+    use egui_kittest::kittest::Queryable;
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music with spaces and % marks");
+    std::fs::create_dir_all(&music).unwrap();
+    // One second of 1 kHz PCM, long enough to measure loudness as well as peak.
+    let rate = 44_100u32;
+    let data_len = rate * 2;
+    let mut wav = Vec::from(b"RIFF".as_slice());
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..rate {
+        let sample = ((i as f64 * std::f64::consts::TAU * 1000.0 / f64::from(rate)).sin() * 8000.0) as i16;
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(music.join("tone.wav"), wav).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1360.0, 1000.0)).allow_missing_glyphs().build_ui_state(
+        |ui, app: &mut Option<OndApp>| {
+            if let Some(app) = app {
+                app.main_ui(ui);
+            }
+        },
+        None,
+    );
+    let mut app = first_run(&h.ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 1 && a.analysis.loaded);
+    let track = app.data.tracks.all[0].clone();
+    assert!(!app.session.caps().downloads);
+    assert!(app.session.source.as_ref().unwrap().download_url(&track.id).is_none());
+    app.ui.settings_section = settings_page::Section::Library;
+    app.ui.overlay = Some(Overlay::Settings);
+    *h.state_mut() = Some(app);
+    h.run_steps(4);
+    h.get_by_label("Analyze library").click();
+    h.run_steps(2);
+    let app = h.state_mut().as_mut().unwrap();
+    until(app, |a| a.analysis_of(&track).is_some());
+    let result = app.analysis_of(&track).unwrap();
+    assert_eq!(result.sample_rate, rate);
+    assert!(result.integrated_lufs.is_some_and(f64::is_finite));
+    assert!(result.true_peak_dbtp.is_some_and(f64::is_finite));
+    assert_eq!(app.analysis.runner.progress().failed, 0);
+    h.run_steps(4);
+    h.get_by_label("Every track is analyzed");
+    h.get_by_label("Each track is measured from its music file as it plays.");
+    let app = h.state_mut().as_mut().unwrap();
+    let mut wrong = app.analysis.records[&track.id].clone();
+    wrong.stamp = "another account".into();
+    app.handle(AnalysisMsg::Analyzed { key: crate::source::TrackKey::new(accounts::AccountId::new(), &track.id), record: wrong });
+    assert!(app.analysis_of(&track).is_some(), "another account cannot replace this track's result");
+    app.player.queue.play_now(app.session.account().unwrap(), vec![track.clone()], 0, Source::Album { id: track.album_id.clone(), name: "Tone".into() });
+    app.ui.overlay = None;
+    app.ui.queue_ui.tab = QueueTab::Info;
+    h.run_steps(4);
+    assert!(h.query_all_by_value("−15.2 LUFS").next().is_some());
+    assert!(h.query_all_by_value("−12.2 dBTP").next().is_some());
+    *h.state_mut() = None;
+}
+
+#[test]
 fn a_rescan_finds_a_song_added_to_the_folder() {
     let dir = tempfile::tempdir().unwrap();
     let music = music_folder(dir.path());

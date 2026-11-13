@@ -1,6 +1,7 @@
 //! Library analysis in the background: one track at a time on a low-priority
 //! thread, out of the way of playback. Files already in the playback cache are
-//! read from there; others are fetched into a small separate cache so a
+//! read from there; local source files are read directly. Other tracks are
+//! fetched into a small separate cache so a
 //! library-wide run doesn't push recently played tracks out.
 //!
 //! Results go into the library db (keyed by track id, with a stamp of the
@@ -29,7 +30,7 @@ pub struct Job {
     pub suffix: Option<String>,
     pub stamp: String,
     pub secs: f64,
-    /// A downloaded copy (offline store), read directly instead of fetching.
+    /// A source file or downloaded copy, read directly instead of fetching.
     pub local: Option<std::path::PathBuf>,
 }
 
@@ -395,7 +396,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload.downcast_ref::<&str>().map(|s| (*s).to_owned()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".to_owned())
 }
 
-/// Reads the job's downloaded copy, if it has one that opens.
+/// Reads the job's source file or downloaded copy, if it opens.
 fn analyze_local(job: &Job, stop: &(dyn Fn() -> bool + Sync)) -> Option<Result<TrackAnalysis, analysis::AnalyzeError>> {
     let file = std::fs::File::open(job.local.as_ref()?).ok()?;
     let len = file.metadata().ok().map(|m| m.len());
