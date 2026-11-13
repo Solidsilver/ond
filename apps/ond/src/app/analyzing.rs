@@ -112,7 +112,7 @@ impl OndApp {
     }
 
     /// Queues the tracks that have no current analysis; returns how many.
-    /// Downloaded copies are read straight from disk (and need no server).
+    /// Source files and downloaded copies are read straight from disk.
     /// The stream URLs are made by the runner as it gets to each track.
     pub(super) fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
         let Some(account) = self.session.account() else { return 0 };
@@ -121,7 +121,16 @@ impl OndApp {
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
             .filter_map(|t| {
-                let local = self.downloads.local_path(&crate::source::TrackKey::new(account, t.id.clone()));
+                let local = self.downloads.local_path(&crate::source::TrackKey::new(account, t.id.clone())).or_else(|| {
+                    let source = self.session.source.as_ref()?;
+                    // Server URLs stay lazy: only sources without downloads
+                    // need their file path resolved here.
+                    if source.capabilities().downloads {
+                        return None;
+                    }
+                    let (url, _) = source.stream(t, None);
+                    url.strip_prefix("file://").map(std::path::PathBuf::from)
+                });
                 (online || local.is_some()).then(|| analyze::job_for(account, t, local))
             })
             .collect();

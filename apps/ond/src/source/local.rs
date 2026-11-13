@@ -111,7 +111,6 @@ impl LocalSource {
         Self { account, folders, scan_index_path, state: Mutex::new(LocalState { index, ..LocalState::default() }) }
     }
 
-    #[allow(dead_code)]
     pub fn folders(&self) -> &[PathBuf] {
         &self.folders
     }

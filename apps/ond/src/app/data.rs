@@ -253,6 +253,15 @@ impl OndApp {
             }
             LibraryMsg::FolderMissing(paths) => {
                 self.session.folder_missing = paths;
+                if !self.session.folder_missing.is_empty() {
+                    // An unavailable root is already shown in Sources and the
+                    // sidebar. A fully missing scan has no more results coming.
+                    self.sync.albums = false;
+                    self.sync.tracks = false;
+                    self.sync.progress = None;
+                    self.sync.label = "Folder missing".into();
+                    self.first_scan_done(None);
+                }
             }
             LibraryMsg::Skipped(n) => self.session.skipped = n,
             LibraryMsg::LoadFailed { key, error } => {

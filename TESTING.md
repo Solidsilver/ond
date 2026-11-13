@@ -34,6 +34,9 @@ Frame times on a big library and the search index's keystroke latency:
 - [ ] Settings › Queue: the Apple Music and Spotify presets set the four rows at once and the queue follows them (Play next goes to the top with Apple Music, after the next track with Ond); changing a row turns the preset to Custom; the choice survives a restart.
 
 ## Music folders
+- [ ] With a folder live, copy an album onto a watched external drive: it appears a few seconds after the copy ends without Rescan. Delete it: it disappears. Unplug and reconnect the drive: Folder missing appears and then clears automatically, with the stored albums kept while absent.
+- [ ] Switch sources or remove the folder source, then change its files: no background scan or notification comes from the old folders.
+- [ ] On a network share that delivers no file events, add a track while Ond is closed: reopening still finds it. While open, Rescan finds changes even when the share sends no notifications.
 - [ ] First run: pick Music folder, Choose folder… opens the system's folder picker (macOS: NSOpenPanel; Linux: the portal; Windows: the common dialog); a big library shows the count climbing, then the library opens and plays with Wi-Fi off.
 - [ ] A folder on an external drive: unplug it mid-play. The playing track stops or plays out what's buffered; the next fails with "…isn't there" and is skipped; Rescan shows Folder missing in the footer and Settings › Sources, and the albums stay. Plug it back in and Rescan: the state clears and the tracks play.
 - [ ] Start Ond with that drive unplugged: it opens on the stored library with Folder missing, not a sign-in prompt.
