@@ -1233,7 +1233,7 @@ fn source_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Albums);
     unreachable(h);
     h.run_steps(2);
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, 2 sources").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, Home server · Offline").click();
     h.run_steps(2);
     h.event(egui::Event::PointerGone);
     s.shoot(h, "sources-unreachable");

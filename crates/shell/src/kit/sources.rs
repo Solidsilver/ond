@@ -20,7 +20,7 @@ use super::menus::{POPOVER_PAD, menu_row, popover_at, popover_rule};
 use super::text::elide;
 use crate::icons::{self, Icon};
 use crate::theme::{self, Tokens, semibold};
-use accounts::{AccountId, Scope, SourceColor, SourceState};
+use accounts::{AccountId, OfflineReason, Scope, SourceColor, SourceState};
 use egui::{Color32, FontId, Pos2, Rect, Response, Sense, Ui, pos2, vec2};
 use std::time::Duration;
 
@@ -257,10 +257,8 @@ impl<'s, 'a> Shown<'s, 'a> {
             (Shown::One(s), SwitcherLook::Line) if matches!(s.state, SourceState::Online) => s.name.to_owned(),
             (Shown::One(s), SwitcherLook::Line) => format!("{} · {}", s.name, s.line()),
             (Shown::All, SwitcherLook::Card) => all_line(switcher.sources),
-            (Shown::All, SwitcherLook::Line) => match troubled(switcher.sources).next() {
-                Some(_) => format!("All sources · {}", all_line(switcher.sources)),
-                None => "All sources".to_owned(),
-            },
+            // Trouble is flagged at the row's end; there's no room to say it too.
+            (Shown::All, SwitcherLook::Line) => "All sources".to_owned(),
         }
     }
 
@@ -292,9 +290,18 @@ impl<'s, 'a> Shown<'s, 'a> {
     }
 }
 
-/// The sources that need the user.
+/// Whether the switcher flags a source: it needs the user (signed out, a
+/// folder missing), or it's a server that can't be reached. Offline by
+/// choice isn't trouble. An unreachable server keeps the app's own line
+/// (which can say more than "Offline"); only what needs the user replaces
+/// it.
+pub fn flagged(state: &SourceState) -> bool {
+    state.needs_attention() || matches!(state, SourceState::Offline(OfflineReason::Unreachable))
+}
+
+/// The sources the switcher flags.
 fn troubled<'s, 'a>(sources: &'s [SourceInfo<'a>]) -> impl Iterator<Item = &'s SourceInfo<'a>> {
-    sources.iter().filter(|s| s.state.needs_attention())
+    sources.iter().filter(|s| flagged(s.state))
 }
 
 /// All sources' line: which needs attention, or how many there are.
@@ -343,7 +350,15 @@ fn foot(ui: &mut Ui, switcher: &SourceSwitcher<'_>, shown: &Shown<'_, '_>, width
                     text_x = text_x.max(rect.left() + 12.0 - DOT_R + w + 6.0);
                 }
             }
-            let g = elide(ui, &line, FontId::proportional(11.5), t.muted, rect.right() - text_x - 6.0);
+            // Several sources with one in trouble: a flag at the row's end,
+            // the menu and the tooltip say which and why.
+            let flag = !matches!(shown, Shown::Single(_) | Shown::One(_)) && troubled(switcher.sources).next().is_some();
+            let mut right = rect.right() - 6.0;
+            if flag {
+                flag_mark(ui, pos2(rect.right() - 14.0, lead.y));
+                right -= 20.0;
+            }
+            let g = elide(ui, &line, FontId::proportional(11.5), t.muted, right - text_x);
             ui.painter().galley(pos2(text_x, rect.center().y - g.size().y / 2.0), g, t.muted);
         }
         SwitcherLook::Card => {
@@ -443,8 +458,8 @@ fn menu<R>(ui: &mut Ui, switcher: &SourceSwitcher<'_>, shown: &Shown<'_, '_>, ro
 }
 
 /// A source in the menu: a check when it's the one in scope, its dot, its
-/// name, and its line under it (in the warning colour when it needs
-/// attention). True when chosen, and the menu closes.
+/// name, and its line under it (in the warning colour when it's
+/// [`flagged`]). True when chosen, and the menu closes.
 fn source_menu_row(ui: &mut Ui, s: &SourceInfo<'_>, on: bool) -> bool {
     let t = Tokens::of(ui);
     let line = s.line();
@@ -461,7 +476,7 @@ fn source_menu_row(ui: &mut Ui, s: &SourceInfo<'_>, on: bool) -> bool {
         let x = rect.left() + MENU_TEXT_X;
         let room = rect.right() - x - POPOVER_PAD;
         let name = elide(ui, s.name, FontId::proportional(13.0), t.text, room);
-        let ink = if s.state.needs_attention() { t.warn } else { t.muted };
+        let ink = if flagged(s.state) { t.warn } else { t.muted };
         let below = elide(ui, &line, FontId::proportional(11.0), ink, room);
         let top = rect.center().y - (name.size().y + below.size().y) / 2.0;
         let below_y = top + name.size().y;
@@ -507,6 +522,11 @@ fn all_menu_row(ui: &mut Ui, colors: &[SourceColor], on: bool, ground: Color32) 
 fn check(ui: &Ui, rect: Rect) {
     let mark = Rect::from_center_size(pos2(rect.left() + POPOVER_PAD + 6.0, rect.center().y), vec2(11.0, 11.0));
     icons::paint(ui.painter(), mark, Icon::Check, Tokens::of(ui).text);
+}
+
+/// The mark that says a source wants a look, whatever its trouble.
+fn flag_mark(ui: &Ui, c: Pos2) {
+    super::download_mark(ui, c, 12.0, super::DownloadMark::Failed);
 }
 
 /// The [`SwitcherLook::Card`]'s lead: the name's initial in a quiet disc,
@@ -593,7 +613,6 @@ fn spin_id() -> egui::Id {
 mod tests {
     use super::*;
     use crate::kit::{canvas, themed};
-    use accounts::OfflineReason;
     use egui_kittest::kittest::Queryable;
 
     /// An account id from its string form: the kit has no `uuid` of its own.
@@ -604,6 +623,7 @@ mod tests {
     const ONLINE: SourceState = SourceState::Online;
     const OUT: SourceState = SourceState::SignedOut;
     const AWAY: SourceState = SourceState::Offline(OfflineReason::Unreachable);
+    const BY_CHOICE: SourceState = SourceState::Offline(OfflineReason::ByChoice);
 
     fn three(office: &'static SourceState) -> [SourceInfo<'static>; 3] {
         let info = |n: u128, name: &'static str, color: u8, state: &'static SourceState, detail: &'static str| SourceInfo {
@@ -618,7 +638,7 @@ mod tests {
         [
             info(1, "Home server", 0, &ONLINE, "Synced 2 min ago"),
             info(2, "Office", 3, office, "Synced yesterday"),
-            info(3, "Music folder", 5, &AWAY, "12 840 songs"),
+            info(3, "Music folder", 5, &ONLINE, "12 840 songs"),
         ]
     }
 
@@ -702,6 +722,32 @@ mod tests {
         let mut h = harness(three(&OUT).to_vec(), Scope::all(), SwitcherLook::Card, SwitcherPlace::Foot { width: 200.0 });
         h.run();
         h.get_by_label("All sources, Office · Signed out");
+    }
+
+    #[test]
+    fn an_unreachable_server_flags_the_switcher_and_offline_by_choice_does_not() {
+        let mut sources = three(&AWAY);
+        sources[1].detail = Some("Can't reach the server");
+        let flag = |h: &egui_kittest::Harness<'_, (bool, Seen)>| shapes(h).iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.text() == "!"));
+        let mut h = harness(sources.to_vec(), Scope::all(), SwitcherLook::Line, SwitcherPlace::Foot { width: 200.0 });
+        h.run();
+        assert!(flag(&h), "the row is flagged");
+        h.get_by_label("All sources, Office · Offline").click();
+        h.run();
+        // The menu keeps the app's own words for it, in the warning colour.
+        h.get_by_role_and_label(egui::accesskit::Role::MenuItem, "Office, Can't reach the server");
+        let warn = Tokens::of_ctx(&h.ctx).warn;
+        let warned = shapes(&h).iter().any(|s| match s {
+            egui::Shape::Text(text) => text.galley.text() == "Can't reach the server" && text.fallback_color == warn,
+            _ => false,
+        });
+        assert!(warned, "the line is in the warning colour");
+        // Gone offline on purpose, it isn't trouble.
+        assert!(!flagged(&BY_CHOICE) && flagged(&AWAY) && flagged(&OUT) && !flagged(&ONLINE));
+        let mut h = harness(three(&BY_CHOICE).to_vec(), Scope::all(), SwitcherLook::Line, SwitcherPlace::Foot { width: 200.0 });
+        h.run();
+        h.get_by_label("All sources, 3 sources");
+        assert!(!flag(&h));
     }
 
     #[test]
@@ -793,12 +839,13 @@ mod tests {
         let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
         std::fs::create_dir_all(&out).unwrap();
         let one = vec![SourceInfo { detail: Some("music.example.com"), ..three(&ONLINE)[0] }];
-        let scenes: [(&str, Vec<SourceInfo<'static>>, Scope); 5] = [
+        let scenes: [(&str, Vec<SourceInfo<'static>>, Scope); 6] = [
             ("one", one.clone(), Scope::all()),
             ("three", three(&ONLINE).to_vec(), Scope::all()),
             ("three-one", three(&ONLINE).to_vec(), Scope::only(id(1))),
             ("trouble", three(&OUT).to_vec(), Scope::only(id(2))),
             ("trouble-all", three(&OUT).to_vec(), Scope::all()),
+            ("unreachable", three(&AWAY).to_vec(), Scope::all()),
         ];
         for (theme, pref) in [("light", theme::ThemePref::Light), ("dark", theme::ThemePref::Dark)] {
             for (name, sources, scope) in &scenes {
@@ -822,8 +869,12 @@ mod tests {
                 h.render().unwrap().save(out.join(format!("kit-sources-{name}-{theme}.png"))).unwrap();
             }
             // The menu, with Add and Manage, over the app's own rows.
-            for (name, sources, scope) in [("one", &scenes[0].1, &scenes[0].2), ("three", &scenes[2].1, &scenes[2].2), ("trouble", &scenes[3].1, &scenes[3].2)]
-            {
+            for (name, sources, scope) in [
+                ("one", &scenes[0].1, &scenes[0].2),
+                ("three", &scenes[2].1, &scenes[2].2),
+                ("trouble", &scenes[3].1, &scenes[3].2),
+                ("unreachable", &scenes[5].1, &scenes[5].2),
+            ] {
                 let (sources, scope) = (sources.clone(), scope.clone());
                 let mut h = canvas(vec2(300.0, 400.0), pref, move |ui| {
                     ui.add_space(340.0);
