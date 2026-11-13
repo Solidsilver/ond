@@ -45,8 +45,9 @@
 //! - [`sources`]: a source as the app describes it ([`SourceInfo`]), the
 //!   [`source_dot`] in its colour (and [`source_dots`], stacked, for All
 //!   sources; [`source_dot_lead`] in front of a line of text,
-//!   [`source_dot_after`] and [`text_then_dots`] after one, and
-//!   [`source_label`], a dot and a name as one item), and the sidebar's
+//!   [`source_dot_after`] and [`text_then_dots`] after one,
+//!   [`source_label`], a dot and a name as one item, and [`source_cell`],
+//!   one in a table's Source column), and the sidebar's
 //!   foot, [`source_switcher`]: what's in scope
 //!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its
 //!   [`SwitcherPlace`]) and a menu to change it, which says what was picked

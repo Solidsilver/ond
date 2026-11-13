@@ -211,6 +211,19 @@ pub fn source_label(ui: &mut Ui, color: SourceColor, name: &str, font: FontId, i
     resp
 }
 
+/// A source named in a table's cell: its dot from `x`, then its name (its
+/// words, font and ink), cut to what's left of `width`, both centred on
+/// `cy`. The Source column of a list that mixes sources. Painted only, as
+/// the row it's in is what's named.
+pub fn source_cell(ui: &Ui, x: f32, cy: f32, width: f32, color: SourceColor, (name, font, ink): (&str, FontId, Color32)) {
+    if width < DOT_LEAD {
+        return;
+    }
+    let text_x = source_dot_lead(ui, x, cy, color);
+    let g = elide(ui, name, font, ink, width - DOT_LEAD);
+    ui.painter().galley(pos2(text_x, cy - g.size().y / 2.0), g, ink);
+}
+
 /// Several sources' dots overlapping in a row centred on `center`, the
 /// first on top, each cut out of the one under it by a ring of `ground`
 /// (what they're drawn on). All sources' mark.
@@ -1010,6 +1023,28 @@ mod tests {
         let rect = found.rect();
         assert!((dot.x - (rect.left() + DOT_R)).abs() < 0.5, "the dot leads the name");
         assert!(rect.width() > DOT_LEAD, "and the name follows it");
+    }
+
+    #[test]
+    fn a_source_cell_leads_with_its_dot_and_cuts_its_name_to_the_cell() {
+        let color = SourceColor::new(2);
+        let mut h = themed((), move |ui, _| {
+            let t = Tokens::of(ui);
+            source_cell(ui, 20.0, 30.0, 60.0, color, ("A source with a long name", FontId::proportional(13.0), t.muted));
+        });
+        h.run();
+        let shapes = shapes_of(&h.output().shapes);
+        let dot = shapes.iter().find_map(|s| match s {
+            egui::Shape::Circle(c) if c.fill == theme::source_color(color, false) => Some(c.center),
+            _ => None,
+        });
+        assert_eq!(dot.map(|c| c.x), Some(20.0 + DOT_R), "the dot leads");
+        let text = shapes.iter().find_map(|s| match s {
+            egui::Shape::Text(t) => Some((t.pos.x, t.galley.size().x)),
+            _ => None,
+        });
+        let (x, w) = text.expect("the name");
+        assert!((x - (20.0 + DOT_LEAD)).abs() < 0.5 && x + w <= 80.0 + 0.5, "the name follows, cut to the cell: {x} {w}");
     }
 
     #[test]
