@@ -163,24 +163,18 @@ impl OndApp {
     fn server_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
         let state = self.server_state();
         let source_state = state.source_state();
-        // Before the first connect has given the account its id, a stand-in
-        // that stays put, so a spinner counts from when it started.
-        static NO_ACCOUNT: std::sync::LazyLock<AccountId> = std::sync::LazyLock::new(AccountId::new);
-        let id = self.session.account().unwrap_or(*NO_ACCOUNT);
-        let sources = [kit::SourceInfo {
-            id,
-            name: state.host(),
-            kind: "Subsonic server",
-            icon: Icon::Disc,
-            color: SourceColor::default(),
-            state: &source_state,
-            detail: Some(state.label()),
-        }];
+        let id = self.source_id();
+        let (name, color) = self.source_look(&state);
+        let sources =
+            [kit::SourceInfo { id, name: &name, kind: "Subsonic server", icon: Icon::Disc, color, state: &source_state, detail: Some(state.label()) }];
         let scope = Scope::only(id);
         let tooltip = state.tooltip();
         let switcher =
-            kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Line, add: false, manage: false, tooltip: Some(&tooltip) };
+            kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Line, add: false, manage: true, tooltip: Some(&tooltip) };
         let picked = kit::source_switcher(ui, &switcher, place, |ui| self.server_menu(ui, &state));
+        if picked == Some(kit::SourcePick::Manage) {
+            return self.actions.push(Action::OpenSettings(super::settings_page::Section::Sources));
+        }
         let Some(kit::SourcePick::App(row)) = picked else { return };
         self.actions.push(match row {
             ServerRow::MeasureLatency => Action::MeasureLatency,
@@ -192,7 +186,22 @@ impl OndApp {
         });
     }
 
-    fn server_state(&self) -> ServerState {
+    /// The server's account id. Before the first connect has given it one,
+    /// a stand-in that stays put, so a spinner counts from when it started.
+    pub(super) fn source_id(&self) -> AccountId {
+        static NO_ACCOUNT: std::sync::LazyLock<AccountId> = std::sync::LazyLock::new(AccountId::new);
+        self.session.account().unwrap_or(*NO_ACCOUNT)
+    }
+
+    /// What the server is called and its colour: the name it was given in
+    /// the Sources tab, else its host.
+    pub(super) fn source_look(&self, state: &ServerState) -> (String, SourceColor) {
+        let saved = self.session.settings.as_ref();
+        let name = saved.and_then(|s| s.source_name.clone()).unwrap_or_else(|| state.host().to_owned());
+        (name, saved.map(|s| s.source_color).unwrap_or_default())
+    }
+
+    pub(super) fn server_state(&self) -> ServerState {
         let host = self.session.settings.as_ref().map(|s| super::diagnostics::server_host(&s.server)).unwrap_or_default();
         if let Some(p) = self.sync.progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
@@ -477,7 +486,7 @@ fn menu_item(ui: &mut Ui, label: &str) -> bool {
 
 /// The server's state as the footer shows it.
 #[derive(Debug, Clone, PartialEq)]
-enum ServerState {
+pub(super) enum ServerState {
     Connected {
         host: String,
     },
@@ -506,7 +515,7 @@ enum ServerState {
 }
 
 impl ServerState {
-    fn host(&self) -> &str {
+    pub(super) fn host(&self) -> &str {
         match self {
             ServerState::Connected { host }
             | ServerState::Syncing { host, .. }
@@ -518,7 +527,7 @@ impl ServerState {
     }
 
     /// What the footer says.
-    fn label(&self) -> &str {
+    pub(super) fn label(&self) -> &str {
         match self {
             ServerState::Connected { host } => host,
             ServerState::Syncing { label, .. } => label,
@@ -543,7 +552,7 @@ impl ServerState {
     }
 
     /// The state as the kit's switcher draws it.
-    fn source_state(&self) -> SourceState {
+    pub(super) fn source_state(&self) -> SourceState {
         match self {
             ServerState::Connected { .. } => SourceState::Online,
             ServerState::Syncing { fraction, .. } => SourceState::Syncing(*fraction),

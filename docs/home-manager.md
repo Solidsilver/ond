@@ -43,7 +43,7 @@ Names and values are the same as in Ond's own `settings.json`. Ond logs a warnin
 | `server` | The server's address, like `"https://music.example.com"` |
 | `username` | Your username on it |
 
-These fill in the sign-in form and lock those two fields. The password isn't a setting: Ond asks for it once and keeps it in the system keyring. If you change the server or username, Ond asks you to sign in again.
+These fill in the sign-in form and lock those two fields. The password isn't a setting: Ond asks for it once and keeps it in the system keyring. If you change the server or username, Ond asks you to sign in again. Settings › Sources shows a managed server locked: it can be given a colour, but not renamed.
 
 ### Appearance
 

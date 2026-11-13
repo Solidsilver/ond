@@ -109,6 +109,13 @@ pub struct Settings {
     pub server: String,
     #[serde(default)]
     pub username: String,
+    /// What the server was renamed to in Settings' Sources tab; without one
+    /// it goes by its host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
+    /// The server's dot colour, shown once Ond holds more than one source.
+    #[serde(default, skip_serializing_if = "is_first_color")]
+    pub source_color: accounts::SourceColor,
     /// Size cap for the streaming cache; `None` uses the default (2 GB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_cache_mb: Option<u64>,
@@ -254,6 +261,10 @@ fn yes() -> bool {
     true
 }
 
+fn is_first_color(color: &accounts::SourceColor) -> bool {
+    *color == accounts::SourceColor::default()
+}
+
 fn full() -> f32 {
     1.0
 }
@@ -264,6 +275,8 @@ impl Default for Settings {
             account: None,
             server: String::new(),
             username: String::new(),
+            source_name: None,
+            source_color: accounts::SourceColor::default(),
             stream_cache_mb: None,
             output_device: None,
             device_modes: Default::default(),
@@ -398,6 +411,9 @@ impl Settings {
             account: Some(account.unwrap_or_else(accounts::AccountId::new)),
             server: server.to_owned(),
             username: username.to_owned(),
+            // Another account starts with no name and the first colour.
+            source_name: if same { self.source_name.clone() } else { None },
+            source_color: if same { self.source_color } else { accounts::SourceColor::default() },
             signed_out: false,
             ..self.clone()
         }
@@ -468,6 +484,23 @@ mod tests {
         let signed_out = Settings { signed_out: true, ..old };
         assert_eq!(signed_out.sign_in("https://music.example.com", "me").account, Some(account));
         assert!(serde_json::to_value(Settings::default()).unwrap().get("account").is_none());
+    }
+
+    #[test]
+    fn the_servers_name_and_colour_stay_with_its_account_and_another_starts_fresh() {
+        let named = Settings {
+            source_name: Some("Home".into()),
+            source_color: accounts::SourceColor::new(3),
+            ..login("https://music.example.com", "me").sign_in("https://music.example.com", "me")
+        };
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!((&json["source_name"], &json["source_color"]), (&serde_json::json!("Home"), &serde_json::json!(3)));
+        let again = named.sign_in("https://music.example.com/", "me");
+        assert_eq!((again.source_name.as_deref(), again.source_color), (Some("Home"), accounts::SourceColor::new(3)));
+        let other = named.sign_in("https://other.example.com", "me");
+        assert_eq!((other.source_name, other.source_color), (None, accounts::SourceColor::default()));
+        let fresh = serde_json::to_value(Settings::default()).unwrap();
+        assert!(fresh.get("source_name").is_none() && fresh.get("source_color").is_none(), "nothing written until it's set");
     }
 
     #[test]

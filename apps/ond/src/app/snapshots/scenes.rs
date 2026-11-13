@@ -551,6 +551,20 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app_mut(h).actions.push(Action::OpenSettings(section));
         s.shoot(h, &format!("settings-{}", section.label().to_lowercase()));
     }
+    // The one server as a source: unreachable, then its menu open.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).session.online = false;
+    app_mut(h).session.unreachable = true;
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    s.shoot(h, "settings-sources-offline");
+    reset(h, FULL, Route::Recent);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.get_by_label_contains("music.example.com, Navidrome, ").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "settings-sources-menu");
+    egui::Popup::close_all(&h.ctx);
 
     // A queue set up by hand: no preset matches, so Custom shows.
     reset(h, FULL, Route::Recent);
@@ -1098,6 +1112,7 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         settings_page::Section::Playback,
         settings_page::Section::Output,
         settings_page::Section::Offline,
+        settings_page::Section::Sources,
         settings_page::Section::About,
     ] {
         reset(h, FULL, Route::Recent);

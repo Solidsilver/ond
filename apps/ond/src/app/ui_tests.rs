@@ -1023,3 +1023,63 @@ fn undo_puts_back_a_song_removed_from_a_playlist() {
     let app = app_mut(&mut h);
     assert_eq!(app.data.playlist_tracks[&id].iter().map(|t| t.id.clone()).collect::<Vec<_>>(), before);
 }
+
+/// Manage sources… opens Settings on Sources, where the one server's row
+/// renames it in place and gives it a colour (both saved, and the switcher
+/// takes the name) and asks before signing out. It can't be
+/// removed while Ond holds one server.
+#[test]
+fn the_sources_tab_renames_and_recolours_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "music.example.com").click();
+    h.run_steps(2);
+    h.get_by_label("Manage sources…").hover();
+    h.run_steps(1);
+    h.get_by_label("Manage sources…").click();
+    h.run_steps(3);
+    assert!(matches!(app_mut(&mut h).ui.overlay, Some(dialogs::Overlay::Settings)));
+    assert_eq!(app_mut(&mut h).ui.settings_section, settings_page::Section::Sources);
+    h.check_accessibility();
+    h.get_by_label_contains("music.example.com, Navidrome, ").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Remove…").is_none(), "one server can't be removed");
+    h.get_by_label("Sign out…");
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.get_by_label("Source name").type_text("Home");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name.as_deref(), Some("Home"));
+    h.get_by_label_contains("Home, Navidrome, ").click();
+    h.run_steps(2);
+    h.get_by_label("Green").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_color, accounts::SourceColor::new(2));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Home, music.example.com");
+    *h.state_mut() = None;
+}
+
+/// A server set in managed.json is the Nix config's: its row says so and
+/// offers no Rename, and a rename asked for anyway does nothing.
+#[test]
+fn a_managed_server_is_locked_in_the_sources_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("managed.json"), MANAGED).unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.get_by_label_contains(crate::managed::LOCKED).click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Rename").is_none());
+    h.get_by_label("Sign out…");
+    app_mut(&mut h).actions.push(Action::Prefs(PrefsAction::SourceName("Elsewhere".into())));
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name, None, "locked");
+    *h.state_mut() = None;
+}

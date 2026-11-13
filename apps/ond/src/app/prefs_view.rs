@@ -130,6 +130,11 @@ pub enum PrefsAction {
     Experimental(Experimental),
     /// How the queue behaves.
     Queue(crate::queue::QueuePrefs),
+    /// The server's name in the Sources tab and the switcher; empty, or its
+    /// host, goes back to the host.
+    SourceName(String),
+    /// The server's dot colour.
+    SourceColor(accounts::SourceColor),
 }
 
 impl OndApp {
@@ -149,6 +154,9 @@ impl OndApp {
                 PrefsAction::ArtistPhotos(_) => "artist_photos",
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
+                // A managed server is the Nix config's, name and all.
+                PrefsAction::SourceName(_) => "server",
+                PrefsAction::SourceColor(_) => return false,
                 // Partly managed groups: the managed parts are put back.
                 PrefsAction::WaveformBars(_)
                 | PrefsAction::Experimental(_)
@@ -199,6 +207,24 @@ impl OndApp {
                 self.prefs.edit(|s| s.scrobble = on);
             }
             PrefsAction::Diagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
+            PrefsAction::SourceName(name) => {
+                let edit = |s: &mut crate::settings::Settings| {
+                    let name = name.trim();
+                    let host = super::diagnostics::server_host(&s.server);
+                    s.source_name = (!name.is_empty() && name != host).then(|| name.to_owned());
+                };
+                self.prefs.edit(edit);
+                // The session's copy is what the switcher and Settings draw.
+                if let Some(s) = self.session.settings.as_mut() {
+                    edit(s);
+                }
+            }
+            PrefsAction::SourceColor(color) => {
+                self.prefs.edit(|s| s.source_color = color);
+                if let Some(s) = self.session.settings.as_mut() {
+                    s.source_color = color;
+                }
+            }
             PrefsAction::Experimental(x) => self.prefs.edit(|s| s.experimental = x),
             PrefsAction::Queue(q) => {
                 self.prefs.edit(|s| s.queue = q);

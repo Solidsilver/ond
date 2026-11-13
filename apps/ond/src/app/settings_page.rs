@@ -25,19 +25,21 @@ pub enum Section {
     Output,
     Offline,
     Library,
+    Sources,
     Account,
     Experimental,
     About,
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::Appearance,
         Section::Playback,
         Section::Queue,
         Section::Output,
         Section::Offline,
         Section::Library,
+        Section::Sources,
         Section::Account,
         Section::Experimental,
         Section::About,
@@ -51,6 +53,7 @@ impl Section {
             Section::Output => "Output",
             Section::Offline => "Offline",
             Section::Library => "Library",
+            Section::Sources => "Sources",
             Section::Account => "Account",
             Section::Experimental => "Experimental",
             Section::About => "About",
@@ -70,6 +73,7 @@ impl OndApp {
             Section::Output => self.output_settings(ui),
             Section::Offline => self.offline_settings(ui),
             Section::Library => self.library_settings(ui),
+            Section::Sources => self.source_settings(ui),
             Section::Account => self.account_settings(ui),
             Section::Experimental => self.experimental_settings(ui),
             Section::About => self.about(ui),
@@ -689,6 +693,41 @@ impl OndApp {
         if x != before {
             self.actions.push(Action::Prefs(PrefsAction::Experimental(x)));
         }
+    }
+
+    /// The one server Ond holds, as a source: its name and colour, Sync
+    /// now and Sign out…. It can't be removed until Ond holds several, and
+    /// one set in managed.json is locked.
+    fn source_settings(&mut self, ui: &mut Ui) {
+        if self.session.settings.as_ref().is_none_or(|s| s.server.is_empty()) {
+            group(ui, "Sources", |ui| setting(ui, "Not connected", "", |_| ()));
+            return;
+        }
+        let state = self.server_state();
+        let source_state = state.source_state();
+        let (name, color) = self.source_look(&state);
+        let source = kit::SourceInfo {
+            id: self.source_id(),
+            name: &name,
+            kind: "Navidrome",
+            icon: Icon::Disc,
+            color,
+            state: &source_state,
+            detail: Some(state.label()),
+        };
+        let syncs = self.session.source.is_some() && self.session.online && !self.sync.tracks;
+        let menu = kit::SourceRowMenu { rename: true, color: true, sync: syncs.then_some("Sync now"), sign_out: true, remove: false };
+        let locked = self.ui.prefs.server_managed.then_some(crate::managed::LOCKED);
+        let mut picked = None;
+        group(ui, "Sources", |ui| picked = kit::source_row(ui, &kit::SourceRow { source, menu, locked }));
+        self.actions.extend(picked.and_then(|event| match event {
+            kit::SourceRowEvent::Rename(name) => Some(PrefsAction::SourceName(name).into()),
+            kit::SourceRowEvent::Color(color) => Some(PrefsAction::SourceColor(color).into()),
+            kit::SourceRowEvent::Sync => Some(Action::SyncNow),
+            kit::SourceRowEvent::SignOut => Some(Action::AskSignOut),
+            // Not offered while Ond holds one server.
+            kit::SourceRowEvent::Remove => None,
+        }));
     }
 
     fn account_settings(&mut self, ui: &mut Ui) {
