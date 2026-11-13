@@ -608,7 +608,7 @@ impl OndApp {
         match msg.into() {
             Msg::OndPlaylistChanged => self.refresh_ond_playlists(),
             Msg::MixedPlaylistReady { id, name, existing, added } => self.offer_mixed_playlist(id, name, existing, added),
-            Msg::OndPlaylists { generation, playlists, tracks } => self.ond_playlists_loaded(generation, playlists, tracks),
+            Msg::OndPlaylists { generation, playlists, tracks, entries } => self.ond_playlists_loaded(generation, playlists, tracks, entries),
             Msg::Source { account, session, message } => self.source_message(account, session, *message),
             Msg::Scoped { session, message } => {
                 if session == self.bridge.session() {

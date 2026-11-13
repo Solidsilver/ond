@@ -363,6 +363,23 @@ impl OndStore {
         })
     }
 
+    /// Applies a view's edit only if its raw entry snapshot is still current.
+    /// Missing mirror rows must never turn a stale edit into a destructive replace.
+    pub fn replace_playlist_entries_if_unchanged(&self, id: &str, expected: &[ItemKey], entries: Vec<ItemKey>) -> Result<bool> {
+        let mut applied = false;
+        self.update_playlist(id, |pl| {
+            if pl.entries.len() != expected.len()
+                || pl.entries.iter().zip(expected).any(|(entry, key)| entry.account != key.account.to_string() || entry.item != key.item)
+            {
+                return false;
+            }
+            pl.entries = entries.iter().map(entry_to_v1).collect();
+            applied = true;
+            true
+        })?;
+        Ok(applied)
+    }
+
     fn update_playlist(&self, id: &str, edit: impl FnOnce(&mut PlaylistV1) -> bool) -> Result<bool> {
         let wt = self.db.begin_write()?;
         let updated = {

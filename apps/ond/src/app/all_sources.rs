@@ -9,7 +9,7 @@ use crate::bridge::{Bridge, LibraryMsg, Msg};
 use crate::nav::Route;
 use crate::source::identity;
 use accounts::{AccountId, Scope};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -22,6 +22,7 @@ pub(super) struct AllSources {
     pub ond_generation: u64,
     pub ond_playlists: Vec<crate::source::Playlist>,
     pub ond_tracks: BTreeMap<String, Arc<Vec<library::Track>>>,
+    pub ond_entries: HashMap<String, crate::bridge::OndPlaylistEntries>,
     revisions: BTreeMap<AccountId, u64>,
     artist_catalog: crate::memo::Memo<Vec<(AccountId, u64, u64)>, Vec<crate::source::artists::MergedArtist>>,
     pub(super) projection: Option<Vec<(AccountId, u64)>>,
@@ -871,6 +872,45 @@ mod tests {
         for query in ["u=", "t=", "s="] {
             assert!(!exported.contains(query));
         }
+    }
+
+    #[test]
+    fn playlist_edits_preserve_deleted_files_and_use_the_displayed_rows_raw_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        let missing = TrackKey::new(account(1), "deleted-file");
+        let first = TrackKey::new(account(1), "1");
+        let second = TrackKey::new(account(2), "1");
+        let entries = vec![missing.clone(), first.clone(), second.clone(), missing.clone()];
+        let store = app.bridge.ond_store().clone();
+        let playlist = store.create_playlist("Missing files", &entries).unwrap();
+        let id = format!("ond:{}", playlist.id);
+        app.refresh_ond_playlists();
+        pump(&mut app, |a| a.multi.ond_entries.contains_key(&id));
+        assert_eq!(app.multi.ond_entries[&id].visible, [1, 2]);
+        app.apply(Action::PlaylistEdit(PlaylistAction::Move { id: id.clone(), from: 1, to: 0 }));
+        pump(&mut app, |a| a.multi.ond_entries[&id].entries[1] == second);
+        assert_eq!(store.playlist(&playlist.id).unwrap().unwrap().entries, [missing.clone(), second.clone(), first.clone(), missing.clone()]);
+        let removed = app.multi.ond_tracks[&id][0].clone();
+        app.apply(Action::PlaylistEdit(PlaylistAction::Remove { id: id.clone(), index: 0 }));
+        pump(&mut app, |a| a.multi.ond_entries[&id].entries.len() == 3);
+        assert_eq!(store.playlist(&playlist.id).unwrap().unwrap().entries, [missing.clone(), first.clone(), missing.clone()]);
+        let after = app.multi.ond_tracks[&id].iter().map(|t| t.id.clone()).collect();
+        app.apply(Action::PlaylistEdit(PlaylistAction::Restore { id: id.clone(), index: 0, track: Box::new(removed), after }));
+        pump(&mut app, |a| a.multi.ond_entries[&id].entries.len() == 4);
+        assert_eq!(store.playlist(&playlist.id).unwrap().unwrap().entries, [missing.clone(), second, first, missing]);
+
+        // Startup's empty mirrors must retain raw entries even with no rows to draw.
+        for (account, bridge) in &mut app.multi.bridges {
+            *bridge = bridge.fork_source(*account, Arc::new(library::Library::in_memory().unwrap()));
+        }
+        app.refresh_ond_playlists();
+        pump(&mut app, |a| a.multi.ond_tracks[&id].is_empty());
+        app.apply(Action::PlaylistEdit(PlaylistAction::Remove { id: id.clone(), index: 0 }));
+        app.apply(Action::PlaylistEdit(PlaylistAction::Move { id, from: 0, to: 1 }));
+        assert_eq!(store.playlist(&playlist.id).unwrap().unwrap().entries.len(), 4);
     }
 
     #[test]

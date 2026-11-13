@@ -246,3 +246,18 @@ fn corrupt_store_is_moved_aside_and_newer_schema_is_refused() {
 
     assert!(matches!(OndStore::open_or_recover(&path), Err(Error::NewerSchema { .. })));
 }
+
+#[test]
+fn a_stale_playlist_replacement_preserves_entries_added_since_the_view_loaded() {
+    let store = OndStore::in_memory().unwrap();
+    let first = ItemKey::new(acc(1), "one");
+    let deleted = ItemKey::new(acc(2), "deleted-file");
+    let snapshot = vec![deleted.clone(), first.clone()];
+    let playlist = store.create_playlist("Keep", &snapshot).unwrap();
+    store.add_to_playlist(&playlist.id, std::slice::from_ref(&deleted)).unwrap();
+    assert!(!store.replace_playlist_entries_if_unchanged(&playlist.id, &snapshot, vec![first.clone()]).unwrap());
+    let current = vec![deleted.clone(), first.clone(), deleted.clone()];
+    assert_eq!(store.playlist(&playlist.id).unwrap().unwrap().entries, current);
+    assert!(store.replace_playlist_entries_if_unchanged(&playlist.id, &current, vec![deleted.clone(), deleted.clone()]).unwrap());
+    assert_eq!(store.playlist(&playlist.id).unwrap().unwrap().entries, [deleted.clone(), deleted]);
+}

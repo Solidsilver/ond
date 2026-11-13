@@ -16,6 +16,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use subsonic::{Client, Credentials};
 
+/// Raw playlist entries and the displayed rows' indices into that same snapshot.
+#[derive(Clone)]
+pub struct OndPlaylistEntries {
+    pub entries: Vec<accounts::ItemKey>,
+    pub visible: Vec<usize>,
+}
+
 /// What background work tells the UI. Messages for one part of the app are
 /// grouped under it ([`LibraryMsg`], [`AnalysisMsg`], [`OfflineMsg`]), and
 /// that part's handler matches its own group whole, so a message added to a
@@ -32,6 +39,7 @@ pub enum Msg {
         generation: u64,
         playlists: Vec<Playlist>,
         tracks: HashMap<String, Arc<Vec<Track>>>,
+        entries: HashMap<String, OndPlaylistEntries>,
     },
     /// Both enqueue and inbox checks use this account's independent session.
     Source {

@@ -5,7 +5,7 @@
 
 use super::all_sources::PendingMixedPlaylist;
 use super::{OndApp, PlaylistAction};
-use crate::bridge::{Msg, PlaylistEdit};
+use crate::bridge::{Msg, OndPlaylistEntries};
 use crate::failure::Failure;
 use crate::source::{Playlist, identity};
 use accounts::{AccountId, ItemKey};
@@ -80,51 +80,59 @@ impl OndApp {
             }
             _ => {}
         }
-        let (id, edit) = match action {
-            PlaylistAction::Add { id, tracks } => (id, PlaylistEdit::Add(tracks.iter().map(|t| t.id.clone()).collect())),
-            PlaylistAction::Rename { id, name } => (id, PlaylistEdit::Rename(name.clone())),
-            PlaylistAction::Delete { id } => (id, PlaylistEdit::Delete),
-            PlaylistAction::Remove { id, index } => (id, PlaylistEdit::Remove(vec![*index])),
-            PlaylistAction::Move { id, from, to } => {
-                if !id.starts_with("ond:") {
-                    return false;
-                }
-                let Some(ts) = self.data.playlist_tracks.get(id) else { return true };
-                let mut ts = ts.as_ref().clone();
-                if !super::commands::move_item(&mut ts, *from, *to) {
-                    return true;
-                }
-                (id, PlaylistEdit::Replace(ts.into_iter().map(|t| t.id).collect()))
-            }
-            PlaylistAction::Restore { id, index, track, after } => {
-                if !id.starts_with("ond:") {
-                    return false;
-                }
-                let Some(ts) = self.data.playlist_tracks.get(id) else { return true };
-                if ts.iter().map(|t| &t.id).ne(after.iter()) || *index > ts.len() {
-                    return true;
-                }
-                let mut ts = ts.as_ref().clone();
-                ts.insert(*index, *track.clone());
-                (id, PlaylistEdit::Replace(ts.into_iter().map(|t| t.id).collect()))
-            }
-            PlaylistAction::ExportM3u { .. } => return false,
+        let id = match action {
+            PlaylistAction::Add { id, .. }
+            | PlaylistAction::Rename { id, .. }
+            | PlaylistAction::Delete { id }
+            | PlaylistAction::Remove { id, .. }
+            | PlaylistAction::Move { id, .. }
+            | PlaylistAction::Restore { id, .. } => id,
             _ => return false,
         };
         if !id.starts_with("ond:") {
             return false;
         }
+        let fallback = self.session.account().expect("configured source");
+        let edit = match action {
+            PlaylistAction::Add { tracks, .. } => OndEdit::Add(tracks.iter().map(|t| identity::key(fallback, &t.id)).collect()),
+            PlaylistAction::Rename { name, .. } => OndEdit::Rename(name.clone()),
+            PlaylistAction::Delete { .. } => OndEdit::Delete,
+            _ => {
+                let Some(rows) = self.multi.ond_entries.get(id) else { return true };
+                let mut entries = rows.entries.clone();
+                match action {
+                    PlaylistAction::Remove { index, .. } => {
+                        let Some(raw) = rows.visible.get(*index) else { return true };
+                        entries.remove(*raw);
+                    }
+                    PlaylistAction::Move { from, to, .. } => {
+                        let (Some(from), Some(to)) = (rows.visible.get(*from), rows.visible.get(*to)) else { return true };
+                        if !super::commands::move_item(&mut entries, *from, *to) {
+                            return true;
+                        }
+                    }
+                    PlaylistAction::Restore { index, track, after, .. } => {
+                        let Some(tracks) = self.multi.ond_tracks.get(id) else { return true };
+                        if tracks.iter().map(|t| &t.id).ne(after.iter()) || *index > rows.visible.len() {
+                            return true;
+                        }
+                        let raw = rows.visible.get(*index).copied().unwrap_or(entries.len());
+                        entries.insert(raw, identity::key(fallback, &track.id));
+                    }
+                    _ => unreachable!(),
+                }
+                OndEdit::Replace { expected: rows.entries.clone(), entries }
+            }
+        };
         let store = self.bridge.ond_store().clone();
         let id = id.trim_start_matches("ond:").to_owned();
-        let fallback = self.session.account().expect("configured source");
         let post = self.bridge.poster();
         self.bridge.runtime().spawn_blocking(move || {
             let result = match edit {
-                PlaylistEdit::Add(ids) => store.add_to_playlist(&id, &ids.iter().map(|id| identity::key(fallback, id)).collect::<Vec<_>>()).map(|_| ()),
-                PlaylistEdit::Replace(ids) => store.replace_playlist_entries(&id, ids.iter().map(|id| identity::key(fallback, id)).collect()).map(|_| ()),
-                PlaylistEdit::Remove(indices) => store.remove_from_playlist(&id, &indices).map(|_| ()),
-                PlaylistEdit::Rename(name) => store.rename_playlist(&id, &name).map(|_| ()),
-                PlaylistEdit::Delete => store.delete_playlist(&id).map(|_| ()),
+                OndEdit::Add(entries) => store.add_to_playlist(&id, &entries).map(|_| ()),
+                OndEdit::Replace { expected, entries } => store.replace_playlist_entries_if_unchanged(&id, &expected, entries).map(|_| ()),
+                OndEdit::Rename(name) => store.rename_playlist(&id, &name).map(|_| ()),
+                OndEdit::Delete => store.delete_playlist(&id).map(|_| ()),
             };
             match result {
                 Ok(()) => post(Msg::OndPlaylistChanged),
@@ -163,8 +171,9 @@ impl OndApp {
                 let playlists = store.playlists().map_err(|e| Failure::Local(e.to_string()))?;
                 let mut rows = Vec::new();
                 let mut lists = HashMap::new();
+                let mut entries = HashMap::new();
                 for playlist in playlists {
-                    let tracks = resolve_entries(&playlist.entries, &mirrors)?;
+                    let (tracks, visible) = resolve_entries(&playlist.entries, &mirrors)?;
                     let id = format!("ond:{}", playlist.id);
                     rows.push(Playlist {
                         id: id.clone(),
@@ -174,21 +183,29 @@ impl OndApp {
                         cover_art: tracks.iter().find_map(|t| t.cover_art.clone()),
                         owner: None,
                     });
+                    entries.insert(id.clone(), OndPlaylistEntries { entries: playlist.entries, visible });
                     lists.insert(id, Arc::new(tracks));
                 }
-                Ok((rows, lists))
+                Ok((rows, lists, entries))
             };
             match load() {
-                Ok((playlists, tracks)) => post(Msg::OndPlaylists { generation, playlists, tracks }),
+                Ok((playlists, tracks, entries)) => post(Msg::OndPlaylists { generation, playlists, tracks, entries }),
                 Err(e) => post(Msg::Error(e.context("Couldn't load Ond playlists"))),
             }
         });
     }
 
-    pub(super) fn ond_playlists_loaded(&mut self, generation: u64, playlists: Vec<Playlist>, tracks: HashMap<String, Arc<Vec<Track>>>) {
+    pub(super) fn ond_playlists_loaded(
+        &mut self,
+        generation: u64,
+        playlists: Vec<Playlist>,
+        tracks: HashMap<String, Arc<Vec<Track>>>,
+        entries: HashMap<String, OndPlaylistEntries>,
+    ) {
         if generation != self.multi.ond_generation {
             return;
         }
+        self.multi.ond_entries = entries;
         self.multi.ond_playlists = playlists;
         self.multi.ond_tracks = tracks.into_iter().collect();
         self.multi.projection = None;
@@ -208,14 +225,24 @@ impl OndApp {
     }
 }
 
-fn resolve_entries(entries: &[ItemKey], mirrors: &BTreeMap<AccountId, Arc<library::Library>>) -> Result<Vec<Track>, Failure> {
+fn resolve_entries(entries: &[ItemKey], mirrors: &BTreeMap<AccountId, Arc<library::Library>>) -> Result<(Vec<Track>, Vec<usize>), Failure> {
     let mut tracks = Vec::new();
-    for entry in entries {
+    let mut visible = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
         let Some(mirror) = mirrors.get(&entry.account) else { continue };
         if let Some(mut track) = mirror.tracks(std::slice::from_ref(&entry.item)).map_err(|e| Failure::Local(e.to_string()))?.into_iter().next() {
             identity::track(entry.account, &mut track);
             tracks.push(track);
+            visible.push(index);
         }
     }
-    Ok(tracks)
+    Ok((tracks, visible))
+}
+
+/// Replacements retain the complete raw list, including unresolved entries.
+enum OndEdit {
+    Add(Vec<ItemKey>),
+    Rename(String),
+    Delete,
+    Replace { expected: Vec<ItemKey>, entries: Vec<ItemKey> },
 }
