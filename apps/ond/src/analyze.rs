@@ -307,7 +307,7 @@ impl Runner {
         let Some(account) = account else { return 0 };
         ids.into_iter()
             .filter(|id| {
-                let key = TrackKey::new(account, *id);
+                let key = crate::source::identity::key(account, id);
                 st.queued.contains(&key) || st.current.as_ref().is_some_and(|c| c.key == key)
             })
             .count()
@@ -585,6 +585,27 @@ mod tests {
         assert_eq!(runner.enqueue([one, two]), 2);
         assert_eq!(runner.pending(Some(a), ["abc"]), 1);
         assert_eq!(runner.pending(Some(b), ["abc"]), 1);
+    }
+
+    #[test]
+    fn pending_analysis_accepts_qualified_ids_and_keeps_each_accounts_jobs_distinct() {
+        let runner = idle_runner();
+        let one = job("1", 10.0);
+        let mut two = one.clone();
+        two.key.account = accounts::AccountId::new();
+        let (a, b) = (one.key.account, two.key.account);
+        let (one_id, two_id) = (one.key.to_string(), two.key.to_string());
+        runner.enqueue([one, two]);
+        assert_eq!(runner.pending(Some(a), [one_id.as_str(), two_id.as_str()]), 2);
+        assert_eq!(runner.pending(Some(b), [one_id.as_str()]), 1);
+        {
+            let mut st = runner.shared.lock();
+            st.current = st.pop_front();
+        }
+        assert_eq!(runner.pending(Some(a), [one_id.as_str(), two_id.as_str()]), 2);
+        runner.clear();
+        assert_eq!(runner.pending(Some(b), [one_id.as_str()]), 1, "the running job still counts");
+        assert_eq!(runner.pending(Some(a), [two_id.as_str()]), 0);
     }
 
     #[test]
