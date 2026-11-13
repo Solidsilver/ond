@@ -2017,10 +2017,11 @@ fn an_ond_playlist_of_local_tracks_survives_a_rescan_that_moves_a_file_and_expor
     let dest_for_picker = m3u_dest.clone();
     app.save_m3u = Arc::new(move |_, _, done| done(Some(dest_for_picker.clone())));
     app.apply(Action::PlaylistEdit(PlaylistAction::ExportM3u { id: playlist_id, name: "Sunday spin".into() }));
-    until(&mut app, |_| m3u_dest.is_file());
+    until(&mut app, |a| a.ui.toasts.texts().contains(&"Exported sunday.m3u"));
     let exported = std::fs::read_to_string(&m3u_dest).unwrap();
     assert!(exported.starts_with("#EXTM3U\n"));
-    assert!(exported.contains(&moved_file.to_string_lossy().into_owned()), "{exported}");
+    assert!(exported.lines().any(|line| line == moved_file.to_string_lossy()));
+    assert!(!exported.contains("file://"));
 }
 
 #[test]

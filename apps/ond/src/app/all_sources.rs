@@ -849,18 +849,28 @@ mod tests {
         app.apply(Action::PlaylistEdit(PlaylistAction::AcceptMixed(true)));
         pump(&mut app, |a| a.multi.ond_tracks.values().any(|ts| ts.len() == 2));
         let (id, tracks) = app.multi.ond_tracks.iter().next().map(|(id, ts)| (id.clone(), ts.clone())).unwrap();
+        let mut credentials = Vec::new();
         for (i, track) in tracks.iter().enumerate() {
             let resolved = app.source(i as u64, None, track, None).unwrap();
             let expected = if i == 0 { one.base() } else { two.base() };
             assert!(resolved.url.starts_with(expected));
+            let url = url::Url::parse(&resolved.url).unwrap();
+            credentials.extend(url.query_pairs().filter(|(key, _)| ["u", "t", "s"].contains(&key.as_ref())).map(|(_, value)| value.into_owned()));
         }
+        assert_eq!(credentials.len(), 6);
         app.apply(Action::Playlist(id.clone(), QueueAction::Add));
         assert_eq!(app.player.queue.upcoming.iter().map(|i| i.key.account).collect::<Vec<_>>(), [account(1), account(2)]);
         let destination = dir.path().join("mixed.m3u");
         app.handle(Msg::M3uPathChosen { id, path: destination.clone() });
         pump(&mut app, |a| a.ui.toasts.texts().contains(&"Exported mixed.m3u"));
         let exported = std::fs::read_to_string(destination).unwrap();
-        assert!(exported.contains(one.base()) && exported.contains(two.base()));
+        assert_eq!(exported, "#EXTM3U\n", "server entries must not export authenticated URLs");
+        for credential in credentials {
+            assert!(!exported.contains(&credential));
+        }
+        for query in ["u=", "t=", "s="] {
+            assert!(!exported.contains(query));
+        }
     }
 
     #[test]

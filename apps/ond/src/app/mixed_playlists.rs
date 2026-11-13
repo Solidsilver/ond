@@ -23,9 +23,10 @@ impl OndApp {
             let result = (|| -> Result<(), Failure> {
                 let body = store
                     .export_m3u(id.trim_start_matches("ond:"), |key| {
-                        let source = sources.get(&key.account)?;
+                        // Server entries are skipped: stream URLs contain credentials.
+                        // Local entries keep plain paths, as the original exporter did.
+                        let location = sources.get(&key.account)?.local()?.track_path(&key.item)?.to_string_lossy().into_owned();
                         let track = mirrors.get(&key.account)?.tracks(std::slice::from_ref(&key.item)).ok()?.into_iter().next()?;
-                        let (location, _) = source.stream(&track, None);
                         Some(crate::store::M3uTrack { location, title: Some(track.title), artist: track.artist, duration_secs: track.duration_secs })
                     })
                     .map_err(|e| Failure::Local(e.to_string()))?

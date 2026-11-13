@@ -264,7 +264,8 @@ The `sources` list in `settings.json` arrives with the second kind of source (mi
   opens the minimal `Overlay::MixedPlaylist` confirmation. Dispatch
   `PlaylistAction::AcceptMixed(true)` to create the Ond copy, or `false` to
   decline. Ond playlist ids are `ond:<uuid>` in memory; their unchanged store
-  rows hold ordered ItemKeys. Resolving and exporting use each entry's source.
+  rows hold ordered ItemKeys. Resolving uses each entry's source; M3U export
+  writes local paths and skips server tracks to keep credentials out of files.
 - Source row controls dispatch `Action::ForSource(id, Box<Action>)` for
   SyncNow, StopSync, AskSignOut and SignInAgain. Removal uses
   `SourceAction::AskRemove(id)` / `Remove(id)`. The UI pass can use the
