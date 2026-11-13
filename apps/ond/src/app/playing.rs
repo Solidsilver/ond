@@ -9,7 +9,6 @@ use crate::output::Outputs;
 use crate::playback;
 use crate::player::{self, Note, Player, QueueEdit};
 use crate::queue::Item;
-use crate::source::Src;
 use crate::source::{TrackKey, stream_name};
 use audio::{Command, PlaybackMode, TrackSource};
 use library::Track;
@@ -34,16 +33,16 @@ pub(super) fn play_pause(state: audio::PlayState, player: &Player) -> (crate::ic
 struct AppSources<'a> {
     /// Knows its account even while its store opens.
     offline: &'a Downloads,
-    account: Option<accounts::AccountId>,
+    other_downloads: &'a std::collections::BTreeMap<accounts::AccountId, Downloads>,
+    session: &'a super::Session,
     /// Songs streamed before and still whole in the cache play without the
     /// server too.
     cache: &'a StreamCache,
     /// Only while the server answers.
-    source: Option<&'a Src>,
     /// The server is connecting: what needs it waits.
-    connecting: bool,
     output: &'a Outputs,
     data: &'a Data,
+    source_data: &'a std::collections::BTreeMap<accounts::AccountId, Data>,
     now_playing: &'a now_playing::Session,
 }
 
@@ -52,12 +51,11 @@ impl player::Sources for AppSources<'_> {
     /// its queue neighbours `prev` and `next`).
     fn source(&self, item: &Item, prev: Option<&Track>, next: Option<&Track>) -> Option<TrackSource> {
         let (track, key, token) = (&item.track, &item.key, item.uid);
-        if Some(key.account) != self.account {
-            return None;
-        }
+        self.session.get(key.account)?;
         let replay_gain = playback::replay_gain(track);
         let album_context = playback::in_album(prev, track, next);
-        if let Some(path) = self.offline.local_path(key) {
+        let offline = if self.offline.owner == Some(key.account) { Some(self.offline) } else { self.other_downloads.get(&key.account) };
+        if let Some(path) = offline.and_then(|d| d.local_path(key)) {
             return Some(TrackSource {
                 id: stream_name(key).into_owned(),
                 url: format!("file://{}", path.display()),
@@ -68,7 +66,7 @@ impl player::Sources for AppSources<'_> {
                 token,
             });
         }
-        let Some(source) = self.source else {
+        let Some(source) = self.session.get(key.account).and_then(|s| s.live()) else {
             let path = cached(self.cache, self.output, key, track)?;
             return Some(TrackSource {
                 id: stream_name(key).into_owned(),
@@ -84,14 +82,17 @@ impl player::Sources for AppSources<'_> {
             return None;
         }
         let transcode = source.capabilities().transcoding.then(|| self.output.transcode()).flatten();
-        let (url, suffix) = source.stream(track, transcode.as_ref());
+        let mut bare = track.clone();
+        bare.id = key.item.clone();
+        let (url, suffix) = source.stream(&bare, transcode.as_ref());
         Some(TrackSource { id: stream_name(key).into_owned(), url, suffix, replay_gain, album_context, transcode, token })
     }
 
     /// Describes `track` for Now Playing before the engine reaches it.
     fn announce(&self, item: &Item) {
         let track = &item.track;
-        let album = self.data.album(&track.album_id);
+        let data = self.source_data.get(&item.key.account).unwrap_or(self.data);
+        let album = data.album(&track.album_id);
         self.now_playing.known(now_playing::Info {
             key: item.key.clone(),
             token: item.uid,
@@ -99,12 +100,12 @@ impl player::Sources for AppSources<'_> {
             artist: track.artist.clone(),
             album: album.map(|a| a.name.clone()),
             duration_secs: track.duration_secs.map(f64::from),
-            cover: self.data.cover_for(track).map(str::to_owned),
+            cover: data.cover_for(track).map(str::to_owned),
         });
     }
 
-    fn waiting(&self) -> bool {
-        self.connecting
+    fn waiting_for(&self, item: &Item) -> bool {
+        self.session.get(item.key.account).is_some_and(|s| s.connecting)
     }
 }
 
@@ -284,12 +285,12 @@ impl OndApp {
         let mut notes = Vec::new();
         let sources = AppSources {
             offline: &self.downloads,
-            account: self.session.account(),
+            other_downloads: &self.multi.downloads,
+            session: &self.session,
             cache: &self.cache,
-            source: self.session.live(),
-            connecting: self.session.connecting,
             output: &self.output,
             data: &self.data,
+            source_data: &self.multi.data,
             now_playing: &self.now_playing,
         };
         let result = f(&mut self.player, &mut player::Ctx { engine: &self.engine, sources: &sources, notes: &mut notes });
@@ -301,9 +302,15 @@ impl OndApp {
                     let songs = if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
                     self.ui.toasts.note(format!("Cleared {songs} from the queue"), "Undo", Action::Queue(QueueEdit::UndoClear));
                 }
-                Note::Probe => self.probe(),
+                Note::Probe => {
+                    if let Some(account) = self.player.queue.current.as_ref().map(|i| i.key.account).filter(|a| self.multi.bridges.contains_key(a)) {
+                        self.with_source(account, |app| app.probe());
+                    } else {
+                        self.probe();
+                    }
+                }
                 Note::Started { key, track, restart } => {
-                    if Some(key.account) == self.session.account() && self.prefs_now().analyze_playing && !restart {
+                    if self.session.get(key.account).is_some() && self.prefs_now().analyze_playing && !restart {
                         self.enqueue_analysis(std::slice::from_ref(&*track));
                     }
                 }
@@ -326,7 +333,7 @@ impl OndApp {
     /// Where `track` would play from now (tests).
     #[cfg(test)]
     pub(super) fn source(&mut self, token: u64, prev: Option<&Track>, track: &Track, next: Option<&Track>) -> Option<TrackSource> {
-        let key = TrackKey::new(self.session.account()?, track.id.clone());
+        let key = self.session.key(&track.id)?;
         let item = Item { uid: token, key, track: track.clone(), source: crate::queue::Source::Added, next: false };
         self.with_player(|_, cx| cx.sources.source(&item, prev, next))
     }

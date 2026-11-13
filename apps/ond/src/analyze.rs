@@ -12,7 +12,7 @@ use crate::source::{TrackKey, stream_name};
 use analysis::{Record, TrackAnalysis};
 use audio::Status;
 use library::{AnalysisStore, Track};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ const ASSUMED_SPEED: f64 = 20.0;
 /// thread is a noticeable stall.
 #[derive(Debug, Clone)]
 pub struct Job {
+    pub source_session: Option<u64>,
     pub key: TrackKey,
     pub suffix: Option<String>,
     pub stamp: String,
@@ -40,7 +41,14 @@ pub fn stamp_of(t: &Track) -> String {
 }
 
 pub fn job_for(account: accounts::AccountId, t: &Track, local: Option<std::path::PathBuf>) -> Job {
-    Job { key: TrackKey::new(account, t.id.clone()), suffix: t.suffix.clone(), stamp: stamp_of(t), secs: f64::from(t.duration_secs.unwrap_or(0)), local }
+    Job {
+        source_session: None,
+        key: crate::source::identity::key(account, &t.id),
+        suffix: t.suffix.clone(),
+        stamp: stamp_of(t),
+        secs: f64::from(t.duration_secs.unwrap_or(0)),
+        local,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -71,6 +79,7 @@ pub type StreamUrl = Arc<dyn Fn(&TrackKey) -> Option<String> + Send + Sync>;
 #[derive(Default)]
 struct State {
     store: Option<Arc<AnalysisStore>>,
+    stores: HashMap<accounts::AccountId, Arc<AnalysisStore>>,
     queue: VecDeque<Job>,
     queued: HashSet<TrackKey>,
     /// Audio seconds in `queue`, kept as jobs come and go so progress (read
@@ -145,7 +154,7 @@ pub struct Config {
     pub scratch: StreamCache,
     pub status: Arc<Status>,
     /// Called with each finished analysis (on the worker thread).
-    pub on_result: Arc<dyn Fn(TrackKey, Record) + Send + Sync>,
+    pub on_result: Arc<dyn Fn(TrackKey, Record, Option<u64>) + Send + Sync>,
     /// Called whenever progress changes (on the worker thread).
     pub on_progress: Arc<dyn Fn() + Send + Sync>,
 }
@@ -154,7 +163,7 @@ struct WorkerConfig {
     playback: StreamCache,
     scratch: StreamCache,
     status: Arc<Status>,
-    on_result: Arc<dyn Fn(TrackKey, Record) + Send + Sync>,
+    on_result: Arc<dyn Fn(TrackKey, Record, Option<u64>) + Send + Sync>,
     on_progress: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -235,6 +244,31 @@ impl Runner {
         self.shared.lock().store = Some(store);
     }
 
+    pub fn use_account_stores(&self) {
+        self.shared.lock().store = None;
+    }
+
+    pub fn set_account_store(&self, account: accounts::AccountId, store: Arc<AnalysisStore>) {
+        self.shared.lock().stores.insert(account, store);
+    }
+
+    pub fn remove_account(&self, account: accounts::AccountId) {
+        self.cancel_account(account);
+        self.shared.lock().stores.remove(&account);
+    }
+
+    pub fn cancel_account(&self, account: accounts::AccountId) {
+        let mut st = self.shared.lock();
+        st.queue.retain(|j| j.key.account != account);
+        st.queued.retain(|key| key.account != account);
+        st.queued_secs = st.queue.iter().map(|j| j.secs).sum();
+        if let Some(job) = st.current.as_mut().filter(|j| j.key.account == account) {
+            job.stamp.clear();
+        }
+        drop(st);
+        self.shared.wake.notify_all();
+    }
+
     pub fn progress(&self) -> Progress {
         self.shared.lock().progress()
     }
@@ -255,7 +289,8 @@ impl Runner {
             // out as asked.
             let left = progress.total.saturating_sub(progress.done);
             let each = if left > 0 { progress.remaining_secs / left as f64 } else { 0.0 };
-            let job = |id: String| Job { key: crate::test_tracks::key(&id), suffix: None, stamp: "stand-in".into(), secs: each, local: None };
+            let job =
+                |id: String| Job { source_session: None, key: crate::test_tracks::key(&id), suffix: None, stamp: "stand-in".into(), secs: each, local: None };
             for i in 0..left.saturating_sub(1) {
                 st.push_back(job(format!("stand-in-{i}")));
             }
@@ -368,11 +403,11 @@ fn run(shared: &Shared, cfg: &WorkerConfig) {
                 st.audio_secs += analysis.duration_secs;
                 st.wall_secs += started.elapsed().as_secs_f64();
                 let record = Record { stamp: job.stamp.clone(), analysis };
-                if let Some(Err(e)) = st.store.as_ref().map(|store| store.put(&job.key.item, &record.encode())) {
+                if let Some(Err(e)) = st.stores.get(&job.key.account).or(st.store.as_ref()).map(|store| store.put(&job.key.item, &record.encode())) {
                     tracing::warn!("storing analysis: {e}");
                 }
                 drop(st);
-                (cfg.on_result)(job.key, record);
+                (cfg.on_result)(job.key, record, job.source_session);
             }
             Ok(_) => {}
             Err(analysis::AnalyzeError::Cancelled) => {
@@ -470,7 +505,7 @@ mod tests {
     use super::*;
 
     fn job(id: &str, secs: f64) -> Job {
-        Job { key: crate::test_tracks::key(id), suffix: None, stamp: "s".into(), secs, local: None }
+        Job { source_session: None, key: crate::test_tracks::key(id), suffix: None, stamp: "s".into(), secs, local: None }
     }
 
     #[test]
@@ -584,7 +619,7 @@ mod tests {
             playback: cache("play"),
             scratch: cache("scratch"),
             status: status.clone(),
-            on_result: Arc::new(|_, _| {}),
+            on_result: Arc::new(|_, _, _| {}),
             on_progress: Arc::new(|| {}),
         };
         let j = job("t", 10.0);
@@ -609,7 +644,7 @@ mod tests {
             playback: cache("play"),
             scratch: cache("scratch"),
             status: Arc::new(Status::default()),
-            on_result: Arc::new(|_, _| {}),
+            on_result: Arc::new(|_, _, _| {}),
             on_progress: Arc::new(|| {}),
         });
         // The second job has nothing to read: it fails normally, which only

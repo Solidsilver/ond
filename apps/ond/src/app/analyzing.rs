@@ -77,11 +77,17 @@ impl OndApp {
     /// A result came in, or the stored ones were read.
     pub(super) fn analysis_msg(&mut self, msg: AnalysisMsg) {
         match msg {
+            AnalysisMsg::Store(store) => {
+                if let Some(account) = self.session.account() {
+                    self.analysis.runner.set_account_store(account, store);
+                }
+            }
             AnalysisMsg::Analyzed { key, record } => {
-                if Some(key.account) != self.session.account() {
+                if self.session.get(key.account).is_none() {
                     return;
                 }
-                self.analysis.records.insert(key.item, record);
+                let id = if self.multi.bridges.is_empty() { key.item } else { key.to_string() };
+                self.analysis.records.insert(id, record);
                 self.analysis.version += 1;
             }
             AnalysisMsg::Loaded(rows) => {
@@ -115,23 +121,26 @@ impl OndApp {
     /// Source files and downloaded copies are read straight from disk.
     /// The stream URLs are made by the runner as it gets to each track.
     pub(super) fn enqueue_analysis(&self, tracks: &[Track]) -> usize {
-        let Some(account) = self.session.account() else { return 0 };
-        let online = self.session.source.is_some();
         let jobs: Vec<analyze::Job> = tracks
             .iter()
             .filter(|t| self.analysis_of(t).is_none())
             .filter_map(|t| {
-                let local = self.downloads.local_path(&crate::source::TrackKey::new(account, t.id.clone())).or_else(|| {
-                    let source = self.session.source.as_ref()?;
-                    // Server URLs stay lazy: only sources without downloads
-                    // need their file path resolved here.
+                let key = self.session.key(&t.id)?;
+                let state = self.session.get(key.account)?;
+                let local = self.downloads_for(key.account).and_then(|d| d.local_path(&key)).or_else(|| {
+                    let source = state.source.as_ref()?;
                     if source.capabilities().downloads {
                         return None;
                     }
-                    let (url, _) = source.stream(t, None);
-                    url.strip_prefix("file://").map(std::path::PathBuf::from)
+                    let mut bare = t.clone();
+                    bare.id = key.item.clone();
+                    source.stream(&bare, None).0.strip_prefix("file://").map(std::path::PathBuf::from)
                 });
-                (online || local.is_some()).then(|| analyze::job_for(account, t, local))
+                (state.online || local.is_some()).then(|| {
+                    let mut job = analyze::job_for(key.account, t, local);
+                    job.source_session = self.multi.bridges.get(&key.account).map(|b| b.session());
+                    job
+                })
             })
             .collect();
         self.analysis.runner.enqueue(jobs)

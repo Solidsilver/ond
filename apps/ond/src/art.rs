@@ -102,6 +102,8 @@ impl LookParts {
 }
 
 pub struct Art {
+    sources: HashMap<AccountId, Box<Art>>,
+    routed: bool,
     rt: tokio::runtime::Handle,
     ctx: egui::Context,
     root: PathBuf,
@@ -158,6 +160,8 @@ impl Art {
             rt.spawn_blocking(move || shell::art::trim_disk_cache(&trim, DISK_BUDGET));
         }
         Self {
+            sources: HashMap::new(),
+            routed: false,
             rt,
             ctx,
             root,
@@ -189,6 +193,26 @@ impl Art {
             #[cfg(test)]
             pinned_disk: None,
         }
+    }
+
+    fn source_art(&mut self, account: AccountId) -> &mut Art {
+        self.sources.entry(account).or_insert_with(|| {
+            let mut art = Self::new(self.rt.clone(), self.ctx.clone(), self.root.clone(), Some(account));
+            art.routed = true;
+            Box::new(art)
+        })
+    }
+
+    pub fn add_source(&mut self, source: Src) {
+        self.source_art(source.account()).set_source(source);
+    }
+    pub fn offline_source(&mut self, account: AccountId) {
+        if let Some(art) = self.sources.get_mut(&account) {
+            art.clear_source();
+        }
+    }
+    pub fn remove_source(&mut self, account: AccountId) {
+        self.sources.remove(&account);
     }
 
     pub fn set_source(&mut self, source: Src) {
@@ -263,6 +287,9 @@ impl Art {
     /// Uploads finished loads (a few per frame), drops what's no longer drawn
     /// and starts what's next. Call once per frame before drawing.
     pub fn poll(&mut self) {
+        for art in self.sources.values_mut() {
+            art.poll();
+        }
         let mut uploads = 0;
         while uploads < UPLOADS_PER_FRAME
             && let Ok((generation, key, job, outcome)) = self.rx.try_recv()
@@ -328,6 +355,11 @@ impl Art {
     /// `cover`'s look, once worked out; the first ask starts that (in the
     /// background, ahead of the queue) and returns `None` meanwhile.
     pub fn look(&mut self, cover: &str) -> Option<Arc<Look>> {
+        if !self.routed
+            && let Some(account) = crate::source::identity::account(cover)
+        {
+            return self.source_art(account).look(crate::source::identity::bare(cover));
+        }
         if let Some(l) = self.looks.get(cover) {
             self.looks_lru.touch(cover);
             return Some(l.clone());
@@ -359,6 +391,11 @@ impl Art {
     /// the right size isn't here yet, and meanwhile returns any other size
     /// already loaded so a resize doesn't flash the placeholder.
     pub fn texture(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
+        if !self.routed
+            && let Some(account) = crate::source::identity::account(cover)
+        {
+            return self.source_art(account).texture(crate::source::identity::bare(cover), points);
+        }
         let key = self.shown(cover, points)?;
         self.textures.get(&key).cloned()
     }
@@ -367,6 +404,11 @@ impl Art {
     /// the server sends for every artist it has no photo of. That one is
     /// known once it's come back for a second artist; until then it shows.
     pub fn portrait(&mut self, cover: &str, points: f32) -> Option<TextureHandle> {
+        if !self.routed
+            && let Some(account) = crate::source::identity::account(cover)
+        {
+            return self.source_art(account).portrait(crate::source::identity::bare(cover), points);
+        }
         let key = self.shown(cover, points)?;
         if let Some(&print) = self.prints.get(&key) {
             let first = *self.portraits.entry(print).or_insert(key.cover);
@@ -395,6 +437,11 @@ impl Art {
     /// Asks for `cover` at `points` wide before it's drawn (just past the
     /// viewport); it loads after everything on screen.
     pub fn prefetch(&mut self, cover: &str, points: f32) {
+        if !self.routed
+            && let Some(account) = crate::source::identity::account(cover)
+        {
+            return self.source_art(account).prefetch(crate::source::identity::bare(cover), points);
+        }
         let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
         if !self.textures.contains_key(&key) {
             self.request(key, true);
@@ -482,6 +529,9 @@ impl Art {
     /// Forgets every cover, here and on disk: what's on screen loads again
     /// from the server.
     pub fn clear(&mut self) {
+        for art in self.sources.values_mut() {
+            art.clear();
+        }
         self.reset_memory();
         self.generation += 1;
         if let Some(dir) = self.dir.clone() {
@@ -503,6 +553,9 @@ impl Art {
     /// that hasn't drawn any albums yet would have none at hand.
     #[cfg(test)]
     pub fn unload(&mut self) {
+        for art in self.sources.values_mut() {
+            art.unload();
+        }
         self.textures.clear();
         self.prints.clear();
         self.lru = Lru::new(TEXTURE_BUDGET);
@@ -547,6 +600,11 @@ impl Art {
 
     /// Whether `cover` at `points` wide is known not to be had.
     fn is_missing(&mut self, cover: &str, points: f32) -> bool {
+        if !self.routed
+            && let Some(account) = crate::source::identity::account(cover)
+        {
+            return self.source_art(account).is_missing(crate::source::identity::bare(cover), points);
+        }
         let key = self.key(cover, bucket(points * self.ctx.pixels_per_point()));
         self.missing.contains(&key)
     }
@@ -555,6 +613,11 @@ impl Art {
     /// when there's none: for drawing what's at hand (an artist's albums on
     /// their disc) without a request of its own.
     pub fn loaded(&mut self, cover: &str) -> Option<TextureHandle> {
+        if !self.routed
+            && let Some(account) = crate::source::identity::account(cover)
+        {
+            return self.source_art(account).loaded(crate::source::identity::bare(cover));
+        }
         let &n = self.covers.get(cover)?;
         let key = SIZES.iter().rev().map(|&size| Key { cover: n, size }).find(|k| self.textures.contains_key(k))?;
         self.lru.touch(&key);
@@ -583,7 +646,7 @@ impl Art {
 
 /// The cover an album without art gets: its title and artist.
 pub fn album_cover(album: &library::Album) -> Generated<'_> {
-    Generated { title: &album.name, byline: album.artist.as_deref(), seed: &album.id }
+    Generated { title: &album.name, byline: album.artist.as_deref(), seed: crate::source::identity::bare(&album.id) }
 }
 
 /// The cover a track without art gets: its album's, else its own title and
@@ -591,7 +654,7 @@ pub fn album_cover(album: &library::Album) -> Generated<'_> {
 pub fn track_cover<'a>(album: Option<&'a library::Album>, track: &'a library::Track) -> Generated<'a> {
     match album {
         Some(a) => album_cover(a),
-        None => Generated { title: &track.title, byline: track.artist.as_deref(), seed: &track.album_id },
+        None => Generated { title: &track.title, byline: track.artist.as_deref(), seed: crate::source::identity::bare(&track.album_id) },
     }
 }
 

@@ -1,6 +1,6 @@
 # Sources: several libraries in one player
 
-Status: milestone 1 is built on `feat/sources`; milestone 2's kit (form, onboarding, switcher, dots, Sources rows and filter chips) is built, with Rede holding several accounts and both apps showing a Sources tab in Settings. Milestone 3 is built: the `scan` crate (with stable per-folder keys and a watcher), the local source, the `sources` list in `settings.json`, Music folder in Ond's first-run sheet, folder sources in Settings › Sources, `ond.redb` holding favourites, ratings and playlists for sources that can't, analysis of folder tracks, and the views hiding only what neither the source nor Ond can do. Ond still holds one source live at a time. Milestones 4–5 are design. Written 11 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
+Status: milestones 1–3 are built. Milestone 4's Ond backend is built: concurrent sources with independent sessions and watchers, account-qualified in-memory identity, persisted scope and chips, merged libraries and artists, scope-aware search and navigation, and mixed Ond playlists. The sidebar switcher, chips and playlist-copy confirmation have minimal working controls; the separate UI pass will draw source dots and artist groups and finish the Sources presentation. Milestone 5 remains design. Updated 13 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
 
 Ond plays from one Navidrome server. This design makes the server one **source** among several: a Navidrome (or other OpenSubsonic) server, a local folder of music, and later Jellyfin and Plex. Setup starts with one or more of them, and the library shows one source at a time or all of them together.
 
@@ -44,7 +44,7 @@ pub struct TrackKey { pub account: AccountId, pub id: Arc<str> }   // likewise A
 ```
 
 - An account's id is made when the source is added and never changes. A server's address and a folder's path are properties of the account and can change without orphaning favourites, downloads or the queue.
-- Until the Sources rows can edit an account's address (milestone 2), Ond's sign-in form decides as its library mirror always has: signing in to the same server and user as before, even after signing out, reuses the account and keeps its folder and downloads; any other sign-in makes a new account. Ond keeps one source live at a time (the first in the `sources` list). When another takes over, the previous one's folder and cached art are removed only if it's gone from the list (another server signed in to in its place); a source still configured, such as the server behind a music folder added after signing out, keeps its library on disk and is only not in use.
+- Signing in to the same server and user reuses its account, mirror and downloads, including after signing out. Another server or user adds a separate account; it does not replace the other configured sources. The first entry in a request's settings snapshot selects its credentials and storage helpers, while the persisted `Scope` selects the library on screen. Every configured source opens independently; signing out ends only its session, and removing it deletes only Ond's copy of that account.
 - Inside one source's database, ids stay bare: the database *is* the account, so qualifying every row would only make the stored format bigger and force a migration of every struct. Ids are qualified when they leave the database: in the queue, the merged views, the saved blobs that span sources, the stream cache and the offline store.
 - On disk, names follow Rede: `<account>/<id>` passed through `streamcache::escape_id`, one flat file name per key.
 - The `library` crate stops depending on `subsonic`. The `From<subsonic::…>` conversions in `model.rs` and the `upsert_*` methods that take Subsonic types move to the Subsonic source, which hands the library `Track`, `Album` and `Artist` built its own way. This is the same move `streamcache` already made with `ReplyCheck`.
@@ -116,7 +116,7 @@ pub struct Capabilities {
 
 | | Navidrome | Local folder |
 |---|---|---|
-| stars, ratings, playlists | yes, on the server | no; Ond keeps its own (not built yet: hidden for now) |
+| stars, ratings, playlists | yes, on the server | no; Ond keeps its own |
 | lyrics | server | `.lrc` beside the file, then embedded |
 | scrobbling | through the server | no at first; later direct to ListenBrainz and Last.fm |
 | transcoding, downloads, network | yes | no |
@@ -190,7 +190,7 @@ pub struct SourceKind<'a> {
 - **`kit::source_switcher`**: the sidebar's foot, replacing the account row each app draws now. It shows the scope: the one source's name and state, or "All sources" with its sources' dots stacked. Its menu lists each source (dot, name, state, a check on the one in scope), then All sources, then **Add source…** and **Manage sources…**, then the app's own rows (Settings, shortcuts). A source that needs attention (signed out, folder missing) shows its state in place of the detail in both the row and the menu. In the folded rail it's the stacked dots alone.
 - **`kit::source_dot`**: the small mark on covers and rows, in the source's colour, drawn only when the app says there's more than one source.
 - **`kit::source_chips`**: the filter chips above a library page: All sources, then a chip per source (dot and name), lit as the `Scope`'s chips are. They hand back what was clicked (`SourceChip::All` or `Toggle(id)`) for the app to apply with `clear_chips` or `toggle_chip`, and draw nothing with one source or the switcher on one. Built and snapshotted in the kit; neither app draws them until All sources (milestone 4).
-- **`kit::source_row`**: a source in Settings' Sources tab: dot, name, kind, state (in place of the detail when the source needs attention, as in the switcher), detail, and a menu: Rename (in place, in the row), a colour picker over the eight `SOURCE_COLORS`, the app's sync word (Sync now, Rescan), Sign out… and Remove…. The app says which entries apply and gets the choice back as a `SourceRowEvent`; asking first and doing it are the app's. Remove asks and says what goes with it (Rede: its downloads and its library on this computer, and listening not yet sent; Ond, once it can remove: its downloads, Ond's playlists from it, favourites kept only by Ond). A locked source (managed) shows the app's lock words and offers no Rename or Remove. Rede lists every account with Add source…, then the account in view's address, who's signed in and how, and its last sync with Sync now (this replaced its Account tab); Ond lists every configured source, the one in use first and the others as not in use; a folder source's sync word is Rescan, its line is its folders (and the files its last scan skipped), it offers Remove… and no Sign out…, and while it's in use its folders are listed under the rows to add to or take from (which rescans). The switcher's Manage sources… opens the tab in both.
+- **`kit::source_row`**: a source in Settings' Sources tab: dot, name, kind, state (in place of the detail when the source needs attention, as in the switcher), detail, and a menu: Rename (in place, in the row), a colour picker over the eight `SOURCE_COLORS`, the app's sync word (Sync now, Rescan), Sign out… and Remove…. The app says which entries apply and gets the choice back as a `SourceRowEvent`; asking first and doing it are the app's. Remove asks and says what goes with it (Rede: its downloads and its library on this computer, and listening not yet sent; Ond, once it can remove: its downloads, Ond's playlists from it, favourites kept only by Ond). A locked source (managed) shows the app's lock words and offers no Rename or Remove. Rede lists every account with Add source…, then the account in view's address, who's signed in and how, and its last sync with Sync now (this replaced its Account tab); Ond lists every configured source with its own connection and sync state; a folder source's sync word is Rescan, its line is its folders (and the files its last scan skipped), it offers Remove… and no Sign out…, and while it's in use its folders are listed under the rows to add to or take from (which rescans). The switcher's Manage sources… opens the tab in both.
 
 Snapshots: each piece gets a scene in both apps' snapshot sets, with one source, three sources, and one of them in trouble.
 
@@ -230,8 +230,51 @@ The `sources` list in `settings.json` arrives with the second kind of source (mi
 1. **Accounts, with Navidrome as the only source.** `AccountId`, the per-source folder, `TrackKey` through the queue, player, offline store and stream cache, and per-account cover art; `library` freed of `subsonic`; `MusicSource` with the Subsonic implementation; the migration above. Done when Ond's snapshots come out the same as before and an existing install opens with everything intact.
 2. **The shared kit.** `kit::form`, onboarding, the switcher, dots, chips and Sources rows, in both apps. Rede now holds and switches between multiple Audiobookshelf accounts via `kit::source_switcher` (one active account at a time via `Scope::only(id)`, assigning a `SourceColor` per account, reusing an existing `(server, username)` on re-sign-in, keeping signed-out rows in the list, and flushing pending progress on switch; merged "All sources" views belong to milestone 4). Done when both apps sign in through `kit::onboarding` and both sidebars draw `kit::source_switcher`.
 3. **Local folders.** The `scan` crate and the local source, Ond's own favourites and playlists. Done when a first run can choose a folder instead of a server and play from it with no network.
-4. **All sources.** The merged views, merged artists, filter chips, scope-aware search, Ond playlists that mix sources. Done when a Navidrome source and a local one show as one library, and switching scope keeps your place.
+4. **All sources.** The merged views, merged artists, filter chips, scope-aware search, Ond playlists that mix sources. The backend and minimal controls are built; the UI presentation follows. Done when a Navidrome source and a local one show as one library, and switching scope keeps your place.
 5. **Later:** album matching; direct scrobbling for local tracks; Jellyfin; Plex.
+
+## Ond backend handoff (milestone 4)
+
+- `Session.accounts[AccountId]` holds each source's handle, connection flags,
+  sign-in reason, request settings, server label/info, missing folders, skipped
+  count and `sync` (label, album/track flags, progress, last sync). Its
+  `state(work_offline)` produces the kit's `SourceState`. `Session.work_offline`
+  is global; `Session.scope` is the current persisted scope. Source bridges,
+  data snapshots and download stores live in `OndApp.multi` by account.
+- Switcher rows are the configured sources in settings order, then All
+  sources, Add source…, and Manage sources…. A source picks
+  `Action::Scope(ScopeAction::One(id))`; All picks `ScopeAction::All`. Add uses
+  `Action::Onboarding(AddAnother)` and Manage opens Settings › Sources.
+  Existing one-source drawing stays on its original path.
+- Dots obtain the account from `source::identity::account(&item.id)` and the
+  colour/name from `Settings::source(account)`. All in-memory item ids,
+  links, cover ids, route ids and selection ids carry the canonical ItemKey
+  spelling. Per-source database rows and source API arguments remain bare.
+- Chips read `Session.scope` (also copied into `PrefsView.scope`) and dispatch
+  `PrefsAction::Scope(ScopeAction::Chip(SourceChip::{All, Toggle(id)}))`.
+  The action uses `Scope::clear_chips` / `toggle_chip`; it never cancels work.
+- `Data.merged_artists` holds each artist's original members and
+  `albums: BTreeMap<AccountId, Vec<String>>` for the current scope. These are
+  the groups to draw under each source's dot. Members outside the scope stay
+  as aliases so changing scope can retain the same artist page. MusicBrainz
+  ids have a separate `artist_mbids_v1` saved blob; frozen rows are unchanged.
+- A foreign addition to a server playlist fetches the server's complete
+  listing without editing it. `Msg::MixedPlaylistReady` installs
+  `multi.pending_playlist` (`source: ItemKey`, `name`, ordered `entries`) and
+  opens the minimal `Overlay::MixedPlaylist` confirmation. Dispatch
+  `PlaylistAction::AcceptMixed(true)` to create the Ond copy, or `false` to
+  decline. Ond playlist ids are `ond:<uuid>` in memory; their unchanged store
+  rows hold ordered ItemKeys. Resolving and exporting use each entry's source.
+- Source row controls dispatch `Action::ForSource(id, Box<Action>)` for
+  SyncNow, StopSync, AskSignOut and SignInAgain. Removal uses
+  `SourceAction::AskRemove(id)` / `Remove(id)`. The UI pass can use the
+  per-account state above for both Settings and sidebar details without
+  selecting a different browsing scope.
+
+The remaining UI work is presentation: source dots on rows/covers and Now
+Playing, visible per-source artist headings, richer per-source status/details,
+and the finished mixed-playlist prompt. The backend does not merge album
+copies. Rede's source/session implementation is unchanged.
 
 ## Later sources
 
@@ -241,6 +284,6 @@ The `sources` list in `settings.json` arrives with the second kind of source (mi
 ## Open questions
 
 - Should a local folder that holds both music and audiobooks be offered to both apps, or should each ignore what isn't its own (by folder, by genre tag, by file type)?
-- Is Work Offline still one switch for every networked source, or does each source get its own? One switch is simpler and matches "I'm on a plane"; per source suits "my home server is down".
+- **Settled:** Work Offline is one persisted switch for every networked source. It cancels their sessions and reconnect attempts together; local folders stay open and their watchers keep running. An unreachable server otherwise changes only its own state.
 - When a track is starred in All sources and its source can't hold stars, Ond keeps the star. If that source later gains the capability (a server upgrade), are Ond's stars sent to it?
 - How much of the merged view does Mini and the Player show? Probably the playing track's source dot, and nothing else.

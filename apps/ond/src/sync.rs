@@ -63,6 +63,10 @@ impl From<Vec<Track>> for SongPage {
 /// Paged library rows, supplied by a server source or a test fake.
 #[async_trait]
 pub trait Fetch: Send + Sync + 'static {
+    /// Optional identity metadata, separate from frozen library rows.
+    fn artist_mbids(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// One page of the album list, alphabetical by artist.
     async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure>;
     async fn artists(&self) -> Result<Vec<Artist>, Failure>;
@@ -73,6 +77,9 @@ pub trait Fetch: Send + Sync + 'static {
 
 #[async_trait]
 impl<T: Fetch + ?Sized> Fetch for Arc<T> {
+    fn artist_mbids(&self) -> Vec<(String, String)> {
+        (**self).artist_mbids()
+    }
     async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure> {
         (**self).album_page(size, offset).await
     }

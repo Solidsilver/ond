@@ -46,6 +46,12 @@ Names and values are the same as in Ond's own `settings.json`. Ond logs a warnin
 
 `server` and `username` continue to work as before (equivalent to one managed `"subsonic"` source) and fill in the sign-in form while locking those fields. The password isn't a setting: Ond asks for it once and keeps it in the system keyring. If you change the server or username, Ond asks you to sign in again. Settings › Sources shows a managed source locked: it can be given a colour, but not renamed or removed.
 
+The current library `scope` is a personal preference, saved leniently in
+`settings.json` as `{ "all": true, "only": [] }` (optionally narrowed by source
+ids). It is not a managed key. `work_offline` applies to all networked sources;
+local folder sources keep scanning and playing.
+
+
 ### Appearance
 
 | Setting | Values | Default |

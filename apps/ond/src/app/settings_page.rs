@@ -541,7 +541,7 @@ impl OndApp {
             ui.add_space(28.0);
         }
         let caps = self.session.caps();
-        group_if(caps.network, ui, "Without the server", |ui| {
+        group_if(caps.network || self.session.accounts.values().any(|s| s.source_caps().network), ui, "Without the server", |ui| {
             let hint = "Don't connect to the server. Show only music that plays without it: downloads, and songs streamed recently enough to still be cached.";
             self.pref_switch(ui, "work_offline", "Offline mode", hint, self.session.work_offline, OfflineAction::WorkOffline);
             let mut unplayable = self.prefs.get(|s| s.offline_unplayable);
@@ -588,17 +588,17 @@ impl OndApp {
     fn library_settings(&mut self, ui: &mut Ui) {
         group(ui, "Sync", |ui| {
             let counts = format!("{} albums · {} tracks", self.data.albums.len(), self.data.tracks.all.len());
-            let when = if self.sync.tracks {
-                self.sync.label.clone()
+            let when = if self.session.sync.tracks {
+                self.session.sync.label.clone()
             } else {
-                match self.sync.last {
+                match self.session.sync.last {
                     Some(at) => format!("Last synced at {}", at.format("%-I:%M %p")),
                     None if self.session.source.is_some() => "Synced at launch".to_owned(),
                     None => "Not connected".to_owned(),
                 }
             };
             setting(ui, &counts, &when, |ui| {
-                if self.sync.tracks {
+                if self.session.sync.tracks {
                     if secondary(ui, "Stop").clicked() {
                         self.actions.push(Action::StopSync);
                     }
@@ -729,6 +729,9 @@ impl OndApp {
     /// take from, and how its last scan went. One set in managed.json is
     /// locked.
     fn source_settings(&mut self, ui: &mut Ui) {
+        if self.session.accounts.len() > 1 {
+            return self.all_source_settings(ui);
+        }
         let t = Tokens::of(ui);
         let configured = self.prefs.get(|s| s.sources.clone());
         if configured.is_empty() {
@@ -751,7 +754,7 @@ impl OndApp {
                 let in_use = Some(entry.id) == live;
                 let detail = if in_use { self.source_detail(entry, &state) } else { "Not in use".to_owned() };
                 let menu = if in_use {
-                    let syncs = self.session.source.is_some() && self.session.online && !self.sync.tracks;
+                    let syncs = self.session.source.is_some() && self.session.online && !self.session.sync.tracks;
                     kit::SourceRowMenu { rename: true, color: true, sync: syncs.then_some(kind.sync), sign_out: caps.network, remove: removable }
                 } else {
                     kit::SourceRowMenu { rename: true, color: true, sync: None, sign_out: false, remove: removable }
@@ -808,6 +811,47 @@ impl OndApp {
             ui.add_space(8.0);
             ui.add(egui::Label::new(egui::RichText::new(line).size(12.0).color(t.muted)).wrap());
         }
+    }
+
+    fn all_source_settings(&mut self, ui: &mut Ui) {
+        let configured = self.prefs.get(|s| s.sources.clone());
+        group(ui, "Sources", |ui| {
+            for entry in &configured {
+                let kind = crate::source::Kind::of(entry.kind);
+                let runtime = self.session.get(entry.id);
+                let state = runtime.map(|s| s.state(self.session.work_offline)).unwrap_or(SourceState::SignedOut);
+                let name = entry.name.clone().unwrap_or_else(|| super::sidebar::default_name(entry));
+                let detail = runtime
+                    .map(|s| {
+                        if s.sync.albums || s.sync.tracks {
+                            s.sync.label.clone()
+                        } else if kind.scans {
+                            format!("{} · {} skipped", entry.folder_paths().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "), s.skipped)
+                        } else {
+                            s.server_label.clone()
+                        }
+                    })
+                    .unwrap_or_default();
+                let source =
+                    kit::SourceInfo { id: entry.id, name: &name, kind: kind.name, icon: kind.icon, color: entry.color, state: &state, detail: Some(&detail) };
+                let sync = runtime.is_some_and(|s| s.online && !s.sync.albums && !s.sync.tracks);
+                let menu = kit::SourceRowMenu { rename: true, color: true, sync: sync.then_some(kind.sync), sign_out: kind.capabilities.network, remove: true };
+                let locked = self.prefs.managed("sources").then_some(crate::managed::LOCKED);
+                if let Some(event) = kit::source_row(ui, &kit::SourceRow { source, menu, locked }) {
+                    let action = match event {
+                        kit::SourceRowEvent::Rename(name) => PrefsAction::SourceName(entry.id, name).into(),
+                        kit::SourceRowEvent::Color(color) => PrefsAction::SourceColor(entry.id, color).into(),
+                        kit::SourceRowEvent::Sync => Action::ForSource(entry.id, Box::new(Action::SyncNow)),
+                        kit::SourceRowEvent::SignOut => Action::ForSource(entry.id, Box::new(Action::AskSignOut)),
+                        kit::SourceRowEvent::Remove => SourceAction::AskRemove(entry.id).into(),
+                    };
+                    self.actions.push(action);
+                }
+            }
+            if ui.add_enabled(!self.prefs.managed("sources"), egui::Button::new("Add source…")).clicked() {
+                self.actions.push(Action::Onboarding(kit::OnboardingEvent::AddAnother));
+            }
+        });
     }
 
     /// What a source in use says under its name: how far a sync or scan has

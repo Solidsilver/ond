@@ -47,8 +47,9 @@ type Location = (u32, usize);
 
 /// The library's tracks, grouped by album and indexed by id. Building one walks
 /// every track, so the bridge does it off the UI thread.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TrackSet {
+    sources: Vec<Arc<TrackSet>>,
     /// Every stored track, grouped by album (the Songs view sorts these).
     /// Albums fetched since (`set_album`) aren't in it.
     pub all: Arc<Vec<Track>>,
@@ -62,6 +63,15 @@ pub struct TrackSet {
 }
 
 impl TrackSet {
+    /// Shares each source's existing index and album slices. Only the flat
+    /// Songs list is materialized; unchanged sources are never reindexed.
+    pub fn merge(sets: impl IntoIterator<Item = Arc<TrackSet>>) -> Self {
+        let sources: Vec<_> = sets.into_iter().collect();
+        let all = if sources.len() == 1 { sources[0].all.clone() } else { Arc::new(sources.iter().flat_map(|s| s.all.iter().cloned()).collect()) };
+        let by_album = sources.iter().flat_map(|s| s.by_album.iter().map(|(id, ts)| (id.clone(), ts.clone()))).collect();
+        Self { all, by_album, sources, ..Default::default() }
+    }
+
     /// Groups `tracks`, which the library returns album by album. An album
     /// split across runs still works: its runs are joined into one list.
     pub fn new(tracks: Vec<Track>) -> Self {
@@ -145,7 +155,9 @@ impl TrackSet {
 
     /// A track by id, stored or fetched since.
     pub fn track(&self, id: &str) -> Option<&Track> {
-        let &(slot, i) = self.index.get(id)?;
+        let Some(&(slot, i)) = self.index.get(id) else {
+            return self.sources.iter().find_map(|s| s.track(id));
+        };
         self.by_album.get(self.album_ids.get(slot as usize)?)?.get(i)
     }
 }

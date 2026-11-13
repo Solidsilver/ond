@@ -12,6 +12,25 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use library::Track;
 
 impl ViewCtx<'_> {
+    pub(super) fn playlists_page(&mut self, ui: &mut Ui) {
+        shell::kit::page_heading(ui, "Playlists", None);
+        if self.data.playlists.is_empty() {
+            crate::widgets::empty_state(ui, Icon::List, "No playlists", "Make a playlist from any song's menu.");
+            return;
+        }
+        let mut scroll = egui::ScrollArea::vertical().id_salt("playlists");
+        if let Some(y) = super::alpha::take_jump(ui, "playlists") {
+            scroll = scroll.vertical_scroll_offset(y);
+        }
+        scroll.show(ui, |ui| {
+            for playlist in &self.data.playlists {
+                if ui.button(&playlist.name).clicked() {
+                    self.actions.push(Action::Go(crate::nav::Route::Playlist { id: playlist.id.clone(), name: playlist.name.clone() }));
+                }
+            }
+        });
+    }
+
     /// A playlist: a mosaic of its first albums' covers, name, length, Play /
     /// Shuffle / ⋯, then its tracks. The user's own playlists can be renamed,
     /// deleted, reordered by dragging (or ⌥↑/↓) and trimmed (⌫).
@@ -98,7 +117,7 @@ impl ViewCtx<'_> {
         if ui.button("Rename…").clicked() {
             self.actions.push(Action::Overlay(Overlay::Rename { id: id.to_owned(), name: name.to_owned() }));
         }
-        if !self.session.source_caps().playlists && ui.button("Export M3U…").clicked() {
+        if (id.starts_with("ond:") || !self.session.for_item(id).source_caps().playlists) && ui.button("Export M3U…").clicked() {
             self.actions.push(Action::PlaylistEdit(super::PlaylistAction::ExportM3u { id: id.to_owned(), name: name.to_owned() }));
         }
         if ui.button("Delete…").clicked() {

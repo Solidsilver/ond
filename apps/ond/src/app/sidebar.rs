@@ -192,6 +192,9 @@ impl OndApp {
     /// or the glyph alone in the rail (the words in a tooltip). Click for
     /// the details popover (latency, last sync, Sync now, Sign out).
     fn server_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
+        if self.session.accounts.len() > 1 {
+            return self.all_sources_switcher(ui, place);
+        }
         let state = self.server_state();
         let source_state = state.source_state();
         let id = self.source_id();
@@ -217,6 +220,39 @@ impl OndApp {
         });
     }
 
+    fn all_sources_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
+        let settings = self.prefs.snapshot();
+        let states: Vec<_> =
+            settings.sources.iter().map(|e| self.session.get(e.id).map(|s| s.state(self.session.work_offline)).unwrap_or(SourceState::SignedOut)).collect();
+        let names: Vec<_> = settings.sources.iter().map(|e| e.name.clone().unwrap_or_else(|| default_name(e))).collect();
+        let sources: Vec<_> = settings
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let kind = crate::source::Kind::of(e.kind);
+                kit::SourceInfo { id: e.id, name: &names[i], kind: kind.name, icon: kind.icon, color: e.color, state: &states[i], detail: None }
+            })
+            .collect();
+        let switcher = kit::SourceSwitcher {
+            sources: &sources,
+            scope: &self.session.scope,
+            look: kit::SwitcherLook::Line,
+            add: !self.prefs.managed("sources"),
+            manage: true,
+            tooltip: None,
+        };
+        let pick = kit::source_switcher::<()>(ui, &switcher, place, |_| None);
+        let action = match pick {
+            Some(kit::SourcePick::Source(account)) => Action::Scope(super::all_sources::ScopeAction::One(account)),
+            Some(kit::SourcePick::All) => Action::Scope(super::all_sources::ScopeAction::All),
+            Some(kit::SourcePick::Manage) => Action::OpenSettings(super::settings_page::Section::Sources),
+            Some(kit::SourcePick::Add) => Action::Onboarding(kit::OnboardingEvent::AddAnother),
+            _ => return,
+        };
+        self.actions.push(action);
+    }
+
     /// The server's account id. Before the first connect has given it one,
     /// a stand-in that stays put, so a spinner counts from when it started.
     pub(super) fn source_id(&self) -> AccountId {
@@ -236,7 +272,7 @@ impl OndApp {
         // A server's host; for a source that isn't one, its default name.
         let host = self.session.settings.as_ref().and_then(|s| s.primary()).map(default_name).unwrap_or_default();
         let scans = self.session.kind().scans;
-        if let Some(p) = self.sync.progress {
+        if let Some(p) = self.session.sync.progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
             let (done, total) = (crate::fmt::thousands(p.done), crate::fmt::thousands(p.total));
             // Short enough for the footer; the counts are in the tooltip and popover.
@@ -253,7 +289,7 @@ impl OndApp {
                 if scans { format!("Scanning the music folder\n{done} of {total} {what}") } else { format!("{}\n{done} of {total} {what}", p.label()) };
             return ServerState::Syncing { host, label, detail, fraction, scans };
         }
-        if self.session.online && (self.sync.albums || self.sync.tracks) {
+        if self.session.online && (self.session.sync.albums || self.session.sync.tracks) {
             let (label, detail) = if scans { ("Scanning…", "Looking for music") } else { ("Syncing library…", "Fetching the album list") };
             return ServerState::Syncing { host, label: label.into(), detail: detail.into(), fraction: None, scans };
         }
@@ -335,14 +371,14 @@ impl OndApp {
             ServerState::Syncing { detail, scans, .. } => {
                 format!("{} {}", if *scans { "Scanning" } else { "Syncing" }, detail.lines().last().unwrap_or_default())
             }
-            _ => match self.sync.last {
+            _ => match self.session.sync.last {
                 Some(at) => at.format("%-I:%M %p").to_string(),
                 None if self.session.source.is_some() => "At launch".to_owned(),
                 None => "Not yet".to_owned(),
             },
         };
         info_row(ui, if kind.scans { "Last scan" } else { "Last sync" }, &synced, t.text);
-        let action = if self.sync.tracks {
+        let action = if self.session.sync.tracks {
             Some(if kind.scans { "Stop scan" } else { "Stop sync" })
         } else if self.session.source.is_some() && self.session.online {
             Some(kind.sync)
@@ -354,7 +390,7 @@ impl OndApp {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 if crate::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
-                    if self.sync.tracks {
+                    if self.session.sync.tracks {
                         picked = Some(ServerRow::StopSync);
                     } else {
                         picked = Some(ServerRow::SyncNow);
@@ -529,6 +565,10 @@ fn active_place(nav: &Nav) -> Option<usize> {
 
 /// Playlists the user can change (others' public ones are read-only).
 pub(super) fn owns(session: &super::Session, p: &crate::source::Playlist) -> bool {
+    if p.id.starts_with("ond:") {
+        return true;
+    }
+    let session = session.for_item(&p.id);
     match (&p.owner, &session.source, &session.settings) {
         (Some(owner), Some(_), Some(settings)) => owner == settings.username(),
         _ => true,

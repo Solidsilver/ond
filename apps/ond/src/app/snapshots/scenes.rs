@@ -476,8 +476,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     {
         let app = app_mut(h);
         app.prefs.edit(|s| s.diagnostics_bar = true);
-        app.sync.tracks = true;
-        app.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.session.sync.tracks = true;
+        app.session.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
         app.diagnostics.note_frame(Duration::from_micros(1800));
     }
     h.run_steps(2);
@@ -578,8 +578,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         let app = app_mut(h);
         use_folder(app);
         let (scan, skipped, missing) = setup;
-        app.sync.progress = scan;
-        app.sync.tracks = scan.is_some();
+        app.session.sync.progress = scan;
+        app.session.sync.tracks = scan.is_some();
         app.session.skipped = skipped;
         if missing {
             app.session.folder_missing = vec![PathBuf::from("/Volumes/Archive/Lossless")];
@@ -668,9 +668,9 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "songs");
 
     reset(h, FULL, Route::Songs);
-    let all = std::mem::take(&mut app_mut(h).data.tracks.all);
+    let all = std::mem::take(&mut Arc::make_mut(&mut app_mut(h).data.tracks).all);
     s.shoot(h, "songs-empty");
-    app_mut(h).data.tracks.all = all;
+    Arc::make_mut(&mut app_mut(h).data.tracks).all = all;
 
     reset(h, FULL, Route::Offline);
     s.shoot(h, "offline-pins");
@@ -849,8 +849,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        app.sync.tracks = true;
-        app.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.session.sync.tracks = true;
+        app.session.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
     }
     s.shoot(h, "sidebar-syncing");
     let side = egui::Rect::from_min_max(pos2(0.0, 700.0), pos2(216.0, 900.0));
@@ -861,7 +861,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "sidebar-syncing-hover");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).sync.albums = true;
+    app_mut(h).session.sync.albums = true;
     s.shoot(h, "sidebar-syncing-albums");
 
     reset(h, FULL, Route::Recent);
@@ -872,8 +872,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(760.0, 640.0), Route::Albums);
     {
         let app = app_mut(h);
-        app.sync.tracks = true;
-        app.sync.progress = Some(crate::sync::Progress { done: 1200, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.session.sync.tracks = true;
+        app.session.sync.progress = Some(crate::sync::Progress { done: 1200, total: 1866, unit: crate::sync::Unit::Tracks });
     }
     s.shoot(h, "narrow-rail-syncing");
 
@@ -935,7 +935,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         let form = crate::app::sources::FolderForm { folders, busy, ..Default::default() };
         app.onboarding = Some(Onboard { step: OnboardingStep::Form(crate::app::onboarding::FOLDER), folders: form, ..Default::default() });
         if busy {
-            app.sync.progress = Some(crate::sync::Progress { done: 1_284, total: 3_960, unit: crate::sync::Unit::Tracks });
+            app.session.sync.progress = Some(crate::sync::Progress { done: 1_284, total: 3_960, unit: crate::sync::Unit::Tracks });
         }
         s.shoot(h, scene);
     }
@@ -1006,6 +1006,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     s.shoot(h, "zoom-150-player-min");
     reset(h, FULL, Route::Recent);
+    reset(h, FULL, Route::Playlists);
+    s.shoot(h, "playlists");
 }
 
 /// The appearance settings, each on its own: colors from the album art, the

@@ -142,7 +142,7 @@ impl ViewCtx<'_> {
         let n = self.data.tracks.all.len();
         self.heading(ui, "Songs", (n > 0).then(|| n.to_string()));
         if n == 0 {
-            let (title, body) = if self.sync.tracks {
+            let (title, body) = if self.session.sync.tracks {
                 ("Syncing your tracks…", "Songs appear here as the library comes in.")
             } else {
                 ("No songs yet", "They appear once the library has synced with your server.")

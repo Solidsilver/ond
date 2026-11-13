@@ -36,6 +36,8 @@ const ADD_ANOTHER: bool = false;
 /// The sheet's own state while it's up.
 #[derive(Debug, Default)]
 pub(super) struct Onboard {
+    /// This sheet was opened over a configured library by Add source.
+    pub(super) adding: bool,
     pub(super) step: OnboardingStep,
     /// The server signed in to from the sheet: its account and its
     /// address.
@@ -98,7 +100,7 @@ impl OndApp {
                 step,
                 add_another: ADD_ANOTHER,
                 back,
-                cancel: false,
+                cancel: self.onboarding.as_ref().is_some_and(|o| o.adding),
                 waiting,
                 form_height: if step == OnboardingStep::Form(FOLDER) { super::sources::FOLDER_FORM_H } else { FORM_H },
             };
@@ -112,6 +114,14 @@ impl OndApp {
 
     /// What was done on the sheet.
     pub(super) fn onboarding_event(&mut self, event: OnboardingEvent) {
+        if event == OnboardingEvent::AddAnother && self.onboarding.is_none() {
+            self.onboarding = Some(Onboard { adding: true, ..Default::default() });
+        }
+        if event == OnboardingEvent::Cancel && !self.multi.bridges.is_empty() {
+            self.onboarding = None;
+            self.login = None;
+            return;
+        }
         let Some(sheet) = self.onboarding.as_mut() else { return };
         match event {
             OnboardingEvent::Picked(FOLDER) => sheet.step = OnboardingStep::Form(FOLDER),

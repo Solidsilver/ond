@@ -30,6 +30,7 @@ pub fn route_label(route: &Route, data: &Data) -> String {
         Route::Albums => "Albums".into(),
         Route::Artists => "Artists".into(),
         Route::Songs => "Songs".into(),
+        Route::Playlists => "Playlists".into(),
         Route::Favorites => "Favorites".into(),
         Route::Offline => "Offline".into(),
         Route::Artist { name, .. } => name.clone(),
@@ -56,7 +57,7 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, descending: bool, data: &Data) -
             return ids;
         }
         Route::Albums => (0..albums.len()).collect(),
-        Route::Artist { name, id } => (0..albums.len()).filter(|&i| albums[i].has_artist(id.as_deref(), name)).collect(),
+        Route::Artist { name, id } => (0..albums.len()).filter(|&i| data.artist_has_album(&albums[i], id.as_deref(), name)).collect(),
         Route::Filter { kind, value } => (0..albums.len())
             .filter(|&i| {
                 let a = &albums[i];
@@ -89,12 +90,14 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, descending: bool, data: &Data) -
 
 impl OndApp {
     pub(super) fn main_view(&mut self, ui: &mut Ui) {
+        self.scope_chips(ui);
         self.trail_bar(ui);
         let route = self.ui.nav.current().clone();
         match &route {
             Route::Recent | Route::Albums | Route::Filter { .. } => self.albums_place(ui, &route),
             Route::Artists => self.view().artists_page(ui),
             Route::Songs => self.view().songs_page(ui),
+            Route::Playlists => self.view().playlists_page(ui),
             Route::Artist { name, .. } => self.artist_page(ui, &route, name),
             Route::Album(id) => self.view().album_page(ui, id),
             Route::Playlist { id, name } => self.view().playlist_page(ui, id, name),
@@ -175,7 +178,8 @@ impl OndApp {
         });
         ui.add_space(14.0);
         if own.is_empty() && credited.is_empty() {
-            let (title, body) = if self.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
+            let (title, body) =
+                if self.session.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
             crate::widgets::empty_state(ui, Icon::Disc, title, body);
             return;
         }
@@ -218,12 +222,16 @@ impl OndApp {
     /// The artist's name and album count, and (when they have albums) the
     /// buttons to play them and love them.
     fn artist_header(&mut self, ui: &mut Ui, route: &Route, name: &str, sub: Option<String>, albums: bool) {
+        let id = match route {
+            Route::Artist { id, .. } => id.clone(),
+            _ => None,
+        };
         self.view().heading(ui, name, sub);
         if albums {
             ui.horizontal(|ui| {
                 // Play takes their albums in the page's order; Shuffle mixes them.
                 if let Some(a) = play_shuffle(ui) {
-                    self.actions.push(Action::Artist(name.to_owned(), a));
+                    self.actions.push(Action::Artist(name.to_owned(), id.clone(), a));
                 }
                 // Only artists the server knows by id can be loved.
                 if let Route::Artist { id: Some(id), .. } = route
@@ -240,7 +248,7 @@ impl OndApp {
                     }
                 }
                 let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(Tokens::of(ui).accent));
-                egui::Popup::menu(&more).show(|ui| collection_menu(ui, &Collection::Artist(name.to_owned()), false, None, None, &mut self.actions));
+                egui::Popup::menu(&more).show(|ui| collection_menu(ui, &Collection::Artist(name.to_owned(), id.clone()), false, None, None, &mut self.actions));
             });
         }
     }
@@ -313,7 +321,7 @@ pub fn grid_metrics(width: f32) -> (usize, f32) {
 pub enum Collection {
     Album(String),
     Playlist(String),
-    Artist(String),
+    Artist(String, Option<String>),
 }
 
 impl Collection {
@@ -321,7 +329,7 @@ impl Collection {
         match self {
             Collection::Album(id) => Action::Album(id.clone(), a),
             Collection::Playlist(id) => Action::Playlist(id.clone(), a),
-            Collection::Artist(name) => Action::Artist(name.clone(), a),
+            Collection::Artist(name, id) => Action::Artist(name.clone(), id.clone(), a),
         }
     }
 
@@ -330,7 +338,7 @@ impl Collection {
         match self {
             Collection::Album(id) => Some(Keep::Album(id.clone())),
             Collection::Playlist(id) => Some(Keep::Playlist(id.clone())),
-            Collection::Artist(_) => None,
+            Collection::Artist(..) => None,
         }
     }
 }
@@ -345,7 +353,7 @@ pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: Option<boo
     if play {
         match c {
             // An artist's menu offers the shuffle across their albums.
-            Collection::Artist(_) => items.push(("Shuffle all", QueueAction::Shuffle)),
+            Collection::Artist(..) => items.push(("Shuffle all", QueueAction::Shuffle)),
             _ => items.extend([("Play", QueueAction::Play { start: 0 }), ("Shuffle", QueueAction::Shuffle)]),
         }
     }
@@ -605,7 +613,7 @@ mod tests {
     fn albums_and_playlists_download_but_artists_do_not() {
         assert!(matches!(Collection::Album("a".into()).keep(), Some(Keep::Album(id)) if id == "a"));
         assert!(matches!(Collection::Playlist("p".into()).keep(), Some(Keep::Playlist(id)) if id == "p"));
-        assert!(Collection::Artist("Bill Evans".into()).keep().is_none());
+        assert!(Collection::Artist("Bill Evans".into(), None).keep().is_none());
         assert!(matches!(Collection::Playlist("p".into()).action(QueueAction::Add), Action::Playlist(id, QueueAction::Add) if id == "p"));
     }
 }

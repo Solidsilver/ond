@@ -18,11 +18,12 @@ use std::sync::Arc;
 pub struct SubsonicSource {
     account: accounts::AccountId,
     client: Client,
+    artist_mbids: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl SubsonicSource {
     pub fn new(account: accounts::AccountId, client: Client) -> Self {
-        Self { account, client }
+        Self { account, client, artist_mbids: Arc::default() }
     }
 }
 
@@ -174,12 +175,18 @@ impl MusicSource for SubsonicSource {
 
 #[async_trait]
 impl Fetch for SubsonicSource {
+    fn artist_mbids(&self) -> Vec<(String, String)> {
+        self.artist_mbids.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
     async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure> {
         Ok(self.client.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await?.into_iter().map(convert::album).collect())
     }
 
     async fn artists(&self) -> Result<Vec<Artist>, Failure> {
-        Ok(self.client.artists().await?.into_iter().map(convert::artist).collect())
+        let artists = self.client.artists().await?;
+        *self.artist_mbids.lock().unwrap_or_else(|e| e.into_inner()) =
+            artists.iter().filter_map(|a| Some((a.id.clone(), a.music_brainz_id.clone()?))).collect();
+        Ok(artists.into_iter().map(convert::artist).collect())
     }
 
     async fn album(&self, id: String) -> Result<AlbumTracks, Failure> {

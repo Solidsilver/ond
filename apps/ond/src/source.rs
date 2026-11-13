@@ -4,6 +4,8 @@
 //! maps a configured kind to anything is [`Kind`], which says how each is
 //! named and what it can do before its source is connected.
 
+pub mod artists;
+pub mod identity;
 pub mod local;
 pub mod subsonic;
 
@@ -19,7 +21,7 @@ use std::sync::Arc;
 pub type TrackKey = accounts::ItemKey;
 
 pub fn matches_track(key: &TrackKey, account: Option<accounts::AccountId>, id: &str) -> bool {
-    Some(key.account) == account && key.item == id
+    Some(key.account) == crate::source::identity::account(id).or(account) && key.item == crate::source::identity::bare(id)
 }
 
 /// The qualified key keeps files apart across sources.

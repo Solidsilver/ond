@@ -3,11 +3,8 @@
 //! folders changed in Settings › Sources, the folder picker that both use,
 //! and removing a source.
 //!
-//! Ond holds one source live at a time: the first in `settings.json`'s list.
-//! Adding a folder makes it that one; a server configured before stays in
-//! the list with its library kept on disk, only not in use (signing in to
-//! it again makes it the live one). Running several at once is for later
-//! (docs/sources.md, milestone 4).
+//! Every configured source opens independently. Folder changes replace only
+//! that account's watcher and scan session; removing it also prunes its queue.
 //!
 //! The picker is a seam ([`FolderPicker`]): the app's is the system's
 //! dialog, and tests and snapshots hand in one that answers at once. Its
@@ -195,14 +192,13 @@ impl OndApp {
         form.account = id;
         form.busy = true;
         form.error = None;
-        // Whatever was connecting (a server signed out of) delivers nothing now.
-        self.bridge.end_session();
-        self.forget_in_flight();
-        self.forget_waiting();
-        let settings = self.prefs.snapshot();
-        self.session.settings = Some(settings.clone());
-        self.session.connecting = true;
-        self.bridge.connect(settings, None);
+        let mut settings = self.prefs.snapshot();
+        let account = id.expect("added account");
+        settings.make_primary(account);
+        self.start_source(settings);
+        if self.session.focus.is_none() {
+            self.session.focus = Some(account);
+        }
     }
 
     /// The first scan of a source added from the sheet ended: on success the
@@ -230,6 +226,12 @@ impl OndApp {
         if let Some(s) = self.session.settings.as_mut() {
             s.set_folders(id, folders);
         }
+        if self.multi.bridges.contains_key(&id) {
+            let mut settings = self.prefs.snapshot();
+            settings.make_primary(id);
+            self.start_source(settings);
+            return;
+        }
         if self.session.account() == Some(id) {
             let settings = self.prefs.snapshot();
             self.session.settings = Some(settings.clone());
@@ -242,6 +244,9 @@ impl OndApp {
     /// When it was the one in use, the next one configured takes over, or the
     /// first-run sheet opens.
     fn remove_source(&mut self, id: AccountId) {
+        if self.multi.bridges.contains_key(&id) {
+            return self.remove_live_source(id);
+        }
         let Some(entry) = self.prefs.get(|s| s.source(id).cloned()) else { return };
         let name = entry.name.clone().unwrap_or_else(|| super::sidebar::default_name(&entry));
         let live = self.session.account() == Some(id);
@@ -310,7 +315,7 @@ impl OndApp {
     /// how many tracks it's found, and a way to carry on without waiting.
     pub(super) fn folder_form(&mut self, ui: &mut egui::Ui) {
         let t = crate::theme::Tokens::of(ui);
-        let progress = self.sync.progress.map(|p| (p.done, p.total));
+        let progress = self.session.sync.progress.map(|p| (p.done, p.total));
         let Some(form) = self.onboarding.as_mut().map(|o| &mut o.folders) else { return };
         kit::field_label(ui, "Folders");
         ui.add_space(2.0);
@@ -358,7 +363,7 @@ impl OndApp {
 
 /// What's said once a source is gone, which for a folder includes that its
 /// music is still there.
-fn removed_notice(name: &str, kind: SourceKind) -> String {
+pub(super) fn removed_notice(name: &str, kind: SourceKind) -> String {
     match kind {
         SourceKind::Local => format!("Removed “{name}”. Your music files are still in their folders."),
         SourceKind::Subsonic => format!("Removed “{name}”."),

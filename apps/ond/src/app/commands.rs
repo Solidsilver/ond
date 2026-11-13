@@ -14,6 +14,8 @@ use std::sync::Arc;
 /// A change to a playlist, from a view.
 #[derive(Debug, Clone)]
 pub enum PlaylistAction {
+    /// Accept or decline the pending offer to copy a server playlist.
+    AcceptMixed(bool),
     Create {
         name: String,
         tracks: Vec<Track>,
@@ -193,8 +195,12 @@ impl OndApp {
     /// Applies a playlist change: locally first where the result is certain
     /// (so lists don't jump), then on the server, which sends back the truth.
     pub(super) fn playlist_action(&mut self, a: PlaylistAction) {
+        if self.ond_playlist_action(&a) {
+            return;
+        }
         let source = self.session.source.clone();
         match a {
+            PlaylistAction::AcceptMixed(_) => {}
             PlaylistAction::Create { name, tracks } => {
                 let name = if name.trim().is_empty() { "Untitled playlist".to_owned() } else { name.trim().to_owned() };
                 let ids = tracks.iter().map(|t| t.id.clone()).collect();

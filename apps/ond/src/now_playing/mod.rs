@@ -107,6 +107,12 @@ pub struct Config {
 }
 
 enum In {
+    Register(Src),
+    Remove(accounts::AccountId),
+    MultiSubmitted {
+        play: PendingPlay,
+        outcome: Outcome,
+    },
     Source(Option<Src>),
     Known(Info),
     Engine(audio::Event),
@@ -132,6 +138,13 @@ impl Session {
         let worker = Worker::new(cfg, tx.clone());
         std::thread::Builder::new().name("now-playing".into()).spawn(move || worker.run(rx)).expect("spawn now-playing worker");
         Self { tx }
+    }
+
+    pub fn add_source(&self, source: Src) {
+        let _ = self.tx.send(In::Register(source));
+    }
+    pub fn remove_source(&self, account: accounts::AccountId) {
+        let _ = self.tx.send(In::Remove(account));
     }
 
     pub fn set_source(&self, source: Src) {
@@ -194,6 +207,9 @@ struct Worker {
     cfg: Config,
     tx: Sender<In>,
     source: Option<Src>,
+    registered: bool,
+    sources: HashMap<accounts::AccountId, Src>,
+    retries: HashMap<accounts::AccountId, (RetryQueue, bool, Instant)>,
     scrobble: bool,
     /// Metadata for recently named queue items, by the engine's token.
     known: HashMap<u64, Info>,
@@ -227,6 +243,9 @@ impl Worker {
             cfg,
             tx,
             source: None,
+            registered: false,
+            sources: HashMap::new(),
+            retries: HashMap::new(),
             known: HashMap::new(),
             current: None,
             listen: None,
@@ -262,6 +281,40 @@ impl Worker {
 
     fn handle(&mut self, msg: In) {
         match msg {
+            In::Register(source) => {
+                self.registered = true;
+                let account = source.account();
+                if !self.retries.contains_key(&account) {
+                    let file = self
+                        .cfg
+                        .retry_root
+                        .as_ref()
+                        .map(|r| crate::storage::account_dir(r, account).join("scrobbles.json"))
+                        .unwrap_or_else(|| self.cfg.retry_file.clone());
+                    self.retries.insert(account, (RetryQueue::load(&file, Some(account)), false, Instant::now()));
+                }
+                self.sources.insert(account, source);
+                if let Some((_, _, next)) = self.retries.get_mut(&account) {
+                    *next = Instant::now();
+                }
+                self.flush_source(account);
+            }
+            In::Remove(account) => {
+                self.sources.remove(&account);
+            }
+            In::MultiSubmitted { play, outcome } => {
+                if let Some((queue, flushing, next)) = self.retries.get_mut(&play.key.account) {
+                    *flushing = false;
+                    match outcome {
+                        Outcome::Done | Outcome::Refused => {
+                            queue.pop_front();
+                            *next = Instant::now();
+                        }
+                        Outcome::Unreachable => *next = Instant::now() + RETRY_EVERY,
+                    }
+                }
+                self.flush_source(play.key.account);
+            }
             In::Source(c) => {
                 if let Some(account) = c.as_ref().map(|s| s.account())
                     && Some(account) != self.cfg.account
@@ -318,7 +371,7 @@ impl Worker {
                 self.listen = Some(Listen::new(key.clone(), token, started_ms, info.duration_secs));
                 self.publisher.reset();
                 if self.scrobble
-                    && let Some(source) = self.source.clone()
+                    && let Some(source) = self.source_for(key.account)
                     && source.capabilities().scrobbling
                     && source.account() == key.account
                 {
@@ -346,6 +399,9 @@ impl Worker {
     }
 
     fn poll(&mut self) {
+        for account in self.sources.keys().copied().collect::<Vec<_>>() {
+            self.flush_source(account);
+        }
         let status = self.cfg.status.clone();
         let state = State::of(status.state());
         let pos = status.position_secs();
@@ -385,7 +441,40 @@ impl Worker {
         }
     }
 
+    fn source_for(&self, account: accounts::AccountId) -> Option<Src> {
+        if self.registered { self.sources.get(&account).cloned() } else { self.source.clone().filter(|s| s.account() == account) }
+    }
+
+    fn flush_source(&mut self, account: accounts::AccountId) {
+        if !self.scrobble {
+            return;
+        }
+        let Some(source) = self.sources.get(&account).filter(|s| s.capabilities().scrobbling).cloned() else { return };
+        let Some((queue, flushing, next)) = self.retries.get_mut(&account) else { return };
+        if *flushing || Instant::now() < *next {
+            return;
+        }
+        let Some(play) = queue.front().cloned() else { return };
+        *flushing = true;
+        let tx = self.tx.clone();
+        self.cfg.rt.spawn(async move {
+            let result = source.scrobble(&play.key.item, play.time_ms, true).await;
+            let _ = tx.send(In::MultiSubmitted { play, outcome: Outcome::of(&result) });
+        });
+    }
+
     fn submit(&mut self, play: PendingPlay) {
+        if self.registered {
+            if !self.scrobble || self.sources.get(&play.key.account).is_some_and(|s| !s.capabilities().scrobbling) {
+                return;
+            }
+            let account = play.key.account;
+            if let Some((queue, _, _)) = self.retries.get_mut(&account) {
+                queue.push(play);
+            }
+            self.flush_source(account);
+            return;
+        }
         if Some(play.key.account) != self.cfg.account || !self.scrobble || self.source.as_ref().is_some_and(|s| !s.capabilities().scrobbling) {
             return;
         }
@@ -453,9 +542,9 @@ impl Worker {
     /// Hands the cover to the system: from the art cache if it's there, else from
     /// the server (and into the cache for the UI).
     fn fetch_artwork(&self, info: &Info) {
-        let Some(cover) = info.cover.clone() else { return };
+        let Some(cover) = info.cover.as_deref().map(crate::source::identity::bare).map(str::to_owned) else { return };
         let dir = crate::art::account_dir(&self.cfg.art_dir, info.key.account);
-        let source = self.source.clone().filter(|s| s.account() == info.key.account);
+        let source = self.source_for(info.key.account);
         let key = info.key.clone();
         *self.art_for.lock().unwrap_or_else(|e| e.into_inner()) = Some(key.clone());
         let art_for = Arc::clone(&self.art_for);

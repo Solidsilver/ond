@@ -12,6 +12,10 @@ use library::Track;
 use shell::kit::{DIALOG_W, ShortcutGroup, confirm, shortcuts_sheet};
 
 pub enum Overlay {
+    SignOutSource {
+        account: accounts::AccountId,
+    },
+    MixedPlaylist,
     Shortcuts,
     Settings,
     /// Name a new playlist holding `tracks` (empty for File › New Playlist).
@@ -78,6 +82,26 @@ impl OndApp {
         let modal = egui::Modal::new(id).frame(frame).show(ctx, |ui| {
             let t = Tokens::of(ui);
             match overlay {
+                Overlay::SignOutSource { account } => {
+                    if let Some(yes) = confirm(
+                        ui,
+                        "Sign out of this source?",
+                        "Ond forgets its saved password. Its library and queue entries stay on this computer.",
+                        "Sign out",
+                    ) {
+                        done = Some(yes.then(|| Action::ForSource(*account, Box::new(Action::SignOut))));
+                    }
+                }
+                Overlay::MixedPlaylist => {
+                    if let Some(yes) = confirm(
+                        ui,
+                        "Make an Ond playlist instead?",
+                        "This playlist has songs from another source. Ond can keep a copy with songs from both.",
+                        "Make playlist",
+                    ) {
+                        done = Some(Some(Action::PlaylistEdit(PlaylistAction::AcceptMixed(yes))));
+                    }
+                }
                 Overlay::Shortcuts => shortcuts_ui(ui, visualizer),
                 // Drawn by `settings_window` above, which returns first.
                 Overlay::Settings => {}

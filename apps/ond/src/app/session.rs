@@ -28,7 +28,8 @@ pub(super) struct LoginForm {
 
 /// The server connection and who's signed in.
 #[derive(Default)]
-pub struct Session {
+pub struct SourceSession {
+    pub sync: super::SyncState,
     pub source: Option<Src>,
     /// The server answered last time we asked. While it's unreachable only
     /// downloaded tracks play.
@@ -42,8 +43,6 @@ pub struct Session {
     /// The server turned the saved login away (password changed, nothing in
     /// the keychain): why. The library stays up; the footer asks to sign in.
     pub sign_in: Option<String>,
-    /// Offline by choice: no connecting, and only what can play shows.
-    pub work_offline: bool,
     /// The login in use, for reconnecting.
     pub settings: Option<Settings>,
     /// "user · navidrome 0.64.2", or "user · offline".
@@ -56,7 +55,82 @@ pub struct Session {
     pub skipped: usize,
 }
 
+/// All configured sources stay live independently. `focus` selects the source
+/// whose controls are being handled; browsing scope never ends a session.
+#[derive(Default)]
+pub struct Session {
+    pub accounts: std::collections::BTreeMap<accounts::AccountId, SourceSession>,
+    pub focus: Option<accounts::AccountId>,
+    pub work_offline: bool,
+    pub scope: accounts::Scope,
+    fallback: SourceSession,
+}
+
 impl Session {
+    pub fn new(settings: Option<Settings>, connecting: bool, work_offline: bool) -> Self {
+        Self {
+            work_offline,
+            scope: settings.as_ref().map(|s| s.scope.clone()).unwrap_or_default(),
+            fallback: SourceSession { settings, connecting, ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    pub fn get(&self, account: accounts::AccountId) -> Option<&SourceSession> {
+        self.accounts.get(&account).or_else(|| (self.fallback.account() == Some(account)).then_some(&self.fallback))
+    }
+
+    pub fn key(&self, id: &str) -> Option<accounts::ItemKey> {
+        accounts::ItemKey::parse(id).ok().or_else(|| Some(accounts::ItemKey::new(self.account()?, id)))
+    }
+
+    pub fn for_item(&self, id: &str) -> &SourceSession {
+        crate::source::identity::account(id).and_then(|a| self.get(a)).unwrap_or(self)
+    }
+}
+
+impl std::ops::Deref for Session {
+    type Target = SourceSession;
+    fn deref(&self) -> &SourceSession {
+        self.focus.and_then(|a| self.accounts.get(&a)).unwrap_or(&self.fallback)
+    }
+}
+
+impl std::ops::DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut SourceSession {
+        match self.focus {
+            Some(a) => self.accounts.get_mut(&a).expect("configured focus"),
+            None => &mut self.fallback,
+        }
+    }
+}
+
+impl SourceSession {
+    pub fn state(&self, work_offline: bool) -> accounts::SourceState {
+        use accounts::{OfflineReason, SourceState};
+        if !self.folder_missing.is_empty() {
+            SourceState::FolderMissing
+        } else if self.source_caps().network && work_offline {
+            SourceState::Offline(OfflineReason::ByChoice)
+        } else if self.sign_in.is_some() {
+            SourceState::SignedOut
+        } else if self.connecting {
+            SourceState::Connecting
+        } else if self.unreachable {
+            SourceState::Offline(OfflineReason::Unreachable)
+        } else if self.sync.albums || self.sync.tracks {
+            if self.kind().scans {
+                SourceState::Scanning
+            } else {
+                SourceState::Syncing(self.sync.progress.and_then(|p| (p.total > 0).then_some(p.done as f32 / p.total as f32)))
+            }
+        } else if self.online {
+            SourceState::Online
+        } else {
+            SourceState::Offline(OfflineReason::Unreachable)
+        }
+    }
+
     pub fn account(&self) -> Option<accounts::AccountId> {
         self.settings.as_ref().and_then(|s| s.account())
     }
@@ -142,8 +216,8 @@ impl OndApp {
         // Always a new pass, even if the flags say one runs: any still
         // running is from before the server went away, and the bridge
         // has this one replace it.
-        self.sync.label = "syncing…".into();
-        self.sync.albums = true;
+        self.session.sync.label = "syncing…".into();
+        self.session.sync.albums = true;
         self.bridge.sync_source(&source);
         self.bridge.fetch_home(source.clone());
         self.art.set_source(source.clone());
@@ -221,6 +295,12 @@ impl OndApp {
         if self.session.work_offline == on {
             return;
         }
+        if !self.multi.bridges.is_empty() {
+            return self.work_offline_for_sources(on);
+        }
+        if self.session.work_offline == on {
+            return;
+        }
         self.session.work_offline = on;
         self.prefs.edit(|s| s.work_offline = on);
         if on {
@@ -244,6 +324,13 @@ impl OndApp {
     /// what can play (once downloads are open: until then nothing is known
     /// to be downloaded, and their opening calls this again).
     pub(super) fn load_local(&mut self) {
+        if !self.multi.bridges.is_empty() {
+            let accounts: Vec<_> = self.multi.bridges.keys().copied().collect();
+            for account in accounts {
+                self.with_source(account, |app| app.load_source_local(account));
+            }
+            return;
+        }
         self.data.served = Default::default();
         if !self.session.work_offline {
             return self.bridge.load_local(None);
@@ -283,7 +370,7 @@ impl OndApp {
         self.session.connecting = false;
         self.diagnostics.set_latency(None);
         self.session.server_label = format!("{username} · offline");
-        self.sync.label = "reconnecting…".into();
+        self.session.sync.label = "reconnecting…".into();
         self.server_gone();
     }
 
@@ -296,7 +383,7 @@ impl OndApp {
             && source.capabilities().network
         {
             self.diagnostics.latency_asked();
-            self.bridge.measure_latency(source);
+            self.multi.bridges.get(&source.account()).unwrap_or(&self.bridge).measure_latency(source);
         }
     }
 
@@ -306,7 +393,7 @@ impl OndApp {
             && let (Some(source), Some(settings)) = (&self.session.source, &self.session.settings)
             && source.capabilities().network
         {
-            self.bridge.probe(source.clone(), settings.clone());
+            self.multi.bridges.get(&source.account()).unwrap_or(&self.bridge).probe(source.clone(), settings.clone());
         }
     }
 
@@ -346,19 +433,31 @@ impl OndApp {
 
     /// The server's gone: browse what's stored, play what's downloaded.
     pub(super) fn set_offline(&mut self) {
+        if let Some(account) = self.session.focus.filter(|a| self.multi.bridges.contains_key(a)) {
+            self.art.offline_source(account);
+            self.now_playing.remove_source(account);
+            self.analysis.runner.cancel_account(account);
+        }
         self.session.online = false;
         self.session.source = None;
         if let Some(store) = &self.downloads.store {
             store.set_source(None);
         }
-        self.sync.tracks = false;
-        self.sync.albums = false;
-        self.sync.progress = None;
+        self.session.sync.tracks = false;
+        self.session.sync.albums = false;
+        self.session.sync.progress = None;
+        if !self.multi.bridges.is_empty() {
+            self.refresh_analysis_sources();
+        }
     }
 
     /// Asks before signing out: it stops what's playing and the password has
     /// to be typed again.
     pub(super) fn ask_sign_out(&mut self) {
+        if let Some(account) = self.session.focus.filter(|a| self.multi.bridges.contains_key(a) && self.session.accounts.len() > 1) {
+            self.ui.overlay = Some(super::Overlay::SignOutSource { account });
+            return;
+        }
         let server = self.session.settings.as_ref().map_or_else(|| self.prefs.snapshot().server().to_owned(), |s| s.server().to_owned());
         let host = super::diagnostics::server_host(&server);
         self.ui.palette = None;
@@ -369,6 +468,9 @@ impl OndApp {
     /// Stops playback, forgets the saved password and shows the login screen
     /// with the server and username filled in.
     pub(super) fn sign_out(&mut self) {
+        if let Some(account) = self.session.focus.filter(|a| self.multi.bridges.contains_key(a)) {
+            return self.sign_out_source(account);
+        }
         self.with_player(|p, cx| p.reset(cx));
         self.ui.palette = None;
         self.ui.overlay = None;
@@ -520,7 +622,8 @@ impl OndApp {
         form.error = None;
         let settings = self.prefs.snapshot().sign_in(form.server.trim(), form.username.trim());
         // Kept in the form until it's answered, so a cancelled connect can be tried again as typed.
-        self.bridge.connect(settings, Some(form.password.clone()));
+        let password = form.password.clone();
+        self.connect_source_form(settings, password);
     }
 
     /// Gives up on the login form's connect. The session ends, as on signing
@@ -530,6 +633,16 @@ impl OndApp {
     pub(super) fn cancel_sign_in(&mut self) {
         let Some(form) = self.login.as_mut().filter(|f| f.busy) else { return };
         form.busy = false;
+        if let Some(account) = self.multi.signing_in.take() {
+            if let Some(bridge) = self.multi.bridges.get(&account) {
+                bridge.end_session();
+            }
+            if let Some(state) = self.session.accounts.get_mut(&account) {
+                state.connecting = false;
+            }
+            self.forget_source_requests(account);
+            return;
+        }
         self.bridge.end_session();
         // Work for the ended session delivers nothing now.
         self.forget_in_flight();

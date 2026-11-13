@@ -99,6 +99,7 @@ mod tests {
     #[test]
     fn artists_and_albums_keep_their_metadata_and_split_credits() {
         let a = subsonic::Artist {
+            music_brainz_id: None,
             id: "ar-1".into(),
             name: "Bill Evans".into(),
             sort_name: Some("Evans, Bill".into()),

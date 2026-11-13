@@ -11,7 +11,7 @@
 //! keeps its own state and switches bit-perfect on the spot, and the
 //! visualizer saves the one it switches to (←/→) as it switches.
 
-use super::{Action, Analysis, Data, Downloads, OndApp, SearchState, Session, SongStats, SyncState, UiState, diagnostics};
+use super::{Action, Analysis, Data, Downloads, OndApp, SearchState, Session, SongStats, UiState, diagnostics};
 use crate::art::Art;
 use crate::favorites::Favorites;
 use crate::memo::Memo;
@@ -27,11 +27,11 @@ pub struct ViewCtx<'a> {
     pub engine: &'a EngineHandle,
     pub favorites: &'a Favorites,
     pub downloads: &'a Downloads,
+    pub source_downloads: &'a std::collections::BTreeMap<accounts::AccountId, Downloads>,
     pub cache: &'a streamcache::StreamCache,
     pub analysis: &'a Analysis,
     pub output: &'a Outputs,
     pub session: &'a Session,
-    pub sync: &'a SyncState,
     /// The palette scores with the index's own scratch space.
     pub search: &'a mut SearchState,
     /// Lyrics by track id, as fetched so far.
@@ -70,14 +70,18 @@ pub fn hash_str(s: &str) -> u64 {
 }
 
 impl<'a> ViewCtx<'a> {
+    fn downloads_for(&self, account: accounts::AccountId) -> Option<&'a Downloads> {
+        if self.downloads.owner == Some(account) { Some(self.downloads) } else { self.source_downloads.get(&account) }
+    }
+
     pub fn download_state(&self, track: &Track) -> Option<&offline::TrackState> {
-        let key = crate::source::TrackKey::new(self.session.account()?, track.id.clone());
-        self.downloads.tracks().track(&key)
+        let key = self.session.key(&track.id)?;
+        self.downloads_for(key.account)?.tracks().track(&key)
     }
 
     pub fn track_pin(&self, track: &Track) -> Option<offline::Pin> {
-        let key = crate::source::TrackKey::new(self.session.account()?, track.id.clone());
-        self.downloads.tracks().pin(&key)
+        let key = self.session.key(&track.id)?;
+        self.downloads_for(key.account)?.tracks().pin(&key)
     }
 
     pub fn position_secs(&self) -> f64 {
@@ -95,7 +99,8 @@ impl<'a> ViewCtx<'a> {
 
     /// Whether `track` can play right now (see [`super::playable`]).
     pub fn playable(&self, track: &Track) -> bool {
-        super::playable(self.session, self.downloads, self.cache, self.ui.transcode.as_ref(), track)
+        let downloads = self.session.key(&track.id).and_then(|k| self.downloads_for(k.account)).unwrap_or(self.downloads);
+        super::playable(self.session, downloads, self.cache, self.ui.transcode.as_ref(), track)
     }
 
     /// This frame's spectrum of what's playing, for a visual on screen;
@@ -114,7 +119,7 @@ impl<'a> ViewCtx<'a> {
 
     /// The album's download, when it's kept offline (see [`Downloads::album_pin`]).
     pub fn album_pin(&self, id: &str) -> Option<&'a offline::PinSummary> {
-        let downloads: &'a Downloads = self.downloads;
+        let downloads = crate::source::identity::account(id).and_then(|a| self.downloads_for(a)).unwrap_or(self.downloads);
         downloads.album_pin(id)
     }
 
@@ -134,11 +139,11 @@ impl OndApp {
             engine: &self.engine,
             favorites: &self.favorites,
             downloads: &self.downloads,
+            source_downloads: &self.multi.downloads,
             cache: &self.cache,
             analysis: &self.analysis,
             output: &self.output,
             session: &self.session,
-            sync: &self.sync,
             search: &mut self.search,
             lyrics: &self.lyrics,
             song_stats: &self.song_stats,

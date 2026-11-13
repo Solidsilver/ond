@@ -45,6 +45,8 @@ pub struct Favorites {
     seq: u64,
     /// Shared so the Favorites view draws it without a copy per frame.
     pub view: Arc<Starred>,
+    all: Arc<Starred>,
+    scope: accounts::Scope,
     /// `getStarred2` has answered at least once.
     pub loaded: bool,
 }
@@ -70,7 +72,7 @@ impl Favorites {
     }
 
     fn set(&mut self, kind: StarKind, id: &str, on: bool, track: Option<&Track>, name: Option<&str>) {
-        let v = Arc::make_mut(&mut self.view);
+        let v = Arc::make_mut(&mut self.all);
         if on {
             self.on.entry(kind).or_default().insert(id.to_owned());
             match kind {
@@ -102,6 +104,42 @@ impl Favorites {
                 StarKind::Artist => v.artists.retain(|(a, _)| a != id),
             }
         }
+        self.refresh_view();
+    }
+
+    fn refresh_view(&mut self) {
+        if self.scope == accounts::Scope::all() {
+            self.view = self.all.clone();
+            return;
+        }
+        let includes = |id: &str| crate::source::identity::account(id).is_none_or(|a| self.scope.includes(a));
+        self.view = Arc::new(Starred {
+            songs: self.all.songs.iter().filter(|t| includes(&t.id)).cloned().collect(),
+            albums: self.all.albums.iter().filter(|id| includes(id)).cloned().collect(),
+            artists: self.all.artists.iter().filter(|(id, _)| includes(id)).cloned().collect(),
+        });
+    }
+
+    pub fn set_scope(&mut self, scope: accounts::Scope) {
+        self.scope = scope;
+        self.refresh_view();
+    }
+
+    pub fn load_source(&mut self, account: accounts::AccountId, mut starred: Starred, mut ratings: Vec<(String, u8)>) {
+        let other = |id: &str| crate::source::identity::account(id) != Some(account);
+        starred.songs.extend(self.all.songs.iter().filter(|t| other(&t.id)).cloned());
+        starred.albums.extend(self.all.albums.iter().filter(|id| other(id)).cloned());
+        starred.artists.extend(self.all.artists.iter().filter(|(id, _)| other(id)).cloned());
+        ratings.extend(self.ratings.iter().filter(|(id, _)| other(id)).map(|(id, r)| (id.clone(), *r)));
+        self.ratings.retain(|id, _| other(id) || self.pending_ratings.contains_key(id));
+        self.load(starred, ratings);
+    }
+
+    pub fn remove_account(&mut self, account: accounts::AccountId) {
+        let other = |id: &str| crate::source::identity::account(id) != Some(account);
+        self.pending.retain(|(_, id), _| other(id));
+        self.pending_ratings.retain(|id, _| other(id));
+        self.load_source(account, Starred::default(), Vec::new());
     }
 
     /// The server confirmed change `seq`. An earlier change's reply doesn't
@@ -166,9 +204,9 @@ impl Favorites {
             (StarKind::Album, starred.albums.iter().cloned().collect()),
             (StarKind::Artist, starred.artists.iter().map(|(a, _)| a.clone()).collect()),
         ]);
-        self.view = Arc::new(starred);
+        self.all = Arc::new(starred);
         for ((kind, id), on) in keep {
-            let track = self.view.songs.iter().find(|s| s.id == id).cloned();
+            let track = self.all.songs.iter().find(|s| s.id == id).cloned();
             self.set(kind, &id, on, track.as_ref(), None);
         }
         for (id, r) in ratings {
@@ -177,6 +215,7 @@ impl Favorites {
             }
         }
         self.loaded = true;
+        self.refresh_view();
     }
 
     /// Folds in what an album or playlist load said about its songs.

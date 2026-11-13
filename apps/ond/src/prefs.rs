@@ -178,11 +178,12 @@ impl Prefs {
     pub fn set_login(&self, server: &str, username: &str, account: accounts::AccountId) {
         self.edit(|s| {
             let entry = crate::settings::SourceEntry::subsonic(account, server, username);
-            match s.sources.iter_mut().find(|e| e.kind == crate::settings::SourceKind::Subsonic) {
+            match s.sources.iter_mut().find(|e| e.id == account) {
                 Some(slot) => {
                     slot.id = account;
                     slot.server = entry.server;
                     slot.username = entry.username;
+                    slot.signed_out = false;
                 }
                 None => s.sources.insert(0, entry),
             }

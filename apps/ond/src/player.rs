@@ -58,6 +58,9 @@ pub trait Sources {
     fn waiting(&self) -> bool {
         false
     }
+    fn waiting_for(&self, _item: &Item) -> bool {
+        self.waiting()
+    }
 }
 
 /// Something for the app to act on.
@@ -132,6 +135,38 @@ impl Player {
     /// and what was lined up offline can be lined up again).
     pub fn forget_next(&mut self) {
         self.sent_next = None;
+    }
+
+    /// A source signed out: stop its current track without touching another
+    /// account's playback or discarding entries that can be used offline.
+    pub fn suspend_account(&mut self, account: AccountId, cx: &mut Ctx<'_>) {
+        if self.queue.current.as_ref().is_some_and(|i| i.key.account == account) {
+            cx.engine.send(Command::Stop);
+            self.playing_from = None;
+            self.pending_seek = None;
+            self.started = None;
+            self.held = false;
+        }
+        self.sent_next = None;
+        self.next_from = None;
+        self.sync_next(cx);
+    }
+
+    pub fn remove_account(&mut self, account: AccountId, cx: &mut Ctx<'_>) {
+        self.cleared = None;
+        if self.queue.remove_account(account) {
+            cx.engine.send(Command::Stop);
+            self.playing_from = None;
+            self.pending_seek = None;
+            self.started = None;
+            self.held = false;
+            if self.queue.advance().is_some() {
+                self.start_current(cx);
+            }
+        }
+        self.sent_next = None;
+        self.next_from = None;
+        self.sync_next(cx);
     }
 
     /// Stops and empties the queue (signing out).
@@ -261,7 +296,7 @@ impl Player {
                 self.sync_next(cx);
                 break;
             }
-            if cx.sources.waiting() {
+            if cx.sources.waiting_for(item) {
                 cx.engine.send(Command::Stop);
                 self.held = true;
                 break;

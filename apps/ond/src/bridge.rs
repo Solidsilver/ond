@@ -21,6 +21,24 @@ use subsonic::{Client, Credentials};
 /// that part's handler matches its own group whole, so a message added to a
 /// group can't be left unhandled.
 pub enum Msg {
+    OndPlaylistChanged,
+    MixedPlaylistReady {
+        id: String,
+        name: String,
+        existing: Vec<Track>,
+        added: Vec<Track>,
+    },
+    OndPlaylists {
+        generation: u64,
+        playlists: Vec<Playlist>,
+        tracks: HashMap<String, Arc<Vec<Track>>>,
+    },
+    /// Both enqueue and inbox checks use this account's independent session.
+    Source {
+        account: accounts::AccountId,
+        session: u64,
+        message: Box<Msg>,
+    },
     /// Keeps a result scoped even while it waits in the UI inbox. Checking
     /// only before enqueueing leaves a gap if an account switches meanwhile.
     Scoped {
@@ -134,6 +152,11 @@ pub enum Msg {
 /// About the library, its sync, the search index, and track lists that
 /// loaded (`app/data.rs` handles them).
 pub enum LibraryMsg {
+    ScopeTracks {
+        key: ListKey,
+        parts: Vec<(accounts::AccountId, u64, Vec<Track>)>,
+    },
+    ArtistMbids(Vec<(String, String)>),
     /// A search index built off the UI thread, for the request numbered `generation`.
     SearchIndex {
         generation: u64,
@@ -199,8 +222,12 @@ pub enum LibraryMsg {
 
 /// About library analysis (`app/analyzing.rs` handles them).
 pub enum AnalysisMsg {
+    Store(Arc<library::AnalysisStore>),
     /// A track's analysis just finished.
-    Analyzed { key: crate::source::TrackKey, record: analysis::Record },
+    Analyzed {
+        key: crate::source::TrackKey,
+        record: analysis::Record,
+    },
     /// Every stored analysis, read at startup.
     Loaded(Vec<(String, analysis::Record)>),
 }
@@ -350,6 +377,7 @@ const OFFLINE_JOBS: &str = "offline";
 
 #[derive(Clone)]
 pub struct Bridge {
+    pub(super) account_tag: Option<accounts::AccountId>,
     rt: tokio::runtime::Handle,
     tx: Sender<Msg>,
     notify: Notify,
@@ -397,6 +425,7 @@ struct LibrarySlot {
 impl Bridge {
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, library: Arc<Library>, ond_store: Arc<crate::store::OndStore>) -> Self {
         Self {
+            account_tag: None,
             rt,
             tx,
             notify,
@@ -414,6 +443,59 @@ impl Bridge {
             in_order: Arc::default(),
             scope: None,
         }
+    }
+
+    pub fn fork_source(&self, account: accounts::AccountId, library: Arc<Library>) -> Self {
+        let mut bridge = Self::new(self.rt.clone(), self.tx.clone(), self.notify.clone(), library, self.ond_store.clone());
+        bridge.account_tag = Some(account);
+        let old = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = bridge.libraries.lock().unwrap_or_else(|e| e.into_inner());
+        slot.data = old.data.clone();
+        slot.art_cache = old.art_cache.clone();
+        if old.account == Some(account) {
+            slot.account = old.account;
+            slot.analyses = old.analyses.clone();
+        }
+        drop(slot);
+        bridge
+    }
+
+    pub fn storage_account(&self) -> Option<accounts::AccountId> {
+        self.libraries.lock().unwrap_or_else(|e| e.into_inner()).account
+    }
+
+    /// Opens a source independently, then reads its mirror before connecting.
+    pub fn open_source(&self, settings: Settings, keep: Option<crate::local::Playable>, connect: bool) {
+        let mut this = self.scoped();
+        self.rt.spawn(async move {
+            let account = settings.account().expect("configured source");
+            match this.prepare_storage(account).await {
+                Ok(Some(stores)) if this.current() => {
+                    this.scoped_library = Some(stores.library.clone());
+                    let analyses = this.install_storage(account, stores, &[account]);
+                    this.load_analyses(analyses);
+                }
+                Ok(None) => {
+                    let analyses = this.libraries.lock().unwrap_or_else(|e| e.into_inner()).analyses.upgrade();
+                    if let Some(analyses) = analyses {
+                        this.load_analyses(analyses);
+                    }
+                }
+                Ok(Some(_)) => return,
+                Err(e) => return this.send(Msg::ConnectFailed { session: this.session(), error: format!("Couldn't open the library: {e}") }),
+            }
+            if !this.current() {
+                return;
+            }
+            this.load_local(keep);
+            if connect {
+                this.connect(settings, None);
+            }
+        });
+    }
+
+    pub fn library_handle(&self) -> Arc<Library> {
+        self.library()
     }
 
     /// A lightweight callback that posts a message without keeping the stores
@@ -628,11 +710,20 @@ impl Bridge {
             return;
         }
         let msg = msg.into();
+        let msg = if let Some(account) = self.account_tag { crate::source::identity::message(account, msg) } else { msg };
         let msg = match (self.scope, msg) {
             (_, msg @ (Msg::Connected { .. } | Msg::ConnectFailed { .. } | Msg::Unreachable { .. } | Msg::Scoped { .. })) => msg,
             (Some(session), msg) => Msg::Scoped { session, message: Box::new(msg) },
             (None, msg) => msg,
         };
+        let msg = if let Some(account) = self.account_tag {
+            Msg::Source { account, session: self.scope.unwrap_or_else(|| self.session()), message: Box::new(msg) }
+        } else {
+            msg
+        };
+        if !self.current() {
+            return;
+        }
         let _ = self.tx.send(msg);
         (self.notify)();
     }
@@ -687,6 +778,9 @@ impl Bridge {
                 return;
             }
             let l = this.library();
+            if let Ok(Some(mbids)) = l.saved::<std::collections::BTreeMap<String, String>>("artist_mbids_v1") {
+                this.send(LibraryMsg::ArtistMbids(mbids.into_iter().collect()));
+            }
             let mut saved = Saved {
                 newest: l.saved(SAVED_NEWEST).ok().flatten(),
                 playlists: l.saved::<Vec<SavedPlaylist>>(SAVED_PLAYLISTS).ok().flatten().map(|p| p.into_iter().map(Into::into).collect()),
@@ -749,6 +843,9 @@ impl Bridge {
 
     /// Reads the stored analysis results.
     pub fn load_analyses(&self, store: Arc<library::AnalysisStore>) {
+        if self.account_tag.is_some() {
+            self.scoped().send(AnalysisMsg::Store(store.clone()));
+        }
         let this = self.scoped();
         self.rt.spawn_blocking(move || match store.records() {
             Ok(rows) => {
@@ -1057,6 +1154,9 @@ impl Bridge {
                     this.send(LibraryMsg::FolderMissing(synced.missing_roots));
                     this.send(LibraryMsg::Skipped(synced.skipped));
                     this.send(LibraryMsg::Albums(synced.albums));
+                    if let Ok(Some(mbids)) = this.library().saved::<std::collections::BTreeMap<String, String>>("artist_mbids_v1") {
+                        this.send(LibraryMsg::ArtistMbids(mbids.into_iter().collect()));
+                    }
                     this.send(LibraryMsg::Artists(synced.artists));
                     this.send(LibraryMsg::Newest(synced.newest_ids));
                     this.send(LibraryMsg::AlbumSyncDone(Ok(synced.album_count)));
@@ -1120,7 +1220,13 @@ impl Bridge {
                 return;
             }
             match artists {
-                Ok(stored) => this.send(LibraryMsg::Artists(stored)),
+                Ok(stored) => {
+                    let mbids = source.artist_mbids();
+                    let saved: std::collections::BTreeMap<_, _> = mbids.iter().cloned().collect();
+                    this.keep("artist_mbids_v1".into(), saved).await;
+                    this.send(LibraryMsg::ArtistMbids(mbids));
+                    this.send(LibraryMsg::Artists(stored));
+                }
                 Err(e) => this.send(Msg::Error(e)),
             }
             this.sync_tracks(source);
@@ -1208,6 +1314,12 @@ impl Bridge {
 
     /// Shows cached tracks immediately, then refreshes them from the server.
     pub fn open_album(&self, source: Option<Src>, album_id: String) {
+        if let Some(account) = crate::source::identity::account(&album_id)
+            && (self.account_tag.is_some_and(|a| a != account) || source.as_ref().is_some_and(|s| s.account() != account))
+        {
+            return self.send(Msg::Error(Failure::Local("This source is no longer available".into())));
+        }
+        let album_id = crate::source::identity::bare(&album_id).to_owned();
         let this = self.scoped();
         self.rt.spawn(async move {
             let id = album_id.clone();
@@ -1274,12 +1386,17 @@ impl Bridge {
     }
 
     /// Ond's cross-source store for hearts, ratings and playlists.
-    #[cfg(test)]
     pub fn ond_store(&self) -> &Arc<crate::store::OndStore> {
         &self.ond_store
     }
 
     pub fn open_playlist(&self, source: Option<Src>, id: String) {
+        if let Some(account) = crate::source::identity::account(&id)
+            && (self.account_tag.is_some_and(|a| a != account) || source.as_ref().is_some_and(|s| s.account() != account))
+        {
+            return self.send(Msg::Error(Failure::Local("This source is no longer available".into())));
+        }
+        let id = crate::source::identity::bare(&id).to_owned();
         let this = self.scoped();
         let Some(source) = source else {
             // Offline: the copy saved when it last loaded, if there is one.
@@ -1303,6 +1420,10 @@ impl Bridge {
         self.rt.spawn(async move {
             match source.playlist(&id).await {
                 Ok((tracks, meta)) => {
+                    let rows = tracks.clone();
+                    if let Err(e) = this.db(move |l| l.store_tracks(rows)).await {
+                        return this.send(Msg::Error(Failure::Local(e).context("Couldn't save the playlist")));
+                    }
                     this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
                     this.send(LibraryMsg::PlaylistTracks { id: id.clone(), tracks: tracks.clone(), fresh: true });
                     this.keep(saved_playlist_name(&id), tracks).await;
@@ -1371,6 +1492,9 @@ impl Bridge {
     }
 
     fn read_ond_playlists(&self, account: accounts::AccountId) -> Result<Vec<Playlist>, Failure> {
+        if self.account_tag.is_some() {
+            return Ok(Vec::new());
+        }
         let lists = self.ond_store.playlists().map_err(|e| Failure::Local(e.to_string()))?;
         let mut all_ids = Vec::new();
         for pl in &lists {
@@ -1400,7 +1524,14 @@ impl Bridge {
                         }
                     }
                 }
-                Playlist { id: pl.id, name: pl.name, song_count: count, duration, cover_art, owner: None }
+                Playlist {
+                    id: if self.account_tag.is_some() { format!("ond:{}", pl.id) } else { pl.id },
+                    name: pl.name,
+                    song_count: count,
+                    duration,
+                    cover_art,
+                    owner: None,
+                }
             })
             .collect())
     }
@@ -1418,6 +1549,12 @@ impl Bridge {
     /// plain `getLyrics` by artist and title. Failures read as "no lyrics":
     /// they're a nicety, never worth an error banner.
     pub fn fetch_lyrics(&self, source: Option<Src>, track_id: String, artist: Option<String>, title: String) {
+        if let Some(account) = crate::source::identity::account(&track_id)
+            && (self.account_tag.is_some_and(|a| a != account) || source.as_ref().is_some_and(|s| s.account() != account))
+        {
+            return self.send(Msg::Error(Failure::Local("This source is no longer available".into())));
+        }
+        let track_id = crate::source::identity::bare(&track_id).to_owned();
         let Some(source) = source else { return };
         let this = self.scoped();
         self.rt.spawn(async move {
@@ -1429,6 +1566,12 @@ impl Bridge {
     /// The playing song's play count and when it was last played, for the
     /// Info tab. Quietly nothing on failure.
     pub fn fetch_song_stats(&self, source: Option<Src>, track_id: String) {
+        if let Some(account) = crate::source::identity::account(&track_id)
+            && (self.account_tag.is_some_and(|a| a != account) || source.as_ref().is_some_and(|s| s.account() != account))
+        {
+            return self.send(Msg::Error(Failure::Local("This source is no longer available".into())));
+        }
+        let track_id = crate::source::identity::bare(&track_id).to_owned();
         let Some(source) = source else { return };
         let this = self.scoped();
         self.rt.spawn(async move {
@@ -1445,6 +1588,12 @@ impl Bridge {
 
     /// Loves or unloves; `seq` comes back in the reply so a stale one is recognised.
     pub fn set_starred(&self, source: Option<Src>, kind: StarKind, id: String, name: Option<String>, on: bool, seq: u64) {
+        if let Some(account) = crate::source::identity::account(&id)
+            && (self.account_tag.is_some_and(|a| a != account) || source.as_ref().is_some_and(|s| s.account() != account))
+        {
+            return self.send(Msg::Error(Failure::Local("This source is no longer available".into())));
+        }
+        let id = crate::source::identity::bare(&id).to_owned();
         let this = self.scoped();
         self.after_previous(format!("star:{kind:?}:{id}"), async move {
             let error = match &source {
@@ -1465,6 +1614,12 @@ impl Bridge {
     }
 
     pub fn set_rating(&self, source: Option<Src>, id: String, rating: u8, previous: u8, seq: u64) {
+        if let Some(account) = crate::source::identity::account(&id)
+            && (self.account_tag.is_some_and(|a| a != account) || source.as_ref().is_some_and(|s| s.account() != account))
+        {
+            return self.send(Msg::Error(Failure::Local("This source is no longer available".into())));
+        }
+        let id = crate::source::identity::bare(&id).to_owned();
         let this = self.scoped();
         self.after_previous(format!("rating:{id}"), async move {
             let error = match &source {
@@ -1484,20 +1639,51 @@ impl Bridge {
         });
     }
 
+    /// Reads the server's complete playlist before offering an Ond copy.
+    /// No edit is sent to the server, even when the new songs are foreign.
+    pub fn prepare_mixed_playlist(&self, source: Src, id: String, added: Vec<Track>) {
+        let this = self.scoped();
+        self.rt.spawn(async move {
+            let raw = crate::source::identity::bare(&id).to_owned();
+            let name = match source.playlists().await {
+                Ok(ps) => ps.into_iter().find(|p| p.id == raw).map(|p| p.name).unwrap_or_else(|| "Playlist".into()),
+                Err(e) => return this.send(Msg::Error(e.context("Couldn't copy the playlist"))),
+            };
+            match source.playlist(&raw).await {
+                Ok((existing, _)) => {
+                    let rows = existing.clone();
+                    if let Err(e) = this.db(move |l| l.store_tracks(rows)).await {
+                        return this.send(Msg::Error(Failure::Local(e).context("Couldn't copy the playlist")));
+                    }
+                    this.send(Msg::MixedPlaylistReady { id: raw, name, existing, added });
+                }
+                Err(e) => this.send(Msg::Error(e.context("Couldn't copy the playlist"))),
+            }
+        });
+    }
+
     /// Makes a playlist of `song_ids`; the app opens it when it's there.
     pub fn create_playlist(&self, source: Option<Src>, name: String, song_ids: Vec<String>) {
         let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
+        if source.capabilities().playlists && song_ids.iter().any(|id| crate::source::identity::account(id).is_some_and(|a| a != source.account())) {
+            return self.send(Msg::Error(Failure::Local("Songs from another source need an Ond playlist".into())));
+        }
+        let song_ids: Vec<_> =
+            if source.capabilities().playlists { song_ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect() } else { song_ids };
         let this = self.scoped();
         if !source.capabilities().playlists {
             self.rt.spawn_blocking(move || {
-                let entries: Vec<accounts::ItemKey> = song_ids.iter().map(|id| accounts::ItemKey::new(source.account(), id)).collect();
+                let entries: Vec<accounts::ItemKey> = song_ids.iter().map(|id| crate::source::identity::key(source.account(), id)).collect();
                 match this.ond_store.create_playlist(&name, &entries) {
                     Ok(created) => {
                         match this.read_ond_playlists(source.account()) {
                             Ok(p) => this.send(LibraryMsg::Playlists(p)),
                             Err(e) => this.send(Msg::Error(e.context("Couldn't load playlists"))),
                         }
-                        this.send(Msg::PlaylistCreated { id: created.id, name: created.name });
+                        this.send(Msg::PlaylistCreated {
+                            id: if this.account_tag.is_some() { format!("ond:{}", created.id) } else { created.id },
+                            name: created.name,
+                        });
                     }
                     Err(e) => this.send(Msg::Error(Failure::Local(e.to_string()).context("Couldn't create the playlist"))),
                 }
@@ -1519,6 +1705,21 @@ impl Bridge {
     /// also undoes the app's optimistic copy if the edit failed).
     pub fn edit_playlist(&self, source: Option<Src>, id: String, edit: PlaylistEdit) {
         let Some(source) = source else { return self.send(Msg::Error(Failure::Local(NOT_CONNECTED.into()))) };
+        let id = crate::source::identity::bare(&id).to_owned();
+        let edit = match edit {
+            PlaylistEdit::Add(ids) | PlaylistEdit::Replace(ids)
+                if source.capabilities().playlists && ids.iter().any(|id| crate::source::identity::account(id).is_some_and(|a| a != source.account())) =>
+            {
+                return self.send(Msg::Error(Failure::Local("Songs from another source need an Ond playlist".into())));
+            }
+            PlaylistEdit::Add(ids) if source.capabilities().playlists => {
+                PlaylistEdit::Add(ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect())
+            }
+            PlaylistEdit::Replace(ids) if source.capabilities().playlists => {
+                PlaylistEdit::Replace(ids.iter().map(|id| crate::source::identity::bare(id).to_owned()).collect())
+            }
+            edit => edit,
+        };
         let this = self.scoped();
         if !source.capabilities().playlists {
             self.rt.spawn_blocking(move || {
@@ -1526,12 +1727,12 @@ impl Bridge {
                 let res = match &edit {
                     PlaylistEdit::Rename(name) => this.ond_store.rename_playlist(&id, name).map(|_| ()),
                     PlaylistEdit::Add(ids) => {
-                        let entries: Vec<_> = ids.iter().map(|tid| accounts::ItemKey::new(account, tid)).collect();
+                        let entries: Vec<_> = ids.iter().map(|tid| crate::source::identity::key(account, tid)).collect();
                         this.ond_store.add_to_playlist(&id, &entries).map(|_| ())
                     }
                     PlaylistEdit::Remove(indices) => this.ond_store.remove_from_playlist(&id, indices).map(|_| ()),
                     PlaylistEdit::Replace(ids) => {
-                        let entries: Vec<_> = ids.iter().map(|tid| accounts::ItemKey::new(account, tid)).collect();
+                        let entries: Vec<_> = ids.iter().map(|tid| crate::source::identity::key(account, tid)).collect();
                         this.ond_store.replace_playlist_entries(&id, entries).map(|_| ())
                     }
                     PlaylistEdit::Delete => this.ond_store.delete_playlist(&id).map(|_| ()),
@@ -1560,6 +1761,7 @@ impl Bridge {
             }
             this.refresh_playlists(&source).await;
             if !matches!(edit, PlaylistEdit::Delete) {
+                let id = this.account_tag.map_or_else(|| id.clone(), |a| accounts::ItemKey::new(a, &id).to_string());
                 this.open_playlist(Some(source), id);
             }
         });
@@ -1634,6 +1836,39 @@ impl Bridge {
                 this.send(LibraryMsg::Credited { name, album_ids });
             }
         });
+    }
+
+    /// Resolves one qualified album for a cross-source queue request. Its
+    /// source session protects both the mirror write and the eventual batch.
+    pub async fn resolve_album(&self, source: Option<Src>, id: String) -> Vec<Track> {
+        let this = self.scoped();
+        let raw = crate::source::identity::bare(&id).to_owned();
+        let stored_id = raw.clone();
+        let (mut tracks, count) =
+            this.db(move |l| Ok((l.album_tracks(&stored_id)?, l.album(&stored_id)?.map_or(0, |a| a.song_count)))).await.unwrap_or_default();
+        if (tracks.is_empty() || tracks.len() < count as usize)
+            && let Some(source) = source
+        {
+            match source.album(&raw).await {
+                Ok((album, meta)) if this.current() => {
+                    tracks = album.tracks.clone();
+                    if this.db(move |l| l.upsert_album_tracks(album)).await.is_ok() {
+                        this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
+                    }
+                }
+                Err(e) => this.send(Msg::Error(e.context("Couldn't load the album"))),
+                _ => {}
+            }
+        }
+        if !this.current() {
+            return Vec::new();
+        }
+        if let Some(account) = this.account_tag {
+            for t in &mut tracks {
+                crate::source::identity::track(account, t);
+            }
+        }
+        tracks
     }
 
     /// Gathers the tracks of `album_ids` in order: stored ones straight from the

@@ -90,8 +90,8 @@ fn shoot_scenes(themes: &[(egui::Theme, &'static str)], managed: Option<&str>, s
                         }
                         app.art.pin_disk_size(48_300_000);
                         let synced = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2024, 1, 1, 9, 41, 0).unwrap();
-                        if app.sync.last != Some(synced) {
-                            app.sync.last = Some(synced);
+                        if app.session.sync.last != Some(synced) {
+                            app.session.sync.last = Some(synced);
                         }
                         if app.signing_in() {
                             app.login_ui(ui);

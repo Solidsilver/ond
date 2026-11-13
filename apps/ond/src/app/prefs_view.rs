@@ -14,8 +14,9 @@ use crate::window::WindowMode;
 /// after the frame, so the copy holds for the whole frame. Code that applies
 /// actions reads them as they are now, with [`OndApp::prefs_now`], since an
 /// action just applied may have changed them.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrefsView {
+    pub scope: accounts::Scope,
     /// Full, Player or Mini.
     pub mode: WindowMode,
     /// The Player's lyrics drawer is open.
@@ -74,6 +75,7 @@ impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
         let (server_managed, username_managed) = (prefs.managed("server") || prefs.managed("sources"), prefs.managed("username") || prefs.managed("sources"));
         prefs.get(|s| Self {
+            scope: s.scope.clone(),
             mode: s.window.mode,
             lyrics_open: s.window.lyrics_open,
             system_title_bar: s.window.system_title_bar,
@@ -106,6 +108,7 @@ impl PrefsView {
 
 /// A change to an appearance or behaviour preference.
 pub enum PrefsAction {
+    Scope(super::all_sources::ScopeAction),
     Theme(ThemePref),
     /// The interface's size, in percent.
     Zoom(u16),
@@ -144,6 +147,7 @@ impl OndApp {
         use super::{AnalysisAction, OfflineAction, WindowAction};
         let path = match action {
             Action::Prefs(p) => match p {
+                PrefsAction::Scope(_) => return false,
                 PrefsAction::Theme(_) => "theme",
                 PrefsAction::Zoom(_) => "zoom",
                 PrefsAction::Accent(_) => "accent",
@@ -171,6 +175,13 @@ impl OndApp {
             Action::Offline(OfflineAction::WorkOffline(_)) => "work_offline",
             Action::Offline(OfflineAction::Unplayable(_)) => "offline_unplayable",
             Action::Update(super::UpdateAction::Check(_)) => "updates",
+            Action::Sources(
+                super::SourceAction::AskRemove(_)
+                | super::SourceAction::Remove(_)
+                | super::SourceAction::RemoveFolder(..)
+                | super::SourceAction::Choose(super::FolderTarget::Source(_))
+                | super::SourceAction::AddFolders,
+            ) => "sources",
             _ => return false,
         };
         self.prefs.managed(path)
@@ -178,6 +189,7 @@ impl OndApp {
 
     pub(super) fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
+            PrefsAction::Scope(a) => self.apply_scope(a),
             PrefsAction::Theme(pref) => {
                 crate::theme::set_pref(&self.ctx, pref);
                 self.prefs.edit(|s| s.theme = pref);
@@ -218,11 +230,21 @@ impl OndApp {
                 if let Some(s) = self.session.settings.as_mut() {
                     edit(s);
                 }
+                for state in self.session.accounts.values_mut() {
+                    if let Some(s) = state.settings.as_mut() {
+                        edit(s);
+                    }
+                }
             }
             PrefsAction::SourceColor(id, color) => {
                 self.prefs.edit(|s| s.set_source_color(id, color));
                 if let Some(s) = self.session.settings.as_mut() {
                     s.set_source_color(id, color);
+                }
+                for state in self.session.accounts.values_mut() {
+                    if let Some(s) = state.settings.as_mut() {
+                        s.set_source_color(id, color);
+                    }
                 }
             }
             PrefsAction::Experimental(x) => self.prefs.edit(|s| s.experimental = x),

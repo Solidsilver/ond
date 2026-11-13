@@ -115,9 +115,9 @@ impl ViewCtx<'_> {
             // On the circle's edge, low on the left, where the album tiles have theirs.
             let at = photo.center() + vec2(-1.0, 1.0) * (tile / 2.0 * std::f32::consts::FRAC_1_SQRT_2);
             let shuffle = Rect::from_center_size(at, vec2(32.0, 32.0));
-            let id = ui.scope_id().with(("artist-shuffle", &a.name));
+            let id = ui.scope_id().with(("artist-shuffle", a.id.as_ref().unwrap_or(&a.name)));
             if crate::widgets::tile_button(ui, t, shuffle, id, resp.hovered(), Icon::Shuffle, "Shuffle artist") {
-                self.actions.push(Action::Artist(a.name.clone(), QueueAction::Shuffle));
+                self.actions.push(Action::Artist(a.name.clone(), a.id.clone(), QueueAction::Shuffle));
                 return;
             }
         }
@@ -125,7 +125,7 @@ impl ViewCtx<'_> {
         if resp.clicked() {
             self.open_artist(a);
         }
-        resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, None, None, self.actions));
+        resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone(), a.id.clone()), true, None, None, self.actions));
     }
 
     /// The table: name (with the photo), genre, albums and years.
@@ -177,7 +177,7 @@ impl ViewCtx<'_> {
         if row.resp.clicked() {
             self.open_artist(a);
         }
-        row.resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, None, None, self.actions));
+        row.resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone(), a.id.clone()), true, None, None, self.actions));
     }
 
     /// Goes to the artist's page. One known only by name (no artists from

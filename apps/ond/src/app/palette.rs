@@ -91,7 +91,7 @@ impl ViewCtx<'_> {
                     // A whole artist is a lot to download by accident; do it per album.
                     Verb::Download => return,
                 };
-                self.actions.push(Action::Artist(name, action));
+                self.actions.push(Action::Artist(name, known, action));
             }
             Hit::Album(i) => {
                 let id = index.albums[i].id.clone();

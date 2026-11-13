@@ -166,9 +166,9 @@ impl ViewCtx<'_> {
         }
 
         // Background work.
-        if let Some(p) = self.sync.progress {
+        if let Some(p) = self.session.sync.progress {
             out.push(Segment { text: format!("sync {}/{}", p.done, p.total), detail: p.label(), tone: Tone::Normal });
-        } else if self.sync.albums {
+        } else if self.session.sync.albums {
             out.push(Segment { text: "sync albums…".into(), detail: "Fetching the album list".into(), tone: Tone::Normal });
         }
         let a = self.analysis.runner.progress();

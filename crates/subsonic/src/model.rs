@@ -235,6 +235,7 @@ pub struct PlaylistWithSongs {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Artist {
+    pub music_brainz_id: Option<String>,
     pub id: String,
     pub name: String,
     #[serde(default, deserialize_with = "lenient::int_or_zero")]

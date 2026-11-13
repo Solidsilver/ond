@@ -231,6 +231,7 @@ fn every_view_draws() {
         Route::Favorites,
         Route::Favorites,
         Route::Offline,
+        Route::Playlists,
         Route::Songs,
     ];
     let mut tabs = [favorites_page::FavTab::Songs, favorites_page::FavTab::Albums, favorites_page::FavTab::Artists].into_iter();
@@ -393,16 +394,16 @@ fn a_failed_album_sync_stops_saying_syncing() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     app.session.online = true;
-    app.sync.albums = true;
+    app.session.sync.albums = true;
     app.handle(LibraryMsg::AlbumSyncDone(Err(Failure::Network("sync: timed out".into()))));
-    assert!(!app.sync.albums && !app.sync.tracks);
+    assert!(!app.session.sync.albums && !app.session.sync.tracks);
     assert!(app.ui.toasts.texts().contains(&"sync: timed out"));
     // While an album sync runs, Sync now doesn't start a second one.
-    app.sync.albums = true;
+    app.session.sync.albums = true;
     app.session.source = Some(crate::source::subsonic::test_source());
-    app.sync.label = "syncing… 500".into();
+    app.session.sync.label = "syncing… 500".into();
     app.apply(Action::SyncNow);
-    assert_eq!(app.sync.label, "syncing… 500", "a second album sync started");
+    assert_eq!(app.session.sync.label, "syncing… 500", "a second album sync started");
 }
 
 #[test]
@@ -950,7 +951,7 @@ fn playing_an_album_stored_only_in_part_waits_for_the_server() {
     let mut app = app(&ctx, dir.path());
     let all: Vec<Track> = (1..=20).map(|n| track(&format!("p-{n}"), "al-3", n)).collect();
     // A sync cut short stored 5 of its 20 songs.
-    app.data.tracks.set_album("al-3", all[..5].to_vec());
+    Arc::make_mut(&mut app.data.tracks).set_album("al-3", all[..5].to_vec());
     app.player.queue = crate::queue::Queue::default();
     // Queued (offline nothing here is downloaded, so it's all skipped into history).
     let queued = |app: &OndApp| app.player.queue.history.len() + app.player.queue.pass_len();
@@ -973,7 +974,7 @@ fn playing_an_album_stored_only_in_part_waits_for_the_server() {
 
     // The server can't be reached: play what's stored rather than nothing.
     app.player.queue = crate::queue::Queue::default();
-    app.data.tracks.set_album("al-3", all[..5].to_vec());
+    Arc::make_mut(&mut app.data.tracks).set_album("al-3", all[..5].to_vec());
     app.apply(Action::Album("al-3".into(), QueueAction::Play { start: 0 }));
     app.handle(LibraryMsg::LoadFailed { key: ListKey::Album("al-3".into()), error: Some(Failure::Network("timed out".into())) });
     assert_eq!(queued(&app), 5);
@@ -1045,30 +1046,32 @@ fn cancelling_a_sign_in_drops_what_the_connect_answers_later() {
     let mut app = app(&ctx, dir.path());
     let source = || crate::source::subsonic::test_source();
     app.login = Some(session::LoginForm { server: "http://127.0.0.1:9".into(), username: "u".into(), password: "p".into(), ..Default::default() });
-    let before = app.bridge.session();
     app.apply(Action::SignIn);
     assert!(app.login.as_ref().is_some_and(|f| f.busy));
-
+    let account = app.multi.signing_in.expect("connecting account");
+    let before = app.multi.bridges[&account].session();
     app.apply(Action::CancelSignIn);
     let form = app.login.as_ref().expect("still on the login screen");
     assert!(!form.busy && form.error.is_none());
     assert_eq!(form.password, "p", "kept, to try again as typed");
-    assert_ne!(app.bridge.session(), before, "the connect's session is over");
-
-    // The server answers at last, either way: stale, ignored.
-    app.handle(Msg::ConnectFailed { session: before, error: "The server didn't answer".into() });
-    app.handle(Msg::Connected {
-        stores: None,
+    assert_ne!(app.multi.bridges[&account].session(), before, "the connect's session is over");
+    app.handle(Msg::Source { account, session: before, message: Box::new(Msg::ConnectFailed { session: before, error: "The server didn't answer".into() }) });
+    app.handle(Msg::Source {
+        account,
         session: before,
-        source: source(),
-        settings: Box::default(),
-        server: "test".into(),
-        new_account: false,
-        password_saved: true,
+        message: Box::new(Msg::Connected {
+            stores: None,
+            session: before,
+            source: source(),
+            settings: Box::default(),
+            server: "test".into(),
+            new_account: false,
+            password_saved: true,
+        }),
     });
     let form = app.login.as_ref().expect("still on the login screen");
     assert!(!form.busy && form.error.is_none());
-    assert!(!app.session.online && app.session.source.is_none());
+    assert!(!app.session.get(account).unwrap().online && app.session.get(account).unwrap().source.is_none());
 }
 
 #[test]
@@ -1567,13 +1570,13 @@ fn missing_folder_sets_source_state_without_dropping_existing_albums() {
     assert!(before > 0);
     let missing = dir.path().join("unplugged-drive");
 
-    app.sync.albums = true;
-    app.sync.tracks = true;
-    app.sync.progress = Some(crate::sync::Progress { done: 0, total: 1, unit: crate::sync::Unit::Tracks });
+    app.session.sync.albums = true;
+    app.session.sync.tracks = true;
+    app.session.sync.progress = Some(crate::sync::Progress { done: 0, total: 1, unit: crate::sync::Unit::Tracks });
     app.handle(Msg::Library(LibraryMsg::FolderMissing(vec![missing.clone()])));
 
     assert_eq!(app.session.folder_missing, vec![missing]);
-    assert!(!app.sync.albums && !app.sync.tracks && app.sync.progress.is_none());
+    assert!(!app.session.sync.albums && !app.session.sync.tracks && app.session.sync.progress.is_none());
     assert!(app.ui.toasts.texts().is_empty());
     assert_eq!(app.data.albums.len(), before);
     assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
@@ -1590,7 +1593,7 @@ fn a_scan_storage_failure_still_shows_its_error() {
     let mut app = app(&ctx, dir.path());
     app.handle(LibraryMsg::AlbumSyncDone(Err(crate::failure::Failure::Local("Couldn't save scanned library: disk is full".into()))));
     assert!(app.ui.toasts.texts().contains(&"Couldn't save scanned library: disk is full"));
-    assert!(!app.sync.albums && !app.sync.tracks);
+    assert!(!app.session.sync.albums && !app.session.sync.tracks);
 }
 
 /// A folder of three tagged FLACs of one album, under `dir/music`.
@@ -1753,7 +1756,7 @@ fn a_rescan_finds_a_song_added_to_the_folder() {
     until(&mut app, |a| a.data.tracks.all.len() == 3);
     add_song(&music.join("Bill Evans Trio").join("Portrait in Jazz"), 4);
     app.apply(Action::SyncNow);
-    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.session.sync.tracks);
     assert!(app.data.tracks.all.iter().any(|t| t.title == "Song 4"));
 }
 
@@ -1768,9 +1771,9 @@ fn a_watched_folder_adds_and_removes_a_copied_song_without_rescan() {
     let album = music.join("Bill Evans Trio").join("Portrait in Jazz");
     let copied = album.join("copied.flac");
     std::fs::copy(album.join("01 Song 1.flac"), &copied).unwrap();
-    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.session.sync.tracks);
     std::fs::remove_file(copied).unwrap();
-    until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.sync.tracks);
+    until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.session.sync.tracks);
     assert!(app.ui.toasts.texts().is_empty());
 }
 
@@ -1785,13 +1788,13 @@ fn a_missing_folder_keeps_its_albums_fails_plainly_and_clears_once_back() {
 
     let away = dir.path().join("unplugged");
     std::fs::rename(&music, &away).unwrap();
-    until(&mut app, |a| !a.session.folder_missing.is_empty() && !a.sync.albums && !a.sync.tracks);
+    until(&mut app, |a| !a.session.folder_missing.is_empty() && !a.session.sync.albums && !a.session.sync.tracks);
     assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
     assert_eq!(app.data.albums.len(), 1, "the albums stay");
     assert_eq!(app.data.tracks.all.len(), 3);
     assert!(app.ui.toasts.texts().is_empty(), "missing folders are shown as source state");
     app.apply(Action::SyncNow);
-    until(&mut app, |a| !a.sync.albums && !a.sync.tracks);
+    until(&mut app, |a| !a.session.sync.albums && !a.session.sync.tracks);
     assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
     assert!(app.ui.toasts.texts().is_empty(), "a manual rescan must stay quiet too");
 
@@ -1800,7 +1803,7 @@ fn a_missing_folder_keeps_its_albums_fails_plainly_and_clears_once_back() {
     until(&mut app, |a| a.ui.toasts.texts().iter().any(|t| t.contains("isn't there")));
 
     std::fs::rename(&away, &music).unwrap();
-    until(&mut app, |a| a.session.folder_missing.is_empty() && !a.sync.tracks && !a.sync.albums);
+    until(&mut app, |a| a.session.folder_missing.is_empty() && !a.session.sync.tracks && !a.session.sync.albums);
     assert_eq!(app.server_state().source_state(), accounts::SourceState::Online);
 }
 
@@ -1867,10 +1870,10 @@ fn a_folder_sources_folders_change_and_it_rescans() {
     let extra = dir.path().join("more");
     app.pick_folder = Arc::new(move |_, _, done| done(Some(extra.clone())));
     app.apply(Action::Sources(SourceAction::Choose(FolderTarget::Source(id))));
-    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.session.sync.tracks);
     assert_eq!(app.prefs.snapshot().source(id).unwrap().folders.len(), 2);
     app.apply(Action::Sources(SourceAction::RemoveFolder(id, 1)));
-    until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.sync.tracks);
+    until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.session.sync.tracks);
     // The last folder stays: a source with none would scan to nothing.
     app.apply(Action::Sources(SourceAction::RemoveFolder(id, 0)));
     assert_eq!(app.prefs.snapshot().source(id).unwrap().folder_paths(), [music]);
@@ -1922,11 +1925,11 @@ fn removing_an_earlier_folder_keeps_later_folders_track_ids() {
     let extra = second.clone();
     app.pick_folder = Arc::new(move |_, _, done| done(Some(extra.clone())));
     app.apply(Action::Sources(SourceAction::Choose(FolderTarget::Source(id))));
-    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.session.sync.tracks);
 
     let second_track_id_before = app.data.tracks.all.iter().find(|t| t.title == "Song 9").unwrap().id.clone();
     app.apply(Action::Sources(SourceAction::RemoveFolder(id, 0)));
-    until(&mut app, |a| a.data.tracks.all.len() == 1 && !a.sync.tracks);
+    until(&mut app, |a| a.data.tracks.all.len() == 1 && !a.session.sync.tracks);
     assert_eq!(app.data.tracks.all[0].id, second_track_id_before);
 }
 
@@ -1950,7 +1953,7 @@ fn loving_and_rating_a_local_track_persists_across_restarts() {
         app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Song, id: loved_id.clone(), track: Some(Box::new(track)), name: None });
         app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Album, id: album_id.clone(), track: None, name: None });
         app.apply(Action::Rate(loved_id.clone(), 4));
-        let key = accounts::ItemKey::new(account, &loved_id);
+        let key = crate::source::identity::key(account, &loved_id);
         let store = app.bridge.ond_store().clone();
         testkit::wait_until("ond.redb persists love and rating", || {
             store.is_starred(crate::favorites::StarKind::Song, &key).unwrap_or(false) && store.rating(&key).unwrap_or(0) == 4
@@ -1999,7 +2002,9 @@ fn an_ond_playlist_of_local_tracks_survives_a_rescan_that_moves_a_file_and_expor
 
     app.apply(Action::SyncNow);
     until(&mut app, |a| {
-        !a.sync.tracks && a.data.tracks.all.len() == 3 && a.data.playlist_tracks.get(&playlist_id).is_some_and(|ts| ts.len() == 2 && ts[0].id != first.id)
+        !a.session.sync.tracks
+            && a.data.tracks.all.len() == 3
+            && a.data.playlist_tracks.get(&playlist_id).is_some_and(|ts| ts.len() == 2 && ts[0].id != first.id)
     });
     let new_first_id = app.data.playlist_tracks[&playlist_id][0].id.clone();
     assert_eq!(app.data.playlist_tracks[&playlist_id][0].title, "Song 1");
@@ -2040,6 +2045,6 @@ fn removing_a_local_source_cleans_up_its_stars_ratings_and_playlist_entries() {
     let starred = app.bridge.ond_store().starred(account).unwrap();
     assert!(starred.songs.is_empty() && starred.albums.is_empty() && starred.artists.is_empty());
     assert!(app.bridge.ond_store().ratings(account).unwrap().is_empty());
-    let playlist = app.bridge.ond_store().playlist(&playlist_id).unwrap().unwrap();
+    let playlist = app.bridge.ond_store().playlist(playlist_id.trim_start_matches("ond:")).unwrap().unwrap();
     assert!(playlist.entries.is_empty());
 }

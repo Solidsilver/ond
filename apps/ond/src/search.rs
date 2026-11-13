@@ -163,7 +163,7 @@ impl SearchIndex {
             artists
                 .iter()
                 .map(|a| ArtistEntry {
-                    id: Some(a.id.clone()),
+                    id: (!a.id.is_empty()).then(|| a.id.clone()),
                     name: a.name.clone(),
                     sort: a.sort.clone().unwrap_or_else(|| a.name.clone()),
                     albums: a.album_count as usize,

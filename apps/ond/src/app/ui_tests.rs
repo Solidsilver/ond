@@ -825,6 +825,7 @@ fn every_view_names_its_controls() {
         Route::Albums,
         Route::Artists,
         Route::Songs,
+        Route::Playlists,
         Route::Favorites,
         Route::Offline,
         Route::Album(album_id(0)),

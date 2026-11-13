@@ -165,6 +165,8 @@ impl<'de> Deserialize<'de> for FolderEntry {
 /// One configured music source in `settings.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceEntry {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_out: bool,
     #[serde(default = "accounts::AccountId::new")]
     pub id: accounts::AccountId,
     #[serde(default)]
@@ -185,6 +187,7 @@ impl SourceEntry {
     pub fn subsonic(id: accounts::AccountId, server: impl Into<String>, username: impl Into<String>) -> Self {
         Self {
             id,
+            signed_out: false,
             kind: SourceKind::Subsonic,
             name: None,
             color: accounts::SourceColor::default(),
@@ -195,7 +198,7 @@ impl SourceEntry {
     }
 
     pub fn local(id: accounts::AccountId, name: Option<String>, color: accounts::SourceColor, folders: Vec<FolderEntry>) -> Self {
-        Self { id, kind: SourceKind::Local, name, color, server: String::new(), username: String::new(), folders }
+        Self { id, signed_out: false, kind: SourceKind::Local, name, color, server: String::new(), username: String::new(), folders }
     }
 
     /// Configured folder paths without keys, for display and forms.
@@ -599,6 +602,11 @@ impl Paths {
 impl Settings {
     /// Carries settings from older builds over to where they live now.
     pub fn migrate(&mut self) {
+        if self.signed_out
+            && let Some(entry) = self.primary_mut()
+        {
+            entry.signed_out = true;
+        }
         // "Colors from the album art" grew out of Experimental into a setting.
         if std::mem::take(&mut self.experimental.art_colors) {
             self.adapt_colors = true;
@@ -702,9 +710,9 @@ impl Settings {
         id
     }
 
-    /// Makes `id` the source Ond plays from: Ond holds one source live at a
-    /// time, the first in the list, and the others stay configured (their
-    /// libraries kept on disk) until it holds several at once.
+    /// Puts `id` first in a request's settings snapshot, so the existing
+    /// credential and storage helpers address it. Browsing uses `scope`;
+    /// changing this order does not stop any other configured source.
     pub fn make_primary(&mut self, id: accounts::AccountId) {
         if let Some(at) = self.sources.iter().position(|s| s.id == id) {
             let entry = self.sources.remove(at);
@@ -725,23 +733,24 @@ impl Settings {
         Some(self.sources.remove(at))
     }
 
-    /// Sets or updates a Subsonic account entry in [`Self::sources`], which
-    /// becomes the source Ond plays from.
+    /// Sets or updates a Subsonic account in this sign-in request, keeping
+    /// every other configured source. The requested account goes first.
     ///
     /// The same server and user keep their mirror and downloads, including
     /// after signing out. Compare addresses as the existing mirror does.
     pub fn sign_in(&self, server: &str, username: &str) -> Self {
         let mut next = self.clone();
-        let existing = next.subsonic().filter(|s| s.matches_subsonic(server, username)).cloned();
+        let existing = next.sources.iter().find(|s| s.matches_subsonic(server, username)).cloned();
         let entry = match existing {
             Some(mut s) => {
                 s.server = server.to_owned();
                 s.username = username.to_owned();
+                s.signed_out = false;
                 s
             }
             None => SourceEntry::subsonic(accounts::AccountId::new(), server, username),
         };
-        next.sources.retain(|s| s.kind != SourceKind::Subsonic);
+        next.sources.retain(|s| s.id != entry.id);
         next.sources.insert(0, entry);
         next.signed_out = false;
         next
@@ -763,7 +772,7 @@ impl Settings {
 
     /// Blocking: may show a Keychain prompt. Call off the UI thread.
     pub fn load_password(&self) -> Option<String> {
-        self.subsonic()?.load_password()
+        self.primary().filter(|s| s.kind == SourceKind::Subsonic)?.load_password()
     }
 
     /// Blocking: may show a Keychain prompt. Call off the UI thread.

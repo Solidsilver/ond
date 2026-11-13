@@ -286,7 +286,21 @@ impl Queue {
     }
 
     fn items(&mut self, account: AccountId, tracks: Vec<Track>, source: &Source) -> Vec<Item> {
-        tracks.into_iter().map(|t| self.item(TrackKey::new(account, t.id.clone()), t, source.clone())).collect()
+        tracks.into_iter().map(|t| self.item(crate::source::identity::key(account, &t.id), t, source.clone())).collect()
+    }
+
+    /// Removes an account everywhere, including repeat history. Offline
+    /// sources do not call this: their queue entries remain in place.
+    pub fn remove_account(&mut self, account: AccountId) -> bool {
+        let before = self.history[..self.cycle_start.min(self.history.len())].iter().filter(|i| i.key.account == account).count();
+        self.history.retain(|i| i.key.account != account);
+        self.cycle_start = self.cycle_start.saturating_sub(before).min(self.history.len());
+        self.upcoming.retain(|i| i.key.account != account);
+        let current = self.current.as_ref().is_some_and(|i| i.key.account == account);
+        if current {
+            self.current = None;
+        }
+        current
     }
 
     fn retire_current(&mut self) {

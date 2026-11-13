@@ -73,6 +73,11 @@ fn jump_id(list: impl Hash + std::fmt::Debug) -> Id {
     Id::unique("alpha-jump").with(list)
 }
 
+/// A detail page left scope: start its fallback section at the top.
+pub fn to_top(ctx: &egui::Context, list: impl Hash + std::fmt::Debug) {
+    ctx.data_mut(|d| d.insert_temp(jump_id(list), 0.0_f32));
+}
+
 /// Where the rail last asked `list` to scroll to: give it to the list's
 /// scroll area (`vertical_scroll_offset`) as it's built.
 pub fn take_jump(ui: &Ui, list: impl Hash + std::fmt::Debug) -> Option<f32> {

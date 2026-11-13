@@ -345,7 +345,7 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
         Some(Settings { sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "", "")], ..Default::default() });
     app.downloads.owner = Some(crate::test_tracks::account());
     app.session.server_label = "demo · navidrome 0.64.2".into();
-    app.sync.label = format!("{} albums", ALBUMS.len());
+    app.session.sync.label = format!("{} albums", ALBUMS.len());
 
     let albums: Vec<Album> = (0..ALBUMS.len()).map(album).collect();
     for i in 0..ALBUMS.len() {
@@ -355,15 +355,15 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     app.data.newest = albums.iter().map(|a| a.id.clone()).collect();
     app.data.set_albums(albums);
     app.rebuild_search();
-    app.data.tracks.set_album(&album_id(0), vanguard());
-    app.data.tracks.set_album(&album_id(1), kind_of_blue());
+    Arc::make_mut(&mut app.data.tracks).set_album(&album_id(0), vanguard());
+    Arc::make_mut(&mut app.data.tracks).set_album(&album_id(1), kind_of_blue());
     for i in [2, 20, 23] {
-        app.data.tracks.set_album(&album_id(i), filler(i, 9));
+        Arc::make_mut(&mut app.data.tracks).set_album(&album_id(i), filler(i, 9));
     }
     // The flat list the Songs view and search read (the per-album map stays as is).
     let mut all: Vec<Track> = app.data.tracks.by_album.values().flat_map(|s| s.iter()).cloned().collect();
     all.sort_by(|a, b| (&a.album_id, a.disc, a.track).cmp(&(&b.album_id, b.disc, b.track)));
-    app.data.tracks.all = Arc::new(all);
+    Arc::make_mut(&mut app.data.tracks).all = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.session.online = true;
     let source = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
@@ -479,9 +479,9 @@ pub(super) fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Rout
     app.login = None;
     app.onboarding = None;
     app.session.online = true;
-    app.sync.albums = false;
-    app.sync.tracks = false;
-    app.sync.progress = None;
+    app.session.sync.albums = false;
+    app.session.sync.tracks = false;
+    app.session.sync.progress = None;
     // Back to 100%, unless managed.json holds it elsewhere.
     app.prefs.edit(|s| s.zoom = shell::zoom::DEFAULT);
     let zoom = app.prefs.get(|s| s.zoom);

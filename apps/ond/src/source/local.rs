@@ -14,7 +14,7 @@ use crate::sync::Fetch;
 use async_trait::async_trait;
 use library::{Album, AlbumTracks, Artist, ArtistLink, Contributor, Library, Track};
 use scan::{ScanIndex, ScanProgress, ScanRoot, ScannedAlbum, ScannedArtist, ScannedTrack, TrackLyrics, TrackMove};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -149,6 +149,15 @@ impl LocalSource {
             return Err(LocalSyncError::FolderMissing(result.missing_roots));
         }
 
+        let mut mbids = BTreeMap::new();
+        for track in &result.tracks {
+            for (artist, mbid) in track.artists.iter().zip(&track.mb_artist_ids).chain(track.album_artists.iter().zip(&track.mb_album_artist_ids)) {
+                if let Some(id) = &artist.id {
+                    mbids.insert(id.clone(), mbid.clone());
+                }
+            }
+        }
+        library.save("artist_mbids_v1", &mbids).map_err(|e| LocalSyncError::Storage(e.to_string()))?;
         let artists: Vec<Artist> = result.artists.into_iter().map(convert_artist).collect();
         let albums: Vec<Album> = result.albums.into_iter().map(convert_album).collect();
         let tracks: Vec<Track> = result.tracks.into_iter().map(convert_track).collect();

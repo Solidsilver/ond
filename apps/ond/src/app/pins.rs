@@ -68,9 +68,9 @@ pub(super) fn playable(
     transcode: Option<&audio::Transcode>,
     track: &Track,
 ) -> bool {
-    session.expected()
-        || session.account().is_some_and(|account| {
-            let key = TrackKey::new(account, track.id.clone());
+    session.for_item(&track.id).expected()
+        || session.for_item(&track.id).account().is_some_and(|account| {
+            let key = crate::source::identity::key(account, &track.id);
             downloads.tracks().is_done(&key) || crate::local::is_cached(cache, transcode, &key, track)
         })
 }
@@ -195,6 +195,40 @@ impl Downloads {
             }
         }
         Ok(downloads)
+    }
+
+    pub(super) fn for_source(&self, settings: &crate::settings::Settings, bridge: &Bridge) -> Self {
+        let mut downloads = Self {
+            store: None,
+            snap: Arc::default(),
+            pending_pins: Vec::new(),
+            base: self.base.clone(),
+            account: settings.account_id(),
+            owner: settings.account(),
+            generation: 0,
+            opening: false,
+            deferred: Vec::new(),
+            moving: None,
+            open: self.open.clone(),
+            album_pins: Default::default(),
+        };
+        downloads.open_in_background(settings.offline_limit_gb.map(|gb| gb * 1_000_000_000), None, bridge);
+        downloads
+    }
+
+    pub(super) fn remove_files(&mut self, bridge: &Bridge) {
+        let store = self.store.take();
+        self.snap = Arc::default();
+        self.pending_pins.clear();
+        self.deferred.clear();
+        self.opening = false;
+        if let Some(store) = store {
+            let path = store.dir().to_path_buf();
+            bridge.offline_job(move |_| {
+                drop(store);
+                let _ = std::fs::remove_dir_all(path);
+            });
+        }
     }
 
     /// The store folder for `account` under `base`. Before any sign-in there is
@@ -389,6 +423,36 @@ impl<'a> OfflineTracks<'a> {
 impl OndApp {
     /// Applies a download action. One that needs the store waits while it opens.
     pub(super) fn apply_offline(&mut self, action: OfflineAction) {
+        if !self.multi.bridges.is_empty() {
+            match &action {
+                OfflineAction::Keep(Keep::Tracks(tracks), on) => {
+                    let mut groups = std::collections::BTreeMap::<AccountId, Vec<Track>>::new();
+                    for track in tracks {
+                        if let Some(key) = self.session.key(&track.id)
+                            && self.session.get(key.account).is_some_and(|s| s.source_caps().downloads)
+                        {
+                            groups.entry(key.account).or_default().push(track.clone());
+                        }
+                    }
+                    for (account, tracks) in groups {
+                        self.with_source(account, |app| app.apply_offline_for_source(OfflineAction::Keep(Keep::Tracks(tracks), *on)));
+                    }
+                    return;
+                }
+                OfflineAction::Keep(Keep::Playlist(id), on) if id.starts_with("ond:") => {
+                    let accounts: Vec<_> = self.session.accounts.iter().filter(|(_, s)| s.source_caps().downloads).map(|(a, _)| *a).collect();
+                    for account in accounts {
+                        self.with_source(account, |app| app.apply_offline_for_source(OfflineAction::Keep(Keep::Playlist(id.clone()), *on)));
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.apply_offline_for_source(action);
+    }
+
+    fn apply_offline_for_source(&mut self, action: OfflineAction) {
         if self.downloads.store.is_none() && action.needs_store() {
             if self.downloads.opening {
                 self.downloads.deferred.push(action);
@@ -473,6 +537,15 @@ impl OndApp {
     /// Takes in the store's changes since the last frame. A download that
     /// finished may let what's next play from disk, or play at all.
     pub(super) fn poll_downloads(&mut self) {
+        let mut changed = false;
+        for downloads in self.multi.downloads.values_mut() {
+            let version = downloads.snap.version;
+            downloads.refresh();
+            changed |= version != downloads.snap.version;
+        }
+        if changed {
+            self.sync_next();
+        }
         if let Some(snap) = self.downloads.store.as_ref().map(|s| s.snapshot())
             && snap.version != self.downloads.snap.version
         {
@@ -502,10 +575,18 @@ impl OndApp {
                 url.download_url(&key.item).expect("a downloadable source supplies track URLs")
             }) as offline::UrlFn
         }));
+        let mut ond = false;
         for p in &self.downloads.snap.pins {
             if let Pin::Playlist(id) = &p.pin {
-                self.bridge.open_playlist(Some(source.clone()), id.clone());
+                if id.starts_with("ond:") {
+                    ond = true;
+                } else {
+                    self.bridge.open_playlist(Some(source.clone()), id.clone());
+                }
             }
+        }
+        if ond {
+            self.refresh_ond_playlists();
         }
     }
 
@@ -528,7 +609,7 @@ impl OndApp {
         let Some(account) = self.session.account().filter(|a| Some(*a) == self.downloads.owner) else { return };
         let snapshot = self.downloads.snap.clone();
         let adapter = OfflineTracks { account: self.downloads.owner, snap: &snapshot, store: Some(&store) };
-        let refs = || tracks.iter().filter_map(|t| adapter.track_ref(&TrackKey::new(account, t.id.clone()), t)).collect::<Vec<_>>();
+        let refs = || tracks.iter().filter_map(|t| adapter.track_ref(&crate::source::identity::key(account, &t.id), t)).collect::<Vec<_>>();
         if let Some(at) = self.downloads.pending_pins.iter().position(|(_, p)| p == &pin) {
             self.downloads.pending_pins.remove(at);
             store.pin(pin, label, refs());
@@ -545,7 +626,9 @@ impl OndApp {
         match pin {
             Pin::Album(id) => self.data.album(id).map(|a| a.name.clone()).unwrap_or_default(),
             Pin::Playlist(id) => self.data.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
-            Pin::Track(id) => TrackKey::parse(id).ok().and_then(|k| self.data.track(&k.item)).map(|t| t.title.clone()).unwrap_or_default(),
+            Pin::Track(id) => {
+                self.data.track(id).or_else(|| TrackKey::parse(id).ok().and_then(|k| self.data.track(&k.item))).map(|t| t.title.clone()).unwrap_or_default()
+            }
             Pin::Book(_) => String::new(),
         }
     }
@@ -555,25 +638,28 @@ impl OndApp {
         let Some(store) = self.downloads.store.clone() else { return };
         let Some(account) = self.session.account().filter(|a| Some(*a) == self.downloads.owner) else { return };
         let adapter = self.downloads.tracks();
-        let track_ref = |t: &Track| adapter.track_ref(&TrackKey::new(account, t.id.clone()), t).expect("the store belongs to this library");
+        let track_ref = |t: &Track| adapter.track_ref(&crate::source::identity::key(account, &t.id), t);
         // An album or playlist is pinned whole, once its track list is known.
         let (key, pin, refs) = match what {
             Keep::Album(id) => {
-                let refs = self.data.tracks.album(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
+                let refs = self.data.tracks.album(&id).map(|t| t.iter().filter_map(track_ref).collect::<Vec<_>>());
                 (ListKey::Album(id.clone()), Pin::Album(id), refs)
             }
             Keep::Playlist(id) => {
-                let refs = self.data.playlist_tracks.get(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
+                let refs = self.data.playlist_tracks.get(&id).map(|t| t.iter().filter_map(track_ref).collect::<Vec<_>>());
                 (ListKey::Playlist(id.clone()), Pin::Playlist(id), refs)
             }
             // One pin per song, saved together: a big selection doesn't stall.
             Keep::Tracks(tracks) => {
                 if on {
                     store.pin_many(
-                        tracks.iter().map(|t| (adapter.pin(&TrackKey::new(account, t.id.clone())).unwrap(), t.title.clone(), vec![track_ref(t)])).collect(),
+                        tracks
+                            .iter()
+                            .filter_map(|t| Some((adapter.pin(&crate::source::identity::key(account, &t.id))?, t.title.clone(), vec![track_ref(t)?])))
+                            .collect(),
                     );
                 } else {
-                    store.unpin_many(&tracks.iter().filter_map(|t| adapter.pin(&TrackKey::new(account, t.id.clone()))).collect::<Vec<_>>());
+                    store.unpin_many(&tracks.iter().filter_map(|t| adapter.pin(&crate::source::identity::key(account, &t.id))).collect::<Vec<_>>());
                 }
                 self.downloads.refresh();
                 return;
@@ -586,6 +672,7 @@ impl OndApp {
                 self.wait_to_pin(key.clone(), pin);
                 match key {
                     ListKey::Album(id) => self.bridge.open_album(self.session.source.clone(), id),
+                    ListKey::Playlist(id) if id.starts_with("ond:") => self.refresh_ond_playlists(),
                     ListKey::Playlist(id) => self.bridge.open_playlist(self.session.source.clone(), id),
                     ListKey::Artist(_) => {}
                 }
