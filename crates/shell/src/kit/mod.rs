@@ -44,7 +44,8 @@
 //!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
 //! - [`sources`]: a source as the app describes it ([`SourceInfo`]), the
 //!   [`source_dot`] in its colour (and [`source_dots`], stacked, for All
-//!   sources; [`source_dot_lead`] in front of a line of text, and
+//!   sources; [`source_dot_lead`] in front of a line of text,
+//!   [`source_dot_after`] and [`text_then_dots`] after one, and
 //!   [`source_label`], a dot and a name as one item), and the sidebar's
 //!   foot, [`source_switcher`]: what's in scope
 //!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its

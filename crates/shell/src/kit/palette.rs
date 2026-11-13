@@ -64,7 +64,7 @@ pub struct PaletteRow {
     pub title: String,
     pub detail: String,
     pub keys: &'static str,
-    /// The dot of the source it comes from, leading the detail, when the
+    /// The dot of the source it comes from, after the detail, when the
     /// app shows more than one source at once.
     pub dot: Option<accounts::SourceColor>,
 }
@@ -237,12 +237,9 @@ fn result_row(ui: &mut egui::Ui, t: &Tokens, width: f32, rows: &mut impl Palette
     let w = inner.right() - x - hint_w - 12.0;
     let g = elide(ui, &title, FontId::proportional(13.0), t.text, w);
     ui.painter().galley(pos2(x, inner.center().y - g.size().y), g, t.text);
-    let g = elide(ui, &detail, FontId::proportional(12.0), t.muted, w - dot.map_or(0.0, |_| super::DOT_LEAD));
-    let detail_x = match dot {
-        Some(color) => super::source_dot_lead(ui, x, inner.center().y + 1.0 + g.size().y / 2.0, color),
-        None => x,
-    };
-    ui.painter().galley(pos2(detail_x, inner.center().y + 1.0), g, t.muted);
+    // The source's dot follows the detail, so both lines start together.
+    let dots: &[accounts::SourceColor] = dot.as_slice();
+    super::text_then_dots(ui, pos2(x, inner.center().y + 1.0), (&detail, FontId::proportional(12.0), t.muted), w, dots, ui.visuals().window_fill);
     if selected {
         ui.painter().text(pos2(inner.right() - 12.0, inner.center().y), egui::Align2::RIGHT_CENTER, hint, FontId::proportional(11.0), t.muted);
     }

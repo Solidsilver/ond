@@ -152,6 +152,35 @@ pub fn source_dot_lead(ui: &Ui, x: f32, cy: f32, color: SourceColor) -> f32 {
     x + DOT_LEAD
 }
 
+/// The room a dot takes after a line of text: the gap after the last
+/// letter, and the dot.
+pub const DOT_TRAIL: f32 = 5.0 + 2.0 * DOT_R;
+
+/// A source's dot after a line of text that ends at `x` and is centred on
+/// `cy`, so the line still starts where the title over it does.
+pub fn source_dot_after(ui: &Ui, x: f32, cy: f32, color: SourceColor) {
+    source_dot(ui, pos2(x + DOT_TRAIL - DOT_R, cy), color);
+}
+
+/// One line of text (its words, font and ink) from `at` (its top left),
+/// cut to `width`, then the
+/// dots of the sources it comes from when there are any: one source's dot,
+/// or several stacked on `ground` (a playlist holding songs from more than
+/// one). The text gives way to the dots, which always show. Returns how
+/// wide the text and its dots are.
+pub fn text_then_dots(ui: &Ui, at: Pos2, (text, font, ink): (&str, FontId, Color32), width: f32, dots: &[SourceColor], ground: Color32) -> f32 {
+    let trail = if dots.is_empty() { 0.0 } else { DOT_TRAIL - 2.0 * DOT_R + dots_width(dots.len()) };
+    let g = elide(ui, text, font, ink, (width - trail).max(0.0));
+    let (text_w, cy) = (g.size().x, at.y + g.size().y / 2.0);
+    ui.painter().galley(at, g, ink);
+    match dots {
+        [] => {}
+        [one] => source_dot_after(ui, at.x + text_w, cy, *one),
+        many => source_dots(ui, pos2(at.x + text_w + DOT_TRAIL - 2.0 * DOT_R + dots_width(many.len()) / 2.0, cy), many, ground),
+    }
+    text_w + trail
+}
+
 /// A source named inline, its dot then its name in `font` and `ink`, laid
 /// out as one item (the line of facts under an album's title, a heading
 /// over one source's part of a page). Not a control: it only says where
@@ -803,6 +832,36 @@ mod tests {
         let rect = found.rect();
         assert!((dot.x - (rect.left() + DOT_R)).abs() < 0.5, "the dot leads the name");
         assert!(rect.width() > DOT_LEAD, "and the name follows it");
+    }
+
+    #[test]
+    fn dots_after_a_line_follow_its_text_and_the_text_gives_way_to_them() {
+        let (one, two) = (SourceColor::new(1), SourceColor::new(6));
+        let mut h = themed((), move |ui, _| {
+            let t = Tokens::of(ui);
+            let font = FontId::proportional(12.0);
+            text_then_dots(ui, pos2(10.0, 10.0), ("Bill Evans", font.clone(), t.muted), 200.0, &[one], t.sidebar);
+            let w = text_then_dots(ui, pos2(10.0, 40.0), (&"Bill Evans Trio ".repeat(8), font, t.muted), 120.0, &[one, two], t.sidebar);
+            assert!(w <= 120.0 + 0.5, "the dots fit in the width: {w}");
+        });
+        h.run();
+        let shapes = shapes_of(&h.output().shapes);
+        let text_right = |y: f32| {
+            shapes.iter().find_map(|s| match s {
+                egui::Shape::Text(t) if (t.pos.y - y).abs() < 0.5 => Some(t.pos.x + t.galley.size().x),
+                _ => None,
+            })
+        };
+        let dot_x = |color: SourceColor, below: f32| {
+            shapes.iter().find_map(|s| match s {
+                egui::Shape::Circle(c) if c.fill == theme::source_color(color, false) && c.center.y > below => Some(c.center.x),
+                _ => None,
+            })
+        };
+        let (first, second) = (text_right(10.0).unwrap(), text_right(40.0).unwrap());
+        assert!((dot_x(one, 0.0).unwrap() - (first + DOT_TRAIL - DOT_R)).abs() < 0.5, "the dot follows the text");
+        assert!(dot_x(two, 30.0).unwrap() > second, "both stacked dots follow the cut text");
+        assert!(second < 10.0 + 120.0 - DOT_TRAIL, "and the text was cut to make room");
     }
 
     /// Every shape in `clipped`, nested ones flattened.
