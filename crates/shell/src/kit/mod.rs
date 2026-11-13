@@ -25,7 +25,8 @@
 //!   [`TextField`] with its [`field_label`], [`field_error`] and
 //!   [`field_help`], the full-width [`form_button`] (the main way in, or a
 //!   quieter one, either able to say it's waiting), the [`or_divider`]
-//!   between two ways in, and a [`notice`] to read.
+//!   between two ways in, a [`notice`] to read, and a [`folder_list`] (the
+//!   folders a source reads, each with a ×, and Choose folder…).
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
 //!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
 //!   one; [`kv_section`], [`kv_row`] and [`kv_text`] (a label and its value,

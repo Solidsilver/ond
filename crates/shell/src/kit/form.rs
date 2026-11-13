@@ -1,8 +1,9 @@
 //! A form's pieces, for signing in and for a source's settings: a
 //! [`TextField`] (its [`field_label`] above, a [`field_error`] and a
 //! [`field_help`] line under it), the full-width [`form_button`] that can
-//! say it's waiting, the [`or_divider`] between two ways in, and a
-//! [`notice`] to be read rather than acted on. The words are the caller's;
+//! say it's waiting, the [`or_divider`] between two ways in, a
+//! [`notice`] to be read rather than acted on, and a [`folder_list`] for a
+//! source that reads folders on this computer. The words are the caller's;
 //! nothing here knows what the form is for.
 
 use crate::icons::Icon;
@@ -149,6 +150,73 @@ pub fn form_button(ui: &mut Ui, label: &str, primary: bool, busy: Option<bool>) 
     if busy.is_none() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
+/// What was done to a [`folder_list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderListEvent {
+    /// The × beside the folder at this index: take it off the list.
+    Remove(usize),
+    /// Choose folder…: the app opens its folder picker.
+    Choose,
+}
+
+/// A list of folders, each in an outlined row with its name over its path
+/// and a × that takes it off, then a quiet "Choose folder…" under them.
+/// With none yet, `empty` stands in the outline. While `busy` nothing can
+/// be changed. The folders and the picker are the app's; this only draws
+/// them and says what was clicked.
+pub fn folder_list(ui: &mut Ui, folders: &[std::path::PathBuf], empty: &str, busy: bool) -> Option<FolderListEvent> {
+    let t = Tokens::of(ui);
+    let mut event = None;
+    let width = ui.available_width();
+    let rows = folders.len().max(1) as f32;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, rows * FOLDER_ROW_H + 2.0), Sense::hover());
+    ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, t.hairline), egui::StrokeKind::Inside);
+    if folders.is_empty() {
+        let g = super::elide(ui, empty, FontId::proportional(12.0), t.muted, width - 28.0);
+        ui.painter().galley(egui::pos2(rect.left() + 14.0, rect.center().y - g.size().y / 2.0), g.clone(), t.muted);
+        ui.interact(rect, ui.scope_id().with("kit-folder-list-empty"), Sense::hover())
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, g.text()));
+    }
+    for (i, path) in folders.iter().enumerate() {
+        let row = egui::Rect::from_min_size(egui::pos2(rect.left(), rect.top() + 1.0 + i as f32 * FOLDER_ROW_H), vec2(width, FOLDER_ROW_H));
+        let p = ui.painter();
+        if i > 0 {
+            p.hline(row.left() + 12.0..=row.right() - 12.0, row.top(), egui::Stroke::new(1.0, t.hairline));
+        }
+        crate::icons::paint(p, egui::Rect::from_center_size(egui::pos2(row.left() + 20.0, row.center().y), vec2(14.0, 14.0)), Icon::Folder, t.muted);
+        let name = path.file_name().map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy()).into_owned();
+        let full = path.to_string_lossy();
+        let room = width - 36.0 - 36.0;
+        let name_g = super::elide(ui, &name, FontId::proportional(13.0), t.text, room);
+        let shown = super::elide_middle(ui, &full, &FontId::proportional(11.0), room);
+        let path_g = ui.painter().layout_no_wrap(shown, FontId::proportional(11.0), t.muted);
+        let top = row.center().y - (name_g.size().y + path_g.size().y) / 2.0;
+        let x = row.left() + 36.0;
+        let below = top + name_g.size().y;
+        p.galley(egui::pos2(x, top), name_g, t.text);
+        p.galley(egui::pos2(x, below), path_g, t.muted);
+        let x_rect = egui::Rect::from_center_size(egui::pos2(row.right() - 20.0, row.center().y), vec2(24.0, 24.0));
+        let label = format!("Remove {name}");
+        let removed = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(x_rect).id_salt(("kit-folder-remove", i)), |ui| {
+                ui.add_enabled_ui(!busy, |ui| crate::icons::sized_button(ui, Icon::Close, &label, vec2(24.0, 24.0), 10.0, Some(t.muted)).clicked()).inner
+            })
+            .inner;
+        if removed {
+            event = Some(FolderListEvent::Remove(i));
+        }
+    }
+    ui.add_space(6.0);
+    let choose = ui.add_enabled_ui(!busy, |ui| super::quiet_button(ui, Some(Icon::Plus), "Choose folder…")).inner;
+    if choose.clicked() {
+        event = Some(FolderListEvent::Choose);
+    }
+    event
+}
+
+/// A folder's row in a [`folder_list`]: its name over its path.
+const FOLDER_ROW_H: f32 = 44.0;
+
 /// A hairline either side of a small "or", between two ways in.
 pub fn or_divider(ui: &mut Ui) {
     let t = Tokens::of(ui);
@@ -206,5 +274,58 @@ mod tests {
         h.get_by_label("Connecting…").click();
         h.run_steps(2);
         assert_eq!(h.state().1, 1);
+    }
+
+    #[test]
+    fn a_folder_list_names_each_remove_and_offers_another_folder() {
+        let folders = vec![std::path::PathBuf::from("/Users/me/Music"), std::path::PathBuf::from("/Volumes/Archive/Lossless")];
+        let mut h = super::super::themed(Vec::new(), move |ui, seen: &mut Vec<FolderListEvent>| {
+            ui.set_width(320.0);
+            seen.extend(folder_list(ui, &folders, "No folders yet", false));
+        });
+        h.run_steps(2);
+        h.get_by_label("Remove Lossless").click();
+        h.run_steps(2);
+        h.get_by_label("Choose folder…").click();
+        h.run_steps(2);
+        assert_eq!(h.state().1, [FolderListEvent::Remove(1), FolderListEvent::Choose]);
+    }
+
+    #[test]
+    fn an_empty_folder_list_says_so_and_a_busy_one_takes_no_clicks() {
+        let mut h = super::super::themed(Vec::new(), |ui, seen: &mut Vec<FolderListEvent>| {
+            ui.set_width(320.0);
+            seen.extend(folder_list(ui, &[], "No folders yet", true));
+        });
+        h.run_steps(2);
+        assert!(h.query_by_label("No folders yet").is_some());
+        h.get_by_label("Choose folder…").click();
+        h.run_steps(2);
+        assert!(h.state().1.is_empty());
+    }
+
+    /// Renders an empty folder list and one with two folders, to look at:
+    /// `cargo test -p shell --release snapshots -- --ignored` writes
+    /// `target/snapshots/kit-folder-list-*.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    fn snapshots() {
+        let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
+        std::fs::create_dir_all(&out).unwrap();
+        for (theme, pref) in [("light", crate::theme::ThemePref::Light), ("dark", crate::theme::ThemePref::Dark)] {
+            for (name, folders) in [
+                ("empty", Vec::new()),
+                ("two", vec![std::path::PathBuf::from("/Users/demo/Music"), std::path::PathBuf::from("/Volumes/Archive/Lossless/Classical and Jazz")]),
+            ] {
+                let mut h = super::super::canvas(vec2(360.0, 200.0), pref, move |ui| {
+                    egui::Frame::new().inner_margin(20).show(ui, |ui| {
+                        ui.set_width(320.0);
+                        folder_list(ui, &folders, "No folders yet", false);
+                    });
+                });
+                h.run();
+                h.render().unwrap().save(out.join(format!("kit-folder-list-{name}-{theme}.png"))).unwrap();
+            }
+        }
     }
 }
