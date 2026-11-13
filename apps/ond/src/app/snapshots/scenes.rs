@@ -1153,6 +1153,106 @@ fn snapshots() {
     shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, scenes);
 }
 
+/// A server and a music folder live together, in All sources: dots on
+/// covers and rows, the filter chips, the switcher and its menu, a merged
+/// artist, the mixed-playlist offer, and one source unreachable.
+#[test]
+#[ignore = "renders PNGs for review; run with --ignored"]
+fn sources_snapshots() {
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, source_scenes);
+}
+
+fn source_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    reset(h, FULL, Route::Albums);
+    two_sources(app_mut(h));
+    reset(h, FULL, Route::Albums);
+    s.shoot(h, "sources-albums");
+
+    reset(h, FULL, Route::Albums);
+    app_mut(h).prefs.edit(|p| p.album_view = crate::settings::ViewMode::List);
+    s.shoot(h, "sources-albums-list");
+
+    reset(h, FULL, Route::Songs);
+    s.shoot(h, "sources-songs");
+
+    // The folder's chip lit: only its albums, and no dots, since they all
+    // come from one source.
+    reset(h, FULL, Route::Albums);
+    app_mut(h).actions.push(Action::Prefs(PrefsAction::Scope(all_sources::ScopeAction::Chip(shell::kit::SourceChip::Toggle(local_account())))));
+    s.shoot(h, "sources-chips-narrowed");
+    app_mut(h).actions.push(Action::Prefs(PrefsAction::Scope(all_sources::ScopeAction::Chip(shell::kit::SourceChip::All))));
+    h.run_steps(2);
+
+    reset(h, FULL, Route::Albums);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, 2 sources").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "sources-switcher-menu");
+    egui::Popup::close_all(&h.ctx);
+
+    reset(h, FULL, Route::Artist { name: "Bill Evans Trio".into(), id: None });
+    s.shoot(h, "sources-artist");
+
+    let album = accounts::ItemKey::new(local_account(), album_id(1)).to_string();
+    reset(h, FULL, Route::Album(album));
+    s.shoot(h, "sources-album");
+
+    reset(h, FULL, Route::Albums);
+    // The chips' scope changes dropped the index; a real one rebuilds in the background.
+    app_mut(h).rebuild_search();
+    app_mut(h).actions.push(Action::OpenPalette);
+    h.run_steps(2);
+    {
+        let app = app_mut(h);
+        if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
+            p.state.query = "bill".into();
+            p.refresh(index);
+        }
+    }
+    s.shoot(h, "sources-search");
+
+    reset(h, FULL, Route::Playlists);
+    {
+        let app = app_mut(h);
+        let (server, local) = (crate::test_tracks::account(), local_account());
+        app.multi.pending_playlist = Some(all_sources::PendingMixedPlaylist {
+            source: accounts::ItemKey::new(server, "pl-1"),
+            name: "Headphone test tracks".into(),
+            entries: vec![accounts::ItemKey::new(server, "vg-0"), accounts::ItemKey::new(local, "kb-0")],
+        });
+        app.ui.overlay = Some(Overlay::MixedPlaylist);
+    }
+    s.shoot(h, "sources-mixed-playlist");
+
+    // The server stops answering while the folder plays on.
+    let unreachable = |h: &mut Harness<'_, Option<OndApp>>| {
+        let server = app_mut(h).session.accounts.get_mut(&crate::test_tracks::account()).expect("server source");
+        server.online = false;
+        server.unreachable = true;
+    };
+    reset(h, FULL, Route::Albums);
+    unreachable(h);
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, 2 sources").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "sources-unreachable");
+    egui::Popup::close_all(&h.ctx);
+
+    reset(h, FULL, Route::Albums);
+    unreachable(h);
+    {
+        let folder = app_mut(h).session.accounts.get_mut(&local_account()).expect("folder source");
+        folder.skipped = 3;
+    }
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    s.shoot(h, "sources-settings");
+
+    // The folded rail: the stacked dots alone.
+    reset(h, vec2(760.0, 700.0), Route::Albums);
+    s.shoot(h, "sources-rail");
+}
+
 /// Settings with some set in managed.json (as the Home Manager module writes
 /// it): their rows and the output picker locked, and the sign-in form.
 #[test]

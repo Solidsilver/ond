@@ -1154,3 +1154,66 @@ fn a_folder_source_hides_what_it_cant_do_and_says_its_files_are_kept() {
     use_server(app_mut(&mut h));
     *h.state_mut() = None;
 }
+
+/// Two live sources in All sources: the chips, the switcher's menu, the
+/// merged artist's headings and the mixed-playlist offer all name
+/// themselves, and a chip narrows the library to its source.
+#[test]
+fn two_sources_name_their_controls_and_a_chip_narrows_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Albums);
+    two_sources(app_mut(&mut h));
+    for route in [Route::Albums, Route::Songs, Route::Playlists, Route::Favorites, Route::Artist { name: "Bill Evans Trio".into(), id: None }] {
+        reset(&mut h, FULL, route);
+        h.check_accessibility();
+    }
+    h.get_by_label("Home server");
+    h.get_by_label("Music folder");
+    reset(&mut h, FULL, Route::Albums);
+    let all = app_mut(&mut h).data.albums.len();
+    h.get_by_label("Music folder").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.session.scope.chip_selected(local_account()));
+    assert!(app.data.albums.len() < all && app.data.albums.iter().all(|a| crate::source::identity::account(&a.id) == Some(local_account())));
+    h.get_by_label("All sources").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).data.albums.len(), all, "All sources shows every source again");
+
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, 2 sources").click();
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label("Music folder, Scanned 9:41 AM").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).session.scope.single(), Some(local_account()), "picking a source in the menu shows it alone");
+    *h.state_mut() = None;
+}
+
+/// The mixed-playlist offer says which source can't hold whose songs, and
+/// closing it without an answer declines it, so nothing is left waiting.
+#[test]
+fn closing_the_mixed_playlist_offer_declines_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Playlists);
+    two_sources(app_mut(&mut h));
+    let (server, local) = (crate::test_tracks::account(), local_account());
+    {
+        let app = app_mut(&mut h);
+        app.multi.pending_playlist = Some(all_sources::PendingMixedPlaylist {
+            source: accounts::ItemKey::new(server, "pl-1"),
+            name: "Car".into(),
+            entries: vec![accounts::ItemKey::new(server, "vg-0"), accounts::ItemKey::new(local, "kb-0")],
+        });
+        app.ui.overlay = Some(Overlay::MixedPlaylist);
+    }
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label_contains("Home server can't hold songs from Music folder.");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.ui.overlay.is_none() && app.multi.pending_playlist.is_none());
+    *h.state_mut() = None;
+}

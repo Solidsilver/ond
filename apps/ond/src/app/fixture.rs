@@ -849,3 +849,67 @@ pub(super) fn use_server(app: &mut OndApp) {
     app.session.server_label = "demo · navidrome 0.64.2".into();
     app.session.server_info = "navidrome 0.64.2".into();
 }
+
+/// Splits the fixture's library between two live sources, the server and a
+/// music folder (every third album is the folder's, so Bill Evans Trio has
+/// albums on both), and shows them together in All sources. Item ids,
+/// covers and playlists take each source's qualified spelling, as a real
+/// merged library's do. Nothing undoes it: scenes after it are two-source.
+pub(super) fn two_sources(app: &mut OndApp) {
+    use crate::source::identity;
+    let (server, local) = (crate::test_tracks::account(), local_account());
+    let folders = vec![crate::settings::FolderEntry::with_key("demo-music", "/Users/demo/Music")];
+    let folder_entry = crate::settings::SourceEntry::local(local, Some("Music folder".into()), accounts::SourceColor::new(1), folders);
+    let mut server_entry = crate::settings::SourceEntry::subsonic(server, "https://music.example.com", "demo");
+    server_entry.name = Some("Home server".into());
+    app.prefs.edit(|s| {
+        s.sources = vec![server_entry.clone(), folder_entry.clone()];
+        s.scope = accounts::Scope::all();
+    });
+    let synced = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2024, 1, 1, 9, 41, 0).unwrap();
+    let live = |entry: &crate::settings::SourceEntry, label: &str| super::session::SourceSession {
+        online: true,
+        settings: Some(Settings { sources: vec![entry.clone()], ..Default::default() }),
+        server_label: label.into(),
+        sync: super::SyncState { last: Some(synced), ..Default::default() },
+        ..Default::default()
+    };
+    app.session.accounts.insert(server, live(&server_entry, "demo · navidrome 0.64.2"));
+    app.session.accounts.insert(local, live(&folder_entry, "Local folders"));
+    app.session.focus = Some(server);
+    app.session.scope = accounts::Scope::all();
+
+    let owner = |i: usize| if i % 3 == 1 { local } else { server };
+    let mut by_source: std::collections::BTreeMap<accounts::AccountId, (Vec<Album>, Vec<Track>)> = Default::default();
+    for (i, mut a) in (0..ALBUMS.len()).map(album).enumerate() {
+        let account = owner(i);
+        app.art.preload(&accounts::ItemKey::new(account, album_id(i)).to_string(), cover(i));
+        identity::album(account, &mut a);
+        let mut tracks: Vec<Track> = app.data.tracks.album(&album_id(i)).map(|s| s.to_vec()).unwrap_or_default();
+        tracks.iter_mut().for_each(|t| identity::track(account, t));
+        let entry = by_source.entry(account).or_default();
+        entry.0.push(a);
+        entry.1.extend(tracks);
+    }
+    for (account, (albums, tracks)) in by_source {
+        let mut data = Data::default();
+        data.account = Some(account);
+        data.newest = albums.iter().map(|a| a.id.clone()).collect();
+        data.set_albums(albums);
+        data.set_tracks(crate::tracks::TrackSet::new(tracks));
+        if account == server {
+            data.playlists = app.data.playlists.clone();
+            data.playlists.iter_mut().for_each(|p| identity::playlist(account, p));
+        }
+        app.multi.data.insert(account, data);
+    }
+    // The first account's art took over the shared cache: the queue's bare
+    // covers go back in.
+    for i in 0..ALBUMS.len() {
+        app.art.preload(&album_id(i), cover(i));
+    }
+    app.art.preload(WHITE, white_cover());
+    app.multi.projection = None;
+    app.project_sources();
+    app.rebuild_search();
+}

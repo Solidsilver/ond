@@ -691,8 +691,17 @@ impl Art {
     }
 
     /// Makes `image` the art for `cover` at every size, without a server.
+    /// A qualified cover goes to its account's art, where it's looked up.
     #[cfg(test)]
     pub fn preload(&mut self, cover: &str, image: ColorImage) {
+        if let Some(account) = crate::source::identity::account(cover) {
+            return self.source_art(account).preload_bare(crate::source::identity::bare(cover), image);
+        }
+        self.preload_bare(cover, image);
+    }
+
+    #[cfg(test)]
+    fn preload_bare(&mut self, cover: &str, image: ColorImage) {
         self.preloaded.insert(cover.to_owned(), image.clone());
         let image_pixels = image.pixels.clone();
         let tex = self.ctx.load_texture(format!("art:{cover}"), image, TextureOptions::LINEAR);
