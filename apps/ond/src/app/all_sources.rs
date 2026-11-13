@@ -314,6 +314,16 @@ impl OndApp {
             ScopeAction::One(_) => return,
             ScopeAction::All => scope.choose_all(),
             ScopeAction::Chip(shell::kit::SourceChip::All) => scope.clear_chips(),
+            // From one source, a box in the switcher's menu adds another to
+            // it (or, on the one itself, takes it out, leaving every source),
+            // which is All sources narrowed to them.
+            ScopeAction::Chip(shell::kit::SourceChip::Toggle(account)) if let Some(one) = scope.single() => {
+                scope.choose_all();
+                if account != one {
+                    scope.toggle_chip(one);
+                    scope.toggle_chip(account);
+                }
+            }
             ScopeAction::Chip(shell::kit::SourceChip::Toggle(account)) => scope.toggle_chip(account),
         }
         self.session.scope = scope.clone();
@@ -791,6 +801,26 @@ mod tests {
         assert!(app.favorites.is_on(StarKind::Song, &key(account(2), "1")));
         assert_eq!(app.favorites.rating(&key(account(1), "1")), 5);
         assert_eq!(app.favorites.rating(&key(account(2), "1")), 4);
+    }
+
+    #[test]
+    fn a_box_toggled_from_one_source_shows_both_and_on_that_source_shows_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (server(), server());
+        let mut app = rig(dir.path(), &one, &two);
+        let toggle = |app: &mut OndApp, a| app.apply(Action::Scope(ScopeAction::Chip(shell::kit::SourceChip::Toggle(a))));
+        app.apply(Action::Scope(ScopeAction::One(account(2))));
+        assert_eq!(app.data.albums.len(), 1);
+        toggle(&mut app, account(1));
+        let scope = app.prefs.snapshot().scope;
+        assert!(scope.is_all() && scope.chip_selected(account(1)) && scope.chip_selected(account(2)), "{scope:?}");
+        assert_eq!(app.data.albums.len(), 2);
+        toggle(&mut app, account(1));
+        assert_eq!(app.data.albums.len(), 1, "and out again, through the chips' own rule");
+        assert!(app.prefs.snapshot().scope.chip_selected(account(2)));
+        app.apply(Action::Scope(ScopeAction::One(account(2))));
+        toggle(&mut app, account(2));
+        assert_eq!(app.prefs.snapshot().scope, Scope::all());
     }
 
     #[test]

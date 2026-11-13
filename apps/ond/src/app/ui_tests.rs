@@ -1187,6 +1187,20 @@ fn two_sources_name_their_controls_and_a_chip_narrows_the_library() {
     h.get_by_label("Music folder, Scanned 9:41 AM").click();
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).session.scope.single(), Some(local_account()), "picking a source in the menu shows it alone");
+
+    // From there, the server's box in the menu shows both, and the switcher
+    // and the chips agree.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Music folder, Scanned 9:41 AM").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Include Home server").click();
+    h.run_steps(3);
+    let scope = app_mut(&mut h).session.scope.clone();
+    assert!(scope.is_all() && scope.chip_selected(local_account()) && scope.chip_selected(crate::test_tracks::account()), "{scope:?}");
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Include Music folder").click();
+    h.run_steps(3);
+    let scope = app_mut(&mut h).session.scope.clone();
+    assert!(scope.chip_selected(crate::test_tracks::account()) && !scope.chip_selected(local_account()), "{scope:?}");
+    h.check_accessibility();
     *h.state_mut() = None;
 }
 

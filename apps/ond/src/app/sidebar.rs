@@ -242,7 +242,7 @@ impl OndApp {
             look: kit::SwitcherLook::Line,
             add: !self.prefs.managed("sources"),
             manage: true,
-            toggles: false,
+            toggles: true,
             tooltip: Some(&tooltip),
         };
         // Work Offline is one switch for every server; folders aren't touched by it.
@@ -258,7 +258,9 @@ impl OndApp {
             Some(kit::SourcePick::Manage) => Action::OpenSettings(super::settings_page::Section::Sources),
             Some(kit::SourcePick::Add) => Action::Onboarding(kit::OnboardingEvent::AddAnother),
             Some(kit::SourcePick::App(on)) => Action::Offline(super::OfflineAction::WorkOffline(on)),
-            Some(kit::SourcePick::Toggle(_)) | None => return,
+            // The menu's boxes are the filter chips by another way in.
+            Some(kit::SourcePick::Toggle(account)) => Action::Scope(super::all_sources::ScopeAction::Chip(kit::SourceChip::Toggle(account))),
+            None => return,
         };
         self.actions.push(action);
     }
