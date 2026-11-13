@@ -33,6 +33,15 @@ Frame times on a big library and the search index's keystroke latency:
 - [ ] Streaming → Always AAC 256 (check Navidrome has the AAC transcoder): `AAC 256 · transcoded`.
 - [ ] Settings › Queue: the Apple Music and Spotify presets set the four rows at once and the queue follows them (Play next goes to the top with Apple Music, after the next track with Ond); changing a row turns the preset to Custom; the choice survives a restart.
 
+## Music folders
+- [ ] First run: pick Music folder, Choose folder… opens the system's folder picker (macOS: NSOpenPanel; Linux: the portal; Windows: the common dialog); a big library shows the count climbing, then the library opens and plays with Wi-Fi off.
+- [ ] A folder on an external drive: unplug it mid-play. The playing track stops or plays out what's buffered; the next fails with "…isn't there" and is skipped; Rescan shows Folder missing in the footer and Settings › Sources, and the albums stay. Plug it back in and Rescan: the state clears and the tracks play.
+- [ ] Start Ond with that drive unplugged: it opens on the stored library with Folder missing, not a sign-in prompt.
+- [ ] A folder on a network share (SMB/NFS): scanning works, and a share that drops mid-scan reports the folder missing rather than emptying the library.
+- [ ] A folder with files Ond can't read (a corrupt FLAC, a DRM'd .m4p): Settings › Sources says how many were skipped.
+- [ ] A server signed out of, then a music folder added: the server's row in Settings › Sources says Not in use. Remove the folder source: the sign-in sheet opens on the server, and signing in brings its library back from disk without a full resync.
+- [ ] Remove… on a folder source: the music files are all still there afterwards.
+
 ## macOS integration
 - [ ] Control Center shows title/artwork/progress; scrubbing there seeks.
 - [ ] F7/F8/F9 and headphone buttons work, also with the window minimized.
