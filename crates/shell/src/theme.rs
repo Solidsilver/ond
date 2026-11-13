@@ -113,6 +113,9 @@ pub const SOURCE_COLORS: [(Color32, Color32); accounts::SourceColor::COUNT as us
     (hex(0x853A8E), hex(0xD696DF)), // Plum
 ];
 
+/// What each of [`SOURCE_COLORS`] is called, where a picker names them.
+pub const SOURCE_COLOR_NAMES: [&str; accounts::SourceColor::COUNT as usize] = ["Blue", "Amber", "Green", "Rose", "Violet", "Teal", "Red", "Plum"];
+
 /// The theme colour for `color`, in light or `dark` mode.
 pub fn source_color(color: accounts::SourceColor, dark: bool) -> Color32 {
     let (light, dark_c) = SOURCE_COLORS[color.as_usize() % SOURCE_COLORS.len()];

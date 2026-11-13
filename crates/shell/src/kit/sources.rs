@@ -161,7 +161,7 @@ fn dots_width(n: usize) -> f32 {
     2.0 * DOT_R + (n - 1) as f32 * DOT_STEP
 }
 
-fn dot_color(ui: &Ui, color: SourceColor) -> Color32 {
+pub(super) fn dot_color(ui: &Ui, color: SourceColor) -> Color32 {
     theme::source_color(color, ui.visuals().dark_mode)
 }
 
@@ -495,7 +495,7 @@ fn avatar(ui: &Ui, c: Pos2, name: &str, color: Option<SourceColor>) {
 
 /// Which size a state's glyph is drawn at.
 #[derive(Clone, Copy)]
-enum Glyph {
+pub(super) enum Glyph {
     /// Leading a one-line row, or alone in the rail: online is a check.
     Lead,
     /// Beside a small line of text, or as a badge: online is a dot.
@@ -504,7 +504,7 @@ enum Glyph {
 
 /// A state's small glyph at `c`: online, a ring or spinner while busy, a
 /// cloud while offline, a warning when it needs the user.
-fn glyph(ui: &Ui, c: Pos2, id: AccountId, state: &SourceState, size: Glyph) {
+pub(super) fn glyph(ui: &Ui, c: Pos2, id: AccountId, state: &SourceState, size: Glyph) {
     let t = Tokens::of(ui);
     let painter = ui.painter();
     let lead = matches!(size, Glyph::Lead);
@@ -527,7 +527,7 @@ fn glyph(ui: &Ui, c: Pos2, id: AccountId, state: &SourceState, size: Glyph) {
     }
 }
 
-fn spins(state: &SourceState) -> bool {
+pub(super) fn spins(state: &SourceState) -> bool {
     matches!(state, SourceState::Syncing(None) | SourceState::Connecting | SourceState::Scanning)
         || matches!(state, SourceState::Syncing(Some(f)) if !f.is_finite())
 }
@@ -551,7 +551,7 @@ fn spin(ui: &Ui, id: AccountId, state: &SourceState) {
 }
 
 /// Nothing is spinning: the next spinner counts from its own start.
-fn forget_spin(ui: &Ui) {
+pub(super) fn forget_spin(ui: &Ui) {
     ui.data_mut(|d| d.remove::<SpinSince>(spin_id()));
 }
 
@@ -564,7 +564,7 @@ fn spin_id() -> egui::Id {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kit::themed;
+    use crate::kit::{canvas, themed};
     use accounts::OfflineReason;
     use egui_kittest::kittest::Queryable;
 
@@ -793,28 +793,5 @@ mod tests {
             h.run();
             h.render().unwrap().save(out.join(format!("kit-sources-dots-{theme}.png"))).unwrap();
         }
-    }
-
-    /// A harness `size` big on the sidebar's ground, in `pref`'s theme, that
-    /// draws `body` once the theme's fonts are in.
-    fn canvas(size: egui::Vec2, pref: theme::ThemePref, mut body: impl FnMut(&mut Ui) + 'static) -> egui_kittest::Harness<'static, bool> {
-        let dark = matches!(pref, theme::ThemePref::Dark);
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .with_pixels_per_point(2.0)
-            .with_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light })
-            .build_ui_state(
-                move |ui, installed: &mut bool| {
-                    if !std::mem::replace(installed, true) {
-                        theme::install(ui.ctx(), pref);
-                        ui.ctx().request_repaint();
-                        return;
-                    }
-                    let ground = Tokens::of(ui).sidebar;
-                    ui.ctx().layer_painter(egui::LayerId::background()).rect_filled(Rect::EVERYTHING, 0.0, ground);
-                    body(ui);
-                },
-                false,
-            )
     }
 }

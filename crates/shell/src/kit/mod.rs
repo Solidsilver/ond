@@ -46,6 +46,11 @@
 //!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its
 //!   [`SwitcherPlace`]) and a menu to change it, which says what was picked
 //!   as a [`SourcePick`].
+//! - [`source_row`](mod@source_row): a source in Settings' Sources tab,
+//!   [`source_row`](fn@source_row) ([`SourceRow`]): its dot, name, kind and
+//!   state, and a menu ([`SourceRowMenu`]) to rename it in place, recolour
+//!   it with the [`source_color_picker`], sync it, sign out or remove it,
+//!   which says what was chosen as a [`SourceRowEvent`].
 //! - [`onboarding`](mod@onboarding): the first-run sheet,
 //!   [`onboarding`](fn@onboarding): the app's welcome line over the kinds
 //!   of source it can add ([`SourceKind`]), a kind's form once picked, and
@@ -97,6 +102,7 @@ pub mod palette;
 pub mod rows;
 pub mod settings;
 pub mod sheets;
+pub mod source_row;
 pub mod sources;
 pub mod text;
 pub mod toasts;
@@ -114,6 +120,7 @@ pub use palette::*;
 pub use rows::*;
 pub use settings::*;
 pub use sheets::*;
+pub use source_row::*;
 pub use sources::*;
 pub use text::*;
 pub use toasts::Toasts;
@@ -133,4 +140,29 @@ fn themed<S: 'static>(state: S, mut body: impl FnMut(&mut egui::Ui, &mut S) + 's
         },
         (false, state),
     )
+}
+
+/// A harness `size` big on the sidebar's ground, in `pref`'s theme, at
+/// twice the pixels, that draws `body` once the theme's fonts are in: the
+/// kit's snapshot scenes.
+#[cfg(test)]
+fn canvas(size: egui::Vec2, pref: crate::theme::ThemePref, mut body: impl FnMut(&mut egui::Ui) + 'static) -> egui_kittest::Harness<'static, bool> {
+    let dark = matches!(pref, crate::theme::ThemePref::Dark);
+    egui_kittest::Harness::builder()
+        .with_size(size)
+        .with_pixels_per_point(2.0)
+        .with_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light })
+        .build_ui_state(
+            move |ui, installed: &mut bool| {
+                if !std::mem::replace(installed, true) {
+                    crate::theme::install(ui.ctx(), pref);
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                let ground = crate::theme::Tokens::of(ui).sidebar;
+                ui.ctx().layer_painter(egui::LayerId::background()).rect_filled(egui::Rect::EVERYTHING, 0.0, ground);
+                body(ui);
+            },
+            false,
+        )
 }
