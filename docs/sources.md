@@ -1,6 +1,6 @@
 # Sources: several libraries in one player
 
-Status: milestones 1–3 are built. Milestone 4's Ond backend is built: concurrent sources with independent sessions and watchers, account-qualified in-memory identity, persisted scope and chips, merged libraries and artists, scope-aware search and navigation, and mixed Ond playlists. The sidebar switcher, chips and playlist-copy confirmation have minimal working controls; the separate UI pass will draw source dots and artist groups and finish the Sources presentation. Milestone 5 remains design. Updated 13 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
+Status: milestones 1–4 are built, UI included. Milestone 4 brings concurrent sources with independent sessions and watchers, account-qualified in-memory identity, persisted scope and chips, merged libraries and artists, scope-aware search and navigation, and mixed Ond playlists; in Ond's UI, the switcher with each source's own state, source dots on covers, rows, the album page and search, filter chips under the library pages, a merged artist's albums grouped by source, the Make Ond playlist offer, and each source's live state in Settings › Sources. Milestone 5 remains design. Updated 13 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
 
 Ond plays from one Navidrome server. This design makes the server one **source** among several: a Navidrome (or other OpenSubsonic) server, a local folder of music, and later Jellyfin and Plex. Setup starts with one or more of them, and the library shows one source at a time or all of them together.
 
@@ -230,7 +230,7 @@ The `sources` list in `settings.json` arrives with the second kind of source (mi
 1. **Accounts, with Navidrome as the only source.** `AccountId`, the per-source folder, `TrackKey` through the queue, player, offline store and stream cache, and per-account cover art; `library` freed of `subsonic`; `MusicSource` with the Subsonic implementation; the migration above. Done when Ond's snapshots come out the same as before and an existing install opens with everything intact.
 2. **The shared kit.** `kit::form`, onboarding, the switcher, dots, chips and Sources rows, in both apps. Rede now holds and switches between multiple Audiobookshelf accounts via `kit::source_switcher` (one active account at a time via `Scope::only(id)`, assigning a `SourceColor` per account, reusing an existing `(server, username)` on re-sign-in, keeping signed-out rows in the list, and flushing pending progress on switch; merged "All sources" views belong to milestone 4). Done when both apps sign in through `kit::onboarding` and both sidebars draw `kit::source_switcher`.
 3. **Local folders.** The `scan` crate and the local source, Ond's own favourites and playlists. Done when a first run can choose a folder instead of a server and play from it with no network.
-4. **All sources.** The merged views, merged artists, filter chips, scope-aware search, Ond playlists that mix sources. The backend and minimal controls are built; the UI presentation follows. Done when a Navidrome source and a local one show as one library, and switching scope keeps your place.
+4. **All sources.** The merged views, merged artists, filter chips, scope-aware search, Ond playlists that mix sources. Built, UI included. Done when a Navidrome source and a local one show as one library, and switching scope keeps your place.
 5. **Later:** album matching; direct scrobbling for local tracks; Jellyfin; Plex.
 
 ## Ond backend handoff (milestone 4)
@@ -272,10 +272,11 @@ The `sources` list in `settings.json` arrives with the second kind of source (mi
   per-account state above for both Settings and sidebar details without
   selecting a different browsing scope.
 
-The remaining UI work is presentation: source dots on rows/covers and Now
-Playing, visible per-source artist headings, richer per-source status/details,
-and the finished mixed-playlist prompt. The backend does not merge album
-copies. Rede's source/session implementation is unchanged.
+The UI pass is built on this: dots on covers, rows, the album page and
+search (not yet Now Playing, Mini or the queue), per-source artist headings,
+each source's live state in the switcher and Settings, and the finished
+mixed-playlist offer. The backend does not merge album copies. Rede's
+source/session implementation is unchanged.
 
 ## Later sources
 
