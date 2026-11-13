@@ -1297,7 +1297,12 @@ fn open_source(src: &TrackSource, cache: Option<&StreamCache>, abort: Abort) -> 
         return Ok(Box::new(f));
     }
     if let Some(path) = src.url.strip_prefix("file://") {
-        let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        // Said plainly: the usual reason is a drive that isn't plugged in.
+        let f = std::fs::File::open(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => format!("{path} isn't there"),
+            std::io::ErrorKind::PermissionDenied => format!("Ond isn't allowed to read {path}"),
+            _ => format!("couldn't open {path}: {e}"),
+        })?;
         return Ok(Box::new(f));
     }
     let cache = cache.ok_or("no stream cache configured")?;

@@ -916,6 +916,8 @@ fn a_next_track_that_fails_to_open_lets_the_current_one_play_out() {
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
     let errors: Vec<_> = seen.iter().filter_map(|e| if let Event::Error { track_id, .. } = e { Some(track_id.clone()) } else { None }).collect();
     assert_eq!(errors, [Some("gone".to_owned())], "the error names the track that failed: {seen:?}");
+    let said = seen.iter().find_map(|e| if let Event::Error { message, .. } = e { Some(message.clone()) } else { None }).unwrap();
+    assert!(said.ends_with("gone.wav isn't there"), "said plainly: {said}");
     assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "a"), "{seen:?}");
     let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
     assert!(out == a, "the current track played out: {} of {} samples", out.len(), a.len());
