@@ -39,11 +39,14 @@
 //!   [`switch_row`], and [`menu_label`] (a quiet button with a chevron that
 //!   opens one).
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
-//!   in), [`sheet_header`] (its title, and a × that closes it), and the
+//!   in), [`sheet_header`] (its title, and a × that closes it), a question
+//!   in one ([`confirm`], its verb in red, or [`ask`], filled), and the
 //!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
 //! - [`sources`]: a source as the app describes it ([`SourceInfo`]), the
 //!   [`source_dot`] in its colour (and [`source_dots`], stacked, for All
-//!   sources), and the sidebar's foot, [`source_switcher`]: what's in scope
+//!   sources; [`source_dot_lead`] in front of a line of text, and
+//!   [`source_label`], a dot and a name as one item), and the sidebar's
+//!   foot, [`source_switcher`]: what's in scope
 //!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its
 //!   [`SwitcherPlace`]) and a menu to change it, which says what was picked
 //!   as a [`SourcePick`].

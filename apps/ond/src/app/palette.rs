@@ -171,7 +171,7 @@ impl kit::PaletteRows for Hits<'_> {
     fn row(&mut self, ui: &mut egui::Ui, tile: Rect, n: usize) -> PaletteRow {
         let keys = "⏎ open    ⌘⏎ play";
         let (index, data) = (&*self.index, self.data);
-        let Some(hit) = self.results.hit(n) else { return PaletteRow { title: String::new(), detail: String::new(), keys } };
+        let Some(hit) = self.results.hit(n) else { return PaletteRow { title: String::new(), detail: String::new(), keys, dot: None } };
         let (title, detail) = match hit {
             Hit::Artist(i) => {
                 let a = &index.artists[i];
@@ -199,6 +199,6 @@ impl kit::PaletteRows for Hits<'_> {
                 (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album))
             }
         };
-        PaletteRow { title, detail, keys }
+        PaletteRow { title, detail, keys, dot: None }
     }
 }

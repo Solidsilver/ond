@@ -140,6 +140,34 @@ pub fn source_dot(ui: &Ui, center: Pos2, color: SourceColor) {
     ui.painter().circle_filled(center, DOT_R, dot_color(ui, color));
 }
 
+/// The room a dot takes in front of a line of text: the dot, and the gap
+/// between it and the first letter.
+pub const DOT_LEAD: f32 = 2.0 * DOT_R + 5.0;
+
+/// A source's dot leading a line of text that starts at `x` and is centred
+/// on `cy` (an artist under a cover, a row's second line). Returns where the
+/// text starts.
+pub fn source_dot_lead(ui: &Ui, x: f32, cy: f32, color: SourceColor) -> f32 {
+    source_dot(ui, pos2(x + DOT_R, cy), color);
+    x + DOT_LEAD
+}
+
+/// A source named inline, its dot then its name in `font` and `ink`, laid
+/// out as one item (the line of facts under an album's title, a heading
+/// over one source's part of a page). Not a control: it only says where
+/// something comes from.
+pub fn source_label(ui: &mut Ui, color: SourceColor, name: &str, font: FontId, ink: Color32) -> Response {
+    let galley = ui.painter().layout_no_wrap(name.to_owned(), font, ink);
+    let size = vec2(DOT_LEAD + galley.size().x, galley.size().y);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let x = source_dot_lead(ui, rect.left(), rect.center().y, color);
+        ui.painter().galley(pos2(x, rect.top()), galley, ink);
+    }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, name));
+    resp
+}
+
 /// Several sources' dots overlapping in a row centred on `center`, the
 /// first on top, each cut out of the one under it by a ring of `ground`
 /// (what they're drawn on). All sources' mark.
@@ -709,6 +737,41 @@ mod tests {
         h.get_by_label("Add source…").click();
         h.run();
         assert_eq!(h.state().1, Some(SourcePick::Add));
+    }
+
+    #[test]
+    fn a_source_label_draws_its_dot_before_its_name() {
+        let color = SourceColor::new(4);
+        let mut h = themed((), move |ui, _| {
+            source_label(ui, color, "Music folder", FontId::proportional(12.0), Tokens::of(ui).muted);
+        });
+        h.run();
+        let found = h.get_by_label("Music folder");
+        let dot = shapes_of(&h.output().shapes)
+            .into_iter()
+            .find_map(|s| match s {
+                egui::Shape::Circle(c) if c.fill == theme::source_color(color, false) => Some(c.center),
+                _ => None,
+            })
+            .expect("a dot in the source's colour");
+        let rect = found.rect();
+        assert!((dot.x - (rect.left() + DOT_R)).abs() < 0.5, "the dot leads the name");
+        assert!(rect.width() > DOT_LEAD, "and the name follows it");
+    }
+
+    /// Every shape in `clipped`, nested ones flattened.
+    fn shapes_of(clipped: &[egui::epaint::ClippedShape]) -> Vec<egui::Shape> {
+        fn flatten(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| flatten(s, out)),
+                other => out.push(other.clone()),
+            }
+        }
+        let mut out = Vec::new();
+        for c in clipped {
+            flatten(&c.shape, &mut out);
+        }
+        out
     }
 
     #[test]
