@@ -772,6 +772,55 @@ mod tests {
     }
 
     #[test]
+    fn late_saved_favourites_cannot_overwrite_live_results_from_the_same_source() {
+        use crate::bridge::Saved;
+        use crate::favorites::{SavedStarred, Starred};
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        let song = crate::test_tracks::track("1", "1", "Live favourite");
+        inject(
+            &mut app,
+            Msg::Source {
+                account: account(1),
+                session: 0,
+                message: Box::new(Msg::Starred { starred: Starred { songs: vec![song.clone()], ..Default::default() }, ratings: vec![("1".into(), 5)] }),
+            },
+        );
+        for a in [account(1), account(2)] {
+            inject(
+                &mut app,
+                Msg::Source {
+                    account: a,
+                    session: 0,
+                    message: Box::new(
+                        LibraryMsg::Saved(Box::new(Saved {
+                            starred: Some(SavedStarred { starred: Starred::default(), ratings: vec![("1".into(), 2)] }),
+                            ..Default::default()
+                        }))
+                        .into(),
+                    ),
+                },
+            );
+        }
+        assert!(app.favorites.is_on(StarKind::Song, &key(account(1), "1")));
+        assert_eq!(app.favorites.rating(&key(account(1), "1")), 5);
+        assert_eq!(app.favorites.rating(&key(account(2), "1")), 2, "another source still accepts its saved snapshot");
+        inject(
+            &mut app,
+            Msg::Source {
+                account: account(2),
+                session: 0,
+                message: Box::new(Msg::Starred { starred: Starred { songs: vec![song], ..Default::default() }, ratings: vec![("1".into(), 4)] }),
+            },
+        );
+        assert!(app.favorites.is_on(StarKind::Song, &key(account(2), "1")));
+        assert_eq!(app.favorites.rating(&key(account(1), "1")), 5);
+        assert_eq!(app.favorites.rating(&key(account(2), "1")), 4);
+    }
+
+    #[test]
     fn scope_changes_preserve_details_or_return_to_their_own_section() {
         let dir = tempfile::tempdir().unwrap();
         let one = server();

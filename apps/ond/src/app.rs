@@ -629,6 +629,9 @@ impl OndApp {
             Msg::Remote(r) => self.remote(r),
             Msg::Offline(m) => self.offline_msg(m),
             Msg::Starred { starred, ratings } => {
+                if let Some(account) = self.session.focus.filter(|a| self.multi.bridges.contains_key(a)) {
+                    self.multi.data.entry(account).or_default().served.starred = true;
+                }
                 self.data.served.starred = true;
                 self.load_favorites(starred, ratings);
             }
