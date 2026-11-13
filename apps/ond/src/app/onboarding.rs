@@ -1,9 +1,12 @@
-//! The first-run sheet: where Ond opens without a login to resume, and
+//! The first-run sheet: where Ond opens without a source to resume, and
 //! where signing out leads. It's the kit's [`onboarding`](fn@kit::onboarding)
-//! with the kinds of source Ond knows of, of which only Navidrome can be
-//! added yet; picking it shows the login form (`session`). Once the server
-//! answers, the sheet closes on the library: Ond holds one server, so
-//! there's no Add another and no step that would only say Done.
+//! with the kinds of source Ond knows of, of which Navidrome and a folder of
+//! music can be added yet. Picking Navidrome shows the login form
+//! (`session`); once the server answers, the sheet closes on the library.
+//! Picking a folder shows the folder form (`sources`); once its first scan
+//! has run (or the user carries on without waiting), the sheet closes on it.
+//! Ond holds one source live at a time, so there's no Add another and no
+//! step that would only say Done.
 //!
 //! The login form opened on its own, to sign in again over the library, is
 //! drawn in the same sheet, on the form with no way back to the tiles.
@@ -17,12 +20,14 @@ use shell::kit::{self, OnboardingEvent, OnboardingStep, SourceKind};
 /// The kinds of source the sheet offers, Navidrome first.
 pub(super) const KINDS: [SourceKind<'static>; 4] = [
     SourceKind { name: "Navidrome", icon: Icon::Server, blurb: "Your own server, at home or away.", available: true },
-    SourceKind { name: "Local folder", icon: Icon::Folder, blurb: "Music on this computer.", available: false },
+    SourceKind { name: "Music folder", icon: Icon::Folder, blurb: "Music on this computer. No server needed.", available: true },
     SourceKind { name: "Jellyfin", icon: Icon::Server, blurb: "A Jellyfin server.", available: false },
     SourceKind { name: "Plex", icon: Icon::Server, blurb: "A Plex server.", available: false },
 ];
 /// Navidrome's place in [`KINDS`]: the login form's kind.
 const NAVIDROME: usize = 0;
+/// A folder of music's place in [`KINDS`]: the folder form's kind.
+pub(super) const FOLDER: usize = 1;
 
 /// Ond signs in to one server at a time until it holds several, so the
 /// sheet doesn't offer to add another.
@@ -35,6 +40,8 @@ pub(super) struct Onboard {
     /// The server signed in to from the sheet: its account and its
     /// address.
     pub(super) added: Option<(AccountId, String)>,
+    /// The folder form, kept while the sheet is up.
+    pub(super) folders: super::sources::FolderForm,
 }
 
 impl OndApp {
@@ -61,8 +68,10 @@ impl OndApp {
             if bar.double_clicked() {
                 crate::chrome::title_double_click(ui.ctx());
             }
-            let waiting = self.login.as_ref().is_some_and(|f| f.busy);
+            let folder_busy = self.onboarding.as_ref().is_some_and(|o| o.folders.busy);
+            let waiting = self.login.as_ref().is_some_and(|f| f.busy) || folder_busy;
             let (step, back) = match &self.onboarding {
+                Some(o) if o.step == OnboardingStep::Form(FOLDER) => (o.step, true),
                 // The form needs its fields; without them (the server went
                 // away before it answered) the tiles lead back to it.
                 Some(o) if matches!(o.step, OnboardingStep::Form(_)) && self.login.is_none() => (OnboardingStep::Kinds, false),
@@ -91,9 +100,11 @@ impl OndApp {
                 back,
                 cancel: false,
                 waiting,
-                form_height: FORM_H,
+                form_height: if step == OnboardingStep::Form(FOLDER) { super::sources::FOLDER_FORM_H } else { FORM_H },
             };
-            if let Some(event) = kit::onboarding(ui, &sheet, |ui, _| self.login_form(ui)) {
+            let folder = step == OnboardingStep::Form(FOLDER);
+            let drawn = kit::onboarding(ui, &sheet, |ui, _| if folder { self.folder_form(ui) } else { self.login_form(ui) });
+            if let Some(event) = drawn {
                 self.actions.push(Action::Onboarding(event));
             }
         });
@@ -103,6 +114,7 @@ impl OndApp {
     pub(super) fn onboarding_event(&mut self, event: OnboardingEvent) {
         let Some(sheet) = self.onboarding.as_mut() else { return };
         match event {
+            OnboardingEvent::Picked(FOLDER) => sheet.step = OnboardingStep::Form(FOLDER),
             OnboardingEvent::Picked(kind) if KINDS.get(kind).is_some_and(|k| k.available) => {
                 sheet.step = OnboardingStep::Form(kind);
                 // The form is kept while the sheet is up; this is for one
@@ -116,7 +128,7 @@ impl OndApp {
             OnboardingEvent::Picked(_) => {}
             // Not while the form waits on the server: the sheet doesn't
             // offer it then.
-            OnboardingEvent::Back if self.login.as_ref().is_some_and(|f| f.busy) => {}
+            OnboardingEvent::Back if self.login.as_ref().is_some_and(|f| f.busy) || sheet.folders.busy => {}
             OnboardingEvent::Back | OnboardingEvent::AddAnother => sheet.step = OnboardingStep::Kinds,
             OnboardingEvent::Done | OnboardingEvent::Open(_) if sheet.added.is_some() => self.onboarding = None,
             // Ond's sheet is never over a server in view, so it offers no
@@ -125,11 +137,14 @@ impl OndApp {
         }
     }
 
-    /// A server answered the login form: the sheet, if it's up, moves on
-    /// as the kit says, which without Add another is to close on the
-    /// library.
+    /// A source connected: the sheet, if it's up, moves on as the kit says,
+    /// which without Add another is to close on the library.
     pub(super) fn source_added(&mut self, server: &str, account: AccountId) {
         let Some(sheet) = self.onboarding.as_mut() else { return };
+        // A folder just added stays on its form while its first scan runs.
+        if sheet.folders.busy && sheet.folders.account == Some(account) {
+            return;
+        }
         match OnboardingStep::after_adding(ADD_ANOTHER) {
             Some(step) => {
                 sheet.added = Some((account, server.to_owned()));

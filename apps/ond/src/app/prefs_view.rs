@@ -130,11 +130,11 @@ pub enum PrefsAction {
     Experimental(Experimental),
     /// How the queue behaves.
     Queue(crate::queue::QueuePrefs),
-    /// The server's name in the Sources tab and the switcher; empty, or its
-    /// host, goes back to the host.
-    SourceName(String),
-    /// The server's dot colour.
-    SourceColor(accounts::SourceColor),
+    /// A source's name in the Sources tab and the switcher; empty, or its
+    /// default name (a server's host, a folder's name), goes back to that.
+    SourceName(accounts::AccountId, String),
+    /// A source's dot colour.
+    SourceColor(accounts::AccountId, accounts::SourceColor),
 }
 
 impl OndApp {
@@ -155,8 +155,8 @@ impl OndApp {
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
                 // A managed server is the Nix config's, name and all.
-                PrefsAction::SourceName(_) => return self.prefs.managed("server") || self.prefs.managed("sources"),
-                PrefsAction::SourceColor(_) => return false,
+                PrefsAction::SourceName(..) => return self.prefs.managed("server") || self.prefs.managed("sources"),
+                PrefsAction::SourceColor(..) => return false,
                 // Partly managed groups: the managed parts are put back.
                 PrefsAction::WaveformBars(_)
                 | PrefsAction::Experimental(_)
@@ -207,11 +207,11 @@ impl OndApp {
                 self.prefs.edit(|s| s.scrobble = on);
             }
             PrefsAction::Diagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
-            PrefsAction::SourceName(name) => {
+            PrefsAction::SourceName(id, name) => {
                 let edit = |s: &mut crate::settings::Settings| {
                     let name = name.trim();
-                    let host = super::diagnostics::server_host(s.server());
-                    s.set_source_name((!name.is_empty() && name != host).then(|| name.to_owned()));
+                    let default = s.source(id).map(super::sidebar::default_name).unwrap_or_default();
+                    s.set_source_name(id, (!name.is_empty() && name != default).then(|| name.to_owned()));
                 };
                 self.prefs.edit(edit);
                 // The session's copy is what the switcher and Settings draw.
@@ -219,10 +219,10 @@ impl OndApp {
                     edit(s);
                 }
             }
-            PrefsAction::SourceColor(color) => {
-                self.prefs.edit(|s| s.set_source_color(color));
+            PrefsAction::SourceColor(id, color) => {
+                self.prefs.edit(|s| s.set_source_color(id, color));
                 if let Some(s) = self.session.settings.as_mut() {
-                    s.set_source_color(color);
+                    s.set_source_color(id, color);
                 }
             }
             PrefsAction::Experimental(x) => self.prefs.edit(|s| s.experimental = x),

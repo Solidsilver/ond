@@ -52,11 +52,26 @@ pub struct Session {
     pub server_info: String,
     /// Local source folders missing or unreadable on the last scan.
     pub folder_missing: Vec<std::path::PathBuf>,
+    /// Files the last scan of local folders couldn't read.
+    pub skipped: usize,
 }
 
 impl Session {
     pub fn account(&self) -> Option<accounts::AccountId> {
         self.settings.as_ref().and_then(|s| s.account())
+    }
+
+    /// What the source in use is called and how it syncs, from its
+    /// configured kind (a Navidrome server before anything is configured).
+    pub fn kind(&self) -> crate::source::Kind {
+        let kind = self.settings.as_ref().and_then(|s| s.primary()).map(|e| e.kind).unwrap_or_default();
+        crate::source::Kind::of(kind)
+    }
+
+    /// What the source in use can do: its own word once connected, else
+    /// what its kind can (so a local folder shows no hearts while it opens).
+    pub fn caps(&self) -> crate::source::Capabilities {
+        self.source.as_ref().map_or_else(|| self.kind().capabilities, |s| s.capabilities())
     }
 
     /// The source, while the server answers.
@@ -86,6 +101,7 @@ impl OndApp {
         } else {
             settings.sources.push(crate::settings::SourceEntry::subsonic(source.account(), "", ""));
         }
+        let stores_changed = stores.is_some();
         if new_account || stores.is_some() {
             // Drop the old account's UI state before sync fills the new mirror.
             // A second library read could arrive after sync and blank its albums.
@@ -93,7 +109,10 @@ impl OndApp {
             self.forget_library();
         }
         if let Some(stores) = stores {
-            let store = self.bridge.install_storage(source.account(), stores);
+            // Another configured source keeps its library on disk: it's only
+            // not the one in use. One that's gone from the list is removed.
+            let keep: Vec<accounts::AccountId> = settings.sources.iter().map(|s| s.id).collect();
+            let store = self.bridge.install_storage(source.account(), stores, &keep);
             self.analysis.records.clear();
             self.analysis.version += 1;
             self.analysis.loaded = false;
@@ -106,14 +125,14 @@ impl OndApp {
         }
         let limit = self.prefs.snapshot().offline_limit_gb.map(|gb| gb * 1_000_000_000);
         self.downloads.switch_account(settings.account_id(), Some(source.account()), limit, &self.bridge);
-        self.session.server_label = if settings.username().is_empty() {
-            settings.source_name().map(str::to_owned).unwrap_or_else(|| server.clone())
-        } else {
-            format!("{} · {server}", settings.username())
-        };
+        // The server's address and user, when a server is the source in use.
+        let login = settings.primary().filter(|e| e.kind == crate::settings::SourceKind::Subsonic).map(|e| (e.server.clone(), e.username.clone()));
+        let (address, user) = login.clone().unwrap_or_default();
+        self.session.server_label =
+            if user.is_empty() { settings.source_name().map(str::to_owned).unwrap_or_else(|| server.clone()) } else { format!("{user} · {server}") };
         self.session.server_info = server.clone();
         self.login = None;
-        self.source_added(settings.server(), source.account());
+        self.source_added(&address, source.account());
         // Always a new pass, even if the flags say one runs: any still
         // running is from before the server went away, and the bridge
         // has this one replace it.
@@ -123,7 +142,7 @@ impl OndApp {
         self.bridge.fetch_home(source.clone());
         self.art.set_source(source.clone());
         self.now_playing.set_source(source.clone());
-        self.output.connected(settings.server());
+        self.output.connected(&address);
         // A store still opening gets the server once it's open.
         self.connect_downloads(&source);
         let url = source.clone();
@@ -142,15 +161,20 @@ impl OndApp {
         self.session.connecting = false;
         self.session.sign_in = None;
         self.session.folder_missing.clear();
+        if stores_changed {
+            self.session.skipped = 0;
+        }
         self.session.source = Some(source.clone());
-        if settings.primary().is_some_and(|e| e.kind != crate::settings::SourceKind::Local) {
-            self.prefs.set_login(settings.server(), settings.username(), source.account());
-        } else if let Some(entry) = settings.primary().cloned() {
-            self.prefs.edit(|s| {
-                if s.sources.is_empty() {
-                    s.sources.push(entry.clone());
+        match (&login, settings.primary().cloned()) {
+            (Some((server, user)), _) => self.prefs.set_login(server, user, source.account()),
+            (None, Some(entry)) => self.prefs.edit(|s| {
+                if !s.sources.iter().any(|e| e.id == entry.id) {
+                    s.sources.insert(0, entry.clone());
                 }
-            });
+                s.make_primary(entry.id);
+                s.signed_out = false;
+            }),
+            (None, None) => {}
         }
         self.session.settings = Some(*settings);
         if !self.session.online {

@@ -185,6 +185,7 @@ impl Prefs {
                 }
                 None => s.sources.insert(0, entry),
             }
+            s.make_primary(account);
             s.signed_out = false;
         });
     }

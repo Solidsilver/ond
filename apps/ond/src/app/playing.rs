@@ -116,6 +116,8 @@ pub enum Origin {
     Streamed(Option<audio::Transcode>),
     /// Streamed earlier and kept in the stream cache (played offline).
     Cached,
+    /// A file in a folder of music on this computer.
+    File,
 }
 
 impl Origin {
@@ -131,6 +133,7 @@ impl Origin {
             Origin::Streamed(None) => "Streaming",
             Origin::Streamed(Some(_)) => "Streaming, converted",
             Origin::Cached => "Stream cache",
+            Origin::File => "On this computer",
         }
     }
 
@@ -144,15 +147,23 @@ impl Origin {
             Origin::Streamed(None) => with_kind("Streaming"),
             Origin::Streamed(Some(t)) => format!("Streaming, converted to {} {} kbps", t.format.to_uppercase(), t.kbps),
             Origin::Cached => with_kind("Stream cache"),
+            Origin::File => with_kind("On this computer"),
         }
     }
 }
 
 /// Where `src` plays from: a file in the stream cache, another file (a
-/// download), or the server.
-pub(super) fn origin(src: &TrackSource, cache: &StreamCache) -> Origin {
+/// download, from a source whose music `downloads`; else the source's own
+/// file on this computer), or the server.
+pub(super) fn origin(src: &TrackSource, cache: &StreamCache, downloads: bool) -> Origin {
     let Some(path) = src.url.strip_prefix("file://") else { return Origin::Streamed(src.transcode.clone()) };
-    if std::path::Path::new(path).starts_with(cache.dir()) { Origin::Cached } else { Origin::Downloaded }
+    if std::path::Path::new(path).starts_with(cache.dir()) {
+        Origin::Cached
+    } else if downloads {
+        Origin::Downloaded
+    } else {
+        Origin::File
+    }
 }
 
 /// `track`'s file in the stream cache, as it plays now.

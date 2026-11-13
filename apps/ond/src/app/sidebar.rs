@@ -10,6 +10,17 @@ use accounts::{AccountId, OfflineReason, Scope, SourceColor, SourceState};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use shell::kit::{self, info_row};
 
+/// What a source is called when it hasn't been given a name: a server's
+/// host, a folder source's first folder.
+pub(super) fn default_name(entry: &crate::settings::SourceEntry) -> String {
+    match entry.kind {
+        crate::settings::SourceKind::Subsonic => super::diagnostics::server_host(&entry.server).to_owned(),
+        crate::settings::SourceKind::Local => {
+            entry.folders.first().and_then(|f| f.file_name()).map_or_else(|| "Music folder".to_owned(), |n| n.to_string_lossy().into_owned())
+        }
+    }
+}
+
 /// Width of the icon rail (the full sidebar's is the user's, see `layout`).
 pub const RAIL_W: f32 = 52.0;
 /// The footer's buttons (and the server switcher's height, in its one-line
@@ -40,8 +51,12 @@ impl OndApp {
         ui.add_space(18.0);
 
         let active = active_place(&self.ui.nav);
+        let caps = self.session.caps();
         self.section(ui, "Library");
         for (i, (label, route, _)) in PLACES.into_iter().enumerate() {
+            if !place_shown(&route, caps) {
+                continue;
+            }
             let on = active == Some(i);
             let is_offline = route == Route::Offline;
             let resp = self.place(ui, label, on);
@@ -54,25 +69,10 @@ impl OndApp {
             }
         }
         ui.add_space(18.0);
-        // "Playlists" with a + for a new one, in line with the section label.
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.set_height(18.0);
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("Playlists").font(FontId::new(11.0, semibold())).color(t.muted));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icons::sized_button(ui, Icon::Plus, "New Playlist (⌘N)", vec2(20.0, 18.0), 9.0, Some(t.muted)).clicked() {
-                    self.actions.push(Action::NewPlaylist);
-                }
-            });
-        });
-        ui.add_space(4.0);
         let bottom_h = if self.update.is_some() { 34.0 + UPDATE_H + 6.0 } else { 34.0 };
-        let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
-        egui::ScrollArea::vertical()
-            .id_salt("playlists")
-            .max_height((ui.available_height() - bottom_h).max(40.0))
-            .show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
+        if caps.playlists {
+            self.playlists_section(ui, bottom_h);
+        }
 
         // The footer: the server's state on the left (click for details and
         // Sign out), keyboard shortcuts and Settings on the right.
@@ -91,6 +91,30 @@ impl OndApp {
                 self.update_notice(ui, v);
             }
         });
+    }
+
+    /// "Playlists" with a + for a new one, and the playlists under it, for a
+    /// source that holds them.
+    fn playlists_section(&mut self, ui: &mut Ui, bottom_h: f32) {
+        let t = Tokens::of(ui);
+        // "Playlists" with a + for a new one, in line with the section label.
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.set_height(18.0);
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Playlists").font(FontId::new(11.0, semibold())).color(t.muted));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::sized_button(ui, Icon::Plus, "New Playlist (⌘N)", vec2(20.0, 18.0), 9.0, Some(t.muted)).clicked() {
+                    self.actions.push(Action::NewPlaylist);
+                }
+            });
+        });
+        ui.add_space(4.0);
+        let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
+        egui::ScrollArea::vertical()
+            .id_salt("playlists")
+            .max_height((ui.available_height() - bottom_h).max(40.0))
+            .show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
     }
 
     /// A newer Ond is out, above the footer: click for Settings › About,
@@ -118,12 +142,16 @@ impl OndApp {
         ui.spacing_mut().item_spacing.y = 4.0;
         let size = vec2(32.0, 32.0);
         let active = active_place(&self.ui.nav);
+        let caps = self.session.caps();
         ui.vertical_centered(|ui| {
             if icons::sized_button(ui, Icon::Search, "Search (⌘K)", size, 14.0, Some(t.muted)).clicked() {
                 self.actions.push(Action::OpenPalette);
             }
             ui.add_space(12.0);
             for (i, (label, route, icon)) in PLACES.into_iter().enumerate() {
+                if !place_shown(&route, caps) {
+                    continue;
+                }
                 let on = active == Some(i);
                 let resp = icons::sized_button(ui, icon, label, size, 15.0, Some(if on { t.text } else { t.muted }));
                 if on {
@@ -133,6 +161,9 @@ impl OndApp {
                 if resp.clicked() {
                     self.actions.push(Action::Go(route));
                 }
+            }
+            if !caps.playlists {
+                return;
             }
             ui.add_space(12.0);
             let lists = icons::sized_button(ui, Icon::List, "Playlists", size, 14.0, Some(t.muted));
@@ -165,10 +196,10 @@ impl OndApp {
         let source_state = state.source_state();
         let id = self.source_id();
         let (name, color) = self.source_look(&state);
-        let sources =
-            [kit::SourceInfo { id, name: &name, kind: "Subsonic server", icon: Icon::Disc, color, state: &source_state, detail: Some(state.label()) }];
+        let kind = self.session.kind();
+        let sources = [kit::SourceInfo { id, name: &name, kind: kind.name, icon: kind.icon, color, state: &source_state, detail: Some(state.label()) }];
         let scope = Scope::only(id);
-        let tooltip = state.tooltip();
+        let tooltip = state.tooltip(self.session.caps().network);
         let switcher =
             kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Line, add: false, manage: true, tooltip: Some(&tooltip) };
         let picked = kit::source_switcher(ui, &switcher, place, |ui| self.server_menu(ui, &state));
@@ -202,24 +233,29 @@ impl OndApp {
     }
 
     pub(super) fn server_state(&self) -> ServerState {
-        let host = self.session.settings.as_ref().map(|s| super::diagnostics::server_host(s.server())).unwrap_or_default();
+        // A server's host; for a source that isn't one, its default name.
+        let host = self.session.settings.as_ref().and_then(|s| s.primary()).map(default_name).unwrap_or_default();
+        let scans = self.session.kind().scans;
         if let Some(p) = self.sync.progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
+            let (done, total) = (crate::fmt::thousands(p.done), crate::fmt::thousands(p.total));
             // Short enough for the footer; the counts are in the tooltip and popover.
             let label = match fraction {
+                _ if scans => format!("Scanning · {done} tracks"),
                 Some(f) => format!("Syncing · {:.0}%", 100.0 * f),
                 None => "Syncing…".to_owned(),
             };
-            let (done, total) = (crate::fmt::thousands(p.done), crate::fmt::thousands(p.total));
             let what = match p.unit {
                 crate::sync::Unit::Tracks => "tracks",
                 crate::sync::Unit::Albums => "albums",
             };
-            let detail = format!("{}\n{done} of {total} {what}", p.label());
-            return ServerState::Syncing { host, label, detail, fraction };
+            let detail =
+                if scans { format!("Scanning the music folder\n{done} of {total} {what}") } else { format!("{}\n{done} of {total} {what}", p.label()) };
+            return ServerState::Syncing { host, label, detail, fraction, scans };
         }
         if self.session.online && (self.sync.albums || self.sync.tracks) {
-            return ServerState::Syncing { host, label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None };
+            let (label, detail) = if scans { ("Scanning…", "Looking for music") } else { ("Syncing library…", "Fetching the album list") };
+            return ServerState::Syncing { host, label: label.into(), detail: detail.into(), fraction: None, scans };
         }
         if !self.session.folder_missing.is_empty() {
             return ServerState::FolderMissing { host };
@@ -245,10 +281,19 @@ impl OndApp {
         let t = Tokens::of(ui);
         // Opening the popover refreshes the round trip if it's old.
         let mut picked = (self.session.online && self.diagnostics.latency_stale()).then_some(ServerRow::MeasureLatency);
-        let (server, user) = self.session.settings.as_ref().map(|s| (s.server().to_owned(), s.username().to_owned())).unwrap_or_default();
+        let caps = self.session.caps();
+        let kind = self.session.kind();
+        let entry = self.session.settings.as_ref().and_then(|s| s.primary());
+        // Under the name: a server's address and user, or a folder source's folders.
+        let (server, user) = match entry {
+            Some(e) if caps.network => (e.server.clone(), e.username.clone()),
+            Some(e) => (e.folders.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", "), String::new()),
+            None => Default::default(),
+        };
+        let (title, _) = self.source_look(state);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(state.host()).font(FontId::new(13.0, semibold())).color(t.text));
+            ui.label(egui::RichText::new(title).font(FontId::new(13.0, semibold())).color(t.text));
         });
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -257,6 +302,7 @@ impl OndApp {
         });
         ui.add_space(10.0);
         let status = match state {
+            ServerState::Connected { .. } | ServerState::Syncing { .. } if !caps.network => "Ready".to_owned(),
             ServerState::Connected { .. } | ServerState::Syncing { .. } => match self.diagnostics.latency() {
                 Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
                 None => "Connected".to_owned(),
@@ -282,22 +328,24 @@ impl OndApp {
         if !user.is_empty() {
             info_row(ui, "User", &user, t.text);
         }
-        if !self.session.server_info.is_empty() {
+        if !self.session.server_info.is_empty() && caps.network {
             info_row(ui, "Server", &self.session.server_info, t.text);
         }
         let synced = match state {
-            ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
+            ServerState::Syncing { detail, scans, .. } => {
+                format!("{} {}", if *scans { "Scanning" } else { "Syncing" }, detail.lines().last().unwrap_or_default())
+            }
             _ => match self.sync.last {
                 Some(at) => at.format("%-I:%M %p").to_string(),
                 None if self.session.source.is_some() => "At launch".to_owned(),
                 None => "Not yet".to_owned(),
             },
         };
-        info_row(ui, "Last sync", &synced, t.text);
+        info_row(ui, if kind.scans { "Last scan" } else { "Last sync" }, &synced, t.text);
         let action = if self.sync.tracks {
-            Some("Stop sync")
+            Some(if kind.scans { "Stop scan" } else { "Stop sync" })
         } else if self.session.source.is_some() && self.session.online {
-            Some("Sync now")
+            Some(kind.sync)
         } else {
             None
         };
@@ -320,6 +368,12 @@ impl OndApp {
         ui.add_space(4.0);
         if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…") {
             picked = Some(ServerRow::SignInAgain);
+        }
+        // A folder on this computer has no connection to drop and no
+        // sign-in: neither row is offered for it.
+        if !caps.network {
+            ui.add_space(4.0);
+            return picked;
         }
         let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
         if !self.prefs.managed("work_offline") && menu_item(ui, label) {
@@ -430,13 +484,30 @@ impl ViewCtx<'_> {
             }
             resp.context_menu(|ui| {
                 let kept = self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
-                super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, self.actions);
+                super::browse::collection_menu(
+                    ui,
+                    &super::browse::Collection::Playlist(p.id.clone()),
+                    true,
+                    self.session.caps().downloads.then_some(kept),
+                    None,
+                    self.actions,
+                );
                 if mine {
                     ui.separator();
                     self.playlist_edit_items(ui, &p.id, &p.name);
                 }
             });
         }
+    }
+}
+
+/// Whether a source that can do `caps` has anything at `route`: Favorites
+/// for one that holds hearts, Offline for one whose music downloads.
+pub(super) fn place_shown(route: &Route, caps: crate::source::Capabilities) -> bool {
+    match route {
+        Route::Favorites => caps.stars,
+        Route::Offline => caps.downloads,
+        _ => true,
     }
 }
 
@@ -499,6 +570,8 @@ pub(super) enum ServerState {
         label: String,
         detail: String,
         fraction: Option<f32>,
+        /// A scan of folders on this computer, not a server's sync.
+        scans: bool,
     },
     /// Not answering; reconnecting in the background.
     Offline {
@@ -548,8 +621,9 @@ impl ServerState {
         }
     }
 
-    fn tooltip(&self) -> String {
+    fn tooltip(&self, network: bool) -> String {
         match self {
+            ServerState::Connected { host } if !network => format!("{host}: music on this computer. Click for details."),
             ServerState::Connected { host } => format!("Connected to {host}. Click for details."),
             ServerState::Syncing { detail, .. } => format!("{detail}\nYou can browse while it runs. New albums and tracks appear as they arrive."),
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
@@ -566,6 +640,7 @@ impl ServerState {
     pub(super) fn source_state(&self) -> SourceState {
         match self {
             ServerState::Connected { .. } => SourceState::Online,
+            ServerState::Syncing { scans: true, .. } => SourceState::Scanning,
             ServerState::Syncing { fraction, .. } => SourceState::Syncing(*fraction),
             ServerState::Offline { .. } => SourceState::Offline(OfflineReason::Unreachable),
             ServerState::FolderMissing { .. } => SourceState::FolderMissing,

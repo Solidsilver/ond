@@ -181,7 +181,7 @@ impl ViewCtx<'_> {
         };
         let slice = data.tracks.album(id);
         let tracks: &[Track] = slice.map_or(&[], |s| s);
-        if self.download_key(ui) {
+        if self.session.caps().downloads && self.download_key(ui) {
             let kept = self.downloads.snap.pin(&offline::Pin::Album(id.to_owned())).is_some();
             self.actions.push(Action::Offline(OfflineAction::Keep(Keep::Album(id.to_owned()), !kept)));
         }
@@ -334,8 +334,9 @@ impl ViewCtx<'_> {
         if let Some(a) = super::browse::play_shuffle(ui) {
             self.actions.push(Action::Album(album.id.clone(), a));
         }
+        let caps = self.session.caps();
         let loved = self.favorites.is_on(StarKind::Album, &album.id);
-        if heart_button(ui, loved, 30.0, 14.0).clicked() {
+        if caps.stars && heart_button(ui, loved, 30.0, 14.0).clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Album, id: album.id.clone(), track: None, name: None });
         }
         let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
@@ -343,20 +344,22 @@ impl ViewCtx<'_> {
         let kept = self.downloads.snap.pin(&pin).is_some();
         egui::Popup::menu(&more).show(|ui| {
             let c = super::browse::Collection::Album(album.id.clone());
-            super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
+            super::browse::collection_menu(ui, &c, false, caps.downloads.then_some(kept), Some("⇧⌘D"), self.actions);
             if !page.facts.summary.complete() && page.analysing == 0 && !tracks.is_empty() {
                 ui.separator();
                 if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {
                     self.actions.push(Action::Analysis(AnalysisAction::Tracks(tracks.to_vec())));
                 }
             }
-            if !tracks.is_empty() {
+            if !tracks.is_empty() && caps.playlists {
                 ui.separator();
                 self.add_to_playlist_menu(ui, tracks);
             }
         });
         ui.add_space(6.0);
-        self.pin_status(ui, &pin);
+        if caps.downloads {
+            self.pin_status(ui, &pin);
+        }
     }
 
     /// "Album details ›": the album's credits and its per-track measurements,

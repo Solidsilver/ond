@@ -226,7 +226,9 @@ impl OndApp {
                     self.actions.push(Action::Artist(name.to_owned(), a));
                 }
                 // Only artists the server knows by id can be loved.
-                if let Route::Artist { id: Some(id), .. } = route {
+                if let Route::Artist { id: Some(id), .. } = route
+                    && self.session.caps().stars
+                {
                     let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
                     if crate::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
                         self.actions.push(Action::ToggleStar {
@@ -238,7 +240,7 @@ impl OndApp {
                     }
                 }
                 let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(Tokens::of(ui).accent));
-                egui::Popup::menu(&more).show(|ui| collection_menu(ui, &Collection::Artist(name.to_owned()), false, false, None, &mut self.actions));
+                egui::Popup::menu(&more).show(|ui| collection_menu(ui, &Collection::Artist(name.to_owned()), false, None, None, &mut self.actions));
             });
         }
     }
@@ -335,8 +337,10 @@ impl Collection {
 
 /// The same queue and download items wherever a collection has a menu. With
 /// `play` the menu leads with Play and Shuffle (context menus); header menus
-/// skip them, having those buttons beside. `shortcut` labels the download item.
-pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: bool, shortcut: Option<&str>, actions: &mut Vec<Action>) {
+/// skip them, having those buttons beside. `kept` says whether it's
+/// downloaded, `None` for a source whose music doesn't download (no item);
+/// `shortcut` labels the download item.
+pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: Option<bool>, shortcut: Option<&str>, actions: &mut Vec<Action>) {
     let mut items = Vec::new();
     if play {
         match c {
@@ -351,7 +355,7 @@ pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: bool, shor
             actions.push(c.action(action));
         }
     }
-    if let Some(keep) = c.keep() {
+    if let (Some(keep), Some(kept)) = (c.keep(), kept) {
         ui.separator();
         offline_item(ui, kept, shortcut, || keep, actions);
     }
@@ -505,7 +509,7 @@ impl ViewCtx<'_> {
 
     /// An album's right-click menu, on its tile or its row.
     pub(super) fn album_menu(&mut self, ui: &mut Ui, album: &library::Album, kept: bool) {
-        collection_menu(ui, &Collection::Album(album.id.clone()), true, kept, None, self.actions);
+        collection_menu(ui, &Collection::Album(album.id.clone()), true, self.session.caps().downloads.then_some(kept), None, self.actions);
         if let Some(name) = &album.artist {
             ui.separator();
             if ui.button(format!("Go to {name}")).clicked() {

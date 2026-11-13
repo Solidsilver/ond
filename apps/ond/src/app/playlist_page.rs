@@ -62,7 +62,7 @@ impl ViewCtx<'_> {
                     let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
                     egui::Popup::menu(&more).show(|ui| {
                         let c = super::browse::Collection::Playlist(id.to_owned());
-                        super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
+                        super::browse::collection_menu(ui, &c, false, self.session.caps().downloads.then_some(kept), Some("⇧⌘D"), self.actions);
                         if mine {
                             ui.separator();
                             self.playlist_edit_items(ui, id, name);

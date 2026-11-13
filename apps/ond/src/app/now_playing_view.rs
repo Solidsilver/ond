@@ -188,7 +188,7 @@ impl ViewCtx<'_> {
             let title = elide(ui, &track.title, FontId::new(20.0, semibold()), t.text, width - 36.0);
             let (r, _) = ui.allocate_exact_size(vec2(width - 32.0, title.size().y), Sense::hover());
             ui.painter().galley(r.min, title, t.text);
-            if heart_button(ui, loved, 26.0, 13.0).clicked() {
+            if self.session.caps().stars && heart_button(ui, loved, 26.0, 13.0).clicked() {
                 self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: track.id.clone(), track: Some(Box::new(track.clone())), name: None });
             }
         });

@@ -898,11 +898,37 @@ fn every_view_names_its_controls() {
     ] {
         reset(&mut h, FULL, Route::Recent);
         app_mut(&mut h).login = login;
-        app_mut(&mut h).onboarding = step.map(|step| onboarding::Onboard { step, added: None });
+        app_mut(&mut h).onboarding = step.map(|step| onboarding::Onboard { step, ..Default::default() });
         h.run_steps(2);
         assert!(h.query_by_label_contains("Where's your music?").is_some() || h.query_by_label("Navidrome").is_some(), "the sheet is drawn");
         h.check_accessibility();
     }
+    // A folder of music's form: empty, with folders, and scanning.
+    for (folders, busy) in
+        [(Vec::new(), false), (vec![std::path::PathBuf::from("/Users/demo/Music")], false), (vec![std::path::PathBuf::from("/Users/demo/Music")], true)]
+    {
+        reset(&mut h, FULL, Route::Recent);
+        let app = app_mut(&mut h);
+        app.login = Some(form());
+        let folders = sources::FolderForm { folders, busy, ..Default::default() };
+        app.onboarding = Some(onboarding::Onboard { step: shell::kit::OnboardingStep::Form(onboarding::FOLDER), folders, ..Default::default() });
+        h.run_steps(2);
+        assert!(h.query_by_label("Choose folder…").is_some(), "the folder form is drawn");
+        h.check_accessibility();
+    }
+    // A folder of music in use: the library, an album, and its Settings.
+    for route in [Route::Albums, Route::Album(album_id(0))] {
+        reset(&mut h, FULL, route);
+        use_folder(app_mut(&mut h));
+        h.run_steps(2);
+        h.check_accessibility();
+    }
+    reset(&mut h, FULL, Route::Recent);
+    use_folder(app_mut(&mut h));
+    app_mut(&mut h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.check_accessibility();
+    use_server(app_mut(&mut h));
     for section in [
         settings_page::Section::Appearance,
         settings_page::Section::Playback,
@@ -1081,8 +1107,49 @@ fn a_managed_server_is_locked_in_the_sources_tab() {
     h.run_steps(2);
     assert!(h.query_by_label("Rename").is_none());
     h.get_by_label("Sign out…");
-    app_mut(&mut h).actions.push(Action::Prefs(PrefsAction::SourceName("Elsewhere".into())));
+    app_mut(&mut h).actions.push(Action::Prefs(PrefsAction::SourceName(crate::test_tracks::account(), "Elsewhere".into())));
     h.run_steps(2);
     assert_eq!(app_mut(&mut h).prefs.snapshot().source_name(), None, "locked");
+    *h.state_mut() = None;
+}
+
+/// A folder of music in use hides what it can't do (hearts, downloads,
+/// playlists, Favorites and Offline, Work Offline and Sign out, scrobbling
+/// and streaming settings), and its Sources row rescans and asks before
+/// removing it, saying the music files are kept.
+#[test]
+fn a_folder_source_hides_what_it_cant_do_and_says_its_files_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Album(album_id(0)));
+    assert!(h.query_by_label("Favorites").is_some() && h.query_by_label("Offline").is_some(), "a server has both");
+    use_folder(app_mut(&mut h));
+    h.run_steps(3);
+    for gone in ["Favorites", "Offline", "Playlists", "New Playlist (⌘N)", "Love", "Unlove"] {
+        assert!(h.query_by_label(gone).is_none(), "{gone} is hidden for a folder");
+    }
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Music").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Rescan").is_some());
+    assert!(h.query_by_label("Go offline").is_none() && h.query_by_label("Sign out…").is_none());
+    egui::Popup::close_all(&h.ctx);
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Playback));
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Scrobble").is_none() && h.query_by_label("Quality").is_none());
+    assert!(h.query_by_label("Account").is_none() && h.query_by_label("Offline").is_none(), "no server's sections");
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.get_by_label_contains("Music, Music folder, ").click();
+    h.run_steps(2);
+    h.get_by_label("Rescan");
+    assert!(h.query_by_label("Sign out…").is_none());
+    h.get_by_label("Remove…").click();
+    h.run_steps(3);
+    assert!(matches!(app_mut(&mut h).ui.overlay, Some(dialogs::Overlay::RemoveSource { .. })));
+    assert!(h.query_by_label_contains("Your music files are kept").is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(matches!(app_mut(&mut h).ui.overlay, Some(dialogs::Overlay::Settings)), "No goes back to Settings");
+    use_server(app_mut(&mut h));
     *h.state_mut() = None;
 }

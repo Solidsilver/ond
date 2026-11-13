@@ -4,15 +4,17 @@
 //! account) lives here; the popovers keep only what's needed in the moment.
 
 use super::seek::{WaveGrid, paint_wave};
-use super::{Action, OndApp};
+use super::{Action, FolderTarget, OndApp, SourceAction};
 use super::{AnalysisAction, OfflineAction, OutputAction, PrefsAction, WindowAction};
 use crate::icons::{self, Icon};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::queue::{AddAt, ClearWhat, NextAt, OnPlay, Preset};
+use crate::settings::SourceKind;
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
 use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
 use crate::widgets::{Head, ROW_PAD, choice, divider, group, managed, menu_label, row_with, secondary, secondary_danger, setting, switch, thin_slider};
+use accounts::SourceState;
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use shell::kit::{self, readout, step_slider};
 
@@ -62,11 +64,26 @@ impl Section {
 }
 
 impl OndApp {
+    /// The sections that apply to the source in use: Offline for one whose
+    /// music downloads or that can be unreachable, Account for a server.
+    fn sections(&self) -> Vec<Section> {
+        let caps = self.session.caps();
+        Section::ALL
+            .into_iter()
+            .filter(|s| match s {
+                Section::Offline => caps.downloads || caps.network,
+                Section::Account => caps.network,
+                _ => true,
+            })
+            .collect()
+    }
+
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
-        let labels = Section::ALL.map(Section::label);
-        let at = Section::ALL.iter().position(|s| *s == self.ui.settings_section).unwrap_or(0);
+        let sections = self.sections();
+        let labels: Vec<&str> = sections.iter().map(|s| s.label()).collect();
+        let at = sections.iter().position(|s| *s == self.ui.settings_section).unwrap_or(0);
         // Below the toolbar, so a narrow window's display keeps its times.
-        let window = kit::settings_window(ctx, super::toolbar::TOOLBAR_H, &labels, at, "settings-pane", |ui, i| match Section::ALL[i] {
+        let window = kit::settings_window(ctx, super::toolbar::TOOLBAR_H, &labels, at, "settings-pane", |ui, i| match sections[i] {
             Section::Appearance => self.appearance_settings(ui),
             Section::Playback => self.playback_settings(ui),
             Section::Queue => self.queue_settings(ui),
@@ -79,7 +96,7 @@ impl OndApp {
             Section::About => self.about(ui),
         });
         if let Some(i) = window.clicked {
-            self.ui.settings_section = Section::ALL[i];
+            self.ui.settings_section = sections[i];
         }
         if window.close {
             self.ui.overlay = None;
@@ -263,10 +280,13 @@ impl OndApp {
     }
 
     fn playback_settings(&mut self, ui: &mut Ui) {
-        group(ui, "Listening", |ui| {
-            let hint = "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.";
-            self.pref_switch(ui, "scrobble", "Scrobble plays", hint, self.ui.prefs.scrobble, PrefsAction::Scrobble);
-        });
+        let caps = self.session.caps();
+        if caps.scrobbling {
+            group(ui, "Listening", |ui| {
+                let hint = "Ond reports plays to your server, which can pass them on to Last.fm or ListenBrainz.";
+                self.pref_switch(ui, "scrobble", "Scrobble plays", hint, self.ui.prefs.scrobble, PrefsAction::Scrobble);
+            });
+        }
         let mut p: PlaybackPrefs = self.output.prefs().clone();
         let before = p.clone();
         group(ui, "Volume", |ui| {
@@ -279,7 +299,8 @@ impl OndApp {
                 });
             }
         });
-        group(ui, "Streaming", |ui| {
+        // Converting streams is the server's; files on this computer play as they are.
+        group_if(caps.transcoding, ui, "Streaming", |ui| {
             let hint = p.quality.hint();
             choice_row(ui, self.prefs.managed("playback.quality"), "Quality", hint, &QualityMode::ALL, &mut p.quality, |q| q.label().into());
             if p.quality != QualityMode::Original {
@@ -519,7 +540,8 @@ impl OndApp {
             super::offline_page::set_aside_notice(ui, &snap, &mut self.actions, "settings");
             ui.add_space(28.0);
         }
-        group(ui, "Without the server", |ui| {
+        let caps = self.session.caps();
+        group_if(caps.network, ui, "Without the server", |ui| {
             let hint = "Don't connect to the server. Show only music that plays without it: downloads, and songs streamed recently enough to still be cached.";
             self.pref_switch(ui, "work_offline", "Offline mode", hint, self.session.work_offline, OfflineAction::WorkOffline);
             let mut unplayable = self.prefs.get(|s| s.offline_unplayable);
@@ -529,7 +551,7 @@ impl OndApp {
                 self.actions.push(Action::Offline(OfflineAction::Unplayable(unplayable)));
             }
         });
-        group(ui, "Storage", |ui| {
+        group_if(caps.downloads, ui, "Storage", |ui| {
             managed(ui, self.prefs.managed("offline_limit_gb"), |ui| {
                 setting(ui, "Storage limit", &super::offline_page::storage_used(&snap), |ui| {
                     let label = match snap.limit {
@@ -545,7 +567,7 @@ impl OndApp {
                 self.actions.push(Action::Offline(OfflineAction::Pause(paused)));
             }
         });
-        group(ui, "Location", |ui| {
+        group_if(caps.downloads, ui, "Location", |ui| {
             let dir = self.downloads.base.display().to_string();
             let folder_locked = self.prefs.managed("offline_dir");
             row_with(ui, Head { label: "Download folder", tag: folder_locked.then_some(crate::managed::LOCKED), hint: &dir, path: true }, |ui| {
@@ -583,7 +605,8 @@ impl OndApp {
                 } else {
                     let can = self.session.source.is_some() && self.session.online;
                     let why = if self.session.work_offline { "Offline mode" } else { "Not connected" };
-                    if ui.add_enabled_ui(can, |ui| secondary(ui, "Sync now")).inner.on_disabled_hover_text(why).clicked() {
+                    let word = self.session.kind().sync;
+                    if ui.add_enabled_ui(can, |ui| secondary(ui, word)).inner.on_disabled_hover_text(why).clicked() {
                         self.actions.push(Action::SyncNow);
                     }
                 }
@@ -695,39 +718,106 @@ impl OndApp {
         }
     }
 
-    /// The one server Ond holds, as a source: its name and colour, Sync
-    /// now and Sign out…. It can't be removed until Ond holds several, and
-    /// one set in managed.json is locked.
+    /// Every configured source, the one in use first: its name and colour,
+    /// its sync word, Sign out… for a server and Remove… for a folder. The
+    /// others are listed as not in use (Ond plays from one at a time). A
+    /// folder source in use shows its folders under the list, to add to or
+    /// take from, and how its last scan went. One set in managed.json is
+    /// locked.
     fn source_settings(&mut self, ui: &mut Ui) {
-        if self.session.settings.as_ref().is_none_or(|s| s.account_id().is_none()) {
+        let t = Tokens::of(ui);
+        let configured = self.prefs.get(|s| s.sources.clone());
+        if configured.is_empty() {
             group(ui, "Sources", |ui| setting(ui, "Not connected", "", |_| ()));
             return;
         }
+        // The one in use; the first saved stands in until the session knows.
+        let live = self.session.account().filter(|id| configured.iter().any(|e| e.id == *id)).or(configured.first().map(|e| e.id));
         let state = self.server_state();
-        let source_state = state.source_state();
-        let (name, color) = self.source_look(&state);
-        let source = kit::SourceInfo {
-            id: self.source_id(),
-            name: &name,
-            kind: "Navidrome",
-            icon: Icon::Disc,
-            color,
-            state: &source_state,
-            detail: Some(state.label()),
-        };
-        let syncs = self.session.source.is_some() && self.session.online && !self.sync.tracks;
-        let menu = kit::SourceRowMenu { rename: true, color: true, sync: syncs.then_some("Sync now"), sign_out: true, remove: false };
-        let locked = self.ui.prefs.server_managed.then_some(crate::managed::LOCKED);
+        let live_state = state.source_state();
+        let idle = SourceState::Offline(accounts::OfflineReason::ByChoice);
+        let caps = self.session.caps();
+        let managed = self.ui.prefs.server_managed.then_some(crate::managed::LOCKED);
         let mut picked = None;
-        group(ui, "Sources", |ui| picked = kit::source_row(ui, &kit::SourceRow { source, menu, locked }));
-        self.actions.extend(picked.and_then(|event| match event {
-            kit::SourceRowEvent::Rename(name) => Some(PrefsAction::SourceName(name).into()),
-            kit::SourceRowEvent::Color(color) => Some(PrefsAction::SourceColor(color).into()),
-            kit::SourceRowEvent::Sync => Some(Action::SyncNow),
-            kit::SourceRowEvent::SignOut => Some(Action::AskSignOut),
-            // Not offered while Ond holds one server.
-            kit::SourceRowEvent::Remove => None,
+        group(ui, "Sources", |ui| {
+            for entry in &configured {
+                let kind = crate::source::Kind::of(entry.kind);
+                let name = entry.name.clone().unwrap_or_else(|| super::sidebar::default_name(entry));
+                let removable = entry.kind == SourceKind::Local;
+                let in_use = Some(entry.id) == live;
+                let detail = if in_use { self.source_detail(entry, &state) } else { "Not in use".to_owned() };
+                let menu = if in_use {
+                    let syncs = self.session.source.is_some() && self.session.online && !self.sync.tracks;
+                    kit::SourceRowMenu { rename: true, color: true, sync: syncs.then_some(kind.sync), sign_out: caps.network, remove: removable }
+                } else {
+                    kit::SourceRowMenu { rename: true, color: true, sync: None, sign_out: false, remove: removable }
+                };
+                let source = kit::SourceInfo {
+                    id: entry.id,
+                    name: &name,
+                    kind: kind.name,
+                    icon: kind.icon,
+                    color: entry.color,
+                    state: if in_use { &live_state } else { &idle },
+                    detail: Some(&detail),
+                };
+                let locked = managed.filter(|_| entry.kind == SourceKind::Subsonic);
+                if let Some(event) = kit::source_row(ui, &kit::SourceRow { source, menu, locked }) {
+                    picked = Some((entry.id, event));
+                }
+            }
+        });
+        if configured.len() > 1 {
+            note(ui, "Ond plays from one source at a time. The others keep their library on this computer until you use them again.");
+            ui.add_space(20.0);
+        }
+        self.actions.extend(picked.map(|(id, event)| match event {
+            kit::SourceRowEvent::Rename(name) => PrefsAction::SourceName(id, name).into(),
+            kit::SourceRowEvent::Color(color) => PrefsAction::SourceColor(id, color).into(),
+            kit::SourceRowEvent::Sync => Action::SyncNow,
+            kit::SourceRowEvent::SignOut => Action::AskSignOut,
+            kit::SourceRowEvent::Remove => SourceAction::AskRemove(id).into(),
         }));
+        // The folders of a folder source in use.
+        let Some(entry) = configured.iter().find(|e| Some(e.id) == live && e.kind == SourceKind::Local) else { return };
+        let id = entry.id;
+        group(ui, "Folders", |ui| {
+            ui.add_space(8.0);
+            match kit::folder_list(ui, &entry.folders, "No folders", false) {
+                Some(kit::FolderListEvent::Remove(i)) => self.actions.push(SourceAction::RemoveFolder(id, i).into()),
+                Some(kit::FolderListEvent::Choose) => self.actions.push(SourceAction::Choose(FolderTarget::Source(id)).into()),
+                None => {}
+            }
+            ui.add_space(ROW_PAD);
+        });
+        let mut lines = Vec::new();
+        if !self.session.folder_missing.is_empty() {
+            let missing: Vec<String> = self.session.folder_missing.iter().map(|p| p.display().to_string()).collect();
+            lines.push(format!("Not found: {}. Its albums stay in the library; they play again once it's back and Ond has rescanned.", missing.join(", ")));
+        }
+        if self.session.skipped > 0 {
+            lines.push(format!("{} couldn't be read on the last scan, so they aren't in the library.", crate::fmt::plural(self.session.skipped, "file")));
+        }
+        lines.push("Adding or removing a folder rescans. Removing this source deletes only Ond's copy of its library; your music files are kept.".into());
+        for line in lines {
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(egui::RichText::new(line).size(12.0).color(t.muted)).wrap());
+        }
+    }
+
+    /// What a source in use says under its name: how far a sync or scan has
+    /// got; else a folder source's folders (and the files its last scan
+    /// skipped), or a server's state.
+    fn source_detail(&self, entry: &crate::settings::SourceEntry, state: &super::sidebar::ServerState) -> String {
+        if matches!(state, super::sidebar::ServerState::Syncing { .. }) || entry.kind == SourceKind::Subsonic {
+            return state.label().to_owned();
+        }
+        let folders: Vec<String> = entry.folders.iter().map(|f| f.display().to_string()).collect();
+        let mut detail = folders.join(", ");
+        if self.session.skipped > 0 {
+            detail.push_str(&format!(" · {} skipped", crate::fmt::plural(self.session.skipped, "file")));
+        }
+        detail
     }
 
     fn account_settings(&mut self, ui: &mut Ui) {
@@ -766,6 +856,14 @@ impl OndApp {
 
 /// Sliders in rows (with their readout beside them).
 const SLIDER_W: f32 = 160.0;
+
+/// A [`group`] drawn only when `shown`: settings a source can't use aren't
+/// offered.
+fn group_if(shown: bool, ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+    if shown {
+        group(ui, title, body);
+    }
+}
 
 /// A [`setting`] that's a switch. True when it changed.
 fn switch_row(ui: &mut Ui, label: &str, hint: &str, on: &mut bool) -> bool {

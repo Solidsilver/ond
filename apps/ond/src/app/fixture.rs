@@ -812,3 +812,36 @@ pub(super) fn wheel(h: &mut Harness<'_, Option<OndApp>>, at: Pos2, dy: f32, step
     }
     h.run_steps(10);
 }
+
+/// The fixture's folder source's account.
+pub(super) fn local_account() -> accounts::AccountId {
+    "00000000-0000-4000-8000-00000000f01d".parse().unwrap()
+}
+
+/// Makes a folder of music the source in use, over the same library: two
+/// folders, the server kept in the list behind it. [`use_server`] puts the
+/// fixture's server back.
+pub(super) fn use_folder(app: &mut OndApp) {
+    let folders = vec![PathBuf::from("/Users/demo/Music"), PathBuf::from("/Volumes/Archive/Lossless")];
+    let local = crate::settings::SourceEntry::local(local_account(), None, accounts::SourceColor::new(1), folders.clone());
+    let server = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
+    app.prefs.edit(|s| s.sources = vec![local.clone(), server.clone()]);
+    app.session.settings = Some(Settings { sources: vec![local, server], ..Default::default() });
+    app.session.source = Some(Arc::new(crate::source::local::LocalSource::new(local_account(), folders, None)));
+    app.session.folder_missing.clear();
+    app.session.skipped = 0;
+    app.session.server_label = "Music".into();
+    app.session.server_info = "Local folders".into();
+}
+
+/// The fixture's server is the source in use again.
+pub(super) fn use_server(app: &mut OndApp) {
+    let server = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
+    app.prefs.edit(|s| s.sources = vec![server.clone()]);
+    app.session.settings = Some(Settings { sources: vec![server], ..Default::default() });
+    app.session.source = None;
+    app.session.folder_missing.clear();
+    app.session.skipped = 0;
+    app.session.server_label = "demo · navidrome 0.64.2".into();
+    app.session.server_info = "navidrome 0.64.2".into();
+}

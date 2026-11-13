@@ -125,7 +125,7 @@ impl ViewCtx<'_> {
         if resp.clicked() {
             self.open_artist(a);
         }
-        resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, false, None, self.actions));
+        resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, None, None, self.actions));
     }
 
     /// The table: name (with the photo), genre, albums and years.
@@ -177,7 +177,7 @@ impl ViewCtx<'_> {
         if row.resp.clicked() {
             self.open_artist(a);
         }
-        row.resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, false, None, self.actions));
+        row.resp.context_menu(|ui| collection_menu(ui, &Collection::Artist(a.name.clone()), true, None, None, self.actions));
     }
 
     /// Goes to the artist's page. One known only by name (no artists from

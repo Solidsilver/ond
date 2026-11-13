@@ -201,7 +201,11 @@ impl OndApp {
             LibraryMsg::TrackSync(p) => {
                 self.sync.tracks = true;
                 self.sync.progress = Some(p);
-                self.sync.label = p.label();
+                self.sync.label = if self.session.kind().scans {
+                    format!("Scanning · {} of {} tracks", crate::fmt::thousands(p.done), crate::fmt::thousands(p.total))
+                } else {
+                    p.label()
+                };
             }
             LibraryMsg::TrackSyncDone(outcome) => {
                 self.sync.tracks = false;
@@ -211,6 +215,7 @@ impl OndApp {
                 self.sync.label = match outcome {
                     crate::sync::Outcome::Done { .. } => {
                         self.sync.last = Some(chrono::Local::now());
+                        self.first_scan_done(None);
                         format!("{albums} albums · {tracks} tracks")
                     }
                     crate::sync::Outcome::Cancelled => format!("{albums} albums · {tracks} tracks · sync stopped"),
@@ -236,14 +241,20 @@ impl OndApp {
                 self.sync.tracks = true;
             }
             LibraryMsg::AlbumSyncDone(Err(e)) => {
-                // Nothing more follows (no artist or track sync): stop saying "syncing".
+                // Nothing more follows (no artist or track sync, or the scan
+                // stopped): stop saying "syncing".
                 self.sync.albums = false;
+                self.sync.tracks = false;
+                self.sync.progress = None;
                 self.sync.label = "Sync failed".into();
-                self.show_failure_or_retry(e, Some(Action::SyncNow));
+                if !self.first_scan_done(Some(e.message())) {
+                    self.show_failure_or_retry(e, Some(Action::SyncNow));
+                }
             }
             LibraryMsg::FolderMissing(paths) => {
                 self.session.folder_missing = paths;
             }
+            LibraryMsg::Skipped(n) => self.session.skipped = n,
             LibraryMsg::LoadFailed { key, error } => {
                 // One that only waited for a complete listing plays what's stored.
                 if let Some(at) = self.pending.iter().position(|p| p.key == key && p.fresh) {

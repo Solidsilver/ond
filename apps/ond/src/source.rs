@@ -1,6 +1,8 @@
 //! The music library as the app asks for it. Callers read capabilities and
-//! ask the source, never which kind it is. Subsonic is the only kind until
-//! local folders arrive (docs/sources.md); paged servers share sync.rs.
+//! ask the source, never which kind it is: a Subsonic server (paged servers
+//! share sync.rs) or local folders (docs/sources.md). The one place that
+//! maps a configured kind to anything is [`Kind`], which says how each is
+//! named and what it can do before its source is connected.
 
 pub mod local;
 pub mod subsonic;
@@ -54,6 +56,34 @@ impl Capabilities {
     #[cfg(test)]
     pub const fn none() -> Self {
         Self { stars: false, ratings: false, playlists: false, lyrics: false, scrobbling: false, transcoding: false, downloads: false, network: false }
+    }
+}
+
+/// How a configured kind of source is named and drawn, and what it can do
+/// before its source has connected (the source itself says so after).
+#[derive(Debug, Clone, Copy)]
+pub struct Kind {
+    /// "Navidrome", "Music folder": a source's kind in Settings.
+    pub name: &'static str,
+    pub icon: crate::icons::Icon,
+    /// The word for fetching what changed: "Sync now", "Rescan".
+    pub sync: &'static str,
+    /// A sync reads files on this computer: it's called a scan.
+    pub scans: bool,
+    pub capabilities: Capabilities,
+}
+
+impl Kind {
+    pub const fn of(kind: crate::settings::SourceKind) -> Self {
+        use crate::settings::SourceKind;
+        match kind {
+            SourceKind::Subsonic => {
+                Self { name: "Navidrome", icon: crate::icons::Icon::Disc, sync: "Sync now", scans: false, capabilities: Capabilities::subsonic() }
+            }
+            SourceKind::Local => {
+                Self { name: "Music folder", icon: crate::icons::Icon::Folder, sync: "Rescan", scans: true, capabilities: Capabilities::local() }
+            }
+        }
     }
 }
 

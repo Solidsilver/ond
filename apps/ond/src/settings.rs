@@ -606,7 +606,6 @@ impl Settings {
         self.sources.iter_mut().find(|s| s.kind == SourceKind::Subsonic)
     }
 
-    #[allow(dead_code)]
     pub fn source(&self, id: accounts::AccountId) -> Option<&SourceEntry> {
         self.sources.iter().find(|s| s.id == id)
     }
@@ -631,21 +630,21 @@ impl Settings {
         self.primary().map_or_else(accounts::SourceColor::default, |s| s.color)
     }
 
-    pub fn set_source_name(&mut self, name: Option<String>) {
-        if let Some(entry) = self.primary_mut() {
+    /// Names the source `id`; `None` goes back to its default name.
+    pub fn set_source_name(&mut self, id: accounts::AccountId, name: Option<String>) {
+        if let Some(entry) = self.sources.iter_mut().find(|s| s.id == id) {
             entry.name = name;
         }
     }
 
-    pub fn set_source_color(&mut self, color: accounts::SourceColor) {
-        if let Some(entry) = self.primary_mut() {
+    pub fn set_source_color(&mut self, id: accounts::AccountId, color: accounts::SourceColor) {
+        if let Some(entry) = self.sources.iter_mut().find(|s| s.id == id) {
             entry.color = color;
         }
     }
 
     /// Appends a local-folder source entry with a fresh [`accounts::AccountId`] and next
     /// unused colour, returning the new account id.
-    #[allow(dead_code)]
     pub fn add_local(&mut self, name: Option<String>, folders: Vec<PathBuf>) -> accounts::AccountId {
         let id = accounts::AccountId::new();
         let color = accounts::next_color(self.sources.iter().map(|s| s.color));
@@ -653,7 +652,31 @@ impl Settings {
         id
     }
 
-    /// Sets or updates a Subsonic account entry in [`Self::sources`].
+    /// Makes `id` the source Ond plays from: Ond holds one source live at a
+    /// time, the first in the list, and the others stay configured (their
+    /// libraries kept on disk) until it holds several at once.
+    pub fn make_primary(&mut self, id: accounts::AccountId) {
+        if let Some(at) = self.sources.iter().position(|s| s.id == id) {
+            let entry = self.sources.remove(at);
+            self.sources.insert(0, entry);
+        }
+    }
+
+    /// Replaces a local source's folders.
+    pub fn set_folders(&mut self, id: accounts::AccountId, folders: Vec<PathBuf>) {
+        if let Some(entry) = self.sources.iter_mut().find(|s| s.id == id && s.kind == SourceKind::Local) {
+            entry.folders = folders;
+        }
+    }
+
+    /// Takes the source `id` off the list, returning it.
+    pub fn remove_source(&mut self, id: accounts::AccountId) -> Option<SourceEntry> {
+        let at = self.sources.iter().position(|s| s.id == id)?;
+        Some(self.sources.remove(at))
+    }
+
+    /// Sets or updates a Subsonic account entry in [`Self::sources`], which
+    /// becomes the source Ond plays from.
     ///
     /// The same server and user keep their mirror and downloads, including
     /// after signing out. Compare addresses as the existing mirror does.
@@ -668,20 +691,17 @@ impl Settings {
             }
             None => SourceEntry::subsonic(accounts::AccountId::new(), server, username),
         };
-        if let Some(slot) = next.sources.iter_mut().find(|s| s.kind == SourceKind::Subsonic) {
-            *slot = entry;
-        } else {
-            next.sources.insert(0, entry);
-        }
+        next.sources.retain(|s| s.kind != SourceKind::Subsonic);
+        next.sources.insert(0, entry);
         next.signed_out = false;
         next
     }
 
     /// A stable id for the server account (server address and user), used to
     /// keep each account's library mirror and downloads apart. `None` before a
-    /// login. The address is compared without case or a trailing slash.
+    /// login, and while a source that isn't a server is the one in use. The address is compared without case or a trailing slash.
     pub fn account_id(&self) -> Option<u32> {
-        let s = self.subsonic()?;
+        let s = self.primary().filter(|s| s.kind == SourceKind::Subsonic)?;
         let server = s.server.trim().trim_end_matches('/').to_lowercase();
         if server.is_empty() || s.username.is_empty() {
             return None;
@@ -747,8 +767,9 @@ mod tests {
     #[test]
     fn the_servers_name_and_colour_stay_with_its_account_and_another_starts_fresh() {
         let mut named = login("https://music.example.com", "me").sign_in("https://music.example.com", "me");
-        named.set_source_name(Some("Home".into()));
-        named.set_source_color(accounts::SourceColor::new(3));
+        let id = named.account().unwrap();
+        named.set_source_name(id, Some("Home".into()));
+        named.set_source_color(id, accounts::SourceColor::new(3));
         let json = serde_json::to_value(&named).unwrap();
         assert_eq!((&json["sources"][0]["name"], &json["sources"][0]["color"]), (&serde_json::json!("Home"), &serde_json::json!(3)));
         assert!(json.get("source_name").is_none() && json.get("source_color").is_none());
@@ -815,6 +836,33 @@ mod tests {
         assert_eq!(parsed.sources.len(), 1);
         assert_eq!(parsed.sources[0].kind, SourceKind::Subsonic);
         assert_eq!(parsed.sources[0].name.as_deref(), Some("Future"));
+    }
+
+    #[test]
+    fn the_source_in_use_is_the_first_and_the_others_stay_configured() {
+        let server = Settings::default().sign_in("https://music.example.com", "me");
+        let server_id = server.account().unwrap();
+        assert!(server.account_id().is_some());
+        let mut both = server.clone();
+        let folder = both.add_local(None, vec![PathBuf::from("/Users/me/Music")]);
+        assert_eq!(both.account(), Some(server_id), "adding a folder doesn't make it the one in use by itself");
+        both.make_primary(folder);
+        assert_eq!(both.account(), Some(folder));
+        assert_eq!(both.sources.len(), 2, "the server stays configured");
+        assert_eq!(both.account_id(), None, "no server's downloads while a folder is in use");
+        assert_eq!(both.server(), "https://music.example.com", "its address is still there to sign in with");
+        both.set_folders(folder, vec![PathBuf::from("/Volumes/Archive")]);
+        assert_eq!(both.source(folder).unwrap().folders, [PathBuf::from("/Volumes/Archive")]);
+        both.set_folders(server_id, vec![PathBuf::from("/nowhere")]);
+        assert!(both.source(server_id).unwrap().folders.is_empty(), "a server has no folders");
+
+        let back = both.sign_in("https://music.example.com/", "me");
+        assert_eq!(back.account(), Some(server_id), "signing in to the server makes it the one in use again");
+        assert_eq!(back.sources.len(), 2);
+        let mut removed = back.clone();
+        assert_eq!(removed.remove_source(folder).map(|e| e.kind), Some(SourceKind::Local));
+        assert_eq!(removed.sources.len(), 1);
+        assert!(removed.remove_source(folder).is_none());
     }
 
     #[test]

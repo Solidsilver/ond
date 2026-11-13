@@ -33,6 +33,11 @@ pub enum Overlay {
         host: String,
         from_settings: bool,
     },
+    /// Remove the source `id` (called `name`)? Asked from Settings.
+    RemoveSource {
+        id: accounts::AccountId,
+        name: String,
+    },
     /// Playing something new while the user has added tracks: keep them or
     /// clear them? (Settings › Queue › Playing something new: Ask.)
     KeepAdded {
@@ -127,6 +132,12 @@ impl OndApp {
                         done = Some(yes.then_some(Action::SignOut));
                     }
                 }
+                Overlay::RemoveSource { id, name } => {
+                    let body = "Ond forgets its library on this computer. Your music files are kept, untouched.";
+                    if let Some(yes) = confirm(ui, &format!("Remove “{name}”?"), body, "Remove") {
+                        done = Some(yes.then(|| super::SourceAction::Remove(*id).into()));
+                    }
+                }
                 Overlay::Delete { id, name } => {
                     let body = "This deletes the playlist on the server. The songs stay in your library.";
                     if let Some(yes) = confirm(ui, &format!("Delete “{name}”?"), body, "Delete") {
@@ -140,7 +151,8 @@ impl OndApp {
         }
         if let Some(action) = done {
             ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));
-            let back_to_settings = action.is_none() && matches!(self.ui.overlay, Some(Overlay::SignOut { from_settings: true, .. }));
+            let back_to_settings =
+                action.is_none() && matches!(self.ui.overlay, Some(Overlay::SignOut { from_settings: true, .. } | Overlay::RemoveSource { .. }));
             self.ui.overlay = back_to_settings.then_some(Overlay::Settings);
             if let Some(a) = action {
                 self.actions.push(a);

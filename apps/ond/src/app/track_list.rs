@@ -264,7 +264,7 @@ impl ViewCtx<'_> {
         // The heart sits just left of the duration: always when loved,
         // on hover otherwise.
         let heart = Rect::from_center_size(pos2(rect.right() - col::HEART_FROM_RIGHT, cy), vec2(col::HEART_BOX, col::HEART_BOX));
-        if loved || hovered {
+        if (loved || hovered) && self.session.caps().stars {
             let label = if loved { "Unlove" } else { "Love" };
             let hr = crate::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
             if hr.on_hover_text(label).clicked() {
@@ -350,12 +350,15 @@ impl ViewCtx<'_> {
         if ui.button("Add to queue").clicked() {
             self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: source.clone(), action: QueueAction::Add });
         }
-        ui.separator();
+        let caps = self.session.caps();
+        if caps.stars || caps.ratings || caps.playlists {
+            ui.separator();
+        }
         let loved = self.favorites.is_on(StarKind::Song, &tr.id);
-        if ui.button(if loved { "Unlove" } else { "Love" }).clicked() {
+        if caps.stars && ui.button(if loved { "Unlove" } else { "Love" }).clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
         }
-        ui.menu_button("Rating", |ui| {
+        let rating = |ui: &mut Ui| {
             let current = self.favorites.rating(&tr.id);
             for r in 1..=5u8 {
                 if crate::widgets::rating_choice(ui, r, current == r).clicked() {
@@ -367,8 +370,13 @@ impl ViewCtx<'_> {
             if ui.add_enabled(current > 0, egui::Button::new("Clear rating")).clicked() {
                 self.actions.push(Action::Rate(tr.id.clone(), 0));
             }
-        });
-        self.add_to_playlist_menu(ui, std::slice::from_ref(tr));
+        };
+        if caps.ratings {
+            ui.menu_button("Rating", rating);
+        }
+        if caps.playlists {
+            self.add_to_playlist_menu(ui, std::slice::from_ref(tr));
+        }
         if let Some(artist) = &tr.artist {
             ui.separator();
             if ui.button(format!("Go to {artist}")).clicked()
@@ -383,7 +391,7 @@ impl ViewCtx<'_> {
         // Kept on its own: can be removed on its own. Kept with an album or
         // playlist: that's where it's removed.
         let alone = self.track_pin(tr).is_some_and(|p| self.downloads.snap.pin(&p).is_some());
-        if alone || !matches!(self.download_state(tr), Some(offline::TrackState::Done { .. })) {
+        if caps.downloads && (alone || !matches!(self.download_state(tr), Some(offline::TrackState::Done { .. }))) {
             ui.separator();
             super::browse::offline_item(ui, alone, None, || Keep::Tracks(vec![tr.clone()]), self.actions);
         }

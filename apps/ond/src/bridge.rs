@@ -107,6 +107,11 @@ pub enum Msg {
     },
     /// Selected from the native menu bar.
     Menu(crate::keys::Cmd),
+    /// The folder picker's answer, and what it was asked for.
+    FolderChosen {
+        target: crate::app::FolderTarget,
+        path: std::path::PathBuf,
+    },
     /// The update checker's latest release, or why it couldn't tell.
     UpdateChecked(Result<crate::updates::Version, String>),
     /// A release's notes, for Settings › About.
@@ -129,6 +134,9 @@ pub enum LibraryMsg {
     /// Configured local folders that were missing during the latest scan (empty
     /// when every configured folder was present).
     FolderMissing(Vec<std::path::PathBuf>),
+    /// Files in the local folders that looked like audio but couldn't be
+    /// read, on the latest scan.
+    Skipped(usize),
     /// An album's tracks. `fresh`: straight from the server's `getAlbum` (the
     /// complete list), not the local library (which may be partial).
     Tracks {
@@ -455,7 +463,9 @@ impl Bridge {
 
     /// Installs a prepared mirror only after the UI accepts its live sign-in.
     /// A cancelled connect can therefore never replace the current library.
-    pub fn install_storage(&self, account: accounts::AccountId, stores: crate::storage::Stores) -> Arc<library::AnalysisStore> {
+    /// The previous account's folder and cached art are removed unless it's
+    /// one of `keep` (still configured, only not the one in use).
+    pub fn install_storage(&self, account: accounts::AccountId, stores: crate::storage::Stores, keep: &[accounts::AccountId]) -> Arc<library::AnalysisStore> {
         let old = {
             let mut slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
             let old = (slot.account, Arc::downgrade(&slot.library), slot.analyses.clone(), slot.data.clone(), slot.art_cache.clone());
@@ -464,29 +474,75 @@ impl Bridge {
             slot.analyses = Arc::downgrade(&stores.analyses);
             old
         };
-        if let Some(account) = old.0 {
-            let dir = crate::storage::account_dir(old.3.as_ref().expect("persistent library has a data root"), account);
-            let art_dir = old.4.as_ref().map(|root| crate::art::account_dir(root, account));
-            self.rt.spawn(async move {
-                // Old requests may still be returning from the network. Their
-                // handles keep the old database alive until they have stopped.
-                while old.1.strong_count() > 0 || old.2.strong_count() > 0 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                let _ = tokio::task::spawn_blocking(move || {
-                    for (what, path) in [("library", Some(dir)), ("art cache", art_dir)] {
-                        if let Some(path) = path
-                            && let Err(e) = std::fs::remove_dir_all(&path)
-                            && e.kind() != std::io::ErrorKind::NotFound
-                        {
-                            tracing::warn!("removing previous {what} {}: {e}", path.display());
-                        }
-                    }
-                })
-                .await;
-            });
+        if let Some(account) = old.0.filter(|a| !keep.contains(a)) {
+            self.remove_account_files(account, old.1, old.2, old.3, old.4);
         }
         stores.analyses
+    }
+
+    /// A source was removed: its folder (library, scan index, analyses) and
+    /// its cached art go, once nothing still reads them. When it's the one in
+    /// use, an empty library in memory takes its place, whose analysis store
+    /// is returned for the app to hand on.
+    pub fn forget_account(&self, account: accounts::AccountId) -> Option<Arc<library::AnalysisStore>> {
+        let (old, fresh) = {
+            let mut slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.account == Some(account) {
+                let fresh = match crate::storage::Stores::in_memory() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("opening an empty library: {e}");
+                        return None;
+                    }
+                };
+                let old = (Arc::downgrade(&slot.library), slot.analyses.clone());
+                slot.library = fresh.library;
+                slot.account = None;
+                slot.analyses = Arc::downgrade(&fresh.analyses);
+                (old, Some(fresh.analyses))
+            } else {
+                ((std::sync::Weak::new(), std::sync::Weak::new()), None)
+            }
+        };
+        let (data, art) = {
+            let slot = self.libraries.lock().unwrap_or_else(|e| e.into_inner());
+            (slot.data.clone(), slot.art_cache.clone())
+        };
+        self.remove_account_files(account, old.0, old.1, data, art);
+        fresh
+    }
+
+    /// Removes `account`'s folder and cached art once the old library and
+    /// analysis handles have all been dropped.
+    fn remove_account_files(
+        &self,
+        account: accounts::AccountId,
+        library: std::sync::Weak<Library>,
+        analyses: std::sync::Weak<library::AnalysisStore>,
+        data: Option<std::path::PathBuf>,
+        art: Option<std::path::PathBuf>,
+    ) {
+        let Some(data) = data else { return };
+        let dir = crate::storage::account_dir(&data, account);
+        let art_dir = art.as_ref().map(|root| crate::art::account_dir(root, account));
+        self.rt.spawn(async move {
+            // Old requests may still be returning from the network. Their
+            // handles keep the old database alive until they have stopped.
+            while library.strong_count() > 0 || analyses.strong_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let _ = tokio::task::spawn_blocking(move || {
+                for (what, path) in [("library", Some(dir)), ("art cache", art_dir)] {
+                    if let Some(path) = path
+                        && let Err(e) = std::fs::remove_dir_all(&path)
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!("removing previous {what} {}: {e}", path.display());
+                    }
+                }
+            })
+            .await;
+        });
     }
 
     async fn prepare_storage(&self, account: accounts::AccountId) -> Result<Option<crate::storage::Stores>, String> {
@@ -759,10 +815,9 @@ impl Bridge {
             };
             let data = this.libraries.lock().unwrap_or_else(|e| e.into_inner()).data.clone();
             let source: Src = Arc::new(crate::source::local::LocalSource::new(account, folders, data.as_deref()));
-            match ping(&source).await {
-                Ok(server) => this.connected(session, source, settings, server, true).await,
-                Err(PingError::Unreachable(e) | PingError::Refused(e)) => this.send(Msg::ConnectFailed { session, error: e }),
-            }
+            // A folder that's away (a drive unplugged) still opens: its
+            // stored library shows, and the scan says the folder is missing.
+            this.connected(session, source, settings, "Local folders".into(), true).await;
         });
     }
 
@@ -939,6 +994,7 @@ impl Bridge {
                         "local scan complete"
                     );
                     this.send(LibraryMsg::FolderMissing(synced.missing_roots));
+                    this.send(LibraryMsg::Skipped(synced.skipped));
                     this.send(LibraryMsg::Albums(synced.albums));
                     this.send(LibraryMsg::Artists(synced.artists));
                     this.send(LibraryMsg::Newest(synced.newest_ids));
@@ -1448,7 +1504,7 @@ mod tests {
         rt.block_on(bridge.connected(bridge.session(), source(next_account), next, "test".into(), true));
         let Msg::Connected { new_account: true, stores: Some(prepared), .. } = rx.try_recv().unwrap() else { panic!("expected a prepared new mirror") };
         bridge.end_session();
-        let new_analysis = bridge.install_storage(next_account, prepared);
+        let new_analysis = bridge.install_storage(next_account, prepared, &[]);
         assert!(new_analysis.records().unwrap().is_empty());
         release.send(()).unwrap();
         rt.block_on(job).unwrap();

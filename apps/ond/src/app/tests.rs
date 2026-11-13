@@ -1577,3 +1577,195 @@ fn missing_folder_sets_source_state_without_dropping_existing_albums() {
     assert!(app.session.folder_missing.is_empty());
     assert_eq!(app.server_state().source_state(), accounts::SourceState::Online);
 }
+
+/// A folder of three tagged FLACs of one album, under `dir/music`.
+fn music_folder(dir: &std::path::Path) -> std::path::PathBuf {
+    let music = dir.join("music");
+    let album = music.join("Bill Evans Trio").join("Portrait in Jazz");
+    std::fs::create_dir_all(&album).unwrap();
+    for n in 1..=3 {
+        add_song(&album, n);
+    }
+    music
+}
+
+fn add_song(album: &std::path::Path, n: u32) {
+    let title = format!("Song {n}");
+    let number = n.to_string();
+    let tags =
+        [("TITLE", title.as_str()), ("ARTIST", "Bill Evans Trio"), ("ALBUMARTIST", "Bill Evans Trio"), ("ALBUM", "Portrait in Jazz"), ("TRACKNUMBER", &number)];
+    std::fs::write(album.join(format!("{n:02} {title}.flac")), crate::test_tracks::flac(&tags, None)).unwrap();
+}
+
+/// Ond as it opens the first time, on the first-run sheet, with a folder
+/// picker that answers `chosen` at once.
+fn first_run(ctx: &egui::Context, dir: &std::path::Path, chosen: std::path::PathBuf) -> OndApp {
+    let paths = Paths {
+        config_file: dir.join("settings.json"),
+        library_db: dir.join("library.redb"),
+        stream_cache: dir.join("streams"),
+        art_cache: dir.join("art"),
+        offline: dir.join("offline"),
+    };
+    let mut app = OndApp::build(ctx, paths, Box::new(NullOutput)).unwrap();
+    app.pick_folder = Arc::new(move |_, _, done| done(Some(chosen.clone())));
+    app
+}
+
+/// Picks Music folder on the sheet, chooses `folder` and adds it; returns
+/// once the first scan has run and the sheet has closed.
+fn add_folder_from_the_sheet(app: &mut OndApp) {
+    assert!(app.onboarding.is_some(), "the first-run sheet is up");
+    app.apply(Action::Onboarding(shell::kit::OnboardingEvent::Picked(onboarding::FOLDER)));
+    app.apply(Action::Sources(SourceAction::Choose(FolderTarget::Onboarding)));
+    until(app, |a| a.onboarding.as_ref().is_some_and(|o| !o.folders.folders.is_empty()));
+    app.apply(Action::Sources(SourceAction::AddFolders));
+    assert!(app.onboarding.as_ref().is_some_and(|o| o.folders.busy), "the sheet waits on the first scan");
+    until(app, |a| a.onboarding.is_none());
+}
+
+#[test]
+fn a_first_run_adds_a_music_folder_and_plays_from_it_with_no_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    assert!(app.login.is_none());
+    assert_eq!(app.data.albums.len(), 1);
+    assert_eq!(app.data.albums[0].name, "Portrait in Jazz");
+    let saved = app.prefs.snapshot();
+    assert_eq!(saved.primary().map(|e| (e.kind, e.folders.clone())), Some((crate::settings::SourceKind::Local, vec![music.clone()])));
+    assert!(!app.session.caps().network && !app.session.caps().stars && !app.session.caps().downloads);
+    assert!(app.session.online, "a folder needs no server to be ready");
+    frame(&ctx, &mut app, Vec::new());
+
+    let album = app.data.albums[0].id.clone();
+    app.apply(Action::Album(album, crate::player::QueueAction::Play { start: 0 }));
+    until(&mut app, |a| a.player.playing_from.is_some());
+    let from = app.player.playing_from.clone().unwrap();
+    let path = from.url.strip_prefix("file://").expect("played from the file itself");
+    assert!(std::path::Path::new(path).starts_with(&music), "{path}");
+    assert_eq!(super::playing::origin(&from, &app.cache, app.session.caps().downloads), super::playing::Origin::File);
+
+    // What a folder can't do isn't done, from a key or a menu either.
+    let track = app.data.tracks.all[0].clone();
+    app.apply(Action::ToggleStar { kind: crate::favorites::StarKind::Song, id: track.id.clone(), track: Some(Box::new(track.clone())), name: None });
+    assert!(!app.favorites.is_on(crate::favorites::StarKind::Song, &track.id));
+    app.apply(Action::NewPlaylist);
+    assert!(app.ui.overlay.is_none());
+}
+
+#[test]
+fn a_rescan_finds_a_song_added_to_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    add_song(&music.join("Bill Evans Trio").join("Portrait in Jazz"), 4);
+    app.apply(Action::SyncNow);
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+    assert!(app.data.tracks.all.iter().any(|t| t.title == "Song 4"));
+}
+
+#[test]
+fn a_missing_folder_keeps_its_albums_fails_plainly_and_clears_once_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+
+    let away = dir.path().join("unplugged");
+    std::fs::rename(&music, &away).unwrap();
+    app.apply(Action::SyncNow);
+    until(&mut app, |a| !a.session.folder_missing.is_empty() && !a.sync.albums && !a.sync.tracks);
+    assert_eq!(app.server_state().source_state(), accounts::SourceState::FolderMissing);
+    assert_eq!(app.data.albums.len(), 1, "the albums stay");
+    assert_eq!(app.data.tracks.all.len(), 3);
+
+    let album = app.data.albums[0].id.clone();
+    app.apply(Action::Album(album, crate::player::QueueAction::Play { start: 0 }));
+    until(&mut app, |a| a.ui.toasts.texts().iter().any(|t| t.contains("isn't there")));
+
+    std::fs::rename(&away, &music).unwrap();
+    app.apply(Action::SyncNow);
+    until(&mut app, |a| a.session.folder_missing.is_empty() && !a.sync.tracks && !a.sync.albums);
+    assert_eq!(app.server_state().source_state(), accounts::SourceState::Online);
+}
+
+#[test]
+fn a_folder_added_after_signing_out_of_a_server_keeps_the_servers_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    // A server signed in to before and signed out of, with its library on disk.
+    let server = Settings { signed_out: true, ..Settings::default().sign_in("https://music.example.com", "me") };
+    let server_id = server.account().unwrap();
+    std::fs::write(dir.path().join("settings.json"), serde_json::to_vec(&server).unwrap()).unwrap();
+    let server_dir = crate::storage::account_dir(dir.path(), server_id);
+    std::fs::create_dir_all(&server_dir).unwrap();
+    std::fs::write(server_dir.join("library.redb"), b"kept").unwrap();
+
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music);
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    let saved = app.prefs.snapshot();
+    assert_eq!(saved.sources.len(), 2);
+    assert_eq!(saved.primary().map(|e| e.kind), Some(crate::settings::SourceKind::Local));
+    assert_eq!(saved.sources[1].id, server_id, "the server stays configured");
+    // Give a removal, were one coming, the time it would take.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(server_dir.join("library.redb").is_file(), "the server's library stays on disk");
+}
+
+#[test]
+fn removing_a_folder_source_deletes_onds_copy_and_keeps_the_music() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    let id = app.session.account().unwrap();
+    let mirror = crate::storage::account_dir(dir.path(), id);
+    assert!(mirror.join("scan.json").is_file());
+
+    app.apply(Action::Sources(SourceAction::AskRemove(id)));
+    assert!(matches!(&app.ui.overlay, Some(Overlay::RemoveSource { id: asked, .. }) if *asked == id));
+    app.apply(Action::Sources(SourceAction::Remove(id)));
+    assert!(app.prefs.snapshot().sources.is_empty());
+    assert!(app.onboarding.is_some(), "nothing left: back to the first-run sheet");
+    assert!(app.data.albums.is_empty());
+    assert!(app.ui.toasts.texts().iter().any(|t| t.contains("music files are still")), "{:?}", app.ui.toasts.texts());
+    testkit::wait_until("Ond's copy of the folder's library to be removed", || !mirror.exists());
+    assert_eq!(std::fs::read_dir(music.join("Bill Evans Trio").join("Portrait in Jazz")).unwrap().count(), 3, "the music is untouched");
+}
+
+#[test]
+fn a_folder_sources_folders_change_and_it_rescans() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = music_folder(dir.path());
+    let more = dir.path().join("more").join("Miles Davis").join("Kind of Blue");
+    std::fs::create_dir_all(&more).unwrap();
+    add_song(&more, 9);
+    let ctx = egui::Context::default();
+    let mut app = first_run(&ctx, dir.path(), music.clone());
+    add_folder_from_the_sheet(&mut app);
+    until(&mut app, |a| a.data.tracks.all.len() == 3);
+    let id = app.session.account().unwrap();
+    let extra = dir.path().join("more");
+    app.pick_folder = Arc::new(move |_, _, done| done(Some(extra.clone())));
+    app.apply(Action::Sources(SourceAction::Choose(FolderTarget::Source(id))));
+    until(&mut app, |a| a.data.tracks.all.len() == 4 && !a.sync.tracks);
+    assert_eq!(app.prefs.snapshot().source(id).unwrap().folders.len(), 2);
+    app.apply(Action::Sources(SourceAction::RemoveFolder(id, 1)));
+    until(&mut app, |a| a.data.tracks.all.len() == 3 && !a.sync.tracks);
+    // The last folder stays: a source with none would scan to nothing.
+    app.apply(Action::Sources(SourceAction::RemoveFolder(id, 0)));
+    assert_eq!(app.prefs.snapshot().source(id).unwrap().folders, [music]);
+}

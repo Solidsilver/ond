@@ -606,10 +606,14 @@ impl OndApp {
         let base = &self.downloads.base;
         let start = base.parent().unwrap_or(base).to_owned();
         let bridge = self.bridge.clone();
-        crate::folder::pick("Choose where to keep downloaded music", &start, move |chosen| {
-            if let Some(dir) = chosen {
-                bridge.post(OfflineMsg::Folder(dir));
-            }
-        });
+        (self.pick_folder)(
+            "Choose where to keep downloaded music",
+            &start,
+            Box::new(move |chosen| {
+                if let Some(dir) = chosen {
+                    bridge.post(OfflineMsg::Folder(dir));
+                }
+            }),
+        );
     }
 }

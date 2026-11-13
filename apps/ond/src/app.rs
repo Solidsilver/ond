@@ -10,6 +10,8 @@
 //!
 //! - `session`: the server connection, the login form, offline and back, signing out
 //! - `onboarding`: the first-run sheet the login form is drawn in
+//! - `sources`: a folder of music added from the sheet, a source's folders,
+//!   the folder picker, removing a source ([`SourceAction`])
 //! - `data`: the library as loaded, the sync's state, the search index, queue
 //!   actions waiting for tracks
 //! - `pins`: offline downloads ([`OfflineAction`])
@@ -69,6 +71,7 @@ mod playing;
 mod prefs_view;
 mod session;
 mod signal_card;
+mod sources;
 mod ui_state;
 mod updating;
 mod view_ctx;
@@ -160,6 +163,7 @@ pub use pins::{Downloads, Keep, OfflineAction};
 pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
+pub use sources::{FolderTarget, SourceAction};
 pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, UiState};
 pub use window_state::WindowAction;
 
@@ -234,6 +238,8 @@ pub enum Action {
     CloseLogin,
     /// Something done on the first-run sheet.
     Onboarding(shell::kit::OnboardingEvent),
+    /// Folders added or changed, a source removed.
+    Sources(SourceAction),
     Update(UpdateAction),
     Album(String, QueueAction),
     Artist(String, QueueAction),
@@ -394,6 +400,8 @@ pub struct OndApp {
     /// Wakes the update checker for Check Now.
     update_now: Arc<tokio::sync::Notify>,
     updates: Updates,
+    /// The folder picker (the system's; a test's answers at once).
+    pick_folder: sources::FolderPicker,
 }
 
 impl OndApp {
@@ -494,7 +502,8 @@ impl OndApp {
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
         // Working offline, the library loads once downloads are open (only
         // what can play shows).
-        let work_offline = saved.work_offline && prefs.has_login() && !saved.signed_out;
+        let networked = saved.primary().is_none_or(|e| crate::source::Kind::of(e.kind).capabilities.network);
+        let work_offline = saved.work_offline && prefs.has_login() && !saved.signed_out && networked;
         if !work_offline {
             bridge.load_local(None);
         }
@@ -561,6 +570,7 @@ impl OndApp {
             update_check: Arc::default(),
             update_now: Arc::default(),
             updates: Updates::default(),
+            pick_folder: sources::system_picker(),
             prefs,
             analysis: Analysis::new(analyzer),
             favorites: Favorites::default(),
@@ -609,6 +619,7 @@ impl OndApp {
                 self.go(Route::Playlist { id, name });
             }
             Msg::Menu(cmd) => self.command(cmd),
+            Msg::FolderChosen { target, path } => self.folder_chosen(target, path),
             Msg::UpdateChecked(result) => self.update_checked(result),
             Msg::ReleaseNotes(v, notes) => {
                 if let Some((n, slot)) = &mut self.updates.notes
@@ -674,7 +685,7 @@ impl OndApp {
     /// Applies one action. Most groups go to the part of the app they belong
     /// to; an action never asks for another one later, it applies it at once.
     fn apply(&mut self, action: Action) {
-        if self.locked(&action) {
+        if self.locked(&action) || !self.can(&action) {
             return;
         }
         if self.ui.visualizer.is_some() && Self::leaves_visualizer(&action) {
@@ -780,6 +791,7 @@ impl OndApp {
             Action::CancelSignIn => self.cancel_sign_in(),
             Action::CloseLogin => self.login = None,
             Action::Onboarding(event) => self.onboarding_event(event),
+            Action::Sources(a) => self.apply_source(a),
             Action::Update(a) => self.update_action(a),
             Action::Album(id, action) => self.play_album(id, action),
             Action::Artist(name, action) => self.play_artist(name, action),
@@ -800,6 +812,22 @@ impl OndApp {
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),
             Action::PlaylistEdit(edit) => self.playlist_action(edit),
+        }
+    }
+
+    /// Whether the source in use can do what `action` asks of it: the
+    /// views don't offer what it can't, and this stops keys, menus and the
+    /// palette too.
+    fn can(&self, action: &Action) -> bool {
+        let caps = self.session.caps();
+        match action {
+            Action::ToggleStar { .. } => caps.stars,
+            Action::Rate(..) => caps.ratings,
+            Action::NewPlaylist => caps.playlists,
+            Action::PlaylistEdit(PlaylistAction::Create { .. } | PlaylistAction::Add { .. }) => caps.playlists,
+            Action::Offline(OfflineAction::Keep(..)) => caps.downloads,
+            Action::Offline(OfflineAction::WorkOffline(true)) => caps.network,
+            _ => true,
         }
     }
 

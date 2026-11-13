@@ -172,7 +172,7 @@ impl OndApp {
                     let out = self.output.control_ui(ui, &self.engine, &mut self.bit_perfect, self.ui.prefs.output_control(), Some(crate::output::SLIDER_W));
                     self.output_control_out(out);
                     // The same few characters of signal path as the full window's display.
-                    let origin = self.player.playing_from.as_ref().map(|s| super::playing::origin(s, &self.cache));
+                    let origin = self.player.playing_from.as_ref().map(|s| super::playing::origin(s, &self.cache, self.session.caps().downloads));
                     let readout = super::signal_card::readout(&self.output, &self.engine.status, origin.as_ref());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let (Some(r), Some(item)) = (readout, self.player.queue.current.as_ref()) {

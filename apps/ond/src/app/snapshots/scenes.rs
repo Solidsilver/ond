@@ -566,6 +566,41 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "settings-sources-menu");
     egui::Popup::close_all(&h.ctx);
 
+    // A folder of music in use, the server kept behind it: scanning, with
+    // files it couldn't read, and with one of its folders unplugged.
+    let progress = crate::sync::Progress { done: 1_284, total: 3_960, unit: crate::sync::Unit::Tracks };
+    for (scene, setup) in [
+        ("settings-sources-local-scanning", (Some(progress), 0, false)),
+        ("settings-sources-local-skipped", (None, 3, false)),
+        ("settings-sources-local-missing", (None, 0, true)),
+    ] {
+        reset(h, FULL, Route::Recent);
+        let app = app_mut(h);
+        use_folder(app);
+        let (scan, skipped, missing) = setup;
+        app.sync.progress = scan;
+        app.sync.tracks = scan.is_some();
+        app.session.skipped = skipped;
+        if missing {
+            app.session.folder_missing = vec![PathBuf::from("/Volumes/Archive/Lossless")];
+        }
+        app.actions.push(Action::OpenSettings(settings_page::Section::Sources));
+        s.shoot(h, scene);
+    }
+    // The library from a folder: no hearts, downloads or playlists, and
+    // the folder in the sidebar's foot; an album page and its menu.
+    reset(h, FULL, Route::Albums);
+    use_folder(app_mut(h));
+    s.shoot(h, "local-albums");
+    reset(h, FULL, Route::Album(album_id(0)));
+    use_folder(app_mut(h));
+    s.shoot(h, "local-album");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Music").click();
+    h.run_steps(2);
+    s.shoot(h, "local-footer-menu");
+    egui::Popup::close_all(&h.ctx);
+    use_server(app_mut(h));
+
     // A queue set up by hand: no preset matches, so Custom shows.
     reset(h, FULL, Route::Recent);
     {
@@ -884,8 +919,22 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
-    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
     s.shoot(h, "login-form");
+
+    // A folder of music's form: empty, with two folders, and scanning.
+    let two = || vec![PathBuf::from("/Users/demo/Music"), PathBuf::from("/Volumes/Archive/Lossless")];
+    for (scene, folders, busy) in [("login-folder-empty", Vec::new(), false), ("login-folder-two", two(), false), ("login-folder-scanning", two(), true)] {
+        reset(h, FULL, Route::Recent);
+        let app = app_mut(h);
+        app.login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
+        let form = crate::app::sources::FolderForm { folders, busy, ..Default::default() };
+        app.onboarding = Some(Onboard { step: OnboardingStep::Form(crate::app::onboarding::FOLDER), folders: form, ..Default::default() });
+        if busy {
+            app.sync.progress = Some(crate::sync::Progress { done: 1_284, total: 3_960, unit: crate::sync::Unit::Tracks });
+        }
+        s.shoot(h, scene);
+    }
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm {
@@ -894,12 +943,12 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         error: Some(crate::bridge::connect_error(&subsonic::Error::Api { code: 40, message: "Wrong username or password".into() })),
         ..Default::default()
     });
-    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
     s.shoot(h, "login-error");
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() });
-    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
     s.shoot(h, "login-busy");
 
     // Signing in again over the library: the form alone.
@@ -1126,7 +1175,7 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     egui::Popup::close_all(&h.ctx);
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(super::session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
-    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), added: None });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
     s.shoot(h, "managed-sign-in");
     app_mut(h).login = None;
     app_mut(h).onboarding = None;

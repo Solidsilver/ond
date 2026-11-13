@@ -240,24 +240,28 @@ impl ViewCtx<'_> {
         // Always clickable: the heart sits over the display, so while the pointer
         // is on it the display itself doesn't count as hovered.
         let love_label = if loved { "Unlove (⇧⌘L)" } else { "Love (⇧⌘L)" };
-        let heart_resp = crate::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label);
-        if heart_resp.clicked() {
+        let stars = self.session.caps().stars;
+        let heart_resp = stars.then(|| crate::widgets::hover_heart(ui, heart, ui.scope_id().with("lcd-heart"), loved, hovering, 11.0, love_label));
+        let heart_hovered = heart_resp.as_ref().is_some_and(|r| r.hovered());
+        if heart_resp.as_ref().is_some_and(|r| r.clicked()) {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: item.track.id.clone(), track: Some(Box::new(item.track.clone())), name: None });
         }
         body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Now playing: {}, {sub_text}", item.track.title)));
         // The artwork switches to the player last used (Player or Mini); the
         // rest of the display opens the album.
         let on_art = body.interact_pointer_pos().or(body.hover_pos()).is_some_and(|p| art.contains(p));
-        if body.clicked() && !strip_resp.hovered() && !heart_resp.hovered() && !on_readout {
+        if body.clicked() && !strip_resp.hovered() && !heart_hovered && !on_readout {
             self.actions.push(if on_art { Action::Window(WindowAction::TogglePlayer) } else { Action::Go(Route::Album(item.track.album_id.clone())) });
         }
         if on_art && body.hovered() {
             painter.rect_stroke(art.shrink(1.0), 6.0, egui::Stroke::new(1.5, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
         }
-        if !heart_resp.hovered() && !on_readout && !strip_resp.hovered() {
+        if !heart_hovered && !on_readout && !strip_resp.hovered() {
             body.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
-        heart_resp.on_hover_text(crate::keys::shown(love_label));
+        if let Some(resp) = heart_resp {
+            resp.on_hover_text(crate::keys::shown(love_label));
+        }
         if let (Some(resp), Some(r)) = (readout_resp, readout) {
             super::signal_card::pill(resp, &r, origin.as_ref(), &item.track, self.output, self.engine.status.underruns());
         }
