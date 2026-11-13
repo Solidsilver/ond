@@ -587,8 +587,9 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app.actions.push(Action::OpenSettings(settings_page::Section::Sources));
         s.shoot(h, scene);
     }
-    // The library from a folder: no hearts, downloads or playlists, and
-    // the folder in the sidebar's foot; an album page and its menu.
+    // The library from a folder: hearts, ratings and playlists via Ond's store,
+    // no downloads, the folder in the sidebar's foot, an album page, its menu,
+    // and an Ond playlist.
     reset(h, FULL, Route::Albums);
     use_folder(app_mut(h));
     s.shoot(h, "local-albums");
@@ -599,6 +600,9 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     h.run_steps(2);
     s.shoot(h, "local-footer-menu");
     egui::Popup::close_all(&h.ctx);
+    reset(h, FULL, Route::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() });
+    use_folder(app_mut(h));
+    s.shoot(h, "local-playlist");
     use_server(app_mut(h));
 
     // A queue set up by hand: no preset matches, so Custom shows.
