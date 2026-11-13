@@ -68,10 +68,16 @@ impl Session {
         crate::source::Kind::of(kind)
     }
 
-    /// What the source in use can do: its own word once connected, else
-    /// what its kind can (so a local folder shows no hearts while it opens).
-    pub fn caps(&self) -> crate::source::Capabilities {
+    /// What the source in use can do natively, before Ond's own store fills
+    /// in hearts, ratings and playlists.
+    pub fn source_caps(&self) -> crate::source::Capabilities {
         self.source.as_ref().map_or_else(|| self.kind().capabilities, |s| s.capabilities())
+    }
+
+    /// What the source in use can do, together with Ond's own store for what
+    /// the source itself lacks (hearts, ratings, playlists).
+    pub fn caps(&self) -> crate::source::Capabilities {
+        self.source_caps().with_ond_store()
     }
 
     /// The source, while the server answers.

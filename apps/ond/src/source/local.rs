@@ -222,7 +222,8 @@ impl LocalSource {
         Ok(summary)
     }
 
-    fn track_path(&self, id: &str) -> Option<PathBuf> {
+    /// Path on disk for a scanned track id.
+    pub fn track_path(&self, id: &str) -> Option<PathBuf> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).index.track_path(id).map(Path::to_path_buf)
     }
 

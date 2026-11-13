@@ -28,9 +28,18 @@ use std::time::Duration;
 /// `None` when cancelled, to the callback, from any thread.
 pub type FolderPicker = Arc<dyn Fn(&str, &Path, Box<dyn FnOnce(Option<PathBuf>) + Send>) + Send + Sync>;
 
+/// Asks for an `.m3u` destination (suggested file name, where to start) and
+/// hands the choice, or `None` when cancelled, to the callback.
+pub type SaveFilePicker = Arc<dyn Fn(&str, &Path, Box<dyn FnOnce(Option<PathBuf>) + Send>) + Send + Sync>;
+
 /// The system's folder picker.
 pub fn system_picker() -> FolderPicker {
     Arc::new(crate::folder::pick)
+}
+
+/// The system's playlist save dialog.
+pub fn system_save_m3u() -> SaveFilePicker {
+    Arc::new(crate::folder::save_m3u)
 }
 
 /// Where a chosen folder goes.

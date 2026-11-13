@@ -93,10 +93,13 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Rename… and Delete… for one of the user's playlists.
+    /// Rename…, Export M3U… (when Ond owns it), and Delete… for one of the user's playlists.
     pub(super) fn playlist_edit_items(&mut self, ui: &mut Ui, id: &str, name: &str) {
         if ui.button("Rename…").clicked() {
             self.actions.push(Action::Overlay(Overlay::Rename { id: id.to_owned(), name: name.to_owned() }));
+        }
+        if !self.session.source_caps().playlists && ui.button("Export M3U…").clicked() {
+            self.actions.push(Action::PlaylistEdit(super::PlaylistAction::ExportM3u { id: id.to_owned(), name: name.to_owned() }));
         }
         if ui.button("Delete…").clicked() {
             self.actions.push(Action::Overlay(Overlay::Delete { id: id.to_owned(), name: name.to_owned() }));

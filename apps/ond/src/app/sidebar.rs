@@ -464,8 +464,9 @@ impl ViewCtx<'_> {
         };
         for (i, p) in data.playlists.iter().enumerate() {
             let mine = owns(self.session, p);
-            // Downloaded (or on its way): the same mark as on album cards.
-            let mark = super::offline_page::pin_mark(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())));
+            // Downloaded (or on its way): only when the source downloads.
+            let mark =
+                self.session.caps().downloads.then(|| super::offline_page::pin_mark(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())))).flatten();
             let resp = place(ui, &p.name, active == Some(i), mark);
             // A drop target for songs dragged from any list.
             if mine && dragging {

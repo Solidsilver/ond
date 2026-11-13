@@ -48,6 +48,11 @@ pub enum PlaylistAction {
         from: usize,
         to: usize,
     },
+    /// Export an Ond playlist to an M3U file.
+    ExportM3u {
+        id: String,
+        name: String,
+    },
 }
 
 /// Moves `v[from]` to `to`, shifting the others; out-of-range is a no-op.
@@ -148,10 +153,10 @@ impl OndApp {
         self.ctx.request_repaint();
     }
 
-    /// Flips a heart now and tells the server; a refusal puts it back.
+    /// Flips a heart now and tells the server (or Ond's store); a refusal puts it back.
     pub(super) fn toggle_star(&mut self, kind: StarKind, id: String, track: Option<Track>, name: Option<String>) {
         let (on, seq) = self.favorites.toggle(kind, &id, track.as_ref(), name.as_deref());
-        self.bridge.set_starred(self.session.source.clone(), kind, id, on, seq);
+        self.bridge.set_starred(self.session.source.clone(), kind, id, name, on, seq);
     }
 
     pub(super) fn rate(&mut self, id: String, rating: u8) {
@@ -275,6 +280,23 @@ impl OndApp {
                 }
                 let ids = list.iter().map(|t| t.id.clone()).collect();
                 self.bridge.edit_playlist(source, id, PlaylistEdit::Replace(ids));
+            }
+            PlaylistAction::ExportM3u { id, name } => {
+                let start = self
+                    .prefs
+                    .get(|s| s.primary().and_then(|e| e.folder_paths().into_iter().next()))
+                    .or_else(|| directories::UserDirs::new().map(|u| u.audio_dir().unwrap_or(u.home_dir()).to_path_buf()))
+                    .unwrap_or_default();
+                let bridge = self.bridge.clone();
+                (self.save_m3u)(
+                    &name,
+                    &start,
+                    Box::new(move |chosen| {
+                        if let Some(path) = chosen {
+                            bridge.post(crate::bridge::Msg::M3uPathChosen { id, path });
+                        }
+                    }),
+                );
             }
         }
     }
