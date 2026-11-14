@@ -18,6 +18,7 @@ use crate::window::WindowMode;
 pub struct PrefsView {
     pub scope: accounts::Scope,
     pub combine_copies: bool,
+    pub prefer_copy: crate::settings::PreferCopy,
     /// Each source's name and colour, once there's more than one.
     pub sources: super::source_look::SourceMarks,
     /// Full, Player or Mini.
@@ -80,6 +81,7 @@ impl PrefsView {
         prefs.get(|s| Self {
             scope: s.scope.clone(),
             combine_copies: s.combine_copies,
+            prefer_copy: s.prefer_copy,
             sources: super::source_look::SourceMarks::read(s),
             mode: s.window.mode,
             lyrics_open: s.window.lyrics_open,
@@ -132,6 +134,9 @@ pub enum PrefsAction {
     /// The Sources row is added by the combined-album UI pass.
     #[allow(dead_code)]
     CombineCopies(bool),
+    /// The Sources control is added by the combined-album UI pass.
+    #[allow(dead_code)]
+    PreferCopy(crate::settings::PreferCopy),
     AlbumView(crate::settings::ViewMode),
     ArtistView(crate::settings::ViewMode),
     Scrobble(bool),
@@ -165,6 +170,7 @@ impl OndApp {
                 PrefsAction::AlphaRail(_) => "alpha_rail",
                 PrefsAction::ArtistPhotos(_) => "artist_photos",
                 PrefsAction::CombineCopies(_) => "combine_copies",
+                PrefsAction::PreferCopy(_) => "prefer_copy",
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
                 // A managed server is the Nix config's, name and all.
@@ -225,6 +231,7 @@ impl OndApp {
                 self.prefs.edit(|s| s.combine_copies = on);
                 self.project_sources();
             }
+            PrefsAction::PreferCopy(prefer) => self.prefs.edit(|s| s.prefer_copy = prefer),
             PrefsAction::AlbumView(v) => self.prefs.edit(|s| s.album_view = v),
             PrefsAction::ArtistView(v) => self.prefs.edit(|s| s.artist_view = v),
             PrefsAction::Scrobble(on) => {

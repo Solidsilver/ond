@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 const ALLOWED: &[&str] = &[
     "sources",
     "combine_copies",
+    "prefer_copy",
     "server",
     "username",
     "scrobble",

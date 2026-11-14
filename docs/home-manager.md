@@ -68,6 +68,7 @@ local folder sources keep scanning and playing.
 | `alpha_rail` | The alphabet rail beside lists sorted by name | `false` |
 | `artist_photos` | Artists' photos from the server | `true` |
 | `combine_copies` | Combine matching albums and songs across sources | `false` |
+| `prefer_copy` | Preferred reachable copy: `"source-order"` or `"best-quality"` | `"source-order"` |
 | `window.system_title_bar` | Linux: the desktop's title bar instead of Ond's own buttons | `false` |
 
 ### Playback

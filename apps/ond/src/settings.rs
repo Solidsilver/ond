@@ -16,6 +16,39 @@ pub enum ViewMode {
     List,
 }
 
+/// Which reachable copy of a combined song plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreferCopy {
+    #[default]
+    SourceOrder,
+    BestQuality,
+}
+
+impl<'de> Deserialize<'de> for PreferCopy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            Some("best-quality") => Self::BestQuality,
+            _ => Self::SourceOrder,
+        })
+    }
+}
+
+impl PreferCopy {
+    // The Sources control is added by the combined-album UI pass.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 2] = [Self::SourceOrder, Self::BestQuality];
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SourceOrder => "Source order",
+            Self::BestQuality => "Best quality",
+        }
+    }
+}
+
 /// When the volume slider shows the device's own level in dB (bit-perfect,
 /// on a device with a volume control).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -276,6 +309,8 @@ pub struct Settings {
     /// Combine matching albums and songs in scopes with several sources.
     #[serde(default)]
     pub combine_copies: bool,
+    #[serde(default)]
+    pub prefer_copy: PreferCopy,
     /// Size cap for the streaming cache; `None` uses the default (2 GB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_cache_mb: Option<u64>,
@@ -522,6 +557,7 @@ impl Default for Settings {
             sources: Vec::new(),
             scope: accounts::Scope::default(),
             combine_copies: false,
+            prefer_copy: PreferCopy::default(),
             stream_cache_mb: None,
             output_device: None,
             device_modes: Default::default(),
