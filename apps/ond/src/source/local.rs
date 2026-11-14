@@ -152,8 +152,8 @@ impl LocalSource {
         let mut mbids = BTreeMap::new();
         for track in &result.tracks {
             for (artist, mbid) in track.artists.iter().zip(&track.mb_artist_ids).chain(track.album_artists.iter().zip(&track.mb_album_artist_ids)) {
-                if let Some(id) = &artist.id {
-                    mbids.insert(id.clone(), mbid.clone());
+                if let (Some(id), Some(clean)) = (&artist.id, crate::source::artists::clean_mbid(Some(mbid))) {
+                    mbids.insert(id.clone(), clean);
                 }
             }
         }

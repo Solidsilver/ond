@@ -175,6 +175,11 @@ impl Data {
             } else {
                 album.artists.iter().map(|a| (&a.name, a.id.as_ref())).collect()
             };
+            if let (Some(name), Some(id)) = (&album.artist, &album.artist_ref)
+                && known.insert(id.clone())
+            {
+                artists.push(library::Artist { id: id.clone(), name: name.clone(), sort: None, album_count: 0, cover_art: None });
+            }
             for (name, id) in credits {
                 let id = id.cloned().unwrap_or_else(|| {
                     let id = accounts::ItemKey::new(account, format!("\0{}", crate::source::artists::normalize_name(name))).to_string();
@@ -201,8 +206,15 @@ impl Data {
         for album in self.albums.iter() {
             let Some(account) = identity::account(&album.id) else { continue };
             let mut matched = std::collections::BTreeSet::new();
-            for id in album.artist_ref.iter().chain(album.artists.iter().filter_map(|a| a.id.as_ref())) {
+            for id in album.artist_ref.iter() {
                 if let Some(&i) = by_id.get(id) {
+                    matched.insert(i);
+                }
+            }
+            for a in &album.artists {
+                if let Some(&i) = a.id.as_ref().and_then(|id| by_id.get(id)) {
+                    matched.insert(i);
+                } else if let Some(&i) = by_name.get(&(account, crate::source::artists::normalize_name(&a.name))) {
                     matched.insert(i);
                 }
             }
@@ -370,7 +382,7 @@ impl OndApp {
                 self.library_msg(LibraryMsg::TrackBatch { key, tracks });
             }
             LibraryMsg::ArtistMbids(rows) => {
-                self.data.artist_mbids = rows.into_iter().collect();
+                self.data.artist_mbids = crate::source::artists::clean_mbids(rows).into_iter().collect();
                 self.data.artists_version += 1;
                 self.search.stale = true;
             }

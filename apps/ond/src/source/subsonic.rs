@@ -185,7 +185,7 @@ impl Fetch for SubsonicSource {
     async fn artists(&self) -> Result<Vec<Artist>, Failure> {
         let artists = self.client.artists().await?;
         *self.artist_mbids.lock().unwrap_or_else(|e| e.into_inner()) =
-            artists.iter().filter_map(|a| Some((a.id.clone(), a.music_brainz_id.clone()?))).collect();
+            artists.iter().filter_map(|a| Some((a.id.clone(), crate::source::artists::clean_mbid(a.music_brainz_id.as_deref())?))).collect();
         Ok(artists.into_iter().map(convert::artist).collect())
     }
 

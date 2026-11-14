@@ -26,8 +26,26 @@ pub struct MergedArtist {
     pub albums: BTreeMap<AccountId, Vec<String>>,
 }
 
+/// Normalizes an optional MusicBrainz id, treating empty or whitespace-only
+/// strings (such as Navidrome's `""`) as absent.
+pub fn clean_mbid(mbid: Option<&str>) -> Option<String> {
+    let trimmed = mbid?.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// Drops entries whose MusicBrainz id is empty or whitespace-only.
+pub fn clean_mbids(rows: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    rows.into_iter().filter_map(|(id, mbid)| Some((id, clean_mbid(Some(&mbid))?))).collect()
+}
+
 pub fn merge(artists: impl IntoIterator<Item = ArtistIdentity>) -> Vec<MergedArtist> {
-    let mut artists: Vec<_> = artists.into_iter().collect();
+    let mut artists: Vec<_> = artists
+        .into_iter()
+        .map(|mut a| {
+            a.musicbrainz = clean_mbid(a.musicbrainz.as_deref());
+            a
+        })
+        .collect();
     // Known identities precede name-only records, giving an ambiguous name
     // a deterministic home without joining different known MusicBrainz ids.
     artists.sort_by_key(|a| (a.musicbrainz.is_none(), a.key.clone()));
@@ -72,5 +90,25 @@ mod tests {
             merge([entry("1", "Björk", Some("one")), entry("2", "Other spelling", Some("one")), entry("3", "BJORK", None), entry("4", "Björk", Some("two"))]);
         assert_eq!(groups.len(), 2);
         assert!(groups.iter().any(|g| g.members.len() == 3));
+    }
+
+    #[test]
+    fn empty_or_whitespace_musicbrainz_ids_are_ignored_when_merging() {
+        let a = AccountId::new();
+        let b = AccountId::new();
+        let entry =
+            |acc, id: &str, name: &str, mb: Option<&str>| ArtistIdentity { key: ItemKey::new(acc, id), name: name.into(), musicbrainz: mb.map(str::to_owned) };
+        let groups = merge([
+            entry(a, "1", "Josh Garrels", Some("mbid-jg")),
+            entry(a, "2", "Stand", Some("")),
+            entry(a, "3", "Paul Simon", Some("   ")),
+            entry(b, "4", "Josh Garrels", Some("")),
+            entry(b, "5", "Sojourn Music", Some("")),
+        ]);
+        assert_eq!(groups.len(), 4);
+        assert!(groups.iter().any(|g| g.name == "Josh Garrels" && g.members.len() == 2));
+        for single in ["Stand", "Paul Simon", "Sojourn Music"] {
+            assert!(groups.iter().any(|g| g.name == single && g.members.len() == 1), "{single} should stay separate");
+        }
     }
 }

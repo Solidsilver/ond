@@ -787,7 +787,7 @@ impl Bridge {
             }
             let l = this.library();
             if let Ok(Some(mbids)) = l.saved::<std::collections::BTreeMap<String, String>>("artist_mbids_v1") {
-                this.send(LibraryMsg::ArtistMbids(mbids.into_iter().collect()));
+                this.send(LibraryMsg::ArtistMbids(crate::source::artists::clean_mbids(mbids)));
             }
             let mut saved = Saved {
                 newest: l.saved(SAVED_NEWEST).ok().flatten(),
@@ -1163,7 +1163,7 @@ impl Bridge {
                     this.send(LibraryMsg::Skipped(synced.skipped));
                     this.send(LibraryMsg::Albums(synced.albums));
                     if let Ok(Some(mbids)) = this.library().saved::<std::collections::BTreeMap<String, String>>("artist_mbids_v1") {
-                        this.send(LibraryMsg::ArtistMbids(mbids.into_iter().collect()));
+                        this.send(LibraryMsg::ArtistMbids(crate::source::artists::clean_mbids(mbids)));
                     }
                     this.send(LibraryMsg::Artists(synced.artists));
                     this.send(LibraryMsg::Newest(synced.newest_ids));
@@ -1223,7 +1223,7 @@ impl Bridge {
             }
             match artists {
                 Ok(stored) => {
-                    let mbids = source.artist_mbids();
+                    let mbids = crate::source::artists::clean_mbids(source.artist_mbids());
                     let saved: std::collections::BTreeMap<_, _> = mbids.iter().cloned().collect();
                     this.keep("artist_mbids_v1".into(), saved).await;
                     this.send(LibraryMsg::ArtistMbids(mbids));
