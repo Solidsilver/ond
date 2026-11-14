@@ -85,8 +85,17 @@ impl Data {
             self.set_albums(merged);
             self.newest = sources.iter().flat_map(|d| d.newest.iter().cloned()).collect();
         }
-        if self.merged_track_versions != tracks {
-            self.set_tracks(TrackSet::merge(sources.iter().map(|d| d.tracks.clone())));
+        if self.merged_track_versions != tracks || (sources.len() > 1 && self.merged_album_versions != albums) {
+            let mut set = TrackSet::merge(sources.iter().map(|d| d.tracks.clone()));
+            // Single-source tracks keep their source's order; merged across
+            // sources, interleave them in the Songs list order (Artist
+            // ascending, keeping each album intact).
+            if sources.len() > 1 {
+                let keys = super::songs::SortKeys::new(&set.all, &|id| self.album(id).map(|a| a.name.clone()).unwrap_or_default());
+                let order = super::songs::sort_with(&set.all, &keys, super::songs::Column::Artist, false);
+                set.all = Arc::new(order.into_iter().map(|i| set.all[i].clone()).collect());
+            }
+            self.set_tracks(set);
         }
         if self.merged_list_versions != lists {
             self.playlists = sources.iter().flat_map(|d| d.playlists.iter().cloned()).collect();
@@ -709,6 +718,70 @@ mod tests {
         merged.merge_sources(&[&server, &folder]);
         let names: Vec<&str> = merged.albums.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["Moon Safari", "Fingerlings", "Kid A", "OK Computer"]);
+    }
+
+    #[test]
+    fn two_sources_songs_merge_in_songs_order_not_one_source_after_the_other() {
+        let source = |n: u32, tracks: &[(&str, &str, &str, u32)]| {
+            let account: accounts::AccountId = format!("00000000-0000-4000-8000-{n:012x}").parse().unwrap();
+            let mut d = Data { account: Some(account), ..Default::default() };
+            let mut albums = Vec::new();
+            let mut list = Vec::new();
+            for &(title, alb, artist, no) in tracks {
+                let alb_id = accounts::ItemKey::new(account, alb).to_string();
+                if !albums.iter().any(|a: &Album| a.id == alb_id) {
+                    albums.push(Album { artist: Some(artist.into()), ..album(&alb_id, alb) });
+                }
+                let mut tr = crate::test_tracks::track(&accounts::ItemKey::new(account, title).to_string(), &alb_id, title);
+                tr.artist = Some(artist.into());
+                tr.track = Some(no);
+                list.push(tr);
+            }
+            d.set_albums(albums);
+            d.set_tracks(TrackSet::new(list));
+            d
+        };
+        let mut server = source(1, &[("La Femme d'Argent", "Moon Safari", "Air", 1), ("Airbag", "OK Computer", "Radiohead", 1)]);
+        let mut folder = source(2, &[("Sovay", "Fingerlings", "Andrew Bird", 1), ("Everything in Its Right Place", "Kid A", "Radiohead", 1)]);
+        let mut merged = Data::default();
+        merged.merge_sources(&[&server, &folder]);
+        let titles: Vec<&str> = merged.tracks.all.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["La Femme d'Argent", "Sovay", "Everything in Its Right Place", "Airbag"]);
+
+        // Memo: unrelated version changes or repeated merges keep `tracks.all` intact.
+        let cached = Arc::clone(&merged.tracks.all);
+        server.artists_version += 1;
+        merged.merge_sources(&[&server, &folder]);
+        assert!(Arc::ptr_eq(&cached, &merged.tracks.all));
+
+        // Adding a track to one source interleaves it without disturbing single-source reuse.
+        let folder_account = folder.account.unwrap();
+        let mut extra = crate::test_tracks::track(
+            &accounts::ItemKey::new(folder_account, "Idioteque").to_string(),
+            &accounts::ItemKey::new(folder_account, "Kid A").to_string(),
+            "Idioteque",
+        );
+        extra.artist = Some("Radiohead".into());
+        extra.track = Some(2);
+        let mut next = folder.tracks.all.to_vec();
+        next.push(extra);
+        folder.set_tracks(TrackSet::new(next));
+        merged.merge_sources(&[&server, &folder]);
+        let titles: Vec<&str> = merged.tracks.all.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["La Femme d'Argent", "Sovay", "Everything in Its Right Place", "Idioteque", "Airbag"]);
+
+        // An album rename in one source re-sorts multi-source tracks that tie on artist.
+        let mut renamed = server.albums.to_vec();
+        renamed[1].name = "A OK Computer".into();
+        server.set_albums(renamed);
+        merged.merge_sources(&[&server, &folder]);
+        let titles: Vec<&str> = merged.tracks.all.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["La Femme d'Argent", "Sovay", "Airbag", "Everything in Its Right Place", "Idioteque"]);
+
+        // Single source keeps its own `tracks.all` without copying.
+        let mut single = Data::default();
+        single.merge_sources(&[&server]);
+        assert!(Arc::ptr_eq(&single.tracks.all, &server.tracks.all));
     }
 
     fn album(id: &str, name: &str) -> Album {
