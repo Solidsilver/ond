@@ -571,18 +571,17 @@ impl ViewCtx<'_> {
             let title = elide(ui, &album.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
             // Where it comes from follows the artist, while sources are
-            // mixed, so the artist starts under the title.
+            // mixed, so the artist starts under the title: a dot for each
+            // source with a copy.
             let artist = album.artist.as_deref().unwrap_or_default();
             let sub_top = art.bottom() + 24.0;
-            match self.source_dot(id) {
-                Some(color) => {
-                    let line = (artist, FontId::proportional(12.0), t.muted);
-                    shell::kit::text_then_dots(ui, pos2(rect.left(), sub_top), line, tile - mark_w, &[color], t.bg);
-                }
-                None => {
-                    let sub = elide(ui, artist, FontId::proportional(12.0), t.muted, tile - mark_w);
-                    ui.painter().galley(pos2(rect.left(), sub_top), sub, t.muted);
-                }
+            let dots = self.album_dots(id);
+            if dots.is_empty() {
+                let sub = elide(ui, artist, FontId::proportional(12.0), t.muted, tile - mark_w);
+                ui.painter().galley(pos2(rect.left(), sub_top), sub, t.muted);
+            } else {
+                let line = (artist, FontId::proportional(12.0), t.muted);
+                shell::kit::text_then_dots(ui, pos2(rect.left(), sub_top), line, tile - mark_w, &dots, t.bg);
             }
             if let Some(m) = mark {
                 super::offline_page::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);

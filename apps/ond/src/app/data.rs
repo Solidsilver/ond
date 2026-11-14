@@ -26,7 +26,6 @@ mod copies;
 type CopyVersions = Vec<(Option<accounts::AccountId>, u64, u64, u64, u64, u64)>;
 
 /// The original format of one copy, before any playback transcoding.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyFormat<'a> {
     pub suffix: Option<&'a str>,

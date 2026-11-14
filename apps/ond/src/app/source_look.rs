@@ -14,6 +14,11 @@
 //! tile's artist, a queue row's) the dot follows the line, so the lines
 //! under a title start where it does.
 //!
+//! With matching albums combined, an album or song more than one source
+//! holds is one item with a copy on each: it gets a dot per copy, stacked,
+//! in the sources' order, and its Source cell names them all. Everything
+//! else still gets its one dot.
+//!
 //! What's said about a source comes in two lengths. The switcher's menu and
 //! the sidebar's tooltip get the short one ("Synced 9:41 AM", "3 files
 //! skipped"); Settings › Sources gets the long one (the server's label, a
@@ -70,15 +75,6 @@ pub fn name_of(entry: &SourceEntry) -> String {
 /// drawn.
 pub fn mixed(session: &Session) -> bool {
     session.accounts.len() > 1 && session.scope.is_all() && session.accounts.keys().filter(|a| session.scope.includes(**a)).count() > 1
-}
-
-/// The mark for the item `id` (an album, a track), while the library mixes
-/// sources.
-pub fn mark_of<'m>(session: &Session, marks: &'m SourceMarks, id: &str) -> Option<&'m Mark> {
-    if !mixed(session) {
-        return None;
-    }
-    marks.get(identity::account(id)?)
 }
 
 /// The dot for something from `account` that may come from outside the
@@ -190,17 +186,45 @@ fn skipped(n: usize) -> String {
     format!("{} skipped", crate::fmt::plural(n, "file"))
 }
 
+/// The marks of the sources holding `copies` (an album's or a song's, the
+/// lead first), in that order, while the library mixes sources.
+fn marks_of_copies<'m>(session: &Session, marks: &'m SourceMarks, copies: &[accounts::ItemKey]) -> Vec<&'m Mark> {
+    if !mixed(session) {
+        return Vec::new();
+    }
+    copies.iter().filter_map(|k| marks.get(k.account)).collect()
+}
+
+/// The dots of `marks`, in their order.
+pub fn colors(marks: &[&Mark]) -> Vec<SourceColor> {
+    marks.iter().map(|m| m.color).collect()
+}
+
+/// A Source column's cell from `x`, centred on `cy`, in `width`: the dot
+/// and name of each source in `marks`, stacked on `ground` when there are
+/// several.
+pub fn source_cell(ui: &egui::Ui, (x, cy, width): (f32, f32, f32), marks: &[&Mark], ground: egui::Color32, font: egui::FontId, ink: egui::Color32) {
+    let names: Vec<&str> = marks.iter().map(|m| m.name.as_str()).collect();
+    kit::sources_cell(ui, x, cy, width, &colors(marks), ground, (&names, font, ink));
+}
+
 impl ViewCtx<'_> {
-    /// The colour of the dot for the item `id`, while the library mixes
-    /// sources.
-    pub fn source_dot(&self, id: &str) -> Option<SourceColor> {
-        mark_of(self.session, &self.ui.prefs.sources, id).map(|m| m.color)
+    /// The sources holding the album `id`, while the library mixes sources:
+    /// its one source, or each with a copy of a combined album, in the
+    /// sources' order.
+    pub fn album_sources(&self, id: &str) -> Vec<&Mark> {
+        marks_of_copies(self.session, &self.ui.prefs.sources, &self.data.copies_of_album(id))
     }
 
-    /// The source of the item `id`, while the library mixes sources: what
-    /// a Source column shows.
-    pub fn source_mark(&self, id: &str) -> Option<&Mark> {
-        mark_of(self.session, &self.ui.prefs.sources, id)
+    /// The dots for the album `id`, as [`album_sources`](Self::album_sources).
+    pub fn album_dots(&self, id: &str) -> Vec<SourceColor> {
+        colors(&self.album_sources(id))
+    }
+
+    /// The sources holding the song `id`, while the library mixes sources:
+    /// its one source, or each with a copy of a combined song.
+    pub fn track_sources(&self, id: &str) -> Vec<&Mark> {
+        marks_of_copies(self.session, &self.ui.prefs.sources, &self.data.copies_of_track(id))
     }
 
     /// Whether the library on screen mixes sources, so a list shows its
@@ -240,16 +264,29 @@ impl ViewCtx<'_> {
         playing_dot(self.session, &self.ui.prefs.sources, self.player, track)
     }
 
-    /// The dot for the queue's `item`, while the library mixes sources.
-    pub fn queue_dot(&self, item: &crate::queue::Item) -> Option<SourceColor> {
-        mixed(self.session).then(|| configured_dot(&self.ui.prefs.sources, item.key.account)).flatten()
+    /// The dots for the queue's `item`, while the library mixes sources:
+    /// one per copy of a combined song, else its own source's. The queue
+    /// says which copy it holds, so a song with one copy takes its dot from
+    /// there rather than from its id.
+    pub fn queue_dots(&self, item: &crate::queue::Item) -> Vec<SourceColor> {
+        if !mixed(self.session) {
+            return Vec::new();
+        }
+        let copies = self.data.copies_of_track(&item.track.id);
+        if copies.len() > 1 {
+            return colors(&marks_of_copies(self.session, &self.ui.prefs.sources, &copies));
+        }
+        configured_dot(&self.ui.prefs.sources, item.key.account).into_iter().collect()
     }
 
     /// Whether a list of `tracks` shows its Source column: the library mixes
-    /// sources and the list holds songs from more than one (an album, or a
-    /// server's playlist, comes from one, and says so elsewhere).
+    /// sources and the list holds songs from more than one, or a song more
+    /// than one source holds (an album, or a server's playlist, otherwise
+    /// comes from one, and says so elsewhere).
     pub fn sources_column(&self, tracks: &[library::Track]) -> bool {
-        mixed(self.session) && spans(tracks.iter().map(|t| t.id.as_str()))
+        let data = self.data;
+        let combined = || !data.track_copies.is_empty() && tracks.iter().any(|t| data.track_copies.contains_key(data.track_lead(&t.id)));
+        mixed(self.session) && (spans(tracks.iter().map(|t| t.id.as_str())) || combined())
     }
 
     /// The filter chips under a library page's heading, in All sources with

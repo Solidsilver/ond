@@ -97,9 +97,16 @@ impl ViewCtx<'_> {
                 row.line(ui, r.left() + col::INSET, r.width() - 2.0 * col::INSET, text, FontId::proportional(13.0), t.muted);
             };
             cell(ui, c.artist, album.artist.as_deref().unwrap_or(""));
-            if let (Some(r), Some(mark)) = (c.source, self.source_mark(&album.id)) {
-                let name = (mark.name.as_str(), FontId::proportional(13.0), t.muted);
-                shell::kit::source_cell(ui, r.left() + col::INSET, row.cy(), r.width() - 2.0 * col::INSET, mark.color, name);
+            if let Some(r) = c.source {
+                let at = (r.left() + col::INSET, row.cy(), r.width() - 2.0 * col::INSET);
+                super::source_look::source_cell(
+                    ui,
+                    at,
+                    &self.album_sources(&album.id),
+                    TrackRow::ground(t, false, row.pointer_on()),
+                    FontId::proportional(13.0),
+                    t.muted,
+                );
             }
             cell(ui, c.year, &album.year.map(|y| y.to_string()).unwrap_or_default());
             cell(ui, c.genre, &album.all_genres().join(", "));

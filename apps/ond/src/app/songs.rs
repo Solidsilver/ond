@@ -219,9 +219,16 @@ impl ViewCtx<'_> {
             };
             cell(ui, &tr.title, title_x, c.title.right() - title_x + col::INSET, title_font(13.0, playing), color);
             cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + col::INSET, c.artist.width(), FontId::proportional(13.0), t.muted);
-            if let (Some(r), Some(mark)) = (c.source, self.source_mark(&tr.id)) {
-                let name = (mark.name.as_str(), FontId::proportional(13.0), t.muted);
-                shell::kit::source_cell(ui, r.left() + col::INSET, row.cy(), r.width() - 2.0 * col::INSET, mark.color, name);
+            if let Some(r) = c.source {
+                let at = (r.left() + col::INSET, row.cy(), r.width() - 2.0 * col::INSET);
+                super::source_look::source_cell(
+                    ui,
+                    at,
+                    &self.track_sources(&tr.id),
+                    TrackRow::ground(t, selected, row.pointer_on()),
+                    FontId::proportional(13.0),
+                    t.muted,
+                );
             }
             let album = self.data.album(&tr.album_id).map_or("", |a| a.name.as_str());
             cell(ui, album, c.album.left() + col::INSET, c.album.width(), FontId::proportional(13.0), t.muted);

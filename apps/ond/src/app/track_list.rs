@@ -282,12 +282,12 @@ impl ViewCtx<'_> {
         // The Source column sits just before the heart, and gives way first
         // to a narrow window; the hover actions take its place.
         let text_end = rect.right() - col::TEXT_FROM_RIGHT;
-        let source = (list.sources && text_end - SOURCE_W - x >= SOURCE_MIN_TEXT).then(|| self.source_mark(&tr.id)).flatten();
-        let source_w = if source.is_some() { SOURCE_W } else { 0.0 };
+        let source = if list.sources && text_end - SOURCE_W - x >= SOURCE_MIN_TEXT { self.track_sources(&tr.id) } else { Vec::new() };
+        let source_w = if source.is_empty() { 0.0 } else { SOURCE_W };
         let text_w = text_end - actions_w.max(source_w) - x;
-        if let Some(mark) = source.filter(|_| !hovered) {
-            let name = (mark.name.as_str(), FontId::proportional(12.0), t.muted);
-            shell::kit::source_cell(ui, text_end - SOURCE_W + col::INSET, cy, SOURCE_W - 2.0 * col::INSET, mark.color, name);
+        if !hovered {
+            let at = (text_end - SOURCE_W + col::INSET, cy, SOURCE_W - 2.0 * col::INSET);
+            super::source_look::source_cell(ui, at, &source, TrackRow::ground(t, selected, false), FontId::proportional(12.0), t.muted);
         }
         let title_font = title_font(13.0, playing);
         if opts.artist {

@@ -50,7 +50,6 @@ impl Data {
     }
 
     /// Per-source formats, in source order, including songs absent on the lead.
-    #[allow(dead_code)]
     pub fn album_copy_formats(&self, id: &str) -> Vec<(AccountId, Vec<CopyFormat<'_>>)> {
         self.copies_of_album(id)
             .into_iter()

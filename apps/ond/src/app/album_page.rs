@@ -3,6 +3,11 @@
 //! credits gathered from the tracks' OpenSubsonic contributors and the
 //! per-track measurements, folded away until asked for. The track list itself
 //! is in `track_list`.
+//!
+//! A combined album (the same album on more than one source) names each
+//! source with a copy at the end of its facts, and its formats ("FLAC ·
+//! MP3") where one album's shared format would be; each song's row has a
+//! dot per copy of it.
 
 use super::track_list::ListOpts;
 use super::view_ctx::ViewCtx;
@@ -71,11 +76,54 @@ fn shared_format(tracks: &[Track]) -> Option<String> {
     tracks.iter().all(|t| crate::fmt::quality(t) == first).then_some(first)
 }
 
+/// `FLAC · MP3`: the formats of a combined album's copies (`copies`, each
+/// source's in the sources' order), each named once. A lossy format that
+/// two copies hold at different bitrates names them (`MP3 320 · MP3 128`),
+/// as long as each of those copies has the one bitrate. `None` when the
+/// copies don't differ, so the album's own shared format stands.
+fn copies_format(copies: &[(accounts::AccountId, Vec<super::data::CopyFormat<'_>>)]) -> Option<String> {
+    if copies.len() < 2 {
+        return None;
+    }
+    // Each copy's suffixes, with the copy's bitrate for a lossy one when
+    // every song of it in that suffix has the same.
+    let mut held: Vec<(String, Option<u32>)> = Vec::new();
+    for (_, formats) in copies {
+        let mut labels: Vec<String> = Vec::new();
+        for label in formats.iter().filter_map(|f| f.suffix).map(str::to_uppercase) {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        for label in labels {
+            let of_it = || formats.iter().filter(|f| f.suffix.is_some_and(|s| s.eq_ignore_ascii_case(&label)));
+            let rate = match of_it().next() {
+                Some(f) if !f.lossless && f.bitrate_kbps.is_some() && of_it().all(|g| g.bitrate_kbps == f.bitrate_kbps) => f.bitrate_kbps,
+                _ => None,
+            };
+            held.push((label, rate));
+        }
+    }
+    let mut shown: Vec<String> = Vec::new();
+    for (label, rate) in &held {
+        let same: Vec<_> = held.iter().filter(|(l, _)| l == label).collect();
+        let text = match rate {
+            Some(r) if same.iter().all(|(_, s)| s.is_some()) && same.iter().any(|(_, s)| s != rate) => format!("{label} {r}"),
+            _ => label.clone(),
+        };
+        if !shown.contains(&text) {
+            shown.push(text);
+        }
+    }
+    (shown.len() > 1).then(|| shown.join(" · "))
+}
+
 /// What the album page works out from the album and its tracks, kept between
 /// frames: rebuilt when the album, its track list or their analysis change.
 pub(super) struct AlbumFacts {
     summary: analysis::AlbumSummary,
-    /// `FLAC 16/44.1` when every track shares it.
+    /// `FLAC 16/44.1` when every track shares it; a combined album's
+    /// copies' formats when they differ (`FLAC · MP3`).
     format: Option<String>,
     /// "6 songs · 41 min"
     extent: String,
@@ -92,14 +140,14 @@ pub(super) struct AlbumFacts {
 pub(super) type AlbumKey = (u64, u64, u64, usize, usize);
 
 impl AlbumFacts {
-    fn new(album: &library::Album, slice: Option<&crate::tracks::TrackSlice>, analysis: &super::Analysis) -> Self {
+    fn new(album: &library::Album, slice: Option<&crate::tracks::TrackSlice>, analysis: &super::Analysis, data: &super::Data) -> Self {
         let tracks: &[Track] = slice.map_or(&[], |s| s);
         let found: Vec<&TrackAnalysis> = tracks.iter().filter_map(|t| analysis.of(t)).collect();
         let secs = tracks.iter().filter_map(|t| t.duration_secs).sum::<u32>();
         let extent = format!("{} · {}", crate::fmt::plural(tracks.len(), "song"), crate::fmt::span(secs));
         Self {
             summary: analysis::summarize(&found, tracks.len()),
-            format: shared_format(tracks),
+            format: copies_format(&data.album_copy_formats(&album.id)).or_else(|| shared_format(tracks)),
             extent,
             credits: credits(tracks),
             source: Source::Album { id: album.id.clone(), name: album.name.clone() },
@@ -186,7 +234,7 @@ impl ViewCtx<'_> {
             self.actions.push(Action::Offline(OfflineAction::Keep(Keep::Album(id.to_owned()), !kept)));
         }
         let key = (super::view_ctx::hash_str(id), data.version, analysis.version, tracks.as_ptr() as usize, tracks.len());
-        let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis));
+        let facts = self.ui.memos.album.get(key, || AlbumFacts::new(album, slice, analysis, data));
         let analysing = analysis.runner.pending(self.session.account(), tracks.iter().map(|t| t.id.as_str()));
         let page = AlbumHeader { album, tracks, facts: &facts, analysing };
         super::layout::into_gutter(ui, |ui| {
@@ -288,10 +336,11 @@ impl ViewCtx<'_> {
             ui.label(egui::RichText::new(&page.facts.extent).size(12.0).color(t.muted));
         }
         // Where it comes from ends the line, while sources are mixed, so the
-        // line starts under the title as the artist does.
-        if let Some(mark) = self.source_mark(&album.id) {
+        // line starts under the title as the artist does: each source with
+        // a copy, for a combined album.
+        for mark in self.album_sources(&album.id) {
             sep(ui);
-            shell::kit::source_label(ui, mark.color, &mark.name, small, t.muted);
+            shell::kit::source_label(ui, mark.color, &mark.name, small.clone(), t.muted);
         }
     }
 
@@ -465,6 +514,22 @@ mod tests {
         let composers: Vec<&str> = c[2].people.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(composers, ["Scott LaFaro", "George Gershwin"]);
         assert!(credits(&[track(&[])]).is_empty());
+    }
+
+    #[test]
+    fn copies_name_each_format_once_and_a_bitrate_only_where_it_tells_them_apart() {
+        use super::super::data::CopyFormat;
+        let (one, two): (accounts::AccountId, accounts::AccountId) =
+            ("00000000-0000-4000-8000-000000000001".parse().unwrap(), "00000000-0000-4000-8000-000000000002".parse().unwrap());
+        let f = |suffix, bitrate_kbps, lossless| CopyFormat { suffix: Some(suffix), bitrate_kbps, lossless };
+        let flac = || vec![f("flac", Some(900), true), f("flac", Some(1100), true)];
+        assert_eq!(copies_format(&[(one, flac()), (two, vec![f("mp3", Some(320), false)])]).as_deref(), Some("FLAC · MP3"));
+        assert_eq!(copies_format(&[(one, vec![f("mp3", Some(320), false)]), (two, vec![f("mp3", Some(128), false)])]).as_deref(), Some("MP3 320 · MP3 128"));
+        // A copy whose bitrate varies leaves nothing to tell apart by it.
+        let vbr = vec![f("mp3", Some(245), false), f("mp3", Some(190), false)];
+        assert_eq!(copies_format(&[(one, vec![f("mp3", Some(320), false)]), (two, vbr)]), None);
+        assert_eq!(copies_format(&[(one, flac()), (two, flac())]), None, "the same format: the album's own line says more");
+        assert_eq!(copies_format(&[(one, flac())]), None);
     }
 
     #[test]

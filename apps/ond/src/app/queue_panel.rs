@@ -331,7 +331,7 @@ impl ViewCtx<'_> {
                 text_w,
                 (&item.track.title, FontId::proportional(12.5), color),
                 (item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted),
-                self.queue_dot(item),
+                &self.queue_dots(item),
             );
         }
         row.describe(selected, || format!("{} by {}", item.track.title, item.track.artist.as_deref().unwrap_or("unknown artist")));
